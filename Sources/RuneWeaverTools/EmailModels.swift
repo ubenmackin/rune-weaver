@@ -985,6 +985,16 @@ public enum EmailBridgeParsing {
         let message: EmailFullMessage?
     }
 
+    /// Bridge `batch_fetch` response shape.
+    struct BatchFetchResponse: Decodable {
+        /// Whether the operation succeeded.
+        let ok: Bool
+        /// Error detail when `ok` is false.
+        let error: String?
+        /// Messages when `ok` is true.
+        let messages: [EmailFullMessage]?
+    }
+
     /// Bridge `attachment` payload shape.
     struct BridgeAttachmentPayload: Decodable {
         /// Original filename.
@@ -1028,6 +1038,15 @@ public enum EmailBridgeParsing {
             throw EmailIMAPError.decodeFailed("IMAP bridge returned no message")
         }
         return message
+    }
+
+    /// Decodes a bridge `batch_fetch` stdout payload.
+    public static func parseBatchFetchPayload(_ data: Data) throws -> [EmailFullMessage] {
+        let response = try JSONDecoder().decode(BatchFetchResponse.self, from: data)
+        if !response.ok {
+            throw EmailIMAPError.bridgeFailed(response.error ?? "IMAP batch fetch failed")
+        }
+        return response.messages ?? []
     }
 
     /// Encodes search hits as the `email.search` tool output document.

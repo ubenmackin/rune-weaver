@@ -1067,6 +1067,11 @@ public actor IndexCoordinator {
         }
         activeRunTask?.cancel()
     }
+
+    /// Clears the durable run state store.
+    public func reset() async throws {
+        try await stateStore.reset()
+    }
 }
 
 // MARK: - Sequencing

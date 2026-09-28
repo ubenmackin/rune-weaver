@@ -80,14 +80,47 @@ public struct MailSessionEventLog: Sendable {
         self.sink = sink
     }
 
+    /// Silent log dropping all events.
+    public static let silent = MailSessionEventLog { _ in }
+
+    /// Whether the current process is running inside an automated test harness.
+    public static var isRunningInTestEnvironment: Bool {
+        let env = ProcessInfo.processInfo.environment
+        if env["RUNEWEAVER_FORCE_LIVE_EVENT_LOG"] == "1" {
+            return false
+        }
+        if env["XCTestConfigurationFilePath"] != nil ||
+            env["XCTestBundlePath"] != nil ||
+            env["SWIFT_DETERMINISTIC_HASHING"] != nil
+        {
+            return true
+        }
+        let processName = ProcessInfo.processInfo.processName
+        if processName.range(of: "test", options: .caseInsensitive) != nil {
+            return true
+        }
+        if ProcessInfo.processInfo.arguments.contains(where: {
+            $0.contains(".xctest") || $0.contains("swift-testing") || $0.contains("swift-test")
+        }) {
+            return true
+        }
+        if NSClassFromString("XCTestCase") != nil || NSClassFromString("XCTest") != nil {
+            return true
+        }
+        return false
+    }
+
     /// Live log appending to the default file.
     ///
-    /// Always on with no configuration knob; failures are swallowed so event
-    /// logging never fails a session turn. Production-only by convention:
-    /// every test injects a silent or collecting sink instead of touching
-    /// this default, so hermetic suites write zero bytes to the live path.
+    /// Always on with no configuration knob in production; failures are swallowed
+    /// so event logging never fails a session turn. When running under unit tests,
+    /// this automatically returns `.silent` so test suites never pollute the
+    /// production log file with test accounts or dummy queries.
     public static var live: MailSessionEventLog {
-        MailSessionEventLog { line in
+        guard !isRunningInTestEnvironment else {
+            return .silent
+        }
+        return MailSessionEventLog { line in
             let url = defaultLogURL()
             let payload = Data((line + "\n").utf8)
             liveQueue.async {

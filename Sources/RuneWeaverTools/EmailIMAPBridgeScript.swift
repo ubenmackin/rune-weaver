@@ -5,26 +5,26 @@
 // Scope: one JSON document over stdin with one JSON envelope on stdout; reads use BODY.PEEK
 // with quoted selects.
 // Architectural role: one-shot wire-protocol owner; composes the shared wire-parsing prelude
-// and the single-sourced search bound so parsing and limits cannot drift from the session helper.
+// and the single-sourced search bound owned by EmailIMAPBridgeScript plus EmailIMAPLimits.
 
 import Foundation
 
 /// Single source for the bounded email search window.
 ///
-/// Both embedded Python helpers clamp through this bound so a future `EmailSearchArgs.maxLimit`
-/// change propagates to the one-shot and session clamps without editing two literals.
+/// The embedded Python helper clamps through this bound so a future `EmailSearchArgs.maxLimit`
+/// change propagates to the one-shot clamp without editing scattered literals.
 enum EmailIMAPLimits {
-    /// Upper bound for `email.search` limit shared by Swift validation and both Python helpers.
+    /// Upper bound for `email.search` limit shared by Swift validation and the one-shot helper.
     static let maxSearchLimit = EmailSearchArgs.maxLimit
 }
 
-/// Shared Python wire-parsing prelude for both IMAP helpers.
+/// Shared Python wire-parsing prelude for the one-shot IMAP helper.
 ///
-/// The one-shot and session programs decode the same wire shapes, so the header, body,
+/// The one-shot program decodes the shared wire shapes, so the header, body,
 /// attachment, snippet, and quoter helpers live here once. The spelling uses `+`
-/// concatenation instead of `append` so the session program keeps its read-only shape
+/// concatenation instead of `append` so the one-shot program keeps its read-only shape
 /// without introducing extra operation names. Address ordering also lives here once so
-/// both programs dial IPv4 first without drifting apart on dual-stack hosts.
+/// the helper dials IPv4 first on dual-stack hosts.
 enum EmailIMAPSharedPrelude {
     /// Shared Python source prepended ahead of each helper-specific body.
     static let text = #"""
@@ -157,13 +157,16 @@ enum EmailIMAPSharedPrelude {
 /// Embedded `python3 imaplib` helper.
 enum EmailIMAPBridgeScript {
     /// Python source executed via `python3 -c`.
-    static let source = EmailIMAPBridgeScriptHead.text + "\n" + EmailIMAPBridgeScriptMiddle.text + "\n" + EmailIMAPBridgeScriptTail.text
+    static let source = EmailIMAPBridgeScriptHead.text + "\n"
+        + EmailIMAPBridgeScriptMiddle.text + "\n"
+        + EmailIMAPBridgeScriptSearch.text + "\n"
+        + EmailIMAPBridgeScriptTail.text
 }
 
 /// First half of the embedded `python3 imaplib` helper (imports through connect).
 ///
 /// Composes the shared wire-parsing prelude after the imports so header, body,
-/// attachment, snippet, and quoter parsing stays single-sourced with the session helper.
+/// attachment, snippet, and quoter parsing stays single-sourced in the one-shot helper.
 private enum EmailIMAPBridgeScriptHead {
     /// First half of the Python source.
     static let text = importsText + "\n" + EmailIMAPSharedPrelude.text + "\n" + remainderText
@@ -174,6 +177,7 @@ private enum EmailIMAPBridgeScriptHead {
     from email import policy
     from email.header import decode_header
     from email.utils import getaddresses
+    imaplib._MAXLINE = 40000000
     """#
 
     /// One-shot-specific helpers plus the `main()` dispatch head.
@@ -291,6 +295,15 @@ private enum EmailIMAPBridgeScriptHead {
             early_idx = attachment_index_of(req)
             if early_idx is None or early_idx < 0:
                 fail("Invalid attachment index")
+                return
+            early_box = str(req.get("mailbox") or "INBOX")
+            if "\r" in early_box or "\n" in early_box:
+                fail("Invalid mailbox")
+                return
+        elif op == "batch_fetch":
+            early_query = req.get("query") or ""
+            if "\r" in early_query or "\n" in early_query:
+                fail("Invalid search query")
                 return
             early_box = str(req.get("mailbox") or "INBOX")
             if "\r" in early_box or "\n" in early_box:
@@ -578,9 +591,9 @@ private enum EmailIMAPBridgeScriptMiddle {
     """#
 }
 
-/// Final segment of the embedded `python3 imaplib` helper (append through `main()`).
-private enum EmailIMAPBridgeScriptTail {
-    /// Final Python source.
+/// Search segment of the embedded `python3 imaplib` helper (append through search).
+private enum EmailIMAPBridgeScriptSearch {
+    /// Search Python source.
     static let text = #"""
             if op == "append":
                 append_box = str(req.get("mailbox") or "").strip()
@@ -789,6 +802,13 @@ private enum EmailIMAPBridgeScriptTail {
                 except Exception as exc:
                     fail("IMAP search failed: %s" % exc)
                     return
+    """#
+}
+
+/// Final segment of the embedded `python3 imaplib` helper (fetch through `main()`).
+private enum EmailIMAPBridgeScriptTail {
+    /// Final Python source.
+    static let text = #"""
             elif op == "fetch":
                 mid = str(req.get("messageID") or req.get("messageId") or req.get("id") or req.get("uid") or "").strip()
                 if not mid:
@@ -889,6 +909,88 @@ private enum EmailIMAPBridgeScriptTail {
                     sys.stdout.flush()
                 except Exception as exc:
                     fail("IMAP attachment fetch failed: %s" % exc)
+                    return
+            elif op == "batch_fetch":
+                raw_query = req.get("query") or ""
+                if "\r" in raw_query or "\n" in raw_query:
+                    fail("Invalid search query")
+                    return
+                if "\r" in mailbox or "\n" in mailbox:
+                    fail("Invalid mailbox")
+                    return
+                query = raw_query.strip()
+                try:
+                    raw = req.get("limit")
+                    limit = 50 if raw is None else int(raw)
+                except Exception:
+                    limit = 50
+                limit = max(1, min(limit, \#(EmailIMAPLimits.maxSearchLimit)))
+                try:
+                    if re.fullmatch(r"UID \d+:\d+", query):
+                        parts = query.split()[1].split(":")
+                        lo = int(parts[0])
+                        hi = int(parts[1])
+                        typ, data = conn.uid("search", None, "UID %d:%d" % (lo, hi))
+                    elif not query or query == "*":
+                        typ, data = conn.uid("search", None, "ALL")
+                    else:
+                        esc = query.replace("\\", "\\\\").replace('"', '\\"')
+                        criteria = 'OR OR SUBJECT "%s" FROM "%s" BODY "%s"' % (esc, esc, esc)
+                        ctyp, cdata = None, None
+                        try:
+                            ctyp, cdata = conn.uid("search", "CHARSET", "UTF-8", criteria)
+                        except Exception:
+                            ctyp, cdata = None, None
+                        if ctyp == "OK" and cdata is not None:
+                            typ, data = ctyp, cdata
+                        else:
+                            typ, data = conn.uid("search", None, criteria)
+                    if typ != "OK":
+                        fail("IMAP search failed")
+                        return
+                    uids = (data[0] or b"").split() if data else []
+                    wanted = [u.decode("utf-8", errors="replace") for u in uids[-limit:]]
+                    wanted.reverse()
+                    messages = []
+                    for uid in wanted:
+                        try:
+                            ftyp, fdata = conn.uid("fetch", uid, "(BODY.PEEK[])")
+                            if ftyp != "OK" or not fdata:
+                                continue
+                            raw = None
+                            for chunk in fdata:
+                                if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[1], bytes):
+                                    raw = chunk[1]
+                                    break
+                            if not raw:
+                                continue
+                            msg = email.message_from_bytes(raw, policy=policy.default)
+                            text = body_text(msg)
+                            seen = attachments_of(msg)
+                            deferred = len(seen) > 0
+                            note = None
+                            if deferred:
+                                if len(seen) == 1:
+                                    note = "1 attachment available; use email.attachment to download."
+                                else:
+                                    note = "%d attachments available; use email.attachment to download." % len(seen)
+                            messages.append({
+                                "id": uid,
+                                "subject": decode_value(msg["Subject"]),
+                                "from": decode_value(msg["From"]),
+                                "to": decode_value(msg["To"]),
+                                "date": str(msg["Date"] or ""),
+                                "body": text or "",
+                                "attachments": seen,
+                                "attachmentsDeferred": deferred,
+                                "attachmentsNote": note,
+                            })
+                        except Exception:
+                            continue
+                    sys.stdout.write(json.dumps({"ok": True, "messages": messages}))
+                    sys.stdout.flush()
+                except Exception as exc:
+                    fail("IMAP batch fetch failed: %s" % exc)
                     return
             else:
                 fail("Unknown IMAP op '%s'" % op)

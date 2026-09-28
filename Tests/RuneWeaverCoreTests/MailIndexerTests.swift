@@ -2549,4 +2549,111 @@ struct MailIndexerTests {
         #expect(await recorder.closesSnapshot() == [])
         #expect(await messageCalls.value() == 0)
     }
+
+    @Test
+    func `Checkpoint store reset deletes file and clears in-memory watermarks`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let cpFile = base.appendingPathComponent("cp.json")
+        let checkpoints = MailIndexCheckpointStore(path: cpFile.path)
+        try await checkpoints.record(account: "test", mailbox: "INBOX", watermark: 42, contentHash: "hash123")
+        #expect(await checkpoints.watermark(account: "test", mailbox: "INBOX") == 42)
+        #expect(FileManager.default.fileExists(atPath: cpFile.path))
+
+        try await checkpoints.reset()
+        #expect(!FileManager.default.fileExists(atPath: cpFile.path))
+        #expect(await checkpoints.watermark(account: "test", mailbox: "INBOX") == 0)
+        #expect(await !checkpoints.containsContentHash("hash123"))
+    }
+
+    @Test
+    func `Checkpoint store detects external file removal and resets in-memory cache`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let cpFile = base.appendingPathComponent("cp.json")
+        let checkpoints = MailIndexCheckpointStore(path: cpFile.path)
+        try await checkpoints.record(account: "test", mailbox: "INBOX", watermark: 99, contentHash: "hash99")
+        #expect(await checkpoints.watermark(account: "test", mailbox: "INBOX") == 99)
+
+        try FileManager.default.removeItem(at: cpFile)
+        #expect(!FileManager.default.fileExists(atPath: cpFile.path))
+
+        #expect(await checkpoints.watermark(account: "test", mailbox: "INBOX") == 0)
+        #expect(await !checkpoints.containsContentHash("hash99"))
+    }
+
+    @Test
+    func `Checkpoint store records and clears backfill floor`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let cpFile = base.appendingPathComponent("cp.json")
+        let checkpoints = MailIndexCheckpointStore(path: cpFile.path)
+
+        #expect(await checkpoints.backfillFloor(account: "test", mailbox: "INBOX") == nil)
+
+        try await checkpoints.recordBackfillFloor(account: "test", mailbox: "INBOX", floor: 2500)
+        #expect(await checkpoints.backfillFloor(account: "test", mailbox: "INBOX") == 2500)
+
+        // Setting floor <= 1 clears the backfill floor
+        try await checkpoints.recordBackfillFloor(account: "test", mailbox: "INBOX", floor: 1)
+        #expect(await checkpoints.backfillFloor(account: "test", mailbox: "INBOX") == nil)
+
+        try await checkpoints.recordBackfillFloor(account: "test", mailbox: "INBOX", floor: 1500)
+        #expect(await checkpoints.backfillFloor(account: "test", mailbox: "INBOX") == 1500)
+
+        // Setting floor to nil also clears it
+        try await checkpoints.recordBackfillFloor(account: "test", mailbox: "INBOX", floor: nil)
+        #expect(await checkpoints.backfillFloor(account: "test", mailbox: "INBOX") == nil)
+    }
+
+    @Test
+    func `MailIndexCheckpoint decodes backward-compatibly without backfillFloors`() throws {
+        let jsonWithoutBackfill = """
+        {
+            "watermarks": {"test\\u001fINBOX": 42},
+            "contentHashes": ["hash1"],
+            "uidValidities": {"test\\u001fINBOX": 100}
+        }
+        """.data(using: .utf8)!
+
+        let checkpoint = try JSONDecoder().decode(MailIndexCheckpoint.self, from: jsonWithoutBackfill)
+        #expect(checkpoint.watermarks["test\u{1F}INBOX"] == 42)
+        #expect(checkpoint.backfillFloors.isEmpty)
+
+        let encoded = try JSONEncoder().encode(checkpoint)
+        let roundTripped = try JSONDecoder().decode(MailIndexCheckpoint.self, from: encoded)
+        #expect(roundTripped == checkpoint)
+    }
+
+    @Test
+    func `Streaming backfill indexes page-by-page and clears backfill floor when complete`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let bounds = BoundRecorder()
+        let all = Array((1 ... 120).map {
+            makeMessage(id: "\($0)", body: "streaming body \($0)")
+        }.reversed())
+
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: StubMailGateway(messages: all, bounds: bounds),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run()
+            #expect(report.messagesIndexed == 120)
+            #expect(report.messagesSeen == 120)
+
+            let watermark = await checkpoints.watermark(account: testAccount.name, mailbox: "INBOX")
+            #expect(watermark == 120)
+
+            let floor = await checkpoints.backfillFloor(account: testAccount.name, mailbox: "INBOX")
+            #expect(floor == nil)
+
+            let stats = try await store.stats()
+            #expect(stats.documents == 120)
+        }
+    }
 }

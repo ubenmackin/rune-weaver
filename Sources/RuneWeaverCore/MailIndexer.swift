@@ -20,235 +20,6 @@ import CryptoKit
 import Dispatch
 import Foundation
 
-// MARK: - Checkpoint store
-
-/// JSON-backed store for per-mailbox UID watermarks and seen content hashes.
-///
-/// The checkpoint is small and read on demand, so a JSON sidecar keeps the
-/// incremental cursor independent of the document store schema.
-public actor MailIndexCheckpointStore {
-    /// Default checkpoint path, kept beside the other durable memory stores.
-    public static let defaultPath = "~/.runeweaver/memory/mail-index-checkpoint.json"
-    /// Upper bound on retained content hashes so the sidecar stays bounded.
-    public static let maxTrackedHashes = 5000
-
-    /// Filesystem path of the JSON checkpoint.
-    public let path: String
-
-    /// Whether the sidecar has been read into memory.
-    private var loaded = false
-    /// In-memory checkpoint snapshot.
-    private var checkpoint = MailIndexCheckpoint()
-
-    /// Creates a checkpoint store.
-    /// - Parameter path: JSON sidecar path. `~` is expanded on first load.
-    public init(path: String = MailIndexCheckpointStore.defaultPath) {
-        self.path = path
-    }
-
-    /// Composes the mailbox key used for watermarks.
-    ///
-    /// Delegates to the shared `mailboxKey` so padded spellings share one
-    /// watermark with the pooled session instead of forking pool vs checkpoint.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    /// - Returns: A stable opaque key.
-    public static func key(account: String, mailbox: String) -> String {
-        mailboxKey(account: account, mailbox: mailbox)
-    }
-
-    /// Highest indexed UID for one mailbox.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    /// - Returns: The watermark, or zero when none has been recorded.
-    public func watermark(account: String, mailbox: String) -> Int {
-        loadIfNeeded()
-        return checkpoint.watermarks[Self.key(account: account, mailbox: mailbox)] ?? 0
-    }
-
-    /// Whether a content hash has already been indexed.
-    /// - Parameter hash: Content hash under test.
-    /// - Returns: True when the hash is already tracked.
-    public func containsContentHash(_ hash: String) -> Bool {
-        loadIfNeeded()
-        return checkpoint.contentHashes.contains(hash)
-    }
-
-    /// Last observed validity token for one mailbox.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    /// - Returns: Stored token, or nil when never observed.
-    public func uidValidity(account: String, mailbox: String) -> Int? {
-        loadIfNeeded()
-        return checkpoint.uidValidities[Self.key(account: account, mailbox: mailbox)]
-    }
-
-    /// Reconciles the stored validity token, resetting the watermark on mismatch.
-    ///
-    /// A changed token means the server reassigned UIDs, so the mailbox
-    /// restarts from zero while retained hashes dedupe refetches instead of
-    /// duplicating. A first observation only records without resetting.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    ///   - uidValidity: Current server token, or nil when unknown.
-    /// - Returns: True when the watermark was reset.
-    @discardableResult
-    public func synchronizeValidity(account: String, mailbox: String, uidValidity: Int?) throws -> Bool {
-        loadIfNeeded()
-        guard let uidValidity else { return false }
-        let mailboxKey = Self.key(account: account, mailbox: mailbox)
-        if let stored = checkpoint.uidValidities[mailboxKey] {
-            guard stored != uidValidity else { return false }
-            checkpoint.watermarks[mailboxKey] = 0
-            checkpoint.uidValidities[mailboxKey] = uidValidity
-            try persist()
-            return true
-        }
-        checkpoint.uidValidities[mailboxKey] = uidValidity
-        try persist()
-        return false
-    }
-
-    /// Records progress for one mailbox, persisting immediately.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    ///   - watermark: Highest indexed UID, which may only advance.
-    ///   - contentHash: Content hash to remember, when one was computed.
-    public func record(account: String, mailbox: String, watermark: Int, contentHash: String?) throws {
-        loadIfNeeded()
-        let mailboxKey = Self.key(account: account, mailbox: mailbox)
-        if watermark > (checkpoint.watermarks[mailboxKey] ?? 0) {
-            checkpoint.watermarks[mailboxKey] = watermark
-        }
-        if let contentHash, !checkpoint.contentHashes.contains(contentHash) {
-            checkpoint.contentHashes.append(contentHash)
-            if checkpoint.contentHashes.count > Self.maxTrackedHashes {
-                checkpoint.contentHashes.removeFirst(checkpoint.contentHashes.count - Self.maxTrackedHashes)
-            }
-        }
-        try persist()
-    }
-
-    /// Returns the current checkpoint snapshot.
-    /// - Returns: The in-memory checkpoint.
-    public func snapshot() -> MailIndexCheckpoint {
-        loadIfNeeded()
-        return checkpoint
-    }
-
-    /// Drops the watermark and validity token for one mailbox.
-    ///
-    /// Called after a denied mailbox retires so re-allowing it backfills from
-    /// zero instead of resuming past mail it never indexed while denied.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Denied mailbox name.
-    public func dropMailbox(account: String, mailbox: String) throws {
-        loadIfNeeded()
-        let key = Self.key(account: account, mailbox: mailbox)
-        var changed = false
-        if checkpoint.watermarks.removeValue(forKey: key) != nil {
-            changed = true
-        }
-        if checkpoint.uidValidities.removeValue(forKey: key) != nil {
-            changed = true
-        }
-        if changed {
-            try persist()
-        }
-    }
-
-    /// Forgets content hashes for retired mail so a re-allowed mailbox re-indexes.
-    ///
-    /// Hashes are global dedupe keys, so only the retired rows' hashes leave:
-    /// every other mailbox keeps its dedupe memory while the denied bodies
-    /// become indexable again.
-    /// - Parameter hashes: Content hashes of the retired documents.
-    public func removeContentHashes(_ hashes: Set<String>) throws {
-        loadIfNeeded()
-        guard !hashes.isEmpty else { return }
-        let before = checkpoint.contentHashes.count
-        checkpoint.contentHashes.removeAll { hashes.contains($0) }
-        if checkpoint.contentHashes.count != before {
-            try persist()
-        }
-    }
-
-    /// Reads the sidecar once, ignoring unreadable or corrupt state.
-    private func loadIfNeeded() {
-        guard !loaded else { return }
-        loaded = true
-        let expanded = (path as NSString).expandingTildeInPath
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: expanded)) else { return }
-        do {
-            checkpoint = try JSONDecoder().decode(MailIndexCheckpoint.self, from: data)
-        } catch {
-            RuneWeaverLog.stores.warning("MailIndexCheckpointStore: failed to decode checkpoint from '\(expanded)': \(error.localizedDescription)")
-        }
-    }
-
-    /// Writes the checkpoint to disk atomically.
-    private func persist() throws {
-        let expanded = (path as NSString).expandingTildeInPath
-        let url = URL(fileURLWithPath: expanded)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let data = try JSONEncoder().encode(checkpoint)
-        try data.write(to: url, options: .atomic)
-    }
-}
-
-// MARK: - Report
-
-/// Outcome of one mail indexing run.
-public struct MailIndexRunReport: Sendable, Equatable {
-    /// Accounts whose credentials resolved and whose mailbox listing succeeded.
-    public var accountsScanned = 0
-    /// Mailboxes enumerated across all accounts.
-    public var mailboxesScanned = 0
-    /// Denied mailboxes skipped without dialing.
-    public var mailboxesSkipped = 0
-    /// New messages considered after the UID watermark filter.
-    public var messagesSeen = 0
-    /// Messages written to the index.
-    public var messagesIndexed = 0
-    /// Messages skipped because their stored body hash was already current.
-    public var messagesUnchanged = 0
-    /// Messages skipped because their content hash matched an earlier message.
-    public var messagesDeduplicated = 0
-    /// Attachments staged, extracted, and deleted this run.
-    public var attachmentsStaged = 0
-    /// Attachments skipped for exceeding the per-attachment size cap.
-    public var attachmentsSkippedOversize = 0
-    /// Attachments whose text layer was unavailable, marked for the vision path.
-    public var attachmentsMetadataOnly = 0
-    /// Text chunks written this run.
-    public var chunksWritten = 0
-    /// Chunks written carrying an embedding this run.
-    public var vectorsWritten = 0
-    /// Mail documents retired because their mailbox joined the denylist.
-    public var retiredCount = 0
-    /// Non-fatal account- or mailbox-level problems, without any secret value.
-    public var warnings: [String] = []
-    /// Set when the run did not execute because mail indexing is disabled.
-    public var skippedReason: String?
-
-    /// Creates a run report.
-    /// - Parameter skippedReason: Set when the run was skipped.
-    public init(skippedReason: String? = nil) {
-        self.skippedReason = skippedReason
-    }
-
-    /// Whether the indexer actually ran.
-    public var didRun: Bool {
-        skippedReason == nil
-    }
-}
-
 // MARK: - Indexer
 
 /// Actor-isolated mail indexer over an injected read-only gateway seam.
@@ -429,36 +200,6 @@ public actor MailIndexer {
         return cursor.report
     }
 
-    /// Deletes index rows for newly denied mailboxes and drops their checkpoints.
-    ///
-    /// The store owns deletion while this gate owns the observed set: hashes
-    /// for the retired rows are read first so the checkpoint can forget them,
-    /// otherwise a re-allowed mailbox would dedupe against its own deleted
-    /// bodies instead of re-indexing. Failures degrade to a warning so a
-    /// retire problem never fails an otherwise complete run.
-    /// - Parameter denied: Mailbox names skipped this run.
-    /// - Returns: Number of mail documents retired.
-    private func retireDeniedMailboxes(_ denied: Set<String>) async -> Int {
-        do {
-            let hashes = await (try? store.mailContentHashes(mailboxes: denied)) ?? []
-            let retired = try await store.retireMailboxes(denied)
-            if retired > 0 {
-                _ = try? await store.reclaim()
-            }
-            for account in emailConfig.accounts {
-                for mailbox in denied {
-                    try? await checkpoints.dropMailbox(account: account.name, mailbox: mailbox)
-                }
-            }
-            if !hashes.isEmpty {
-                try? await checkpoints.removeContentHashes(hashes)
-            }
-            return retired
-        } catch {
-            return 0
-        }
-    }
-
     /// Mutable per-run budget, progress throttle, and report bundle.
     ///
     /// Grouped so mailbox helpers stay under the parameter budget without
@@ -616,39 +357,58 @@ public actor MailIndexer {
                 return
             }
         }
-        guard let (fetched, windowComplete) = try await fetchFreshWindowWithRetry(
-            context: context,
-            watermark: watermark,
-            anchoredUidNext: probedStatus?.uidNext,
-            cursor: &cursor
-        ) else {
-            return
+        // Phase 1: Forward catch-up for new messages above the watermark.
+        // Runs whenever watermark > 0 to pull only new arrivals since the previous run.
+        if watermark > 0 {
+            guard let (fetched, windowComplete) = try await fetchFreshWindowWithRetry(
+                context: context,
+                watermark: watermark,
+                anchoredUidNext: probedStatus?.uidNext,
+                cursor: &cursor
+            ) else {
+                return
+            }
+            let fresh = Self.freshSortedMessages(fetched, watermark: watermark)
+            await reporter(ToolProgress(
+                message: "Indexing mail: \(cursor.report.messagesIndexed) indexed, \(cursor.report.messagesSeen) scanned",
+                scanned: cursor.report.messagesSeen,
+                matched: cursor.report.messagesIndexed,
+                current: "\(context.account.name) - \(context.mailbox) (\(fresh.count) new)"
+            ))
+            let holdsWatermark = Self.holdsWatermark(windowComplete: windowComplete, fresh: fresh, watermark: watermark)
+            if holdsWatermark {
+                cursor.report.warnings.append(
+                    "Mailbox '\(context.mailbox)' has more new messages than the gateway's widest page; "
+                        + "indexed the newest \(fresh.count) and held the watermark at \(watermark) "
+                        + "so older arrivals stay pending instead of being skipped."
+                )
+            }
+            let batch = MailboxBatch(
+                context: context,
+                fresh: fresh,
+                watermark: watermark,
+                holdsWatermark: holdsWatermark
+            )
+            try await indexFreshMessages(batch: batch, cursor: &cursor, reporter: reporter)
+            watermark = await checkpoints.watermark(account: context.account.name, mailbox: context.mailbox)
         }
-        let fresh = Self.freshSortedMessages(fetched, watermark: watermark)
-        // Window-fetched frame from the same owner, carrying the fresh count
-        // so a paged backfill stays visible between the fetch return and the
-        // first per-message emit. Same copy shape as the per-message frames.
-        await reporter(ToolProgress(
-            message: "Indexing mail: \(cursor.report.messagesIndexed) indexed, \(cursor.report.messagesSeen) scanned",
-            scanned: cursor.report.messagesSeen,
-            matched: cursor.report.messagesIndexed,
-            current: "\(context.account.name) - \(context.mailbox) (\(fresh.count) new)"
-        ))
-        let holdsWatermark = Self.holdsWatermark(windowComplete: windowComplete, fresh: fresh, watermark: watermark)
-        if holdsWatermark {
-            cursor.report.warnings.append(
-                "Mailbox '\(context.mailbox)' has more new messages than the gateway's widest page; "
-                    + "indexed the newest \(fresh.count) and held the watermark at \(watermark) "
-                    + "so older arrivals stay pending instead of being skipped."
+
+        // Phase 2: Streaming historical backfill downward below backfillFloor (or from top if watermark == 0).
+        let pendingBackfillFloor = await checkpoints.backfillFloor(
+            account: context.account.name,
+            mailbox: context.mailbox
+        )
+        let needsBackfill = watermark == 0 || (pendingBackfillFloor != nil && pendingBackfillFloor! > 1)
+        if needsBackfill, cursor.budget > 0 {
+            try await streamBackfill(
+                context: context,
+                watermark: &watermark,
+                initialFloor: pendingBackfillFloor,
+                anchoredUidNext: probedStatus?.uidNext,
+                cursor: &cursor,
+                reporter: reporter
             )
         }
-        let batch = MailboxBatch(
-            context: context,
-            fresh: fresh,
-            watermark: watermark,
-            holdsWatermark: holdsWatermark
-        )
-        try await indexFreshMessages(batch: batch, cursor: &cursor, reporter: reporter)
     }
 
     /// Retries fetching fresh window up to `maxFetchAttempts`, backing off on retryable errors.
@@ -742,6 +502,291 @@ public actor MailIndexer {
                 await reporter(Self.progress(report: cursor.report, account: batch.context.account.name, mailbox: batch.context.mailbox, messageID: message.id))
             }
         }
+    }
+}
+
+// MARK: - Streaming backfill
+
+extension MailIndexer {
+    /// Deletes index rows for newly denied mailboxes and drops their checkpoints.
+    ///
+    /// The store owns deletion while this gate owns the observed set: hashes
+    /// for the retired rows are read first so the checkpoint can forget them,
+    /// otherwise a re-allowed mailbox would dedupe against its own deleted
+    /// bodies instead of re-indexing. Failures degrade to a warning so a
+    /// retire problem never fails an otherwise complete run.
+    /// - Parameter denied: Mailbox names skipped this run.
+    /// - Returns: Number of mail documents retired.
+    private func retireDeniedMailboxes(_ denied: Set<String>) async -> Int {
+        do {
+            let hashes = await (try? store.mailContentHashes(mailboxes: denied)) ?? []
+            let retired = try await store.retireMailboxes(denied)
+            if retired > 0 {
+                _ = try? await store.reclaim()
+            }
+            for account in emailConfig.accounts {
+                for mailbox in denied {
+                    try? await checkpoints.dropMailbox(account: account.name, mailbox: mailbox)
+                }
+            }
+            if !hashes.isEmpty {
+                try? await checkpoints.removeContentHashes(hashes)
+            }
+            return retired
+        } catch {
+            return 0
+        }
+    }
+
+    /// Streams historical backfill downward page-by-page, indexing each batch immediately.
+    ///
+    /// Watermark is established on the first page if zero; the backfill floor advances
+    /// downward as pages arrive and is cleared when the start of the mailbox is reached.
+    private func streamBackfill(
+        context: MailboxContext,
+        watermark: inout Int,
+        initialFloor: Int?,
+        anchoredUidNext: Int?,
+        cursor: inout MailRunCursor,
+        reporter: ToolProgressReporter
+    ) async throws {
+        let initialWatermark = watermark
+        var currentBeforeUID: Int? = initialFloor ?? anchoredUidNext
+        var isFirstIteration = true
+        var isInitialWindow = (initialWatermark == 0 && initialFloor == nil)
+        var seenIDs = Set<String>()
+
+        while cursor.budget > 0 {
+            try Task.checkCancellation()
+            if !isFirstIteration {
+                try await Task.sleep(nanoseconds: UInt64(Self.interPagePauseSeconds * 1_000_000_000))
+            }
+            isFirstIteration = false
+
+            guard let page = try await fetchSinglePageWithRetry(
+                context: context,
+                limit: Self.pageLimit,
+                beforeUID: currentBeforeUID,
+                cursor: &cursor
+            ) else {
+                return
+            }
+
+            if page.isEmpty {
+                guard let next = try await handleEmptyBackfillWindow(
+                    account: context.account.name,
+                    mailbox: context.mailbox,
+                    currentBeforeUID: currentBeforeUID
+                ) else {
+                    break
+                }
+                currentBeforeUID = next
+                continue
+            }
+
+            if isInitialWindow {
+                isInitialWindow = false
+                await reporter(ToolProgress(
+                    message: "Indexing mail: \(cursor.report.messagesIndexed) indexed, \(cursor.report.messagesSeen) scanned",
+                    scanned: cursor.report.messagesSeen,
+                    matched: cursor.report.messagesIndexed,
+                    current: "\(context.account.name) - \(context.mailbox) (\(page.count) new)"
+                ))
+            }
+
+            var advanced = false
+            for message in page where seenIDs.insert(message.id).inserted {
+                advanced = true
+            }
+
+            let numericUIDs = page.map { Self.uid(of: $0.id) }.filter { $0 > 0 }
+            guard let lowest = numericUIDs.min() else {
+                break
+            }
+
+            let isClamped = !advanced || (currentBeforeUID != nil && lowest >= currentBeforeUID!)
+            if isClamped {
+                await handleClampedGateway(
+                    context: context,
+                    pageCount: page.count,
+                    initialWatermark: initialWatermark,
+                    watermark: &watermark,
+                    cursor: &cursor
+                )
+                break
+            }
+
+            if watermark == 0, let highest = numericUIDs.max() {
+                watermark = highest
+                try await checkpoints.record(
+                    account: context.account.name,
+                    mailbox: context.mailbox,
+                    watermark: watermark,
+                    contentHash: nil
+                )
+            }
+
+            let sortedPage = page.sorted { Self.uid(of: $0.id) < Self.uid(of: $1.id) }
+            try await indexBackfillBatch(
+                page: sortedPage,
+                context: context,
+                watermark: watermark,
+                cursor: &cursor,
+                reporter: reporter
+            )
+
+            if lowest <= 1 || (page.count < Self.pageLimit && lowest <= 1) {
+                try await checkpoints.recordBackfillFloor(
+                    account: context.account.name,
+                    mailbox: context.mailbox,
+                    floor: nil
+                )
+                break
+            }
+
+            currentBeforeUID = lowest
+            try await checkpoints.recordBackfillFloor(
+                account: context.account.name,
+                mailbox: context.mailbox,
+                floor: lowest
+            )
+        }
+    }
+
+    /// Handles an empty backfill window by stepping downward or completing at the mailbox start.
+    private func handleEmptyBackfillWindow(
+        account: String,
+        mailbox: String,
+        currentBeforeUID: Int?
+    ) async throws -> Int? {
+        guard let current = currentBeforeUID,
+              let window = MailIndexTiling.window(beforeUID: current),
+              window.lower > 1
+        else {
+            try await checkpoints.recordBackfillFloor(account: account, mailbox: mailbox, floor: nil)
+            return nil
+        }
+        try await checkpoints.recordBackfillFloor(account: account, mailbox: mailbox, floor: window.lower)
+        return window.lower
+    }
+
+    /// Handles a clamped gateway by reverting zero watermark and emitting an advisory warning.
+    private func handleClampedGateway(
+        context: MailboxContext,
+        pageCount: Int,
+        initialWatermark: Int,
+        watermark: inout Int,
+        cursor: inout MailRunCursor
+    ) async {
+        if initialWatermark == 0 {
+            try? await checkpoints.record(
+                account: context.account.name,
+                mailbox: context.mailbox,
+                watermark: initialWatermark,
+                contentHash: nil
+            )
+            watermark = initialWatermark
+        }
+        cursor.report.warnings.append(
+            "Mailbox '\(context.mailbox)' has more new messages than the gateway's widest page; "
+                + "indexed the newest \(pageCount) and held the watermark at \(watermark) "
+                + "so older arrivals stay pending instead of being skipped."
+        )
+    }
+
+    /// Indexes all messages in one backfill page, recording outcomes and hashes.
+    private func indexBackfillBatch(
+        page: [MailIndexMessage],
+        context: MailboxContext,
+        watermark: Int,
+        cursor: inout MailRunCursor,
+        reporter: ToolProgressReporter
+    ) async throws {
+        for message in page {
+            try Task.checkCancellation()
+            guard cursor.budget > 0 else { break }
+            cursor.budget -= 1
+            cursor.report.messagesSeen += 1
+            let outcome = try await index(message: message, context: context)
+            cursor.report.messagesIndexed += outcome.indexed ? 1 : 0
+            cursor.report.messagesUnchanged += outcome.unchanged ? 1 : 0
+            cursor.report.messagesDeduplicated += outcome.deduplicated ? 1 : 0
+            cursor.report.attachmentsStaged += outcome.staged
+            cursor.report.attachmentsSkippedOversize += outcome.oversize
+            cursor.report.attachmentsMetadataOnly += outcome.metadataOnly
+            cursor.report.chunksWritten += outcome.chunks
+            cursor.report.vectorsWritten += outcome.vectors
+
+            if let hash = outcome.contentHash.isEmpty ? nil : outcome.contentHash {
+                try await checkpoints.record(
+                    account: context.account.name,
+                    mailbox: context.mailbox,
+                    watermark: watermark,
+                    contentHash: hash
+                )
+            }
+            let stamp = DispatchTime.now().uptimeNanoseconds
+            if stamp &- cursor.lastReport >= ToolProgress.minimumReportIntervalNanoseconds {
+                cursor.lastReport = stamp
+                await reporter(Self.progress(
+                    report: cursor.report,
+                    account: context.account.name,
+                    mailbox: context.mailbox,
+                    messageID: message.id
+                ))
+            }
+        }
+    }
+
+    /// Fetches one page with retry up to `maxFetchAttempts`, backing off on retryable errors.
+    private func fetchSinglePageWithRetry(
+        context: MailboxContext,
+        limit: Int,
+        beforeUID: Int?,
+        cursor: inout MailRunCursor
+    ) async throws -> [MailIndexMessage]? {
+        var attempt = 0
+        var terminalTransportError: Error?
+        while attempt < Self.maxFetchAttempts {
+            attempt += 1
+            do {
+                return try await gateway.messages(
+                    credentials: context.credentials,
+                    mailbox: context.mailbox,
+                    limit: limit,
+                    mode: .peek,
+                    beforeUID: beforeUID
+                )
+            } catch let cancel as CancellationError {
+                throw cancel
+            } catch {
+                guard Self.isRetryableMailError(error) else {
+                    cursor.report.warnings.append("Skipped mailbox '\(context.account.name)/\(context.mailbox)': \(error.localizedDescription)")
+                    return nil
+                }
+                if attempt >= Self.maxFetchAttempts {
+                    terminalTransportError = error
+                    break
+                }
+                let delayIndex = min(attempt - 1, Self.fetchRetryDelaysSeconds.count - 1)
+                let delaySeconds = Self.fetchRetryDelaysSeconds[delayIndex]
+                try await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
+                do {
+                    try await gateway.openMailboxSession(credentials: context.credentials, mailbox: context.mailbox)
+                } catch let cancel as CancellationError {
+                    throw cancel
+                } catch {
+                    cursor.report.warnings.append("Skipped mailbox '\(context.account.name)/\(context.mailbox)': \(error.localizedDescription)")
+                    return nil
+                }
+            }
+        }
+        if let terminalTransportError {
+            let message = "Skipped mailbox '\(context.account.name)/\(context.mailbox)': \(terminalTransportError.localizedDescription) "
+                + "(after \(Self.maxFetchAttempts) attempts)"
+            cursor.report.warnings.append(message)
+        }
+        return nil
     }
 }
 
@@ -1192,228 +1237,5 @@ extension MailIndexer {
     /// - Parameter directory: Confined temp directory to remove.
     private func discardStaged(at directory: URL) {
         try? FileManager.default.removeItem(at: directory)
-    }
-}
-
-// MARK: - Value helpers
-
-extension MailIndexer {
-    /// Reports whether a mailbox joins the Trash-class denylist.
-    ///
-    /// The mail run gate owns this match: every pattern and every candidate
-    /// lowercases first to mirror the files walker, and the full mailbox name
-    /// plus each slash-separated hierarchy segment is tested so `Trash`
-    /// covers both `Trash` and `INBOX/Trash` while `Deleted*` still spans the
-    /// space in `Deleted Messages`.
-    /// - Parameters:
-    ///   - mailbox: Mailbox name from the gateway.
-    ///   - patterns: Raw denylist globs from `IndexConfig.mailboxDeny`.
-    /// - Returns: True when any pattern matches the mailbox or a segment.
-    public static func isMailboxDenied(_ mailbox: String, patterns: [String]) -> Bool {
-        let trimmedMailbox = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedMailbox.isEmpty else { return false }
-        let loweredMailbox = trimmedMailbox.lowercased()
-        let segments = loweredMailbox.split(separator: "/").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        var candidates = [loweredMailbox]
-        candidates.append(contentsOf: segments)
-        for rawPattern in patterns {
-            let pattern = rawPattern.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard !pattern.isEmpty else { continue }
-            for candidate in candidates where SharedGlobMatching.matches(pattern: pattern, relativePath: candidate) {
-                return true
-            }
-        }
-        return false
-    }
-
-    /// Whether a mail fetch error is worth retrying.
-    ///
-    /// The wording owner is `MailErrorClassification`: cancellation never
-    /// retries, authentication failures never retry, transient transport
-    /// phrases retry, and everything else skips at once. Authentication wins
-    /// over transport so a message carrying both signals still skips.
-    /// - Parameter error: Fetch failure under test.
-    /// - Returns: True for retryable transport failures, false otherwise.
-    public static func isRetryableMailError(_ error: Error) -> Bool {
-        if error is CancellationError {
-            return false
-        }
-        let described: String = if let localized = (error as? LocalizedError)?.errorDescription {
-            localized + " " + String(describing: error)
-        } else {
-            error.localizedDescription + " " + String(describing: error)
-        }
-        if MailErrorClassification.isAuthFailureDetail(described) {
-            return false
-        }
-        return MailErrorClassification.isTransportFailureDetail(described)
-    }
-
-    /// Whether a STATUS probe failure must skip the mailbox without paging.
-    ///
-    /// Only authentication, fail-closed validation, and unknown-account
-    /// failures skip: a bad credential or bad argument cannot succeed on the
-    /// message path. Every other probe failure falls back to the unanchored
-    /// path with a nil probe, matching the one-shot empty-query fallback.
-    /// Auth wording stays owned by `MailErrorClassification`; validation plus
-    /// unknown-account arrive as Core-owned `MailIndexError` cases mapped by
-    /// the gateway adapter so this layer matches by type without importing
-    /// the tool layer.
-    /// - Parameter error: STATUS probe failure under test.
-    /// - Returns: True when the mailbox must be skipped, false to page unanchored.
-    private static func isSkippableStatusError(_ error: Error) -> Bool {
-        if let indexError = error as? MailIndexError {
-            switch indexError {
-            case .validationFailed, .unknownAccount:
-                return true
-            case .stagingFailed:
-                return false
-            }
-        }
-        let described: String = if let localized = (error as? LocalizedError)?.errorDescription {
-            localized + " " + String(describing: error)
-        } else {
-            error.localizedDescription + " " + String(describing: error)
-        }
-        return MailErrorClassification.isAuthFailureDetail(described)
-    }
-
-    /// Closes a pooled mailbox session without inheriting cancellation.
-    ///
-    /// The mailbox bracket owns this close: the evict runs detached so a
-    /// cancelled caller still releases the pooled connection instead of
-    /// leaking it, and the detached task is awaited so the close lands before
-    /// the mailbox returns and stays observable to callers. The adapter close
-    /// is an idempotent no-op when absent.
-    /// - Parameters:
-    ///   - gateway: Gateway owning the pooled session.
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox whose session ends.
-    private static func closeMailboxSessionAssumingOpen(
-        gateway: any MailIndexGateway,
-        credentials: MailIndexCredentials,
-        mailbox: String
-    ) async {
-        await Task.detached { [gateway, credentials, mailbox] in
-            await gateway.closeMailboxSession(credentials: credentials, mailbox: mailbox)
-        }.value
-    }
-
-    /// Parses an IMAP UID, returning zero for anything non-numeric.
-    /// - Parameter id: Message identifier from the gateway.
-    /// - Returns: The UID, or zero when the identifier is not numeric.
-    static func uid(of id: String) -> Int {
-        Int(id.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-    }
-
-    /// Filters to UIDs above the watermark and sorts ascending for contiguous advance.
-    ///
-    /// Newest-first pages are re-sorted so the watermark only advances past
-    /// messages that were actually considered, never jumping a gap.
-    static func freshSortedMessages(_ fetched: [MailIndexMessage], watermark: Int) -> [MailIndexMessage] {
-        fetched
-            .filter { Self.uid(of: $0.id) > watermark }
-            .sorted { Self.uid(of: $0.id) < Self.uid(of: $1.id) }
-    }
-
-    /// Whether the watermark must be held over an unfetched gap.
-    ///
-    /// A burst larger than the gateway's widest page leaves IDs between the
-    /// watermark and the fetched middle; holding keeps them eligible while
-    /// hashes still dedupe on revisit.
-    static func holdsWatermark(windowComplete: Bool, fresh: [MailIndexMessage], watermark: Int) -> Bool {
-        let minFreshUID = fresh.map { Self.uid(of: $0.id) }.filter { $0 > 0 }.min()
-        return !windowComplete && (minFreshUID ?? watermark + 1) > watermark + 1
-    }
-
-    /// Composes the source-scoped identifier for one message.
-    /// The mailbox is trimmed so padded spellings share one document identity with the pooled
-    /// session and checkpoint watermark, which already normalize through the shared mailbox key;
-    /// otherwise one mailbox would fork pool and watermark from document identity.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    ///   - messageID: IMAP UID.
-    /// - Returns: A stable document identifier.
-    static func documentExternalID(account: String, mailbox: String, messageID: String) -> String {
-        let trimmedMailbox = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
-        return "\(account)/\(trimmedMailbox)/\(messageID)"
-    }
-
-    /// Joins a subject and body into the indexed message text.
-    /// - Parameters:
-    ///   - subject: Decoded subject header.
-    ///   - body: Decoded plain-text body.
-    /// - Returns: Subject plus body, each trimmed, separated by a blank line.
-    static func messageText(subject: String, body: String) -> String {
-        let trimmedSubject = subject.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmedSubject.isEmpty {
-            return trimmedBody
-        }
-        if trimmedBody.isEmpty {
-            return trimmedSubject
-        }
-        return "\(trimmedSubject)\n\n\(trimmedBody)"
-    }
-
-    /// Hashes message text for change detection and duplicate suppression.
-    /// - Parameter text: Normalized message text.
-    /// - Returns: Lowercase SHA-256 hex digest.
-    static func contentHash(_ text: String) -> String {
-        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
-    }
-
-    /// Human-readable name for a message document.
-    /// - Parameter subject: Decoded subject header.
-    /// - Returns: The trimmed subject, or a placeholder when blank.
-    static func displayName(subject: String) -> String {
-        let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "(no subject)" : trimmed
-    }
-
-    /// Classifies how completely a message was extracted.
-    /// - Parameters:
-    ///   - hasText: Whether any chunk text was produced.
-    ///   - degraded: Whether any part was partial, oversized, or unreadable.
-    /// - Returns: The extraction status to persist.
-    static func extractStatus(hasText: Bool, degraded: Bool) -> ExtractStatus {
-        guard hasText else { return .metadataOnly }
-        return degraded ? .partial : .extracted
-    }
-
-    /// Reduces an attachment filename to a safe base name.
-    ///
-    /// The staged binary is only ever read back for extraction and then deleted,
-    /// so this only needs to prevent path traversal and control characters.
-    /// - Parameters:
-    ///   - filename: Original filename.
-    ///   - fallback: Name used when nothing safe remains.
-    /// - Returns: A sanitized base name.
-    static func sanitizedFilename(_ filename: String, fallback: String) -> String {
-        let base = (filename as NSString).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
-        var cleaned = base
-            .replacingOccurrences(of: "\0", with: "_")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "\\", with: "_")
-            .replacingOccurrences(of: ":", with: "_")
-        cleaned = cleaned.unicodeScalars.map { scalar -> String in
-            let value = scalar.value
-            if value < 32 || value == 127 {
-                return "_"
-            }
-            return String(scalar)
-        }.joined()
-        while cleaned.hasPrefix(".") || cleaned.hasPrefix("-") {
-            cleaned.removeFirst()
-        }
-        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleaned.count > 255 {
-            cleaned = String(cleaned.prefix(255))
-        }
-        guard !cleaned.isEmpty, cleaned != ".", cleaned != ".." else {
-            return fallback
-        }
-        return cleaned
     }
 }

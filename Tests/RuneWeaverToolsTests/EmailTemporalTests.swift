@@ -296,86 +296,22 @@ struct EmailTemporalTests {
     }
 
     @Test
-    func `Session serializes non-midnight until rounded for BEFORE`() async throws {
-        let range = try TemporalFilter.parse(since: "2026-07-14", until: "2026-07-16")
-        let sinceDate = try #require(range.since)
-        let untilMidnight = try #require(range.until)
-        let untilNoon = untilMidnight.addingTimeInterval(-12 * 3600)
-        let searchPayload = #"{"ok": true, "messages": []}"#
-        let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#, searchPayload])
-        let credentials = ResolvedEmailCredentials(
-            accountName: "personal",
-            host: "mail.example.com",
-            port: 993,
-            username: "you@example.com",
-            password: "test-secret"
-        )
-        let session = EmailIMAPSession(
-            credentials: credentials,
-            transportFactory: { fake },
-            eventLog: MailSessionEventLog(sink: { _ in })
-        )
-        try await session.start()
-        _ = try await session.search(mailbox: "INBOX", query: "hello", limit: 10, since: sinceDate, until: untilNoon)
-        let lines = fake.writtenLines
-        #expect(lines.count == 2)
-        let searchLine = try #require(lines.last)
-        #expect(searchLine.contains(TemporalFilter.imapDateString(from: sinceDate)))
-        #expect(searchLine.contains("16-Jul-2026"))
-        await session.close()
-    }
-
-    @Test
-    func `Session serializes bounds with IMAP date strings`() async throws {
-        let range = try TemporalFilter.parse(since: "2026-09-13", until: "2026-09-14")
-        let sinceDate = try #require(range.since)
-        let untilDate = try #require(range.until)
-        let sinceIMAP = TemporalFilter.imapDateString(from: sinceDate)
-        let untilIMAP = TemporalFilter.imapDateString(from: untilDate)
-        let searchPayload = #"{"ok": true, "messages": []}"#
-        let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#, searchPayload])
-        let credentials = ResolvedEmailCredentials(
-            accountName: "personal",
-            host: "mail.example.com",
-            port: 993,
-            username: "you@example.com",
-            password: "test-secret"
-        )
-        let session = EmailIMAPSession(
-            credentials: credentials,
-            transportFactory: { fake },
-            eventLog: MailSessionEventLog(sink: { _ in })
-        )
-        try await session.start()
-        _ = try await session.search(mailbox: "INBOX", query: "hello", limit: 10, since: range.since, until: range.until)
-        let lines = fake.writtenLines
-        #expect(lines.count == 2)
-        let searchLine = try #require(lines.last)
-        #expect(searchLine.contains("\"since\""))
-        #expect(searchLine.contains("\"until\""))
-        #expect(searchLine.contains(sinceIMAP))
-        #expect(searchLine.contains(untilIMAP))
-        await session.close()
-    }
-
-    @Test
     func `Python helpers share the dated criteria shape`() throws {
-        for source in [EmailIMAPBridgeScript.source, EmailIMAPSessionScript.source] {
-            #expect(source.contains("since_imap"))
-            #expect(source.contains("until_imap"))
-            #expect(source.contains("date_prefix"))
-            #expect(source.contains("SINCE %s BEFORE %s"))
-            #expect(source.contains("SINCE %s"))
-            #expect(source.contains("BEFORE %s"))
-            // Dated keyword intersects the date prefix with the keyword OR shape.
-            #expect(source.contains("%s OR OR SUBJECT"))
-            // Dated wildcard sends the date prefix alone.
-            #expect(source.contains("conn.uid(\"search\", None, date_prefix)"))
-            // Undated shapes stay byte-identical.
-            #expect(source.contains("conn.uid(\"search\", None, \"ALL\")"))
-            #expect(source.contains("OR OR SUBJECT \"%s\" FROM \"%s\" BODY \"%s\""))
-            try ToolsTestSupport.assertBridgeSourceParses(source)
-        }
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("since_imap"))
+        #expect(source.contains("until_imap"))
+        #expect(source.contains("date_prefix"))
+        #expect(source.contains("SINCE %s BEFORE %s"))
+        #expect(source.contains("SINCE %s"))
+        #expect(source.contains("BEFORE %s"))
+        // Dated keyword intersects the date prefix with the keyword OR shape.
+        #expect(source.contains("%s OR OR SUBJECT"))
+        // Dated wildcard sends the date prefix alone.
+        #expect(source.contains("conn.uid(\"search\", None, date_prefix)"))
+        // Undated shapes stay byte-identical.
+        #expect(source.contains("conn.uid(\"search\", None, \"ALL\")"))
+        #expect(source.contains("OR OR SUBJECT \"%s\" FROM \"%s\" BODY \"%s\""))
+        try ToolsTestSupport.assertBridgeSourceParses(source)
     }
 
     @Test

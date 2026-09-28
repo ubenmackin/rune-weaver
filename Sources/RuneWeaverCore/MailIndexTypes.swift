@@ -437,10 +437,11 @@ public enum MailVectorWindow: Sendable, Equatable {
 
 // MARK: - Checkpoints
 
-/// Persisted indexer progress: per-mailbox UID watermarks plus content hashes.
+/// Persisted indexer progress: per-mailbox UID watermarks, backfill floors, and content hashes.
 ///
-/// Watermarks advance only across fully dispositioned fixed windows; the
-/// validity map detects server resets so a changed token restarts the mailbox
+/// Watermarks track the highest indexed UID for forward sync of new arrivals;
+/// backfill floors track the lowest indexed UID for downward historical backfill.
+/// The validity map detects server resets so a changed token restarts the mailbox
 /// from zero while retained hashes dedupe refetches instead of duplicating.
 public struct MailIndexCheckpoint: Sendable, Equatable, Codable {
     /// Highest indexed IMAP UID per `account{1F}mailbox` key.
@@ -449,16 +450,25 @@ public struct MailIndexCheckpoint: Sendable, Equatable, Codable {
     public var contentHashes: [String]
     /// Last observed UIDVALIDITY per `account{1F}mailbox` key.
     public var uidValidities: [String: Int]
+    /// Lowest indexed IMAP UID reached during backfill per `account{1F}mailbox` key.
+    public var backfillFloors: [String: Int]
 
     /// Creates a checkpoint.
     /// - Parameters:
     ///   - watermarks: Highest indexed UID per mailbox key.
     ///   - contentHashes: Content hashes already indexed.
     ///   - uidValidities: Last observed validity token per mailbox key.
-    public init(watermarks: [String: Int] = [:], contentHashes: [String] = [], uidValidities: [String: Int] = [:]) {
+    ///   - backfillFloors: Lowest indexed UID reached during backfill per mailbox key.
+    public init(
+        watermarks: [String: Int] = [:],
+        contentHashes: [String] = [],
+        uidValidities: [String: Int] = [:],
+        backfillFloors: [String: Int] = [:]
+    ) {
         self.watermarks = watermarks
         self.contentHashes = contentHashes
         self.uidValidities = uidValidities
+        self.backfillFloors = backfillFloors
     }
 
     /// Coding keys for the checkpoint sidecar.
@@ -469,6 +479,8 @@ public struct MailIndexCheckpoint: Sendable, Equatable, Codable {
         case contentHashes
         /// Validity map key.
         case uidValidities
+        /// Backfill floor map key.
+        case backfillFloors
     }
 
     /// Decodes a checkpoint, defaulting missing maps so older sidecars migrate forward.
@@ -478,15 +490,64 @@ public struct MailIndexCheckpoint: Sendable, Equatable, Codable {
         watermarks = try container.decodeIfPresent([String: Int].self, forKey: .watermarks) ?? [:]
         contentHashes = try container.decodeIfPresent([String].self, forKey: .contentHashes) ?? []
         uidValidities = try container.decodeIfPresent([String: Int].self, forKey: .uidValidities) ?? [:]
+        backfillFloors = try container.decodeIfPresent([String: Int].self, forKey: .backfillFloors) ?? [:]
     }
 
-    /// Encodes the checkpoint including the validity map.
+    /// Encodes the checkpoint including the validity and backfill floor maps.
     /// - Parameter encoder: Encoder for the checkpoint document.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(watermarks, forKey: .watermarks)
         try container.encode(contentHashes, forKey: .contentHashes)
         try container.encode(uidValidities, forKey: .uidValidities)
+        try container.encode(backfillFloors, forKey: .backfillFloors)
+    }
+}
+
+// MARK: - Report
+
+/// Outcome of one mail indexing run.
+public struct MailIndexRunReport: Sendable, Equatable {
+    /// Accounts whose credentials resolved and whose mailbox listing succeeded.
+    public var accountsScanned = 0
+    /// Mailboxes enumerated across all accounts.
+    public var mailboxesScanned = 0
+    /// Denied mailboxes skipped without dialing.
+    public var mailboxesSkipped = 0
+    /// New messages considered after the UID watermark filter.
+    public var messagesSeen = 0
+    /// Messages written to the index.
+    public var messagesIndexed = 0
+    /// Messages skipped because their stored body hash was already current.
+    public var messagesUnchanged = 0
+    /// Messages skipped because their content hash matched an earlier message.
+    public var messagesDeduplicated = 0
+    /// Attachments staged, extracted, and deleted this run.
+    public var attachmentsStaged = 0
+    /// Attachments skipped for exceeding the per-attachment size cap.
+    public var attachmentsSkippedOversize = 0
+    /// Attachments whose text layer was unavailable, marked for the vision path.
+    public var attachmentsMetadataOnly = 0
+    /// Text chunks written this run.
+    public var chunksWritten = 0
+    /// Chunks written carrying an embedding this run.
+    public var vectorsWritten = 0
+    /// Mail documents retired because their mailbox joined the denylist.
+    public var retiredCount = 0
+    /// Non-fatal account- or mailbox-level problems, without any secret value.
+    public var warnings: [String] = []
+    /// Set when the run did not execute because mail indexing is disabled.
+    public var skippedReason: String?
+
+    /// Creates a run report.
+    /// - Parameter skippedReason: Set when the run was skipped.
+    public init(skippedReason: String? = nil) {
+        self.skippedReason = skippedReason
+    }
+
+    /// Whether the indexer actually ran.
+    public var didRun: Bool {
+        skippedReason == nil
     }
 }
 
