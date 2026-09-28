@@ -6,8 +6,13 @@ import RuneWeaverCore
 
 /// Arguments for `bash.exec`.
 public struct BashArgs: Codable, Sendable, Equatable {
+    /// Shared command carrier so gate and tool decode the same field once.
+    public var commandArgs: BashCommandArgs
     /// Shell command string to execute.
-    public let command: String
+    public var command: String {
+        commandArgs.command
+    }
+
     /// Working directory for execution (optional).
     public let cwd: String?
     /// Execution timeout in seconds (optional).
@@ -18,9 +23,32 @@ public struct BashArgs: Codable, Sendable, Equatable {
         cwd: String? = nil,
         timeoutSeconds: Int? = nil
     ) {
-        self.command = command
+        self.commandArgs = BashCommandArgs(command: command)
         self.cwd = cwd
         self.timeoutSeconds = timeoutSeconds
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case command
+        case cwd
+        case timeoutSeconds
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let command = try container.decode(String.self, forKey: .command)
+        // Flat wire shape stays `{"command": ...}`; the value lands in the
+        // shared carrier so trimming rules cannot drift from the gate.
+        self.commandArgs = BashCommandArgs(command: command)
+        self.cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
+        self.timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(commandArgs.command, forKey: .command)
+        try container.encodeIfPresent(cwd, forKey: .cwd)
+        try container.encodeIfPresent(timeoutSeconds, forKey: .timeoutSeconds)
     }
 }
 
@@ -205,7 +233,9 @@ public struct BashTool: Tool {
         // Ask decisions park for human approval via the permission gate and
         // inbox; the tool reports approvalRequired and never executes, so a
         // model-supplied flag cannot self-approve an ask or chained command.
-        if decision.requiresApproval {
+        // An approved context carries the recorded decide authorization and
+        // proceeds to execution instead of returning the envelope.
+        if decision.requiresApproval, !context.approved {
             let envelope = BashResultEnvelope(
                 command: trimmedCommand,
                 approvalRequired: true,

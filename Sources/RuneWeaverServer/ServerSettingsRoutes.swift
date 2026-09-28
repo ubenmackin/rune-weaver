@@ -457,6 +457,9 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
     let hasFilesPatch = body.filesDenyPatterns != nil || body.filesAllowRoots != nil || body.filesRequireApprovalOnDeny != nil
     guard hasBashPatch || hasFilesPatch else { return }
     context.setBashFiles(bash: config.bash, files: config.files)
+    if hasBashPatch {
+        await context.permissionGate.updateBashConfig(config.bash)
+    }
     let live = context.bashFilesSnapshot()
     if hasFilesPatch {
         for tool in FilesTools.makeTools(filesConfig: live.files) {

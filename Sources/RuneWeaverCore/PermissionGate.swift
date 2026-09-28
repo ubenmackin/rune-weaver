@@ -986,6 +986,8 @@ public actor PermissionGate {
     private let store: (any TrustStore)?
     /// Configured plugins directory for protected path enforcement.
     public let pluginsDir: URL?
+    /// Live bash shell policy consulted before parking `bash.exec` calls.
+    private var bashConfig = BashConfig()
     /// Recurring task for pruning expired grants periodically.
     private var reaperTask: Task<Void, Never>?
 
@@ -1000,6 +1002,12 @@ public actor PermissionGate {
         let gate = PermissionGate(store: store, pluginsDir: pluginsDir)
         await gate.bootstrap()
         return gate
+    }
+
+    /// Updates the live bash shell policy consulted by the gate.
+    /// - Parameter config: Replacement bash policy.
+    public func updateBashConfig(_ config: BashConfig) {
+        bashConfig = config
     }
 
     /// Hydrates grants from storage, cleaning up expired records immediately.
@@ -1097,6 +1105,17 @@ public actor PermissionGate {
         case .trusted:
             return .allowed
         case .requiresApproval:
+            if tool.name == "bash.exec", let command = Self.bashCommand(from: toolCall) {
+                let decision = BashSecurity.evaluate(command: command, config: bashConfig)
+                switch decision.action {
+                case .deny:
+                    return .denied(decision.reason)
+                case .allow:
+                    return .allowed
+                case .ask:
+                    break
+                }
+            }
             if covers(descriptor) {
                 return .allowed
             }
@@ -1270,6 +1289,18 @@ public actor PermissionGate {
     }
 
     // MARK: - Private
+
+    /// Extracts the bash command for rule evaluation via the shared decoder.
+    /// - Parameter toolCall: Raw invocation arguments.
+    /// - Returns: Trimmed command (possibly empty so `evaluate` denies), or nil only when unparseable.
+    private static func bashCommand(from toolCall: ToolInput) -> String? {
+        guard let data = toolCall.argumentsJSON.data(using: .utf8),
+              let args = try? JSONDecoder().decode(BashCommandArgs.self, from: data)
+        else { return nil }
+        // Blank commands return empty so the evaluator denies closed instead
+        // of skipping evaluation and parking for approval.
+        return args.command.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     /// Whether the first effective expiry strictly outlives the second. A nil
     /// expiry is the forever tier, so it outlives every dated grant while two

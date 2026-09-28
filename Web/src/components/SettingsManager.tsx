@@ -752,14 +752,6 @@ export default function SettingsManager() {
     formatAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS)
   );
   const [filesRequireApprovalOnDeny, setFilesRequireApprovalOnDeny] = useState(true);
-  // Direct handle to the blocked-paths editor so Add Pattern can return
-  // keyboard focus without a document-wide lookup that breaks with
-  // multiple instances or strict-mode remounts.
-  const denyTextareaRef = useRef<HTMLTextAreaElement>(null);
-  // Direct handle to the allowed-roots editor so Add Roots can return
-  // keyboard focus without a document-wide lookup that breaks with
-  // multiple instances or strict-mode remounts.
-  const allowRootsTextareaRef = useRef<HTMLTextAreaElement>(null);
   // Form-local reset confirmations: resetting only rewrites the in-progress
   // form and never persists until Save, so the modal must state counts and
   // the until-Save nature explicitly.
@@ -1059,15 +1051,9 @@ export default function SettingsManager() {
   // focus without a document-wide lookup that breaks with multiple instances
   // or strict-mode remounts.
   const bashRulesTextareaRef = useRef<HTMLTextAreaElement>(null);
-  // Files & Access lives in the Security pane: the same form state backs
-  // both the full-save and the Security inline save through one shared
-  // payload helper, so Security is the only files editor without forking shapes.
-  const [filesSaveLoading, setFilesSaveLoading] = useState(false);
-  const [filesModalError, setFilesModalError] = useState<string | null>(null);
-  // Short-lived success-then-close timer for the files inline save: held in a
-  // ref (not bare setTimeout) so unmount or a second save clears the pending
-  // tick instead of firing setState on an unmounted pane or closing a fresh edit.
-  const filesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Files & Access lives in the Security pane as the single files editor:
+  // the page Save owns persistence through executeSave with
+  // validateFilesFields and buildFilesPayload, so guard shapes never fork.
   // Network bind ([server] hostname, port, allowed_hosts): the socket and the
   // Host gate are fixed at boot, so saves persist to the file and return
   // requiresRestart instead of live-reloading. The allowed-hosts editor holds
@@ -1880,11 +1866,10 @@ export default function SettingsManager() {
     return null;
   }, [bashDefaultAction, bashRulesText, bashTimeoutSeconds]);
 
-  // Builds the [files] delta from the guard form fields so the full-settings
-  // save and the Security inline save share one shape. Reuses the existing
-  // top-level keys (filesDenyPatterns, filesAllowRoots,
-  // filesRequireApprovalOnDeny) so the wire contract never forks between the
-  // two paths. Both textareas parse one entry per line with blank lines
+  // Builds the [files] delta for the single page Save via executeSave; no section save remains.
+  // Reuses the existing top-level keys (filesDenyPatterns, filesAllowRoots,
+  // filesRequireApprovalOnDeny) so the wire contract stays single-shaped.
+  // Each textarea parses one entry per line with blank lines
   // ignored; allow-roots order is preserved for display only.
   const buildFilesPayload = useCallback(
     (): {
@@ -1901,12 +1886,12 @@ export default function SettingsManager() {
     [filesDenyText, filesAllowRootsText, filesRequireApprovalOnDeny]
   );
 
-  // Shared files validation for the full-save and Security inline-save paths
-  // so both reject traversal escapes and empty roots before any network write
-  // with one message. Both editors validate with original line numbers so a
+  // Shared files validation for the single page Save via executeSave
+  // so it rejects traversal escapes and empty roots before any network write
+  // with one message. Validation reports original line numbers so a
   // bad entry points at its editor row; blank lines collapse on save. Deny
   // lines validate per-line while allow roots also reject an emptied editor,
-  // and `..` segments are rejected with line numbers in both editors.
+  // and `..` segments are rejected with line numbers.
   const validateFilesFields = useCallback((): string | null => {
     const denyLines = filesDenyText.split("\n");
     for (let lineIndex = 0; lineIndex < denyLines.length; lineIndex += 1) {
@@ -2213,7 +2198,7 @@ export default function SettingsManager() {
     return () => clearInterval(timer);
   }, [activeTab, settings, liveServerBind, serverRestartRequired, refreshBootBind]);
 
-  // Unmount must never leave the browser provision poll or media/desktop/bash/files tick
+  // Unmount must never leave the browser provision poll or media/desktop/bash tick
   // running behind a closed pane.
   useEffect(() => {
     const pollRef = browserTimerRef;
@@ -2221,7 +2206,6 @@ export default function SettingsManager() {
     const browserSaveRef = browserSaveTimerRef;
     const desktopSaveRef = desktopSaveTimerRef;
     const bashSaveRef = bashSaveTimerRef;
-    const filesSaveRef = filesSaveTimerRef;
     return () => {
       if (pollRef.current !== null) {
         clearInterval(pollRef.current);
@@ -2242,10 +2226,6 @@ export default function SettingsManager() {
       if (bashSaveRef.current !== null) {
         clearTimeout(bashSaveRef.current);
         bashSaveRef.current = null;
-      }
-      if (filesSaveRef.current !== null) {
-        clearTimeout(filesSaveRef.current);
-        filesSaveRef.current = null;
       }
     };
   }, []);
@@ -2415,9 +2395,8 @@ export default function SettingsManager() {
       };
     }
 
-    // Blocked-paths plus allowed-roots validation shares the files helper so
-    // the full-save and the Security Files inline save reject the same shapes
-    // before any network write. Blank lines collapse on save and an emptied
+    // Blocked-paths plus allowed-roots validation for the single page Save shares validateFilesFields so page Save rejects
+    // the same shapes before any network write. Blank lines collapse on save and an emptied
     // allow-roots editor is rejected, while `..` fails closed here and
     // authoritatively on the server guard.
     const filesValidationError = validateFilesFields();
@@ -2918,23 +2897,6 @@ export default function SettingsManager() {
     });
   };
 
-  // Saves the [files] delta for the Security Files & Access editor through
-  // PUT /settings, mirroring the media-only save shape so unsaved edits in
-  // other tabs survive. Validates through the shared files helper and reuses
-  // the existing top-level keys so the inline and the full-save stay symmetric.
-  // The parsed allow-roots array is what is sent on the wire.
-  const handleSaveFilesConfig = async () => {
-    await saveCategoryConfig({
-      validate: validateFilesFields,
-      buildPayload: () => ({ ...buildFilesPayload() }),
-      successToast: "Files settings saved!",
-      errorMessage: "Failed to save files settings",
-      setLoading: setFilesSaveLoading,
-      setError: setFilesModalError,
-      timerRef: filesSaveTimerRef,
-    });
-  };
-
   // Bash rules editing is a single textarea (small-screen friendly for long
   // rule sets, and copy and paste of rule sets works through this text); Add
   // Rule focuses the editor for keyboard flow.
@@ -3187,17 +3149,6 @@ export default function SettingsManager() {
   // Blocked-paths editing is a single textarea (small-screen friendly for
   // long guard lists); reset only rewrites the form text after an explicit
   // modal confirm and never persists until Save.
-  const handleAddDenyPattern = () => {
-    // No row model exists for the textarea, so Add focuses the editor for
-    // keyboard flow; ensure a trailing newline exists so typed globs start
-    // on a fresh line without altering the parsed count by itself.
-    setFilesDenyText((prev) => {
-      if (!prev) return prev;
-      return prev.endsWith("\n") ? prev : `${prev}\n`;
-    });
-    denyTextareaRef.current?.focus();
-  };
-
   const handleConfirmResetDenyPatterns = () => {
     setFilesDenyText(DEFAULT_FILES_DENY_PATTERNS_TEXT);
     setPendingResetDeny(false);
@@ -3209,19 +3160,8 @@ export default function SettingsManager() {
 
   // Allowed-roots editing is a single textarea (small-screen friendly for
   // long root sets, and copy and paste of root sets works through this text);
-  // Add focuses the editor for keyboard flow while reset only rewrites the
-  // form text after an explicit modal confirm and never persists until Save.
-  const handleAddAllowRoot = () => {
-    // No row model exists for the textarea, so Add focuses the editor for
-    // keyboard flow; ensure a trailing newline exists so typed roots start
-    // on a fresh line without altering the parsed count by itself.
-    setFilesAllowRootsText((prev) => {
-      if (!prev) return prev;
-      return prev.endsWith("\n") ? prev : `${prev}\n`;
-    });
-    allowRootsTextareaRef.current?.focus();
-  };
-
+  // reset only rewrites the form text after an explicit modal confirm and
+  // never persists until Save.
   const handleConfirmResetAllowRoots = () => {
     setFilesAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS_TEXT);
     setPendingResetRoots(false);
@@ -4442,7 +4382,6 @@ export default function SettingsManager() {
                                   setBrowserModalError(null);
                                   setDesktopModalError(null);
                                   setBashModalError(null);
-                                  setFilesModalError(null);
                                   setConfiguringToolName(categoryConfigKey);
                                 }}
                                 style={{ padding: "4px 8px", fontSize: "0.78rem" }}
@@ -4673,15 +4612,9 @@ export default function SettingsManager() {
               <div className="settings-section-title-group">
                 <h3>Files & Access</h3>
                 <p className="settings-section-hint">
-                  Home containment plus deny list for file tools, mirroring the engine guard.
+                  Allow roots bound file tools, email attachment saves, bash working directories, and staged-file review: those surfaces can only reach paths inside the allowed roots. Denied paths are skipped everywhere including the document index, while allow roots do not affect index coverage.
                 </p>
               </div>
-              {filesModalError && (
-                <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-                  <AlertTriangleIcon size={16} />
-                  <span>{filesModalError}</span>
-                </div>
-              )}
               <div className="settings-subsection-header">
                 <div className="settings-section-title-group">
                   <h4 style={{ margin: "0 0 4px 0" }}>Blocked Paths</h4>
@@ -4698,14 +4631,6 @@ export default function SettingsManager() {
                     <RefreshIcon size={14} />
                     <span>Reset to Defaults</span>
                   </button>
-                  <button
-                    type="button"
-                    className="ghost icon-text-btn"
-                    onClick={handleAddDenyPattern}
-                  >
-                    <PlusIcon size={14} />
-                    <span>Add Pattern</span>
-                  </button>
                 </div>
               </div>
               <div className="form-group" style={{ marginTop: "8px" }}>
@@ -4717,7 +4642,6 @@ export default function SettingsManager() {
                 </label>
                 <textarea
                   id="deny-patterns-textarea"
-                  ref={denyTextareaRef}
                   className="input-field deny-patterns-textarea"
                   aria-label="Deny patterns, one per line"
                   value={filesDenyText}
@@ -4753,14 +4677,6 @@ export default function SettingsManager() {
                     <RefreshIcon size={14} />
                     <span>Reset Roots</span>
                   </button>
-                  <button
-                    type="button"
-                    className="ghost icon-text-btn"
-                    onClick={handleAddAllowRoot}
-                  >
-                    <PlusIcon size={14} />
-                    <span>Add Roots</span>
-                  </button>
                 </div>
               </div>
               <div className="form-group" style={{ marginTop: "8px" }}>
@@ -4772,7 +4688,6 @@ export default function SettingsManager() {
                 </label>
                 <textarea
                   id="allow-roots-textarea"
-                  ref={allowRootsTextareaRef}
                   className="input-field allow-roots-textarea"
                   aria-label="Allowed roots, one per line"
                   value={filesAllowRootsText}
@@ -4798,22 +4713,6 @@ export default function SettingsManager() {
                 <span className="form-group-hint">
                   When on, denied paths escalate to the approvals inbox instead of failing silently.
                 </span>
-              </div>
-              <p className="muted text-sm" data-testid="files-consumer-note" style={{ margin: "12px 0 0 0" }}>
-                Allow roots bound file tools, email attachment saves, bash working directories, and
-                staged-file review: those surfaces can only reach paths inside the allowed roots.
-                Denied paths are skipped everywhere including the document index, while allow roots
-                do not affect index coverage.
-              </p>
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "16px" }}>
-                <button
-                  type="button"
-                  className="primary"
-                  onClick={() => void handleSaveFilesConfig()}
-                  disabled={filesSaveLoading}
-                >
-                  {filesSaveLoading ? "Saving…" : "Save Configuration"}
-                </button>
               </div>
             </div>
             {/* Access management: the single owner token gate. Rotation lives
@@ -6753,6 +6652,10 @@ export default function SettingsManager() {
             <p className="muted text-sm" style={{ marginBottom: "16px" }}>
               Sandboxed shell execution with per-command approval policy. Rules evaluate
               top-to-bottom last-match-wins; the default action applies when no rule matches.
+            </p>
+
+            <p className="muted text-sm" style={{ marginBottom: "16px" }}>
+              Default working directory is the engine home with an optional per-call override inside allowed roots, confined by the Seatbelt sandbox.
             </p>
 
             <div className="form-group checkbox-group" style={{ marginBottom: "12px" }}>

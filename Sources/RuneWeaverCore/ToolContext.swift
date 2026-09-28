@@ -42,6 +42,8 @@ public struct ToolContext: Sendable, Equatable {
     public let conversationID: UUID
     /// When true, the tool must not mutate external state.
     public let dryRun: Bool
+    /// When true, a prior approval decision authorizes the gated branch to execute.
+    public let approved: Bool
     /// Sink for indeterminate progress a tool chooses to report mid-execution.
     /// Defaults to a no-op so callers that never stream (CLI, direct tool calls,
     /// tests) construct a context with only the fields they care about.
@@ -54,14 +56,17 @@ public struct ToolContext: Sendable, Equatable {
     /// - Parameters:
     ///   - conversationID: Owning session identifier.
     ///   - dryRun: Whether the tool must avoid mutating external state.
+    ///   - approved: Whether a prior approval decision authorizes execution.
     ///   - progress: Optional progress sink; defaults to a no-op.
     public init(
         conversationID: UUID,
         dryRun: Bool = false,
+        approved: Bool = false,
         progress: @escaping ToolProgressReporter = ToolContext.noProgress
     ) {
         self.conversationID = conversationID
         self.dryRun = dryRun
+        self.approved = approved
         self.progress = progress
     }
 
@@ -70,7 +75,7 @@ public struct ToolContext: Sendable, Equatable {
     /// same turn compare unequal and break callers that compare for change.
     /// - Returns: True when both contexts describe the same execution.
     public static func == (lhs: ToolContext, rhs: ToolContext) -> Bool {
-        lhs.conversationID == rhs.conversationID && lhs.dryRun == rhs.dryRun
+        lhs.conversationID == rhs.conversationID && lhs.dryRun == rhs.dryRun && lhs.approved == rhs.approved
     }
 }
 

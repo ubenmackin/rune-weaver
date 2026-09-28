@@ -398,3 +398,71 @@ struct BashToolExecutionTests {
         #expect(output.content.contains("Dry run preview"))
     }
 }
+
+/// Smoke-test contract for `bash.exec`: echo runs free, touch prompts then runs, rm never runs.
+@Suite("Bash Smoke Contract")
+struct BashSmokeContractTests {
+    /// Allowed echo executes with no approval envelope.
+    @Test
+    func `echo Hello World executes without approval`() async throws {
+        let tool = BashTool(bashConfig: ToolsTestSupport.smokeBashConfig(), allowUnsandboxedFallback: true)
+        let input = ToolInput(
+            toolName: "bash.exec",
+            argumentsJSON: #"{"command":"echo Hello World"}"#
+        )
+        let output = try await tool.execute(input: input, context: ToolContext(conversationID: UUID()))
+
+        #expect(!output.isError)
+        #expect(output.content.contains("Hello World"))
+        #expect(output.content.contains("\"exitCode\":0"))
+        #expect(!output.content.contains("\"approvalRequired\":true"))
+    }
+
+    /// Touch parks until approved, then executes instead of enveloping.
+    @Test
+    func `approved touch executes instead of enveloping`() async throws {
+        let tool = BashTool(bashConfig: ToolsTestSupport.smokeBashConfig(), allowUnsandboxedFallback: true)
+        let target = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-smoke-touch-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: target) }
+        let input = ToolInput(
+            toolName: "bash.exec",
+            argumentsJSON: #"{"command":"touch \#(target.path)"}"#
+        )
+
+        // Without approval the ask rule parks in the approvals inbox envelope.
+        let parked = try await tool.execute(input: input, context: ToolContext(conversationID: UUID()))
+        #expect(parked.isError)
+        #expect(parked.content.contains("\"approvalRequired\":true"))
+        #expect(parked.content.contains("Command requires approval"))
+        #expect(!FileManager.default.fileExists(atPath: target.path))
+
+        // An approved ask-rule command carries the gate authorization and runs.
+        let approved = try await tool.execute(
+            input: input,
+            context: ToolContext(conversationID: UUID(), approved: true)
+        )
+        #expect(!approved.isError)
+        #expect(!approved.content.contains("\"approvalRequired\":true"))
+        #expect(FileManager.default.fileExists(atPath: target.path))
+    }
+
+    /// Denied rm refuses even when an approval flag is present.
+    @Test
+    func `rm denies even when approved`() async throws {
+        let tool = BashTool(bashConfig: ToolsTestSupport.smokeBashConfig(), allowUnsandboxedFallback: true)
+        let input = ToolInput(
+            toolName: "bash.exec",
+            argumentsJSON: #"{"command":"rm ~/helloWorld.txt"}"#
+        )
+        let output = try await tool.execute(
+            input: input,
+            context: ToolContext(conversationID: UUID(), approved: true)
+        )
+
+        #expect(output.isError)
+        #expect(output.content.contains("\"denied\":true"))
+        #expect(output.content.contains("Command denied by security policy"))
+        #expect(!output.content.contains("\"approvalRequired\":true"))
+    }
+}

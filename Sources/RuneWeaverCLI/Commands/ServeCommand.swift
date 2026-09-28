@@ -217,13 +217,15 @@ extension ServeCommand {
         return conversations
     }
 
-    private func loadPermissionGate(episodesDBPath: String, pluginsDir: String) async -> PermissionGate {
+    private func loadPermissionGate(episodesDBPath: String, pluginsDir: String, bashConfig: BashConfig) async -> PermissionGate {
         let episodesDB = (episodesDBPath as NSString).expandingTildeInPath
         let trustStore = SQLiteTrustStore(dbPath: episodesDB)
-        return await PermissionGate.load(
+        let gate = await PermissionGate.load(
             store: trustStore,
             pluginsDir: URL(fileURLWithPath: (pluginsDir as NSString).expandingTildeInPath)
         )
+        await gate.updateBashConfig(bashConfig)
+        return gate
     }
 
     private func makeGoalStack(
@@ -315,7 +317,8 @@ extension ServeCommand {
         let conversations = await loadConversations(episodesDBPath: loaded.config.memory.episodesDBPath)
         let permissionGate = await loadPermissionGate(
             episodesDBPath: loaded.config.memory.episodesDBPath,
-            pluginsDir: loaded.config.plugins.pluginsDir
+            pluginsDir: loaded.config.plugins.pluginsDir,
+            bashConfig: loaded.config.bash
         )
         // Resolve the embeddings producer once from config so served memory
         // routes and the orchestrator share one backend; nil keeps the

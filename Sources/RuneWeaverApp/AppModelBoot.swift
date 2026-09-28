@@ -114,6 +114,7 @@ extension AppModel {
             store: trustStore,
             pluginsDir: URL(fileURLWithPath: (config.plugins.pluginsDir as NSString).expandingTildeInPath)
         )
+        await permissionGate.updateBashConfig(config.bash)
         await permissionGate.startPeriodicCleanup()
         let previewBus = ToolBus(permissionGate: permissionGate)
         let desktopNames = Set(DesktopTools.allToolNames)
