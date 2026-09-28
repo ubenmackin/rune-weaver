@@ -123,6 +123,13 @@ export default function TopNav({
   const normalizedWarnings = normalizeBadgeCount(warningsBadge);
   const warningsDisplay = formatBadgeCount(normalizedWarnings);
 
+  // Staged drawer trigger stays always visible (including zero, fetch
+  // failure, and reload) so review never waits on the tool path. The badge
+  // always shows the numeric count with a muted style at zero, and clicking
+  // always delegates to the upstream drawer wiring where the empty state
+  // already renders `No staged changes`. Never auto-opens on tool_end.
+  const normalizedStagedCount = normalizeBadgeCount(stagedFilesCount);
+
   // Local transient feedback for the bell: the shared stack owns timers plus
   // the dismiss surface, so this nav never invents a second toast system and
   // badge counting stays untouched upstream. One handler covers both
@@ -471,21 +478,32 @@ export default function TopNav({
           ) : null}
         </button>
 
-        {/* Staged Changes Drawer Trigger */}
-        {stagedFilesCount > 0 ? (
-          <button
-            type="button"
-            className="top-nav-staged-btn"
-            data-testid="top-nav-staged-btn"
-            onClick={onOpenStagedDrawer}
-            title={`${stagedFilesCount} staged file change${stagedFilesCount === 1 ? "" : "s"} waiting for review`}
-            aria-label={`Open staged changes drawer (${stagedFilesCount} files)`}
+        {/* Staged Changes Drawer Trigger — always visible in every state
+            (including zero, fetch failure, and reload) so the review path
+            never waits on the tool path. Clicking always delegates to the
+            upstream drawer wiring; at zero the drawer shows its existing
+            `No staged changes` empty state. Never auto-opens on tool_end. */}
+        <button
+          type="button"
+          className="top-nav-staged-btn"
+          data-testid="top-nav-staged-btn"
+          onClick={onOpenStagedDrawer}
+          title={`${normalizedStagedCount} staged file change${normalizedStagedCount === 1 ? "" : "s"} waiting for review`}
+          aria-label={`Open staged changes drawer (${normalizedStagedCount} files)`}
+        >
+          <FileDiffIcon size={16} />
+          <span>Files</span>
+          <span
+            className="top-nav-staged-badge"
+            style={
+              normalizedStagedCount === 0
+                ? { background: "rgba(148, 163, 184, 0.25)", color: "#94a3b8" }
+                : undefined
+            }
           >
-            <FileDiffIcon size={16} />
-            <span>Files</span>
-            <span className="top-nav-staged-badge">{stagedFilesCount}</span>
-          </button>
-        ) : null}
+            {normalizedStagedCount}
+          </span>
+        </button>
 
         {/* Profile Dropdown: click/keyboard driven with Escape to close and
             focus return. No hover-open path so pointer and keyboard orderings

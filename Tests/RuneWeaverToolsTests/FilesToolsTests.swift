@@ -782,6 +782,63 @@ struct FilesToolsTests {
     }
 
     @Test
+    func `Grep non-recursive honors recursive flag`() async throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+        let top = home.appendingPathComponent("top.txt")
+        try FilesTestSupport.write("needle top\n", at: top)
+        let subDir = home.appendingPathComponent("sub")
+        try FileManager.default.createDirectory(at: subDir, withIntermediateDirectories: true)
+        let nested = subDir.appendingPathComponent("nested.txt")
+        try FilesTestSupport.write("needle nested\n", at: nested)
+        let resolvedTop = FilesAccessGuard.resolvedURL(for: top.path).path
+        let resolvedNested = FilesAccessGuard.resolvedURL(for: nested.path).path
+
+        let tool = FilesGrepTool(homeDirectoryURL: home)
+
+        // Omitted recursive defaults to true, so both levels match.
+        let omitted = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.grep",
+                argumentsJSON: #"{"pattern":"needle","path":"\#(home.path)"}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(omitted.isError == false)
+        let omittedDecoded = try JSONDecoder().decode(FilesTestSupport.Grep.self, from: Data(omitted.content.utf8))
+        #expect(omittedDecoded.matches.count == 2)
+        #expect(omittedDecoded.matches.map(\.path).contains(resolvedTop))
+        #expect(omittedDecoded.matches.map(\.path).contains(resolvedNested))
+
+        // Explicit true matches both top and nested.
+        let deep = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.grep",
+                argumentsJSON: #"{"pattern":"needle","path":"\#(home.path)","recursive":true}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(deep.isError == false)
+        let deepDecoded = try JSONDecoder().decode(FilesTestSupport.Grep.self, from: Data(deep.content.utf8))
+        #expect(deepDecoded.matches.count == 2)
+        #expect(deepDecoded.matches.map(\.path).contains(resolvedTop))
+        #expect(deepDecoded.matches.map(\.path).contains(resolvedNested))
+
+        // With recursive false, only the immediate children match.
+        let shallow = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.grep",
+                argumentsJSON: #"{"pattern":"needle","path":"\#(home.path)","recursive":false}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(shallow.isError == false)
+        let shallowDecoded = try JSONDecoder().decode(FilesTestSupport.Grep.self, from: Data(shallow.content.utf8))
+        #expect(shallowDecoded.matches.count == 1)
+        #expect(shallowDecoded.matches[0].path == resolvedTop)
+    }
+
+    @Test
     func `FilesGlobMatching matchesPath follows Git and VS Code convention`() {
         #expect(FilesGlobMatching.matchesPath(pattern: "*.md", relativePath: "harness/CONFIG.md", filename: "CONFIG.md") == true)
         #expect(FilesGlobMatching.matchesPath(pattern: "CONFIG.md", relativePath: "harness/CONFIG.md", filename: "CONFIG.md") == true)

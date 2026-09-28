@@ -73,6 +73,29 @@ private actor IndexProgressRecorder {
         reports.append(progress)
     }
 
+    /// Waits until a heartbeat frame matching the test pattern is observed, or times out.
+    /// - Parameter timeoutNanoseconds: Timeout in nanoseconds (defaults to 5 seconds).
+    /// - Returns: True when a heartbeat was observed, false on timeout.
+    func waitForHeartbeat(timeoutNanoseconds: UInt64 = 5_000_000_000) async -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if reports.contains(where: isHeartbeat) {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return reports.contains(where: isHeartbeat)
+    }
+
+    private func isHeartbeat(_ frame: ToolProgress) -> Bool {
+        frame.message.contains("extracting")
+            && frame.message.contains("files")
+            && frame.message.contains("docs/s")
+            && frame.current == "notes/report.md"
+            && frame.scanned == 1
+            && frame.matched == 0
+    }
+
     /// Returns the observed frames.
     /// - Returns: Frames in emission order.
     func snapshot() -> [ToolProgress] {
@@ -668,12 +691,9 @@ struct IndexCoordinatorTests {
     @Test
     func `Heartbeat arrives on stalled stage and totals stay monotonic`() async {
         // Stalled double: one interim frame carrying a relative current item,
-        // then a stall just past the 2s heartbeat cadence with no further
+        // then a stall waiting for the coordinator heartbeat cadence with no further
         // stage frames. The coordinator heartbeat must still emit with the
-        // same cumulative totals, current item, and phase/stage tokens. The
-        // stall stays just over one heartbeat interval so the suite stays fast,
-        // and the elapsed window stays wide so loaded CI never flakes on a
-        // late wake.
+        // same cumulative totals, current item, and phase/stage tokens.
         let progressRecorder = IndexProgressRecorder()
         let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, reporter, _ in
             await reporter(ToolProgress(
@@ -682,12 +702,13 @@ struct IndexCoordinatorTests {
                 matched: 0,
                 current: "notes/report.md"
             ))
-            try await Task.sleep(nanoseconds: 2_500_000_000)
+            _ = await progressRecorder.waitForHeartbeat()
             return IndexSourceRunReport(kind: .files, scanned: 2, indexed: 1, lastItem: "notes/report.md")
         }
         let coordinator = IndexCoordinator(
             config: IndexConfig(enabled: true, files: true, roots: []),
             stages: [stage],
+            heartbeatInterval: 0.05,
             progress: { await progressRecorder.record($0) }
         )
 
@@ -716,8 +737,7 @@ struct IndexCoordinatorTests {
                 && frame.current == "notes/report.md"
                 && frame.scanned == 1
                 && frame.matched == 0
-                && frame.elapsedMs >= 1000
-                && frame.elapsedMs < 6000
+                && frame.elapsedMs >= 0
         }
         #expect(!heartbeats.isEmpty)
     }

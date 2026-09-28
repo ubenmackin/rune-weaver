@@ -523,3 +523,123 @@ describe("TopNav profile menu", () => {
     expect(pill?.getAttribute("aria-hidden")).toBe("true");
   });
 });
+
+describe("TopNav staged drawer trigger", () => {
+  function renderStagedNav(overrides: Record<string, unknown> = {}) {
+    const props = {
+      currentTab: "chat",
+      onSelectTab: () => {},
+      health: null,
+      runsBadge: 0,
+      approvalsBadge: 0,
+      notificationsEnabled: false,
+      onRequestNotifications: () => {},
+      stagedFilesCount: 0,
+      onOpenStagedDrawer: () => {},
+      ...overrides,
+    } as unknown as ComponentProps<typeof TopNav>;
+    return render(<TopNav {...props} />);
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the Files button plus zero badge visible and focusable at zero", () => {
+    // Always-visible contract: zero never hides the trigger, so review stays
+    // reachable on fetch failure and reload while the drawer owns the
+    // `No staged changes` empty state.
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    renderStagedNav({ stagedFilesCount: 0 });
+    const trigger = screen.getByTestId("top-nav-staged-btn");
+    expect(trigger).toBeInTheDocument();
+    expect(trigger.textContent).toContain("Files");
+    expect(trigger.getAttribute("title")).toBe(
+      "0 staged file changes waiting for review"
+    );
+    expect(trigger.getAttribute("aria-label")).toBe(
+      "Open staged changes drawer (0 files)"
+    );
+    const badge = trigger.querySelector(".top-nav-staged-badge");
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent).toBe("0");
+    // The zero badge keeps the shared class with a muted inline style so the
+    // trigger reads idle without disappearing.
+    expect(badge?.className).toContain("top-nav-staged-badge");
+    expect(trigger.tagName).toBe("BUTTON");
+    expect(trigger.hasAttribute("disabled")).toBe(false);
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("opens the drawer empty state on click at zero", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const onOpenStagedDrawer = vi.fn();
+    renderStagedNav({ stagedFilesCount: 0, onOpenStagedDrawer });
+    await user.click(screen.getByTestId("top-nav-staged-btn"));
+    // Clicking at zero delegates upstream where the drawer renders its
+    // existing empty state; the trigger never swallows the open.
+    expect(onOpenStagedDrawer).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts up the badge with pluralized title through the staged count", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const onOpenStagedDrawer = vi.fn();
+    const { rerender } = renderStagedNav({
+      stagedFilesCount: 2,
+      onOpenStagedDrawer,
+    });
+    const trigger = screen.getByTestId("top-nav-staged-btn");
+    expect(trigger.querySelector(".top-nav-staged-badge")?.textContent).toBe(
+      "2"
+    );
+    expect(trigger.getAttribute("title")).toBe(
+      "2 staged file changes waiting for review"
+    );
+    expect(trigger.getAttribute("aria-label")).toBe(
+      "Open staged changes drawer (2 files)"
+    );
+    await user.click(trigger);
+    expect(onOpenStagedDrawer).toHaveBeenCalledTimes(1);
+
+    // Singular matches the drawer header (`1 file`): no trailing `s`.
+    rerender(
+      <TopNav
+        currentTab="chat"
+        onSelectTab={() => {}}
+        health={null as never}
+        runsBadge={0}
+        approvalsBadge={0}
+        notificationsEnabled={false}
+        onRequestNotifications={() => {}}
+        stagedFilesCount={1}
+        onOpenStagedDrawer={() => {}}
+      />
+    );
+    const singular = screen.getByTestId("top-nav-staged-btn");
+    expect(singular.querySelector(".top-nav-staged-badge")?.textContent).toBe(
+      "1"
+    );
+    expect(singular.getAttribute("title")).toBe(
+      "1 staged file change waiting for review"
+    );
+  });
+
+  it("keeps a stable test id across zero and nonzero states", () => {
+    // Regression guard: visibility states share one test id so selectors and
+    // the `onCountChange` count-up path never fork the trigger.
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const { unmount } = renderStagedNav({ stagedFilesCount: 0 });
+    expect(screen.getByTestId("top-nav-staged-btn")).toBeInTheDocument();
+    unmount();
+    renderStagedNav({ stagedFilesCount: 3 });
+    expect(screen.getByTestId("top-nav-staged-btn")).toBeInTheDocument();
+    expect(
+      screen
+        .getByTestId("top-nav-staged-btn")
+        .querySelector(".top-nav-staged-badge")?.textContent
+    ).toBe("3");
+  });
+});
