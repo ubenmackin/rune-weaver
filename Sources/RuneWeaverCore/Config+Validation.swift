@@ -967,9 +967,11 @@ extension RuneWeaverConfig {
         if proactive.judgeTimeoutSeconds < ProactiveConfig.minJudgeTimeoutSeconds
             || proactive.judgeTimeoutSeconds > ProactiveConfig.maxJudgeTimeoutSeconds
         {
+            let minSeconds = ProactiveConfig.minJudgeTimeoutSeconds
+            let maxSeconds = ProactiveConfig.maxJudgeTimeoutSeconds
             throw ConfigError.validationError(
                 field: "proactive.judge_timeout_seconds",
-                message: "must be between \(ProactiveConfig.minJudgeTimeoutSeconds) and \(ProactiveConfig.maxJudgeTimeoutSeconds) (got \(proactive.judgeTimeoutSeconds))"
+                message: "must be between \(minSeconds) and \(maxSeconds) (got \(proactive.judgeTimeoutSeconds))"
             )
         }
     }

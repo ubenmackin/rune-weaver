@@ -157,6 +157,32 @@ export function SchedulesIcon({ size = 18, className = "", ...props }: IconProps
   );
 }
 
+// Work group glyph: a goal flag planted on a target. The flag carries the
+// long-horizon pursuit behind the Work menu while the concentric rings echo the
+// target used by the goal surfaces, so the dropdown trigger reads as intent at
+// a glance without a bespoke color token.
+export function WorkIcon({ size = 18, className = "", ...props }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      {...props}
+    >
+      <path d="M5 22V3" />
+      <path d="M5 4h13l-2.6 3.5L18 11H5" />
+      <circle cx="11" cy="7.5" r="2.2" />
+      <circle cx="11" cy="7.5" r="0.6" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function BellIcon({ size = 18, className = "", ...props }: IconProps) {
   return (
     <svg

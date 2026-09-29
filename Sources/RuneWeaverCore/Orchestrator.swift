@@ -270,44 +270,11 @@ public actor Orchestrator {
             // turn wiring: one plan plus recall plus starter so service and
             // CLI turns cannot drift. No date math here; the router owns every
             // calendar derivation inside the shared helper.
-            let recall: Message?
-            let starterPack: Message?
-            do {
-                if let memoryEngine {
-                    let wired = try await Self.resolveTurnRecallAndStarter(
-                        engine: memoryEngine,
-                        query: text,
-                        sessionID: sessionID,
-                        embedder: embedder,
-                        labelingEnabled: securityConfig.untrustedLabeling,
-                        budgets: recallBudgets,
-                        currentDate: Date()
-                    )
-                    recall = wired.recall
-                    starterPack = wired.starterPack
-                    // One diagnostics line per turn with counts plus scores plus
-                    // skip flag, never content; silent-nil recalls still emit a
-                    // zero-hit line via the diagnostics payload above.
-                    RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(wired.diagnostics))")
-                    didEmitRecallDiagnostics = true
-                } else {
-                    recall = nil
-                    starterPack = nil
-                    // No engine means no doc index: derive the freshness flag
-                    // so a freshness query logs skipped here as on every path.
-                    RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))))")
-                    didEmitRecallDiagnostics = true
-                }
-            } catch let recallError as CancellationError {
-                // Cancelled recall still emits one zero-hit line before the
-                // outer handler restores history and propagates. The skip flag
-                // mirrors the recall path (freshness plus store presence) since
-                // the shared wiring threw before returning its plan.
-                let fallbackSkip = earlyRecallSkip(for: text)
-                RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(RecallDiagnostics.zero(skippedDocIndex: fallbackSkip)))")
-                didEmitRecallDiagnostics = true
-                throw recallError
-            }
+            let (recall, starterPack) = try await resolveTurnRecall(
+                text: text,
+                sessionID: sessionID,
+                didEmitRecallDiagnostics: &didEmitRecallDiagnostics
+            )
             let reservedToolTokens = ConversationManager.estimateToolTokens(in: tools)
             await conversations.compactHistoryIfNeeded(
                 for: sessionID,
@@ -361,35 +328,106 @@ public actor Orchestrator {
                 )
             }
         } catch let error as CancellationError {
-            // Guarantee one diagnostics line even when cancellation lands
-            // before the recall slot; turns that already emitted keep exactly
-            // one and do not double-log here. The fallback derives the same
-            // freshness-plus-store skip flag so pre-recall cancels agree.
-            if !didEmitRecallDiagnostics {
-                RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))))")
-            }
-            // Executed tools already changed the world: keep working-memory
-            // partials and mirror them so the audit trail survives the
-            // cancel instead of being rolled back as if nothing ran.
-            let hasExecutedTools = pendingEpisodic.contains { $0.role == .tool }
-            if hasExecutedTools {
-                await flushEpisodicUncancellable(pendingEpisodic, sessionID: sessionID)
-            } else if let preTurnSnapshot {
-                await conversations.restoreRollbackSnapshot(preTurnSnapshot)
-            }
+            await handleProcessCancellation(
+                didEmitRecallDiagnostics: didEmitRecallDiagnostics,
+                text: text,
+                pendingEpisodic: pendingEpisodic,
+                sessionID: sessionID,
+                preTurnSnapshot: preTurnSnapshot
+            )
             throw error
         } catch {
-            // Guarantee one diagnostics line on non-cancellation failures that
-            // bypassed recall; turns that already emitted keep exactly one.
-            // The fallback derives the same freshness-plus-store skip flag.
-            if !didEmitRecallDiagnostics {
-                RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))))")
-            }
-            // Non-cancellation failures keep working-memory partials, so
-            // flush the buffered mirror to match instead of diverging.
-            await flushEpisodic(pendingEpisodic, sessionID: sessionID)
+            await handleProcessError(
+                didEmitRecallDiagnostics: didEmitRecallDiagnostics,
+                text: text,
+                pendingEpisodic: pendingEpisodic,
+                sessionID: sessionID
+            )
             throw error
         }
+    }
+
+    private func resolveTurnRecall(
+        text: String,
+        sessionID: UUID,
+        didEmitRecallDiagnostics: inout Bool
+    ) async throws -> (recall: Message?, starterPack: Message?) {
+        do {
+            if let memoryEngine {
+                let wired = try await Self.resolveTurnRecallAndStarter(
+                    engine: memoryEngine,
+                    query: text,
+                    sessionID: sessionID,
+                    embedder: embedder,
+                    labelingEnabled: securityConfig.untrustedLabeling,
+                    budgets: recallBudgets,
+                    currentDate: Date()
+                )
+                // One diagnostics line per turn with counts plus scores plus
+                // skip flag, never content; silent-nil recalls still emit a
+                // zero-hit line via the diagnostics payload above.
+                RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(wired.diagnostics))")
+                didEmitRecallDiagnostics = true
+                return (wired.recall, wired.starterPack)
+            } else {
+                // No engine means no doc index: derive the freshness flag
+                // so a freshness query logs skipped here as on every path.
+                RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))))")
+                didEmitRecallDiagnostics = true
+                return (nil, nil)
+            }
+        } catch let recallError as CancellationError {
+            // Cancelled recall still emits one zero-hit line before the
+            // outer handler restores history and propagates. The skip flag
+            // mirrors the recall path (freshness plus store presence) since
+            // the shared wiring threw before returning its plan.
+            let fallbackSkip = earlyRecallSkip(for: text)
+            RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(RecallDiagnostics.zero(skippedDocIndex: fallbackSkip)))")
+            didEmitRecallDiagnostics = true
+            throw recallError
+        }
+    }
+
+    private func handleProcessCancellation(
+        didEmitRecallDiagnostics: Bool,
+        text: String,
+        pendingEpisodic: [(content: String, role: Message.Role)],
+        sessionID: UUID,
+        preTurnSnapshot: ConversationSession?
+    ) async {
+        // Guarantee one diagnostics line even when cancellation lands
+        // before the recall slot; turns that already emitted keep exactly
+        // one and do not double-log here. The fallback derives the same
+        // freshness-plus-store skip flag so pre-recall cancels agree.
+        if !didEmitRecallDiagnostics {
+            RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))))")
+        }
+        // Executed tools already changed the world: keep working-memory
+        // partials and mirror them so the audit trail survives the
+        // cancel instead of being rolled back as if nothing ran.
+        let hasExecutedTools = pendingEpisodic.contains { $0.role == .tool }
+        if hasExecutedTools {
+            await flushEpisodicUncancellable(pendingEpisodic, sessionID: sessionID)
+        } else if let preTurnSnapshot {
+            await conversations.restoreRollbackSnapshot(preTurnSnapshot)
+        }
+    }
+
+    private func handleProcessError(
+        didEmitRecallDiagnostics: Bool,
+        text: String,
+        pendingEpisodic: [(content: String, role: Message.Role)],
+        sessionID: UUID
+    ) async {
+        // Guarantee one diagnostics line on non-cancellation failures that
+        // bypassed recall; turns that already emitted keep exactly one.
+        // The fallback derives the same freshness-plus-store skip flag.
+        if !didEmitRecallDiagnostics {
+            RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))))")
+        }
+        // Non-cancellation failures keep working-memory partials, so
+        // flush the buffered mirror to match instead of diverging.
+        await flushEpisodic(pendingEpisodic, sessionID: sessionID)
     }
 
     /// Serving model info (model name and context length limit).
@@ -743,27 +781,16 @@ extension Orchestrator {
         var attemptedEmptyRoundSynthesis = false
 
         while true {
-            try Task.checkCancellation()
-            _ = await ingestSteeringMessage(
-                sessionID: request.sessionID,
+            let (collected, shouldRetry) = try await stepTurnGeneration(
+                request: request,
                 workingMessages: &workingMessages,
-                pendingEpisodic: &pendingEpisodic
-            )
-            let collected = try await collectAndEmitTurn(
-                messages: workingMessages,
+                pendingEpisodic: &pendingEpisodic,
                 llmRoundIndex: &llmRoundIndex,
                 billedTokens: &billedTokens,
-                lastRoundContextTokens: &lastRoundContextTokens,
-                request: request
+                lastRoundContextTokens: &lastRoundContextTokens
             )
             finalText = collected.text
-
-            if await handleMidGenerationSteering(
-                sessionID: request.sessionID,
-                finalText: &finalText,
-                workingMessages: &workingMessages,
-                pendingEpisodic: &pendingEpisodic
-            ) {
+            if shouldRetry {
                 continue
             }
 
@@ -858,44 +885,36 @@ extension Orchestrator {
         return .finished(finalText: finalText, toolActions: toolActions, billedTokens: billedTokens, contextTokens: contextTokens)
     }
 
-    private func emitTurnTokens(
-        billed: Int?,
-        billedTokens: inout Int?,
-        roundIndex: Int,
+    private func stepTurnGeneration(
         request: TurnLoopRequest,
-        contextTokens: Int?
-    ) async {
-        guard let billed, billed >= 0 else { return }
-        billedTokens = (billedTokens ?? 0) + billed
-        if let turnTotal = billedTokens {
-            let cumulativeTurnTotal = if let prior = request.priorBilledTokens, prior >= 0 {
-                prior + turnTotal
-            } else {
-                turnTotal
-            }
-            await request.onEvent?(.turnTokens(
-                roundIndex: roundIndex,
-                roundTokens: billed,
-                turnTotalTokens: cumulativeTurnTotal,
-                contextTokens: contextTokens
-            ))
-        }
-    }
-
-    /// Builds the working-memory note recording one tool round's intent.
-    func assistantNoteMessage(text: String, calls: [ToolInput]) -> Message {
-        Message(
-            role: .assistant,
-            content: OrchestratorToolLoop.assistantNoteContent(text: text, calls: calls)
+        workingMessages: inout [Message],
+        pendingEpisodic: inout [(content: String, role: Message.Role)],
+        llmRoundIndex: inout Int,
+        billedTokens: inout Int?,
+        lastRoundContextTokens: inout Int?
+    ) async throws -> (collected: TurnDraft, shouldRetrySteer: Bool) {
+        try Task.checkCancellation()
+        _ = await ingestSteeringMessage(
+            sessionID: request.sessionID,
+            workingMessages: &workingMessages,
+            pendingEpisodic: &pendingEpisodic
         )
-    }
-
-    /// Stable recall slot keeping the prefix identical across rounds.
-    /// Single-sources the slot through the shared memory helper so CLI and service turns
-    /// agree; recall sits after every leading system so a summary arriving mid-turn
-    /// shifts history after recall instead of shifting recall itself.
-    public static func stableHistoryWithRecall(_ history: [Message], recall: Message?) -> [Message] {
-        MemoryEngine.historyWithRecall(history, recall: recall)
+        let collected = try await collectAndEmitTurn(
+            messages: workingMessages,
+            llmRoundIndex: &llmRoundIndex,
+            billedTokens: &billedTokens,
+            lastRoundContextTokens: &lastRoundContextTokens,
+            request: request
+        )
+        var text = collected.text
+        let shouldRetry = await handleMidGenerationSteering(
+            sessionID: request.sessionID,
+            finalText: &text,
+            workingMessages: &workingMessages,
+            pendingEpisodic: &pendingEpisodic
+        )
+        let draft = TurnDraft(text: text, billedTokens: collected.billedTokens, toolCalls: collected.toolCalls)
+        return (draft, shouldRetry)
     }
 
     /// Early-turn doc-index skip flag for zero-hit diagnostics.
@@ -909,94 +928,6 @@ extension Orchestrator {
         let freshnessSkip = MemoryQueryRouter.plan(for: query, currentDate: Date(), budgets: recallBudgets).skipDocIndex
         let store = memoryEngine?.docIndexStore
         return freshnessSkip || store == nil
-    }
-
-    /// Safe single-line recall observability, never content.
-    ///
-    /// Carries hit counts plus injected chars plus skip flag plus hit IDs plus
-    /// sources plus scores so each turn emits exactly one diagnostics line.
-    /// IDs, sources, and scores are safe to log; hit content and queries never
-    /// enter this line.
-    public static func recallDiagnosticsLogLine(_ diagnostics: RecallDiagnostics) -> String {
-        "Orchestrator: recall \(diagnostics.logLine)"
-    }
-
-    /// Stable two-slot history keeping the prefix identical across rounds.
-    /// Auto-recall lands first and the trusted starter pack lands directly
-    /// before the active user turn as the second system message, so the lead
-    /// system prompt plus earlier turns keep their prefix-cache tokens.
-    public static func stableHistoryWithRecallAndStarter(
-        _ history: [Message],
-        recall: Message?,
-        starterPack: Message?
-    ) -> [Message] {
-        let withRecall = MemoryEngine.historyWithRecall(history, recall: recall)
-        return MemoryEngine.historyWithRecall(withRecall, recall: starterPack)
-    }
-
-    /// Shared turn wiring for automatic recall plus starter footing.
-    ///
-    /// Single source for `process` and CLI turns: one `MemoryQueryRouter.plan`
-    /// plus `recallMessageWithDiagnostics` plus `RecallStarterPack.build` so
-    /// terminal turns honor the same budgets and placement instead of
-    /// duplicating the wiring. `Orchestrator` owns this wiring; CLI routes
-    /// through here rather than rebuilding the plan plus recall plus starter.
-    public static func resolveTurnRecallAndStarter(
-        engine: MemoryEngine,
-        query: String,
-        sessionID: UUID,
-        embedder: (any EmbeddingsBackend)?,
-        labelingEnabled: Bool,
-        budgets: RecallBudgets,
-        currentDate: Date = Date()
-    ) async throws -> TurnRecallAndStarter {
-        let effectiveBudgets = budgets.clamped()
-        let plan = MemoryQueryRouter.plan(for: query, currentDate: currentDate, budgets: effectiveBudgets)
-        let (recall, diagnostics) = try await engine.recallMessageWithDiagnostics(
-            for: query,
-            sessionID: sessionID,
-            embedder: embedder,
-            labelingEnabled: labelingEnabled,
-            budgets: effectiveBudgets,
-            plan: plan
-        )
-        let starterPack = await RecallStarterPack.build(for: engine, goalLine: nil, budgets: effectiveBudgets)
-        return TurnRecallAndStarter(recall: recall, starterPack: starterPack, diagnostics: diagnostics, plan: plan)
-    }
-
-    /// Refreshes recall-augmented history after one tool round.
-    /// Reuses the turn's system string verbatim (never recomposes from the live
-    /// registry mid-loop), the turn's recall at its stable slot, and the turn's
-    /// starter pack at its stable slot. The caller passes the turn's effective
-    /// prompt plus the turn's recall and starter explicitly so mid-loop history
-    /// keeps the composed vision-aware prompt and the turn-start footing
-    /// instead of rebuilding the starter from the live engine every round,
-    /// which would shift prefix bytes when the profile or index changes mid-turn.
-    func refreshedWorkingMessages(
-        sessionID: UUID,
-        recall: Message?,
-        starterPack: Message?,
-        systemPrompt: String?
-    ) async -> [Message] {
-        let base = await conversations.workingHistory(for: sessionID, systemPrompt: systemPrompt ?? self.systemPrompt)
-        return Self.stableHistoryWithRecallAndStarter(base, recall: recall, starterPack: starterPack)
-    }
-
-    /// Stores the final assistant text when it carries user-visible content.
-    /// Returns the persisted note so callers can stamp the response completion from the same
-    /// creation instant the history reload path reads, keeping live and reload in agreement.
-    @discardableResult
-    func storeFinalAssistantText(
-        _ finalText: String,
-        sessionID: UUID,
-        pendingEpisodic: inout [(content: String, role: Message.Role)]
-    ) async -> Message? {
-        guard OrchestratorToolLoop.shouldStoreAssistantText(finalText) else { return nil }
-        let note = Message(role: .assistant, content: finalText)
-        // Stamp from the stored instant so the live response and the history reload share one time.
-        let persisted = await conversations.append(note, to: sessionID)
-        pendingEpisodic.append((finalText, .assistant))
-        return persisted
     }
 
     /// Executes tool calls in sequence, publishing real-time events and recording outcomes.

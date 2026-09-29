@@ -1,7 +1,12 @@
 // Rune Weaver Dashboard — Detailed modal viewer for inspectable run logs.
 // Shows prompt, executed tool actions, full assistant response, and performance metrics.
 
-import { indexRunLabelForRun, parseRunTimestamp, type RunLogEntry } from "../api";
+import {
+  formatRunDuration,
+  indexRunLabelForRun,
+  parseRunTimestamp,
+  type RunLogEntry,
+} from "../api";
 import { CloseIcon } from "./icons";
 import MarkdownText from "./MarkdownText";
 import ToolActionRow from "./ToolActionRow";
@@ -23,6 +28,7 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
   // IDs pin the audit trail to its conversation, while per-tool call IDs
   // correlate gated approvals and history without guessing.
   const sessionID = run.sessionID ?? null;
+  const duration = formatRunDuration(run.durationMs);
 
   return (
     <Modal
@@ -67,14 +73,10 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
                 {parseRunTimestamp(run.timestamp).toLocaleString()}
               </span>
             </div>
-            {run.durationMs != null ? (
+            {duration ? (
               <div className="meta-card">
                 <span className="meta-label">Duration</span>
-                <span className="meta-value">
-                  {run.durationMs >= 1000
-                    ? `${(run.durationMs / 1000).toFixed(2)}s`
-                    : `${run.durationMs}ms`}
-                </span>
+                <span className="meta-value">{duration}</span>
               </div>
             ) : null}
             {run.totalTokens != null ? (

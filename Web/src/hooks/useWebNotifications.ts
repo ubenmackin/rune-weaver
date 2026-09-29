@@ -8,6 +8,7 @@ import type {
   WSIncomingFrame,
 } from "./useSharedWebSocket";
 import { normalizeSessionID } from "../approvalsSession";
+import { isGoalNeedsInputProactive } from "../api";
 
 // Reads the filing identity from an approval prompt so rebroadcasts for the
 // same filing collapse to one badge bump. Trims defensively since the wire
@@ -82,6 +83,11 @@ export function useWebNotifications() {
 
   const [runsBadge, setRunsBadge] = useState(0);
   const [approvalsBadge, setApprovalsBadge] = useState(0);
+  // Owner-attention count for goals parked awaiting input. Unlike runs, the
+  // nudge is a proactive push rather than a terminal turn, so it stays its own
+  // counter; the shell clears it when the goals surface opens, mirroring the
+  // runsBadge clear-on-open contract.
+  const [goalsAttention, setGoalsAttention] = useState(0);
   // Degraded-tool notices keep their own counter instead of inflating runs
   // or approvals; the bell surfaces the count as an amber badge gated behind
   // the same permission toggle, cleared when the chat view is shown.
@@ -206,6 +212,22 @@ export function useWebNotifications() {
           body: message.slice(0, 150),
         });
       }
+    } else if (isGoalNeedsInputProactive(frame)) {
+      // A goal parked on owner input is the one proactive nudge the goals
+      // surface badges. The counter always rises so a denied or unsupported
+      // notification API still leaves an honest visual signal; the native
+      // notification is best-effort and rides the existing permission path
+      // rather than triggering a fresh prompt mid-frame.
+      setGoalsAttention((prev) => prev + 1);
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+        const title = typeof frame.title === "string" ? frame.title.trim() : "";
+        const headline =
+          typeof frame.headline === "string" ? frame.headline.trim() : "";
+        new Notification(
+          title ? `Rune Weaver: ${title}` : "Rune Weaver: Goal needs input",
+          { body: headline || undefined },
+        );
+      }
     }
   }, []);
 
@@ -266,6 +288,12 @@ export function useWebNotifications() {
     setWarningsBadge(0);
   }, []);
 
+  const clearGoalsAttention = useCallback(() => {
+    // Acknowledgment only: the goals list remains the source of truth, so
+    // clearing the advisory count never fabricates a server-side resolution.
+    setGoalsAttention(0);
+  }, []);
+
   return {
     notificationsEnabled: permission === "granted",
     permission,
@@ -277,5 +305,7 @@ export function useWebNotifications() {
     clearApprovalsBadge,
     warningsBadge,
     clearWarningsBadge,
+    goalsAttention,
+    clearGoalsAttention,
   };
 }

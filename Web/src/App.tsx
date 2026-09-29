@@ -20,6 +20,7 @@ import {
 } from "./api";
 import ApprovalsInbox from "./components/ApprovalsInbox";
 import ChatView from "./components/ChatView";
+import GoalsManager from "./components/GoalsManager";
 import LoginView from "./components/LoginView";
 import MemoryBrowser from "./components/MemoryBrowser";
 import MobileBottomNav from "./components/MobileBottomNav";
@@ -30,7 +31,7 @@ import StagedChangesDrawer from "./components/StagedChangesDrawer";
 import TopNav, { type Tab } from "./components/TopNav";
 import { useWebNotifications } from "./hooks/useWebNotifications";
 
-const VALID_TABS: Tab[] = ["chat", "approvals", "memory", "runs", "schedules", "settings"];
+const VALID_TABS: Tab[] = ["chat", "approvals", "goals", "memory", "runs", "schedules", "settings"];
 
 export function isStandaloneMode(): boolean {
   if (typeof window === "undefined") return false;
@@ -171,6 +172,11 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
     clearApprovalsBadge,
     warningsBadge,
     clearWarningsBadge,
+    // Owner-attention goal nudges live with the notification hook so the Work
+    // group's rolled-up badge has a single source of truth. The defaults keep a
+    // partial test double from breaking the shell wiring.
+    goalsAttention = 0,
+    clearGoalsAttention = () => {},
   } = useWebNotifications();
 
   useEffect(() => {
@@ -197,6 +203,9 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
     }
     if (selected === "runs") clearRunsBadge();
     if (selected === "approvals") clearApprovalsBadge();
+    // Goals sits inside the Work group; selecting it acknowledges the same
+    // way the flat runs tab does.
+    if (selected === "goals") clearGoalsAttention();
     // Warnings surface in the chat banner, so viewing chat clears the bell badge.
     if (selected === "chat") clearWarningsBadge();
   }
@@ -268,6 +277,7 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
         health={health}
         runsBadge={runsBadge}
         approvalsBadge={approvalsBadge}
+        goalsBadge={goalsAttention}
         warningsBadge={warningsBadge}
         stagedFilesCount={stagedFilesCount}
         onOpenStagedDrawer={() => setStagedDrawerOpen(true)}
@@ -290,10 +300,11 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
             style={{ display: tab === "chat" ? "block" : "none", height: tab === "chat" ? "100%" : undefined }}
             aria-hidden={tab !== "chat"}
           >
-            <ChatView health={health} />
+            <ChatView health={health} onSelectTab={handleSelectTab} />
           </div>
 
           {tab === "approvals" ? <ApprovalsInbox /> : null}
+          {tab === "goals" ? <GoalsManager attentionCount={goalsAttention} /> : null}
           {tab === "memory" ? <MemoryBrowser /> : null}
           {tab === "runs" ? <RunLogViewer /> : null}
           {tab === "schedules" ? <SchedulerManager /> : null}
