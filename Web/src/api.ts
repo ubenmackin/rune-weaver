@@ -1855,6 +1855,19 @@ export function isGoalNeedsInputProactive(value: unknown): boolean {
   return normalized.includes("needsinput");
 }
 
+// Reports whether a `proactive_message` frame announces a freshly proposed
+// idea. The engine labels the trigger `idea_proposed`; normalizing case and
+// separators lets that token and a camelCase `ideaProposed` variant both match
+// so the goals attention badge never misses a suggestion over spelling.
+export function isIdeaProposedProactive(value: unknown): boolean {
+  if (!isRecord(value) || value.type !== "proactive_message") return false;
+  // Bind to a local so the string narrowing survives the normalization chain.
+  const kind = value.kind;
+  if (typeof kind !== "string") return false;
+  const normalized = kind.trim().toLowerCase().replace(/[_-]/g, "");
+  return normalized === "ideaproposed";
+}
+
 // Lists goals, optionally filtered by lifecycle state. A blank filter is
 // omitted so the caller gets every state and can apply its own default hiding.
 export function listGoals(status?: string): Promise<GoalsListResponse> {
@@ -1916,6 +1929,125 @@ export function patchGoalStep(
     `/goals/${encodeURIComponent(goalId)}/steps/${encodeURIComponent(stepId)}`,
     { method: "PATCH", body: JSON.stringify(input) },
   );
+}
+
+// One proactive Muse suggestion mirrored from the engine `Idea` snapshot. The
+// kind and status ride as the engine raw strings so the dashboard never invents
+// a case the store cannot round-trip; the goal link stays optional because tips
+// carry no owning goal.
+export interface Idea {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  goalId: string | null;
+  status: string;
+  createdAt: string | number;
+  updatedAt: string | number;
+}
+
+export interface IdeasListResponse {
+  ideas: Idea[];
+  count: number;
+}
+
+export interface IdeasSummaryResponse {
+  total: number;
+  proposed: number;
+  accepted: number;
+  dismissed: number;
+}
+
+// Parses one idea row before it enters view state. Identity plus the core
+// display fields are required; the body and goal link degrade to empty/null and
+// timestamps to the epoch so a partially drifted payload still renders instead
+// of dropping an otherwise-usable suggestion. A blank title rejects the row,
+// mirroring the engine's trimmed-empty drop, the store's blank-title skip, and
+// the wire decoder's blank-title rejection, instead of rendering an empty card.
+// The goal link accepts the canonical `goalId` spelling first, then the legacy
+// variants, mirroring the engine's alias-tolerant decoder, and trims padding so
+// deep links compare equal.
+export function parseIdea(value: unknown): Idea | null {
+  if (!isRecord(value)) return null;
+  const rawID = value.id;
+  const id = typeof rawID === "string" ? rawID.trim() : "";
+  if (!id) return null;
+  const rawTitle = value.title;
+  const kind = value.kind;
+  const status = value.status;
+  if (
+    typeof rawTitle !== "string" ||
+    typeof kind !== "string" ||
+    typeof status !== "string"
+  ) {
+    return null;
+  }
+  const title = rawTitle.trim();
+  if (!title) return null;
+  const body = typeof value.body === "string" ? value.body : "";
+  const goalRaw = value.goalId ?? value.goalID ?? value.goal_id;
+  const trimmedGoal = typeof goalRaw === "string" ? goalRaw.trim() : "";
+  const goalId = trimmedGoal ? trimmedGoal : null;
+  // Type-check timestamps rather than casting so a drifted object or boolean
+  // cannot reach parseRunTimestamp, whose string path calls `.trim()`.
+  const createdRaw = value.createdAt;
+  const createdAt =
+    typeof createdRaw === "string" || typeof createdRaw === "number"
+      ? createdRaw
+      : 0;
+  const updatedRaw = value.updatedAt;
+  const updatedAt =
+    typeof updatedRaw === "string" || typeof updatedRaw === "number"
+      ? updatedRaw
+      : 0;
+  return { id, kind, title, body, goalId, status, createdAt, updatedAt };
+}
+
+// Display label per idea family. An unknown future raw value falls back to its
+// underscored spelling so a newer engine still renders a readable pill.
+export function ideaKindLabel(kind: string): string {
+  switch (kind) {
+    case "plan_adjustment":
+      return "Plan";
+    case "new_goal":
+      return "New goal";
+    case "tip":
+      return "Tip";
+    default:
+      return kind.replace(/_/g, " ").trim() || "Idea";
+  }
+}
+
+// Lists ideas, optionally filtered by lifecycle state. A blank filter is
+// omitted so the caller gets every state and applies its own default hiding.
+export function listIdeas(status?: string): Promise<IdeasListResponse> {
+  const trimmed = status?.trim();
+  const query = trimmed ? `?status=${encodeURIComponent(trimmed)}` : "";
+  return fetchJson<IdeasListResponse>(`/ideas${query}`);
+}
+
+// Fetches the per-status idea tallies for the attention badge.
+export function getIdeasSummary(): Promise<IdeasSummaryResponse> {
+  return fetchJson<IdeasSummaryResponse>("/ideas/summary");
+}
+
+// Accepts one idea and returns its refreshed row. The engine applies the
+// suggestion's change (plan adjustment or new goal) before flipping status, so
+// a 400/409 here is the honest reason the change could not be applied.
+export function acceptIdea(id: string): Promise<Idea> {
+  return fetchJson<Idea>(`/ideas/${encodeURIComponent(id)}/accept`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+// Dismisses one idea and returns its refreshed row. Dismissal never blocks a
+// future suggestion with the same title; it only records the owner's "no".
+export function dismissIdea(id: string): Promise<Idea> {
+  return fetchJson<Idea>(`/ideas/${encodeURIComponent(id)}/dismiss`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }
 
 export interface ProviderConfigData {
@@ -2123,6 +2255,26 @@ export interface ProactiveSettingsUpdate {
   judge_timeout_seconds?: number;
   judgeTimeoutSeconds?: number;
 }
+
+// Proactive Muse suggestion policy mirroring the engine `IdeasConfig`
+// (Sources/RuneWeaverCore/Config.swift). Ideas stay opt-in so a fresh install
+// never spends background review calls; the per-cycle cap and review timeout
+// stay file-owned planning bounds.
+export interface IdeasConfigData {
+  enabled: boolean;
+  max_per_cycle: number;
+  timeout_seconds: number;
+}
+
+// Partial ideas patch for `PUT /settings`, mirroring the engine `IdeasUpdate`.
+// Only the enable toggle is dashboard-owned; the planning bounds stay file-owned.
+export interface IdeasSettingsUpdate {
+  enabled?: boolean;
+}
+
+// Manual mirror of the IdeasConfig default so a fresh form matches the boundary
+// the engine enforces before the first settings fetch.
+export const DEFAULT_IDEAS_ENABLED = false;
 
 // Manual mirrors of GoalsConfig defaults so a fresh form matches the boundary
 // the engine enforces before the first settings fetch.
@@ -3093,6 +3245,9 @@ export interface SettingsResponse {
   // Interruption policy under [proactive]; optional for back-compat with
   // older engines that predate the section.
   proactive?: ProactiveConfigData;
+  // Proactive Muse suggestion policy under [ideas]; optional for back-compat
+  // with older engines that predate the section.
+  ideas?: IdeasConfigData;
   // HTTP bind from [server]; optional for back-compat with older engines that
   // predate the bind keys. Absent degrades to the loopback defaults so the
   // Network pane never renders blank.
@@ -3154,6 +3309,8 @@ export interface UpdateSettingsInput {
   goals?: GoalsSettingsUpdate;
   // Partial proactive patch; an omitted patch preserves the stored [proactive] section.
   proactive?: ProactiveSettingsUpdate;
+  // Partial ideas patch; an omitted patch preserves the stored [ideas] section.
+  ideas?: IdeasSettingsUpdate;
   // Bind patch for [server]; an omitted patch preserves the stored section.
   // The engine persists these to the file and returns requiresRestart without
   // live-reloading the bind, so the dashboard shows a restart banner.

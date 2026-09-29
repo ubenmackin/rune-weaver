@@ -236,6 +236,7 @@ extension AppModel {
             securityConfig: pipeline.config.security,
             recallBudgets: pipeline.config.memory.recallBudgets,
             goalsConfig: pipeline.config.goals,
+            ideasConfig: pipeline.config.ideas,
             auth: pipeline.auth,
             mediaSecrets: pipeline.secrets,
             secrets: pipeline.secrets,

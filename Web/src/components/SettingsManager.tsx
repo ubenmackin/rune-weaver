@@ -61,6 +61,7 @@ import {
   DEFAULT_GOALS_ENABLED,
   DEFAULT_GOALS_MAX_ACTIVE_GOALS,
   DEFAULT_GOALS_STEP_INTERVAL_MINUTES,
+  DEFAULT_IDEAS_ENABLED,
   DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS,
   DEFAULT_PROACTIVE_MODE,
   GOALS_MAX_ACTIVE_MAX,
@@ -89,6 +90,8 @@ import {
   type EmailAccountData,
   type GoalsConfigData,
   type GoalsSettingsUpdate,
+  type IdeasConfigData,
+  type IdeasSettingsUpdate,
   type ProactiveConfigData,
   type ProactiveSettingsUpdate,
   type MediaConfigData,
@@ -1081,6 +1084,10 @@ export default function SettingsManager() {
   const [goalsMaxActiveGoals, setGoalsMaxActiveGoals] = useState<number | string>(
     DEFAULT_GOALS_MAX_ACTIVE_GOALS
   );
+  // Proactive Muse suggestions ([ideas]): opt-in enable toggle. Off by default
+  // so a fresh install never spends background review calls; the per-cycle cap
+  // and review timeout stay file-owned planning bounds.
+  const [ideasEnabled, setIdeasEnabled] = useState<boolean>(DEFAULT_IDEAS_ENABLED);
   // Background interruption policy ([proactive]): surfacing mode plus the
   // guarded judge budget. Off never interrupts while the approvals inbox and
   // run history keep recording in every mode.
@@ -1923,6 +1930,25 @@ export default function SettingsManager() {
     []
   );
 
+  // Copies one settings fetch into the idea fields, tolerating an absent
+  // [ideas] section from older engines so the form keeps its default instead of
+  // blanking the pane.
+  const populateIdeasSettings = useCallback(
+    (ideas: IdeasConfigData | undefined | null) => {
+      if (!ideas) return;
+      if (typeof ideas.enabled === "boolean") {
+        setIdeasEnabled(ideas.enabled);
+      }
+    },
+    []
+  );
+
+  // Builds the [ideas] delta from the enable toggle so the full-settings save
+  // shares one shape; the planning bounds stay file-owned.
+  const buildIdeasPayload = useCallback((): IdeasSettingsUpdate => {
+    return { enabled: ideasEnabled };
+  }, [ideasEnabled]);
+
   // Builds the [goals] delta from the pursuit form fields so the
   // full-settings save shares one shape with future modal saves. Sends the
   // snake_case keys the engine persists; the engine also accepts the camelCase
@@ -2158,6 +2184,9 @@ export default function SettingsManager() {
     // Goals fields share one helper so load and save stay symmetric; an
     // absent [goals] keeps the form defaults instead of blanking the pane.
     populateGoalsSettings(data.goals);
+    // Ideas enable toggle shares one helper so load and save stay symmetric; an
+    // absent [ideas] keeps the form default instead of blanking the pane.
+    populateIdeasSettings(data.ideas);
     // Proactivity fields share one helper so load and save stay symmetric; an
     // absent [proactive] keeps the form defaults instead of blanking the pane.
     populateProactiveSettings(data.proactive);
@@ -2207,7 +2236,7 @@ export default function SettingsManager() {
       prev ?? { hostname: fileBindHostname, port: fileBindPort, allowedHosts: fileBindHosts }
     );
     setServerRestartRequired(Boolean(data.requiresRestart));
-  }, [populateMediaSettings, populateDesktopSettings, populateBashSettings, populateGoalsSettings, populateProactiveSettings]);
+  }, [populateMediaSettings, populateDesktopSettings, populateBashSettings, populateGoalsSettings, populateIdeasSettings, populateProactiveSettings]);
 
   // Reconciles the boot snapshot from /health when the engine advertises its
   // live bind. Older engines omit the keys, in which case the pre-save file
@@ -2828,6 +2857,7 @@ export default function SettingsManager() {
         bash: buildBashPayload(),
         goals: buildGoalsPayload(),
         proactive: buildProactivePayload(),
+        ideas: buildIdeasPayload(),
         ...(serverDirty
           ? {
               serverHostname: trimmedServerHostname,
@@ -4123,6 +4153,22 @@ export default function SettingsManager() {
                 Off by default so a fresh install never spends planning calls
                 until you opt in. Goals advance on cadence via the service
                 worker and the CLI foreground loop.
+              </span>
+            </div>
+            <div className="form-group checkbox-group">
+              <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                <input
+                  id="ideas-enabled"
+                  type="checkbox"
+                  checked={ideasEnabled}
+                  onChange={(e) => setIdeasEnabled(e.target.checked)}
+                />
+                <span>Enable proactive ideas</span>
+              </label>
+              <span className="form-group-hint">
+                Off by default. When enabled, the agent proposes next moves it
+                thinks you would value; each suggestion waits for Accept or
+                Dismiss before anything changes.
               </span>
             </div>
             <div className="form-row" style={{ marginTop: "1rem" }}>

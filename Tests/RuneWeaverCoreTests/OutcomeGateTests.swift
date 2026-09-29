@@ -44,7 +44,7 @@ struct OutcomeGateTests {
     func `Milestones mode surfaces milestones errors and parked only`() async {
         let gate = OutcomeGate(mode: .milestones)
         let surfaced: [ProactiveEventKind] = [.schedulerError, .goalAchieved, .goalNeedsInput, .goalBlocked, .runParked]
-        let quiet: [ProactiveEventKind] = [.schedulerOk, .goalStepDone]
+        let quiet: [ProactiveEventKind] = [.schedulerOk, .goalStepDone, .ideaProposed]
         for kind in surfaced {
             let decision = await gate.decide(event: event(kind: kind))
             #expect(decision.surface == true)
@@ -66,6 +66,23 @@ struct OutcomeGateTests {
         #expect(parked.surface == true)
         let step = await gate.decide(event: event(kind: .goalStepDone))
         #expect(step.surface == false)
+    }
+
+    @Test
+    func `Idea nudges surface only under all mode`() async {
+        // A volunteered suggestion is not a milestone, so it follows the same
+        // suppression contract as a routine step completion: surfaced by `all`,
+        // hidden by `off` and `milestones`, and quiet under guarded without a
+        // dedicated judge branch.
+        let all = await OutcomeGate(mode: .all).decide(event: event(kind: .ideaProposed, outcome: "Try a shorter loop"))
+        #expect(all.surface == true)
+        #expect(all.headline == "Try a shorter loop")
+        let off = await OutcomeGate(mode: .off).decide(event: event(kind: .ideaProposed))
+        #expect(off.surface == false)
+        let milestones = await OutcomeGate(mode: .milestones).decide(event: event(kind: .ideaProposed))
+        #expect(milestones.surface == false)
+        let guarded = await OutcomeGate(mode: .guarded).decide(event: event(kind: .ideaProposed))
+        #expect(guarded.surface == false)
     }
 
     @Test
@@ -102,6 +119,25 @@ struct OutcomeGateTests {
         let parked = await gate.decide(event: event(kind: .runParked, outcome: "Awaiting approval"))
         #expect(parked.surface == true)
         #expect(parked.headline == "Awaiting approval")
+    }
+
+    @Test
+    func `Guarded never judges ideas or step completions`() async {
+        // The guarded judge only weighs scheduler successes: a throwing judge
+        // proves the gate never consults it for volunteered suggestions or
+        // routine step completions, because a consulted judge would fail open
+        // to surfacing while the correct path stays suppressed.
+        struct JudgeBoom: Error {}
+        let gate = OutcomeGate(
+            mode: .guarded,
+            judge: { _ in throw JudgeBoom() }
+        )
+        let idea = await gate.decide(event: event(kind: .ideaProposed, outcome: "Try a shorter loop"))
+        #expect(idea.surface == false)
+        #expect(!idea.headline.isEmpty)
+        let step = await gate.decide(event: event(kind: .goalStepDone, outcome: "Watered the basil"))
+        #expect(step.surface == false)
+        #expect(!step.headline.isEmpty)
     }
 
     @Test

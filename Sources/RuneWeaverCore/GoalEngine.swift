@@ -54,16 +54,24 @@ public actor GoalEngine {
     /// paths can cancel through `cancelPendingPlans` instead of leaking a
     /// detached task past the engine's lifetime.
     private var planTasks: [UUID: Task<Void, Never>] = [:]
+    /// Optional ideas engine refreshed when a goal reaches achieved.
+    ///
+    /// The natural "what next" moment is the completion of a goal, so the
+    /// engine is injected rather than discovered; when absent, achievement
+    /// simply records its events as before and no suggestion call is spent.
+    private let ideasEngine: IdeasEngine?
 
     /// Creates a goal engine over shared collaborators.
     /// - Parameters:
     ///   - store: Durable goal persistence.
     ///   - llm: Injected provider shared with chat turns.
     ///   - config: Pursuit policy.
-    public init(store: GoalStore, llm: any LLMProvider, config: GoalsConfig) {
+    ///   - ideasEngine: Optional ideas engine refreshed on achievement.
+    public init(store: GoalStore, llm: any LLMProvider, config: GoalsConfig, ideasEngine: IdeasEngine? = nil) {
         self.store = store
         self.llm = llm
         self.config = config.clamped()
+        self.ideasEngine = ideasEngine
     }
 
     /// Whether steady goal pursuit is enabled by configuration.
@@ -71,6 +79,14 @@ public actor GoalEngine {
     /// disabled install never spends advancement turns on pre-existing rows.
     public var isEnabled: Bool {
         config.enabled
+    }
+
+    /// Maximum event triggers armed on one goal, clamped at boot.
+    ///
+    /// Exposed so REST trigger replacement can enforce the same per-goal budget
+    /// `create` already applies instead of reaching for the absolute bound.
+    public var maxTriggersPerGoal: Int {
+        config.maxTriggersPerGoal
     }
 
     /// Creates a goal with a placeholder step and plans in the background.
@@ -86,12 +102,15 @@ public actor GoalEngine {
     ///   - cadence: Cadence hint in minutes; defaults to the configured interval
     ///     and clamps into the validated range so a typo never stalls dues.
     ///   - originSessionID: Session that originated the goal, when known.
+    ///   - triggers: Event wake-ups to arm alongside the goal; clamped to the
+    ///     configured per-goal budget and persisted after the goal row.
     /// - Returns: The persisted goal snapshot.
     public func create(
         title: String,
         statement: String,
         cadence: Int? = nil,
-        originSessionID: UUID? = nil
+        originSessionID: UUID? = nil,
+        triggers: [GoalTriggerDraft] = []
     ) async throws -> Goal {
         guard config.enabled else {
             throw GoalEngineError.disabled
@@ -127,6 +146,31 @@ public actor GoalEngine {
             notes: "Decomposition pending"
         )
         try await store.create(goal: goal, steps: [placeholder])
+        // Triggers are secondary to the goal itself: a store failure arming one
+        // is logged rather than thrown, so a created goal is never reported as a
+        // failure because an event wake-up could not be persisted. Blank kinds
+        // drop and the per-goal budget caps the fan-out.
+        let triggerBudget = config.maxTriggersPerGoal
+        if triggerBudget > 0 {
+            for draft in triggers.prefix(triggerBudget) {
+                let kind = draft.eventKind.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !kind.isEmpty else { continue }
+                let cooldown = max(
+                    GoalsConfig.minTriggerCooldownMinutes,
+                    draft.cooldownMinutes ?? GoalsConfig.defaultTriggerCooldownMinutes
+                )
+                do {
+                    _ = try await store.addTrigger(
+                        goalID: goal.id,
+                        eventKind: kind,
+                        pattern: draft.pattern,
+                        cooldownMinutes: cooldown
+                    )
+                } catch {
+                    RuneWeaverLog.scheduler.warning("GoalEngine: failed to arm trigger for goal \(goal.id): \(error.localizedDescription)")
+                }
+            }
+        }
         let captured = goal
         // Tracked, not detached: the handle lets deterministic callers await the
         // plan and shutdown paths cancel it, while creation still returns the
@@ -296,18 +340,30 @@ public actor GoalEngine {
     ///   - goalID: Goal that just ran.
     ///   - runID: Opaque correlation for the audit event (run-log ID in the
     ///     service, per-run session ID headless).
-    public func postAdvance(goalID: UUID, runID: UUID) async throws {
+    /// - Returns: Suggestions generated because this turn achieved the goal,
+    ///   empty when the goal is still active or the ideas engine is unwired.
+    @discardableResult
+    public func postAdvance(goalID: UUID, runID: UUID) async throws -> [Idea] {
         guard let goal = try await store.goal(id: goalID) else {
             throw GoalEngineError.notFound(goalID)
         }
         let next = try await store.nextActionableStep(goalID: goalID)
+        var generated: [Idea] = []
         if next == nil, goal.status == .active {
             // setStatus logs the completion event alongside the transition.
             try await store.setStatus(goalID: goalID, status: .achieved)
+            // The natural "what next" moment: refresh proactive suggestions
+            // now that a goal just finished. Best-effort only — generate()
+            // self-guards on the ideas config and returns an empty batch on
+            // failure, so a quiet model never fails the advancement that
+            // triggered it. The batch is returned so the caller can surface it
+            // on the proactive frame despite the store's title dedup.
+            generated = await ideasEngine?.generate() ?? []
         }
         let bumped = Date().addingTimeInterval(TimeInterval(goal.stepIntervalMinutes * 60))
         try await store.markAdvanced(goalID: goalID, nextDueAt: bumped)
         try await store.appendEvent(goalID: goalID, kind: .note, message: "Advanced by run \(runID.uuidString).")
+        return generated
     }
 
     /// Parks a goal awaiting owner input, keeping the reason visible.
@@ -501,5 +557,98 @@ public actor GoalEngine {
         } catch {
             RuneWeaverLog.scheduler.warning("GoalEngine: failed to persist fallback plan for goal \(goal.id): \(error.localizedDescription)")
         }
+    }
+}
+
+// MARK: - Event-trigger bridge
+
+/// Polls the shared event stream and arms due goals from armed triggers.
+///
+/// The bridge adds no firing machinery of its own: it reads recent goal audit
+/// events plus mirrored episodes, then hands them to the store, which pulls the
+/// due date of any goal whose trigger matched. The ordinary `advanceDue` path
+/// fires that goal on the next tick, so single-flight locking, run rows, session
+/// linkage, and parked resumes all stay exactly as they were.
+///
+/// Downtime and debounce semantics:
+/// - No catch-up stacking. Each trigger settles at most once per poll and its
+///   debounce window suppresses repeats, so a burst of matching events never
+///   queues a burst of firings.
+/// - Skipped-while-down firings are not replayed. The lookback bounds how far
+///   back a poll reads; events older than the window are ignored, and the goal
+///   still fires on its regular cadence instead.
+/// - Event kinds stay open. The bridge classifies episodes into the shared
+///   vocabulary and forwards goal audit kinds verbatim, but it never switches on
+///   the kind itself, so a new source only needs to publish events to extend it.
+public struct GoalTriggerBridge: Sendable {
+    /// Default bounded lookback for a single poll.
+    public static let defaultLookback: TimeInterval = 15 * 60
+    /// Upper bound on events read from each source per poll, so one noisy
+    /// stream cannot fan the settle work out without bound.
+    public static let maxEventsPerPoll = 200
+
+    /// Maximum age of an event a poll may still consider.
+    public let lookback: TimeInterval
+
+    /// Creates a bridge.
+    /// - Parameter lookback: Bounded lookback window in seconds.
+    public init(lookback: TimeInterval = GoalTriggerBridge.defaultLookback) {
+        self.lookback = lookback
+    }
+
+    /// Reads recent events and settles matching triggers, returning the fires.
+    ///
+    /// `since` is the caller's high-water mark; it is clamped to the lookback so
+    /// a long gap or restart never replays an unbounded backlog. Failures in
+    /// either read degrade to no events rather than failing the tick, matching
+    /// the scheduler's best-effort posture for background work.
+    /// - Parameters:
+    ///   - store: Goal store owning triggers and due dates.
+    ///   - episodeStore: Episodic store over the same database file.
+    ///   - now: Evaluation instant.
+    ///   - since: High-water mark of the previous poll.
+    /// - Returns: Triggers that matched and pulled their goals forward.
+    public func poll(
+        store: GoalStore,
+        episodeStore: EpisodeStore,
+        now: Date,
+        since: Date
+    ) async -> [GoalTriggerFire] {
+        let effectiveSince = max(since, now.addingTimeInterval(-max(0, lookback)))
+        var events: [GoalObservedEvent] = []
+        if let goalEvents = try? await store.observedEvents(since: effectiveSince, limit: Self.maxEventsPerPoll) {
+            events.append(contentsOf: goalEvents)
+        }
+        if let episodes = try? await episodeStore.recent(limit: Self.maxEventsPerPoll) {
+            // `recent` returns newest-first across sessions, so the filter keeps
+            // only events inside the window; the read bound already caps the
+            // downstream settle work.
+            events.append(contentsOf: episodes
+                .filter { $0.timestamp > effectiveSince }
+                .map(Self.observedEvent))
+        }
+        guard !events.isEmpty else { return [] }
+        return await (try? store.fireMatchingTriggers(events: events, now: now)) ?? []
+    }
+
+    /// Classifies one mirrored episode into the trigger event vocabulary.
+    ///
+    /// A tool outcome is an episode carrying a tool-call identifier; a mail
+    /// arrival is an episode the mail reader annotates with the arrival kind.
+    /// Everything else is a plain conversation turn. Classification lives here,
+    /// not in the matcher, so a new annotation only widens this mapping.
+    /// - Parameter episode: Mirrored episode to classify.
+    /// - Returns: Observed event for the trigger matcher.
+    public static func observedEvent(for episode: Episode) -> GoalObservedEvent {
+        let kind = if episode.metadata["tool_call_id"] != nil {
+            GoalTriggerEventKind.tool
+        } else if episode.metadata["source"] == GoalTriggerEventKind.mailArrival
+            || episode.metadata["mail_arrival"] == "true"
+        {
+            GoalTriggerEventKind.mailArrival
+        } else {
+            GoalTriggerEventKind.episode
+        }
+        return GoalObservedEvent(kind: kind, message: episode.content, occurredAt: episode.timestamp)
     }
 }

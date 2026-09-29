@@ -27,18 +27,23 @@ public enum ProactiveEventKind: String, Sendable, Codable, CaseIterable, Equatab
     case goalBlocked
     /// A scheduler or goal turn parked awaiting approval.
     case runParked
+    /// A proactive suggestion the Muse engine proposed outside any turn.
+    case ideaProposed
 
     /// Whether this kind breaks through under the milestones policy.
     ///
     /// Milestones are owner-meaningful transitions (goal completions, input
     /// needs, blocks), failures, and parked turns. Routine successes
-    /// (`schedulerOk`, `goalStepDone`) stay quiet until the guarded judge or
-    /// the all mode lets them through.
+    /// (`schedulerOk`, `goalStepDone`) and volunteered suggestions
+    /// (`ideaProposed`) stay quiet under `milestones`; under `guarded` only
+    /// `schedulerOk` reaches the model judge while `goalStepDone` and
+    /// `ideaProposed` stay suppressed, so only `all` surfaces them
+    /// unconditionally.
     var isMilestone: Bool {
         switch self {
         case .schedulerError, .goalAchieved, .goalNeedsInput, .goalBlocked, .runParked:
             true
-        case .schedulerOk, .goalStepDone:
+        case .schedulerOk, .goalStepDone, .ideaProposed:
             false
         }
     }

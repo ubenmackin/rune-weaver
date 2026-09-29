@@ -8,7 +8,7 @@ import type {
   WSIncomingFrame,
 } from "./useSharedWebSocket";
 import { normalizeSessionID } from "../approvalsSession";
-import { isGoalNeedsInputProactive } from "../api";
+import { isGoalNeedsInputProactive, isIdeaProposedProactive } from "../api";
 
 // Reads the filing identity from an approval prompt so rebroadcasts for the
 // same filing collapse to one badge bump. Trims defensively since the wire
@@ -225,6 +225,21 @@ export function useWebNotifications() {
           typeof frame.headline === "string" ? frame.headline.trim() : "";
         new Notification(
           title ? `Rune Weaver: ${title}` : "Rune Weaver: Goal needs input",
+          { body: headline || undefined },
+        );
+      }
+    } else if (isIdeaProposedProactive(frame)) {
+      // A freshly proposed idea is the other proactive nudge the goals surface
+      // badges: it rides the same proactive frame as a parked goal, so the
+      // counter rises on the same signal the panel reads. The native
+      // notification stays best-effort behind the existing permission path.
+      setGoalsAttention((prev) => prev + 1);
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+        const title = typeof frame.title === "string" ? frame.title.trim() : "";
+        const headline =
+          typeof frame.headline === "string" ? frame.headline.trim() : "";
+        new Notification(
+          title ? `Rune Weaver: ${title}` : "Rune Weaver: New idea",
           { body: headline || undefined },
         );
       }

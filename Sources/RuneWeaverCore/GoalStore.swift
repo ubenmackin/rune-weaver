@@ -74,6 +74,24 @@ public protocol GoalStoring: Sendable {
     func delete(goalID: UUID) async throws
     /// Returns the lowest-ordinal pending or in-progress step, if any.
     func nextActionableStep(goalID: UUID) async throws -> GoalStep?
+    /// Arms one event trigger on a goal.
+    func addTrigger(goalID: UUID, eventKind: String, pattern: String?, cooldownMinutes: Int) async throws -> GoalTrigger
+    /// Removes every trigger armed on a goal.
+    func removeTriggers(goalID: UUID) async throws
+    /// Replaces a goal's entire trigger set in one transaction.
+    ///
+    /// The delete and the inserts commit together, so a mid-replacement failure
+    /// never leaves the goal with zero or partial triggers the way a separate
+    /// remove-then-add sequence would. The set is capped at the absolute
+    /// per-goal bound so direct store callers stay within the same ceiling the
+    /// route layer enforces.
+    func replaceTriggers(goalID: UUID, drafts: [GoalTriggerDraft]) async throws
+    /// Reads a goal's triggers, oldest first.
+    func triggers(for goalID: UUID) async throws -> [GoalTrigger]
+    /// Settles observed events against every active goal's triggers.
+    func fireMatchingTriggers(events: [GoalObservedEvent], now: Date) async throws -> [GoalTriggerFire]
+    /// Reads goal audit events created after `since`, newest first, bounded by `limit`.
+    func observedEvents(since: Date, limit: Int?) async throws -> [GoalObservedEvent]
 }
 
 /// Convenience overloads so callers can omit the bound without a protocol-level
@@ -94,7 +112,11 @@ public extension GoalStoring {
 /// Actor-isolated SQLite store for goals, steps, and audit events.
 public actor GoalStore: GoalStoring {
     /// Filesystem path of the shared SQLite database.
-    public let dbPath: String
+    ///
+    /// Held `nonisolated` so paired stores over the same file can be built
+    /// synchronously without an actor hop for an immutable path; the value
+    /// never mutates after initialization, so no isolation protects it.
+    public nonisolated let dbPath: String
     /// Maximum rows returned per bounded read.
     private static let maxResults = 1000
 
@@ -289,6 +311,90 @@ public actor GoalStore: GoalStoring {
             try SQLiteGoalStore.nextActionableStep(goalID: goalID, dbPath: dbPath)
         }
     }
+
+    /// Arms one event trigger on a goal, rejecting unknown or blank targets.
+    ///
+    /// The cooldown floors at the configured minimum so a direct store caller
+    /// cannot arm a tight re-fire loop the engine and route layers would refuse.
+    public func addTrigger(goalID: UUID, eventKind: String, pattern: String?, cooldownMinutes: Int) async throws -> GoalTrigger {
+        let trimmedKind = eventKind.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKind.isEmpty else {
+            throw GoalStoreError.persistenceFailed("eventKind must not be empty")
+        }
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run {
+            try SQLiteGoalStore.addTrigger(
+                goalID: goalID,
+                eventKind: trimmedKind,
+                pattern: pattern,
+                cooldownMinutes: max(GoalsConfig.minTriggerCooldownMinutes, cooldownMinutes),
+                dbPath: dbPath
+            )
+        }
+    }
+
+    /// Removes every trigger armed on a goal. Unknown goals are a no-op.
+    public func removeTriggers(goalID: UUID) async throws {
+        let dbPath = self.dbPath
+        try await SQLiteSerialIO.run {
+            try SQLiteGoalStore.removeTriggers(goalID: goalID, dbPath: dbPath)
+        }
+    }
+
+    /// Replaces a goal's entire trigger set atomically.
+    ///
+    /// Blank kinds drop and nil cooldowns inherit the configured default before
+    /// the single transaction runs, so the store never arms an unmatchable or
+    /// immediately-repeating trigger; every cooldown floors at the configured
+    /// minimum so a direct store caller cannot bypass the re-fire guard the
+    /// engine and route layers enforce. The surviving set is capped at the
+    /// absolute per-goal bound so direct store callers cannot arm more triggers
+    /// than any route would send.
+    public func replaceTriggers(goalID: UUID, drafts: [GoalTriggerDraft]) async throws {
+        let normalized = drafts.compactMap { draft -> GoalTriggerDraft? in
+            let kind = draft.eventKind.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !kind.isEmpty else { return nil }
+            let cooldown = max(GoalsConfig.minTriggerCooldownMinutes, draft.cooldownMinutes ?? GoalsConfig.defaultTriggerCooldownMinutes)
+            return GoalTriggerDraft(eventKind: kind, pattern: draft.pattern, cooldownMinutes: cooldown)
+        }
+        // Fail-closed on the absolute bound: the route layer still applies its
+        // tighter configured budget first, but a direct store caller bypasses
+        // that prefix cap, so the store enforces the bound itself.
+        let capped = Array(normalized.prefix(GoalsConfig.maxTriggersPerGoalBound))
+        let dbPath = self.dbPath
+        try await SQLiteSerialIO.run {
+            try SQLiteGoalStore.replaceTriggers(goalID: goalID, drafts: capped, dbPath: dbPath)
+        }
+    }
+
+    /// Reads a goal's triggers, oldest first.
+    public func triggers(for goalID: UUID) async throws -> [GoalTrigger] {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run {
+            try SQLiteGoalStore.triggers(for: goalID, dbPath: dbPath)
+        }
+    }
+
+    /// Settles observed events against active goals' triggers, pulling each
+    /// matched goal's due date forward to `now`.
+    public func fireMatchingTriggers(events: [GoalObservedEvent], now: Date) async throws -> [GoalTriggerFire] {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run {
+            try SQLiteGoalStore.fireMatchingTriggers(events: events, now: now, dbPath: dbPath)
+        }
+    }
+
+    /// Reads goal audit events created after `since`, newest first.
+    public func observedEvents(since: Date, limit: Int? = nil) async throws -> [GoalObservedEvent] {
+        if let limit, limit <= 0 {
+            return []
+        }
+        let clamped = limit.map { min($0, Self.maxResults) }
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run {
+            try SQLiteGoalStore.observedEvents(since: since, limit: clamped, dbPath: dbPath)
+        }
+    }
 }
 
 #if canImport(SQLite3)
@@ -338,8 +444,18 @@ public actor GoalStore: GoalStoring {
                     message TEXT NOT NULL,
                     created_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS goal_triggers(
+                    id TEXT PRIMARY KEY,
+                    goal_id TEXT NOT NULL,
+                    event_kind TEXT NOT NULL,
+                    pattern TEXT,
+                    cooldown_minutes INTEGER NOT NULL,
+                    last_fired_at REAL,
+                    created_at REAL NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_goal_steps_goal_ordinal ON goal_steps(goal_id, ordinal);
                 CREATE INDEX IF NOT EXISTS idx_goal_events_goal ON goal_events(goal_id);
+                CREATE INDEX IF NOT EXISTS idx_goal_triggers_goal ON goal_triggers(goal_id);
                 CREATE INDEX IF NOT EXISTS idx_goals_status_due ON goals(status, next_due_at);
                 """,
                 failure: GoalStoreError.persistenceFailed
@@ -711,6 +827,16 @@ public actor GoalStore: GoalStoring {
             defer { sqlite3_close(handle) }
             try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
             do {
+                var triggerStatement: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, "DELETE FROM goal_triggers WHERE goal_id = ?;", -1, &triggerStatement, nil) == SQLITE_OK else {
+                    throw GoalStoreError.persistenceFailed("Could not prepare trigger delete")
+                }
+                bindText(triggerStatement, index: 1, value: goalID.uuidString)
+                let triggerDone = sqlite3_step(triggerStatement) == SQLITE_DONE
+                sqlite3_finalize(triggerStatement)
+                guard triggerDone else {
+                    throw GoalStoreError.persistenceFailed("Could not delete triggers for \(goalID)")
+                }
                 var eventStatement: OpaquePointer?
                 guard sqlite3_prepare_v2(handle, "DELETE FROM goal_events WHERE goal_id = ?;", -1, &eventStatement, nil) == SQLITE_OK else {
                     throw GoalStoreError.persistenceFailed("Could not prepare event delete")
@@ -748,80 +874,296 @@ public actor GoalStore: GoalStoring {
             }
         }
     }
-#else
-    /// Fallback when the SQLite3 module is unavailable.
-    enum SQLiteGoalStore {
-        static func create(goal _: Goal, steps _: [GoalStep], dbPath _: String) throws {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
+
+    // MARK: - Goal Triggers
+
+    /// Trigger persistence and matching for the goal store.
+    extension SQLiteGoalStore {
+        /// Decodes one `goal_triggers` row.
+        static func readTrigger(_ statement: OpaquePointer?) -> GoalTrigger? {
+            guard let idText = columnText(statement, index: 0),
+                  let id = UUID(uuidString: idText),
+                  let goalText = columnText(statement, index: 1),
+                  let goalID = UUID(uuidString: goalText),
+                  let eventKind = columnText(statement, index: 2)
+            else { return nil }
+            var lastFiredAt: Date?
+            if sqlite3_column_type(statement, 5) != SQLITE_NULL {
+                lastFiredAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 5))
+            }
+            return GoalTrigger(
+                id: id,
+                goalID: goalID,
+                eventKind: eventKind,
+                pattern: columnText(statement, index: 3),
+                cooldownMinutes: Int(sqlite3_column_int(statement, 4)),
+                lastFiredAt: lastFiredAt,
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
+            )
         }
 
-        static func goal(id _: UUID, dbPath _: String) throws -> Goal? {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
+        /// Inserts one trigger row.
+        static func insertTrigger(_ trigger: GoalTrigger, handle: OpaquePointer?) throws {
+            let sql = "INSERT INTO goal_triggers(id, goal_id, event_kind, pattern, cooldown_minutes, last_fired_at, created_at) "
+                + "VALUES(?, ?, ?, ?, ?, ?, ?);"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw GoalStoreError.persistenceFailed("Could not prepare trigger insert")
+            }
+            defer { sqlite3_finalize(statement) }
+            bindText(statement, index: 1, value: trigger.id.uuidString)
+            bindText(statement, index: 2, value: trigger.goalID.uuidString)
+            bindText(statement, index: 3, value: trigger.eventKind)
+            bindText(statement, index: 4, value: trigger.pattern)
+            sqlite3_bind_int(statement, 5, Int32(clamping: trigger.cooldownMinutes))
+            if let lastFiredAt = trigger.lastFiredAt {
+                sqlite3_bind_double(statement, 6, lastFiredAt.timeIntervalSince1970)
+            } else {
+                sqlite3_bind_null(statement, 6)
+            }
+            sqlite3_bind_double(statement, 7, trigger.createdAt.timeIntervalSince1970)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw GoalStoreError.persistenceFailed("Could not write trigger for goal \(trigger.goalID)")
+            }
         }
 
-        static func list(status _: GoalStatus?, limit _: Int? = nil, dbPath _: String) throws -> [Goal] {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
+        /// Arms one trigger, rejecting orphan rows for unknown goals.
+        ///
+        /// The cooldown floors at the configured minimum so even a caller that
+        /// reaches this layer directly cannot persist a tight re-fire loop.
+        static func addTrigger(
+            goalID: UUID,
+            eventKind: String,
+            pattern: String?,
+            cooldownMinutes: Int,
+            dbPath: String
+        ) throws -> GoalTrigger {
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            guard try goalExists(goalID, handle: handle) else {
+                throw GoalStoreError.notFound("No goal \(goalID)")
+            }
+            let now = Date()
+            let trigger = GoalTrigger(
+                goalID: goalID,
+                eventKind: eventKind,
+                pattern: pattern,
+                cooldownMinutes: max(GoalsConfig.minTriggerCooldownMinutes, cooldownMinutes),
+                lastFiredAt: nil,
+                createdAt: now
+            )
+            try insertTrigger(trigger, handle: handle)
+            return trigger
         }
 
-        static func replacePlan(goalID _: UUID, steps _: [GoalStep], dbPath _: String) throws {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
+        /// Replaces a goal's entire trigger set in one transaction.
+        ///
+        /// The goal existence check, the delete, and every insert share one
+        /// `BEGIN IMMEDIATE` transaction, so a failure or crash can never leave
+        /// the goal with a partial set while the caller sees an error. Unknown
+        /// goals throw before any row is touched. The inserts stop at the
+        /// absolute per-goal bound so a caller that bypasses the actor wrapper
+        /// still cannot arm an unbounded set.
+        static func replaceTriggers(goalID: UUID, drafts: [GoalTriggerDraft], dbPath: String) throws {
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
+            do {
+                guard try goalExists(goalID, handle: handle) else {
+                    throw GoalStoreError.notFound("No goal \(goalID)")
+                }
+                var deleteStatement: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, "DELETE FROM goal_triggers WHERE goal_id = ?;", -1, &deleteStatement, nil) == SQLITE_OK else {
+                    throw GoalStoreError.persistenceFailed("Could not prepare trigger delete")
+                }
+                bindText(deleteStatement, index: 1, value: goalID.uuidString)
+                let deleted = sqlite3_step(deleteStatement) == SQLITE_DONE
+                sqlite3_finalize(deleteStatement)
+                guard deleted else {
+                    throw GoalStoreError.persistenceFailed("Could not delete triggers for \(goalID)")
+                }
+                let now = Date()
+                for draft in drafts.prefix(GoalsConfig.maxTriggersPerGoalBound) {
+                    let trigger = GoalTrigger(
+                        goalID: goalID,
+                        eventKind: draft.eventKind,
+                        pattern: draft.pattern,
+                        cooldownMinutes: max(GoalsConfig.minTriggerCooldownMinutes, draft.cooldownMinutes ?? GoalsConfig.defaultTriggerCooldownMinutes),
+                        lastFiredAt: nil,
+                        createdAt: now
+                    )
+                    try insertTrigger(trigger, handle: handle)
+                }
+                try exec(handle: handle, sql: "COMMIT;")
+            } catch {
+                try? exec(handle: handle, sql: "ROLLBACK;")
+                throw error
+            }
         }
 
-        static func setStepStatus(
-            goalID _: UUID,
-            stepID _: UUID,
-            status _: StepStatus,
-            notes _: String?,
-            lastRunID _: UUID?,
-            dbPath _: String
-        ) throws {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
+        /// Removes every trigger armed on a goal. Missing goals are a no-op.
+        static func removeTriggers(goalID: UUID, dbPath: String) throws {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "DELETE FROM goal_triggers WHERE goal_id = ?;", -1, &statement, nil) == SQLITE_OK else {
+                throw GoalStoreError.persistenceFailed("Could not prepare trigger delete")
+            }
+            defer { sqlite3_finalize(statement) }
+            bindText(statement, index: 1, value: goalID.uuidString)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw GoalStoreError.persistenceFailed("Could not delete triggers for \(goalID)")
+            }
         }
 
-        static func advanceDue(now _: Date, dbPath _: String) throws -> [Goal] {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
+        /// Reads a goal's triggers, oldest first.
+        static func triggers(for goalID: UUID, dbPath: String) throws -> [GoalTrigger] {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return [] }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            let sql = "SELECT id, goal_id, event_kind, pattern, cooldown_minutes, last_fired_at, created_at "
+                + "FROM goal_triggers WHERE goal_id = ? ORDER BY created_at ASC, rowid ASC;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw GoalStoreError.persistenceFailed("Could not prepare trigger read")
+            }
+            defer { sqlite3_finalize(statement) }
+            bindText(statement, index: 1, value: goalID.uuidString)
+            var results: [GoalTrigger] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let trigger = readTrigger(statement) {
+                    results.append(trigger)
+                }
+            }
+            return results
         }
 
-        static func markAdvanced(goalID _: UUID, nextDueAt _: Date?, dbPath _: String) throws {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
+        /// Reads every trigger belonging to an active goal.
+        ///
+        /// Only active goals are eligible for a wake-up: a paused or parked goal
+        /// must not silently acquire a due date while it is not running.
+        static func activeTriggers(handle: OpaquePointer?) throws -> [GoalTrigger] {
+            let sql = "SELECT t.id, t.goal_id, t.event_kind, t.pattern, t.cooldown_minutes, t.last_fired_at, t.created_at "
+                + "FROM goal_triggers t JOIN goals g ON g.id = t.goal_id "
+                + "WHERE g.status = ? ORDER BY t.created_at ASC, t.rowid ASC;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw GoalStoreError.persistenceFailed("Could not prepare active trigger read")
+            }
+            defer { sqlite3_finalize(statement) }
+            bindText(statement, index: 1, value: GoalStatus.active.rawValue)
+            var results: [GoalTrigger] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let trigger = readTrigger(statement) {
+                    results.append(trigger)
+                }
+            }
+            return results
         }
 
-        static func setStatus(goalID _: UUID, status _: GoalStatus, dbPath _: String) throws {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
+        /// Settles observed events against active triggers in one transaction.
+        ///
+        /// Each trigger settles at most once per call: the first matching event
+        /// wins and the debounce stamp moves immediately, so a burst of matching
+        /// events inside one poll cannot stack repeat firings. Pulling the due
+        /// date to `now` leaves the ordinary due scan to fire the goal next tick.
+        static func fireMatchingTriggers(events: [GoalObservedEvent], now: Date, dbPath: String) throws -> [GoalTriggerFire] {
+            guard !events.isEmpty else { return [] }
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return [] }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
+            do {
+                let candidates = try activeTriggers(handle: handle)
+                var fires: [GoalTriggerFire] = []
+                for trigger in candidates {
+                    guard let event = events.first(where: { trigger.matches(event: $0, now: now) }) else { continue }
+                    var stampStatement: OpaquePointer?
+                    guard sqlite3_prepare_v2(handle, "UPDATE goal_triggers SET last_fired_at = ? WHERE id = ?;", -1, &stampStatement, nil) == SQLITE_OK else {
+                        throw GoalStoreError.persistenceFailed("Could not prepare trigger stamp")
+                    }
+                    sqlite3_bind_double(stampStatement, 1, now.timeIntervalSince1970)
+                    bindText(stampStatement, index: 2, value: trigger.id.uuidString)
+                    let stamped = sqlite3_step(stampStatement) == SQLITE_DONE
+                    sqlite3_finalize(stampStatement)
+                    guard stamped else {
+                        throw GoalStoreError.persistenceFailed("Could not stamp trigger \(trigger.id)")
+                    }
+                    var dueStatement: OpaquePointer?
+                    guard sqlite3_prepare_v2(
+                        handle,
+                        "UPDATE goals SET next_due_at = ?, updated_at = ? WHERE id = ?;",
+                        -1,
+                        &dueStatement,
+                        nil
+                    ) == SQLITE_OK else {
+                        throw GoalStoreError.persistenceFailed("Could not prepare trigger due update")
+                    }
+                    sqlite3_bind_double(dueStatement, 1, now.timeIntervalSince1970)
+                    sqlite3_bind_double(dueStatement, 2, now.timeIntervalSince1970)
+                    bindText(dueStatement, index: 3, value: trigger.goalID.uuidString)
+                    let pulled = sqlite3_step(dueStatement) == SQLITE_DONE
+                    sqlite3_finalize(dueStatement)
+                    guard pulled else {
+                        throw GoalStoreError.persistenceFailed("Could not pull goal \(trigger.goalID) due")
+                    }
+                    fires.append(GoalTriggerFire(
+                        triggerID: trigger.id,
+                        goalID: trigger.goalID,
+                        eventKind: event.kind,
+                        message: event.message,
+                        firedAt: now
+                    ))
+                }
+                try exec(handle: handle, sql: "COMMIT;")
+                return fires
+            } catch {
+                try? exec(handle: handle, sql: "ROLLBACK;")
+                throw error
+            }
         }
 
-        static func updateDetails(
-            goalID _: UUID,
-            title _: String?,
-            statement _: String?,
-            stepIntervalMinutes _: Int?,
-            dbPath _: String
-        ) throws -> Goal {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
-        }
-
-        static func appendEvent(goalID _: UUID, kind _: GoalEventKind, message _: String, dbPath _: String) throws -> GoalEvent {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
-        }
-
-        static func events(goalID _: UUID, limit _: Int?, dbPath _: String) throws -> [GoalEvent] {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
-        }
-
-        static func activeGoalCount(dbPath _: String) throws -> Int {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
-        }
-
-        static func steps(goalID _: UUID, dbPath _: String) throws -> [GoalStep] {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
-        }
-
-        static func delete(goalID _: UUID, dbPath _: String) throws {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
-        }
-
-        static func nextActionableStep(goalID _: UUID, dbPath _: String) throws -> GoalStep? {
-            throw GoalStoreError.storeUnavailable("SQLite unavailable")
+        /// Reads goal audit events created after `since`, newest first.
+        static func observedEvents(since: Date, limit: Int?, dbPath: String) throws -> [GoalObservedEvent] {
+            if let limit, limit <= 0 {
+                return []
+            }
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return [] }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            var sql = "SELECT kind, message, created_at, goal_id FROM goal_events WHERE created_at > ? "
+                + "ORDER BY created_at DESC, id DESC"
+            if limit != nil {
+                sql += " LIMIT ?"
+            }
+            sql += ";"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw GoalStoreError.persistenceFailed("Could not prepare observed event read")
+            }
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_double(statement, 1, since.timeIntervalSince1970)
+            if let limit {
+                sqlite3_bind_int(statement, 2, SQLiteHelpers.sqliteLimit(limit))
+            }
+            var results: [GoalObservedEvent] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let kind = columnText(statement, index: 0),
+                      let message = columnText(statement, index: 1)
+                else { continue }
+                let occurredAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
+                // The goal link is carried so a consumer can attribute the
+                // outcome to its source goal without a second lookup; a
+                // malformed link degrades to nil rather than dropping the row.
+                let goalID = columnText(statement, index: 3).flatMap(UUID.init(uuidString:))
+                results.append(GoalObservedEvent(kind: kind, message: message, occurredAt: occurredAt, goalID: goalID))
+            }
+            return results
         }
     }
 #endif

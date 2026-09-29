@@ -20,22 +20,29 @@
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
+  acceptIdea,
   ApiError,
   createGoal,
   deleteGoal,
+  dismissIdea,
   formatGoalNextAdvance,
   goalEventKindLabel,
   goalProgressPercent,
   goalStatusLabel,
   goalStatusTone,
+  ideaKindLabel,
   isActiveRunStatus,
+  isIdeaProposedProactive,
   listGoals,
+  listIdeas,
   parseGoalUpdatedFrame,
+  parseIdea,
   parseRunTimestamp,
   GOAL_CADENCE_OPTIONS,
   DEFAULT_GOALS_STEP_INTERVAL_MINUTES,
   type Goal,
   type GoalStep,
+  type Idea,
 } from "../api";
 import {
   useSharedWebSocket,
@@ -63,6 +70,15 @@ type GoalFilter = "current" | "all";
 // on the Runs surface.
 const EXPANDED_RUN_LIMIT = 20;
 
+// Normalizes an idea list payload, dropping rows a drifted or older engine
+// cannot validate so a malformed entry never reaches the render path.
+function parseIdeaList(raw: unknown): Idea[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(parseIdea)
+    .filter((idea): idea is Idea => idea !== null);
+}
+
 interface GoalsManagerProps {
   // Needs-input count owned by the shell's notification hook. The panel only
   // renders it, so the Work trigger badge and this header share one source.
@@ -75,6 +91,13 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [filter, setFilter] = useState<GoalFilter>("current");
+
+  // Proactive suggestions shown above the goal list. Dismissed ideas hide
+  // under the default filter exactly as abandoned goals do, so an audit of
+  // past "no"s only appears on the All view.
+  const [ideas, setIdeas] = useState<Idea[]>([]);
+  const [ideasLoading, setIdeasLoading] = useState(false);
+  const [actingIdeaId, setActingIdeaId] = useState<string | null>(null);
 
   // Creation form state; the modal stays open on failure so the owner's input
   // survives a rejected submit instead of being silently discarded.
@@ -149,21 +172,62 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
     };
   }, []);
 
+  const refreshIdeas = useCallback(async () => {
+    setIdeasLoading(true);
+    try {
+      const response = await listIdeas();
+      setIdeas(parseIdeaList(response.ideas));
+    } catch (failure) {
+      setError(failure instanceof ApiError ? failure.message : "Ideas failed");
+    } finally {
+      setIdeasLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIdeasLoading(true);
+    listIdeas()
+      .then((response) => {
+        if (!cancelled) setIdeas(parseIdeaList(response.ideas));
+      })
+      .catch((failure) => {
+        if (!cancelled) {
+          setError(failure instanceof ApiError ? failure.message : "Ideas failed");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIdeasLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleSocketFrame = useCallback(
     (frame: WSIncomingFrame) => {
       // The shared hub passes unknown frame types through as generic records, so
       // this handler reads the discriminator from a widened view instead of
       // narrowing the closed union the client mirrors for chat frames.
       const raw = frame as unknown as Record<string, unknown>;
-      if (raw.type !== "goal_updated") return;
-      // The push is the refresh: the engine only emits it for a real change, so
-      // a valid snapshot re-reads the list to pick up derived tallies. The
-      // shell-owned attention count comes from its own hook, not this handler.
-      if (parseGoalUpdatedFrame(raw)) {
-        void refresh();
+      if (raw.type === "goal_updated") {
+        // The push is the refresh: the engine only emits it for a real change,
+        // so a valid snapshot re-reads the list to pick up derived tallies. The
+        // shell-owned attention count comes from its own hook, not this handler.
+        if (parseGoalUpdatedFrame(raw)) {
+          void refresh();
+        }
+        return;
+      }
+      // A freshly proposed idea rides the shared proactive frame. Re-read the
+      // ideas list so a newly announced suggestion appears in the panel without
+      // a manual refresh or remount; the shell's notification hook still owns
+      // the attention badge, so this handler never counts the frame itself.
+      if (isIdeaProposedProactive(raw)) {
+        void refreshIdeas();
       }
     },
-    [refresh],
+    [refresh, refreshIdeas],
   );
   useSharedWebSocket(handleSocketFrame);
 
@@ -171,6 +235,47 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
     filter === "all"
       ? goals
       : goals.filter((goal) => goal.status !== "abandoned");
+
+  const visibleIdeas =
+    filter === "all"
+      ? ideas
+      : ideas.filter((idea) => idea.status !== "dismissed");
+
+  // Accepting applies the suggestion server-side (a re-plan or a new goal) and
+  // then flips its status, so the goal list refreshes alongside the idea card.
+  async function handleAcceptIdea(idea: Idea) {
+    setActingIdeaId(idea.id);
+    setError(null);
+    try {
+      const updated = await acceptIdea(idea.id);
+      setIdeas((prev) =>
+        prev.map((row) => (row.id === updated.id ? updated : row)),
+      );
+      void refresh();
+      setNotice(`Accepted "${idea.title}".`);
+    } catch (failure) {
+      // The engine answers the same honest 400/409 it would for the equivalent
+      // goal action, so surface that message verbatim instead of a generic one.
+      setError(failure instanceof ApiError ? failure.message : "Accept failed");
+    } finally {
+      setActingIdeaId(null);
+    }
+  }
+
+  async function handleDismissIdea(idea: Idea) {
+    setActingIdeaId(idea.id);
+    setError(null);
+    try {
+      const updated = await dismissIdea(idea.id);
+      setIdeas((prev) =>
+        prev.map((row) => (row.id === updated.id ? updated : row)),
+      );
+    } catch (failure) {
+      setError(failure instanceof ApiError ? failure.message : "Dismiss failed");
+    } finally {
+      setActingIdeaId(null);
+    }
+  }
 
   function resetForm() {
     setTitle("");
@@ -311,7 +416,10 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
           <button
             type="button"
             className="ghost icon-text-btn"
-            onClick={() => void refresh()}
+            onClick={() => {
+              void refresh();
+              void refreshIdeas();
+            }}
             disabled={loading}
           >
             <RefreshIcon size={14} className={loading ? "spin" : ""} />
@@ -353,6 +461,76 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
         >
           All
         </button>
+      </div>
+
+      {/* Ideas panel: proactive suggestions above the goal list. Each card
+          carries a kind pill plus the title and body; the body renders through
+          the sanitized MarkdownText path only, never raw HTML. */}
+      <div className="ideas-panel" data-testid="ideas-panel" style={{ marginTop: 12 }}>
+        <div className="panel-header-row">
+          <h3 style={{ margin: 0 }}>Ideas</h3>
+          <span className="muted text-sm">
+            {ideasLoading && ideas.length === 0
+              ? "Loading…"
+              : `${visibleIdeas.length} ideas`}
+          </span>
+        </div>
+        {visibleIdeas.length === 0 && !ideasLoading ? (
+          <p className="muted text-xs" style={{ marginTop: 6 }}>
+            No suggestions right now. The agent proposes ideas as goals and
+            activity accumulate.
+          </p>
+        ) : null}
+        <div className="job-cards-list">
+          {visibleIdeas.map((idea) => (
+            <div
+              key={idea.id}
+              className="schedule-card active"
+              data-testid={`idea-card-${idea.id}`}
+            >
+              <div className="schedule-card-top">
+                <div className="schedule-card-identity">
+                  <div className="schedule-card-title-row">
+                    <strong className="schedule-card-name">{idea.title}</strong>
+                    <span className="status-pill small">
+                      {ideaKindLabel(idea.kind).toUpperCase()}
+                    </span>
+                  </div>
+                </div>
+                <div className="schedule-card-actions">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => void handleDismissIdea(idea)}
+                    disabled={
+                      actingIdeaId === idea.id || idea.status !== "proposed"
+                    }
+                    aria-label={`Dismiss ${idea.title}`}
+                  >
+                    Dismiss
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => void handleAcceptIdea(idea)}
+                    disabled={
+                      actingIdeaId === idea.id || idea.status !== "proposed"
+                    }
+                    aria-label={`Accept ${idea.title}`}
+                  >
+                    {actingIdeaId === idea.id ? "Applying…" : "Accept"}
+                  </button>
+                </div>
+              </div>
+              {idea.body ? (
+                <MarkdownText
+                  text={idea.body}
+                  className="markdown-content text-xs"
+                />
+              ) : null}
+            </div>
+          ))}
+        </div>
       </div>
 
       {goals.length === 0 && !loading ? (

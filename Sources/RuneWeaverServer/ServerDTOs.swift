@@ -112,6 +112,15 @@ public enum ServerPaths {
     public static let goalAdvance = "advance"
     /// Goal steps subpath under `/goals/:id`.
     public static let goalSteps = "steps"
+    /// Ideas group backing proactive Muse suggestions.
+    public static let ideas = "ideas"
+    /// Ideas summary subpath under `/ideas`.
+    /// Registered before `/:id` so the literal wins over the parameter.
+    public static let ideaSummary = "summary"
+    /// Idea dismiss subpath under `/ideas/:id`.
+    public static let ideaDismiss = "dismiss"
+    /// Idea accept subpath under `/ideas/:id`.
+    public static let ideaAccept = "accept"
     /// Engine API version served on `/health`.
     /// Single-sourced through `RuneWeaverVersion` so health, User-Agents,
     /// and providers cannot drift.
@@ -1215,20 +1224,25 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
     public var stepIntervalMinutes: Int?
     /// Maximum goals in the active state at once. Nil preserves the stored value.
     public var maxActiveGoals: Int?
+    /// Maximum event triggers armed on one goal. Nil preserves the stored value.
+    public var maxTriggersPerGoal: Int?
 
     /// Creates a partial goals patch.
     /// - Parameters:
     ///   - enabled: Whether goal pursuit runs.
     ///   - stepIntervalMinutes: Cadence hint in minutes.
     ///   - maxActiveGoals: Active-goal cap.
+    ///   - maxTriggersPerGoal: Per-goal event-trigger cap.
     public init(
         enabled: Bool? = nil,
         stepIntervalMinutes: Int? = nil,
-        maxActiveGoals: Int? = nil
+        maxActiveGoals: Int? = nil,
+        maxTriggersPerGoal: Int? = nil
     ) {
         self.enabled = enabled
         self.stepIntervalMinutes = stepIntervalMinutes
         self.maxActiveGoals = maxActiveGoals
+        self.maxTriggersPerGoal = maxTriggersPerGoal
     }
 
     /// Populates a patch from a full snapshot so programmatic callers holding
@@ -1238,6 +1252,7 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
         self.enabled = config.enabled
         self.stepIntervalMinutes = config.stepIntervalMinutes
         self.maxActiveGoals = config.maxActiveGoals
+        self.maxTriggersPerGoal = config.maxTriggersPerGoal
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1246,6 +1261,8 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
         case stepIntervalMinutesCamel = "stepIntervalMinutes"
         case maxActiveGoals = "max_active_goals"
         case maxActiveGoalsCamel = "maxActiveGoals"
+        case maxTriggersPerGoal = "max_triggers_per_goal"
+        case maxTriggersPerGoalCamel = "maxTriggersPerGoal"
     }
 
     /// Decodes a partial goals patch accepting snake_case and camelCase aliases.
@@ -1264,6 +1281,9 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
         let snakeCap = try container.decodeIfPresent(Int.self, forKey: .maxActiveGoals)
         let camelCap = try container.decodeIfPresent(Int.self, forKey: .maxActiveGoalsCamel)
         maxActiveGoals = snakeCap ?? camelCap
+        let snakeTriggerCap = try container.decodeIfPresent(Int.self, forKey: .maxTriggersPerGoal)
+        let camelTriggerCap = try container.decodeIfPresent(Int.self, forKey: .maxTriggersPerGoalCamel)
+        maxTriggersPerGoal = snakeTriggerCap ?? camelTriggerCap
     }
 
     /// Encodes a partial goals patch using canonical snake_case keys.
@@ -1276,6 +1296,7 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
         try container.encodeIfPresent(enabled, forKey: .enabled)
         try container.encodeIfPresent(stepIntervalMinutes, forKey: .stepIntervalMinutes)
         try container.encodeIfPresent(maxActiveGoals, forKey: .maxActiveGoals)
+        try container.encodeIfPresent(maxTriggersPerGoal, forKey: .maxTriggersPerGoal)
     }
 }
 
@@ -1379,6 +1400,9 @@ extension UpdateSettingsRequest {
         if let maxActiveGoals = update.maxActiveGoals {
             goals.maxActiveGoals = maxActiveGoals
         }
+        if let maxTriggersPerGoal = update.maxTriggersPerGoal {
+            goals.maxTriggersPerGoal = maxTriggersPerGoal
+        }
     }
 
     /// Merges a partial proactive patch onto the stored policy, preserving
@@ -1409,5 +1433,162 @@ extension UpdateSettingsRequest {
         if let judgeTimeoutSeconds = update.judgeTimeoutSeconds {
             proactive.judgeTimeoutSeconds = judgeTimeoutSeconds
         }
+    }
+}
+
+// MARK: - Ideas DTOs
+
+/// Wire shape of one proactive idea for `GET /ideas` and the decision routes.
+///
+/// Single-sourced from the core ``Idea`` snapshot so list rows and the
+/// accept/dismiss responses encode identically. `kind` and `status` ride as
+/// their stable raw strings so a dashboard never has to branch on a case the
+/// engine could later extend; the goal link stays optional because tips carry
+/// no owning goal. The goal identifier uses the canonical `goalId` spelling on
+/// the wire (matching run and goal contracts) while tolerating the legacy
+/// capital and snake spellings on decode, mirroring the goal snapshot. A blank
+/// title fails decoding so a whitespace-only row can never cross the wire only
+/// to be dropped by dashboard filters, which would leave counts and lists
+/// drifting.
+public struct IdeaDTO: Content, Sendable, Equatable {
+    /// Stable idea identifier.
+    public let id: UUID
+    /// Suggestion family raw value (`plan_adjustment`, `new_goal`, `tip`).
+    public let kind: String
+    /// Short human-readable title.
+    public let title: String
+    /// Fuller explanation shown to the owner; renders through the sanitized
+    /// Markdown path only.
+    public let body: String
+    /// Goal this idea relates to, when the suggestion targets one.
+    public let goalID: UUID?
+    /// Lifecycle state raw value (`proposed`, `accepted`, `dismissed`).
+    public let status: String
+    /// When the idea was first persisted.
+    public let createdAt: Date
+    /// When the idea row last changed.
+    public let updatedAt: Date
+
+    /// Creates an idea DTO.
+    public init(
+        id: UUID,
+        kind: String,
+        title: String,
+        body: String,
+        goalID: UUID? = nil,
+        status: String,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.kind = kind
+        self.title = title
+        self.body = body
+        self.goalID = goalID
+        self.status = status
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    /// Builds a DTO from a stored idea snapshot.
+    /// - Parameter idea: Stored idea.
+    public init(_ idea: Idea) {
+        self.init(
+            id: idea.id,
+            kind: idea.kind.rawValue,
+            title: idea.title,
+            body: idea.body,
+            goalID: idea.goalID,
+            status: idea.status.rawValue,
+            createdAt: idea.createdAt,
+            updatedAt: idea.updatedAt
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case title
+        case body
+        case goalId
+        case goalID
+        case goalSnake = "goal_id"
+        case status
+        case createdAt
+        case updatedAt
+    }
+
+    /// Decodes tolerantly across the goal-identifier spellings through the
+    /// shared alias helper so a pushed or hand-built payload lands on one field.
+    /// A blank title fails decoding fail-closed so whitespace-only rows never
+    /// cross the wire.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.kind = try container.decode(String.self, forKey: .kind)
+        let rawTitle = try container.decode(String.self, forKey: .title)
+        guard !rawTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .title, in: container, debugDescription: "title must not be blank")
+        }
+        self.title = rawTitle
+        self.body = try container.decode(String.self, forKey: .body)
+        self.goalID = BrowserNavigateWire.decodeFirst(container, keys: [.goalId, .goalID, .goalSnake])
+        self.status = try container.decode(String.self, forKey: .status)
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+
+    /// Encodes under the canonical `goalId` spelling so older decoders see no new key.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(title, forKey: .title)
+        try container.encode(body, forKey: .body)
+        try container.encodeIfPresent(goalID, forKey: .goalId)
+        try container.encode(status, forKey: .status)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+}
+
+/// Idea list response for `GET /ideas`.
+public struct IdeasListResponse: Content, Sendable, Equatable {
+    /// Ideas, newest first.
+    public let ideas: [IdeaDTO]
+    /// Number of ideas in `ideas`.
+    public let count: Int
+
+    /// Creates a list response.
+    /// - Parameter ideas: Idea DTOs.
+    public init(ideas: [IdeaDTO]) {
+        self.ideas = ideas
+        self.count = ideas.count
+    }
+}
+
+/// Idea counts for `GET /ideas/summary`.
+///
+/// Explicit per-status tallies keep the dashboard badge free of key-string
+/// branching, mirroring the goals summary shape. `total` is the sum so a
+/// dropped status can never leave the per-status counts disagreeing with it.
+public struct IdeasSummaryResponse: Content, Sendable, Equatable {
+    /// Total ideas across every state.
+    public let total: Int
+    /// Ideas awaiting a decision.
+    public let proposed: Int
+    /// Ideas the owner accepted.
+    public let accepted: Int
+    /// Ideas the owner dismissed.
+    public let dismissed: Int
+
+    /// Creates a summary response.
+    public init(proposed: Int, accepted: Int, dismissed: Int) {
+        self.proposed = proposed
+        self.accepted = accepted
+        self.dismissed = dismissed
+        self.total = proposed + accepted + dismissed
     }
 }

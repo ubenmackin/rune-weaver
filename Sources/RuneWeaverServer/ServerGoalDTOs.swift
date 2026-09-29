@@ -286,6 +286,195 @@ public struct GoalsListResponse: Content, Equatable {
     }
 }
 
+/// Wire shape of one armed event wake-up on a goal.
+///
+/// Carries the debounce stamp so the dashboard can show an armed trigger that
+/// has not fired yet; the identifier lets a later edit target one trigger.
+public struct GoalTriggerDTO: Content, Sendable, Equatable {
+    /// Stable trigger identifier.
+    public let id: UUID
+    /// Owning goal.
+    public let goalID: UUID
+    /// Event kind the trigger watches.
+    public let eventKind: String
+    /// Optional substring filter on the event message.
+    public let pattern: String?
+    /// Debounce window in minutes.
+    public let cooldownMinutes: Int
+    /// When the trigger last fired; nil means never.
+    public let lastFiredAt: Date?
+    /// When the trigger was armed.
+    public let createdAt: Date
+
+    /// Creates a trigger DTO.
+    public init(
+        id: UUID,
+        goalID: UUID,
+        eventKind: String,
+        pattern: String? = nil,
+        cooldownMinutes: Int,
+        lastFiredAt: Date? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.goalID = goalID
+        self.eventKind = eventKind
+        self.pattern = pattern
+        self.cooldownMinutes = cooldownMinutes
+        self.lastFiredAt = lastFiredAt
+        self.createdAt = createdAt
+    }
+
+    /// Builds a DTO from a stored trigger.
+    /// - Parameter trigger: Stored trigger snapshot.
+    public init(_ trigger: GoalTrigger) {
+        self.init(
+            id: trigger.id,
+            goalID: trigger.goalID,
+            eventKind: trigger.eventKind,
+            pattern: trigger.trimmedPattern,
+            cooldownMinutes: trigger.cooldownMinutes,
+            lastFiredAt: trigger.lastFiredAt,
+            createdAt: trigger.createdAt
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case goalId
+        case goalID
+        case goalSnake = "goal_id"
+        case eventKind
+        case eventKindSnake = "event_kind"
+        case pattern
+        case cooldownMinutes
+        case cooldownSnake = "cooldown_minutes"
+        case lastFiredAt
+        case lastFiredSnake = "last_fired_at"
+        case createdAt
+        case createdAtSnake = "created_at"
+    }
+
+    /// Decodes tolerantly across the goal and trigger identifier spellings,
+    /// routing through the shared alias helper so one payload cannot fork the
+    /// row shape. Canonical camelCase spellings win when several ride together.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        guard let goalID: UUID = BrowserNavigateWire.decodeFirst(
+            container,
+            keys: [.goalId, .goalID, .goalSnake]
+        ) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.goalId,
+                DecodingError.Context(codingPath: container.codingPath, debugDescription: "Missing goal identifier")
+            )
+        }
+        self.goalID = goalID
+        guard let eventKind: String = BrowserNavigateWire.decodeFirst(
+            container,
+            keys: [.eventKind, .eventKindSnake]
+        ) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.eventKind,
+                DecodingError.Context(codingPath: container.codingPath, debugDescription: "Missing event kind")
+            )
+        }
+        self.eventKind = eventKind
+        self.pattern = try container.decodeIfPresent(String.self, forKey: .pattern)
+        self.cooldownMinutes = BrowserNavigateWire.decodeFirst(container, keys: [.cooldownMinutes, .cooldownSnake]) ?? 0
+        self.lastFiredAt = BrowserNavigateWire.decodeFirst(container, keys: [.lastFiredAt, .lastFiredSnake])
+        self.createdAt = BrowserNavigateWire.decodeFirst(container, keys: [.createdAt, .createdAtSnake]) ?? Date()
+    }
+
+    /// Encodes under the canonical spellings so older decoders see no new key.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(goalID, forKey: .goalId)
+        try container.encode(eventKind, forKey: .eventKind)
+        try container.encodeIfPresent(pattern, forKey: .pattern)
+        try container.encode(cooldownMinutes, forKey: .cooldownMinutes)
+        try container.encodeIfPresent(lastFiredAt, forKey: .lastFiredAt)
+        try container.encode(createdAt, forKey: .createdAt)
+    }
+}
+
+/// One event wake-up supplied when creating or patching a goal over REST.
+///
+/// The kind is required; the pattern and cooldown stay optional so the common
+/// case needs one field. Aliases mirror the dashboard contract so hand-built
+/// curls and typed clients agree.
+public struct GoalTriggerInput: Content, Sendable, Equatable {
+    /// Event kind to watch.
+    public let eventKind: String
+    /// Optional substring filter on the event message.
+    public let pattern: String?
+    /// Optional debounce window in minutes; nil inherits the default.
+    public let cooldownMinutes: Int?
+
+    /// Creates a trigger input.
+    public init(eventKind: String, pattern: String? = nil, cooldownMinutes: Int? = nil) {
+        self.eventKind = eventKind
+        self.pattern = pattern
+        self.cooldownMinutes = cooldownMinutes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case eventKind
+        case eventKindSnake = "event_kind"
+        case kind
+        case pattern
+        case cooldownMinutes
+        case cooldownSnake = "cooldown_minutes"
+        case cooldown
+    }
+
+    /// Decodes trigger input, accepting the documented aliases.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard let eventKind: String = BrowserNavigateWire.decodeFirst(
+            container,
+            keys: [.eventKind, .eventKindSnake, .kind]
+        ) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.eventKind,
+                DecodingError.Context(codingPath: container.codingPath, debugDescription: "Missing event kind")
+            )
+        }
+        self.eventKind = eventKind
+        self.pattern = try container.decodeIfPresent(String.self, forKey: .pattern)
+        self.cooldownMinutes = BrowserNavigateWire.decodeFirst(
+            container,
+            keys: [.cooldownMinutes, .cooldownSnake, .cooldown]
+        )
+    }
+
+    /// Encodes under the canonical camelCase spellings.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(eventKind, forKey: .eventKind)
+        try container.encodeIfPresent(pattern, forKey: .pattern)
+        try container.encodeIfPresent(cooldownMinutes, forKey: .cooldownMinutes)
+    }
+
+    /// Trimmed event kind.
+    public var trimmedEventKind: String {
+        eventKind.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Trimmed pattern, nil when absent or blank.
+    public var trimmedPattern: String? {
+        guard let pattern else { return nil }
+        let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 /// Goal detail response for `GET /goals/:id` and mutating goal routes.
 ///
 /// Steps ride whole because plans stay small by config bound; events ride
@@ -295,13 +484,21 @@ public struct GoalDetailResponse: Content, Equatable {
     public let goal: GoalDTO
     /// Full plan ordered by ordinal.
     public let steps: [GoalStepDTO]
+    /// Armed event wake-ups, oldest first.
+    public let triggers: [GoalTriggerDTO]
     /// Bounded audit trail, oldest first.
     public let events: [GoalEventDTO]
 
     /// Creates a detail response.
-    public init(goal: GoalDTO, steps: [GoalStepDTO], events: [GoalEventDTO]) {
+    public init(
+        goal: GoalDTO,
+        steps: [GoalStepDTO],
+        triggers: [GoalTriggerDTO] = [],
+        events: [GoalEventDTO]
+    ) {
         self.goal = goal
         self.steps = steps
+        self.triggers = triggers
         self.events = events
     }
 }
@@ -314,12 +511,20 @@ public struct GoalCreateRequest: Content, Equatable {
     public let statement: String
     /// Cadence hint in minutes; defaults to the configured interval when omitted.
     public let stepIntervalMinutes: Int?
+    /// Event wake-ups to arm alongside the goal, when supplied.
+    public let triggers: [GoalTriggerInput]?
 
     /// Creates a creation request.
-    public init(title: String, statement: String, stepIntervalMinutes: Int? = nil) {
+    public init(
+        title: String,
+        statement: String,
+        stepIntervalMinutes: Int? = nil,
+        triggers: [GoalTriggerInput]? = nil
+    ) {
         self.title = title
         self.statement = statement
         self.stepIntervalMinutes = stepIntervalMinutes
+        self.triggers = triggers
     }
 }
 
@@ -338,13 +543,23 @@ public struct GoalPatchRequest: Content, Equatable {
     public let statement: String?
     /// New cadence hint, when retiming.
     public let stepIntervalMinutes: Int?
+    /// Replacement set of event wake-ups; present means replace every armed
+    /// trigger, absent leaves the armed set untouched.
+    public let triggers: [GoalTriggerInput]?
 
     /// Creates a patch request.
-    public init(status: String? = nil, title: String? = nil, statement: String? = nil, stepIntervalMinutes: Int? = nil) {
+    public init(
+        status: String? = nil,
+        title: String? = nil,
+        statement: String? = nil,
+        stepIntervalMinutes: Int? = nil,
+        triggers: [GoalTriggerInput]? = nil
+    ) {
         self.status = status
         self.title = title
         self.statement = statement
         self.stepIntervalMinutes = stepIntervalMinutes
+        self.triggers = triggers
     }
 }
 

@@ -31,6 +31,7 @@ extension RuneWeaverConfig {
         try validateGoalsSection()
         try validateBashSection()
         try validateProactiveSection()
+        try validateIdeasSection()
     }
 
     private func validateEngineSection() throws {
@@ -945,6 +946,14 @@ extension RuneWeaverConfig {
                 message: "must be between \(GoalsConfig.minStepsPerGoalBound) and \(GoalsConfig.maxStepsPerGoalBound) (got \(goals.maxStepsPerGoal))"
             )
         }
+        if goals.maxTriggersPerGoal < GoalsConfig.minTriggersPerGoalBound
+            || goals.maxTriggersPerGoal > GoalsConfig.maxTriggersPerGoalBound
+        {
+            throw ConfigError.validationError(
+                field: "goals.max_triggers_per_goal",
+                message: "must be between \(GoalsConfig.minTriggersPerGoalBound) and \(GoalsConfig.maxTriggersPerGoalBound) (got \(goals.maxTriggersPerGoal))"
+            )
+        }
         if goals.planTimeoutSeconds < 1 {
             throw ConfigError.validationError(
                 field: "goals.plan_timeout_seconds",
@@ -975,6 +984,28 @@ extension RuneWeaverConfig {
             )
         }
     }
+
+    /// Validates the `[ideas]` section.
+    ///
+    /// Bounds keep proactive suggestions cheap: an unbounded per-cycle cap
+    /// would flood the ideas list, and a non-positive or overlong review
+    /// budget would either never call the model or hold the trigger that asked
+    /// too long. The engine clamps again at use so an unvalidated hand-built
+    /// config never waits forever.
+    private func validateIdeasSection() throws {
+        if ideas.maxPerCycle < IdeasConfig.minMaxPerCycle || ideas.maxPerCycle > IdeasConfig.maxMaxPerCycle {
+            throw ConfigError.validationError(
+                field: "ideas.max_per_cycle",
+                message: "must be between \(IdeasConfig.minMaxPerCycle) and \(IdeasConfig.maxMaxPerCycle) (got \(ideas.maxPerCycle))"
+            )
+        }
+        if ideas.timeoutSeconds < IdeasConfig.minTimeoutSeconds || ideas.timeoutSeconds > IdeasConfig.maxTimeoutSeconds {
+            throw ConfigError.validationError(
+                field: "ideas.timeout_seconds",
+                message: "must be between \(IdeasConfig.minTimeoutSeconds) and \(IdeasConfig.maxTimeoutSeconds) (got \(ideas.timeoutSeconds))"
+            )
+        }
+    }
 }
 
 /// Bounds enforcement for goal pursuit when the config bypasses load-time validation.
@@ -992,7 +1023,8 @@ public extension GoalsConfig {
             stepIntervalMinutes: min(max(stepIntervalMinutes, Self.minStepIntervalMinutes), Self.maxStepIntervalMinutes),
             maxActiveGoals: min(max(maxActiveGoals, Self.minActiveGoalsBound), Self.maxActiveGoalsBound),
             maxStepsPerGoal: min(max(maxStepsPerGoal, Self.minStepsPerGoalBound), Self.maxStepsPerGoalBound),
-            planTimeoutSeconds: max(1, planTimeoutSeconds)
+            planTimeoutSeconds: max(1, planTimeoutSeconds),
+            maxTriggersPerGoal: min(max(maxTriggersPerGoal, Self.minTriggersPerGoalBound), Self.maxTriggersPerGoalBound)
         )
     }
 }
@@ -1018,6 +1050,24 @@ public extension RecallBudgets {
             perHitChars: min(max(perHitChars, Self.perHitCharsBounds.lowerBound), Self.perHitCharsBounds.upperBound),
             docPoolMultiplier: min(max(docPoolMultiplier, Self.docPoolMultiplierBounds.lowerBound), Self.docPoolMultiplierBounds.upperBound),
             episodicWeight: min(max(episodicWeight, Self.scoreBounds.lowerBound), Self.scoreBounds.upperBound)
+        )
+    }
+}
+
+/// Bounds enforcement for idea suggestions when the config bypasses load-time validation.
+///
+/// Load-time validation above fails closed; this clamps instead so live
+/// engine paths constructed from hand-built configs degrade to the nearest
+/// sane bound rather than refusing to run. Both share the same range
+/// constants so the two postures cannot drift.
+public extension IdeasConfig {
+    /// Returns a copy clamped into the validated ranges.
+    /// - Returns: Config with the per-cycle cap and review timeout pulled inside bounds.
+    func clamped() -> IdeasConfig {
+        IdeasConfig(
+            enabled: enabled,
+            maxPerCycle: min(max(maxPerCycle, Self.minMaxPerCycle), Self.maxMaxPerCycle),
+            timeoutSeconds: min(max(timeoutSeconds, Self.minTimeoutSeconds), Self.maxTimeoutSeconds)
         )
     }
 }

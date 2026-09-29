@@ -97,6 +97,27 @@ describe("useWebNotifications goals attention", () => {
     expect(MockNotification.instances).toHaveLength(0);
   });
 
+  it("bumps the goals badge when a proactive idea is proposed", async () => {
+    const { hook, capture } = await mountWithSocket();
+
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "proactive_message",
+      kind: "idea_proposed",
+      title: "Try a shorter loop",
+      headline: "Run 2km instead of 5km.",
+    });
+
+    // Ideas ride the same proactive frame as parked goals, so the shared
+    // attention badge rises without a second transport.
+    await waitFor(() => {
+      expect(hook.result.current.goalsAttention).toBe(1);
+    });
+    expect(MockNotification.instances).toHaveLength(1);
+    expect(MockNotification.instances[0].title).toBe(
+      "Rune Weaver: Try a shorter loop",
+    );
+  });
+
   it("ignores proactive messages that are not goal needs-input nudges", async () => {
     const { hook, capture } = await mountWithSocket();
 

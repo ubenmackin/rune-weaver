@@ -65,6 +65,13 @@ import {
   updateJob,
   validateServerAllowedHost,
   validateServerHostname,
+  acceptIdea,
+  dismissIdea,
+  getIdeasSummary,
+  ideaKindLabel,
+  isIdeaProposedProactive,
+  listIdeas,
+  parseIdea,
 } from "./api";
 import { jsonResponse } from "./test-utils/http";
 
@@ -1292,5 +1299,128 @@ describe("goal client and helpers", () => {
       path: "/goals/goal%2F1?purge=true",
       method: "DELETE",
     });
+  });
+
+  it("parses idea rows and recognizes only idea-proposed frames", () => {
+    const parsed = parseIdea({
+      id: "idea-1",
+      kind: "plan_adjustment",
+      title: "Try a shorter loop",
+      body: "Run 2km.",
+      goalId: "goal-1",
+      status: "proposed",
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    expect(parsed?.id).toBe("idea-1");
+    expect(parsed?.goalId).toBe("goal-1");
+    // Padded goal links trim so deep-link equality holds instead of comparing
+    // a padded raw value against a canonical identifier.
+    expect(
+      parseIdea({
+        id: "idea-padded",
+        kind: "tip",
+        title: "Hydrate",
+        status: "proposed",
+        goalId: "  goal-1  ",
+      })?.goalId,
+    ).toBe("goal-1");
+    expect(
+      parseIdea({
+        id: "idea-legacy",
+        kind: "tip",
+        title: "Hydrate",
+        status: "proposed",
+        goal_id: "  goal-2  ",
+      })?.goalId,
+    ).toBe("goal-2");
+    expect(
+      parseIdea({
+        id: "idea-blank-goal",
+        kind: "tip",
+        title: "Hydrate",
+        status: "proposed",
+        goalId: "   ",
+      })?.goalId,
+    ).toBeNull();
+    // A body-less tip still validates instead of dropping the suggestion.
+    expect(
+      parseIdea({ id: "idea-2", kind: "tip", title: "Hydrate", status: "proposed" })
+        ?.body,
+    ).toBe("");
+    expect(parseIdea({ id: "  ", kind: "tip", title: "x", status: "proposed" })).toBeNull();
+    expect(parseIdea({ id: "idea-3", kind: "tip" })).toBeNull();
+    expect(parseIdea(null)).toBeNull();
+    // A blank title rejects the row like the engine and wire decoder do,
+    // instead of rendering an empty card.
+    expect(
+      parseIdea({ id: "idea-4", kind: "tip", title: "", status: "proposed" }),
+    ).toBeNull();
+    expect(
+      parseIdea({ id: "idea-5", kind: "tip", title: "   ", status: "proposed" }),
+    ).toBeNull();
+
+    expect(ideaKindLabel("plan_adjustment")).toBe("Plan");
+    expect(ideaKindLabel("new_goal")).toBe("New goal");
+    expect(ideaKindLabel("tip")).toBe("Tip");
+    expect(ideaKindLabel("wild_idea")).toBe("wild idea");
+
+    expect(
+      isIdeaProposedProactive({
+        type: "proactive_message",
+        kind: "idea_proposed",
+      }),
+    ).toBe(true);
+    expect(
+      isIdeaProposedProactive({
+        type: "proactive_message",
+        kind: "ideaProposed",
+      }),
+    ).toBe(true);
+    expect(
+      isIdeaProposedProactive({
+        type: "proactive_message",
+        kind: "goalNeedsInput",
+      }),
+    ).toBe(false);
+    expect(isIdeaProposedProactive(null)).toBe(false);
+  });
+
+  it("routes idea reads and decisions through the shared JSON client", async () => {
+    const seen: Array<{ path: string; method?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        seen.push({ path: input, method: init?.method });
+        if (input === "/ideas/summary") {
+          return jsonResponse({ total: 2, proposed: 1, accepted: 1, dismissed: 0 });
+        }
+        if (input === "/ideas?status=proposed") {
+          return jsonResponse({ ideas: [], count: 0 });
+        }
+        return jsonResponse({
+          id: "idea-1",
+          kind: "tip",
+          title: "Hydrate",
+          body: "",
+          status: "accepted",
+        });
+      }),
+    );
+    const listed = await listIdeas("proposed");
+    expect(listed.count).toBe(0);
+    const summary = await getIdeasSummary();
+    expect(summary.proposed).toBe(1);
+    const accepted = await acceptIdea("idea/1");
+    expect(accepted.status).toBe("accepted");
+    await dismissIdea("idea/1");
+    expect(seen.map((call) => call.path)).toEqual([
+      "/ideas?status=proposed",
+      "/ideas/summary",
+      "/ideas/idea%2F1/accept",
+      "/ideas/idea%2F1/dismiss",
+    ]);
+    expect(seen[2].method).toBe("POST");
+    expect(seen[3].method).toBe("POST");
   });
 });

@@ -1,0 +1,81 @@
+// Rune Weaver Core — Durable model for proactive Muse idea suggestions.
+//
+// Defines the value types behind the "what next?" suggestions the ideas engine
+// proposes from goals, patterns, and memory: the suggestion families it may
+// emit, the lifecycle states that carry a suggestion from proposal to a
+// decision, and the Codable snapshot the store round-trips. These are
+// storage-agnostic value objects so the engine, tools, and future surfaces can
+// assemble an idea before SQLite persistence exists; `IdeasStore` owns the
+// table beside the existing episode, session, goal, and run-log rows.
+
+import Foundation
+
+/// Category of one proactive idea.
+///
+/// Raw values are the stable wire, SQLite, and model-facing strings, so
+/// renaming a case never silently rewrites persisted rows or a prompt that
+/// asked the model for that spelling.
+public enum IdeaKind: String, Sendable, Codable, CaseIterable, Equatable {
+    /// A suggested change to an existing goal's plan or cadence.
+    case planAdjustment = "plan_adjustment"
+    /// A suggested new goal worth pursuing.
+    case newGoal = "new_goal"
+    /// A general tip or onboarding nudge that is not tied to a goal.
+    case tip
+}
+
+/// Lifecycle state of one proactive idea.
+///
+/// `proposed` is the resting state for a freshly generated suggestion;
+/// `accepted` and `dismissed` are terminal owner decisions. Only a
+/// non-dismissed idea blocks a duplicate title, so a dismissed suggestion may
+/// resurface if the owner later asks for it again.
+public enum IdeaStatus: String, Sendable, Codable, CaseIterable, Equatable {
+    /// Generated and awaiting an owner decision.
+    case proposed
+    /// Owner accepted the suggestion.
+    case accepted
+    /// Owner dismissed the suggestion.
+    case dismissed
+}
+
+/// One proactive idea suggested by the Muse engine.
+public struct Idea: Sendable, Codable, Equatable, Identifiable {
+    /// Stable identifier shared across reads and status changes.
+    public let id: UUID
+    /// Which family of suggestion this is.
+    public let kind: IdeaKind
+    /// Short human-readable title; the dedup key across generations.
+    public let title: String
+    /// Fuller explanation shown to the owner.
+    public let body: String
+    /// Goal this idea relates to, when the suggestion targets one.
+    public let goalID: UUID?
+    /// Current lifecycle state.
+    public var status: IdeaStatus
+    /// When the idea was first persisted.
+    public let createdAt: Date
+    /// When the idea row last changed.
+    public var updatedAt: Date
+
+    /// Creates an idea snapshot.
+    public init(
+        id: UUID = UUID(),
+        kind: IdeaKind,
+        title: String,
+        body: String,
+        goalID: UUID? = nil,
+        status: IdeaStatus = .proposed,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.kind = kind
+        self.title = title
+        self.body = body
+        self.goalID = goalID
+        self.status = status
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}

@@ -76,6 +76,8 @@ public struct SettingsResponse: Content, Equatable {
     public let goals: GoalsConfig
     /// Interruption policy for background scheduler and goal turns.
     public let proactive: ProactiveConfig
+    /// Proactive Muse suggestion policy.
+    public let ideas: IdeasConfig
     /// HTTP bind interface from `[server] hostname`. Changing it needs a restart
     /// because the socket and the Host gate are fixed at boot.
     public let serverHostname: String
@@ -135,6 +137,7 @@ public struct SettingsResponse: Content, Equatable {
         self.bash = config.bash
         self.goals = config.goals
         self.proactive = config.proactive
+        self.ideas = config.ideas
         self.serverHostname = config.server.hostname
         self.serverPort = config.server.port
         self.serverAllowedHosts = config.server.allowedHosts
@@ -187,6 +190,7 @@ public struct SettingsResponse: Content, Equatable {
         case bash
         case goals
         case proactive
+        case ideas
         case serverHostname
         case serverPort
         case serverAllowedHosts
@@ -247,6 +251,7 @@ public struct SettingsResponse: Content, Equatable {
         bash = try container.decodeIfPresent(BashConfig.self, forKey: .bash) ?? BashConfig()
         goals = try container.decodeIfPresent(GoalsConfig.self, forKey: .goals) ?? GoalsConfig()
         proactive = try container.decodeIfPresent(ProactiveConfig.self, forKey: .proactive) ?? ProactiveConfig()
+        ideas = try container.decodeIfPresent(IdeasConfig.self, forKey: .ideas) ?? IdeasConfig()
         serverHostname = try container.decodeIfPresent(String.self, forKey: .serverHostname) ?? ServerEndpointConfig.defaultHostname
         serverPort = try container.decodeIfPresent(Int.self, forKey: .serverPort) ?? ServerEndpointConfig.defaultPort
         serverAllowedHosts = try container.decodeIfPresent([String].self, forKey: .serverAllowedHosts) ?? []
@@ -302,6 +307,7 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(bash, forKey: .bash)
         try container.encode(goals, forKey: .goals)
         try container.encode(proactive, forKey: .proactive)
+        try container.encode(ideas, forKey: .ideas)
         try container.encode(serverHostname, forKey: .serverHostname)
         try container.encode(serverPort, forKey: .serverPort)
         try container.encode(serverAllowedHosts, forKey: .serverAllowedHosts)
@@ -370,6 +376,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let goals: GoalsUpdate?
     /// Partial proactive patch; a nil patch preserves the stored `[proactive]` section.
     public let proactive: ProactiveUpdate?
+    /// Partial ideas patch; a nil patch preserves the stored `[ideas]` section.
+    public let ideas: IdeasUpdate?
     /// Bind interface override for `[server] hostname`. Nil preserves the stored value.
     public let serverHostname: String?
     /// Bind port override for `[server] port`. Nil preserves the stored value.
@@ -422,6 +430,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         bash: BashSettingsUpdate? = nil,
         goals: GoalsUpdate? = nil,
         proactive: ProactiveUpdate? = nil,
+        ideas: IdeasUpdate? = nil,
         serverHostname: String? = nil,
         serverPort: Int? = nil,
         serverAllowedHosts: [String]? = nil
@@ -470,6 +479,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.bash = bash
         self.goals = goals
         self.proactive = proactive
+        self.ideas = ideas
         self.serverHostname = serverHostname
         self.serverPort = serverPort
         self.serverAllowedHosts = serverAllowedHosts
@@ -494,6 +504,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         try applyBash(to: &config.bash)
         applyGoals(to: &config.goals)
         try applyProactive(to: &config.proactive)
+        applyIdeas(to: &config.ideas)
         try applyServer(to: &config.server)
     }
 

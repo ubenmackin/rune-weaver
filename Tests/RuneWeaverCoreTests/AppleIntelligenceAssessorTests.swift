@@ -239,7 +239,7 @@ struct AssessorBudgetQueueTwoPhaseTests {
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
-        let final = try? #require(enriched)
+        let final = enriched
         #expect(final?.id == pending.id)
         #expect(final?.toolName == pending.toolName)
         #expect(final?.assessment != nil)
@@ -281,7 +281,7 @@ struct AssessorBudgetQueueTwoPhaseTests {
         await queue.enqueue(seeded)
         let enriched = ImpactAssessment(severity: .moderate, outcome: "Calls endpoint.", warnings: [])
         let updated = await queue.updateAssessment(id: seeded.id, assessment: enriched)
-        let value = try? #require(updated)
+        let value = updated
         #expect(value?.id == seeded.id)
         #expect(value?.toolName == seeded.toolName)
         #expect(value?.description == seeded.description)

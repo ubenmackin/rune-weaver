@@ -902,6 +902,74 @@ public struct EmailConfig: Sendable, Codable, Equatable {
     }
 }
 
+/// `[ideas]` — proactive Muse suggestions.
+///
+/// Ideas stay opt-in so a fresh install never spends background model calls
+/// brainstorming. `maxPerCycle` caps how many candidate ideas one generation
+/// pass may surface, and `timeoutSeconds` bounds the single cheap review call
+/// so a hung backend returns no ideas instead of stalling the trigger that
+/// asked for them.
+public struct IdeasConfig: Sendable, Equatable {
+    /// Whether proactive idea generation runs at all. Off by default.
+    public var enabled: Bool
+    /// Maximum ideas persisted per generation cycle. Clamped `1...10`.
+    public var maxPerCycle: Int
+    /// Seconds the review waits on the model before returning no ideas.
+    public var timeoutSeconds: Int
+
+    /// Default keeps ideas off so stock installs stay quiet.
+    public static let defaultEnabled = false
+    /// Default batch keeps one review from flooding the ideas list.
+    public static let defaultMaxPerCycle = 3
+    /// Default review budget waits out slow local models without stalling the trigger.
+    public static let defaultTimeoutSeconds = 20
+    /// Fewest ideas worth a generation cycle.
+    public static let minMaxPerCycle = 1
+    /// Most ideas before one review floods the owner.
+    public static let maxMaxPerCycle = 10
+    /// Shortest review budget that still allows one model round trip.
+    public static let minTimeoutSeconds = 1
+    /// Largest review budget before a trigger holds too long.
+    public static let maxTimeoutSeconds = 120
+
+    /// Creates an ideas config.
+    public init(
+        enabled: Bool = defaultEnabled,
+        maxPerCycle: Int = defaultMaxPerCycle,
+        timeoutSeconds: Int = defaultTimeoutSeconds
+    ) {
+        self.enabled = enabled
+        self.maxPerCycle = maxPerCycle
+        self.timeoutSeconds = timeoutSeconds
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case maxPerCycle = "max_per_cycle"
+        case timeoutSeconds = "timeout_seconds"
+    }
+}
+
+extension IdeasConfig: Codable {
+    /// Decodes an ideas config, defaulting every omitted key.
+    /// - Parameter decoder: Decoder for the config document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? Self.defaultEnabled
+        maxPerCycle = try container.decodeIfPresent(Int.self, forKey: .maxPerCycle) ?? Self.defaultMaxPerCycle
+        timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds) ?? Self.defaultTimeoutSeconds
+    }
+
+    /// Encodes an ideas config.
+    /// - Parameter encoder: Encoder for the config document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(maxPerCycle, forKey: .maxPerCycle)
+        try container.encode(timeoutSeconds, forKey: .timeoutSeconds)
+    }
+}
+
 // MARK: - Subsystem configs (Home, Plugins, Browser, Desktop, Security, Goals, Proactive) live in Config+Subsystems.swift
 
 // MARK: - Root config
@@ -948,6 +1016,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var bash = BashConfig()
     /// Interruption policy for background scheduler and goal turns.
     public var proactive = ProactiveConfig()
+    /// Proactive Muse idea suggestions. Off by default.
+    public var ideas = IdeasConfig()
 
     /// Creates a root config from section configs.
     public init(
@@ -970,7 +1040,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         security: SecurityConfig = SecurityConfig(),
         goals: GoalsConfig = GoalsConfig(),
         bash: BashConfig = BashConfig(),
-        proactive: ProactiveConfig = ProactiveConfig()
+        proactive: ProactiveConfig = ProactiveConfig(),
+        ideas: IdeasConfig = IdeasConfig()
     ) {
         self.engine = engine
         self.server = server
@@ -992,6 +1063,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.goals = goals
         self.bash = bash
         self.proactive = proactive
+        self.ideas = ideas
     }
 
     /// Config with sensible defaults matching `config.toml.example`.
@@ -1086,16 +1158,17 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         case goals
         case bash
         case proactive
+        case ideas
     }
 
     /// Decodes a persisted config, defaulting absent additive sections.
     ///
     /// TOML loading early-returns hardened when the section is missing, so JSON
-    /// must match: payloads written before the defense policy, goal pursuit, or
-    /// proactive surfacing existed decode with hardened, disabled, and
-    /// surfacing defaults instead of throwing.
+    /// must match: payloads written before the defense policy, goal pursuit,
+    /// proactive surfacing, or idea suggestions existed decode with hardened,
+    /// disabled, surfacing, and opt-in defaults instead of throwing.
     /// Present-but-wrong-typed values still throw like every prior section.
-    /// Only the security, goals, bash, and proactive sections are
+    /// Only the security, goals, bash, proactive, and ideas sections are
     /// absent-tolerant; every other section decodes strictly so a truncated
     /// payload cannot silently load as hardened defaults.
     /// - Parameter decoder: Source decoder.
@@ -1121,9 +1194,10 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.goals = try container.decodeIfPresent(GoalsConfig.self, forKey: .goals) ?? GoalsConfig()
         self.bash = try container.decodeIfPresent(BashConfig.self, forKey: .bash) ?? BashConfig()
         self.proactive = try container.decodeIfPresent(ProactiveConfig.self, forKey: .proactive) ?? ProactiveConfig()
+        self.ideas = try container.decodeIfPresent(IdeasConfig.self, forKey: .ideas) ?? IdeasConfig()
     }
 
-    /// Encodes every section, including the defense policy, goal pursuit, and proactive surfacing.
+    /// Encodes every section, including the defense policy, goal pursuit, proactive surfacing, and idea suggestions.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -1147,6 +1221,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         try container.encode(goals, forKey: .goals)
         try container.encode(bash, forKey: .bash)
         try container.encode(proactive, forKey: .proactive)
+        try container.encode(ideas, forKey: .ideas)
     }
 }
 

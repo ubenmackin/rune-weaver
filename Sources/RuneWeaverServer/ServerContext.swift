@@ -118,6 +118,13 @@ public final class ServerContext: Sendable {
     /// Shares the serving provider so planning observes the same model
     /// posture as chat turns instead of minting a second backend.
     public let goalEngine: GoalEngine
+    /// Durable proactive idea registry backing the `/ideas` routes.
+    public let ideas: IdeasStore
+    /// Proactive suggestion engine composing the ideas store with the serving
+    /// provider, or nil when `[ideas]` is disabled. Shares the serving provider
+    /// so suggestion quality tracks the active model posture; the engine never
+    /// mints its own backend.
+    public let ideasEngine: IdeasEngine?
     /// Active chat provider backing vision description for live index rebuilds.
     /// Stored at boot so a settings save can resolve the vision stage the same
     /// way boot does without reaching back into the orchestrator.
@@ -231,6 +238,9 @@ public final class ServerContext: Sendable {
         goals: GoalStore? = nil,
         goalEngine: GoalEngine? = nil,
         goalsConfig: GoalsConfig = GoalsConfig(),
+        ideas: IdeasStore? = nil,
+        ideasEngine: IdeasEngine? = nil,
+        ideasConfig: IdeasConfig = IdeasConfig(),
         proactiveConfig: ProactiveConfig = ProactiveConfig()
     ) {
         self.config = config
@@ -252,15 +262,37 @@ public final class ServerContext: Sendable {
         // carry them; an explicit worker still wins untouched for tests that
         // hand-build one without goals.
         let resolvedGoals = goals ?? GoalStore(dbPath: defaultDBPath)
+        // Ideas default over the same `episodes.db` as goals so one database
+        // carries both; an explicit store wins untouched. The engine is built
+        // only when `[ideas]` is enabled and no explicit engine was handed in,
+        // so a disabled install stays inert without spending provider memory.
+        let resolvedIdeas = ideas ?? IdeasStore(dbPath: resolvedGoals.dbPath)
+        let resolvedIdeasEngine: IdeasEngine? = if let ideasEngine {
+            ideasEngine
+        } else if ideasConfig.enabled {
+            // Facts come from the live memory engine so suggestions observe the
+            // owner's profile; capturing the actor is Sendable and the closure
+            // only reads, never mutates.
+            IdeasEngine(
+                store: resolvedIdeas,
+                llm: servingLLM ?? DefaultGoalLLM(),
+                config: ideasConfig,
+                memoryFacts: { await memoryEngine.getUserProfile().facts.map(\.content) }
+            )
+        } else {
+            nil
+        }
         let resolvedEngine: GoalEngine = if let goalEngine {
             goalEngine
         } else if let servingLLM {
-            GoalEngine(store: resolvedGoals, llm: servingLLM, config: goalsConfig)
+            GoalEngine(store: resolvedGoals, llm: servingLLM, config: goalsConfig, ideasEngine: resolvedIdeasEngine)
         } else {
-            GoalEngine(store: resolvedGoals, llm: DefaultGoalLLM(), config: goalsConfig)
+            GoalEngine(store: resolvedGoals, llm: DefaultGoalLLM(), config: goalsConfig, ideasEngine: resolvedIdeasEngine)
         }
         self.goals = resolvedGoals
         self.goalEngine = resolvedEngine
+        self.ideas = resolvedIdeas
+        self.ideasEngine = resolvedIdeasEngine
         // The interruption gate rides the stored `[proactive]` policy with the
         // serving provider as its guarded judge; an explicit worker still wins
         // untouched for tests that hand-build one without goals.
@@ -275,6 +307,7 @@ public final class ServerContext: Sendable {
             indexCoordinator: indexCoordinator,
             goalStore: resolvedGoals,
             goalEngine: resolvedEngine,
+            ideasEngine: resolvedIdeasEngine,
             proactiveConfig: proactiveConfig,
             judgeLLM: servingLLM
         )
@@ -367,6 +400,8 @@ extension ServerContext {
         let bus: ToolBus
         let goalStore: GoalStore
         let goalEngine: GoalEngine
+        let ideasStore: IdeasStore
+        let ideasEngine: IdeasEngine?
         let pluginStack: ResolvedPluginStack
     }
 
@@ -421,38 +456,66 @@ extension ServerContext {
         let indexCoordinator: IndexCoordinator?
         let goalStore: GoalStore
         let goalEngine: GoalEngine
+        /// Proactive suggestion engine, or nil when `[ideas]` is disabled.
+        let ideasEngine: IdeasEngine?
         /// Interruption policy from `[proactive]` so the worker gate matches file config.
         let proactiveConfig: ProactiveConfig
     }
 
+    /// Boot-time configuration resolved before durable stores open.
+    /// Groups the shared database path plus the config bundles that seed
+    /// goal, ideas, plugin, and scheduler hydration, so `bootstrapServices`
+    /// carries one seed instead of a long positional tail.
+    private struct BootstrapConfig: Sendable {
+        let scheduler: SchedulerConfig
+        let episodesDBPath: String?
+        let plugins: PluginConfig
+        let goals: GoalsConfig
+        let ideas: IdeasConfig
+    }
+
     private static func bootstrapServices(
         permissionGate: PermissionGate,
-        schedulerConfig: SchedulerConfig,
-        episodesDBPath: String?,
-        pluginConfig: PluginConfig,
-        goalsConfig: GoalsConfig,
+        config: BootstrapConfig,
         llm: any LLMProvider,
+        memoryEngine: MemoryEngine,
         runs: RunLogStore? = nil,
         hub: WSHub? = nil
     ) async -> ServerBootstrapServices {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
         let durable = await loadDurableServerStores(
-            schedulerConfig: schedulerConfig,
-            episodesDBPath: episodesDBPath,
+            schedulerConfig: config.scheduler,
+            episodesDBPath: config.episodesDBPath,
             runs: runs,
             hub: hub
         )
         let bus = ToolBus(permissionGate: permissionGate)
-        let resolvedGoalDBPath = episodesDBPath ?? MemoryConfig.defaultEpisodesDBPath
+        let resolvedGoalDBPath = config.episodesDBPath ?? MemoryConfig.defaultEpisodesDBPath
         let goalStore = GoalStore(dbPath: resolvedGoalDBPath)
-        let goalEngine = GoalEngine(store: goalStore, llm: llm, config: goalsConfig)
-        let pluginStack = await resolvePluginStack(episodesDBPath: episodesDBPath, pluginConfig: pluginConfig, bus: bus)
+        // Ideas share the goals database and the serving provider; the engine
+        // stays nil while `[ideas]` is disabled so a stock install never spends
+        // a background review call.
+        let ideasStore = IdeasStore(dbPath: goalStore.dbPath)
+        let ideasEngine: IdeasEngine? = if config.ideas.enabled {
+            IdeasEngine(
+                store: ideasStore,
+                llm: llm,
+                config: config.ideas,
+                memoryFacts: { await memoryEngine.getUserProfile().facts.map(\.content) }
+            )
+        } else {
+            nil
+        }
+        let goalEngine = GoalEngine(store: goalStore, llm: llm, config: config.goals, ideasEngine: ideasEngine)
+        let pluginStack = await resolvePluginStack(episodesDBPath: config.episodesDBPath, pluginConfig: config.plugins, bus: bus)
         return ServerBootstrapServices(
             approvals: approvals,
             durable: durable,
             bus: bus,
             goalStore: goalStore,
             goalEngine: goalEngine,
+            ideasStore: ideasStore,
+            ideasEngine: ideasEngine,
             pluginStack: pluginStack
         )
     }
@@ -533,6 +596,7 @@ extension ServerContext {
             indexCoordinator: args.indexCoordinator,
             goalStore: args.goalStore,
             goalEngine: args.goalEngine,
+            ideasEngine: args.ideasEngine,
             proactiveConfig: args.proactiveConfig,
             judgeLLM: args.llm
         )
@@ -567,6 +631,7 @@ extension ServerContext {
         securityConfig: SecurityConfig = SecurityConfig(),
         recallBudgets: RecallBudgets = RecallBudgets(),
         goalsConfig: GoalsConfig = GoalsConfig(),
+        ideasConfig: IdeasConfig = IdeasConfig(),
         proactiveConfig: ProactiveConfig = ProactiveConfig(),
         auth: ServerAuth? = nil,
         browserGateway: (any BrowserPlaywrightGateway)? = nil,
@@ -585,11 +650,12 @@ extension ServerContext {
         await permissionGate.updateBashConfig(bashConfig)
         let services = await bootstrapServices(
             permissionGate: permissionGate,
-            schedulerConfig: schedulerConfig,
-            episodesDBPath: episodesDBPath,
-            pluginConfig: pluginConfig,
-            goalsConfig: goalsConfig,
+            config: BootstrapConfig(
+                scheduler: schedulerConfig, episodesDBPath: episodesDBPath, plugins: pluginConfig,
+                goals: goalsConfig, ideas: ideasConfig
+            ),
             llm: llm,
+            memoryEngine: memoryEngine,
             runs: runs,
             hub: hub
         )
@@ -626,6 +692,7 @@ extension ServerContext {
             durable: services.durable, notifier: notifier,
             indexCoordinator: indexCoordinator, goalStore: services.goalStore,
             goalEngine: services.goalEngine,
+            ideasEngine: services.ideasEngine,
             proactiveConfig: proactiveConfig
         )
         let engines = makeExecutionEngines(args: engineArgs)
@@ -670,6 +737,9 @@ extension ServerContext {
             goals: services.goalStore,
             goalEngine: services.goalEngine,
             goalsConfig: goalsConfig,
+            ideas: services.ideasStore,
+            ideasEngine: services.ideasEngine,
+            ideasConfig: ideasConfig,
             proactiveConfig: proactiveConfig
         )
         await finalizeServerContext(context, sandboxConfig: sandboxConfig, onApprovalRequested: onApprovalRequested)
