@@ -332,10 +332,16 @@ public struct FilesWriteTool: Tool, Sendable {
 
     private let homeDirectoryURL: URL?
     private let filesConfig: FilesConfig
+    private let stagedFilesStore: StagedFilesStore
 
-    public init(homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) {
+    public init(
+        homeDirectoryURL: URL? = nil,
+        filesConfig: FilesConfig = FilesConfig(),
+        stagedFilesStore: StagedFilesStore? = nil
+    ) {
         self.homeDirectoryURL = homeDirectoryURL
         self.filesConfig = filesConfig
+        self.stagedFilesStore = stagedFilesStore ?? StagedFilesStore()
     }
 
     private static func backupExistingFile(liveURL: URL, backupURL: URL) throws {
@@ -462,7 +468,7 @@ public struct FilesWriteTool: Tool, Sendable {
             return makePreviewOutput(target: target, args: args, diffResult: diffResult, callID: input.callID)
         }
 
-        return performDiskWrite(target: target, args: args, diffResult: diffResult, callID: input.callID)
+        return await performDiskWrite(target: target, args: args, diffResult: diffResult, callID: input.callID)
     }
 
     private struct WriteTarget {
@@ -521,7 +527,7 @@ public struct FilesWriteTool: Tool, Sendable {
         args: FilesWriteArgs,
         diffResult: UnifiedDiffEngine.DiffResult,
         callID: String?
-    ) -> ToolOutput {
+    ) async -> ToolOutput {
         do {
             try FileManager.default.createDirectory(at: target.parentDir, withIntermediateDirectories: true)
         } catch {
@@ -547,6 +553,12 @@ public struct FilesWriteTool: Tool, Sendable {
                 return .failure("Failed staging changes to \(target.stagingURL.path): \(error.localizedDescription)", callID: callID)
             }
 
+            await stagedFilesStore.recordStaged(
+                path: target.liveURL.path,
+                stagingPath: target.stagingURL.path,
+                updatedAt: Date()
+            )
+
             envelope = FilesWriteEnvelope(
                 status: "staged",
                 path: target.resolvedPath,
@@ -562,6 +574,20 @@ public struct FilesWriteTool: Tool, Sendable {
                 try Data(args.content.utf8).write(to: target.liveURL, options: .atomic)
             } catch {
                 return .failure("Failed writing to live file \(target.liveURL.path): \(error.localizedDescription)", callID: callID)
+            }
+
+            // A live write supersedes any previously staged edit for this path.
+            // Clean up both the table record and any lingering .rune_<name> sibling.
+            await stagedFilesStore.removeStaged(pathOrStagingPath: target.liveURL.path)
+            if FileManager.default.fileExists(atPath: target.stagingURL.path) {
+                do {
+                    try FileManager.default.removeItem(at: target.stagingURL)
+                } catch {
+                    // The store row is already gone, so an orphan sibling would
+                    // turn invisible with no crawl to surface it; surface the
+                    // failure instead of swallowing it.
+                    RuneWeaverLog.tools.error("files.write: failed removing superseded staging sibling at \(target.stagingURL.path): \(error.localizedDescription)")
+                }
             }
 
             envelope = FilesWriteEnvelope(

@@ -1204,18 +1204,27 @@ public enum FilesTools {
     public static let toolNames = ["files.read", "files.grep", "files.glob", "files.list", "files.write"]
 
     /// Builds the file tools.
-    public static func makeTools(homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) -> [any Tool] {
+    public static func makeTools(
+        homeDirectoryURL: URL? = nil,
+        filesConfig: FilesConfig = FilesConfig(),
+        stagedFilesStore: StagedFilesStore? = nil
+    ) -> [any Tool] {
         let read: any Tool = FilesReadTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
         let grep: any Tool = FilesGrepTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
         let glob: any Tool = FilesGlobTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
         let list: any Tool = FilesListTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
-        let write: any Tool = FilesWriteTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
+        let write: any Tool = FilesWriteTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig, stagedFilesStore: stagedFilesStore)
         return [read, grep, glob, list, write]
     }
 
     /// Registers the file tools, replacing same-named entries.
-    public static func register(on bus: ToolBus, homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) async {
-        for tool in makeTools(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig) {
+    public static func register(
+        on bus: ToolBus,
+        homeDirectoryURL: URL? = nil,
+        filesConfig: FilesConfig = FilesConfig(),
+        stagedFilesStore: StagedFilesStore? = nil
+    ) async {
+        for tool in makeTools(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig, stagedFilesStore: stagedFilesStore) {
             await bus.register(tool: tool)
         }
     }

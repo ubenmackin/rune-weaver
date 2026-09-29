@@ -9,6 +9,8 @@ interface ModalProps {
   // Dismissal for backdrop click and Escape; callers guard when an async
   // action (clearing, deleting) must block dismissal.
   onClose: () => void;
+  // Optional confirmation callback triggered when pressing Enter/Return.
+  onConfirm?: () => void;
   // Dialog content including the modal-header, modal-body, and modal-footer
   // sections so each caller keeps its identical visuals.
   children: ReactNode;
@@ -20,6 +22,7 @@ interface ModalProps {
 export default function Modal({
   label,
   onClose,
+  onConfirm,
   children,
   containerClassName = "modal-container",
 }: ModalProps) {
@@ -29,15 +32,24 @@ export default function Modal({
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   // Dismiss on Escape, matching every confirmation and detail dialog.
+  // Confirm on Enter when onConfirm is provided and an interactive control
+  // (like a button, textarea, or anchor) is not explicitly focused.
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         onClose();
+      } else if (event.key === "Enter" && onConfirm) {
+        const target = event.target as HTMLElement | null;
+        if (target && (target.tagName === "BUTTON" || target.tagName === "TEXTAREA" || target.tagName === "A")) {
+          return;
+        }
+        event.preventDefault();
+        onConfirm();
       }
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [onClose, onConfirm]);
 
   // Move focus into the dialog when it opens for keyboard users.
   useEffect(() => {

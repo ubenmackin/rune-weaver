@@ -481,7 +481,7 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
     }
     let live = context.bashFilesSnapshot()
     if hasFilesPatch {
-        for tool in FilesTools.makeTools(filesConfig: live.files) {
+        for tool in FilesTools.makeTools(filesConfig: live.files, stagedFilesStore: context.stagedFiles) {
             await reregisterPreservingToggle(tool, on: context)
         }
     }

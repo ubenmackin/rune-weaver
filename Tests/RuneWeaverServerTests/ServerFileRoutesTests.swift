@@ -33,9 +33,10 @@ private enum FileRoutesTestSupport {
 @Suite("StagedFilesManager")
 struct StagedFilesManagerTests {
     @Test
-    func `findStagedFiles discovers dot rune files and computes diffs`() throws {
+    func `findStagedFiles discovers dot rune files and computes diffs`() async throws {
         let (base, ws) = try FileRoutesTestSupport.makeTempWorkspace()
         defer { FileRoutesTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: ws.appendingPathComponent("staged.db").path)
 
         let liveFile = ws.appendingPathComponent("App.swift")
         try FileRoutesTestSupport.write("let x = 1\nlet y = 2\n", at: liveFile)
@@ -43,9 +44,12 @@ struct StagedFilesManagerTests {
         let stagedFile = ws.appendingPathComponent(".rune_App.swift")
         try FileRoutesTestSupport.write("let x = 1\nlet y = 20\nlet z = 30\n", at: stagedFile)
 
-        let entries = StagedFilesManager.findStagedFiles(
+        await store.recordStaged(path: liveFile.path, stagingPath: stagedFile.path)
+
+        let entries = await StagedFilesManager.findStagedFiles(
             under: ws.path,
-            filesConfig: FilesConfig(denyPatterns: [], allowRoots: [ws.path])
+            filesConfig: FilesConfig(denyPatterns: [], allowRoots: [ws.path]),
+            store: store
         )
 
         #expect(entries.count == 1)
@@ -60,9 +64,10 @@ struct StagedFilesManagerTests {
     }
 
     @Test
-    func `accept atomically replaces live file and removes staging`() throws {
+    func `accept atomically replaces live file and removes staging`() async throws {
         let (base, ws) = try FileRoutesTestSupport.makeTempWorkspace()
         defer { FileRoutesTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: ws.appendingPathComponent("staged.db").path)
 
         let liveFile = ws.appendingPathComponent("Service.swift")
         try FileRoutesTestSupport.write("Original Version\n", at: liveFile)
@@ -70,23 +75,30 @@ struct StagedFilesManagerTests {
         let stagedFile = ws.appendingPathComponent(".rune_Service.swift")
         try FileRoutesTestSupport.write("Accepted Version\n", at: stagedFile)
 
+        await store.recordStaged(path: liveFile.path, stagingPath: stagedFile.path)
+
         // Temp workspace sits outside the default home root, so scope the
         // fail-closed guard to it; denied paths elsewhere still refuse.
         let filesConfig = FilesConfig(allowRoots: [ws.path])
-        try StagedFilesManager.accept(livePath: liveFile.path, stagingPath: stagedFile.path, filesConfig: filesConfig)
+        try await StagedFilesManager.accept(livePath: liveFile.path, stagingPath: stagedFile.path, filesConfig: filesConfig, store: store)
 
         // Live file contains accepted version
         let content = try String(contentsOf: liveFile, encoding: .utf8)
         #expect(content == "Accepted Version\n")
 
-        // Staged file is removed
+        // Staged file is removed from disk
         #expect(!FileManager.default.fileExists(atPath: stagedFile.path))
+
+        // Cleaned up from store
+        let remaining = await store.list()
+        #expect(remaining.isEmpty)
     }
 
     @Test
-    func `discard removes staging file and preserves live file`() throws {
+    func `discard removes staging file and preserves live file`() async throws {
         let (base, ws) = try FileRoutesTestSupport.makeTempWorkspace()
         defer { FileRoutesTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: ws.appendingPathComponent("staged.db").path)
 
         let liveFile = ws.appendingPathComponent("Config.swift")
         try FileRoutesTestSupport.write("Live Unchanged\n", at: liveFile)
@@ -94,16 +106,22 @@ struct StagedFilesManagerTests {
         let stagedFile = ws.appendingPathComponent(".rune_Config.swift")
         try FileRoutesTestSupport.write("Discarded Content\n", at: stagedFile)
 
+        await store.recordStaged(path: liveFile.path, stagingPath: stagedFile.path)
+
         // Same scoped-root rationale as accept: permit the temp workspace
         // while the guard keeps failing closed outside it.
         let filesConfig = FilesConfig(allowRoots: [ws.path])
-        try StagedFilesManager.discard(stagingPath: stagedFile.path, filesConfig: filesConfig)
+        try await StagedFilesManager.discard(stagingPath: stagedFile.path, filesConfig: filesConfig, store: store)
 
         // Live file remains unchanged
         let content = try String(contentsOf: liveFile, encoding: .utf8)
         #expect(content == "Live Unchanged\n")
 
-        // Staged file is deleted
+        // Staged file is deleted from disk
         #expect(!FileManager.default.fileExists(atPath: stagedFile.path))
+
+        // Cleaned up from store
+        let remaining = await store.list()
+        #expect(remaining.isEmpty)
     }
 }

@@ -7,9 +7,6 @@ import Vapor
 
 /// Scans for and manages .rune_* staged files.
 enum StagedFilesManager {
-    /// Deepest directory level the staged scan descends before pruning.
-    private static let maxScanDepth = 32
-
     /// Canonical staging marker beside each live file.
     private static let stagedPrefix = ".rune_"
     /// Live-write rollback marker that must never surface in the review inbox.
@@ -123,108 +120,43 @@ enum StagedFilesManager {
         return (canonicalLive, canonicalStaging)
     }
 
-    /// Scans a root directory for all .rune_* staged files.
+    /// Retrieves all staged files, optionally scoped under a root path, without walking the disk.
     static func findStagedFiles(
-        under rootPath: String,
-        filesConfig: FilesConfig
-    ) -> [StagedFileEntry] {
-        // Refuse a denied scan root before touching the filesystem.
-        let rootDecision = FilesAccessGuard.evaluate(path: rootPath, filesConfig: filesConfig)
-        guard rootDecision.allowed else { return [] }
-        let rootURL = URL(fileURLWithPath: rootDecision.resolvedPath)
-        let rootPrefix = rootURL.path.hasSuffix("/") ? rootURL.path : rootURL.path + "/"
-        guard let enumerator = FileManager.default.enumerator(
-            at: rootURL,
-            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey, .isDirectoryKey],
-            options: [],
-            errorHandler: { _, _ in true }
-        ) else {
-            return []
-        }
-
+        under rootPath: String? = nil,
+        filesConfig: FilesConfig,
+        store: StagedFilesStore? = nil
+    ) async -> [StagedFileEntry] {
+        let effectiveStore = store ?? StagedFilesStore()
+        let records = await effectiveStore.list(under: rootPath)
         var results: [StagedFileEntry] = []
-        let skipDirs: Set = [".git", ".build", "build", "node_modules", "DerivedData", ".derivedData", ".venv"]
+        let isoFormatter = ISO8601DateFormatter()
 
-        while let element = enumerator.nextObject() {
-            guard let url = element as? URL else { continue }
-            // Bound traversal depth so a broad root cannot exhaust the request.
-            if enumerator.level > maxScanDepth {
-                enumerator.skipDescendants()
-                continue
-            }
-            let name = url.lastPathComponent
-
-            if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
-                // Prune denied or escaped directories without descending into them.
-                let dirDecision = FilesAccessGuard.evaluate(path: url.path, filesConfig: filesConfig)
-                guard dirDecision.allowed,
-                      dirDecision.resolvedPath == rootURL.path || dirDecision.resolvedPath.hasPrefix(rootPrefix)
-                else {
-                    enumerator.skipDescendants()
-                    continue
-                }
-                if skipDirs.contains(name) {
-                    enumerator.skipDescendants()
-                }
-                continue
-            }
-
-            guard name.hasPrefix(stagedPrefix), name.count > stagedPrefix.count else {
-                continue
-            }
-            // Live-write rollbacks share the staging directory but applying
-            // one would revert live to its old bytes while discarding it
-            // would delete the rollback, so keep them out of the inbox.
-            guard !name.hasPrefix(backupPrefix) else {
-                continue
-            }
-
-            // Keep the scan inside the allowed root even when a symlink points out.
-            let stagedDecision = FilesAccessGuard.evaluate(path: url.path, filesConfig: filesConfig)
-            guard stagedDecision.allowed,
-                  stagedDecision.resolvedPath == rootURL.path || stagedDecision.resolvedPath.hasPrefix(rootPrefix)
-            else {
-                continue
-            }
-
-            let liveFilename = String(name.dropFirst(stagedPrefix.count))
-            let liveURL = url.deletingLastPathComponent().appendingPathComponent(liveFilename)
+        for record in records {
+            let liveURL = URL(fileURLWithPath: record.path)
+            let stagingURL = URL(fileURLWithPath: record.stagingPath)
 
             // Validate both paths against policy guard
-            let decision = FilesAccessGuard.evaluate(path: liveURL.path, filesConfig: filesConfig)
-            guard decision.allowed else { continue }
-            // Require the canonical staging entry to sit beside its live file so
-            // a renamed or linked entry cannot smuggle an outside path into the inbox.
-            let canonicalStaging = URL(fileURLWithPath: stagedDecision.resolvedPath)
-            let canonicalLive = URL(fileURLWithPath: decision.resolvedPath)
-            guard canonicalStaging.deletingLastPathComponent().path == canonicalLive.deletingLastPathComponent().path,
-                  canonicalStaging.lastPathComponent == stagedPrefix + canonicalLive.lastPathComponent,
-                  !canonicalStaging.lastPathComponent.hasPrefix(backupPrefix)
-            else {
-                continue
-            }
+            let liveDecision = FilesAccessGuard.evaluate(path: liveURL.path, filesConfig: filesConfig)
+            guard liveDecision.allowed else { continue }
+            let stagedDecision = FilesAccessGuard.evaluate(path: stagingURL.path, filesConfig: filesConfig)
+            guard stagedDecision.allowed else { continue }
 
-            // Missing files and binary payloads collapse to nil on both
-            // sides through one helper, keeping the diff shape consistent.
-            guard let stagedContent = readUTF8Text(at: url) else {
+            guard let stagedContent = readUTF8Text(at: stagingURL) else {
                 continue
             }
 
             let liveContent = readUTF8Text(at: liveURL)
-
             let diff = UnifiedDiffEngine.computeDiff(
                 oldText: liveContent,
                 newText: stagedContent,
-                filepath: liveFilename
+                filepath: liveURL.lastPathComponent
             )
 
-            let modDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
-            let isoFormatter = ISO8601DateFormatter()
-            let updatedAt = isoFormatter.string(from: modDate)
+            let updatedAt = isoFormatter.string(from: record.updatedAt)
 
             results.append(StagedFileEntry(
                 path: liveURL.path,
-                stagingPath: url.path,
+                stagingPath: stagingURL.path,
                 additions: diff.additions,
                 deletions: diff.deletions,
                 diff: diff.diff,
@@ -236,16 +168,22 @@ enum StagedFilesManager {
         return results
     }
 
-    /// Atomically replaces the live file with the staged file and removes the staging file.
+    /// Atomically replaces the live file with the staged file and removes the staging file and table entry.
     /// - Parameters:
     ///   - livePath: Caller-supplied live path for the file to restore.
     ///   - stagingPath: Caller-supplied staging path beside the live file.
     ///   - filesConfig: `[files]` policy re-enforced here so a direct call
     ///     cannot bypass the route-level guard.
+    ///   - store: `StagedFilesStore` to clean up upon acceptance.
     /// - Throws: `Abort(.forbidden)` when either path is denied or the pair
     ///   is not a same-directory `.rune_<name>` couple; `Abort(.notFound)`
     ///   when the staging entry is missing.
-    static func accept(livePath: String, stagingPath: String, filesConfig: FilesConfig = FilesConfig()) throws {
+    static func accept(
+        livePath: String,
+        stagingPath: String,
+        filesConfig: FilesConfig = FilesConfig(),
+        store: StagedFilesStore? = nil
+    ) async throws {
         // Re-validate both sides inside the mutation so the filesystem move
         // never trusts a caller-resolved pair without policy checks.
         let liveDecision = FilesAccessGuard.evaluate(path: livePath, filesConfig: filesConfig)
@@ -286,16 +224,24 @@ enum StagedFilesManager {
         } else {
             try FileManager.default.moveItem(at: stagingURL, to: liveURL)
         }
+
+        let effectiveStore = store ?? StagedFilesStore()
+        await effectiveStore.removeStaged(pathOrStagingPath: liveURL.path)
     }
 
-    /// Deletes the staging file.
+    /// Deletes the staging file and cleans up the table entry.
     /// - Parameters:
     ///   - stagingPath: Caller-supplied staging path to remove.
     ///   - filesConfig: `[files]` policy re-enforced here so a direct call
     ///     cannot bypass the route-level guard.
+    ///   - store: `StagedFilesStore` to clean up upon discard.
     /// - Throws: `Abort(.forbidden)` when the staging path (or its derived
     ///   live counterpart) is denied or not a `.rune_<name>` entry.
-    static func discard(stagingPath: String, filesConfig: FilesConfig = FilesConfig()) throws {
+    static func discard(
+        stagingPath: String,
+        filesConfig: FilesConfig = FilesConfig(),
+        store: StagedFilesStore? = nil
+    ) async throws {
         // Re-validate the staging side inside the mutation; the live side is
         // derived from the `.rune_` name and checked too so a crafted staging
         // path cannot smuggle an outside target into the inbox.
@@ -316,15 +262,17 @@ enum StagedFilesManager {
         guard liveDecision.allowed else {
             throw Abort(.forbidden, reason: liveDecision.reason ?? "Access denied for path.")
         }
-        guard FileManager.default.fileExists(atPath: stagingURL.path) else {
-            return
+        if FileManager.default.fileExists(atPath: stagingURL.path) {
+            // Removing a directory through a staging name would recursively
+            // delete, so only regular files reach removeItem.
+            guard isRegularFile(at: stagingURL) else {
+                throw Abort(.forbidden, reason: "Staged entry is not a regular file.")
+            }
+            try FileManager.default.removeItem(at: stagingURL)
         }
-        // Removing a directory through a staging name would recursively
-        // delete, so only regular files reach removeItem.
-        guard isRegularFile(at: stagingURL) else {
-            throw Abort(.forbidden, reason: "Staged entry is not a regular file.")
-        }
-        try FileManager.default.removeItem(at: stagingURL)
+
+        let effectiveStore = store ?? StagedFilesStore()
+        await effectiveStore.removeStaged(pathOrStagingPath: stagingURL.path)
     }
 }
 
@@ -340,13 +288,13 @@ private func registerFileStagedRoute(_ filesGroup: RoutesBuilder) {
     // GET /files/staged
     filesGroup.get(PathComponent.constant(ServerPaths.filesStaged)) { req async throws -> StagedFilesResponse in
         let filesConfig = req.application.runeWeaver.filesConfig
-        // Absent roots fall back to the policy home/allow-root default shared
-        // with bulk scope, never the process launch directory.
-        let resolvedRoot = try StagedFilesManager.resolvedScanRoot(
-            requestedPath: req.query[String.self, at: "path"],
-            filesConfig: filesConfig
-        )
-        let entries = StagedFilesManager.findStagedFiles(under: resolvedRoot, filesConfig: filesConfig)
+        let store = req.application.runeWeaver.stagedFiles
+        let requested = req.query[String.self, at: "path"]
+        // Validate the scan root before touching the store so denied roots
+        // fail closed with 403 and file roots with 400 instead of silently
+        // yielding an empty inbox. The store query itself performs no crawl.
+        let scanRoot = try StagedFilesManager.resolvedScanRoot(requestedPath: requested, filesConfig: filesConfig)
+        let entries = await StagedFilesManager.findStagedFiles(under: scanRoot, filesConfig: filesConfig, store: store)
         return StagedFilesResponse(files: entries)
     }
 }
@@ -356,15 +304,14 @@ private func registerFileAcceptRoute(_ filesGroup: RoutesBuilder) {
     filesGroup.post(PathComponent.constant(ServerPaths.filesAccept)) { req async throws -> FileActionResponse in
         let actionReq = try req.content.decode(FileActionRequest.self)
         let filesConfig = req.application.runeWeaver.filesConfig
+        let store = req.application.runeWeaver.stagedFiles
 
         if actionReq.all == true {
-            // Bulk scope shares the GET default root and its directory guard,
-            // so bulk never acts outside the listed scope.
-            let resolvedRoot = try StagedFilesManager.resolvedScanRoot(
-                requestedPath: req.query[String.self, at: "path"] ?? actionReq.path,
-                filesConfig: filesConfig
-            )
-            let staged = StagedFilesManager.findStagedFiles(under: resolvedRoot, filesConfig: filesConfig)
+            let requested = req.query[String.self, at: "path"] ?? actionReq.path
+            // Validate the bulk scope before the store query so a denied or
+            // file root fails closed instead of silently scoping to nothing.
+            let scanRoot = try StagedFilesManager.resolvedScanRoot(requestedPath: requested, filesConfig: filesConfig)
+            let staged = await StagedFilesManager.findStagedFiles(under: scanRoot, filesConfig: filesConfig, store: store)
             var count = 0
             // Per-file failures are collected and surfaced as a non-200
             // rather than swallowed into a bare success count.
@@ -372,7 +319,7 @@ private func registerFileAcceptRoute(_ filesGroup: RoutesBuilder) {
             var acceptedPaths: [String] = []
             for file in staged {
                 do {
-                    try StagedFilesManager.accept(livePath: file.path, stagingPath: file.stagingPath, filesConfig: filesConfig)
+                    try await StagedFilesManager.accept(livePath: file.path, stagingPath: file.stagingPath, filesConfig: filesConfig, store: store)
                     count += 1
                     acceptedPaths.append(file.path)
                 } catch {
@@ -409,7 +356,7 @@ private func registerFileAcceptRoute(_ filesGroup: RoutesBuilder) {
         let liveURL = pair.live
         let stagingURL = pair.staging
 
-        try StagedFilesManager.accept(livePath: liveURL.path, stagingPath: stagingURL.path, filesConfig: filesConfig)
+        try await StagedFilesManager.accept(livePath: liveURL.path, stagingPath: stagingURL.path, filesConfig: filesConfig, store: store)
 
         // Return the mutation result first; the frame reconciles viewers eventually.
         let hub = req.application.runeWeaver.hub
@@ -431,15 +378,14 @@ private func registerFileDiscardRoute(_ filesGroup: RoutesBuilder) {
     filesGroup.post(PathComponent.constant(ServerPaths.filesDiscard)) { req async throws -> FileActionResponse in
         let actionReq = try req.content.decode(FileActionRequest.self)
         let filesConfig = req.application.runeWeaver.filesConfig
+        let store = req.application.runeWeaver.stagedFiles
 
         if actionReq.all == true {
-            // Bulk scope shares the GET default root and its directory guard,
-            // so bulk never acts outside the listed scope.
-            let resolvedRoot = try StagedFilesManager.resolvedScanRoot(
-                requestedPath: req.query[String.self, at: "path"] ?? actionReq.path,
-                filesConfig: filesConfig
-            )
-            let staged = StagedFilesManager.findStagedFiles(under: resolvedRoot, filesConfig: filesConfig)
+            let requested = req.query[String.self, at: "path"] ?? actionReq.path
+            // Validate the bulk scope before the store query so a denied or
+            // file root fails closed instead of silently scoping to nothing.
+            let scanRoot = try StagedFilesManager.resolvedScanRoot(requestedPath: requested, filesConfig: filesConfig)
+            let staged = await StagedFilesManager.findStagedFiles(under: scanRoot, filesConfig: filesConfig, store: store)
             var count = 0
             // Per-file failures are collected and surfaced as a non-200
             // rather than swallowed into a bare success count.
@@ -447,7 +393,7 @@ private func registerFileDiscardRoute(_ filesGroup: RoutesBuilder) {
             var discardedPaths: [String] = []
             for file in staged {
                 do {
-                    try StagedFilesManager.discard(stagingPath: file.stagingPath, filesConfig: filesConfig)
+                    try await StagedFilesManager.discard(stagingPath: file.stagingPath, filesConfig: filesConfig, store: store)
                     count += 1
                     discardedPaths.append(file.path)
                 } catch {
@@ -484,7 +430,7 @@ private func registerFileDiscardRoute(_ filesGroup: RoutesBuilder) {
         let liveURL = pair.live
         let stagingURL = pair.staging
 
-        try StagedFilesManager.discard(stagingPath: stagingURL.path, filesConfig: filesConfig)
+        try await StagedFilesManager.discard(stagingPath: stagingURL.path, filesConfig: filesConfig, store: store)
 
         // Return the mutation result first; the frame reconciles viewers eventually.
         let hub = req.application.runeWeaver.hub

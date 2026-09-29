@@ -129,8 +129,8 @@ export default function RunLogViewer() {
     setClearing(true);
     try {
       await clearRuns();
-      setRuns([]);
-      setSelected(null);
+      setRuns((prev) => prev.filter((r) => isActiveRunStatus(r.status)));
+      setSelected((prev) => (prev && isActiveRunStatus(prev.status) ? prev : null));
       setClearModalOpen(false);
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Failed to clear runs");
@@ -486,6 +486,10 @@ export default function RunLogViewer() {
             if (deletingId === pendingDeleteRun.id) return;
             cancelDeleteRun();
           }}
+          onConfirm={() => {
+            if (deletingId === pendingDeleteRun.id) return;
+            void confirmDeleteRun();
+          }}
           containerClassName="modal-container session-delete-modal"
         >
           <div className="modal-header">
@@ -552,7 +556,7 @@ export default function RunLogViewer() {
           <div className="modal-body">
             <p className="muted" style={{ margin: 0, lineHeight: 1.5 }}>
               You can archive your execution history by downloading an audit export (JSON) before clearing.
-              Clearing will permanently delete all {runs.length} stored run entries.
+              Clearing will permanently delete all completed run entries. In-progress runs will be preserved.
             </p>
           </div>
           <div className="modal-footer">

@@ -195,4 +195,42 @@ struct FilesWriteToolTests {
         let stagingURL = home.appendingPathComponent(".rune_.env")
         #expect(!FileManager.default.fileExists(atPath: stagingURL.path))
     }
+
+    @Test
+    func `Default staged mode records metadata into StagedFilesStore and live mode cleans it up`() async throws {
+        let (base, home) = try WriteTestSupport.makeBaseAndHome()
+        defer { WriteTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: base.appendingPathComponent("test.db").path)
+
+        let originalFile = home.appendingPathComponent("document.txt")
+        try WriteTestSupport.write("Original Version 1\n", at: originalFile)
+
+        let tool = FilesWriteTool(homeDirectoryURL: home, stagedFilesStore: store)
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(originalFile.path)\",\"content\":\"Updated Version 2\\n\"}"
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+
+        #expect(output.isError == false)
+        let records = await store.list()
+        #expect(records.count == 1)
+        #expect(records.first?.path == originalFile.path)
+
+        // Now test live write cleans up the staged record
+        let liveOutput = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(originalFile.path)\",\"content\":\"Live Version 3\\n\",\"mode\":\"live\"}"
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(liveOutput.isError == false)
+        let recordsAfterLive = await store.list()
+        #expect(recordsAfterLive.isEmpty)
+        let stagingURL = home.appendingPathComponent(".rune_document.txt")
+        #expect(!FileManager.default.fileExists(atPath: stagingURL.path))
+    }
 }
