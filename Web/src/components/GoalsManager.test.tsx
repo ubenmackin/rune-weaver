@@ -1,12 +1,13 @@
 // Rune Weaver Dashboard — Component tests for GoalsManager.
 //
 // Drives the goal list, the create-form validation gate, the manual-advance
-// contention path, plan-step toggling, and the live WebSocket refreshes
-// (goal_updated list refresh). The needs-input attention count is shell-owned,
-// so these tests pin that the panel renders the passed count without counting
-// the same proactive frames a second time; frames travel through the real
-// shared socket singleton so the tests exercise the same message path a mounted
-// dashboard uses rather than a pre-sanitized handler.
+// contention path, plan-step toggling, the Ideas panel (list, dismiss, accept,
+// and honest conflict copy), and the live WebSocket refreshes (goal_updated
+// list refresh). The needs-input attention count is shell-owned, so these tests
+// pin that the panel renders the passed count without counting the same
+// proactive frames a second time; frames travel through the real shared socket
+// singleton so the tests exercise the same message path a mounted dashboard
+// uses rather than a pre-sanitized handler.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -22,6 +23,8 @@ import {
 
 const GOAL_ID = "11111111-1111-1111-1111-111111111111";
 const STEP_ID = "22222222-2222-2222-2222-222222222222";
+const IDEA_ID = "44444444-4444-4444-4444-444444444444";
+const DISMISSED_IDEA_ID = "55555555-5555-5555-5555-555555555555";
 
 // Full goal row shared by the cases; each test overrides only the field under
 // scrutiny so a failure isolates one behavior.
@@ -50,6 +53,22 @@ function step(overrides: Record<string, unknown> = {}) {
     status: "pending",
     notes: null,
     lastRunId: null,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    ...overrides,
+  };
+}
+
+// Full idea row shared by the cases; each test overrides only the field under
+// scrutiny so a failure isolates one behavior.
+function idea(overrides: Record<string, unknown> = {}) {
+  return {
+    id: IDEA_ID,
+    kind: "plan_adjustment",
+    title: "Try a shorter loop",
+    body: "Run 2km instead of 5km.",
+    goalId: GOAL_ID,
+    status: "proposed",
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString(),
     ...overrides,
@@ -211,6 +230,45 @@ describe("GoalsManager", () => {
     });
   });
 
+  it("refreshes the ideas list when an idea_proposed proactive frame arrives", async () => {
+    const capture = installSocket();
+    let ideasCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/goals" && !init?.method) {
+          return jsonResponse({ goals: [], count: 0 });
+        }
+        if (input === "/ideas" && !init?.method) {
+          ideasCalls += 1;
+          return ideasCalls === 1
+            ? jsonResponse({ ideas: [], count: 0 })
+            : jsonResponse({
+                ideas: [idea({ title: "Announced idea" })],
+                count: 1,
+              });
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<GoalsManager />);
+    // Wait for the first ideas read to settle before dispatching the frame so
+    // the assertion proves the frame triggered a second read.
+    await waitFor(() => {
+      expect(screen.getByText("0 ideas")).toBeInTheDocument();
+    });
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "proactive_message",
+      kind: "idea_proposed",
+      title: "Announced idea",
+      headline: "A fresh suggestion",
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Announced idea")).toBeInTheDocument();
+    });
+  });
+
   it("renders the shell-owned attention count without re-counting frames", async () => {
     const capture = installSocket();
     vi.stubGlobal(
@@ -259,5 +317,147 @@ describe("GoalsManager", () => {
     expect(
       screen.queryByTestId("goals-attention-badge"),
     ).not.toBeInTheDocument();
+  });
+
+  it("lists proposed ideas and hides dismissed ones under the default filter", async () => {
+    installSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/goals" && !init?.method) {
+          return jsonResponse({ goals: [], count: 0 });
+        }
+        if (input === "/ideas" && !init?.method) {
+          return jsonResponse({
+            ideas: [
+              idea(),
+              idea({
+                id: DISMISSED_IDEA_ID,
+                title: "Old suggestion",
+                status: "dismissed",
+              }),
+            ],
+            count: 2,
+          });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const user = userEvent.setup();
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("Try a shorter loop")).toBeInTheDocument();
+    });
+    // The body renders through the sanitized Markdown path, so the text is
+    // present without any raw HTML injection.
+    expect(screen.getByText("Run 2km instead of 5km.")).toBeInTheDocument();
+    expect(screen.queryByText("Old suggestion")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "All" }));
+    expect(screen.getByText("Old suggestion")).toBeInTheDocument();
+  });
+
+  it("accepts a proposed idea through POST", async () => {
+    installSocket();
+    const calls: Array<{ path: string; method?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/goals" && !init?.method) {
+          return jsonResponse({ goals: [goal()], count: 1 });
+        }
+        if (input === "/ideas" && !init?.method) {
+          return jsonResponse({ ideas: [idea()], count: 1 });
+        }
+        if (input === `/ideas/${IDEA_ID}/accept`) {
+          calls.push({ path: input, method: init?.method });
+          return jsonResponse(idea({ status: "accepted" }));
+        }
+        return jsonResponse({});
+      }),
+    );
+    const user = userEvent.setup();
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("Try a shorter loop")).toBeInTheDocument();
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Accept Try a shorter loop" }),
+    );
+    await waitFor(() => {
+      expect(calls).toHaveLength(1);
+    });
+    expect(calls[0].path).toBe(`/ideas/${IDEA_ID}/accept`);
+    expect(calls[0].method).toBe("POST");
+  });
+
+  it("surfaces the honest conflict message when accept is refused", async () => {
+    installSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/goals" && !init?.method) {
+          return jsonResponse({ goals: [goal()], count: 1 });
+        }
+        if (input === "/ideas" && !init?.method) {
+          return jsonResponse({ ideas: [idea()], count: 1 });
+        }
+        if (input === `/ideas/${IDEA_ID}/accept`) {
+          return jsonResponse(
+            {
+              reason: `Linked goal ${GOAL_ID} is not active (status achieved).`,
+            },
+            409,
+          );
+        }
+        return jsonResponse({});
+      }),
+    );
+    const user = userEvent.setup();
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("Try a shorter loop")).toBeInTheDocument();
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Accept Try a shorter loop" }),
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/is not active/i)).toBeInTheDocument();
+    });
+  });
+
+  it("dismisses a proposed idea through POST", async () => {
+    installSocket();
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/goals" && !init?.method) {
+          return jsonResponse({ goals: [], count: 0 });
+        }
+        if (input === "/ideas" && !init?.method) {
+          return jsonResponse({ ideas: [idea()], count: 1 });
+        }
+        if (input === `/ideas/${IDEA_ID}/dismiss`) {
+          calls.push(input);
+          return jsonResponse(idea({ status: "dismissed" }));
+        }
+        return jsonResponse({});
+      }),
+    );
+    const user = userEvent.setup();
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("Try a shorter loop")).toBeInTheDocument();
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Dismiss Try a shorter loop" }),
+    );
+    await waitFor(() => {
+      expect(calls).toEqual([`/ideas/${IDEA_ID}/dismiss`]);
+    });
+    // Dismissal hides the card under the default filter.
+    await waitFor(() => {
+      expect(screen.queryByText("Try a shorter loop")).not.toBeInTheDocument();
+    });
   });
 });

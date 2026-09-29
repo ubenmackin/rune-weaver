@@ -66,11 +66,13 @@ private actor GoalRouteRecordingSocket: WSConnectionSocket {
 /// - Parameters:
 ///   - enabled: Whether pursuit runs for this app.
 ///   - answer: Canned model text for planning turns.
+///   - maxTriggersPerGoal: Optional per-goal trigger budget override.
 ///   - body: Test body receiving the app plus its context.
 /// - Returns: Whatever `body` returns.
 private func withGoalApp<T>(
     enabled: Bool = true,
     answer: String = #"[{"title": "First step"}, {"title": "Second step"}]"#,
+    maxTriggersPerGoal: Int? = nil,
     _ body: (Application, ServerContext) async throws -> T
 ) async throws -> T {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent("runeweaver-goal-routes-\(UUID().uuidString)")
@@ -97,6 +99,9 @@ private func withGoalApp<T>(
         let store = GoalStore(dbPath: dbPath)
         var goalsConfig = GoalsConfig()
         goalsConfig.enabled = enabled
+        if let maxTriggersPerGoal {
+            goalsConfig.maxTriggersPerGoal = maxTriggersPerGoal
+        }
         let engine = GoalEngine(store: store, llm: stub, config: goalsConfig)
         let context = ServerContext(
             conversations: conversations,
@@ -228,6 +233,45 @@ struct GoalDisabledTests {
             // row was refused instead of a bare status code.
             let body = response.body.string ?? ""
             #expect(body.lowercased().contains("disabled") == true)
+        }
+    }
+}
+
+@Suite("Goal Trigger Budget")
+struct GoalTriggerBudgetTests {
+    @Test
+    func `Patch caps armed triggers at the configured budget`() async throws {
+        try await withGoalApp(maxTriggersPerGoal: 1) { app, context in
+            let now = Date()
+            let goal = Goal(
+                title: "Watch inbox",
+                statement: "React to arriving events",
+                status: .active,
+                stepIntervalMinutes: 60,
+                nextDueAt: now,
+                createdAt: now,
+                updatedAt: now
+            )
+            try await context.goals.create(
+                goal: goal,
+                steps: [GoalStep(goalID: goal.id, ordinal: 0, title: "Check", status: .pending)]
+            )
+            let response = try await goalRequest(
+                app: app,
+                method: .PATCH,
+                path: "/goals/\(goal.id.uuidString)",
+                body: GoalPatchRequest(triggers: [
+                    GoalTriggerInput(eventKind: "step_done", cooldownMinutes: 15),
+                    GoalTriggerInput(eventKind: "episode", cooldownMinutes: 15),
+                    GoalTriggerInput(eventKind: "mail_arrival", cooldownMinutes: 15)
+                ])
+            )
+            #expect(response.status == .ok)
+            // The edit honors the same per-goal budget creation does instead of
+            // the absolute bound, so a hand-built curl cannot over-arm a goal.
+            let armed = try await context.goals.triggers(for: goal.id)
+            #expect(armed.count == 1)
+            #expect(armed.first?.eventKind == "step_done")
         }
     }
 }

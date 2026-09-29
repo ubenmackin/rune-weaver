@@ -21,12 +21,15 @@ public struct GoalCreateArgs: Sendable, Equatable, Decodable {
     public let statement: String
     /// Cadence hint in minutes; nil keeps the configured default.
     public let stepIntervalMinutes: Int?
+    /// Event wake-ups to arm alongside the goal; nil arms none.
+    public let triggers: [GoalTriggerArgs]?
 
     /// Creates create args.
-    public init(title: String, statement: String, stepIntervalMinutes: Int? = nil) {
+    public init(title: String, statement: String, stepIntervalMinutes: Int? = nil, triggers: [GoalTriggerArgs]? = nil) {
         self.title = title
         self.statement = statement
         self.stepIntervalMinutes = stepIntervalMinutes
+        self.triggers = triggers
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -35,6 +38,7 @@ public struct GoalCreateArgs: Sendable, Equatable, Decodable {
         case stepIntervalMinutes
         case stepIntervalSnake = "step_interval_minutes"
         case cadence
+        case triggers
     }
 
     /// Decodes create args, accepting every documented cadence alias.
@@ -51,6 +55,7 @@ public struct GoalCreateArgs: Sendable, Equatable, Decodable {
         } else {
             stepIntervalMinutes = nil
         }
+        triggers = try container.decodeIfPresent([GoalTriggerArgs].self, forKey: .triggers)
     }
 
     /// Trimmed title.
@@ -61,6 +66,73 @@ public struct GoalCreateArgs: Sendable, Equatable, Decodable {
     /// Trimmed statement.
     public var trimmedStatement: String {
         statement.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// One event wake-up supplied to `goal.create`.
+///
+/// The kind is required so a trigger can never be armed against an unspecified
+/// event; the pattern and cooldown stay optional so the common "wake me when
+/// this event kind happens" case needs only one field.
+public struct GoalTriggerArgs: Sendable, Equatable, Decodable {
+    /// Event kind to watch (a goal audit kind or a bridge event kind).
+    public let eventKind: String
+    /// Optional substring the event message must contain.
+    public let pattern: String?
+    /// Optional debounce window in minutes; nil inherits the configured default.
+    public let cooldownMinutes: Int?
+
+    /// Creates trigger args.
+    public init(eventKind: String, pattern: String? = nil, cooldownMinutes: Int? = nil) {
+        self.eventKind = eventKind
+        self.pattern = pattern
+        self.cooldownMinutes = cooldownMinutes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case eventKind
+        case eventKindSnake = "event_kind"
+        case kind
+        case pattern
+        case cooldownMinutes
+        case cooldownSnake = "cooldown_minutes"
+        case cooldown
+    }
+
+    /// Decodes trigger args, accepting the documented aliases.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let direct = try container.decodeIfPresent(String.self, forKey: .eventKind) {
+            eventKind = direct
+        } else if let snake = try container.decodeIfPresent(String.self, forKey: .eventKindSnake) {
+            eventKind = snake
+        } else if let kind = try container.decodeIfPresent(String.self, forKey: .kind) {
+            eventKind = kind
+        } else {
+            eventKind = ""
+        }
+        pattern = try container.decodeIfPresent(String.self, forKey: .pattern)
+        if let direct = try container.decodeIfPresent(Int.self, forKey: .cooldownMinutes) {
+            cooldownMinutes = direct
+        } else if let snake = try container.decodeIfPresent(Int.self, forKey: .cooldownSnake) {
+            cooldownMinutes = snake
+        } else if let cooldown = try container.decodeIfPresent(Int.self, forKey: .cooldown) {
+            cooldownMinutes = cooldown
+        } else {
+            cooldownMinutes = nil
+        }
+    }
+
+    /// Trimmed event kind.
+    public var trimmedEventKind: String {
+        eventKind.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Trimmed pattern, nil when absent or blank.
+    public var trimmedPattern: String? {
+        guard let pattern else { return nil }
+        let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -294,6 +366,40 @@ public struct GoalStatusStep: Sendable, Equatable, Codable {
     }
 }
 
+/// One armed event wake-up within a `goal.status` detail.
+///
+/// Carries the debounce stamp so the model can tell an armed-but-never-fired
+/// trigger apart from one that has already pulled its goal forward.
+public struct GoalStatusTrigger: Sendable, Equatable, Codable {
+    /// Event kind the trigger watches.
+    public let eventKind: String
+    /// Optional substring filter on the event message.
+    public let pattern: String?
+    /// Debounce window in minutes.
+    public let cooldownMinutes: Int
+    /// When the trigger last fired; nil means never.
+    public let lastFiredAt: Date?
+
+    /// Creates a status trigger.
+    public init(eventKind: String, pattern: String? = nil, cooldownMinutes: Int, lastFiredAt: Date? = nil) {
+        self.eventKind = eventKind
+        self.pattern = pattern
+        self.cooldownMinutes = cooldownMinutes
+        self.lastFiredAt = lastFiredAt
+    }
+
+    /// Builds a status trigger from a stored trigger.
+    /// - Parameter trigger: Stored trigger snapshot.
+    public init(_ trigger: GoalTrigger) {
+        self.init(
+            eventKind: trigger.eventKind,
+            pattern: trigger.trimmedPattern,
+            cooldownMinutes: trigger.cooldownMinutes,
+            lastFiredAt: trigger.lastFiredAt
+        )
+    }
+}
+
 /// One audit entry within a `goal.status` detail.
 public struct GoalStatusEvent: Sendable, Equatable, Codable {
     /// Audit reason.
@@ -327,6 +433,8 @@ public struct GoalStatusDetail: Sendable, Equatable, Codable {
     public let nextDueAt: Date?
     /// Ordered plan.
     public let steps: [GoalStatusStep]
+    /// Armed event wake-ups for this goal, oldest first.
+    public let triggers: [GoalStatusTrigger]
     /// Recent audit trail, oldest first.
     public let recentEvents: [GoalStatusEvent]
 
@@ -339,6 +447,7 @@ public struct GoalStatusDetail: Sendable, Equatable, Codable {
         stepIntervalMinutes: Int,
         nextDueAt: Date? = nil,
         steps: [GoalStatusStep] = [],
+        triggers: [GoalStatusTrigger] = [],
         recentEvents: [GoalStatusEvent] = []
     ) {
         self.goalID = goalID
@@ -348,6 +457,7 @@ public struct GoalStatusDetail: Sendable, Equatable, Codable {
         self.stepIntervalMinutes = stepIntervalMinutes
         self.nextDueAt = nextDueAt
         self.steps = steps
+        self.triggers = triggers
         self.recentEvents = recentEvents
     }
 }
@@ -455,8 +565,9 @@ public struct GoalCreateTool: Tool, Sendable {
     public let description =
         "Creates a long-horizon goal and starts background planning. "
             + "Use when the user asks to track a commitment over time. "
+            + "Pass triggers to also wake the goal when matching events (goal steps, tool runs, or mirrored episodes) arrive. "
             + "The new goal links to the current chat session so it shows a chip."
-    /// Function-calling contract for title, statement, and optional cadence.
+    /// Function-calling contract for title, statement, cadence, and triggers.
     public let inputSchema = JSONSchema(
         rawValue: #"{"type":"object","properties":{"#
             + #""title":{"type":"string","description":"Short human-readable goal title"},"#
@@ -464,7 +575,17 @@ public struct GoalCreateTool: Tool, Sendable {
             + #""stepIntervalMinutes":{"type":"integer","#
             + #""description":"Cadence hint in minutes between advancements (default daily, 5-20160)","minimum":5,"maximum":20160},"#
             + #""step_interval_minutes":{"type":"integer","description":"Alias for stepIntervalMinutes","minimum":5,"maximum":20160},"#
-            + #""cadence":{"type":"integer","description":"Alias for stepIntervalMinutes","minimum":5,"maximum":20160}},"#
+            + #""cadence":{"type":"integer","description":"Alias for stepIntervalMinutes","minimum":5,"maximum":20160},"#
+            + #""triggers":{"type":"array","description":"Optional event wake-ups that pull the goal forward when a matching event arrives","#
+            + #""maxItems":32,"items":{"type":"object","properties":{"#
+            + #""eventKind":{"type":"string","description":"Event kind to watch, for example step_done, completed, needs_input, tool, or episode"},"#
+            + #""event_kind":{"type":"string","description":"Alias for eventKind"},"#
+            + #""kind":{"type":"string","description":"Alias for eventKind"},"#
+            + #""pattern":{"type":"string","description":"Optional substring the event message must contain"},"#
+            + #""cooldownMinutes":{"type":"integer","description":"Debounce window in minutes (default 60)","minimum":1},"#
+            + #""cooldown_minutes":{"type":"integer","description":"Alias for cooldownMinutes","minimum":1},"#
+            + #""cooldown":{"type":"integer","description":"Alias for cooldownMinutes","minimum":1}},"#
+            + #""additionalProperties":false}}},"#
             + #""required":["title","statement"],"additionalProperties":false}"#
     )
     /// Creation changes durable state, so every call parks for approval.
@@ -504,8 +625,19 @@ public struct GoalCreateTool: Tool, Sendable {
         let cadence = args.stepIntervalMinutes.map {
             min(max($0, GoalsConfig.minStepIntervalMinutes), GoalsConfig.maxStepIntervalMinutes)
         }
+        // A trigger without an event kind can never match, so it is rejected
+        // here instead of being armed as dead weight. The engine still clamps
+        // the list to the configured per-goal budget.
+        let triggerArgs = args.triggers ?? []
+        if triggerArgs.contains(where: \.trimmedEventKind.isEmpty) {
+            return .failure("Invalid goal.create arguments: each trigger requires a non-empty 'eventKind'.", callID: input.callID)
+        }
+        let drafts = triggerArgs.map {
+            GoalTriggerDraft(eventKind: $0.trimmedEventKind, pattern: $0.trimmedPattern, cooldownMinutes: $0.cooldownMinutes)
+        }
         if context.dryRun {
-            return .success("Dry run: would create goal '\(args.trimmedTitle)'.", callID: input.callID)
+            let suffix = drafts.isEmpty ? "" : " with \(drafts.count) trigger(s)"
+            return .success("Dry run: would create goal '\(args.trimmedTitle)'\(suffix).", callID: input.callID)
         }
         do {
             // The creation placeholder plans in the background inside the engine, so the
@@ -515,7 +647,8 @@ public struct GoalCreateTool: Tool, Sendable {
                 title: args.trimmedTitle,
                 statement: args.trimmedStatement,
                 cadence: cadence,
-                originSessionID: context.conversationID
+                originSessionID: context.conversationID,
+                triggers: drafts
             )
             // Link the creating chat so the dashboard chip resolves from the session alone.
             // Unknown sessions stay a no-op inside the manager, so creation never conjures ghosts.
@@ -639,6 +772,9 @@ public struct GoalStatusTool: Tool, Sendable {
             .sorted { $0.ordinal < $1.ordinal }
             .map { GoalStatusStep(ordinal: $0.ordinal, title: $0.title, status: $0.status.rawValue, notes: $0.notes) }
         let trails = events.map { GoalStatusEvent(kind: $0.kind.rawValue, message: $0.message, createdAt: $0.createdAt) }
+        // Triggers read best-effort: a store hiccup degrades the list to the
+        // plan alone instead of failing a read-only status call.
+        let armed = await (try? store.triggers(for: goal.id))?.map(GoalStatusTrigger.init) ?? []
         return GoalStatusDetail(
             goalID: goal.id.uuidString,
             title: goal.title,
@@ -647,6 +783,7 @@ public struct GoalStatusTool: Tool, Sendable {
             stepIntervalMinutes: goal.stepIntervalMinutes,
             nextDueAt: goal.nextDueAt,
             steps: wires,
+            triggers: armed,
             recentEvents: trails
         )
     }

@@ -219,7 +219,19 @@ struct SchedulerRunCommand: AsyncParsableCommand {
         // answering `invalid_tool`; a disabled `[goals]` section still
         // registers and fails closed inside each tool.
         let goalStore = GoalStore(dbPath: loaded.config.memory.episodesDBPath)
-        let goalEngine = GoalEngine(store: goalStore, llm: selected, config: loaded.config.goals)
+        // Ideas share the goals database and the serving provider, mirroring
+        // the service bootstrap: the engine stays nil while `[ideas]` is
+        // disabled so a stock install never spends a background review call,
+        // and post-advance stays quiet instead of logging suggestions that
+        // were never generated.
+        let ideasStore = IdeasStore(dbPath: goalStore.dbPath)
+        let headlessIdeasEngine = Self.makeHeadlessIdeasEngine(
+            store: ideasStore,
+            llm: selected,
+            config: loaded.config.ideas,
+            memoryFacts: { await memoryEngine.getUserProfile().facts.map(\.content) }
+        )
+        let goalEngine = GoalEngine(store: goalStore, llm: selected, config: loaded.config.goals, ideasEngine: headlessIdeasEngine)
         let toolBus = await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
@@ -251,6 +263,34 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             securityConfig: loaded.config.security,
             recallBudgets: loaded.config.memory.recallBudgets
         )
+        let engine = Self.makeHeadlessSchedulerEngine(jobs: jobs, toolBus: toolBus, orchestrator: orchestrator)
+        let goalTurnRunner = Self.makeHeadlessGoalTurnRunner(orchestrator: orchestrator)
+        return HeadlessRuntime(
+            engine: engine,
+            approvalQueue: approvalQueue,
+            permissionGate: permissionGate,
+            goalStore: goalStore,
+            goalEngine: goalEngine,
+            conversations: conversations,
+            goalTurnRunner: goalTurnRunner
+        )
+    }
+
+    /// Builds the headless scheduler engine over the shared orchestrator.
+    ///
+    /// Job prompts run through the same orchestrator as goal turns so headless
+    /// execution shares one model posture; polling reads through the headless
+    /// bus so arrival checks observe the same tools as the foreground loop.
+    /// - Parameters:
+    ///   - jobs: Configured jobs the engine fires when due.
+    ///   - toolBus: Headless bus backing poll checks.
+    ///   - orchestrator: Shared turn runner for job prompts.
+    /// - Returns: Engine firing due jobs headless.
+    private static func makeHeadlessSchedulerEngine(
+        jobs: [SchedulerJobConfig],
+        toolBus: ToolBus,
+        orchestrator: Orchestrator
+    ) -> SchedulerEngine {
         let capturedBus = toolBus
         let pollChecker: SchedulerPollChecker = { rule in
             await SchedulerRunCommand.pollCheck(rule: rule, bus: capturedBus)
@@ -263,11 +303,27 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             ))
             return response.text
         }
-        // Goal advancement rides the same orchestrator but tags the goal link
-        // so the turn stamps the session linkage the dashboard chips resolve.
-        // The full outcome travels so a parked turn stays due instead of
-        // bumping like a finished one.
-        let goalTurnRunner: GoalHeadlessTurnRunner = { prompt, sessionID, goalID in
+        return SchedulerEngine(
+            jobs: jobs,
+            turnRunner: turnRunner,
+            pollChecker: pollChecker,
+            logger: { message in
+                print(TerminalStyle.dim(message))
+            },
+            notifier: MacOSSchedulerNotifier()
+        )
+    }
+
+    /// Builds the headless goal turn runner over the shared orchestrator.
+    ///
+    /// Goal advancement rides the same orchestrator but tags the goal link so
+    /// the turn stamps the session linkage the dashboard chips resolve. The
+    /// full outcome travels so a parked turn stays due instead of bumping like
+    /// a finished one.
+    /// - Parameter orchestrator: Shared turn runner for goal prompts.
+    /// - Returns: Goal turn runner mapping prompt plus session plus goal link.
+    private static func makeHeadlessGoalTurnRunner(orchestrator: Orchestrator) -> GoalHeadlessTurnRunner {
+        { prompt, sessionID, goalID in
             let response = try await orchestrator.process(input: UserInput(
                 text: prompt,
                 sessionID: sessionID,
@@ -281,24 +337,27 @@ struct SchedulerRunCommand: AsyncParsableCommand {
                 totalTokens: response.totalTokens
             )
         }
-        let engine = SchedulerEngine(
-            jobs: jobs,
-            turnRunner: turnRunner,
-            pollChecker: pollChecker,
-            logger: { message in
-                print(TerminalStyle.dim(message))
-            },
-            notifier: MacOSSchedulerNotifier()
-        )
-        return HeadlessRuntime(
-            engine: engine,
-            approvalQueue: approvalQueue,
-            permissionGate: permissionGate,
-            goalStore: goalStore,
-            goalEngine: goalEngine,
-            conversations: conversations,
-            goalTurnRunner: goalTurnRunner
-        )
+    }
+
+    /// Builds the headless ideas engine when proactive suggestions are enabled.
+    ///
+    /// Mirrors the service bootstrap's enabled gate so the CLI and service agree
+    /// on when a review call may be spent: a disabled install keeps a nil engine
+    /// and achievement turns stay quiet instead of spending a model call.
+    /// - Parameters:
+    ///   - store: Durable idea persistence sharing the goals database.
+    ///   - llm: Provider shared with headless turns.
+    ///   - config: Suggestion policy.
+    ///   - memoryFacts: Memory-facts summary for the review prompt.
+    /// - Returns: Wired engine, or nil while `[ideas]` is disabled.
+    static func makeHeadlessIdeasEngine(
+        store: IdeasStore,
+        llm: any LLMProvider,
+        config: IdeasConfig,
+        memoryFacts: @escaping @Sendable () async -> [String] = { [] }
+    ) -> IdeasEngine? {
+        guard config.enabled else { return nil }
+        return IdeasEngine(store: store, llm: llm, config: config, memoryFacts: memoryFacts)
     }
 
     /// Advances due goals headless through the shared advancement runner.
@@ -311,6 +370,11 @@ struct SchedulerRunCommand: AsyncParsableCommand {
     /// parked turn skips its bump until the inbox resume completes, mirroring
     /// the service parked branch; the per-run session supplies the audit
     /// correlation because the headless loop keeps no durable run log.
+    /// Achievement-born suggestions persist through the shared runner and are
+    /// named on stdout because the headless loop keeps no live hub for the
+    /// service's proactive broadcast. There is no nightly suggestion refresh
+    /// here: the service worker owns that cadence, so headless surfaces only
+    /// the achievement-born batch from each advancement turn.
     /// Cancelled turns stay due and rethrow instead of recording an error
     /// result, so cooperative cancellation always propagates.
     private func advanceDueGoals(now: Date, runtime: HeadlessRuntime, goalsConfig: GoalsConfig) async throws -> [SchedulerRunResult] {
@@ -353,6 +417,12 @@ struct SchedulerRunCommand: AsyncParsableCommand {
                 if outcome.isParked {
                     print(TerminalStyle.dim("Goal '\(goal.title)' parked awaiting approval."))
                 }
+                // The headless loop keeps no live hub for the service's
+                // proactive broadcast, so name the persisted suggestions here
+                // instead of dropping the achievement batch silently.
+                if let line = Self.achievementIdeasLogLine(goalTitle: goal.title, ideas: outcome.ideas) {
+                    print(TerminalStyle.dim(line))
+                }
                 results.append(SchedulerRunResult(
                     jobName: goal.title,
                     sessionID: sessionID,
@@ -384,6 +454,23 @@ struct SchedulerRunCommand: AsyncParsableCommand {
         return results
     }
 
+    /// Formats the headless log line naming achievement-born suggestions.
+    ///
+    /// The headless loop keeps no live hub for the service's proactive
+    /// broadcast, so each finished turn names the suggestions the shared runner
+    /// persisted instead of dropping them silently. Titles ride inline-bounded
+    /// so one verbose suggestion cannot flood the tick log.
+    /// - Parameters:
+    ///   - goalTitle: Goal whose turn proposed the suggestions.
+    ///   - ideas: Achievement-born suggestions from the turn outcome.
+    /// - Returns: Log line, or nil when the turn proposed nothing so quiet
+    ///   ticks stay quiet.
+    static func achievementIdeasLogLine(goalTitle: String, ideas: [Idea]) -> String? {
+        guard !ideas.isEmpty else { return nil }
+        let titles = ToolInput.inline(ideas.map(\.title).joined(separator: "; "), limit: 160)
+        return "Goal '\(goalTitle)' proposed \(ideas.count) suggestion(s): \(titles)"
+    }
+
     /// Reports one check batch: per-job outcomes plus pending approvals.
     private func report(results: [SchedulerRunResult], queue: ApprovalQueue) async {
         if results.isEmpty {
@@ -403,9 +490,13 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             print(TerminalStyle.tool("\(pending) approval(s) pending. Decide via the engine API approvals inbox."))
         }
     }
+}
 
+/// Headless email-poll helpers live in an extension so the main command body
+/// stays within the type-length bound while keeping the same call sites.
+extension SchedulerRunCommand {
     /// Observes current message ids for a poll rule via `email.search`.
-    private static func pollCheck(rule: EmailPollRule, bus: ToolBus) async -> SchedulerPollCheck {
+    fileprivate static func pollCheck(rule: EmailPollRule, bus: ToolBus) async -> SchedulerPollCheck {
         let payload = pollSearchJSON(rule: rule)
         let result = await bus.execute(
             toolCall: ToolInput(toolName: "email.search", argumentsJSON: payload),

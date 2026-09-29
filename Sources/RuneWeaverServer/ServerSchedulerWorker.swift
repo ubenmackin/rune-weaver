@@ -41,6 +41,21 @@ public actor ServerSchedulerWorker {
     private let goalStore: GoalStore?
     /// Pursuit engine composing advancement prompts and bumping due dates.
     private let goalEngine: GoalEngine?
+    /// Optional ideas engine refreshed on a nightly cadence so suggestions
+    /// stay fresh even when no goal reaches achieved.
+    private let ideasEngine: IdeasEngine?
+
+    /// Cadence window between nightly idea refresh passes.
+    public static let ideasRefreshInterval: TimeInterval = 24 * 60 * 60
+    /// Episodic store the trigger bridge polls for mirrored events, nil when
+    /// goals are unwired or no database path was available.
+    private let triggerEpisodeStore: EpisodeStore?
+    /// Bridge polling recent events into armed goal triggers.
+    private let goalTriggerBridge: GoalTriggerBridge
+    /// High-water mark for the trigger poll so a long gap is bounded, never replayed.
+    private var lastTriggerCheck: Date
+    /// High-water mark for the nightly ideas refresh.
+    private var lastIdeasRefresh: Date
     /// Dedicated single-flight lock for goal fires so a slow goal turn never
     /// blocks job fires sharing the job lock, and vice versa.
     private let goalRunLock: SchedulerRunLock
@@ -74,7 +89,10 @@ public actor ServerSchedulerWorker {
         indexCoordinator: IndexCoordinator? = nil,
         goalStore: GoalStore? = nil,
         goalEngine: GoalEngine? = nil,
+        ideasEngine: IdeasEngine? = nil,
         goalRunLock: SchedulerRunLock? = nil,
+        triggerEpisodeStore: EpisodeStore? = nil,
+        goalTriggerBridge: GoalTriggerBridge = GoalTriggerBridge(),
         outcomeGate: OutcomeGate? = nil,
         proactiveConfig: ProactiveConfig = ProactiveConfig(),
         judgeLLM: (any LLMProvider)? = nil
@@ -94,7 +112,20 @@ public actor ServerSchedulerWorker {
         self.indexCoordinator = indexCoordinator
         self.goalStore = goalStore
         self.goalEngine = goalEngine
+        self.ideasEngine = ideasEngine
         self.goalRunLock = goalRunLock ?? SchedulerRunLock()
+        // The trigger bridge shares the goals database file, so an unwired
+        // episodic store falls back to one over the same path; a nil path
+        // leaves the bridge inert rather than polling a phantom store.
+        self.triggerEpisodeStore = triggerEpisodeStore ?? goalStore.map { EpisodeStore(dbPath: $0.dbPath) }
+        self.goalTriggerBridge = goalTriggerBridge
+        // High-water mark starts at construction so the first tick never
+        // replays pre-boot history; the bounded lookback still guards a gap.
+        self.lastTriggerCheck = Date()
+        // Ideas refresh starts its cadence at construction so a restart never
+        // immediately spends a review call; the interval high-water mark makes
+        // the cadence independent of tick frequency.
+        self.lastIdeasRefresh = Date()
         if let outcomeGate {
             self.outcomeGate = outcomeGate
         } else if let judgeLLM, proactiveConfig.mode == .guarded {
@@ -244,11 +275,85 @@ public actor ServerSchedulerWorker {
                         continue
                     }
                 }
+                // Event wake-ups settle after the due scan: a matched trigger
+                // pulls its goal due for the NEXT tick, so the ordinary firing
+                // path runs unchanged rather than a second in-tick path.
+                if let triggerEpisodeStore {
+                    let since = lastTriggerCheck
+                    lastTriggerCheck = now
+                    let fires = await goalTriggerBridge.poll(
+                        store: goalStore,
+                        episodeStore: triggerEpisodeStore,
+                        now: now,
+                        since: since
+                    )
+                    for fire in fires {
+                        await logger?("Goal trigger '\(fire.eventKind)' armed goal \(fire.goalID) for the next tick.")
+                    }
+                }
             }
         }
         _ = await indexCoordinator?.fireNightly(now: now)
+        // Ideas ride the same nightly tick so suggestions refresh even when no
+        // goal reaches achieved; the cadence check keeps the refresh from
+        // running on every tick.
+        await refreshIdeasIfDue(now: now)
 
         return results
+    }
+
+    /// Refreshes proactive ideas at most once per cadence window.
+    ///
+    /// Rides the tick that already owns nightly maintenance so no separate
+    /// timer is needed. The interval high-water mark makes the cadence
+    /// independent of tick frequency, and `generate()` self-guards on the
+    /// `[ideas]` enabled flag so a disabled install spends nothing.
+    private func refreshIdeasIfDue(now: Date) async {
+        guard let ideasEngine else { return }
+        guard now.timeIntervalSince(lastIdeasRefresh) >= Self.ideasRefreshInterval else { return }
+        lastIdeasRefresh = now
+        let generated = await ideasEngine.generate()
+        // Each fresh suggestion rides the existing proactive frame so the
+        // dashboard raises the goals attention badge; generation itself is
+        // best-effort and returns an empty batch on failure.
+        for idea in generated {
+            await broadcastIdeaProposed(idea)
+        }
+    }
+
+    /// Broadcasts one freshly proposed idea on the existing proactive frame.
+    ///
+    /// Reuses `WSProactiveMessageFrame` rather than adding a transport: the
+    /// kind names the idea family and the title plus a one-line body headline
+    /// carry the card. The linked goal rides along so the dashboard can
+    /// deep-link without a second lookup. The frame passes through the same
+    /// interruption gate as every other proactive push, so `off`,
+    /// `milestones`, and `guarded` installs stay silent (the guarded judge
+    /// only weighs scheduler successes) while `all` surfaces it as before.
+    /// - Parameter idea: Newly persisted suggestion to surface.
+    private func broadcastIdeaProposed(_ idea: Idea) async {
+        // The frame decoder rejects blank card text, and a directly-seeded row
+        // can carry a whitespace-only body, so trim before choosing the
+        // fallback; a blank title falls back too rather than emitting a frame
+        // the dashboard would drop.
+        let body = idea.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = idea.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackTitle = title.isEmpty ? "New suggestion" : title
+        let outcomeText = body.isEmpty ? fallbackTitle : body
+        // A suggestion is a volunteered nudge, not a goal milestone: routing it
+        // through the gate keeps the same suppression contract as a routine
+        // step completion instead of bypassing the `[proactive]` policy.
+        let decision = await outcomeGate.decide(
+            event: ProactiveEvent(kind: .ideaProposed, title: fallbackTitle, outcome: outcomeText)
+        )
+        guard decision.surface else { return }
+        let frame = WSProactiveMessageFrame(
+            kind: WSProactiveMessageFrame.ideaProposedKind,
+            title: fallbackTitle,
+            headline: decision.headline,
+            goalID: idea.goalID
+        )
+        await hub.broadcastProactiveMessage(frame)
     }
 
     /// Evaluates a poll rule for a job, returning fresh unseen email count if due.
@@ -400,7 +505,13 @@ public actor ServerSchedulerWorker {
         await runLock.release(id: job.id, name: job.name)
         return result
     }
+}
 
+// MARK: - Job Skip & Failure Recording
+
+/// Job skip and failure helpers, extracted from the actor body to keep
+/// the type body length within lint bounds.
+extension ServerSchedulerWorker {
     /// Records an audit run entry for a scheduled job that skipped firing because it is already running.
     private func recordJobSkipped(job: SchedulerJob, startTime: Date) async -> SchedulerRunResult {
         let skipMsg = "Skipped '\(job.name)': already running"
@@ -547,6 +658,15 @@ extension ServerSchedulerWorker {
                 await notifier.notify(title: "Rune Weaver: \(goal.title)", body: short.isEmpty ? goal.title : short)
             }
             await broadcastProactive(kind: eventKind, title: goal.title, headline: decision.headline, sessionID: sessionID, goalID: goal.id)
+        }
+        // Suggestions born from the achievement ride their own proactive frames.
+        // They are surfaced here rather than only on the nightly pass because
+        // `generate()` returns just the newly inserted rows and the store dedups
+        // their titles, so the next nightly batch would never announce them. Each
+        // frame is gated independently so a suppressed goal outcome never hides a
+        // fresh suggestion.
+        for idea in outcome.ideas {
+            await broadcastIdeaProposed(idea)
         }
         return SchedulerRunResult(
             jobName: goal.title,
@@ -866,11 +986,10 @@ extension ServerSchedulerWorker {
     /// Notification or badge and deep-link without a second lookup, even with
     /// no macOS notifier.
     private func broadcastProactive(kind: ProactiveEventKind, title: String, headline: String, sessionID: UUID? = nil, goalID: UUID? = nil) async {
+        // The hub owns the single encoding for this wire shape, so build the
+        // frame and reuse it instead of duplicating the encode here.
         let frame = WSProactiveMessageFrame(kind: kind.rawValue, title: title, headline: headline, sessionID: sessionID, goalID: goalID)
-        guard let data = try? JSONEncoder().encode(frame),
-              let text = String(data: data, encoding: .utf8)
-        else { return }
-        await hub.broadcast(text: text)
+        await hub.broadcastProactiveMessage(frame)
     }
 
     /// Classifies a finished goal turn into its proactive kind.

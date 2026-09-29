@@ -2,12 +2,14 @@
 //
 // Exercises the background goal turn source end to end with stub language
 // providers: due goals fire exactly one linked turn, future goals stay
-// silent, contended goal locks skip without running, and parked goal turns
-// resume in their original session. The suite owns the worker plus goal
-// store pairing so scheduler job firing and goal firing stay isolated on
-// their dedicated single-flight locks.
+// silent, contended goal locks skip without running, parked goal turns
+// resume in their original session, and achievement-born suggestions are
+// announced on the proactive frame (and suppressed when the interruption gate
+// is off). The suite owns the worker plus goal store pairing so scheduler job
+// firing and goal firing stay isolated on their dedicated single-flight locks.
 
 import Foundation
+import NIOWebSocket
 import os
 import RuneWeaverCore
 @testable import RuneWeaverServer
@@ -90,6 +92,20 @@ private struct GoalGatedTool: Tool, Sendable {
     func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         .success("goal-write-ok", callID: input.callID)
     }
+}
+
+/// Recording socket capturing hub broadcasts without a live handshake.
+private actor GoalWorkerRecordingSocket: WSConnectionSocket {
+    /// Frames delivered to this connection.
+    private(set) var sent: [String] = []
+
+    /// Records one frame.
+    func send(_ text: String) async throws {
+        sent.append(text)
+    }
+
+    /// Ignored; these tests never close the connection.
+    func close(code _: WebSocketErrorCode) async throws {}
 }
 
 /// Creates an isolated temporary database path and its base directory.
@@ -346,5 +362,183 @@ struct GoalWorkerTests {
         let session = await conversations.session(id: sessionID)
         #expect(session?.source == "goal")
         #expect(session?.goalID == goal.id)
+    }
+
+    @Test
+    func `Nightly tick refreshes ideas and broadcasts the proactive frame`() async throws {
+        let (dbPath, base) = try makeGoalDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let goalStore = GoalStore(dbPath: dbPath)
+        let stub = GoalFireStubLLM(answer: "unused")
+        let goalEngine = makeEnabledGoalEngine(store: goalStore, llm: stub)
+
+        let ideasStore = IdeasStore(dbPath: dbPath)
+        var ideasConfig = IdeasConfig()
+        ideasConfig.enabled = true
+        let ideasLLM = GoalFireStubLLM(answer: #"[{"kind":"tip","title":"Hydrate","body":"Drink water."}]"#)
+        let ideasEngine = IdeasEngine(store: ideasStore, llm: ideasLLM, config: ideasConfig)
+
+        let conversations = ConversationManager()
+        let bus = ToolBus()
+        let orchestrator = Orchestrator(conversations: conversations, toolBus: bus, llm: stub)
+        let hub = WSHub()
+        let socket = GoalWorkerRecordingSocket()
+        _ = await hub.add(id: UUID(), box: socket)
+        let worker = ServerSchedulerWorker(
+            scheduler: SchedulerStore(),
+            runs: RunLogStore(),
+            hub: hub,
+            runLock: SchedulerRunLock(),
+            orchestrator: orchestrator,
+            conversations: conversations,
+            toolBus: bus,
+            goalStore: goalStore,
+            goalEngine: goalEngine,
+            ideasEngine: ideasEngine,
+            goalRunLock: SchedulerRunLock()
+        )
+
+        // The cadence high-water mark starts at construction, so the first tick
+        // must advance past one full window to spend the review call.
+        let later = Date().addingTimeInterval(2 * ServerSchedulerWorker.ideasRefreshInterval)
+        _ = await worker.tick(now: later)
+
+        let proposed = try await ideasStore.list(status: .proposed)
+        #expect(proposed.map(\.title) == ["Hydrate"])
+        let frames = await socket.sent
+        #expect(frames.count == 1)
+        let raw = try #require(frames.first)
+        let decoded = try JSONDecoder().decode(WSProactiveMessageFrame.self, from: Data(raw.utf8))
+        #expect(decoded.kind == WSProactiveMessageFrame.ideaProposedKind)
+        #expect(decoded.title == "Hydrate")
+        #expect(decoded.headline == "Drink water.")
+
+        // A second tick inside the same cadence window stays quiet.
+        _ = await worker.tick(now: later.addingTimeInterval(60))
+        let after = await socket.sent
+        #expect(after.count == 1)
+    }
+
+    @Test
+    func `Achieving a goal surfaces its generated ideas on the proactive frame`() async throws {
+        let (dbPath, base) = try makeGoalDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let goalStore = GoalStore(dbPath: dbPath)
+        let now = Date()
+        let goal = Goal(
+            title: "Finish the report",
+            statement: "Wrap it up",
+            status: .active,
+            stepIntervalMinutes: 60,
+            nextDueAt: now.addingTimeInterval(-60),
+            createdAt: now,
+            updatedAt: now
+        )
+        // A plan with no actionable step flips the goal to achieved in the
+        // post-advance scan, which is the hook that spends the ideas review call.
+        try await goalStore.create(
+            goal: goal,
+            steps: [GoalStep(goalID: goal.id, ordinal: 0, title: "Draft", status: .done)]
+        )
+
+        let turnStub = GoalFireStubLLM(answer: "all done")
+        let conversations = ConversationManager()
+        let bus = ToolBus()
+        let orchestrator = Orchestrator(conversations: conversations, toolBus: bus, llm: turnStub)
+
+        let ideasStore = IdeasStore(dbPath: dbPath)
+        var ideasConfig = IdeasConfig()
+        ideasConfig.enabled = true
+        let ideasLLM = GoalFireStubLLM(answer: #"[{"kind":"tip","title":"Plan the next win","body":"Pick one small goal."}]"#)
+        let ideasEngine = IdeasEngine(store: ideasStore, llm: ideasLLM, config: ideasConfig)
+        var goalsConfig = GoalsConfig()
+        goalsConfig.enabled = true
+        let goalEngine = GoalEngine(store: goalStore, llm: turnStub, config: goalsConfig, ideasEngine: ideasEngine)
+
+        let hub = WSHub()
+        let socket = GoalWorkerRecordingSocket()
+        _ = await hub.add(id: UUID(), box: socket)
+        let worker = ServerSchedulerWorker(
+            scheduler: SchedulerStore(),
+            runs: RunLogStore(),
+            hub: hub,
+            runLock: SchedulerRunLock(),
+            orchestrator: orchestrator,
+            conversations: conversations,
+            toolBus: bus,
+            goalStore: goalStore,
+            goalEngine: goalEngine,
+            ideasEngine: ideasEngine,
+            goalRunLock: SchedulerRunLock()
+        )
+
+        _ = await worker.tick(now: Date())
+
+        #expect(try await goalStore.goal(id: goal.id)?.status == .achieved)
+        // Generation persists the achievement-born suggestion, and the worker
+        // announces it despite the store's title dedup swallowing the next
+        // nightly batch.
+        let proposed = try await ideasStore.list(status: .proposed)
+        #expect(proposed.map(\.title) == ["Plan the next win"])
+        let frames = await socket.sent
+        let ideaFrames = frames.compactMap { raw -> WSProactiveMessageFrame? in
+            guard let decoded = try? JSONDecoder().decode(WSProactiveMessageFrame.self, from: Data(raw.utf8)),
+                  decoded.kind == WSProactiveMessageFrame.ideaProposedKind
+            else { return nil }
+            return decoded
+        }
+        #expect(ideaFrames.count == 1)
+        #expect(ideaFrames.first?.title == "Plan the next win")
+        #expect(ideaFrames.first?.headline == "Pick one small goal.")
+    }
+
+    @Test
+    func `Off proactive mode suppresses nightly idea frames`() async throws {
+        let (dbPath, base) = try makeGoalDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let goalStore = GoalStore(dbPath: dbPath)
+        let stub = GoalFireStubLLM(answer: "unused")
+        let goalEngine = makeEnabledGoalEngine(store: goalStore, llm: stub)
+
+        let ideasStore = IdeasStore(dbPath: dbPath)
+        var ideasConfig = IdeasConfig()
+        ideasConfig.enabled = true
+        let ideasLLM = GoalFireStubLLM(answer: #"[{"kind":"tip","title":"Hydrate","body":"Drink water."}]"#)
+        let ideasEngine = IdeasEngine(store: ideasStore, llm: ideasLLM, config: ideasConfig)
+
+        let conversations = ConversationManager()
+        let bus = ToolBus()
+        let orchestrator = Orchestrator(conversations: conversations, toolBus: bus, llm: stub)
+        let hub = WSHub()
+        let socket = GoalWorkerRecordingSocket()
+        _ = await hub.add(id: UUID(), box: socket)
+        let worker = ServerSchedulerWorker(
+            scheduler: SchedulerStore(),
+            runs: RunLogStore(),
+            hub: hub,
+            runLock: SchedulerRunLock(),
+            orchestrator: orchestrator,
+            conversations: conversations,
+            toolBus: bus,
+            goalStore: goalStore,
+            goalEngine: goalEngine,
+            ideasEngine: ideasEngine,
+            goalRunLock: SchedulerRunLock(),
+            proactiveConfig: ProactiveConfig(mode: .off)
+        )
+
+        let later = Date().addingTimeInterval(2 * ServerSchedulerWorker.ideasRefreshInterval)
+        _ = await worker.tick(now: later)
+
+        // The suggestion is still generated and persisted; only the interruption
+        // frame is suppressed, so an `off` install stays silent on the wire.
+        let proposed = try await ideasStore.list(status: .proposed)
+        #expect(proposed.map(\.title) == ["Hydrate"])
+        let frames = await socket.sent
+        let ideaFrames = frames.filter { raw in
+            (try? JSONDecoder().decode(WSProactiveMessageFrame.self, from: Data(raw.utf8)))?.kind
+                == WSProactiveMessageFrame.ideaProposedKind
+        }
+        #expect(ideaFrames.isEmpty)
     }
 }

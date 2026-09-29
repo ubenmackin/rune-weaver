@@ -339,6 +339,8 @@ public struct GoalsConfig: Sendable, Equatable {
     public var maxStepsPerGoal: Int
     /// Seconds the planner waits on the model before falling back.
     public var planTimeoutSeconds: Int
+    /// Maximum event triggers armed on one goal. Bounds trigger fan-out.
+    public var maxTriggersPerGoal: Int
 
     /// Default keeps goals off so stock installs stay quiet.
     public static let defaultEnabled = false
@@ -362,6 +364,16 @@ public struct GoalsConfig: Sendable, Equatable {
     public static let minStepsPerGoalBound = 1
     /// Longest plan before the prompt crowds out execution context.
     public static let maxStepsPerGoalBound = 24
+    /// Default trigger budget keeps event wake-ups from swamping the due scan.
+    public static let defaultMaxTriggersPerGoal = 8
+    /// Fewest triggers worth configuring (zero disables event wake-ups).
+    public static let minTriggersPerGoalBound = 0
+    /// Most triggers per goal before wake-up fan-out is abandoned.
+    public static let maxTriggersPerGoalBound = 32
+    /// Default debounce window between two fires of the same trigger.
+    public static let defaultTriggerCooldownMinutes = 60
+    /// Shortest debounce that still prevents a tight re-fire loop.
+    public static let minTriggerCooldownMinutes = 1
 
     /// Creates a goals config.
     public init(
@@ -369,13 +381,15 @@ public struct GoalsConfig: Sendable, Equatable {
         stepIntervalMinutes: Int = defaultStepIntervalMinutes,
         maxActiveGoals: Int = defaultMaxActiveGoals,
         maxStepsPerGoal: Int = defaultMaxStepsPerGoal,
-        planTimeoutSeconds: Int = defaultPlanTimeoutSeconds
+        planTimeoutSeconds: Int = defaultPlanTimeoutSeconds,
+        maxTriggersPerGoal: Int = defaultMaxTriggersPerGoal
     ) {
         self.enabled = enabled
         self.stepIntervalMinutes = stepIntervalMinutes
         self.maxActiveGoals = maxActiveGoals
         self.maxStepsPerGoal = maxStepsPerGoal
         self.planTimeoutSeconds = planTimeoutSeconds
+        self.maxTriggersPerGoal = maxTriggersPerGoal
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -384,6 +398,7 @@ public struct GoalsConfig: Sendable, Equatable {
         case maxActiveGoals = "max_active_goals"
         case maxStepsPerGoal = "max_steps_per_goal"
         case planTimeoutSeconds = "plan_timeout_seconds"
+        case maxTriggersPerGoal = "max_triggers_per_goal"
     }
 }
 
@@ -397,6 +412,7 @@ extension GoalsConfig: Codable {
         maxActiveGoals = try container.decodeIfPresent(Int.self, forKey: .maxActiveGoals) ?? Self.defaultMaxActiveGoals
         maxStepsPerGoal = try container.decodeIfPresent(Int.self, forKey: .maxStepsPerGoal) ?? Self.defaultMaxStepsPerGoal
         planTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .planTimeoutSeconds) ?? Self.defaultPlanTimeoutSeconds
+        maxTriggersPerGoal = try container.decodeIfPresent(Int.self, forKey: .maxTriggersPerGoal) ?? Self.defaultMaxTriggersPerGoal
     }
 
     /// Encodes a goals config.
@@ -408,6 +424,7 @@ extension GoalsConfig: Codable {
         try container.encode(maxActiveGoals, forKey: .maxActiveGoals)
         try container.encode(maxStepsPerGoal, forKey: .maxStepsPerGoal)
         try container.encode(planTimeoutSeconds, forKey: .planTimeoutSeconds)
+        try container.encode(maxTriggersPerGoal, forKey: .maxTriggersPerGoal)
     }
 }
 

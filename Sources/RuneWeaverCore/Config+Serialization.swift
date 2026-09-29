@@ -55,6 +55,7 @@ extension RuneWeaverConfig {
         lines += renderGoalsTOML()
         lines += renderBashTOML()
         lines += renderProactiveTOML()
+        lines += renderIdeasTOML()
         return lines.joined(separator: "\n")
     }
 
@@ -409,6 +410,7 @@ extension RuneWeaverConfig {
             "max_active_goals = \(goals.maxActiveGoals)",
             "max_steps_per_goal = \(goals.maxStepsPerGoal)",
             "plan_timeout_seconds = \(goals.planTimeoutSeconds)",
+            "max_triggers_per_goal = \(goals.maxTriggersPerGoal)",
             ""
         ]
     }
@@ -448,6 +450,21 @@ extension RuneWeaverConfig {
             "[proactive]",
             "mode = \(Self.tomlQuoted(proactive.mode.rawValue))",
             "judge_timeout_seconds = \(proactive.judgeTimeoutSeconds)",
+            ""
+        ]
+    }
+
+    /// Renders the additive `[ideas]` section.
+    ///
+    /// Every key renders, including the opt-in default, so a saved file
+    /// documents the suggestion policy and a round-trip never depends on an
+    /// implicit default silently diverging from what was written.
+    private func renderIdeasTOML() -> [String] {
+        [
+            "[ideas]",
+            "enabled = \(ideas.enabled ? "true" : "false")",
+            "max_per_cycle = \(ideas.maxPerCycle)",
+            "timeout_seconds = \(ideas.timeoutSeconds)",
             ""
         ]
     }

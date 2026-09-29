@@ -67,16 +67,23 @@ private func registerGoalCreateRoute(on goals: RoutesBuilder) {
         let title = try validatedGoalTitle(body.title)
         let statement = try validatedGoalStatement(body.statement)
         let cadence = try validatedGoalCadence(body.stepIntervalMinutes)
+        let triggerDrafts = try goalTriggerDrafts(body.triggers)
         let context = req.application.runeWeaver
         let goal: Goal
         do {
-            goal = try await context.goalEngine.create(title: title, statement: statement, cadence: cadence)
+            goal = try await context.goalEngine.create(
+                title: title,
+                statement: statement,
+                cadence: cadence,
+                triggers: triggerDrafts
+            )
         } catch let error as GoalEngineError {
             // Disabled and capped creation share 400 with the engine's honest
             // message so dashboards surface why the row was refused.
             throw Abort(.badRequest, reason: error.localizedDescription)
         }
         let steps = await (try? context.goals.steps(goalID: goal.id)) ?? []
+        let triggers = await (try? context.goals.triggers(for: goal.id))?.map(GoalTriggerDTO.init) ?? []
         let events = await (try? context.goals.events(goalID: goal.id, limit: 50)) ?? []
         let dto = GoalDTO(goal: goal, steps: steps)
         await context.hub.broadcastGoal(dto)
@@ -101,6 +108,7 @@ private func registerGoalCreateRoute(on goals: RoutesBuilder) {
         return GoalDetailResponse(
             goal: dto,
             steps: steps.map(GoalStepDTO.init),
+            triggers: triggers,
             events: events.map(GoalEventDTO.init)
         )
     }
@@ -163,10 +171,12 @@ private func registerGoalDetailRoute(on goals: RoutesBuilder) {
         // limit must sit inside the advertised range instead of silently clamping.
         let limit = try parseQueryLimit(req, default: 50, min: 1, max: 200)
         let steps = try await context.goals.steps(goalID: id)
+        let triggers = await (try? context.goals.triggers(for: id))?.map(GoalTriggerDTO.init) ?? []
         let events = try await context.goals.events(goalID: id, limit: limit)
         return GoalDetailResponse(
             goal: GoalDTO(goal: goal, steps: steps),
             steps: steps.map(GoalStepDTO.init),
+            triggers: triggers,
             events: events.map(GoalEventDTO.init)
         )
     }
@@ -205,6 +215,15 @@ private func registerGoalPatchRoute(on goals: RoutesBuilder) {
         if let rawStatus = body.status {
             newStatus = try parseGoalStatus(rawStatus)
         }
+        // Trigger edits validate before any write so a blank kind never lands a
+        // half-applied goal patch; present means replace, absent leaves the
+        // armed set untouched.
+        let triggerInputs = body.triggers
+        if let triggerInputs {
+            for input in triggerInputs where input.trimmedEventKind.isEmpty {
+                throw Abort(.badRequest, reason: "trigger eventKind must not be empty")
+            }
+        }
         if newTitle != nil || newStatement != nil || newInterval != nil {
             do {
                 _ = try await context.goals.updateDetails(
@@ -224,16 +243,25 @@ private func registerGoalPatchRoute(on goals: RoutesBuilder) {
                 throw mapGoalStoreError(error, raw: raw)
             }
         }
+        if let triggerInputs {
+            // The absolute bound is the store's last-resort guard; the configured
+            // per-goal budget is what create already honors, so an edit cannot
+            // arm more triggers than creation would.
+            let triggerBudget = await context.goalEngine.maxTriggersPerGoal
+            try await replaceGoalTriggers(triggerInputs, goalID: id, store: context.goals, budget: triggerBudget)
+        }
         guard let updated = try await context.goals.goal(id: id) else {
             throw Abort(.notFound, reason: "Unknown goal \(raw)")
         }
         let steps = await (try? context.goals.steps(goalID: id)) ?? []
+        let triggers = await (try? context.goals.triggers(for: id))?.map(GoalTriggerDTO.init) ?? []
         let events = await (try? context.goals.events(goalID: id, limit: 50)) ?? []
         let dto = GoalDTO(goal: updated, steps: steps)
         await context.hub.broadcastGoal(dto)
         return GoalDetailResponse(
             goal: dto,
             steps: steps.map(GoalStepDTO.init),
+            triggers: triggers,
             events: events.map(GoalEventDTO.init)
         )
     }
@@ -431,6 +459,66 @@ func validatedGoalCadence(_ raw: Int?) throws -> Int? {
         default:
             throw Abort(.badRequest, reason: "stepIntervalMinutes is invalid")
         }
+    }
+}
+
+/// Maps REST trigger inputs onto engine draft specs, rejecting blank kinds.
+///
+/// A trigger without an event kind can never match, so it fails the request
+/// instead of being armed as dead weight. Nil input arms nothing.
+/// - Parameter inputs: Trigger inputs from a create or patch body, if any.
+/// - Returns: Draft specs for the engine.
+private func goalTriggerDrafts(_ inputs: [GoalTriggerInput]?) throws -> [GoalTriggerDraft] {
+    guard let inputs else { return [] }
+    var drafts: [GoalTriggerDraft] = []
+    drafts.reserveCapacity(inputs.count)
+    for input in inputs {
+        let kind = input.trimmedEventKind
+        guard !kind.isEmpty else {
+            throw Abort(.badRequest, reason: "trigger eventKind must not be empty")
+        }
+        drafts.append(GoalTriggerDraft(eventKind: kind, pattern: input.trimmedPattern, cooldownMinutes: input.cooldownMinutes))
+    }
+    return drafts
+}
+
+/// Replaces a goal's armed triggers through one atomic store transaction.
+///
+/// Present patches are a full replacement: the existing set is cleared and the
+/// new set inserted in a single `BEGIN IMMEDIATE` transaction, so a failure or
+/// crash can never leave the goal with zero or partial triggers while the
+/// request errors. Inputs are capped at the configured per-goal budget (never
+/// above the absolute bound) and each cooldown is pulled up to the minimum so a
+/// hand-built curl cannot arm a tight re-fire loop.
+/// - Parameters:
+///   - inputs: Replacement trigger inputs.
+///   - goalID: Goal whose triggers are being replaced.
+///   - store: Durable goal persistence.
+///   - budget: Configured per-goal trigger budget, clamped to the valid range.
+private func replaceGoalTriggers(
+    _ inputs: [GoalTriggerInput],
+    goalID: UUID,
+    store: GoalStore,
+    budget: Int
+) async throws {
+    let cap = min(max(0, budget), GoalsConfig.maxTriggersPerGoalBound)
+    var drafts: [GoalTriggerDraft] = []
+    drafts.reserveCapacity(min(inputs.count, cap))
+    for input in inputs.prefix(cap) {
+        let kind = input.trimmedEventKind
+        guard !kind.isEmpty else {
+            throw Abort(.badRequest, reason: "trigger eventKind must not be empty")
+        }
+        let cooldown = max(
+            GoalsConfig.minTriggerCooldownMinutes,
+            input.cooldownMinutes ?? GoalsConfig.defaultTriggerCooldownMinutes
+        )
+        drafts.append(GoalTriggerDraft(eventKind: kind, pattern: input.trimmedPattern, cooldownMinutes: cooldown))
+    }
+    do {
+        try await store.replaceTriggers(goalID: goalID, drafts: drafts)
+    } catch let error as GoalStoreError {
+        throw mapGoalStoreError(error, raw: goalID.uuidString)
     }
 }
 

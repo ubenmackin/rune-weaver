@@ -438,6 +438,7 @@ extension RuneWeaverConfig {
         try Self.decodeGoals(root, into: &config)
         try Self.decodeBash(root, into: &config)
         try Self.decodeProactive(root, into: &config)
+        try Self.decodeIdeas(root, into: &config)
         self = config
     }
 
@@ -962,6 +963,9 @@ extension RuneWeaverConfig {
         if let timeout = try goals.strictInt("plan_timeout_seconds", field: "goals.plan_timeout_seconds") {
             config.goals.planTimeoutSeconds = timeout
         }
+        if let maxTriggers = try goals.strictInt("max_triggers_per_goal", field: "goals.max_triggers_per_goal") {
+            config.goals.maxTriggersPerGoal = maxTriggers
+        }
     }
 
     /// Decodes the additive `[bash]` section, defaulting omitted keys.
@@ -1027,6 +1031,25 @@ extension RuneWeaverConfig {
         }
         if let timeout = try proactive.strictInt("judge_timeout_seconds", field: "proactive.judge_timeout_seconds") {
             config.proactive.judgeTimeoutSeconds = timeout
+        }
+    }
+
+    /// Decodes the additive `[ideas]` section, defaulting omitted keys.
+    ///
+    /// An absent table keeps the opt-in defaults so existing files load
+    /// untouched; present-but-wrong-typed values throw instead of silently
+    /// defaulting, matching the `[goals]` decode style, and range checks land
+    /// in validation so decode stays type-only.
+    static func decodeIdeas(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let ideas = root.tables["ideas"] else { return }
+        if let enabled = try ideas.strictBool("enabled", field: "ideas.enabled") {
+            config.ideas.enabled = enabled
+        }
+        if let maxPerCycle = try ideas.strictInt("max_per_cycle", field: "ideas.max_per_cycle") {
+            config.ideas.maxPerCycle = maxPerCycle
+        }
+        if let timeout = try ideas.strictInt("timeout_seconds", field: "ideas.timeout_seconds") {
+            config.ideas.timeoutSeconds = timeout
         }
     }
 }

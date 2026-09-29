@@ -166,6 +166,7 @@ public func registerRuneWeaverRoutes(_ app: Application) {
     registerSchedulerRunRoute(app)
     registerRunRoutes(app)
     registerGoalRoutes(app)
+    registerIdeaRoutes(app)
     registerSearchRoutes(app)
     registerBrowserRoutes(app)
     registerSettingsRoutes(app)

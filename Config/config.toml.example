@@ -403,6 +403,8 @@ max_steps_per_goal = 12
 # Seconds the planner waits on the model before the resilient single-step
 # fallback keeps the goal (must stay positive).
 plan_timeout_seconds = 60
+# Maximum event triggers armed on one goal (0-32, 0 disables event wake-ups).
+max_triggers_per_goal = 8
 
 [proactive]
 # Interruption policy for background scheduler and goal turns. `all` surfaces
@@ -412,6 +414,17 @@ plan_timeout_seconds = 60
 # record regardless of mode, so auditing never loses a turn.
 # mode = "all"  # all | milestones | guarded | off
 # judge_timeout_seconds = 15  # Seconds the guarded judge may spend (1-120).
+
+[ideas]
+# Proactive Muse suggestions. Off by default so a fresh install never spends
+# background model calls brainstorming; when enabled the engine reviews recent
+# goal outcomes plus a memory-facts summary on the nightly tick and on goal
+# achievement. Suggestions ride the `proactive_message` frame for the badge.
+enabled = false
+# Maximum ideas persisted per generation cycle (1-10).
+max_per_cycle = 3
+# Seconds the review waits on the model before returning no ideas (1-120).
+timeout_seconds = 20
 
 [security]
 # Harness-level defense policy for external content. Both keys default ON;
