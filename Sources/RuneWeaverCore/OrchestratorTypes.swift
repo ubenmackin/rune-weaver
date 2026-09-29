@@ -23,6 +23,12 @@ public struct UserInput: Sendable, Codable, Equatable {
     /// The orchestrator stamps the session link on creation; untagged chat
     /// turns carry nil and never disturb an existing link.
     public let goalID: UUID?
+    /// Explicit tool names this turn may call, or nil for the full registry.
+    /// Fan-out workers carry the read-only subset so research fan-out cannot
+    /// mutate state; the orchestrator tool loop filters its registry snapshot
+    /// by this list before the loop, so the prompt and the wire advertise only
+    /// the callable subset.
+    public let allowedTools: [String]?
 
     /// Coding keys matching the persisted and wire shape, with the goal tag on
     /// the shared `goalId` spelling plus a tolerant legacy fallback.
@@ -33,19 +39,29 @@ public struct UserInput: Sendable, Codable, Equatable {
         case systemPrompt
         case goalID = "goalId"
         case goalIDLegacy = "goalID"
+        case allowedTools
     }
 
     /// Creates user input.
-    public init(text: String, sessionID: UUID = UUID(), source: String = "text", systemPrompt: String? = nil, goalID: UUID? = nil) {
+    public init(
+        text: String,
+        sessionID: UUID = UUID(),
+        source: String = "text",
+        systemPrompt: String? = nil,
+        goalID: UUID? = nil,
+        allowedTools: [String]? = nil
+    ) {
         self.text = text
         self.sessionID = sessionID
         self.source = source
         self.systemPrompt = systemPrompt
         self.goalID = goalID
+        self.allowedTools = allowedTools
     }
 
-    /// Decodes user input, defaulting a missing goal tag to untagged so inputs
-    /// encoded before goal linkage still decode.
+    /// Decodes user input, defaulting a missing goal tag to untagged and a
+    /// missing tool subset to the full registry so inputs encoded before
+    /// goal linkage or fan-out still decode.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -55,10 +71,11 @@ public struct UserInput: Sendable, Codable, Equatable {
         self.systemPrompt = try container.decodeIfPresent(String.self, forKey: .systemPrompt)
         self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
             ?? container.decodeIfPresent(UUID.self, forKey: .goalIDLegacy)
+        self.allowedTools = try container.decodeIfPresent([String].self, forKey: .allowedTools)
     }
 
-    /// Encodes user input, omitting an absent goal tag so older decoders see
-    /// no new key.
+    /// Encodes user input, omitting an absent goal tag and an absent tool
+    /// subset so older decoders see no new key.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -67,6 +84,25 @@ public struct UserInput: Sendable, Codable, Equatable {
         try container.encode(source, forKey: .source)
         try container.encodeIfPresent(systemPrompt, forKey: .systemPrompt)
         try container.encodeIfPresent(goalID, forKey: .goalID)
+        try container.encodeIfPresent(allowedTools, forKey: .allowedTools)
+    }
+
+    /// Filters a tool snapshot down to the input's allowed subset.
+    ///
+    /// Fan-out workers carry an explicit allowed list so research fan-out
+    /// cannot mutate state; nil keeps the full registry so plain turns pay
+    /// nothing. Names match exactly (no aliases, no prefixes) because the
+    /// subset is composed from registry names the caller already observed,
+    /// and the snapshot's order is preserved so prompt and wire bytes stay
+    /// identical for server prefix caching.
+    /// - Parameters:
+    ///   - tools: Registry snapshot (sorted, disabled tools omitted).
+    ///   - allowed: Explicit tool names to keep, or nil for the full registry.
+    /// - Returns: The filtered snapshot.
+    public static func filteredTools(_ tools: [any Tool], allowed: [String]?) -> [any Tool] {
+        guard let allowed else { return tools }
+        let allowedSet = Set(allowed)
+        return tools.filter { allowedSet.contains($0.name) }
     }
 }
 

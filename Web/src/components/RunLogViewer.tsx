@@ -20,7 +20,7 @@ import {
 import RunDetailModal from "./RunDetailModal";
 import Modal from "./Modal";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
-import { CloseIcon, RefreshIcon, TrashIcon, WrenchIcon } from "./icons";
+import { ChevronDownIcon, ChevronRightIcon, CloseIcon, RefreshIcon, TrashIcon, WrenchIcon } from "./icons";
 import {
   approvalSessionID,
   getSavedEnum,
@@ -32,6 +32,50 @@ import {
 
 export type FilterKind = "all" | "chat" | "scheduler";
 export type TimeRange = "all" | "24h" | "7d" | "30d";
+
+// One rendered row group: the parent record plus the fan-out worker rows that
+// belong to its swarm. Non-fan-out parents carry no children.
+export interface RunRowGroup {
+  parent: RunLogEntry;
+  children: RunLogEntry[];
+}
+
+// Groups fan-out worker rows under their parent swarm record. Worker rows are
+// appended immediately after their parent in the audit trail, so walking the
+// newest-first list and flushing buffered worker rows at the next parent row
+// reproduces the swarm shape without a run-id link on child rows. Orphaned
+// worker rows (parent pruned past retention) render as standalone rows rather
+// than vanishing, so the audit trail stays complete.
+export function groupFanOutRows(runs: RunLogEntry[]): RunRowGroup[] {
+  const groups: RunRowGroup[] = [];
+  let pendingWorkers: RunLogEntry[] = [];
+  for (const run of runs) {
+    if (run.kind === "fanout_worker") {
+      pendingWorkers.push(run);
+      continue;
+    }
+    if (run.kind === "fanout") {
+      groups.push({ parent: run, children: pendingWorkers.reverse() });
+      pendingWorkers = [];
+      continue;
+    }
+    groups.push({ parent: run, children: [] });
+  }
+  for (const worker of pendingWorkers.reverse()) {
+    groups.push({ parent: worker, children: [] });
+  }
+  return groups;
+}
+
+// Display label per run kind; fan-out rows read their own family so the swarm
+// shape and its worker turns never mislabel as chat turns.
+export function runKindLabel(run: RunLogEntry): string {
+  if (run.kind === "scheduler") return "Scheduled Job";
+  if (run.kind === "index") return indexRunLabelForRun(run);
+  if (run.kind === "fanout") return "Fan-out Run";
+  if (run.kind === "fanout_worker") return "Fan-out Worker";
+  return "Chat Turn";
+}
 
 export function getSavedRunsFilterKind(): FilterKind {
   return getSavedEnum<FilterKind>(
@@ -98,6 +142,10 @@ export default function RunLogViewer() {
     null,
   );
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  // Expanded fan-out swarm: the parent kind=fanout row whose worker children
+  // currently render; one swarm stays expanded at a time so the list never
+  // collapses into an unreadable wall of worker rows.
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
 
   const handleFilterChange = (nextFilter: FilterKind) => {
     setFilter(nextFilter);
@@ -271,7 +319,12 @@ export default function RunLogViewer() {
     }
   }, [runs, selected]);
 
-  const filteredRuns = runs.filter((run) => {
+  // Groups form first (on the full fetched list) so a parent and its worker
+  // children always travel together, then filters apply to the parent: a
+  // group renders only when its parent passes the kind and time filters.
+  const groups = groupFanOutRows(runs);
+  const filteredGroups = groups.filter((group) => {
+    const run = group.parent;
     if (filter === "chat" && run.kind !== "chat") return false;
     if (filter === "scheduler" && run.kind !== "scheduler") return false;
 
@@ -317,9 +370,9 @@ export default function RunLogViewer() {
             <span>Clear Logs</span>
           </button>
           <span className="muted text-sm">
-            {filteredRuns.length === runs.length
-              ? `${runs.length} entries`
-              : `${filteredRuns.length} of ${runs.length} entries`}
+            {filteredGroups.length === groups.length
+              ? `${groups.length} entries`
+              : `${filteredGroups.length} of ${groups.length} entries`}
           </span>
         </div>
       </div>
@@ -386,7 +439,7 @@ export default function RunLogViewer() {
 
       {error ? <p className="error">{error}</p> : null}
 
-      {filteredRuns.length === 0 && !loading ? (
+      {filteredGroups.length === 0 && !loading ? (
         <div className="empty-state-box">
           <p className="muted">
             {runs.length === 0
@@ -397,11 +450,15 @@ export default function RunLogViewer() {
       ) : null}
 
       <div className="run-cards-list">
-        {filteredRuns.map((run) => {
+        {filteredGroups.map((group) => {
           // Amber badge only when this run's session (or one of its gated
           // call identifiers) still has an unresolved approval.
+          const run = group.parent;
           const pendingCount = runPendingApprovals(run, approvals).length;
           const duration = formatRunDuration(run.durationMs);
+          const workerCount = group.children.length;
+          const isFanOutParent = run.kind === "fanout" && workerCount > 0;
+          const isExpanded = expandedRunId === run.id;
           return (
             <div className="run-card" key={run.id}>
               <div className="run-card-main">
@@ -422,13 +479,7 @@ export default function RunLogViewer() {
                       Pending approval ({pendingCount})
                     </span>
                   ) : null}
-                  <span className="run-kind-tag">
-                    {run.kind === "scheduler"
-                      ? "Scheduled Job"
-                      : run.kind === "index"
-                        ? indexRunLabelForRun(run)
-                        : "Chat Turn"}
-                  </span>
+                  <span className="run-kind-tag">{runKindLabel(run)}</span>
                   <span className="run-time-muted">
                     {parseRunTimestamp(run.timestamp).toLocaleString()}
                   </span>
@@ -445,6 +496,58 @@ export default function RunLogViewer() {
                     <span className="text-xs muted">
                       {run.toolActions.map((t) => t.toolName).join(", ")}
                     </span>
+                  </div>
+                ) : null}
+
+                {isFanOutParent ? (
+                  <div className="run-tool-pills">
+                    <button
+                      type="button"
+                      className="ghost text-sm"
+                      onClick={() => setExpandedRunId(isExpanded ? null : run.id)}
+                      aria-expanded={isExpanded}
+                      aria-label={
+                        isExpanded
+                          ? `Collapse worker turns for run ${run.id}`
+                          : `Expand worker turns for run ${run.id}`
+                      }
+                    >
+                      {isExpanded ? (
+                        <ChevronDownIcon size={12} />
+                      ) : (
+                        <ChevronRightIcon size={12} />
+                      )}
+                    </button>
+                    <span className="text-xs muted">
+                      {workerCount} worker turn{workerCount > 1 ? "s" : ""}
+                    </span>
+                  </div>
+                ) : null}
+
+                {isFanOutParent && isExpanded ? (
+                  // Worker children render status plus duration each with the
+                  // same pill colors as run statuses, indented under their
+                  // parent swarm so the audit trail reads the swarm shape.
+                  <div style={{ paddingLeft: 22 }}>
+                    {group.children.map((worker) => {
+                      const workerDuration = formatRunDuration(worker.durationMs);
+                      return (
+                        <div className="run-tool-pills" key={worker.id}>
+                          <span className={`status-pill ${worker.status}`}>
+                            {worker.status === "running"
+                              ? "IN PROGRESS"
+                              : worker.status === "awaiting_approval"
+                                ? "AWAITING APPROVAL"
+                                : worker.status.toUpperCase()}
+                          </span>
+                          <span className="run-kind-tag">{runKindLabel(worker)}</span>
+                          <span className="run-prompt-preview">{worker.message}</span>
+                          {workerDuration ? (
+                            <span className="run-time-muted">• {workerDuration}</span>
+                          ) : null}
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : null}
               </div>

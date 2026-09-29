@@ -1,4 +1,7 @@
 // Rune Weaver Dashboard — Component tests for RunLogViewer listing and details view.
+// Covers listing, filters, deletion, the fan-out swarm grouping (a parent
+// kind=fanout row expands to its worker children), and the sanitized merged
+// summary rendering.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -276,5 +279,97 @@ describe("RunLogViewer", () => {
     });
     expect(screen.queryByText("hello")).not.toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: "Confirm delete run" })).not.toBeInTheDocument();
+  });
+
+  it("groups fan-out worker rows under their parent swarm and expands them", async () => {
+    const user = userEvent.setup();
+    // Newest-first order mirrors the audit trail: the worker children appear
+    // before their parent, so the grouping helper must reproduce the swarm
+    // shape (children in run order under the parent).
+    const fanOutPayload = {
+      runs: [
+        {
+          id: "worker-2",
+          kind: "fanout_worker",
+          status: "ok",
+          message: "Research B",
+          timestamp: new Date().toISOString(),
+          durationMs: 1200,
+        },
+        {
+          id: "worker-1",
+          kind: "fanout_worker",
+          status: "failed",
+          message: "Research A",
+          timestamp: new Date().toISOString(),
+          durationMs: 800,
+        },
+        {
+          id: "parent-1",
+          kind: "fanout",
+          status: "ok",
+          message: "Research A; Research B",
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      count: 3,
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(fanOutPayload)));
+
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("Research A; Research B")).toBeInTheDocument();
+    });
+
+    // Children stay collapsed until the parent expands.
+    expect(screen.queryByText("Research B")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Expand worker turns/ }));
+
+    // Children render status plus duration each with the same pill colors as
+    // run statuses.
+    expect(screen.getByText("Research A")).toBeInTheDocument();
+    expect(screen.getByText("Research B")).toBeInTheDocument();
+    // Duration renders as a bullet plus value across split text nodes inside
+    // one span (textContent "• 800ms"), so match on the joined textContent
+    // instead of an exact single-node string.
+    expect(screen.getByText((_, element) => element?.textContent === "• 800ms")).toBeInTheDocument();
+    expect(screen.getByText((_, element) => element?.textContent === "• 1.2s")).toBeInTheDocument();
+    expect(screen.getByText("FAILED")).toBeInTheDocument();
+
+    // Collapse hides the children again.
+    await user.click(screen.getByRole("button", { name: /Collapse worker turns/ }));
+    expect(screen.queryByText("Research B")).not.toBeInTheDocument();
+  });
+
+  it("renders the merged fan-out summary through the sanitized markdown renderer", async () => {
+    const user = userEvent.setup();
+    const mergedPayload = {
+      runs: [
+        {
+          id: "parent-1",
+          kind: "fanout",
+          status: "ok",
+          message: "Research A; Research B",
+          response: '<img src=x onerror="alert(1)">Merged findings',
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      count: 1,
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(mergedPayload)));
+
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("Research A; Research B")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    expect(screen.getByLabelText("Run details")).toBeInTheDocument();
+
+    // A fan-out parent's response is the merged summary, so the section reads
+    // Merged Summary and the sanitized renderer strips the injected markup
+    // element entirely while the text still renders.
+    expect(screen.getByText("Merged Summary")).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    expect(screen.getByText(/Merged findings/)).toBeInTheDocument();
   });
 });

@@ -24,6 +24,21 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
   const isSkipped = run.status === "skipped";
   const isAwaitingApproval = run.status === "awaiting_approval";
   const isRunning = run.status === "running";
+  const isFanOutParent = run.kind === "fanout";
+  // Fan-out rows read their own family so a worker's detail never opens
+  // mislabeled as a chat turn, and a parent's merged summary is the response
+  // surface — it renders through the sanitized Markdown renderer only, never
+  // a raw box, so worker content cannot inject markup.
+  const kindLabel =
+    run.kind === "scheduler"
+      ? "Scheduled Run"
+      : run.kind === "index"
+        ? `${indexRunLabelForRun(run)}`
+        : run.kind === "fanout"
+          ? "Fan-out Run"
+          : run.kind === "fanout_worker"
+            ? "Fan-out Worker"
+            : "Chat Turn";
   // Debug identifiers stay visible even on older payloads: run and session
   // IDs pin the audit trail to its conversation, while per-tool call IDs
   // correlate gated approvals and history without guessing.
@@ -46,11 +61,7 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
                 : run.status.toUpperCase()}
           </span>
           <h3>
-            {run.kind === "scheduler"
-              ? "Scheduled Run"
-              : run.kind === "index"
-                ? `${indexRunLabelForRun(run)}`
-                : "Chat Turn"}{" "}
+            {kindLabel}{" "}
             Details
           </h3>
         </div>
@@ -141,9 +152,11 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
             </div>
           ) : null}
 
-          {/* Agent Response */}
+          {/* Agent Response — a fan-out parent's response is the merged
+              summary, so the header names it and the text renders through the
+              sanitized Markdown renderer only. */}
           <div className="run-section">
-            <h4>Agent Response</h4>
+            <h4>{isFanOutParent ? "Merged Summary" : "Agent Response"}</h4>
             {run.response ? (
               <div className="agent-response-box">
                 <MarkdownText text={run.response} />

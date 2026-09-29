@@ -970,6 +970,95 @@ extension IdeasConfig: Codable {
     }
 }
 
+/// Parallel worker fan-out policy.
+public struct FanOutConfig: Sendable, Equatable {
+    /// Whether parallel worker fan-out runs at all. Off by default so a
+    /// stock install never spends concurrent model rounds.
+    public var enabled: Bool
+    /// Maximum workers running at once. Clamped `1...8` so a wide subtask
+    /// list cannot oversubscribe the serving model.
+    public var maxWorkers: Int
+    /// Wall-clock budget for one worker turn before it is marked failed.
+    public var workerTimeoutSeconds: Int
+    /// Whether workers may call the full tool registry. Off by default so
+    /// research fan-out runs with the read-only subset and cannot mutate
+    /// state; the widening switch is an explicit operator choice.
+    public var fullTools: Bool
+
+    /// Default keeps fan-out off so stock installs stay quiet.
+    public static let defaultEnabled = false
+    /// Default worker cap keeps a swarm cheap on a local model.
+    public static let defaultMaxWorkers = 4
+    /// Lower worker bound; a zero or negative cap is meaningless.
+    public static let minMaxWorkers = 1
+    /// Upper worker bound before a swarm oversubscribes the serving model.
+    public static let maxMaxWorkers = 8
+    /// Default worker budget waits out slow local models without holding
+    /// the parent run hostage.
+    public static let defaultWorkerTimeoutSeconds = 300
+    /// Default keeps workers on the read-only subset so research fan-out
+    /// cannot mutate.
+    public static let defaultFullTools = false
+
+    /// Creates a fanout config.
+    public init(
+        enabled: Bool = defaultEnabled,
+        maxWorkers: Int = defaultMaxWorkers,
+        workerTimeoutSeconds: Int = defaultWorkerTimeoutSeconds,
+        fullTools: Bool = defaultFullTools
+    ) {
+        self.enabled = enabled
+        self.maxWorkers = maxWorkers
+        self.workerTimeoutSeconds = workerTimeoutSeconds
+        self.fullTools = fullTools
+    }
+
+    /// Returns a copy clamped into the validated ranges.
+    /// The engine clamps at init so a hand-built config degrades to the
+    /// nearest sane bound instead of refusing to run or oversubscribing;
+    /// load-time validation fails closed, and both postures share the same
+    /// range constants so they cannot drift.
+    /// - Returns: Config with the worker cap pulled inside bounds and the
+    ///   timeout held at one second minimum.
+    public func clamped() -> FanOutConfig {
+        FanOutConfig(
+            enabled: enabled,
+            maxWorkers: min(max(maxWorkers, Self.minMaxWorkers), Self.maxMaxWorkers),
+            workerTimeoutSeconds: max(1, workerTimeoutSeconds),
+            fullTools: fullTools
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case maxWorkers = "max_workers"
+        case workerTimeoutSeconds = "worker_timeout_seconds"
+        case fullTools = "full_tools"
+    }
+}
+
+extension FanOutConfig: Codable {
+    /// Decodes a fanout config, defaulting every omitted key.
+    /// - Parameter decoder: Decoder for the config document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? Self.defaultEnabled
+        maxWorkers = try container.decodeIfPresent(Int.self, forKey: .maxWorkers) ?? Self.defaultMaxWorkers
+        workerTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .workerTimeoutSeconds) ?? Self.defaultWorkerTimeoutSeconds
+        fullTools = try container.decodeIfPresent(Bool.self, forKey: .fullTools) ?? Self.defaultFullTools
+    }
+
+    /// Encodes a fanout config.
+    /// - Parameter encoder: Encoder for the config document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(maxWorkers, forKey: .maxWorkers)
+        try container.encode(workerTimeoutSeconds, forKey: .workerTimeoutSeconds)
+        try container.encode(fullTools, forKey: .fullTools)
+    }
+}
+
 // MARK: - Subsystem configs (Home, Plugins, Browser, Desktop, Security, Goals, Proactive) live in Config+Subsystems.swift
 
 // MARK: - Root config
@@ -1018,6 +1107,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var proactive = ProactiveConfig()
     /// Proactive Muse idea suggestions. Off by default.
     public var ideas = IdeasConfig()
+    /// Parallel worker fan-out policy. Off by default.
+    public var fanOut = FanOutConfig()
 
     /// Creates a root config from section configs.
     public init(
@@ -1041,7 +1132,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         goals: GoalsConfig = GoalsConfig(),
         bash: BashConfig = BashConfig(),
         proactive: ProactiveConfig = ProactiveConfig(),
-        ideas: IdeasConfig = IdeasConfig()
+        ideas: IdeasConfig = IdeasConfig(),
+        fanOut: FanOutConfig = FanOutConfig()
     ) {
         self.engine = engine
         self.server = server
@@ -1064,6 +1156,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.bash = bash
         self.proactive = proactive
         self.ideas = ideas
+        self.fanOut = fanOut
     }
 
     /// Config with sensible defaults matching `config.toml.example`.
@@ -1159,6 +1252,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         case bash
         case proactive
         case ideas
+        case fanOut = "fanout"
     }
 
     /// Decodes a persisted config, defaulting absent additive sections.
@@ -1168,9 +1262,9 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     /// proactive surfacing, or idea suggestions existed decode with hardened,
     /// disabled, surfacing, and opt-in defaults instead of throwing.
     /// Present-but-wrong-typed values still throw like every prior section.
-    /// Only the security, goals, bash, proactive, and ideas sections are
-    /// absent-tolerant; every other section decodes strictly so a truncated
-    /// payload cannot silently load as hardened defaults.
+    /// Only the security, goals, bash, proactive, ideas, and fanout sections
+    /// are absent-tolerant; every other section decodes strictly so a
+    /// truncated payload cannot silently load as hardened defaults.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -1195,6 +1289,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.bash = try container.decodeIfPresent(BashConfig.self, forKey: .bash) ?? BashConfig()
         self.proactive = try container.decodeIfPresent(ProactiveConfig.self, forKey: .proactive) ?? ProactiveConfig()
         self.ideas = try container.decodeIfPresent(IdeasConfig.self, forKey: .ideas) ?? IdeasConfig()
+        self.fanOut = try container.decodeIfPresent(FanOutConfig.self, forKey: .fanOut) ?? FanOutConfig()
     }
 
     /// Encodes every section, including the defense policy, goal pursuit, proactive surfacing, and idea suggestions.
@@ -1222,6 +1317,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         try container.encode(bash, forKey: .bash)
         try container.encode(proactive, forKey: .proactive)
         try container.encode(ideas, forKey: .ideas)
+        try container.encode(fanOut, forKey: .fanOut)
     }
 }
 

@@ -19,6 +19,21 @@ extension NewSchedulerJob: Content {}
 extension UpdateSchedulerJob: Content {}
 extension RunLogEntry: Content {}
 
+/// Conformance letting the core fan-out engine record its audit rows through
+/// the shared run-log store. The seam stays core-side so the server entry
+/// types never leak into RuneWeaverCore; this adapter is the only bridge, and
+/// it appends through the same store instance every chat and scheduler row
+/// uses so the fan-out swarm renders beside the rest of the audit trail.
+extension RunLogStore: FanOutRunLogging {
+    public func appendFanOutRow(kind: String, status: String, message: String, sessionID: UUID) async -> UUID {
+        await append(kind: kind, status: status, message: message, sessionID: sessionID).id
+    }
+
+    public func updateFanOutRow(id: UUID, status: String) async {
+        _ = await update(id: id, status: status)
+    }
+}
+
 /// Lifecycle hook draining live WebSockets on application shutdown.
 struct WSHubShutdownLifecycle: LifecycleHandler {
     let hub: WSHub

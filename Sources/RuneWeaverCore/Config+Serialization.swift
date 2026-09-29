@@ -56,6 +56,7 @@ extension RuneWeaverConfig {
         lines += renderBashTOML()
         lines += renderProactiveTOML()
         lines += renderIdeasTOML()
+        lines += renderFanOutTOML()
         return lines.joined(separator: "\n")
     }
 
@@ -465,6 +466,22 @@ extension RuneWeaverConfig {
             "enabled = \(ideas.enabled ? "true" : "false")",
             "max_per_cycle = \(ideas.maxPerCycle)",
             "timeout_seconds = \(ideas.timeoutSeconds)",
+            ""
+        ]
+    }
+
+    /// Renders the additive `[fanout]` section.
+    ///
+    /// Every key renders, including the opt-in default, so a saved file
+    /// documents the fan-out policy and a round-trip never depends on an
+    /// implicit default silently diverging from what was written.
+    private func renderFanOutTOML() -> [String] {
+        [
+            "[fanout]",
+            "enabled = \(fanOut.enabled ? "true" : "false")",
+            "max_workers = \(fanOut.maxWorkers)",
+            "worker_timeout_seconds = \(fanOut.workerTimeoutSeconds)",
+            "full_tools = \(fanOut.fullTools ? "true" : "false")",
             ""
         ]
     }

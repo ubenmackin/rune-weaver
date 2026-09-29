@@ -264,7 +264,16 @@ public actor Orchestrator {
             // (vision-aware) so a mid-run tool toggle reaches the next turn's prompt as well
             // as its wire; mid-loop rounds reuse the snapshot, so a toggle takes effect on
             // the next user message. An explicit operator override bypasses composition verbatim.
-            let tools = await VisionSchemaFilter.sortedByName(toolBus.availableTools(), name: { $0.name })
+            // A turn carrying an explicit allowedTools subset filters the snapshot here,
+            // before the loop, so the prompt and the wire advertise only the callable subset
+            // and a worker can never narrate or call outside it; nil keeps the full registry
+            // so plain turns pay nothing.
+            let availableTools = await toolBus.availableTools()
+            let sortedTools = VisionSchemaFilter.sortedByName(availableTools, name: { $0.name })
+            let tools = UserInput.filteredTools(
+                sortedTools,
+                allowed: input.allowedTools
+            )
             let effectiveSystemPrompt = resolveEffectiveSystemPrompt(input: input, tools: tools)
             // Temporal plus freshness-aware auto-recall through the shared
             // turn wiring: one plan plus recall plus starter so service and

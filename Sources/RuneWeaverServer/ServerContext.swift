@@ -127,6 +127,13 @@ public final class ServerContext: Sendable {
     /// so suggestion quality tracks the active model posture; the engine never
     /// mints its own backend.
     public let ideasEngine: IdeasEngine?
+    /// Parallel worker fan-out engine backing the `fanout.run` tool. Built
+    /// even when `[fanout]` is disabled so the tool registers and fails closed
+    /// with the honest disabled copy when called, mirroring the goal-tools
+    /// invariant; the serving provider doubles as the background reviewer so
+    /// review quality tracks the active model posture instead of minting a
+    /// second backend.
+    public let fanOut: FanOutEngine
     /// Active chat provider backing vision description for live index rebuilds.
     /// Stored at boot so a settings save can resolve the vision stage the same
     /// way boot does without reaching back into the orchestrator.
@@ -244,7 +251,9 @@ public final class ServerContext: Sendable {
         ideasEngine: IdeasEngine? = nil,
         ideasConfig: IdeasConfig = IdeasConfig(),
         proactiveConfig: ProactiveConfig = ProactiveConfig(),
-        stagedFiles: StagedFilesStore? = nil
+        stagedFiles: StagedFilesStore? = nil,
+        fanOut: FanOutEngine? = nil,
+        fanOutConfig: FanOutConfig = FanOutConfig()
     ) {
         self.config = config
         self.conversations = conversations
@@ -296,6 +305,18 @@ public final class ServerContext: Sendable {
         self.goalEngine = resolvedEngine
         self.ideas = resolvedIdeas
         self.ideasEngine = resolvedIdeasEngine
+        // Fan-out resolves over the shared orchestrator and run-log store so
+        // workers observe the same model posture as chat, with the serving
+        // provider as the background reviewer; a hand-built engine still wins
+        // untouched for tests that wire their own collaborators. The engine
+        // always constructs (even for a disabled `[fanout]` section) so the
+        // fanout.run tool registers and fails closed when called.
+        self.fanOut = fanOut ?? FanOutEngine(
+            orchestrator: orchestrator,
+            runLogs: runs,
+            config: fanOutConfig,
+            reviewer: servingLLM
+        )
         // The interruption gate rides the stored `[proactive]` policy with the
         // serving provider as its guarded judge; an explicit worker still wins
         // untouched for tests that hand-build one without goals.
@@ -532,6 +553,10 @@ extension ServerContext {
         let embedder: (any EmbeddingsBackend)?
         let goals: GoalComponents
         let stagedFiles: StagedFilesStore
+        /// Fan-out engine riding the live orchestrator, or nil when the
+        /// caller did not wire one (the fanout.run tool then stays
+        /// unregistered, mirroring the goal-tools invariant).
+        let fanOutEngine: FanOutEngine?
     }
 
     private static func registerBuiltinTools(_ args: BuiltinToolArgs) async {
@@ -562,7 +587,8 @@ extension ServerContext {
             goalStore: args.goals.store,
             goalConversations: args.goals.conversations,
             goalsConfig: args.configs.goals,
-            stagedFilesStore: args.stagedFiles
+            stagedFilesStore: args.stagedFiles,
+            fanOutEngine: args.fanOutEngine
         )
     }
 
@@ -642,6 +668,7 @@ extension ServerContext {
         ideasConfig: IdeasConfig = IdeasConfig(),
         proactiveConfig: ProactiveConfig = ProactiveConfig(),
         auth: ServerAuth? = nil,
+        fanOutConfig: FanOutConfig = FanOutConfig(),
         browserGateway: (any BrowserPlaywrightGateway)? = nil,
         searchTransport: (any WebSearchTransport)? = nil,
         fetchTransport: (any WebFetchTransport)? = nil,
@@ -685,11 +712,10 @@ extension ServerContext {
         )
         let dbPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
         let stagedFilesStore = StagedFilesStore(dbPath: dbPath)
-        await registerBuiltinTools(BuiltinToolArgs(
-            bus: services.bus, configs: toolConfigs, transports: transports,
-            memoryEngine: memoryEngine, embedder: embedder,
-            goals: goalComponents, stagedFiles: stagedFilesStore
-        ))
+        // Execution engines build before tool registration so the fan-out
+        // engine can ride the live orchestrator into the fanout.run tool;
+        // engine construction is side-effect free, so the earlier position
+        // changes nothing else about boot.
         let engineArgs = RuntimeEngineArgs(
             conversations: conversations, bus: services.bus, llm: llm,
             systemPrompt: systemPrompt, engineConfig: engineConfig,
@@ -703,6 +729,23 @@ extension ServerContext {
             proactiveConfig: proactiveConfig
         )
         let engines = makeExecutionEngines(args: engineArgs)
+        // Fan-out resolves over the shared orchestrator and run-log store so
+        // workers observe the same model posture as chat, with the serving
+        // provider as the background reviewer. The engine always constructs
+        // (even for a disabled `[fanout]` section) so the fanout.run tool
+        // registers and fails closed with the honest disabled copy when called.
+        let fanOutEngine = FanOutEngine(
+            orchestrator: engines.orchestrator,
+            runLogs: services.durable.runs,
+            config: fanOutConfig,
+            reviewer: llm
+        )
+        await registerBuiltinTools(BuiltinToolArgs(
+            bus: services.bus, configs: toolConfigs, transports: transports,
+            memoryEngine: memoryEngine, embedder: embedder,
+            goals: goalComponents, stagedFiles: stagedFilesStore,
+            fanOutEngine: fanOutEngine
+        ))
         let context = ServerContext(
             config: config, conversations: conversations, toolBus: services.bus,
             orchestrator: engines.orchestrator, memoryEngine: memoryEngine,
@@ -726,7 +769,8 @@ extension ServerContext {
             goals: services.goalStore, goalEngine: services.goalEngine,
             goalsConfig: goalsConfig, ideas: services.ideasStore,
             ideasEngine: services.ideasEngine, ideasConfig: ideasConfig,
-            proactiveConfig: proactiveConfig, stagedFiles: stagedFilesStore
+            proactiveConfig: proactiveConfig, stagedFiles: stagedFilesStore,
+            fanOut: fanOutEngine
         )
         await finalizeServerContext(context, sandboxConfig: sandboxConfig, onApprovalRequested: onApprovalRequested)
         return context

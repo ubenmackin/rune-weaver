@@ -32,6 +32,7 @@ extension RuneWeaverConfig {
         try validateBashSection()
         try validateProactiveSection()
         try validateIdeasSection()
+        try validateFanoutSection()
     }
 
     private func validateEngineSection() throws {
@@ -1003,6 +1004,28 @@ extension RuneWeaverConfig {
             throw ConfigError.validationError(
                 field: "ideas.timeout_seconds",
                 message: "must be between \(IdeasConfig.minTimeoutSeconds) and \(IdeasConfig.maxTimeoutSeconds) (got \(ideas.timeoutSeconds))"
+            )
+        }
+    }
+
+    /// Validates the `[fanout]` section.
+    ///
+    /// The worker cap bounds simultaneous model rounds so a wide subtask list
+    /// cannot oversubscribe the serving model, and a non-positive timeout
+    /// would either cancel workers immediately or hold the parent run forever.
+    /// The engine clamps again at init so an unvalidated hand-built config
+    /// degrades to the nearest sane bound instead of refusing to run.
+    private func validateFanoutSection() throws {
+        if fanOut.maxWorkers < FanOutConfig.minMaxWorkers || fanOut.maxWorkers > FanOutConfig.maxMaxWorkers {
+            throw ConfigError.validationError(
+                field: "fanout.max_workers",
+                message: "must be between \(FanOutConfig.minMaxWorkers) and \(FanOutConfig.maxMaxWorkers) (got \(fanOut.maxWorkers))"
+            )
+        }
+        if fanOut.workerTimeoutSeconds <= 0 {
+            throw ConfigError.validationError(
+                field: "fanout.worker_timeout_seconds",
+                message: "must be positive (got \(fanOut.workerTimeoutSeconds))"
             )
         }
     }
