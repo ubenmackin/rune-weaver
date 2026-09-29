@@ -216,7 +216,10 @@ public struct SettingsResponse: Content, Equatable {
         memoryRecallThreshold = try container.decodeIfPresent(Double.self, forKey: .memoryRecallThreshold) ?? RecallBudgets.defaultThreshold
         memoryRecallMaxChars = try container.decodeIfPresent(Int.self, forKey: .memoryRecallMaxChars) ?? RecallBudgets.defaultMaxChars
         memoryRecallPerHitChars = try container.decodeIfPresent(Int.self, forKey: .memoryRecallPerHitChars) ?? RecallBudgets.defaultPerHitChars
-        memoryRecallDocPoolMultiplier = try container.decodeIfPresent(Int.self, forKey: .memoryRecallDocPoolMultiplier) ?? RecallBudgets.defaultDocPoolMultiplier
+        memoryRecallDocPoolMultiplier = try container.decodeIfPresent(
+            Int.self,
+            forKey: .memoryRecallDocPoolMultiplier
+        ) ?? RecallBudgets.defaultDocPoolMultiplier
         memoryRecallEpisodicWeight = try container.decodeIfPresent(Double.self, forKey: .memoryRecallEpisodicWeight) ?? RecallBudgets.defaultEpisodicWeight
         voiceSTTProvider = try container.decodeIfPresent(String.self, forKey: .voiceSTTProvider) ?? ""
         voiceWhisperModel = try container.decodeIfPresent(String.self, forKey: .voiceWhisperModel) ?? ""

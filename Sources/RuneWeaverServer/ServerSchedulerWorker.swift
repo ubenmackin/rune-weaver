@@ -319,29 +319,7 @@ public actor ServerSchedulerWorker {
         let startTime = Date()
 
         guard await runLock.tryAcquire(id: job.id, name: job.name) else {
-            let skipMsg = "Skipped '\(job.name)': already running"
-            await logger?(skipMsg)
-            // Skipped runs create no conversation, so the audit entry stays
-            // untagged and the result reuses the job identifier as a stable
-            // placeholder instead of inventing an orphan session for filtering.
-            let entry = await runs.append(
-                kind: "scheduler",
-                status: "skipped",
-                message: skipMsg,
-                jobID: job.id,
-                sessionID: nil,
-                durationMs: 0
-            )
-            await hub.broadcastRun(entry)
-            return SchedulerRunResult(
-                jobName: job.name,
-                sessionID: job.id,
-                fired: false,
-                skippedReason: "already running",
-                fireReason: nil,
-                startedAt: startTime,
-                finishedAt: Date()
-            )
+            return await recordJobSkipped(job: job, startTime: startTime)
         }
 
         let sessionID = await makeSchedulerRunSession(job: job, startTime: startTime, conversations: conversations)
@@ -409,41 +387,86 @@ public actor ServerSchedulerWorker {
                 finishedAt: Date()
             )
         } catch {
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            let detail = error.localizedDescription
-            let entry = await runs.update(
-                id: initialEntry.id,
-                status: "error",
-                response: detail,
-                durationMs: durationMs
-            ) ?? initialEntry
-            await hub.broadcastRun(entry)
-            await logger?("Scheduler failed '\(job.name)': \(detail)")
-            // Errors break through under every surfacing mode except off; the
-            // error row above always records so the gate never hides a failure
-            // from history.
-            let errorDecision = await outcomeGate.decide(event: ProactiveEvent(kind: .schedulerError, title: job.name, outcome: detail))
-            if errorDecision.surface {
-                let errorPreview = ProactiveEvent.makePreview(detail)
-                if let notifier {
-                    await notifier.notify(title: "Rune Weaver: \(job.name)", body: errorPreview.isEmpty ? job.prompt : errorPreview)
-                }
-                await broadcastProactive(kind: .schedulerError, title: job.name, headline: errorDecision.headline, sessionID: sessionID)
-            }
-
-            result = SchedulerRunResult(
-                jobName: job.name,
+            result = await handleJobFailure(
+                job: job,
                 sessionID: sessionID,
-                fired: true,
-                errorMessage: detail,
-                fireReason: reason,
-                startedAt: startTime,
-                finishedAt: Date()
+                initialEntry: initialEntry,
+                startTime: startTime,
+                reason: reason,
+                error: error
             )
         }
 
         await runLock.release(id: job.id, name: job.name)
         return result
+    }
+
+    /// Records an audit run entry for a scheduled job that skipped firing because it is already running.
+    private func recordJobSkipped(job: SchedulerJob, startTime: Date) async -> SchedulerRunResult {
+        let skipMsg = "Skipped '\(job.name)': already running"
+        await logger?(skipMsg)
+        // Skipped runs create no conversation, so the audit entry stays
+        // untagged and the result reuses the job identifier as a stable
+        // placeholder instead of inventing an orphan session for filtering.
+        let entry = await runs.append(
+            kind: "scheduler",
+            status: "skipped",
+            message: skipMsg,
+            jobID: job.id,
+            sessionID: nil,
+            durationMs: 0
+        )
+        await hub.broadcastRun(entry)
+        return SchedulerRunResult(
+            jobName: job.name,
+            sessionID: job.id,
+            fired: false,
+            skippedReason: "already running",
+            fireReason: nil,
+            startedAt: startTime,
+            finishedAt: Date()
+        )
+    }
+
+    private func handleJobFailure(
+        job: SchedulerJob,
+        sessionID: UUID,
+        initialEntry: RunLogEntry,
+        startTime: Date,
+        reason: SchedulerFireReason,
+        error: any Error
+    ) async -> SchedulerRunResult {
+        let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+        let detail = error.localizedDescription
+        let entry = await runs.update(
+            id: initialEntry.id,
+            status: "error",
+            response: detail,
+            durationMs: durationMs
+        ) ?? initialEntry
+        await hub.broadcastRun(entry)
+        await logger?("Scheduler failed '\(job.name)': \(detail)")
+        // Errors break through under every surfacing mode except off; the
+        // error row above always records so the gate never hides a failure
+        // from history.
+        let errorDecision = await outcomeGate.decide(event: ProactiveEvent(kind: .schedulerError, title: job.name, outcome: detail))
+        if errorDecision.surface {
+            let errorPreview = ProactiveEvent.makePreview(detail)
+            if let notifier {
+                await notifier.notify(title: "Rune Weaver: \(job.name)", body: errorPreview.isEmpty ? job.prompt : errorPreview)
+            }
+            await broadcastProactive(kind: .schedulerError, title: job.name, headline: errorDecision.headline, sessionID: sessionID)
+        }
+
+        return SchedulerRunResult(
+            jobName: job.name,
+            sessionID: sessionID,
+            fired: true,
+            errorMessage: detail,
+            fireReason: reason,
+            startedAt: startTime,
+            finishedAt: Date()
+        )
     }
 }
 

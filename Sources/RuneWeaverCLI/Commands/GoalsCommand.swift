@@ -525,7 +525,9 @@ enum GoalsCLIHelpers {
         } catch let error as GoalValidationError {
             switch error {
             case let .cadenceOutOfRange(value):
-                throw ValidationError("--interval-minutes must be between \(GoalsConfig.minStepIntervalMinutes) and \(GoalsConfig.maxStepIntervalMinutes) (got \(value)).")
+                let minCadence = GoalsConfig.minStepIntervalMinutes
+                let maxCadence = GoalsConfig.maxStepIntervalMinutes
+                throw ValidationError("--interval-minutes must be between \(minCadence) and \(maxCadence) (got \(value)).")
             default:
                 throw ValidationError("--interval-minutes is invalid.")
             }

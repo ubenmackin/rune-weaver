@@ -1,15 +1,19 @@
-// Rune Weaver Dashboard — Component tests for TopNav health surfacing plus profile menu.
+// Rune Weaver Dashboard — Component tests for TopNav health surfacing, group
+// dropdowns, and the profile menu.
 //
-// Covers the SearXNG tri-state row and the profile contract: the top bar owns
-// section tabs while Settings stays inside the icon-only profile menu, so the
-// menu must preserve navigation, health detail, and badge behavior even when
-// the handheld stylesheet collapses the trigger to its glyph.
+// Covers the SearXNG tri-state row, the Work group menu (membership active
+// state, child selection, roll-up badges, and a deliberately absent hover-open
+// path), and the profile contract: the top bar owns section groups while
+// Settings stays inside the icon-only profile menu, so the menu must preserve
+// navigation, health detail, and badge behavior even when the handheld
+// stylesheet collapses the trigger to its glyph.
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import TopNav from "./TopNav";
+import { isGroupActive, rolledUpBadge } from "./navigationConfig";
 import {
   DEFAULT_SEARCH_MAX_RESULTS,
   DEFAULT_SEARCH_SEARXNG_URL,
@@ -409,19 +413,29 @@ describe("TopNav profile menu", () => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps five section tabs with Settings reserved for the profile menu", async () => {
+  it("groups the work sections under one dropdown while Settings stays in profile", async () => {
     const user = userEvent.setup();
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
     renderProfileNav();
-    // Desktop tabs mirror the bottom-bar order so breakpoints never drift.
+    // Desktop top level is four entries; the Work dropdown folds goals,
+    // schedules, and runs so the bar stays short as operational views grow.
     const sections = screen.getByRole("navigation", { name: "Dashboard sections" });
-    const tabs = Array.from(sections.querySelectorAll("button")).map((tab) =>
-      tab.textContent?.replace(/[0-9+ ]*unread/g, "").trim(),
+    const topLevel = Array.from(sections.querySelectorAll(".top-nav-item")).map(
+      (tab) => tab.textContent?.trim(),
     );
-    expect(tabs).toEqual(["Chat", "Approvals", "Memory", "Runs", "Schedules"]);
+    expect(topLevel).toEqual(["Chat", "Approvals", "Work", "Memory"]);
     expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
 
-    // Opening the icon-only trigger reveals Settings inside the menu.
+    // The Work trigger reveals its children in canonical order.
+    await user.click(screen.getByRole("button", { name: "Work" }));
+    const menu = screen.getByRole("menu", { name: "Work sections" });
+    expect(
+      Array.from(menu.querySelectorAll('[role="menuitem"]')).map((item) =>
+        item.textContent?.trim(),
+      ),
+    ).toEqual(["Goals", "Schedules", "Runs"]);
+
+    // Opening the icon-only profile trigger reveals Settings inside that menu.
     await openProfile(user);
     expect(screen.getByRole("menuitem", { name: "Settings" })).toBeInTheDocument();
   });
@@ -506,8 +520,10 @@ describe("TopNav profile menu", () => {
     expect(
       screen.getByRole("button", { name: "Approvals, 99 unread" }),
     ).toBeInTheDocument();
+    // Runs now lives inside Work, so its unread count rolls into that trigger
+    // rather than surfacing as a top-level tab.
     expect(
-      screen.getByRole("button", { name: "Runs, 100 unread" }),
+      screen.getByRole("button", { name: "Work, 100 unread" }),
     ).toBeInTheDocument();
   });
 
@@ -521,6 +537,136 @@ describe("TopNav profile menu", () => {
     const pill = bell.querySelector(".nav-badge");
     expect(pill?.textContent).toBe("3");
     expect(pill?.getAttribute("aria-hidden")).toBe("true");
+  });
+});
+
+describe("TopNav Work group menu", () => {
+  function groupProps(overrides: Record<string, unknown> = {}) {
+    return {
+      currentTab: "chat",
+      onSelectTab: () => {},
+      health: null,
+      runsBadge: 0,
+      approvalsBadge: 0,
+      goalsBadge: 0,
+      notificationsEnabled: false,
+      onRequestNotifications: () => {},
+      ...overrides,
+    } as unknown as ComponentProps<typeof TopNav>;
+  }
+
+  function renderGroupNav(overrides: Record<string, unknown> = {}) {
+    return render(<TopNav {...groupProps(overrides)} />);
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+  });
+
+  it("rolls normalized child badges up and reports leaf badges", () => {
+    // Membership math is shared contract, not view state: Work sums every
+    // child through the same fail-closed normalizer the flat tabs use, while a
+    // non-nesting entry (approvals) simply reports its own badge.
+    expect(rolledUpBadge("work", { goals: 2, runs: 3 })).toBe(5);
+    // Fractions floor, negatives collapse to zero, and schedules contributes.
+    expect(rolledUpBadge("work", { goals: -1, runs: 2.9, schedules: 1 })).toBe(3);
+    expect(rolledUpBadge("work", {})).toBe(0);
+    expect(rolledUpBadge("approvals", { approvals: 7 })).toBe(7);
+  });
+
+  it("treats group membership as active and unknown groups as inactive", () => {
+    expect(isGroupActive("work", "goals")).toBe(true);
+    expect(isGroupActive("work", "runs")).toBe(true);
+    expect(isGroupActive("work", "chat")).toBe(false);
+    expect(isGroupActive("approvals", "approvals")).toBe(true);
+    expect(isGroupActive("approvals", "runs")).toBe(false);
+  });
+
+  it("marks the Work trigger active whenever any child tab is selected", () => {
+    const { rerender } = renderGroupNav({ currentTab: "goals" });
+    expect(screen.getByRole("button", { name: "Work" }).className).toContain(
+      "active",
+    );
+
+    rerender(<TopNav {...groupProps({ currentTab: "schedules" })} />);
+    expect(screen.getByRole("button", { name: "Work" }).className).toContain(
+      "active",
+    );
+
+    // A tab outside the group leaves the trigger inactive.
+    rerender(<TopNav {...groupProps({ currentTab: "memory" })} />);
+    expect(screen.getByRole("button", { name: "Work" }).className).not.toContain(
+      "active",
+    );
+  });
+
+  it("switches tab and closes the menu when a child is selected", async () => {
+    const user = userEvent.setup();
+    const onSelectTab = vi.fn();
+    renderGroupNav({ onSelectTab });
+    await user.click(screen.getByRole("button", { name: "Work" }));
+    await user.click(screen.getByRole("menuitem", { name: "Goals" }));
+    expect(onSelectTab).toHaveBeenCalledWith("goals");
+    expect(screen.queryByRole("menu", { name: "Work sections" })).toBeNull();
+  });
+
+  it("highlights the active child inside the menu", async () => {
+    const user = userEvent.setup();
+    renderGroupNav({ currentTab: "runs" });
+    // The active child must be reachable even while the parent menu is closed
+    // on first render: opening Work reveals Runs already highlighted.
+    await user.click(screen.getByRole("button", { name: "Work" }));
+    expect(screen.getByRole("menuitem", { name: "Runs" }).className).toContain(
+      "active",
+    );
+  });
+
+  it("closes the menu on Escape and returns focus to the trigger", async () => {
+    const user = userEvent.setup();
+    renderGroupNav();
+    const trigger = screen.getByRole("button", { name: "Work" });
+    await user.click(trigger);
+    expect(
+      screen.getByRole("menu", { name: "Work sections" }),
+    ).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("menu", { name: "Work sections" })).toBeNull();
+    });
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("does not open the Work menu on mouseenter", () => {
+    renderGroupNav();
+    const trigger = screen.getByRole("button", { name: "Work" });
+    // No hover-open path: pointer hover must never toggle the menu, which is
+    // what removes the hover-plus-click ordering race the profile menu fixed.
+    fireEvent.mouseEnter(trigger);
+    fireEvent.mouseOver(trigger);
+    expect(screen.queryByRole("menu", { name: "Work sections" })).toBeNull();
+  });
+
+  it("rolls child badges into the Work trigger display", () => {
+    renderGroupNav({ goalsBadge: 2, runsBadge: 3 });
+    const trigger = screen.getByRole("button", { name: "Work, 5 unread" });
+    expect(trigger.querySelector(".nav-badge")?.textContent).toBe("5");
+    expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("closes the menu when a click lands outside the group", async () => {
+    const user = userEvent.setup();
+    renderGroupNav();
+    await user.click(screen.getByRole("button", { name: "Work" }));
+    expect(
+      screen.getByRole("menu", { name: "Work sections" }),
+    ).toBeInTheDocument();
+    // A click on the document body (outside the container) dismisses the menu.
+    fireEvent.mouseDown(document.body);
+    await waitFor(() => {
+      expect(screen.queryByRole("menu", { name: "Work sections" })).toBeNull();
+    });
   });
 });
 

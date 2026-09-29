@@ -8,8 +8,10 @@ import {
   compareToolActionsByRound,
   concurrentTurnsBusyMessage,
   decideApproval,
+  getGoal,
   getSession,
   getSessionToolActions,
+  goalStatusTone,
   groupToolActionsByRound,
   isActiveRunStatus,
   isValidToolIDs,
@@ -18,6 +20,7 @@ import {
   newSessionId,
   normalizeLineEndings,
   normalizeRoundIndex,
+  parseGoalUpdatedFrame,
   parseRunTimestamp,
   parseToolProgress,
   placeholderCallIDsInText,
@@ -29,6 +32,7 @@ import {
   toolCancel,
   updateSessionTitle,
   type ChatSegment,
+  type Goal,
   type HealthResponse,
   type PermissionRequest,
   type SessionMessageToolActions,
@@ -42,7 +46,8 @@ import InlineApprovalBanner from "./InlineApprovalBanner";
 import MarkdownText from "./MarkdownText";
 import { appendLiveDelta } from "./liveTextBuffer";
 import ToolActionRow from "./ToolActionRow";
-import { AlertTriangleIcon, SettingsIcon, WrenchIcon } from "./icons";
+import { AlertTriangleIcon, SettingsIcon, TargetIcon, WrenchIcon } from "./icons";
+import GoalDrawer from "./GoalDrawer";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import { useChatSettings } from "../chatSettings";
 import ChatSettingsModal from "./ChatSettingsModal";
@@ -1027,6 +1032,9 @@ export function messageListHasActiveSelection(
 
 interface ChatViewProps {
   health?: HealthResponse | null;
+  // Shell tab selector so the goal drawer can jump to the full Goals surface.
+  // Optional so standalone ChatView renders (and tests) stay shell-free.
+  onSelectTab?: (tab: "goals") => void;
 }
 
 // Indexes server-derived per-message groups by parent message ID, oldest message
@@ -1366,7 +1374,7 @@ function getURLSessionID(): string | null {
   return null;
 }
 
-export default function ChatView({ health }: ChatViewProps) {
+export default function ChatView({ health, onSelectTab }: ChatViewProps) {
   const {
     settings: chatSettings,
     updateSettings: updateChatSettings,
@@ -1471,6 +1479,21 @@ export default function ChatView({ health }: ChatViewProps) {
     setSidebarOpen((previous) => !previous);
   }, []);
   const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
+  // Goal linked to the session currently on screen. Resolved from the session
+  // detail fetch so the header chip appears only for a session the engine
+  // tagged with a `goalId`; the separate effect below re-reads it when the
+  // session switches, and `goal_updated` pushes patch it in place.
+  const [sessionGoalId, setSessionGoalId] = useState<string | null>(null);
+  const [sessionGoal, setSessionGoal] = useState<Goal | null>(null);
+  // Drawer open state owned here so the chip is the single opener and Escape or
+  // the drawer's close control only ever dismiss.
+  const [goalDrawerOpen, setGoalDrawerOpen] = useState(false);
+  // Trigger that opened the drawer. The drawer returns focus here after
+  // dismissal so keyboard users land back on the chip instead of the body.
+  const goalChipRef = useRef<HTMLButtonElement | null>(null);
+  // Live twin of the goal id for socket handlers that cannot depend on state
+  // closures; only a snapshot for this id patches the header chip.
+  const sessionGoalIdRef = useRef<string | null>(null);
   const messageListEndRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   // When the user scrolls up to review earlier messages, suppress auto-scroll
@@ -1547,6 +1570,31 @@ export default function ChatView({ health }: ChatViewProps) {
   useEffect(() => {
     sessionIDRef.current = sessionID;
   }, [sessionID]);
+  useEffect(() => {
+    sessionGoalIdRef.current = sessionGoalId;
+  }, [sessionGoalId]);
+  // Re-reads the goal snapshot whenever the resolved id changes. A blank id
+  // clears the chip so a session without a link never inherits the prior
+  // session's goal during the switch window.
+  useEffect(() => {
+    if (!sessionGoalId) {
+      setSessionGoal(null);
+      return;
+    }
+    let cancelled = false;
+    getGoal(sessionGoalId)
+      .then((detail) => {
+        if (!cancelled) setSessionGoal(detail.goal);
+      })
+      .catch(() => {
+        // A goal deleted server-side leaves the session link stale; drop the
+        // chip rather than pinning a row the engine no longer has.
+        if (!cancelled) setSessionGoal(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionGoalId]);
   useEffect(() => {
     pendingRef.current = pending;
   }, [pending]);
@@ -2424,6 +2472,22 @@ export default function ChatView({ health }: ChatViewProps) {
         frameType === "error" ||
         frameType === "cancelled")
     ) {
+      return;
+    }
+
+    if (frameType === "goal_updated") {
+      // Goal snapshots are global broadcasts with no owning session, so the
+      // chip patches by goal identity instead of session: only a snapshot for
+      // the button's own goal updates the header, and the push itself is the
+      // refresh so no extra read is issued here.
+      const snapshot = parseGoalUpdatedFrame(data);
+      if (
+        snapshot &&
+        sessionGoalIdRef.current &&
+        snapshot.id === sessionGoalIdRef.current
+      ) {
+        setSessionGoal(snapshot);
+      }
       return;
     }
 
@@ -3448,6 +3512,9 @@ export default function ChatView({ health }: ChatViewProps) {
     const hydratedContext = loadContextTokens(activeID);
     setContextTokens(hydratedContext);
     setLastTurnTokens(null);
+    // Reset the goal chip on every switch so the prior session's goal never
+    // lingers while this session's detail fetch is in flight.
+    setSessionGoalId(null);
 
     // Seed the Up/Down recall stack from per-session storage so a reload
     // restores prior sends without resending; the server backfill below only
@@ -3478,6 +3545,13 @@ export default function ChatView({ health }: ChatViewProps) {
               : undefined,
           );
           setMessages(mapped);
+          // Adopt the session's goal link, if any. A blank or absent value
+          // leaves the chip hidden rather than guessing an owner.
+          setSessionGoalId(
+            typeof res.goalId === "string" && res.goalId.trim().length > 0
+              ? res.goalId
+              : null,
+          );
           // Backfill the recall stack from persisted user texts oldest-first
           // by createdAt (wire order is oldest-first but never trusted),
           // deduplicated against the stored stack so reloads and cross-tab
@@ -3528,6 +3602,9 @@ export default function ChatView({ health }: ChatViewProps) {
             localStorage.setItem("rw_active_session_id", next);
             setSessionID(next);
           }
+          // A failed or 404 history load proves nothing about the goal link,
+          // so drop the chip instead of pinning a possibly stale one.
+          setSessionGoalId(null);
           setMessages([]);
         }
       });
@@ -4260,6 +4337,10 @@ export default function ChatView({ health }: ChatViewProps) {
     const nextID = newSessionId();
     knownDraftIDRef.current = nextID;
     setSessionID(nextID);
+    // The drawer belongs to the prior session's goal, so a switch dismisses it
+    // rather than reopening over the fresh conversation once its own goal
+    // resolves.
+    setGoalDrawerOpen(false);
     setMessages([]);
     setInFlightTurn(null);
     inFlightTurnRef.current = null;
@@ -4302,6 +4383,10 @@ export default function ChatView({ health }: ChatViewProps) {
     parkActiveFlight();
     knownDraftIDRef.current = null;
     setSessionID(id);
+    // The drawer belongs to the prior session's goal, so a switch dismisses it
+    // rather than reopening over the new conversation once its own goal
+    // resolves.
+    setGoalDrawerOpen(false);
     // Clear the visible live state before the history reload so a rapid
     // switch never interleaves the prior session's deltas into the new view;
     // the parked restore below re-applies the target's own live bubble.
@@ -4435,6 +4520,26 @@ export default function ChatView({ health }: ChatViewProps) {
             <span className="session-id-tag font-mono" title={sessionID}>
               {sessionID.slice(0, 8)}
             </span>
+            {/* Goal chip: compact pursuit pill shown only for a session the
+                engine linked to a goal. Clicking opens the drawer; the chip
+                stays mounted while the drawer is open so Escape can return
+                focus to it. */}
+            {sessionGoal ? (
+              <button
+                type="button"
+                ref={goalChipRef}
+                className={`goal-chip ${goalStatusTone(sessionGoal.status)}`}
+                data-testid="session-goal-chip"
+                onClick={() => setGoalDrawerOpen(true)}
+                title={`${sessionGoal.title} — ${sessionGoal.progress.done}/${sessionGoal.progress.total} steps`}
+              >
+                <TargetIcon size={13} />
+                <span className="goal-chip-title">{sessionGoal.title}</span>
+                <span className="goal-chip-progress">
+                  {sessionGoal.progress.done}/{sessionGoal.progress.total}
+                </span>
+              </button>
+            ) : null}
             {reconnecting && !reconnectDismissed ? (
               <span
                 className="connection-status-pill"
@@ -5042,6 +5147,19 @@ export default function ChatView({ health }: ChatViewProps) {
         onUpdateSettings={updateChatSettings}
         onResetSettings={resetChatSettings}
       />
+
+      {/* Goal drawer overlays the chat column for the linked goal. It mounts
+          only while open and re-reads its own detail, so the header chip stays
+          the single source of the goal summary. */}
+      {goalDrawerOpen && sessionGoal ? (
+        <GoalDrawer
+          goalId={sessionGoal.id}
+          initialGoal={sessionGoal}
+          onClose={() => setGoalDrawerOpen(false)}
+          onSelectTab={onSelectTab}
+          returnFocusRef={goalChipRef}
+        />
+      ) : null}
     </div>
   );
 }

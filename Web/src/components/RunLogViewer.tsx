@@ -6,6 +6,7 @@ import {
   ApiError,
   clearRuns,
   deleteRun,
+  formatRunDuration,
   indexRunLabelForRun,
   isActiveRunStatus,
   listApprovals,
@@ -400,6 +401,7 @@ export default function RunLogViewer() {
           // Amber badge only when this run's session (or one of its gated
           // call identifiers) still has an unresolved approval.
           const pendingCount = runPendingApprovals(run, approvals).length;
+          const duration = formatRunDuration(run.durationMs);
           return (
             <div className="run-card" key={run.id}>
               <div className="run-card-main">
@@ -430,10 +432,8 @@ export default function RunLogViewer() {
                   <span className="run-time-muted">
                     {parseRunTimestamp(run.timestamp).toLocaleString()}
                   </span>
-                  {run.durationMs != null ? (
-                    <span className="run-time-muted">
-                      • {run.durationMs >= 1000 ? `${(run.durationMs / 1000).toFixed(2)}s` : `${run.durationMs}ms`}
-                    </span>
+                  {duration ? (
+                    <span className="run-time-muted">• {duration}</span>
                   ) : null}
                 </div>
 

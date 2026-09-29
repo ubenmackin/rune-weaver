@@ -1,7 +1,10 @@
 // Rune Weaver Dashboard — Top navigation bar for section switching and service status.
-// Keeps primary tabs focused on operational views while the profile dropdown surfaces
-// Settings plus live engine health, so configuration stays reachable without crowding chat.
-import React, { useState, useEffect, useRef, useCallback } from "react";
+// Keeps primary tabs focused on operational views while related sections fold
+// into a Work dropdown and the profile dropdown surfaces Settings plus live
+// engine health, so configuration and pursuit stay reachable without crowding
+// chat. Group and profile menus share the same click/keyboard mechanics with no
+// hover-open path, keeping pointer and keyboard orderings deterministic.
+import { useState, useEffect, useRef, useCallback } from "react";
 import type { HealthResponse } from "../api";
 import {
   DEFAULT_SEARCH_SEARXNG_URL,
@@ -25,16 +28,13 @@ import {
   StopIcon,
   UserIcon,
 } from "./icons";
-import { NAV_ITEMS, formatBadgeCount, normalizeBadgeCount } from "./navigationConfig";
+import { NAV_GROUPS, formatBadgeCount, isGroupActive, normalizeBadgeCount, rolledUpBadge } from "./navigationConfig";
+import type { NavGroupId, NavTabId } from "./navigationConfig";
 
-export type Tab = "chat" | "approvals" | "memory" | "runs" | "schedules" | "settings";
-
-interface NavItemConfig {
-  id: Tab;
-  label: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
-  badge?: number;
-}
+// Dashboard sections reachable from the top nav. Goals is desktop-only: it
+// lives inside the Work dropdown and is intentionally absent from the mobile
+// bottom bar, which keeps its own five-tab contract.
+export type Tab = "chat" | "approvals" | "goals" | "memory" | "runs" | "schedules" | "settings";
 
 interface TopNavProps {
   currentTab: Tab;
@@ -42,6 +42,9 @@ interface TopNavProps {
   health: HealthResponse | null;
   runsBadge?: number;
   approvalsBadge?: number;
+  // Unread goal nudges rolled into the Work trigger alongside runs. The shell
+  // owns the count so selecting goals can acknowledge it like runs/approvals.
+  goalsBadge?: number;
   warningsBadge?: number;
   stagedFilesCount?: number;
   onOpenStagedDrawer?: () => void;
@@ -60,6 +63,7 @@ export default function TopNav({
   health,
   runsBadge = 0,
   approvalsBadge = 0,
+  goalsBadge = 0,
   warningsBadge = 0,
   stagedFilesCount = 0,
   onOpenStagedDrawer,
@@ -69,6 +73,13 @@ export default function TopNav({
   const [profileOpen, setProfileOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
   const profileButtonRef = useRef<HTMLButtonElement>(null);
+  // Desktop group dropdowns (currently Work) mirror the profile menu exactly:
+  // click/keyboard toggled with no hover path. Refs are keyed by group id so
+  // outside-click and Escape can resolve the owning container and trigger even
+  // when another group is added later.
+  const [openGroup, setOpenGroup] = useState<NavGroupId | null>(null);
+  const groupRefs = useRef<Partial<Record<NavGroupId, HTMLDivElement | null>>>({});
+  const groupButtonRefs = useRef<Partial<Record<NavGroupId, HTMLButtonElement | null>>>({});
   // Live SearXNG state from explicit Start/Stop actions or a fallback probe. The /health payload
   // carries search fields on newer engines, so this local copy only overrides when the user acts or
   // when the engine predates those fields and a direct probe succeeds.
@@ -103,19 +114,15 @@ export default function TopNav({
     health?.searchURL ||
     DEFAULT_SEARCH_SEARXNG_URL;
 
-  // Section tabs derive labels, ids, and icons from the shared navigation
-  // contract so desktop and mobile cannot drift. Badge wiring stays local so
-  // approvals and runs counts keep their existing behavior unchanged.
-  const badgeByTab: Partial<Record<Tab, number>> = {
+  // Desktop groups derive labels, icons, and membership from the shared
+  // navigation contract so the top bar cannot drift from the tab model. Badge
+  // wiring stays local: approvals keeps its own top-level count, while the Work
+  // trigger rolls its unread children into one number.
+  const badgeByTab: Partial<Record<NavTabId, number>> = {
     approvals: approvalsBadge,
     runs: runsBadge,
+    goals: goalsBadge,
   };
-  const navItems: NavItemConfig[] = NAV_ITEMS.map((item) => ({
-    id: item.id,
-    label: item.label,
-    icon: item.icon,
-    badge: badgeByTab[item.id] ?? 0,
-  }));
   // Shared normalization keeps the bell badge floored through the single
   // navigation-contract helper so desktop and mobile never drift; the
   // normalized count feeds both the display string and the owning button's
@@ -289,6 +296,61 @@ export default function TopNav({
     setProfileOpen((prev) => !prev);
   }, []);
 
+  // Outside-click closes the open group menu. Containment is probed against the
+  // owning container ref so a click on a menu item (which closes the menu
+  // itself after selecting) is never double-handled, and `instanceof Node`
+  // guards the nullable/non-Node targets synthetic flows can produce.
+  useEffect(() => {
+    if (openGroup === null) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target;
+      const container = groupRefs.current[openGroup];
+      if (target instanceof Node && container && !container.contains(target)) {
+        setOpenGroup(null);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [openGroup]);
+
+  // Escape closes the open group menu and returns focus to its trigger so
+  // keyboard users never lose place. Deliberately no hover-open path exists:
+  // pointer and keyboard orderings therefore toggle deterministically instead
+  // of racing a mouseenter against a click toggle.
+  useEffect(() => {
+    if (openGroup === null) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        const trigger = groupButtonRefs.current[openGroup];
+        setOpenGroup(null);
+        trigger?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [openGroup]);
+
+  // Toggling one group closes any other so two dropdowns are never open at
+  // once; re-clicking the open trigger closes it.
+  const handleGroupToggle = useCallback((groupId: NavGroupId) => {
+    setOpenGroup((prev) => (prev === groupId ? null : groupId));
+  }, []);
+
+  // Choosing a child switches the section and closes the menu; focus stays with
+  // the selected tab's content rather than trapping inside a collapsed menu.
+  const handleChildSelect = useCallback(
+    (tabId: NavTabId) => {
+      onSelectTab(tabId);
+      setOpenGroup(null);
+    },
+    [onSelectTab],
+  );
+
   // One-shot fallback probe for engines that predate search fields on /health. Runs only when the
   // menu opens with no health search data and no local override, so newer engines and explicit
   // Start/Stop results are never clobbered by a background fetch.
@@ -402,38 +464,122 @@ export default function TopNav({
       </div>
 
       <nav className="top-nav-links" aria-label="Dashboard sections">
-        {navItems.map((item) => {
-          const Icon = item.icon;
-          const isActive = currentTab === item.id;
-          // Normalized display keeps top and bottom bars identical through the
-          // shared contract helper: the floored non-negative count feeds both
-          // the capped display string and the owning button's accessible name
-          // so fractional inputs announce honestly. The badge pill itself is
-          // presentational (aria-hidden) because a bare aria-label on a
-          // generic span without a role is ignored by assistive tech.
-          const normalizedBadge = normalizeBadgeCount(item.badge ?? 0);
-          const badgeDisplay = formatBadgeCount(normalizedBadge);
-          const tabAccessibleLabel =
-            normalizedBadge > 0
-              ? `${item.label}, ${normalizedBadge} unread`
-              : item.label;
+        {NAV_GROUPS.map((group) => {
+          // Leaf entries (Chat, Approvals, Memory) render as plain tabs, so the
+          // approvals badge keeps its existing top-level placement and markup.
+          if (group.kind === "tab") {
+            const Icon = group.icon;
+            const isActive = currentTab === group.id;
+            // Normalized display keeps top and bottom bars identical through
+            // the shared contract helper: the floored non-negative count feeds
+            // both the capped display string and the owning button's accessible
+            // name so fractional inputs announce honestly. The badge pill
+            // itself is presentational (aria-hidden) because a bare aria-label
+            // on a generic span without a role is ignored by assistive tech.
+            const normalizedBadge = normalizeBadgeCount(badgeByTab[group.id] ?? 0);
+            const badgeDisplay = formatBadgeCount(normalizedBadge);
+            const tabAccessibleLabel =
+              normalizedBadge > 0
+                ? `${group.label}, ${normalizedBadge} unread`
+                : group.label;
+            return (
+              <button
+                key={group.id}
+                type="button"
+                className={`top-nav-item ${isActive ? "active" : ""}`}
+                onClick={() => onSelectTab(group.id)}
+                aria-selected={isActive}
+                aria-label={tabAccessibleLabel}
+              >
+                <Icon size={16} className="nav-item-icon" />
+                <span>{group.label}</span>
+                {badgeDisplay ? (
+                  <span className="nav-badge" aria-hidden="true">
+                    {badgeDisplay}
+                  </span>
+                ) : null}
+              </button>
+            );
+          }
+
+          const Icon = group.icon;
+          // Parent active is membership, not equality: selecting any child tabs
+          // lights the trigger so the owner keeps their bearings inside Work.
+          const isActive = isGroupActive(group.id, currentTab);
+          const isOpen = openGroup === group.id;
+          // One rolled-up count tells the owner pending work exists across the
+          // whole group without forcing the menu open.
+          const normalizedRolled = normalizeBadgeCount(
+            rolledUpBadge(group.id, badgeByTab),
+          );
+          const badgeDisplay = formatBadgeCount(normalizedRolled);
+          const triggerAccessibleLabel =
+            normalizedRolled > 0
+              ? `${group.label}, ${normalizedRolled} unread`
+              : group.label;
           return (
-            <button
-              key={item.id}
-              type="button"
-              className={`top-nav-item ${isActive ? "active" : ""}`}
-              onClick={() => onSelectTab(item.id)}
-              aria-selected={isActive}
-              aria-label={tabAccessibleLabel}
+            <div
+              key={group.id}
+              ref={(el) => {
+                groupRefs.current[group.id] = el;
+              }}
+              className="nav-dropdown-container"
             >
-              <Icon size={16} className="nav-item-icon" />
-              <span>{item.label}</span>
-              {badgeDisplay ? (
-                <span className="nav-badge" aria-hidden="true">
-                  {badgeDisplay}
-                </span>
-              ) : null}
-            </button>
+              <button
+                type="button"
+                ref={(el) => {
+                  groupButtonRefs.current[group.id] = el;
+                }}
+                className={`top-nav-item nav-group-trigger ${
+                  isActive ? "active" : ""
+                } ${isOpen ? "open" : ""}`}
+                onClick={() => handleGroupToggle(group.id)}
+                aria-haspopup="menu"
+                aria-expanded={isOpen}
+                aria-controls={`nav-group-menu-${group.id}`}
+                aria-label={triggerAccessibleLabel}
+              >
+                <Icon size={16} className="nav-item-icon" />
+                <span>{group.label}</span>
+                <ChevronDownIcon
+                  size={13}
+                  className={`dropdown-chevron ${isOpen ? "rotate-180" : ""}`}
+                />
+                {badgeDisplay ? (
+                  <span className="nav-badge" aria-hidden="true">
+                    {badgeDisplay}
+                  </span>
+                ) : null}
+              </button>
+
+              {isOpen && (
+                <div
+                  id={`nav-group-menu-${group.id}`}
+                  className="nav-dropdown-menu"
+                  role="menu"
+                  aria-label={`${group.label} sections`}
+                >
+                  {group.children.map((child) => {
+                    const ChildIcon = child.icon;
+                    const childActive = currentTab === child.id;
+                    return (
+                      <button
+                        key={child.id}
+                        type="button"
+                        role="menuitem"
+                        className={`nav-dropdown-item ${
+                          childActive ? "active" : ""
+                        }`}
+                        onClick={() => handleChildSelect(child.id)}
+                      >
+                        <ChildIcon size={16} />
+                        <span>{child.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           );
         })}
       </nav>

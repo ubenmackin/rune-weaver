@@ -215,8 +215,10 @@ public actor GoalStore: GoalStoring {
            stepIntervalMinutes < GoalsConfig.minStepIntervalMinutes
            || stepIntervalMinutes > GoalsConfig.maxStepIntervalMinutes
         {
+            let minCadence = GoalsConfig.minStepIntervalMinutes
+            let maxCadence = GoalsConfig.maxStepIntervalMinutes
             throw GoalStoreError.persistenceFailed(
-                "stepIntervalMinutes must be between \(GoalsConfig.minStepIntervalMinutes) and \(GoalsConfig.maxStepIntervalMinutes) (got \(stepIntervalMinutes))"
+                "stepIntervalMinutes must be between \(minCadence) and \(maxCadence) (got \(stepIntervalMinutes))"
             )
         }
         let dbPath = self.dbPath
@@ -524,7 +526,11 @@ public actor GoalStore: GoalStoring {
             }
             return results
         }
+    }
 
+    // MARK: - Goal Lifecycle & Updates
+
+    extension SQLiteGoalStore {
         /// Returns active goals due at or before `now`, earliest due first.
         static func advanceDue(now: Date, dbPath: String) throws -> [Goal] {
             let expanded = (dbPath as NSString).expandingTildeInPath
@@ -627,8 +633,10 @@ public actor GoalStore: GoalStoring {
                stepIntervalMinutes < GoalsConfig.minStepIntervalMinutes
                || stepIntervalMinutes > GoalsConfig.maxStepIntervalMinutes
             {
+                let minCadence = GoalsConfig.minStepIntervalMinutes
+                let maxCadence = GoalsConfig.maxStepIntervalMinutes
                 throw GoalStoreError.persistenceFailed(
-                    "stepIntervalMinutes must be between \(GoalsConfig.minStepIntervalMinutes) and \(GoalsConfig.maxStepIntervalMinutes) (got \(stepIntervalMinutes))"
+                    "stepIntervalMinutes must be between \(minCadence) and \(maxCadence) (got \(stepIntervalMinutes))"
                 )
             }
             let handle = try open(dbPath: dbPath)

@@ -19,6 +19,9 @@ import { installViewport } from "./test-utils/viewport";
 
 vi.mock("./components/ChatView", () => ({ default: () => null }));
 vi.mock("./components/TopNav", () => ({ default: () => <div data-testid="top-nav">TopNav</div> }));
+vi.mock("./components/GoalsManager", () => ({
+  default: () => <div data-testid="goals-manager">Goals</div>,
+}));
 vi.mock("./components/SettingsManager", () => ({ default: () => <div data-testid="settings-manager">Settings</div> }));
 vi.mock("./hooks/useWebNotifications", () => ({
   useWebNotifications: () => ({
@@ -136,6 +139,36 @@ describe("App owner-auth gate", () => {
 
     // Clean up URL
     window.history.pushState({}, "", "/");
+  });
+});
+
+describe("App goals deep link", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    clearAuthToken();
+    window.sessionStorage.clear();
+    window.history.pushState({}, "", "/");
+  });
+
+  afterEach(() => {
+    window.history.pushState({}, "", "/");
+  });
+
+  it("resolves the #goals hash to the mounted goals surface", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ status: "ok", engine: "Rune Weaver", version: "0.1.0" }),
+      ),
+    );
+    // A deep link into the Work group must survive a cold load, so goals has
+    // to be a recognized top-level tab when the shell seeds its initial state.
+    window.history.pushState({}, "", "/#goals");
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByTestId("goals-manager")).toBeInTheDocument();
+    });
+    expect(document.querySelector(".app-root")).not.toBeNull();
   });
 });
 

@@ -8,7 +8,7 @@ import {
   subscribeAuthState,
   toNonNegativeInt,
 } from "../api";
-import type { PermissionRequest, ToolAction, ToolResult } from "../api";
+import type { Goal, PermissionRequest, ToolAction, ToolResult } from "../api";
 import { isApprovalFrame, isRecord } from "../approvalsSession";
 import { sanitizeWarnings } from "../warnings";
 
@@ -178,6 +178,31 @@ export interface WSToolCancelMissFrame {
   sessionID?: string;
 }
 
+// Global goal-change broadcast emitted on create, plan-ready, step progress,
+// status flips, and advancement turns so dashboards patch one row instead of
+// refetching the list. The snapshot rides whole because the push is the
+// refresh. Untagged rather than session-scoped: a goal outlives any single
+// turn, so only the goal identity routes it. TypeScript mirror of
+// RuneWeaverCore.WSGoalUpdatedFrame; update both sides together.
+export interface WSGoalUpdatedFrame {
+  type: "goal_updated";
+  goal: Goal;
+}
+
+// Owner-visible nudge the engine volunteers outside any turn (a due goal, a
+// parked wait). `kind` names the trigger family while `title` plus `headline`
+// carry the one-line card; the optional session and goal links let a card
+// deep-link without a second lookup. TypeScript mirror of
+// RuneWeaverCore.WSProactiveMessageFrame; update both sides together.
+export interface WSProactiveMessageFrame {
+  type: "proactive_message";
+  kind: string;
+  title: string;
+  headline: string;
+  sessionID?: string;
+  goalId?: string;
+}
+
 export interface WSApprovalFrame {
   type: "approval";
   request: PermissionRequest;
@@ -241,6 +266,8 @@ export type WSIncomingFrame =
   | WSTurnTokensFrame
   | WSToolProgressFrame
   | WSToolCancelMissFrame
+  | WSGoalUpdatedFrame
+  | WSProactiveMessageFrame
   | WSRunFrame
   | WSApprovalLifecycleFrame
   | WSFileAcceptedFrame
@@ -368,6 +395,20 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
         toNonNegativeInt(value.roundIndex) !== undefined &&
         toNonNegativeInt(value.roundTokens) !== undefined &&
         toNonNegativeInt(value.turnTotalTokens) !== undefined
+      );
+    case "goal_updated":
+      // The snapshot is parsed leniently at the goal handler, but the frame
+      // still has to carry a goal object for the union to hold; only the
+      // container is checked here so a drifted field degrades downstream.
+      return isRecord(value.goal);
+    case "proactive_message":
+      // Card text stays required like the engine decoder so a partial nudge
+      // never surfaces as an empty notification; optional deep-link ids are
+      // not type-checked here because handlers tolerate their absence.
+      return (
+        typeof value.kind === "string" &&
+        typeof value.title === "string" &&
+        typeof value.headline === "string"
       );
     case "approval":
       return isApprovalFrame(value);

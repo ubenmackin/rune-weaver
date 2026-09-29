@@ -6,6 +6,7 @@ import {
   ApiError,
   createJob,
   deleteJob,
+  formatRunDuration,
   isActiveRunStatus,
   listJobs,
   listRuns,
@@ -437,44 +438,45 @@ export default function SchedulerManager() {
                   ) : null}
 
                   <div className="embedded-runs-list">
-                    {runsForThisJob.map((run) => (
-                      <div className="embedded-run-item" key={run.id}>
-                        <div className="embedded-run-meta">
-                          <span className={`status-pill small ${run.status}`}>
-                            {run.status === "running" ? "IN PROGRESS" : run.status.toUpperCase()}
-                          </span>
-                          <span className="text-xs muted">
-                            {new Date(run.timestamp).toLocaleString()}
-                          </span>
-                          {run.durationMs != null ? (
-                            <span className="text-xs muted">
-                              • {run.durationMs >= 1000 ? `${(run.durationMs / 1000).toFixed(1)}s` : `${run.durationMs}ms`}
+                    {runsForThisJob.map((run) => {
+                      const duration = formatRunDuration(run.durationMs);
+                      return (
+                        <div className="embedded-run-item" key={run.id}>
+                          <div className="embedded-run-meta">
+                            <span className={`status-pill small ${run.status}`}>
+                              {run.status === "running" ? "IN PROGRESS" : run.status.toUpperCase()}
                             </span>
-                          ) : null}
+                            <span className="text-xs muted">
+                              {new Date(run.timestamp).toLocaleString()}
+                            </span>
+                            {duration ? (
+                              <span className="text-xs muted">• {duration}</span>
+                            ) : null}
+                          </div>
+
+                          {run.response ? (
+                            <div className="embedded-run-response">
+                              {run.response.slice(0, 180)}
+                              {run.response.length > 180 ? "…" : ""}
+                            </div>
+                          ) : (
+                            <div className="embedded-run-response muted">
+                              {run.status === "skipped"
+                                ? "Skipped (already running)"
+                                : run.message}
+                            </div>
+                          )}
+
+                          <button
+                            type="button"
+                            className="ghost text-xs view-run-btn"
+                            onClick={() => setSelectedRun(run)}
+                          >
+                            Full Details
+                          </button>
                         </div>
-
-                        {run.response ? (
-                          <div className="embedded-run-response">
-                            {run.response.slice(0, 180)}
-                            {run.response.length > 180 ? "…" : ""}
-                          </div>
-                        ) : (
-                          <div className="embedded-run-response muted">
-                            {run.status === "skipped"
-                              ? "Skipped (already running)"
-                              : run.message}
-                          </div>
-                        )}
-
-                        <button
-                          type="button"
-                          className="ghost text-xs view-run-btn"
-                          onClick={() => setSelectedRun(run)}
-                        >
-                          Full Details
-                        </button>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}

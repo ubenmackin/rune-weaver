@@ -3713,3 +3713,117 @@ describe("Poll-tick selection survival", () => {
   });
 });
 
+describe("ChatView goal chip", () => {
+  const GOAL_ID = "11111111-1111-1111-1111-111111111111";
+  const SESSION_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+
+  function goalSnapshot(overrides: Record<string, unknown> = {}) {
+    return {
+      id: GOAL_ID,
+      title: "field guide",
+      statement: "Publish the field guide",
+      status: "active",
+      progress: { done: 1, total: 4 },
+      stepIntervalMinutes: 1440,
+      nextDueAt: null,
+      originSessionId: null,
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+      ...overrides,
+    };
+  }
+
+  // Routes the session detail, tool-actions, goal detail, and linked-run reads
+  // a mounted ChatView issues so each case only overrides what it probes.
+  function installFetch(sessionGoalId: string | null) {
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input === `/sessions/${SESSION_ID}`) {
+        return jsonResponse({
+          id: SESSION_ID,
+          title: "goal chat",
+          messages: [],
+          goalId: sessionGoalId,
+        });
+      }
+      if (input.includes("/tool-actions")) {
+        return jsonResponse({ sessionID: SESSION_ID, actions: [], count: 0 });
+      }
+      if (input === `/goals/${GOAL_ID}`) {
+        return jsonResponse({
+          goal: goalSnapshot(),
+          steps: [],
+          events: [],
+        });
+      }
+      if (input.startsWith("/runs")) {
+        return jsonResponse({ runs: [], count: 0 });
+      }
+      return jsonResponse({ sessions: [], count: 0 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+    // A stored active id keeps the mount out of the local-draft branch so the
+    // session detail (and its goal link) is actually fetched.
+    localStorage.setItem("rw_active_session_id", SESSION_ID);
+  });
+
+  it("hides the goal chip when the active session has no goal link", async () => {
+    const fetchMock = installFetch(null);
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([url]) => url === `/sessions/${SESSION_ID}`,
+        ),
+      ).toBe(true);
+    });
+    expect(screen.queryByTestId("session-goal-chip")).not.toBeInTheDocument();
+  });
+
+  it("shows the goal chip when the active session carries a goal link", async () => {
+    installFetch(GOAL_ID);
+    render(<ChatView />);
+    const chip = await screen.findByTestId("session-goal-chip");
+    expect(chip).toHaveTextContent("field guide");
+    expect(chip).toHaveTextContent("1/4");
+  });
+
+  it("refreshes the chip progress on a matching goal_updated frame", async () => {
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    installFetch(GOAL_ID);
+    render(<ChatView />);
+    const chip = await screen.findByTestId("session-goal-chip");
+    expect(chip).toHaveTextContent("1/4");
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "goal_updated",
+      goal: goalSnapshot({ progress: { done: 2, total: 4 } }),
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("session-goal-chip")).toHaveTextContent("2/4");
+    });
+  });
+
+  it("opens the goal drawer from the chip and restores focus on Escape", async () => {
+    installFetch(GOAL_ID);
+    const user = userEvent.setup();
+    render(<ChatView />);
+    const chip = await screen.findByTestId("session-goal-chip");
+    await user.click(chip);
+    expect(await screen.findByTestId("goal-drawer")).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByTestId("goal-drawer")).not.toBeInTheDocument();
+    });
+    expect(document.activeElement).toBe(chip);
+  });
+});
+

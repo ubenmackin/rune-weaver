@@ -18,15 +18,22 @@ import {
   DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE,
   DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
   deleteFact,
+  deleteGoal,
   deleteJob,
   formatAllowedOriginsText,
+  formatGoalNextAdvance,
+  formatRunDuration,
   formatToolProgressElapsedMs,
   getAuthToken,
   getFacts,
   getHealth,
   getJob,
   getRun,
+  goalProgressPercent,
+  goalStatusLabel,
+  goalStatusTone,
   isAuthenticatedHealth,
+  isGoalNeedsInputProactive,
   isSessionAuthenticated,
   listApprovals,
   listJobs,
@@ -36,6 +43,8 @@ import {
   MAX_CONCURRENT_CHAT_TURNS_HEADER,
   normalizeServerAllowedHost,
   parseAllowedOriginsText,
+  parseGoalSnapshot,
+  parseGoalUpdatedFrame,
   parseMaxConcurrentChatTurns,
   parsePlaceholderCallID,
   parseToolProgress,
@@ -1097,5 +1106,191 @@ describe("host parity contract", () => {
         vector.allowedHostValid,
       );
     }
+  });
+});
+
+describe("goal client and helpers", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("normalizes a well-formed goal snapshot and degrades drifted fields", () => {
+    const snapshot = parseGoalSnapshot({
+      id: "  goal-1  ",
+      title: "field guide",
+      statement: "Publish the field guide",
+      status: "active",
+      progress: { done: 1.9, total: 4 },
+      stepIntervalMinutes: 1440.8,
+      nextDueAt: 1700000000,
+      // Canonical key wins over the legacy aliases when they ride together.
+      originSessionId: "s-canonical",
+      originSessionID: "s-legacy",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: 1700000000,
+    });
+    expect(snapshot).toMatchObject({
+      id: "goal-1",
+      title: "field guide",
+      progress: { done: 1, total: 4 },
+      stepIntervalMinutes: 1440,
+      nextDueAt: 1700000000,
+      originSessionId: "s-canonical",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: 1700000000,
+    });
+  });
+
+  it("accepts the legacy origin spelling and defaults absent fields", () => {
+    const snapshot = parseGoalSnapshot({
+      id: "goal-1",
+      title: "field guide",
+      status: "paused",
+      origin_session_id: "legacy-session",
+    });
+    expect(snapshot?.originSessionId).toBe("legacy-session");
+    expect(snapshot?.progress).toEqual({ done: 0, total: 0 });
+    expect(snapshot?.stepIntervalMinutes).toBe(0);
+    expect(snapshot?.nextDueAt).toBeNull();
+    expect(snapshot?.createdAt).toBe(0);
+    expect(snapshot?.updatedAt).toBe(0);
+  });
+
+  it("rejects a snapshot missing identity or core display fields", () => {
+    expect(parseGoalSnapshot(null)).toBeNull();
+    expect(parseGoalSnapshot("goal")).toBeNull();
+    expect(parseGoalSnapshot({})).toBeNull();
+    expect(
+      parseGoalSnapshot({ id: "  ", title: "x", status: "active" }),
+    ).toBeNull();
+    expect(parseGoalSnapshot({ id: "g", status: "active" })).toBeNull();
+    expect(parseGoalSnapshot({ id: "g", title: "x" })).toBeNull();
+  });
+
+  it("never lets a drifted timestamp reach the render path", () => {
+    // A non-string/non-number timestamp would throw inside parseRunTimestamp's
+    // string path; the parser must fall back instead of letting it through.
+    const snapshot = parseGoalSnapshot({
+      id: "goal-1",
+      title: "field guide",
+      status: "active",
+      nextDueAt: { nested: true },
+      createdAt: false,
+      updatedAt: ["nope"],
+    });
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.nextDueAt).toBeNull();
+    expect(snapshot?.createdAt).toBe(0);
+    expect(snapshot?.updatedAt).toBe(0);
+  });
+
+  it("extracts a goal only from a well-formed goal_updated frame", () => {
+    const detail = { id: "goal-1", title: "field guide", status: "active" };
+    expect(
+      parseGoalUpdatedFrame({ type: "goal_updated", goal: detail })?.id,
+    ).toBe("goal-1");
+    expect(parseGoalUpdatedFrame({ type: "delta", goal: detail })).toBeNull();
+    expect(parseGoalUpdatedFrame({ type: "goal_updated" })).toBeNull();
+    expect(parseGoalUpdatedFrame(null)).toBeNull();
+  });
+
+  it("recognizes only a needs-input proactive nudge", () => {
+    expect(
+      isGoalNeedsInputProactive({
+        type: "proactive_message",
+        kind: "goalNeedsInput",
+      }),
+    ).toBe(true);
+    expect(
+      isGoalNeedsInputProactive({
+        type: "proactive_message",
+        kind: "needs_input",
+      }),
+    ).toBe(true);
+    expect(
+      isGoalNeedsInputProactive({
+        type: "proactive_message",
+        kind: "NEEDS-INPUT",
+      }),
+    ).toBe(true);
+    expect(
+      isGoalNeedsInputProactive({
+        type: "proactive_message",
+        kind: "schedulerError",
+      }),
+    ).toBe(false);
+    expect(
+      isGoalNeedsInputProactive({
+        type: "run_completed",
+        kind: "goalNeedsInput",
+      }),
+    ).toBe(false);
+    expect(
+      isGoalNeedsInputProactive({ type: "proactive_message", kind: 7 }),
+    ).toBe(false);
+    expect(isGoalNeedsInputProactive(null)).toBe(false);
+  });
+
+  it("formats the next advance across statuses and due windows", () => {
+    const now = Date.UTC(2024, 0, 1, 0, 0, 0);
+    expect(formatGoalNextAdvance("paused", now + 3_600_000, now)).toBe("—");
+    expect(formatGoalNextAdvance("needs_input", now + 3_600_000, now)).toBe("—");
+    expect(formatGoalNextAdvance("achieved", now + 3_600_000, now)).toBe("—");
+    expect(formatGoalNextAdvance("abandoned", now + 3_600_000, now)).toBe("—");
+    expect(formatGoalNextAdvance("active", null, now)).toBe("No schedule");
+    expect(formatGoalNextAdvance("active", now - 1000, now)).toBe("due now");
+    expect(formatGoalNextAdvance("active", now + 3 * 3_600_000, now)).toBe(
+      "in 3h",
+    );
+  });
+
+  it("clamps goal progress to whole percentages", () => {
+    expect(goalProgressPercent(null)).toBe(0);
+    expect(goalProgressPercent({ done: 0, total: 0 })).toBe(0);
+    expect(goalProgressPercent({ done: 1, total: 3 })).toBe(33);
+    expect(goalProgressPercent({ done: 9, total: 4 })).toBe(100);
+    expect(goalProgressPercent({ done: Number.NaN, total: 4 })).toBe(0);
+  });
+
+  it("labels and tones every lifecycle state with an honest fallback", () => {
+    expect(goalStatusLabel("active")).toBe("Active");
+    expect(goalStatusLabel("needs_input")).toBe("Needs input");
+    expect(goalStatusLabel("needsInput")).toBe("Needs input");
+    expect(goalStatusLabel("mystery")).toBe("mystery");
+    expect(goalStatusTone("active")).toBe("running");
+    expect(goalStatusTone("needsInput")).toBe("awaiting_approval");
+    expect(goalStatusTone("achieved")).toBe("ok");
+    expect(goalStatusTone("abandoned")).toBe("error");
+    expect(goalStatusTone("paused")).toBe("skipped");
+    expect(goalStatusTone("mystery")).toBe("skipped");
+  });
+
+  it("formats run durations on one shared scale", () => {
+    expect(formatRunDuration(0)).toBe("0ms");
+    expect(formatRunDuration(345)).toBe("345ms");
+    expect(formatRunDuration(1500)).toBe("1.5s");
+    expect(formatRunDuration(12_500)).toBe("12.5s");
+    expect(formatRunDuration(-1)).toBeNull();
+    expect(formatRunDuration(Number.NaN)).toBeNull();
+    expect(formatRunDuration(null)).toBeNull();
+    expect(formatRunDuration(undefined)).toBeNull();
+  });
+
+  it("routes goal deletes with an optional purge flag", async () => {
+    const seen: Array<{ path: string; method?: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        seen.push({ path: input, method: init?.method });
+        return new Response(null, { status: 204 });
+      }),
+    );
+    await deleteGoal("goal/1");
+    await deleteGoal("goal/1", true);
+    expect(seen[0]).toEqual({ path: "/goals/goal%2F1", method: "DELETE" });
+    expect(seen[1]).toEqual({
+      path: "/goals/goal%2F1?purge=true",
+      method: "DELETE",
+    });
   });
 });
