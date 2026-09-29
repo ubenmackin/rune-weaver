@@ -131,4 +131,63 @@ describe("useWebNotifications goals attention", () => {
     expect(hook.result.current.goalsAttention).toBe(0);
     expect(MockNotification.instances).toHaveLength(0);
   });
+
+  it("fires notifications with appropriate titles on run_completed for different kinds", async () => {
+    const { hook, capture } = await mountWithSocket();
+    expect(hook.result.current.runsBadge).toBe(0);
+
+    // Index run
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        id: "run-idx-1",
+        kind: "index",
+        message: "Index run finished",
+        response: "Indexed 10 files",
+      },
+    });
+
+    await waitFor(() => {
+      expect(hook.result.current.runsBadge).toBe(1);
+    });
+    expect(MockNotification.instances).toHaveLength(1);
+    expect(MockNotification.instances[0].title).toBe("Rune Weaver: Index Run Finished");
+    expect(MockNotification.instances[0].options?.body).toBe("Indexed 10 files");
+
+    // Scheduler run
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        id: "run-sched-1",
+        kind: "scheduler",
+        message: "Job finished",
+      },
+    });
+    expect(MockNotification.instances).toHaveLength(2);
+    expect(MockNotification.instances[1].title).toBe("Rune Weaver: Job Run Finished");
+
+    // Goal run
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        id: "run-goal-1",
+        kind: "goal",
+        message: "Goal advanced",
+      },
+    });
+    expect(MockNotification.instances).toHaveLength(3);
+    expect(MockNotification.instances[2].title).toBe("Rune Weaver: Goal Advancement Finished");
+
+    // Chat turn
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        id: "run-chat-1",
+        kind: "chat",
+        message: "Chat completed",
+      },
+    });
+    expect(MockNotification.instances).toHaveLength(4);
+    expect(MockNotification.instances[3].title).toBe("Rune Weaver: Chat Finished");
+  });
 });

@@ -118,7 +118,15 @@ export function useWebNotifications() {
         const kind = typeof run.kind === "string" ? run.kind : undefined;
         const response = typeof run.response === "string" ? run.response : undefined;
         const message = typeof run.message === "string" ? run.message : undefined;
-        const title = `Rune Weaver: ${kind === "scheduler" ? "Job Run Finished" : "Chat Finished"}`;
+        let label = "Chat Finished";
+        if (kind === "scheduler") {
+          label = "Job Run Finished";
+        } else if (kind === "index") {
+          label = "Index Run Finished";
+        } else if (kind === "goal") {
+          label = "Goal Advancement Finished";
+        }
+        const title = `Rune Weaver: ${label}`;
         const body = response ? response.slice(0, 150) : message;
         new Notification(title, { body });
       }

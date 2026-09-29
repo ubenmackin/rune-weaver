@@ -9,6 +9,7 @@
 // callers lowercase both sides for the case-insensitive macOS view.
 
 import Foundation
+import os
 
 /// Shared glob matching for file excludes, grep includes, and glob search.
 ///
@@ -18,6 +19,8 @@ import Foundation
 /// one non-separator character, `**` spans separators, and `[...]` classes
 /// (with `[!...]` negation) match one character.
 public enum SharedGlobMatching: Sendable {
+    private static let regexCache = OSAllocatedUnfairLock(initialState: [String: NSRegularExpression]())
+
     /// Reports whether a glob tries to climb with a `..` segment.
     /// - Parameter pattern: Glob pattern.
     /// - Returns: True when any `/`-separated segment is `..`.
@@ -31,8 +34,21 @@ public enum SharedGlobMatching: Sendable {
     ///   - relativePath: Path to match against.
     /// - Returns: True when the whole path matches.
     public static func matches(pattern: String, relativePath: String) -> Bool {
-        let source = regexSource(fromGlob: pattern)
-        guard let expression = try? NSRegularExpression(pattern: source) else {
+        let expression: NSRegularExpression? = regexCache.withLock { cache in
+            if let cached = cache[pattern] {
+                return cached
+            }
+            let source = regexSource(fromGlob: pattern)
+            guard let compiled = try? NSRegularExpression(pattern: source) else {
+                return nil
+            }
+            if cache.count > 1000 {
+                cache.removeAll()
+            }
+            cache[pattern] = compiled
+            return compiled
+        }
+        guard let expression else {
             return false
         }
         let range = NSRange(relativePath.startIndex ..< relativePath.endIndex, in: relativePath)

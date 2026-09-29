@@ -199,4 +199,82 @@ describe("RunLogViewer", () => {
       expect(screen.getByText(/No runs yet/)).toBeInTheDocument();
     });
   });
+
+  it("clears completed runs while preserving in-progress runs", async () => {
+    const user = userEvent.setup();
+    const runsWithRunning = {
+      runs: [
+        {
+          id: "run-active",
+          kind: "chat",
+          status: "running",
+          message: "active in-progress turn",
+          timestamp: new Date().toISOString(),
+        },
+        {
+          id: "run-done",
+          kind: "chat",
+          status: "ok",
+          message: "completed turn",
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      count: 2,
+    };
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(runsWithRunning);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("active in-progress turn")).toBeInTheDocument();
+      expect(screen.getByText("completed turn")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Clean up run history" }));
+    await user.click(screen.getByRole("button", { name: "Confirm clear all runs" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/runs", expect.objectContaining({ method: "DELETE" }));
+    });
+    // In-progress run remains visible; completed run is gone
+    expect(screen.getByText("active in-progress turn")).toBeInTheDocument();
+    expect(screen.queryByText("completed turn")).not.toBeInTheDocument();
+  });
+
+  it("confirms single run deletion when pressing Enter in modal", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(runsPayload);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("hello")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Delete run" }));
+    const dialog = screen.getByRole("dialog", { name: "Confirm delete run" });
+    expect(dialog).toBeInTheDocument();
+
+    // Press Enter to confirm deletion
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        `/runs/${encodeURIComponent("22222222-2222-2222-2222-222222222222")}`,
+        expect.objectContaining({ method: "DELETE" }),
+      );
+    });
+    expect(screen.queryByText("hello")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Confirm delete run" })).not.toBeInTheDocument();
+  });
 });

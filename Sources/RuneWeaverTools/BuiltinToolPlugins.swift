@@ -118,7 +118,8 @@ public enum BuiltinToolPlugins {
         goalConversations: ConversationManager? = nil,
         goalsConfig: GoalsConfig = GoalsConfig(),
         messagesGateway: (any MessagesGateway)? = nil,
-        chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath
+        chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
+        stagedFilesStore: StagedFilesStore? = nil
     ) -> [any Tool] {
         var tools: [any Tool] = []
         if let emailConfig {
@@ -132,7 +133,7 @@ public enum BuiltinToolPlugins {
             )
         }
         tools += MessagesTools.makeTools(chatDatabasePath: chatDatabasePath, gateway: messagesGateway)
-        tools += FilesTools.makeTools(filesConfig: filesConfig ?? FilesConfig())
+        tools += FilesTools.makeTools(filesConfig: filesConfig ?? FilesConfig(), stagedFilesStore: stagedFilesStore)
         // Bash always registers so GET /tools stays stable; a disabled
         // config fails closed inside BashTool.execute via its enabled guard.
         tools.append(BashTool(bashConfig: bashConfig, filesConfig: filesConfig ?? FilesConfig()))
@@ -252,7 +253,8 @@ public enum BuiltinToolPlugins {
         goalConversations: ConversationManager? = nil,
         goalsConfig: GoalsConfig = GoalsConfig(),
         messagesGateway: (any MessagesGateway)? = nil,
-        chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath
+        chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
+        stagedFilesStore: StagedFilesStore? = nil
     ) async {
         let desktopNames = Set(DesktopTools.allToolNames)
         for tool in makeAllTools(
@@ -282,7 +284,8 @@ public enum BuiltinToolPlugins {
             goalConversations: goalConversations,
             goalsConfig: goalsConfig,
             messagesGateway: messagesGateway,
-            chatDatabasePath: chatDatabasePath
+            chatDatabasePath: chatDatabasePath,
+            stagedFilesStore: stagedFilesStore
         ) {
             // Every other builtin keeps the enabled-by-default registration;
             // desktop tools ship disabled so only an operator-enabled tool

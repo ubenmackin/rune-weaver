@@ -412,6 +412,29 @@ struct RunLogStoreTests {
     }
 
     @Test
+    func `Clear preserves running runs in memory and SQLite`() async {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbPath = tempDir.appendingPathComponent("test_runs_clear_running.db").path
+
+        let store = await RunLogStore.load(capacity: 10, dbPath: dbPath)
+        let runningEntry = await store.append(kind: "chat", status: "running", message: "in flight turn")
+        _ = await store.append(kind: "chat", status: "ok", message: "finished turn")
+        _ = await store.append(kind: "scheduler", status: "error", message: "failed job")
+        #expect(await store.count() == 3)
+
+        await store.clear()
+        #expect(await store.count() == 1)
+        #expect(await store.entry(id: runningEntry.id) != nil)
+
+        // Verify across reload that running entry is preserved on disk
+        let reloaded = await RunLogStore.load(capacity: 10, dbPath: dbPath)
+        #expect(await reloaded.count() == 1)
+        #expect(await reloaded.entry(id: runningEntry.id)?.id == runningEntry.id)
+    }
+
+    @Test
     func `Startup crash recovery reconciles running runs and unfinished tool actions`() async {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)

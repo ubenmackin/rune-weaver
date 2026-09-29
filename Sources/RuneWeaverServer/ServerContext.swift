@@ -85,6 +85,8 @@ public final class ServerContext: Sendable {
     public let pluginDiscovery: PluginDiscoveryService
     /// Durable per-tool enable/disable toggles for every registered tool.
     public let toolStates: ToolStateStore
+    /// Staged files metadata store tracking edited files awaiting review.
+    public let stagedFiles: StagedFilesStore
     /// Sandbox staging retention configuration bounding `pending/`, `approved/`, and `attachments/`.
     public let sandboxConfig: SandboxConfig
     /// Atomic bash plus files policy pair refreshed by settings saves.
@@ -241,7 +243,8 @@ public final class ServerContext: Sendable {
         ideas: IdeasStore? = nil,
         ideasEngine: IdeasEngine? = nil,
         ideasConfig: IdeasConfig = IdeasConfig(),
-        proactiveConfig: ProactiveConfig = ProactiveConfig()
+        proactiveConfig: ProactiveConfig = ProactiveConfig(),
+        stagedFiles: StagedFilesStore? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -315,6 +318,7 @@ public final class ServerContext: Sendable {
         self.pluginStore = pStore
         self.pluginDiscovery = pluginDiscovery ?? PluginDiscoveryService(pluginsDirectory: PluginDiscoveryService.defaultPluginsDirectory(), store: pStore)
         self.toolStates = toolStates ?? ToolStateStore(dbPath: defaultDBPath)
+        self.stagedFiles = stagedFiles ?? StagedFilesStore(dbPath: defaultDBPath)
         self.sandboxConfig = sandboxConfig
         self.bashFilesBox = OSAllocatedUnfairLock(initialState: BashFilesPair(bash: bashConfig, files: filesConfig))
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
@@ -520,41 +524,45 @@ extension ServerContext {
         )
     }
 
-    private static func registerBuiltinTools(
-        bus: ToolBus,
-        configs: ToolConfigs,
-        transports: ToolTransports,
-        memoryEngine: MemoryEngine,
-        embedder: (any EmbeddingsBackend)?,
-        goals: GoalComponents
-    ) async {
+    private struct BuiltinToolArgs: Sendable {
+        let bus: ToolBus
+        let configs: ToolConfigs
+        let transports: ToolTransports
+        let memoryEngine: MemoryEngine
+        let embedder: (any EmbeddingsBackend)?
+        let goals: GoalComponents
+        let stagedFiles: StagedFilesStore
+    }
+
+    private static func registerBuiltinTools(_ args: BuiltinToolArgs) async {
         await BuiltinToolPlugins.registerAll(
-            on: bus,
-            emailConfig: configs.email,
-            filesConfig: configs.files,
-            bashConfig: configs.bash,
-            sandboxConfig: configs.sandbox,
-            browserConfig: configs.browser,
-            mediaConfig: configs.media,
-            desktopConfig: configs.desktop,
-            llmServerURLs: configs.llmServerURLs,
-            securityConfig: configs.security,
-            memoryEngine: memoryEngine,
-            embedder: embedder,
-            gateway: transports.gateway,
-            searchTransport: transports.search,
-            fetchTransport: transports.fetch,
-            apiTransport: transports.api,
-            mediaTransport: transports.media,
-            ensurer: transports.ensurer,
-            mediaSecrets: transports.mediaSecrets,
-            secrets: transports.secrets,
-            desktopCaptureBridge: transports.desktopCapture,
-            desktopControlBridge: transports.desktopControl,
-            goalEngine: goals.engine,
-            goalStore: goals.store,
-            goalConversations: goals.conversations,
-            goalsConfig: configs.goals
+            on: args.bus,
+            emailConfig: args.configs.email,
+            filesConfig: args.configs.files,
+            bashConfig: args.configs.bash,
+            sandboxConfig: args.configs.sandbox,
+            browserConfig: args.configs.browser,
+            mediaConfig: args.configs.media,
+            desktopConfig: args.configs.desktop,
+            llmServerURLs: args.configs.llmServerURLs,
+            securityConfig: args.configs.security,
+            memoryEngine: args.memoryEngine,
+            embedder: args.embedder,
+            gateway: args.transports.gateway,
+            searchTransport: args.transports.search,
+            fetchTransport: args.transports.fetch,
+            apiTransport: args.transports.api,
+            mediaTransport: args.transports.media,
+            ensurer: args.transports.ensurer,
+            mediaSecrets: args.transports.mediaSecrets,
+            secrets: args.transports.secrets,
+            desktopCaptureBridge: args.transports.desktopCapture,
+            desktopControlBridge: args.transports.desktopControl,
+            goalEngine: args.goals.engine,
+            goalStore: args.goals.store,
+            goalConversations: args.goals.conversations,
+            goalsConfig: args.configs.goals,
+            stagedFilesStore: args.stagedFiles
         )
     }
 
@@ -675,14 +683,13 @@ extension ServerContext {
             store: services.goalStore,
             conversations: conversations
         )
-        await registerBuiltinTools(
-            bus: services.bus,
-            configs: toolConfigs,
-            transports: transports,
-            memoryEngine: memoryEngine,
-            embedder: embedder,
-            goals: goalComponents
-        )
+        let dbPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
+        let stagedFilesStore = StagedFilesStore(dbPath: dbPath)
+        await registerBuiltinTools(BuiltinToolArgs(
+            bus: services.bus, configs: toolConfigs, transports: transports,
+            memoryEngine: memoryEngine, embedder: embedder,
+            goals: goalComponents, stagedFiles: stagedFilesStore
+        ))
         let engineArgs = RuntimeEngineArgs(
             conversations: conversations, bus: services.bus, llm: llm,
             systemPrompt: systemPrompt, engineConfig: engineConfig,
@@ -697,50 +704,29 @@ extension ServerContext {
         )
         let engines = makeExecutionEngines(args: engineArgs)
         let context = ServerContext(
-            config: config,
-            conversations: conversations,
-            toolBus: services.bus,
-            orchestrator: engines.orchestrator,
-            memoryEngine: memoryEngine,
-            embedder: embedder,
-            permissionGate: permissionGate,
-            approvals: services.approvals,
-            scheduler: services.durable.scheduler,
-            runs: services.durable.runs,
-            hub: services.durable.hub,
-            runLock: services.durable.runLock,
-            activeTurns: ActiveTurnTracker(),
-            steeringQueue: engines.steeringQueue,
+            config: config, conversations: conversations, toolBus: services.bus,
+            orchestrator: engines.orchestrator, memoryEngine: memoryEngine,
+            embedder: embedder, permissionGate: permissionGate, approvals: services.approvals,
+            scheduler: services.durable.scheduler, runs: services.durable.runs,
+            hub: services.durable.hub, runLock: services.durable.runLock,
+            activeTurns: ActiveTurnTracker(), steeringQueue: engines.steeringQueue,
             schedulerWorker: engines.schedulerWorker,
             pluginStore: services.pluginStack.store,
             pluginDiscovery: services.pluginStack.discovery,
             toolStates: services.pluginStack.states,
-            sandboxConfig: sandboxConfig,
-            filesConfig: toolConfigs.files,
-            bashConfig: toolConfigs.bash,
-            browserConfig: browserConfig,
-            indexCoordinator: indexCoordinator,
-            indexStore: indexStore,
-            servingLLM: llm,
-            auth: auth,
-            browserGateway: browserGateway,
-            searchTransport: searchTransport,
-            fetchTransport: fetchTransport,
-            apiTransport: apiTransport,
-            mediaTransport: mediaTransport,
-            searchEnsurer: searchEnsurer,
-            mediaSecrets: mediaSecrets,
-            secrets: secrets,
-            desktopCaptureBridge: desktopCaptureBridge,
-            desktopControlBridge: desktopControlBridge,
-            desktopConfig: desktopConfig,
-            goals: services.goalStore,
-            goalEngine: services.goalEngine,
-            goalsConfig: goalsConfig,
-            ideas: services.ideasStore,
-            ideasEngine: services.ideasEngine,
-            ideasConfig: ideasConfig,
-            proactiveConfig: proactiveConfig
+            sandboxConfig: sandboxConfig, filesConfig: toolConfigs.files,
+            bashConfig: toolConfigs.bash, browserConfig: browserConfig,
+            indexCoordinator: indexCoordinator, indexStore: indexStore,
+            servingLLM: llm, auth: auth, browserGateway: browserGateway,
+            searchTransport: searchTransport, fetchTransport: fetchTransport,
+            apiTransport: apiTransport, mediaTransport: mediaTransport,
+            searchEnsurer: searchEnsurer, mediaSecrets: mediaSecrets,
+            secrets: secrets, desktopCaptureBridge: desktopCaptureBridge,
+            desktopControlBridge: desktopControlBridge, desktopConfig: desktopConfig,
+            goals: services.goalStore, goalEngine: services.goalEngine,
+            goalsConfig: goalsConfig, ideas: services.ideasStore,
+            ideasEngine: services.ideasEngine, ideasConfig: ideasConfig,
+            proactiveConfig: proactiveConfig, stagedFiles: stagedFilesStore
         )
         await finalizeServerContext(context, sandboxConfig: sandboxConfig, onApprovalRequested: onApprovalRequested)
         return context

@@ -438,9 +438,9 @@ public actor RunLogStore {
         entries.count
     }
 
-    /// Removes every entry.
+    /// Removes prior run entries, keeping in-progress runs intact.
     public func clear() async {
-        entries.removeAll()
+        entries.removeAll { $0.status != "running" }
         if let dbPath {
             #if canImport(SQLite3)
                 await SQLiteSerialIO.runUncancellable {
@@ -863,7 +863,7 @@ enum SQLiteOpenHelper {
                 return
             }
             defer { sqlite3_close(handle) }
-            let sql = "DELETE FROM run_logs;"
+            let sql = "DELETE FROM run_logs WHERE status != 'running';"
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 let code = sqlite3_errcode(handle)

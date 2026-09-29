@@ -45,17 +45,26 @@ private func registerIndexStatusRoute(_ app: Application) {
         // A missing store or coordinator is a real absent component, not an
         // error: the probe reports zeroed counts and a stopped run so a stock
         // install still renders an honest empty state.
-        let stats = try await context.indexStore?.stats()
-        let running = await context.indexCoordinator?.isRunning ?? false
+        async let statsTask = context.indexStore?.stats()
+        async let runningTask = context.indexCoordinator?.isRunning ?? false
         // Live snapshot rides the coordinator's cached counters, so polling
         // never touches run state or the document store; nil when idle.
-        let live = await context.indexCoordinator?.liveTotals.map(IndexLiveStatus.init)
-        // Kind-filtered store lookup: every `index` row comes straight
-        // from the run log by kind, so a sparse index row survives interleaved
-        // chat traffic within the 500-row retention instead of dropping past
-        // a newest-N overall window. One shared fetch feeds both the latest
-        // strip and the failure list so they agree on the same snapshot.
-        let kindRuns = await context.runs.list(limit: Int.max, kind: ServerIndexRunReporter.kind)
+        async let liveTask = context.indexCoordinator?.liveTotals.map(IndexLiveStatus.init)
+        // Kind-filtered store lookup: bounded to the 50 most recent index runs
+        // so a status poll never pulls Int.max rows through the actor hop. One
+        // shared fetch feeds both the latest strip and the failure list so
+        // they agree on the same snapshot.
+        async let kindRunsTask = context.runs.list(limit: 50, kind: ServerIndexRunReporter.kind)
+
+        let stats = try await statsTask
+        // On-disk and logical sizes ride the store breakdown so the dashboard
+        // renders true file bytes instead of a logical estimate; a missing
+        // store reports zeros matching the zeroed counts above rather than
+        // failing the probe.
+        let storage = try await context.indexStore?.storageBreakdown()
+        let running = await runningTask
+        let live = await liveTask
+        let kindRuns = await kindRunsTask
         let latestEntry = kindRuns.first
         var lastErrors = recentIndexErrors(from: kindRuns)
         // Fail-closed pre-run hint: there is no prompt API for Full Disk
@@ -78,11 +87,6 @@ private func registerIndexStatusRoute(_ app: Application) {
             }
         }
         let lastRun = latestIndexRun(from: latestEntry)
-        // On-disk and logical sizes ride the store breakdown so the dashboard
-        // renders true file bytes instead of a logical estimate; a missing
-        // store reports zeros matching the zeroed counts above rather than
-        // failing the probe.
-        let storage = try await context.indexStore?.storageBreakdown()
         return makeIndexStatusResponse(config: config, stats: stats, running: running, lastErrors: lastErrors, lastRun: lastRun, live: live, storage: storage)
     }
 }
