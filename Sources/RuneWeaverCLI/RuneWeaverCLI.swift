@@ -210,6 +210,10 @@ enum CLIShared {
     /// Goal tools join only when both the engine and store arrive (nil keeps them
     /// unregistered); a disabled `[goals]` section still registers through the same
     /// path and fails closed inside each tool so the surface stays inspectable.
+    /// Fan-out tools follow the same invariant: the tool joins only when the
+    /// fan-out engine arrives (nil keeps it unregistered), and a disabled
+    /// `[fanout]` section still registers through the same path and fails closed
+    /// inside the tool with the honest disabled copy.
     static func pluginTools(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -227,7 +231,8 @@ enum CLIShared {
         goalEngine: GoalEngine? = nil,
         goalStore: GoalStore? = nil,
         goalConversations: ConversationManager? = nil,
-        goalsConfig: GoalsConfig = GoalsConfig()
+        goalsConfig: GoalsConfig = GoalsConfig(),
+        fanOutEngine: FanOutEngine? = nil
     ) -> [any Tool] {
         let browser = browserConfig ?? BrowserConfig()
         let baseOrigins = llmServerURLs
@@ -249,7 +254,8 @@ enum CLIShared {
             goalEngine: goalEngine,
             goalStore: goalStore,
             goalConversations: goalConversations,
-            goalsConfig: goalsConfig
+            goalsConfig: goalsConfig,
+            fanOutEngine: fanOutEngine
         )
     }
 
@@ -265,6 +271,10 @@ enum CLIShared {
     /// a disabled `[goals]` section still registers and fails closed inside each
     /// tool. When only the policy plus an LLM arrive, the store and engine build
     /// here from the episodes path so chat and serve need no second wiring step.
+    /// Fan-out tools follow the same invariant: the optional engine passes
+    /// through so a caller that wired one sees the fanout.run tool, while nil
+    /// keeps it unregistered (the CLI builds no engine here because the
+    /// orchestrator and run-log store arrive after the bus).
     static func makeToolBus(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -287,7 +297,8 @@ enum CLIShared {
         goalEngine: GoalEngine? = nil,
         goalStore: GoalStore? = nil,
         goalConversations: ConversationManager? = nil,
-        goalLLM: (any LLMProvider)? = nil
+        goalLLM: (any LLMProvider)? = nil,
+        fanOutEngine: FanOutEngine? = nil
     ) async -> ToolBus {
         let bus = ToolBus(
             approvalHandler: approvalHandler,
@@ -323,7 +334,8 @@ enum CLIShared {
             goalEngine: effectiveEngine,
             goalStore: effectiveStore,
             goalConversations: goalConversations,
-            goalsConfig: goalsConfig ?? GoalsConfig()
+            goalsConfig: goalsConfig ?? GoalsConfig(),
+            fanOutEngine: fanOutEngine
         ) {
             await bus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
         }

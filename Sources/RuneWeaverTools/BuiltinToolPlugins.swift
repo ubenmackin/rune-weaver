@@ -1,14 +1,17 @@
 // Rune Weaver Tools — Built-in tool plugin registration surface.
 //
 // Single-sources the full built-in suite (Email, Messages, Files, Bash, Memory,
-// Goals, Web, Browser, API, Media, Desktop) shared by CLI, the menu-bar app, and serve. `CLIShared.makeToolBus`,
+// Goals, Fan-out, Web, Browser, API, Media, Desktop) shared by CLI, the menu-bar app, and serve. `CLIShared.makeToolBus`,
 // `AppModel`, and `ServerContext.make` all build through this helper so the
 // registry cannot drift between entry points. Web, browser, and API tools run
 // under one `[browser]` policy; `api.request` additionally exempts the
 // configured LLM origins from the SSRF loopback deny. Goal tools register only
 // when both the engine and store arrive (nil means unregistered); a disabled
 // `[goals]` section still registers and fails closed inside each tool so the
-// surface stays visible instead of shape-shifting.
+// surface stays visible instead of shape-shifting. Fan-out tools follow the
+// same invariant: registration rides the optional fan-out engine (nil means
+// unregistered), and a disabled `[fanout]` section still registers and fails
+// closed inside the tool with the honest disabled copy.
 
 import RuneWeaverCore
 
@@ -20,7 +23,7 @@ public enum BuiltinToolPlugins {
     }
 
     /// All built-in tool names across every suite in registration order
-    /// (email, messages, files, bash, memory, goals, web, browser, api, media, desktop).
+    /// (email, messages, files, bash, memory, goals, web, browser, api, media, desktop, fanout).
     public static var allToolNames: [String] {
         EmailTools.toolNames
             + MessagesTools.toolNames
@@ -31,6 +34,7 @@ public enum BuiltinToolPlugins {
             + toolNames
             + MediaTools.toolNames
             + DesktopTools.allToolNames
+            + FanOutTools.toolNames
     }
 
     /// Builds the shared five-tool set for one `[browser]` policy.
@@ -84,13 +88,19 @@ public enum BuiltinToolPlugins {
             )
     }
 
-    /// Builds the full built-in tool suite (Email, Messages, Files, Bash, Memory, Goals, Web, Browser, API, Media, Desktop)
+    /// Builds the full built-in tool suite (Email, Messages, Files, Bash, Memory, Goals, Web, Browser, API, Media, Desktop, Fan-out)
     /// from component configurations.
     ///
     /// Goal tools join only when both the engine and store arrive; nil keeps them
     /// unregistered so callers without pursuit wiring see no shape change. A disabled
     /// `[goals]` section still registers through the same path and fails closed inside
     /// each tool, keeping `GET /tools` stable instead of shape-shifting with config.
+    /// Fan-out tools follow the same invariant: the tool joins only when the fan-out
+    /// engine arrives (nil keeps it unregistered), and a disabled `[fanout]` section
+    /// still registers through the same path and fails closed inside the tool with
+    /// the honest disabled copy. The read-only subset the workers get derives from
+    /// the built registry snapshot at this point, so the fan-out tool is appended
+    /// after every other suite and the subset covers everything this install ships.
     public static func makeAllTools(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -119,7 +129,8 @@ public enum BuiltinToolPlugins {
         goalsConfig: GoalsConfig = GoalsConfig(),
         messagesGateway: (any MessagesGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
-        stagedFilesStore: StagedFilesStore? = nil
+        stagedFilesStore: StagedFilesStore? = nil,
+        fanOutEngine: FanOutEngine? = nil
     ) -> [any Tool] {
         var tools: [any Tool] = []
         if let emailConfig {
@@ -167,6 +178,17 @@ public enum BuiltinToolPlugins {
             captureBridge: desktopCaptureBridge,
             controlBridge: desktopControlBridge
         )
+        if let fanOutEngine {
+            // The fan-out tool appends last so the read-only subset derives
+            // from the complete built registry; external plugins discovered
+            // later join workers only when the fanout policy widens to the
+            // full live registry.
+            tools += FanOutTools.makeTools(
+                engine: fanOutEngine,
+                conversations: goalConversations,
+                allowedToolNames: FanOutEngine.readOnlyToolNames(in: tools)
+            )
+        }
         return tools
     }
 
@@ -185,7 +207,8 @@ public enum BuiltinToolPlugins {
         secrets: SecretsManager? = nil,
         goalEngine: GoalEngine? = nil,
         goalStore: GoalStore? = nil,
-        goalConversations: ConversationManager? = nil
+        goalConversations: ConversationManager? = nil,
+        fanOutEngine: FanOutEngine? = nil
     ) -> [any Tool] {
         let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
         return makeAllTools(
@@ -211,7 +234,8 @@ public enum BuiltinToolPlugins {
             goalEngine: goalEngine,
             goalStore: goalStore,
             goalConversations: goalConversations,
-            goalsConfig: config.goals
+            goalsConfig: config.goals,
+            fanOutEngine: fanOutEngine
         )
     }
 
@@ -225,6 +249,9 @@ public enum BuiltinToolPlugins {
     /// until the operator enables the tool-state toggle. Goal tools register only
     /// when both the engine and store arrive, and they arrive enabled even when
     /// `[goals]` is off so the honest disabled copy (not a bus-disabled line) answers.
+    /// Fan-out tools follow the same invariant: they register only when the
+    /// fan-out engine arrives, and a disabled `[fanout]` section still registers
+    /// with the engine so the honest disabled copy (not a bus-disabled line) answers.
     public static func registerAll(
         on bus: ToolBus,
         emailConfig: EmailConfig? = nil,
@@ -254,7 +281,8 @@ public enum BuiltinToolPlugins {
         goalsConfig: GoalsConfig = GoalsConfig(),
         messagesGateway: (any MessagesGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
-        stagedFilesStore: StagedFilesStore? = nil
+        stagedFilesStore: StagedFilesStore? = nil,
+        fanOutEngine: FanOutEngine? = nil
     ) async {
         let desktopNames = Set(DesktopTools.allToolNames)
         for tool in makeAllTools(
@@ -285,7 +313,8 @@ public enum BuiltinToolPlugins {
             goalsConfig: goalsConfig,
             messagesGateway: messagesGateway,
             chatDatabasePath: chatDatabasePath,
-            stagedFilesStore: stagedFilesStore
+            stagedFilesStore: stagedFilesStore,
+            fanOutEngine: fanOutEngine
         ) {
             // Every other builtin keeps the enabled-by-default registration;
             // desktop tools ship disabled so only an operator-enabled tool

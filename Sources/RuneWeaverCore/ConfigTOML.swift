@@ -439,6 +439,7 @@ extension RuneWeaverConfig {
         try Self.decodeBash(root, into: &config)
         try Self.decodeProactive(root, into: &config)
         try Self.decodeIdeas(root, into: &config)
+        try Self.decodeFanout(root, into: &config)
         self = config
     }
 
@@ -1050,6 +1051,30 @@ extension RuneWeaverConfig {
         }
         if let timeout = try ideas.strictInt("timeout_seconds", field: "ideas.timeout_seconds") {
             config.ideas.timeoutSeconds = timeout
+        }
+    }
+
+    /// Decodes the additive `[fanout]` section, defaulting omitted keys.
+    ///
+    /// An absent table keeps the opt-in defaults so existing files load
+    /// untouched; present-but-wrong-typed values throw instead of silently
+    /// defaulting, matching the `[ideas]` decode style, and range checks land
+    /// in validation so decode stays type-only. The live engine clamps the
+    /// worker cap at init so a stray digit degrades to the nearest bound
+    /// instead of oversubscribing the serving model.
+    static func decodeFanout(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let fanout = root.tables["fanout"] else { return }
+        if let enabled = try fanout.strictBool("enabled", field: "fanout.enabled") {
+            config.fanOut.enabled = enabled
+        }
+        if let maxWorkers = try fanout.strictInt("max_workers", field: "fanout.max_workers") {
+            config.fanOut.maxWorkers = maxWorkers
+        }
+        if let timeout = try fanout.strictInt("worker_timeout_seconds", field: "fanout.worker_timeout_seconds") {
+            config.fanOut.workerTimeoutSeconds = timeout
+        }
+        if let fullTools = try fanout.strictBool("full_tools", field: "fanout.full_tools") {
+            config.fanOut.fullTools = fullTools
         }
     }
 }
