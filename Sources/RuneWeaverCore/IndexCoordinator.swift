@@ -717,7 +717,11 @@ public actor IndexCoordinator {
             }
             let summary = await run(trigger: .nightly)
             if summary.status != .skipped {
-                try? await stateStore.recordNightlyStart(at: date)
+                do {
+                    try await stateStore.recordNightlyStart(at: date)
+                } catch {
+                    RuneWeaverLog.stores.error("IndexCoordinator: failed to record nightly start: \(error.localizedDescription)")
+                }
             }
             return summary
         } else {
@@ -732,7 +736,11 @@ public actor IndexCoordinator {
             }
             let summary = await run(trigger: .catchUp)
             if summary.status != .skipped {
-                try? await stateStore.recordNightlyStart(at: date)
+                do {
+                    try await stateStore.recordNightlyStart(at: date)
+                } catch {
+                    RuneWeaverLog.stores.error("IndexCoordinator: failed to record nightly start: \(error.localizedDescription)")
+                }
             }
             return summary
         }
@@ -924,7 +932,11 @@ public actor IndexCoordinator {
         let stats = try? await store?.stats()
         let recordedAsOf = stats?.indexAsOf ?? finishedAt
         if status == .ok {
-            try? await stateStore.recordCompleted(at: recordedAsOf)
+            do {
+                try await stateStore.recordCompleted(at: recordedAsOf)
+            } catch {
+                RuneWeaverLog.stores.error("IndexCoordinator: failed to record completion state: \(error.localizedDescription)")
+            }
         }
         let durationMs = max(0, Int(finishedAt.timeIntervalSince(startedAt) * 1000))
         let summary = IndexRunSummary(

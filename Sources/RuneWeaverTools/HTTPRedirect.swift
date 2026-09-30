@@ -3,9 +3,11 @@
 // Manual redirect chains stay single-source here so `web.fetch` and `api.request`
 // cannot diverge on hop budget, relative-Location resolution, or redirect
 // surfacing. Both transports disable automatic following and resolve every hop
-// against the current URL, then re-validate the next hop with the shared URL
-// allowlist plus the SSRF guard before dialing; a safe start can never launder
-// an unsafe redirect target through the session follower.
+// against the current URL, then re-validate the next hop before dialing; a safe
+// start can never launder an unsafe redirect target through the session
+// follower. `api.request` dials the SSRF gate's pinned addresses through
+// `PinnedDialTransport`, so it no longer uses the URLSession no-follow session
+// below; `web.fetch` (whose stack keeps its own SSRF/redirect guard) does.
 
 import Foundation
 
@@ -61,10 +63,10 @@ public enum ToolEnvelopeEncoding: Sendable {
 
 /// Session delegate that surfaces redirects instead of following them.
 ///
-/// Single-sourced no-follow policy shared by the `web.fetch` and `api.request`
-/// live transports. Both chains follow redirects manually so every hop can be
-/// re-validated; a per-tool delegate copy would risk one transport silently
-/// auto-following while the other surfaces 3xx.
+/// No-follow policy for the `web.fetch` live transport and the SearXNG
+/// readiness probe, which need the 3xx surfaced rather than followed.
+/// `api.request` uses the pinned dialer instead, since a URLSession dial
+/// re-resolves the hostname and cannot preserve the SSRF gate's address pin.
 final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
     func urlSession(
         _: URLSession,

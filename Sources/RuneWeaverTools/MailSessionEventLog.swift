@@ -33,43 +33,15 @@ public struct MailSessionEventLog: Sendable {
     /// Serial queue ordering live appends.
     private static let liveQueue = DispatchQueue(label: "com.runeweaver.mail.session-event", qos: .utility)
 
-    /// Locked box around the shared timestamp formatter.
+    /// Sendable format style for fractional-second ISO8601 timestamps.
     ///
-    /// `ISO8601DateFormatter` carries shared mutable state and does not
-    /// conform to `Sendable`, so the box owns the single configured instance
-    /// plus its lock and exposes one synchronized entry point. The box itself
-    /// is `@unchecked Sendable` because every formatter access runs under the
-    /// lock, keeping the static holder concurrency-safe under Swift 6.
-    private final class TimestampFormatterBox: @unchecked Sendable {
-        /// Underlying formatter configured once for fractional-second instants.
-        private let formatter: ISO8601DateFormatter
-        /// Serializes concurrent formatter access across session actors.
-        private let lock = NSLock()
-
-        /// Creates the shared formatter with internet plus fractional seconds.
-        fileprivate init() {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            self.formatter = formatter
-        }
-
-        /// Formats an instant under the lock.
-        /// - Parameter date: Instant to stamp.
-        /// - Returns: Fractional-second ISO8601 string.
-        func string(from date: Date) -> String {
-            lock.lock()
-            defer { lock.unlock() }
-            return formatter.string(from: date)
-        }
-    }
-
-    /// Shared timestamp formatter reused across emissions.
-    ///
-    /// Allocated once because construction is measurably costly on the hot
-    /// backfill path where every spawn, sent, read, result, and command line
-    /// stamps a fractional-second instant. The box serializes access so
-    /// concurrent session and pool actors share one instance safely.
-    private static let sharedTimestampFormatter = TimestampFormatterBox()
+    /// Uses the value-type `Date.ISO8601FormatStyle` instead of the
+    /// reference-type `ISO8601DateFormatter`, so no locking or `@unchecked
+    /// Sendable` wrapper is needed. The style is a `Sendable` struct that
+    /// produces identical output to the former locked formatter.
+    private static let timestampStyle = Date.ISO8601FormatStyle(
+        includingFractionalSeconds: true
+    )
 
     /// Sink invoked with each encoded JSON line.
     private let sink: LineSink
@@ -163,7 +135,7 @@ public struct MailSessionEventLog: Sendable {
     ///   - pid: Helper child pid when known, nil for hermetic fakes.
     ///   - fields: Extra outcome fields without any secret content.
     public func emit(event: String, account: String, pid: Int32?, fields: [String: Any] = [:]) {
-        let timestamp = Self.sharedTimestampFormatter.string(from: Date())
+        let timestamp = Date().formatted(Self.timestampStyle)
         var object: [String: Any] = [
             "ts": timestamp,
             "event": event,

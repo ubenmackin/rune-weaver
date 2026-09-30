@@ -179,6 +179,14 @@ public final class ServerContext: Sendable {
     public let mediaSecrets: SecretsManager?
     /// Shared secrets backing surrogate resolution preserved across live-reloads.
     public let secrets: SecretsManager?
+    /// The one verified security policy store for this process.
+    ///
+    /// Backs the mandatory `api.request` egress supervisor and the
+    /// `GET/PUT /settings/policy` routes, so an HTTP policy write is visible
+    /// to the supervisor immediately through actor state with no filesystem
+    /// watcher and no restart. Held even when the tools were injected (app and
+    /// serve build their own registry), so every route reads one instance.
+    public let policyStore: PolicyStore
     /// Hermetic desktop capture bridge preserved across live-reloads so a
     /// settings PUT refreshes capture knobs without dropping test doubles.
     public let desktopCaptureBridge: (any DesktopCapturing)?
@@ -253,7 +261,8 @@ public final class ServerContext: Sendable {
         proactiveConfig: ProactiveConfig = ProactiveConfig(),
         stagedFiles: StagedFilesStore? = nil,
         fanOut: FanOutEngine? = nil,
-        fanOutConfig: FanOutConfig = FanOutConfig()
+        fanOutConfig: FanOutConfig = FanOutConfig(),
+        policyStore: PolicyStore? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -355,6 +364,11 @@ public final class ServerContext: Sendable {
         self.searchEnsurer = searchEnsurer
         self.mediaSecrets = mediaSecrets
         self.secrets = secrets
+        // A direct init defaults to a fresh unloaded store; `make` always
+        // injects the resolved instance so the supervisor and the policy
+        // routes share one store. Read-only fallback contexts never register
+        // `api.request`, so the unloaded default is never a supervisor source.
+        self.policyStore = policyStore ?? PolicyStore()
         self.desktopCaptureBridge = desktopCaptureBridge
         self.desktopControlBridge = desktopControlBridge
         self.desktopConfigBox = OSAllocatedUnfairLock(initialState: desktopConfig)
@@ -557,10 +571,13 @@ extension ServerContext {
         /// caller did not wire one (the fanout.run tool then stays
         /// unregistered, mirroring the goal-tools invariant).
         let fanOutEngine: FanOutEngine?
+        /// The one policy store for this process, shared by the supervisor
+        /// built for `api.request` and the settings policy routes.
+        let policyStore: PolicyStore
     }
 
-    private static func registerBuiltinTools(_ args: BuiltinToolArgs) async {
-        await BuiltinToolPlugins.registerAll(
+    private static func registerBuiltinTools(_ args: BuiltinToolArgs) async throws {
+        try await BuiltinToolPlugins.registerAll(
             on: args.bus,
             emailConfig: args.configs.email,
             filesConfig: args.configs.files,
@@ -588,7 +605,8 @@ extension ServerContext {
             goalConversations: args.goals.conversations,
             goalsConfig: args.configs.goals,
             stagedFilesStore: args.stagedFiles,
-            fanOutEngine: args.fanOutEngine
+            fanOutEngine: args.fanOutEngine,
+            policyStore: args.policyStore
         )
     }
 
@@ -638,6 +656,14 @@ extension ServerContext {
     }
 
     /// Builds a context wired for live approval prompts over WebSocket.
+    ///
+    /// - Parameter policyStore: The one security policy store for this
+    ///   process. An injected store is used as-is so a caller that already
+    ///   built tools keeps one instance; nil constructs and loads the factory
+    ///   default before any tool registers, which fails closed when the file
+    ///   cannot be verified.
+    /// - Throws: `PolicyInvariantError` when no verified policy is available,
+    ///   so a boot can never leave an unsupervised `api.request` serving.
     public static func make(
         config: ServerConfig = .default,
         conversations: ConversationManager,
@@ -680,8 +706,14 @@ extension ServerContext {
         desktopCaptureBridge: (any DesktopCapturing)? = nil,
         desktopControlBridge: (any DesktopControlling)? = nil,
         runs: RunLogStore? = nil,
-        hub: WSHub? = nil
-    ) async -> ServerContext {
+        hub: WSHub? = nil,
+        policyStore: PolicyStore? = nil
+    ) async throws -> ServerContext {
+        // Resolve the one store for this process before any tool registers:
+        // an injected store is authoritative, while the factory default is
+        // loaded here so the same instance feeds both the egress supervisor
+        // and the settings policy routes.
+        let resolvedPolicyStore = await PolicyStore.makeLoaded(injected: policyStore)
         await permissionGate.updateBashConfig(bashConfig)
         let services = await bootstrapServices(
             permissionGate: permissionGate,
@@ -740,11 +772,11 @@ extension ServerContext {
             config: fanOutConfig,
             reviewer: llm
         )
-        await registerBuiltinTools(BuiltinToolArgs(
+        try await registerBuiltinTools(BuiltinToolArgs(
             bus: services.bus, configs: toolConfigs, transports: transports,
             memoryEngine: memoryEngine, embedder: embedder,
             goals: goalComponents, stagedFiles: stagedFilesStore,
-            fanOutEngine: fanOutEngine
+            fanOutEngine: fanOutEngine, policyStore: resolvedPolicyStore
         ))
         let context = ServerContext(
             config: config, conversations: conversations, toolBus: services.bus,
@@ -770,7 +802,7 @@ extension ServerContext {
             goalsConfig: goalsConfig, ideas: services.ideasStore,
             ideasEngine: services.ideasEngine, ideasConfig: ideasConfig,
             proactiveConfig: proactiveConfig, stagedFiles: stagedFilesStore,
-            fanOut: fanOutEngine
+            fanOut: fanOutEngine, policyStore: resolvedPolicyStore
         )
         await finalizeServerContext(context, sandboxConfig: sandboxConfig, onApprovalRequested: onApprovalRequested)
         return context

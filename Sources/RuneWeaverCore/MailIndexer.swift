@@ -398,7 +398,7 @@ public actor MailIndexer {
             account: context.account.name,
             mailbox: context.mailbox
         )
-        let needsBackfill = watermark == 0 || (pendingBackfillFloor != nil && pendingBackfillFloor! > 1)
+        let needsBackfill = watermark == 0 || (pendingBackfillFloor.map { $0 > 1 } ?? false)
         if needsBackfill, cursor.budget > 0 {
             try await streamBackfill(
                 context: context,
@@ -526,11 +526,19 @@ extension MailIndexer {
             }
             for account in emailConfig.accounts {
                 for mailbox in denied {
-                    try? await checkpoints.dropMailbox(account: account.name, mailbox: mailbox)
+                    do {
+                        try await checkpoints.dropMailbox(account: account.name, mailbox: mailbox)
+                    } catch {
+                        RuneWeaverLog.stores.error("MailIndexer: failed to drop checkpoint for \(account.name)/\(mailbox): \(error.localizedDescription)")
+                    }
                 }
             }
             if !hashes.isEmpty {
-                try? await checkpoints.removeContentHashes(hashes)
+                do {
+                    try await checkpoints.removeContentHashes(hashes)
+                } catch {
+                    RuneWeaverLog.stores.error("MailIndexer: failed to remove content hashes: \(error.localizedDescription)")
+                }
             }
             return retired
         } catch {
@@ -604,7 +612,7 @@ extension MailIndexer {
                 break
             }
 
-            let isClamped = !advanced || (currentBeforeUID != nil && lowest >= currentBeforeUID!)
+            let isClamped = !advanced || (currentBeforeUID.map { lowest >= $0 } ?? false)
             if isClamped {
                 await handleClampedGateway(
                     context: context,
@@ -679,12 +687,16 @@ extension MailIndexer {
         cursor: inout MailRunCursor
     ) async {
         if initialWatermark == 0 {
-            try? await checkpoints.record(
-                account: context.account.name,
-                mailbox: context.mailbox,
-                watermark: initialWatermark,
-                contentHash: nil
-            )
+            do {
+                try await checkpoints.record(
+                    account: context.account.name,
+                    mailbox: context.mailbox,
+                    watermark: initialWatermark,
+                    contentHash: nil
+                )
+            } catch {
+                RuneWeaverLog.stores.error("MailIndexer: failed to record initial checkpoint: \(error.localizedDescription)")
+            }
             watermark = initialWatermark
         }
         cursor.report.warnings.append(

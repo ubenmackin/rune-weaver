@@ -218,6 +218,16 @@ private struct WorkerSettle: Sendable {
     }
 }
 
+/// Worker inputs with fresh sessions and the audit row identifiers parallel to them.
+private struct RecordedSwarmRows: Sendable {
+    /// Worker inputs with fresh sessions parallel to the subtask order.
+    let inputs: [UserInput]
+    /// Identifier of the parent swarm audit row.
+    let parentRowID: UUID
+    /// Identifiers of child worker audit rows parallel to the subtask order.
+    let childRowIDs: [UUID]
+}
+
 /// Resumes a checked continuation exactly once across the background review
 /// race. The provider call and the timeout both try to resume; the first wins
 /// and every later attempt is dropped, so the merge pass returns on
@@ -415,11 +425,14 @@ public actor FanOutEngine {
         )
         // Parent plus child audit rows land before the first turn so the
         // Runs tab renders the swarm while workers are in flight.
-        let (workerInputs, parentRowID, childRowIDs) = await recordSwarmRows(
+        let swarmRows = await recordSwarmRows(
             subtasks: subtasks,
             originSessionID: originSessionID,
             allowedTools: allowedTools
         )
+        let workerInputs = swarmRows.inputs
+        let parentRowID = swarmRows.parentRowID
+        let childRowIDs = swarmRows.childRowIDs
 
         // Workers run concurrently under the group so a slow worker never
         // delays its siblings. Each child races the bounded wall-clock
@@ -568,7 +581,7 @@ public actor FanOutEngine {
         subtasks: [FanOutSubtask],
         originSessionID: UUID,
         allowedTools: [String]?
-    ) async -> (inputs: [UserInput], parentRowID: UUID, childRowIDs: [UUID]) {
+    ) async -> RecordedSwarmRows {
         let parentRowID = await runLogs.appendFanOutRow(
             kind: Self.parentRowKind,
             status: "running",
@@ -596,7 +609,11 @@ public actor FanOutEngine {
             )
             childRowIDs.append(rowID)
         }
-        return (workerInputs, parentRowID, childRowIDs)
+        return RecordedSwarmRows(
+            inputs: workerInputs,
+            parentRowID: parentRowID,
+            childRowIDs: childRowIDs
+        )
     }
 }
 
@@ -857,7 +874,7 @@ extension FanOutEngine {
         outputs: [UUID: FanOutWorkerOutput],
         conflictedIDs: Set<UUID>
     ) async -> MergeReview {
-        guard let reviewer else { return .unwired }
+        guard reviewer != nil else { return .unwired }
         // A review with nothing to read is wasted spend: all workers failed
         // (or produced nothing), so the failure digest is the honest summary
         // without a model round.

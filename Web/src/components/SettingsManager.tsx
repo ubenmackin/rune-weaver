@@ -773,6 +773,17 @@ export default function SettingsManager() {
     formatAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS)
   );
   const [filesRequireApprovalOnDeny, setFilesRequireApprovalOnDeny] = useState(true);
+  // Declarative Security Policy (policy.toml)
+  const [policyData, setPolicyData] = useState<any>(null);
+  const [policyRawToml, setPolicyRawToml] = useState<string>("");
+  const [policyPath, setPolicyPath] = useState<string>("");
+  const [policyLoadedFromDisk, setPolicyLoadedFromDisk] = useState<boolean>(false);
+  const [policyViolations, setPolicyViolations] = useState<string[]>([]);
+  const [policyEditMode, setPolicyEditMode] = useState<"visual" | "raw">("visual");
+  const [policyLoading, setPolicyLoading] = useState<boolean>(false);
+  const [policySaving, setPolicySaving] = useState<boolean>(false);
+  const [policySaveSuccess, setPolicySaveSuccess] = useState<boolean>(false);
+  const [policyError, setPolicyError] = useState<string | null>(null);
   // Form-local reset confirmations: resetting only rewrites the in-progress
   // form and never persists until Save, so the modal must state counts and
   // the until-Save nature explicitly.
@@ -2317,6 +2328,88 @@ export default function SettingsManager() {
       void refreshBootBind();
     }
   }, [activeTab, refreshBootBind]);
+
+  // Policy routes sit behind the same owner gate as every other settings
+  // route, so the three policy calls carry the shared auth convention
+  // (bearer when configured, cookie otherwise) instead of a bare fetch that
+  // would 401 in token mode (headless/tests).
+  const fetchPolicy = useCallback(async () => {
+    setPolicyLoading(true);
+    setPolicyError(null);
+    try {
+      const res = await fetch("/settings/policy", {
+        headers: authHeaders(),
+        credentials: "same-origin",
+      });
+      if (!res.ok) {
+        throw new Error(`Failed to load policy: ${res.statusText}`);
+      }
+      const data = await res.json();
+      setPolicyData(data.policy);
+      setPolicyRawToml(data.raw_toml || "");
+      setPolicyPath(data.path || "");
+      setPolicyLoadedFromDisk(!!data.loaded_from_disk);
+      setPolicyViolations(data.violations || []);
+    } catch (err: any) {
+      setPolicyError(err.message || "Failed to load security policy.");
+    } finally {
+      setPolicyLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "security") {
+      void fetchPolicy();
+    }
+  }, [activeTab, fetchPolicy]);
+
+  const handleSavePolicy = async () => {
+    setPolicySaving(true);
+    setPolicyError(null);
+    setPolicySaveSuccess(false);
+    try {
+      const res = await fetch("/settings/policy", {
+        method: "PUT",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        credentials: "same-origin",
+        body: JSON.stringify({ raw_toml: policyRawToml }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.reason || "Failed to save policy.");
+      }
+      setPolicyData(data.policy);
+      setPolicyRawToml(data.raw_toml || "");
+      setPolicyLoadedFromDisk(true);
+      setPolicyViolations(data.violations || []);
+      setPolicySaveSuccess(true);
+      setTimeout(() => setPolicySaveSuccess(false), 3000);
+    } catch (err: any) {
+      setPolicyError(err.message || "Failed to save security policy.");
+    } finally {
+      setPolicySaving(false);
+    }
+  };
+
+  const handleVerifyPolicy = async () => {
+    setPolicyError(null);
+    try {
+      const res = await fetch("/settings/policy/verify", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        credentials: "same-origin",
+        body: JSON.stringify({ raw_toml: policyRawToml }),
+      });
+      const data = await res.json();
+      setPolicyViolations(data.violations || []);
+      if (data.valid) {
+        setPolicySaveSuccess(true);
+        setTimeout(() => setPolicySaveSuccess(false), 2000);
+      }
+    } catch (err: any) {
+      setPolicyError(err.message || "Verification failed.");
+    }
+  };
 
   // Clears the sticky restart flag once the saved file converges with the
   // re-anchored boot: the health poll moves live to the new boot after an
@@ -5080,6 +5173,227 @@ export default function SettingsManager() {
                   {rotateError}
                 </div>
               ) : null}
+            </div>
+
+            {/* Declarative Security Policy (policy.toml) */}
+            <div className="settings-section card" data-testid="security-policy-section">
+              <div className="settings-section-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px" }}>
+                <div className="settings-section-title-group" style={{ maxWidth: "600px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <KeyIcon size={18} style={{ color: "var(--accent-color, #6366f1)" }} />
+                    <h3 style={{ margin: 0 }}>Declarative Security Policy (<code>policy.toml</code>)</h3>
+                  </div>
+                  <p className="settings-section-hint" style={{ marginTop: "4px" }}>
+                    OpenShell-grade declarative boundary enforcement. Outbound network egress, target-bound credentials, and formal mathematical safety invariants.
+                    {policyPath ? <span className="muted text-sm" style={{ display: "block", marginTop: "2px" }}>Location: <code>{policyPath}</code> ({policyLoadedFromDisk ? "Customized" : "Factory Defaults"})</span> : null}
+                  </p>
+                </div>
+                <div className="row" style={{ gap: "8px", alignItems: "center" }}>
+                  <div className="segmented-control" style={{ display: "inline-flex", borderRadius: "6px", overflow: "hidden", border: "1px solid var(--border-color, #2d3748)" }}>
+                    <button
+                      type="button"
+                      className={`btn-sm ${policyEditMode === "visual" ? "primary" : "ghost"}`}
+                      style={{ padding: "4px 10px", fontSize: "0.8rem", borderRadius: 0 }}
+                      onClick={() => setPolicyEditMode("visual")}
+                    >
+                      Visual Overview
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn-sm ${policyEditMode === "raw" ? "primary" : "ghost"}`}
+                      style={{ padding: "4px 10px", fontSize: "0.8rem", borderRadius: 0 }}
+                      onClick={() => setPolicyEditMode("raw")}
+                    >
+                      Raw TOML Editor
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    className="ghost icon-text-btn btn-sm"
+                    onClick={handleVerifyPolicy}
+                    disabled={policyLoading || policySaving}
+                    title="Run formal invariant verifier on policy"
+                  >
+                    <CheckIcon size={14} />
+                    <span>Verify</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="primary icon-text-btn btn-sm"
+                    onClick={handleSavePolicy}
+                    disabled={policyLoading || policySaving}
+                  >
+                    <RefreshIcon size={14} className={policySaving ? "spin" : ""} />
+                    <span>{policySaving ? "Saving…" : "Save Policy"}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Invariant Verification Status Banner */}
+              <div style={{ marginTop: "12px", marginBottom: "14px" }}>
+                {policyViolations.length === 0 ? (
+                  <div style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "8px 12px",
+                    borderRadius: "6px",
+                    backgroundColor: "rgba(16, 185, 129, 0.1)",
+                    border: "1px solid rgba(16, 185, 129, 0.25)",
+                    color: "var(--success-color, #10b981)",
+                    fontSize: "0.85rem",
+                  }}>
+                    <CheckIcon size={16} />
+                    <span><strong>All 4 Formal Security Invariants Verified:</strong> Path Containment Safety, Credential Binding Confinement, Rule Shadow Prevention, and Critical Tool Lock hold.</span>
+                  </div>
+                ) : (
+                  <div style={{
+                    padding: "10px 14px",
+                    borderRadius: "6px",
+                    backgroundColor: "rgba(239, 68, 68, 0.1)",
+                    border: "1px solid rgba(239, 68, 68, 0.3)",
+                    color: "var(--danger-color, #ef4444)",
+                    fontSize: "0.85rem",
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "bold", marginBottom: "4px" }}>
+                      <AlertTriangleIcon size={16} />
+                      <span>{policyViolations.length} Invariant Violation(s) Detected (Policy will fall back to safe default):</span>
+                    </div>
+                    <ul style={{ margin: "4px 0 0 20px", padding: 0 }}>
+                      {policyViolations.map((v, i) => (
+                        <li key={i} style={{ marginBottom: "2px" }}>{v}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+
+              {policySaveSuccess ? (
+                <div style={{ padding: "8px 12px", borderRadius: "6px", backgroundColor: "rgba(16, 185, 129, 0.15)", color: "#10b981", fontSize: "0.85rem", marginBottom: "12px" }}>
+                  ✓ Security policy saved successfully. Invariants re-verified.
+                </div>
+              ) : null}
+
+              {policyError ? (
+                <div className="error-banner" style={{ marginBottom: "12px" }}>
+                  {policyError}
+                </div>
+              ) : null}
+
+              {policyEditMode === "visual" ? (
+                <div className="policy-visual-layout" style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+                  {/* Network Egress Subsection */}
+                  <div style={{ padding: "12px", borderRadius: "6px", backgroundColor: "var(--bg-card-nested, rgba(255,255,255,0.03))", border: "1px solid var(--border-color, #2d3748)" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+                      <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
+                        <GlobeIcon size={15} />
+                        <span>Network Egress Boundaries</span>
+                      </h4>
+                      <span className="badge" style={{ fontSize: "0.75rem", padding: "2px 8px", borderRadius: "4px", backgroundColor: policyData?.network?.mode === "allowlist_only" ? "rgba(99, 102, 241, 0.2)" : "rgba(245, 158, 11, 0.2)", color: policyData?.network?.mode === "allowlist_only" ? "#818cf8" : "#fbbf24" }}>
+                        Mode: {policyData?.network?.mode || "allowlist_only"}
+                      </span>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", fontSize: "0.82rem" }}>
+                      <div>
+                        <div style={{ fontWeight: 600, marginBottom: "4px", color: "var(--text-muted, #94a3b8)" }}>Allowed Domains ({policyData?.network?.allowed_domains?.length || 0})</div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+                          {(policyData?.network?.allowed_domains || []).map((d: string) => (
+                            <span key={d} style={{ padding: "2px 6px", borderRadius: "4px", backgroundColor: "rgba(99, 102, 241, 0.15)", border: "1px solid rgba(99, 102, 241, 0.3)", fontFamily: "monospace" }}>{d}</span>
+                          ))}
+                          {(!policyData?.network?.allowed_domains || policyData.network.allowed_domains.length === 0) ? <span className="muted">None configured</span> : null}
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{ fontWeight: 600, marginBottom: "4px", color: "var(--text-muted, #94a3b8)" }}>Blocked Domains ({policyData?.network?.blocked_domains?.length || 0})</div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+                          {(policyData?.network?.blocked_domains || []).map((d: string) => (
+                            <span key={d} style={{ padding: "2px 6px", borderRadius: "4px", backgroundColor: "rgba(239, 68, 68, 0.15)", border: "1px solid rgba(239, 68, 68, 0.3)", color: "#f87171", fontFamily: "monospace" }}>{d}</span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Target-Bound Credentials Subsection */}
+                  <div style={{ padding: "12px", borderRadius: "6px", backgroundColor: "var(--bg-card-nested, rgba(255,255,255,0.03))", border: "1px solid var(--border-color, #2d3748)" }}>
+                    <div style={{ marginBottom: "8px" }}>
+                      <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
+                        <KeyIcon size={15} />
+                        <span>Target-Bound Credentials</span>
+                      </h4>
+                      <p className="settings-section-hint" style={{ margin: "2px 0 0 0" }}>
+                        Credentials bound to authorized endpoints. When the model invokes a tool with <code>rwsecret:&lt;key&gt;</code>, the egress supervisor verifies destination host, HTTP method, and path before Keychain access.
+                      </p>
+                    </div>
+
+                    {policyData?.credentials && Object.keys(policyData.credentials).length > 0 ? (
+                      <div style={{ overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem", textAlign: "left" }}>
+                          <thead>
+                            <tr style={{ borderBottom: "1px solid var(--border-color, #2d3748)", color: "var(--text-muted, #94a3b8)" }}>
+                              <th style={{ padding: "6px 8px" }}>Secret Key</th>
+                              <th style={{ padding: "6px 8px" }}>Allowed Destination Hosts</th>
+                              <th style={{ padding: "6px 8px" }}>Allowed Methods</th>
+                              <th style={{ padding: "6px 8px" }}>Path Prefixes</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {Object.entries(policyData.credentials).map(([k, v]: [string, any]) => (
+                              <tr key={k} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                                <td style={{ padding: "6px 8px", fontFamily: "monospace", fontWeight: 600 }}><code>{k}</code></td>
+                                <td style={{ padding: "6px 8px" }}>
+                                  {(v.allowed_hosts || []).map((h: string) => (
+                                    <span key={h} style={{ display: "inline-block", padding: "1px 5px", margin: "1px", borderRadius: "3px", backgroundColor: "rgba(255,255,255,0.06)", fontFamily: "monospace" }}>{h}</span>
+                                  ))}
+                                  {(!v.allowed_hosts || v.allowed_hosts.length === 0) ? <span className="danger text-sm">None (Denied)</span> : null}
+                                </td>
+                                <td style={{ padding: "6px 8px" }}>
+                                  {(v.allowed_methods && v.allowed_methods.length > 0) ? v.allowed_methods.join(", ") : <span className="muted">Any</span>}
+                                </td>
+                                <td style={{ padding: "6px 8px" }}>
+                                  {(v.allowed_path_prefixes && v.allowed_path_prefixes.length > 0) ? v.allowed_path_prefixes.join(", ") : <span className="muted">Any</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <p className="muted text-sm" style={{ margin: "8px 0 0 0" }}>
+                        No credential bindings declared. Add <code>[credentials.&lt;KEY&gt;]</code> in the Raw TOML Editor to authorize secrets for specific hosts.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                /* Raw TOML Editor */
+                <div className="form-group" style={{ marginTop: "4px" }}>
+                  <label htmlFor="policy-raw-toml-textarea" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                    <span>Edit <code>policy.toml</code> directly:</span>
+                    <span className="muted text-sm">Validates against 4 formal invariants on save</span>
+                  </label>
+                  <textarea
+                    id="policy-raw-toml-textarea"
+                    className="input-field"
+                    style={{
+                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                      fontSize: "0.84rem",
+                      lineHeight: "1.45",
+                      minHeight: "260px",
+                      whiteSpace: "pre",
+                      backgroundColor: "var(--bg-editor, #0f172a)",
+                      color: "#f8fafc",
+                    }}
+                    value={policyRawToml}
+                    onChange={(e) => setPolicyRawToml(e.target.value)}
+                    placeholder="# Enter TOML policy content..."
+                    rows={14}
+                  />
+                  <span className="form-group-hint">
+                    Syntax errors or invariant violations prevent committing and keep the existing safe policy active.
+                  </span>
+                </div>
+              )}
             </div>
           </>
         )}

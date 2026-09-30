@@ -396,7 +396,11 @@ public actor DocIndexStore {
         try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.reset(dbPath: dbPath)
         }
-        try? MailIndexCheckpointStore.reset()
+        do {
+            try MailIndexCheckpointStore.reset()
+        } catch {
+            RuneWeaverLog.stores.error("DocIndexStore: failed to reset MailIndexCheckpointStore: \(error.localizedDescription)")
+        }
         invalidateStatusCache()
     }
 

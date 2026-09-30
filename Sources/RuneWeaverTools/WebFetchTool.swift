@@ -71,7 +71,8 @@ public enum WebURLSafety: Sendable {
 /// Pure delegation over `ApiSSRFGuard`: the canonical IPv4 parser
 /// (`canonicalIPv4Octets` across decimal, hex, octal, and short forms), the
 /// sensitive-range table (`isSensitiveIPv4Value` covering loopback,
-/// link-local, private RFC 1918, and `0.0.0.0/8`), the IPv6 checks, and the
+/// link-local, private RFC 1918, shared address space, other special-purpose
+/// reserved blocks, and `0.0.0.0/8`), the IPv6 checks, and the
 /// metadata-host set all live single-source in `ApiSSRFGuard`. Fetch passes no
 /// LLM origins so only the exact configured `searxng_url` origin is exempt;
 /// no second range pass lives here, so obfuscated spellings cannot drift

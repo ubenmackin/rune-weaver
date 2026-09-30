@@ -733,9 +733,9 @@ public extension SearXNGEnsurer {
     }
 
     /// Probes the SearXNG base URL with a short timeout.
-    /// Surfaces 3xx instead of auto-following so the probe shares the manual
-    /// redirect policy with `web.fetch`/`api.request` (`NoRedirectDelegate`
-    /// plus per-hop re-validation there); a safe start can never launder an
+    /// Surfaces 3xx instead of auto-following so the probe shares the no-follow
+    /// session policy with `web.fetch` (`NoRedirectDelegate` plus per-hop
+    /// re-validation there); a safe start can never launder an
     /// unsafe redirect through the session follower.
     /// - Parameter baseURL: Configured `searxng_url`.
     /// - Returns: True when the engine answers with 2xx/3xx.

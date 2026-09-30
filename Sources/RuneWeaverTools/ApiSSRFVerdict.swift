@@ -1,17 +1,165 @@
-// Rune Weaver Tools — SSRF pre-DNS verdict and resolved-address vetting.
+// Rune Weaver Tools — SSRF pre-DNS verdict, resolved-address vetting, and dial pins.
 //
 // Purpose: literal-only refusal stage plus fail-closed vetting of resolved
 // addresses, so hostnames that cannot prove every address dialable never dial.
 // Scope: pure parsing and range checks over the literal host plus the shared
 // resolved-range table; DNS resolution and the bounded pool stay with the gate
-// in `ApiSSRFGuard`. Architectural role: single-source verdict layer backing
-// `ApiSSRFGuard`; the sync engine and the async inline stage share this stage
-// so literal and resolved decisions cannot diverge between callers.
+// in `ApiSSRFGuard`. Every allowed verdict carries a dial pin — the numeric
+// address(es) the resolved-range table proved — so callers can dial the proof
+// instead of re-resolving the hostname at connect time (DNS rebinding).
+// Architectural role: single-source verdict layer backing `ApiSSRFGuard`; the
+// sync engine, the async inline stage, and the async pin-producing path share
+// this stage so literal and resolved decisions cannot diverge between callers.
 
 import Foundation
 import RuneWeaverCore
 
+/// Dial pin proven by the SSRF gate for one destination.
+///
+/// The pin is the dial-time half of the SSRF contract: it names the original
+/// host identity (preserved for the HTTP `Host` header and the TLS server
+/// name) plus the numeric addresses every one of which passed the
+/// resolved-range table, so a transport can connect without consulting the
+/// resolver again.
+public struct SSRFDialPin: Sendable, Equatable {
+    /// Original host, preserved for the `Host` header and TLS server name.
+    public let host: String
+    /// Numeric addresses proven dialable by the resolved-range vetting.
+    public let addresses: [String]
+    /// Effective destination port from the URL.
+    public let port: Int
+    /// Whether the hop dials TLS (`https`).
+    public let isSecure: Bool
+
+    /// Creates a dial pin.
+    public init(host: String, addresses: [String], port: Int, isSecure: Bool) {
+        self.host = host
+        self.addresses = addresses
+        self.port = port
+        self.isSecure = isSecure
+    }
+}
+
+/// Outcome of an async SSRF vetting pass.
+public enum ApiSSRFVetting: Sendable, Equatable {
+    /// The URL may be dialed; the transport must dial the pin's addresses.
+    case dialable(SSRFDialPin)
+    /// The URL was refused with a human-readable reason.
+    case refused(String)
+
+    /// Refusal reason, or nil when dialable.
+    public var refusal: String? {
+        if case let .refused(reason) = self {
+            return reason
+        }
+        return nil
+    }
+}
+
 extension ApiSSRFGuard {
+    /// Async vetting against an explicit exemption set, returning the dial pin.
+    /// Literal checks run inline on the calling task while DNS hops to the
+    /// bounded pool with a fail-closed timeout, so the cooperative pool never
+    /// stalls on a wedged resolver; an allowed verdict pins the proven
+    /// addresses so the dial never re-resolves the name.
+    /// - Parameters:
+    ///   - rawURL: Candidate URL.
+    ///   - allowlistedOrigins: Precomputed `host:port` exemptions that may be dialed.
+    /// - Returns: Dialable pin, or a refusal reason.
+    public static func vetAsync(
+        for rawURL: String,
+        allowlistedOrigins: Set<String> = []
+    ) async -> ApiSSRFVetting {
+        await vet(for: rawURL, origins: allowlistedOrigins, hasLLMOrigins: false)
+    }
+
+    /// Async vetting for a URL, returning the dial pin.
+    /// The verdict stays point-in-time only in the sense that it is taken at
+    /// vetting time: the returned pin closes the race by naming the addresses
+    /// the dial must use, and a later rebinding answer cannot change them.
+    public static func vetAsync(
+        for rawURL: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = []
+    ) async -> ApiSSRFVetting {
+        let origins = allowlistedOrigins(browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs)
+        let hasLLM = llmServerURLs.contains(where: { NormalizedText.value($0) != nil })
+        return await vet(for: rawURL, origins: origins, hasLLMOrigins: hasLLM)
+    }
+
+    /// Shared async vetting engine over a precomputed exemption set.
+    /// The pre-DNS stage runs inline (literal refusals never wait on DNS) and
+    /// only a hostname needing proof hops to the bounded resolver pool; an
+    /// allowed literal becomes a pin directly, while any other allowed host
+    /// (the `localhost` loopback equivalence) still re-enters resolved-range
+    /// vetting so the pin is always numeric.
+    /// - Parameters:
+    ///   - rawURL: Candidate URL.
+    ///   - origins: Precomputed `host:port` exemptions that may be dialed.
+    ///   - hasLLMOrigins: Whether LLM endpoints contribute exemptions, for honest wording.
+    /// - Returns: Dialable pin, or a refusal reason.
+    static func vet(for rawURL: String, origins: Set<String>, hasLLMOrigins: Bool) async -> ApiSSRFVetting {
+        switch preDNSOutcome(for: rawURL, allowlistedOrigins: origins, hasLLMOrigins: hasLLMOrigins) {
+        case let .denied(reason):
+            return .refused(reason)
+        case .allowed:
+            guard let url = parsedVettingURL(rawURL) else {
+                return .refused(unverifiedDenial(for: rawURL))
+            }
+            guard let pin = staticLiteralPin(for: url) else {
+                // The pre-DNS stage allows numeric literals and the
+                // `localhost` loopback equivalence; the latter still needs a
+                // numeric pin, so it proves its addresses through the same
+                // resolved-range vetting instead of dialing a name.
+                guard let host = url.host, !host.isEmpty else {
+                    return .refused(unverifiedDenial(for: rawURL))
+                }
+                return await dnsVettingAsync(host: host, origins: origins, url: url)
+            }
+            return .dialable(pin)
+        case let .needsDNS(host):
+            guard let url = parsedVettingURL(rawURL) else {
+                return .refused(unverifiedDenial(for: host))
+            }
+            return await dnsVettingAsync(host: host, origins: origins, url: url)
+        }
+    }
+
+    /// Parses a candidate URL to the shape whose pin will be built.
+    /// - Parameter rawURL: Candidate URL string.
+    /// - Returns: Parsed URL with a host, or nil when the string has none.
+    static func parsedVettingURL(_ rawURL: String) -> URL? {
+        guard let trimmed = NormalizedText.value(rawURL),
+              let url = URL(string: trimmed),
+              let host = url.host,
+              !host.isEmpty
+        else {
+            return nil
+        }
+        return url
+    }
+
+    /// Pin for a numeric literal host that carries no resolver alias to rebind.
+    /// - Parameter url: Parsed URL whose host is already vetted.
+    /// - Returns: Pin naming the canonical literal, or nil for DNS names.
+    static func staticLiteralPin(for url: URL) -> SSRFDialPin? {
+        guard let host = url.host, !host.isEmpty, isIPAddressLiteral(host) else { return nil }
+        // Obfuscated decimal, hex, octal, and short spellings canonicalize to
+        // the same numeric literal the range checks classified, so the wire
+        // dial cannot depend on how the spelling was written.
+        let canonical = normalizedHost(host)
+        guard !canonical.isEmpty, canonicalIPv4Octets(canonical) != nil || ipv6Hextets(canonical) != nil else {
+            return nil
+        }
+        return SSRFDialPin(
+            host: host,
+            addresses: [canonical],
+            port: effectivePort(for: url),
+            isSecure: url.scheme?.lowercased() == "https"
+        )
+    }
+
     /// Non-DNS verdict shared by the sync engine and the async inline stage.
     /// Pure parsing and range checks only, so awaiting tasks can run it
     /// without hopping queues; anything needing the resolver returns
@@ -55,6 +203,12 @@ extension ApiSSRFGuard {
         if isLinkLocalIPv6(host) {
             return .denied("SSRF denied: refusing link-local address '\(host)' (fe80::/10).")
         }
+        // A NAT64, 6to4, or IPv4-compatible spelling of link-local or metadata
+        // space refuses before any allowlist exemption, mirroring the direct
+        // spellings above: the decoded address decides, not the spelling.
+        if let embeddedDenial = embeddedNeverExemptDenial(for: host) {
+            return .denied(embeddedDenial)
+        }
         if isLoopbackHost(host) {
             if isOriginAllowed(url: url, origins: origins) {
                 return .allowed
@@ -74,7 +228,11 @@ extension ApiSSRFGuard {
             }
             return .denied("SSRF denied: refusing private or reserved IPv4 host '\(host)'.")
         }
-        if isSensitiveIPv6Host(canonical) {
+        // Classify the literal's own prefix as well as the normalized form:
+        // normalization collapses a dotted tail onto its dotted IPv4, which
+        // would drop the link-local, unique-local, or embedded-translation
+        // verdict the literal's prefix carries.
+        if isSensitiveIPv6Host(host) || isSensitiveIPv6Host(canonical) {
             if isOriginAllowed(url: url, origins: origins) {
                 return .allowed
             }
@@ -82,7 +240,9 @@ extension ApiSSRFGuard {
         }
         if isIPAddressLiteral(host) {
             // Literals carry no resolver alias to rebind, so the allowlist verdict above
-            // plus the public-literal default below settle them without DNS.
+            // plus the public-literal default below settle them without DNS. Sensitive
+            // IPv4-embedded prefixes never reach here: their decoded address was
+            // already classified above, before the public-literal allowance.
             return .allowed
         }
         if isOriginAllowed(url: url, origins: origins) {
@@ -126,6 +286,29 @@ extension ApiSSRFGuard {
     /// - Returns: Refusal reason to surface to the caller.
     static func unverifiedDenial(for host: String) -> String {
         "SSRF denied: hostname '\(host)' could not be verified (DNS unavailable; fail closed)."
+    }
+
+    /// Never-exempt refusal for the address an IPv4-embedding prefix carries.
+    ///
+    /// A NAT64 (`64:ff9b::/96` and local-use `64:ff9b:1::/48`), 6to4
+    /// (`2002::/16`), IPv4-compatible (`::/96`), mapped, or translated
+    /// spelling decodes to the IPv4 address it embeds; a decoded link-local
+    /// or metadata target refuses even for an allowlisted name, exactly like
+    /// the direct spelling, so an alternate spelling can never launder a
+    /// blocked destination past the exemption. Private, loopback, and public
+    /// decoded addresses return nil and follow the ordinary exemption path in
+    /// each caller.
+    /// - Parameter host: Address literal to decode.
+    /// - Returns: Refusal reason, or nil when no never-exempt target embeds.
+    static func embeddedNeverExemptDenial(for host: String) -> String? {
+        guard let embedded = ApiSSRFAddresses.embeddedIPv4Literal(host) else { return nil }
+        if isLinkLocalIPv4(embedded) {
+            return "SSRF denied: refusing link-local address '\(host)' (IPv4-embedded)."
+        }
+        if isMetadataHost(embedded) {
+            return "SSRF denied: refusing metadata host '\(host)'."
+        }
+        return nil
     }
 
     /// Reports whether a URL's origin or host matches any allowlisted origin or pattern.
@@ -223,6 +406,7 @@ extension ApiSSRFGuard {
         return false
     }
 
+    /// Vets one address list against the shared resolved-range table and, when
     /// Vets one address list against the shared resolved-range table.
     /// Centralizes the range decision so the system resolver and the canned
     /// debug proof cannot diverge on what counts as blocked.
@@ -231,7 +415,11 @@ extension ApiSSRFGuard {
     ///   - addresses: Resolved IP literals to vet.
     ///   - origins: Precomputed allowed origins/hosts that exempt internal IPs.
     /// - Returns: Refusal reason, or nil when every address is dialable.
-    static func vettedIPListDenial(host: String, addresses: [String], origins: Set<String> = []) -> String? {
+    static func vettedIPListDenial(
+        host: String,
+        addresses: [String],
+        origins: Set<String> = []
+    ) -> String? {
         guard !addresses.isEmpty else {
             return unverifiedDenial(for: host)
         }
@@ -244,6 +432,13 @@ extension ApiSSRFGuard {
         }
         for ipAddress in addresses {
             if isLinkLocalIPv4(ipAddress) || isLinkLocalIPv6(ipAddress) || isMetadataHost(ipAddress) {
+                return "SSRF denied: hostname '\(host)' resolves to blocked address"
+            }
+            // An IPv4-embedding prefix is vetted as the address it carries:
+            // a NAT64, 6to4, or IPv4-compatible spelling of link-local or
+            // metadata space stays denied even for an allowlisted name,
+            // exactly like the direct spellings checked above.
+            if embeddedNeverExemptDenial(for: ipAddress) != nil {
                 return "SSRF denied: hostname '\(host)' resolves to blocked address"
             }
             if isLoopbackHost(ipAddress) {
@@ -259,7 +454,11 @@ extension ApiSSRFGuard {
                 }
                 return "SSRF denied: hostname '\(host)' resolves to blocked address"
             }
-            if isSensitiveIPv6Host(canonicalIP) {
+            // The literal's own prefix classifies before its normalized form:
+            // normalization collapses a dotted tail onto its dotted IPv4,
+            // which would drop the link-local, unique-local, or
+            // embedded-translation verdict the prefix carries.
+            if isSensitiveIPv6Host(ipAddress) || isSensitiveIPv6Host(canonicalIP) {
                 if hostAllowlisted || isHostAllowed(canonicalIP, origins: origins) {
                     continue
                 }
@@ -267,5 +466,36 @@ extension ApiSSRFGuard {
             }
         }
         return nil
+    }
+
+    /// Vets one address list against the shared resolved-range table and, when
+    /// every address clears, returns the dial pin naming them.
+    /// Centralizes the range decision so the system resolver and the canned
+    /// debug proof cannot diverge on what counts as blocked.
+    /// - Parameters:
+    ///   - host: Hostname the addresses were claimed for, for honest wording.
+    ///   - addresses: Resolved IP literals to vet.
+    ///   - origins: Precomputed allowed origins/hosts that exempt internal IPs.
+    ///   - url: Destination URL supplying the pin's port and scheme.
+    /// - Returns: Dialable pin, or the refusal reason.
+    static func vettedIPListVetting(
+        host: String,
+        addresses: [String],
+        origins: Set<String> = [],
+        url: URL
+    ) -> ApiSSRFVetting {
+        if let denial = vettedIPListDenial(host: host, addresses: addresses, origins: origins) {
+            return .refused(denial)
+        }
+        // Every address cleared, so the pin names the exact proof the dial
+        // must use; the transport never re-resolves the hostname.
+        return .dialable(
+            SSRFDialPin(
+                host: host,
+                addresses: addresses,
+                port: effectivePort(for: url),
+                isSecure: url.scheme?.lowercased() == "https"
+            )
+        )
     }
 }

@@ -236,12 +236,13 @@ struct DesktopToolsTests {
     }
 
     @Test
-    func `Builtin registration ships both desktop tools disabled`() async {
+    func `Builtin registration ships both desktop tools disabled`() async throws {
         // Boot-path contract: every tool registers, non-desktop tools stay
         // enabled, and desktop tools arrive disabled until the restore path
         // re-applies persisted rows with no config gate.
+        let policyStore = await ToolsTestSupport.makeTestPolicyStore()
         let bus = ToolBus()
-        await BuiltinToolPlugins.registerAll(on: bus)
+        try await BuiltinToolPlugins.registerAll(on: bus, policyStore: policyStore)
 
         #expect(await bus.tool(named: DesktopTools.screenshotToolName) != nil)
         #expect(await bus.tool(named: DesktopTools.actionToolName) != nil)

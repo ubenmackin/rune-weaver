@@ -335,7 +335,10 @@ struct SmokeHarnessTests {
         #expect(smokeExpected.isSubset(of: busNames), "Missing tools: \(smokeExpected.subtracting(busNames))")
         // Exhaustive registry mirrors the dedicated schema suite so smoke stays
         // honest when a new builtin lands: email plus memory plus files plus web.
-        let fullTools: [any Tool] = busTools + FilesTools.makeTools() + BuiltinToolPlugins.makeTools()
+        // The injected store keeps the mandatory egress supervisor hermetic.
+        let policyStore = await ToolsTestSupport.makeTestPolicyStore()
+        let networkTools = try await BuiltinToolPlugins.makeTools(policyStore: policyStore)
+        let fullTools: [any Tool] = busTools + FilesTools.makeTools() + networkTools
         let expected: Set<String> = Set(EmailTools.toolNames + MemoryTools.toolNames + FilesTools.toolNames + BuiltinToolPlugins.toolNames)
         let names = Set(fullTools.map(\.name))
         #expect(expected.isSubset(of: names), "Missing tools: \(expected.subtracting(names))")

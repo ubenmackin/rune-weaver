@@ -12,6 +12,11 @@
 // same invariant: registration rides the optional fan-out engine (nil means
 // unregistered), and a disabled `[fanout]` section still registers and fails
 // closed inside the tool with the honest disabled copy.
+//
+// `api.request` is the one exception to silent-nil defaults: the factory takes
+// `policyStore:` (nil builds and loads the factory default) and fails the
+// whole build closed when no verified policy is available, so no entry point
+// can register an unsupervised egress tool.
 
 import RuneWeaverCore
 
@@ -48,7 +53,13 @@ public enum BuiltinToolPlugins {
     ///   - apiTransport: Hermetic API transport for tests; live session when nil.
     ///   - ensurer: Lifecycle ensurer for tests; shared actor when nil.
     ///   - secrets: Shared secrets backing surrogate resolution; fresh instance when nil.
+    ///   - policyStore: Shared security policy store. Nil constructs and loads
+    ///     the factory default, which reads `~/.runeweaver/policy.toml`, seeds
+    ///     safe deny-by-default defaults on first run, and fails closed when
+    ///     the file cannot be verified.
     /// - Returns: Tools in registration order.
+    /// - Throws: `PolicyInvariantError` when no verified policy is available;
+    ///   an unsupervised `api.request` is never registered.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
@@ -58,9 +69,17 @@ public enum BuiltinToolPlugins {
         fetchTransport: (any WebFetchTransport)? = nil,
         apiTransport: (any ApiRequestTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil,
-        secrets: SecretsManager? = nil
-    ) -> [any Tool] {
+        secrets: SecretsManager? = nil,
+        policyStore: PolicyStore? = nil
+    ) async throws -> [any Tool] {
         let origins = ApiSSRFGuard.allowlistedOrigins(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs
+        )
+        let supervisor = try await makeEgressSupervisor(
+            policyStore: policyStore,
+            secrets: secrets,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs
@@ -80,11 +99,8 @@ public enum BuiltinToolPlugins {
                 allowlistedOrigins: origins
             )
             + ApiRequestTools.makeTools(
-                browserConfig: browserConfig,
-                mediaConfig: mediaConfig,
-                llmServerURLs: llmServerURLs,
-                transport: apiTransport,
-                secrets: secrets
+                supervisor: supervisor,
+                transport: apiTransport
             )
     }
 
@@ -101,6 +117,10 @@ public enum BuiltinToolPlugins {
     /// the honest disabled copy. The read-only subset the workers get derives from
     /// the built registry snapshot at this point, so the fan-out tool is appended
     /// after every other suite and the subset covers everything this install ships.
+    /// - Parameter policyStore: Shared security policy store; nil builds and
+    ///   loads the factory default. Either way exactly one store instance and
+    ///   one egress supervisor back the `api.request` registration.
+    /// - Throws: `PolicyInvariantError` when no verified policy is available.
     public static func makeAllTools(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -130,8 +150,9 @@ public enum BuiltinToolPlugins {
         messagesGateway: (any MessagesGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         stagedFilesStore: StagedFilesStore? = nil,
-        fanOutEngine: FanOutEngine? = nil
-    ) -> [any Tool] {
+        fanOutEngine: FanOutEngine? = nil,
+        policyStore: PolicyStore? = nil
+    ) async throws -> [any Tool] {
         var tools: [any Tool] = []
         if let emailConfig {
             // Forward the same `[files]` policy the Files tools use so the
@@ -159,7 +180,7 @@ public enum BuiltinToolPlugins {
                 goalsConfig: goalsConfig
             )
         }
-        tools += makeTools(
+        tools += try await makeTools(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
@@ -168,7 +189,8 @@ public enum BuiltinToolPlugins {
             fetchTransport: fetchTransport,
             apiTransport: apiTransport,
             ensurer: ensurer,
-            secrets: secrets
+            secrets: secrets,
+            policyStore: policyStore
         )
         if let mediaConfig {
             tools += MediaTools.makeTools(mediaConfig: mediaConfig, transport: mediaTransport, secrets: mediaSecrets)
@@ -193,6 +215,9 @@ public enum BuiltinToolPlugins {
     }
 
     /// Convenience overload building all tools from a unified `RuneWeaverConfig`.
+    /// - Parameter policyStore: Shared security policy store; nil builds and
+    ///   loads the factory default.
+    /// - Throws: `PolicyInvariantError` when no verified policy is available.
     public static func makeAllTools(
         config: RuneWeaverConfig,
         memoryEngine: MemoryEngine? = nil,
@@ -208,10 +233,11 @@ public enum BuiltinToolPlugins {
         goalEngine: GoalEngine? = nil,
         goalStore: GoalStore? = nil,
         goalConversations: ConversationManager? = nil,
-        fanOutEngine: FanOutEngine? = nil
-    ) -> [any Tool] {
+        fanOutEngine: FanOutEngine? = nil,
+        policyStore: PolicyStore? = nil
+    ) async throws -> [any Tool] {
         let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
-        return makeAllTools(
+        return try await makeAllTools(
             emailConfig: config.email,
             filesConfig: config.files,
             bashConfig: config.bash,
@@ -235,7 +261,8 @@ public enum BuiltinToolPlugins {
             goalStore: goalStore,
             goalConversations: goalConversations,
             goalsConfig: config.goals,
-            fanOutEngine: fanOutEngine
+            fanOutEngine: fanOutEngine,
+            policyStore: policyStore
         )
     }
 
@@ -252,6 +279,10 @@ public enum BuiltinToolPlugins {
     /// Fan-out tools follow the same invariant: they register only when the
     /// fan-out engine arrives, and a disabled `[fanout]` section still registers
     /// with the engine so the honest disabled copy (not a bus-disabled line) answers.
+    /// - Parameter policyStore: Shared security policy store; nil builds and
+    ///   loads the factory default before any tool registers, so a boot can
+    ///   never leave an unsupervised `api.request` on the bus.
+    /// - Throws: `PolicyInvariantError` when no verified policy is available.
     public static func registerAll(
         on bus: ToolBus,
         emailConfig: EmailConfig? = nil,
@@ -282,10 +313,11 @@ public enum BuiltinToolPlugins {
         messagesGateway: (any MessagesGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         stagedFilesStore: StagedFilesStore? = nil,
-        fanOutEngine: FanOutEngine? = nil
-    ) async {
+        fanOutEngine: FanOutEngine? = nil,
+        policyStore: PolicyStore? = nil
+    ) async throws {
         let desktopNames = Set(DesktopTools.allToolNames)
-        for tool in makeAllTools(
+        for tool in try await makeAllTools(
             emailConfig: emailConfig,
             filesConfig: filesConfig,
             bashConfig: bashConfig,
@@ -314,7 +346,8 @@ public enum BuiltinToolPlugins {
             messagesGateway: messagesGateway,
             chatDatabasePath: chatDatabasePath,
             stagedFilesStore: stagedFilesStore,
-            fanOutEngine: fanOutEngine
+            fanOutEngine: fanOutEngine,
+            policyStore: policyStore
         ) {
             // Every other builtin keeps the enabled-by-default registration;
             // desktop tools ship disabled so only an operator-enabled tool
@@ -324,5 +357,31 @@ public enum BuiltinToolPlugins {
         if memoryEngine != nil {
             await MemoryTools.registerMemoryAliases(on: bus)
         }
+    }
+
+    /// Resolves the one policy store and builds the mandatory egress supervisor.
+    ///
+    /// A caller-injected store is used as-is so the process keeps exactly one
+    /// instance (an HTTP policy write then reaches the supervisor without a
+    /// restart); a nil store constructs and loads the factory default, letting
+    /// a missing file seed the deny-by-default posture while corruption
+    /// surfaces as a thrown `PolicyInvariantError`. Either way the supervisor
+    /// factory re-verifies the snapshot, so no unsupervised registry is built.
+    /// - Throws: `PolicyInvariantError` when the store holds no verified policy.
+    private static func makeEgressSupervisor(
+        policyStore: PolicyStore?,
+        secrets: SecretsManager?,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig?,
+        llmServerURLs: [String]
+    ) async throws -> OutboundEgressSupervisor {
+        let resolvedStore = await PolicyStore.makeLoaded(injected: policyStore)
+        return try await OutboundEgressSupervisor.make(
+            policyStore: resolvedStore,
+            secrets: secrets,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs
+        )
     }
 }

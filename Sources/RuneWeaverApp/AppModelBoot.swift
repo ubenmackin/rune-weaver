@@ -100,6 +100,9 @@ extension AppModel {
         let plugins: [any Tool]
         let permissionGate: PermissionGate
         let effectiveSystemPrompt: String
+        /// The one security policy store for this process, shared by the
+        /// served egress supervisor and the settings policy routes.
+        let policyStore: PolicyStore
     }
 
     /// Builds the permission gate and served prompt from the live registry so served turns see
@@ -138,6 +141,10 @@ extension AppModel {
     }
 
     /// Assembles the boot pipeline collaborators.
+    ///
+    /// A security policy that cannot be verified exits the process nonzero
+    /// instead of starting the engine: there is no supervisor-less fallback,
+    /// matching the CLI's fail-closed boot refusal.
     func buildBootPipeline(
         config: RuneWeaverConfig,
         bindConfig: ServerConfig,
@@ -171,16 +178,34 @@ extension AppModel {
         )
         let goalStore = GoalStore(dbPath: config.memory.episodesDBPath)
         let goalEngine = GoalEngine(store: goalStore, llm: selectedProvider, config: config.goals)
-        let plugins = BuiltinToolPlugins.makeAllTools(
-            config: config,
-            memoryEngine: memoryEngine,
-            embedder: embedder,
-            mediaSecrets: secrets,
-            secrets: secrets,
-            goalEngine: goalEngine,
-            goalStore: goalStore,
-            goalConversations: conversations
-        )
+        // One policy store per process, loaded before the registry builds, so
+        // the served egress supervisor and the settings policy routes share
+        // one instance and an HTTP policy write applies without a restart.
+        let policyStore = await PolicyStore.makeLoaded(injected: nil)
+        let plugins: [any Tool]
+        do {
+            plugins = try await BuiltinToolPlugins.makeAllTools(
+                config: config,
+                memoryEngine: memoryEngine,
+                embedder: embedder,
+                mediaSecrets: secrets,
+                secrets: secrets,
+                goalEngine: goalEngine,
+                goalStore: goalStore,
+                goalConversations: conversations,
+                policyStore: policyStore
+            )
+        } catch {
+            // Fail-closed boot: a policy that cannot be verified means no
+            // supervised registry exists, so the engine never starts and the
+            // process exits nonzero rather than ever serving a supervisor-less
+            // `api.request`. The reason reaches both the app log and the
+            // console so the owner can repair policy.toml.
+            let reason = error.localizedDescription
+            RuneWeaverLog.app.error("Security policy rejected at boot: \(reason)")
+            print("[RuneWeaverApp] Security policy rejected at boot: \(reason)")
+            exit(1)
+        }
         let (permissionGate, effectiveSystemPrompt) = await buildGateAndSystemPrompt(
             plugins: plugins,
             config: config
@@ -199,14 +224,18 @@ extension AppModel {
             indexComponents: indexComponents,
             plugins: plugins,
             permissionGate: permissionGate,
-            effectiveSystemPrompt: effectiveSystemPrompt
+            effectiveSystemPrompt: effectiveSystemPrompt,
+            policyStore: policyStore
         )
     }
 
     /// Constructs the live ServerContext from the assembled boot pipeline.
-    func makeBootServerContext(pipeline: BootPipeline) async -> ServerContext {
+    /// - Throws: `PolicyInvariantError` when the served registry cannot be
+    ///   built over a verified policy; the boot then stops rather than
+    ///   serving an unsupervised tool set.
+    func makeBootServerContext(pipeline: BootPipeline) async throws -> ServerContext {
         let appLLMOrigins = LLMOrigins.serverURLs(from: pipeline.config.llm)
-        return await ServerContext.make(
+        return try await ServerContext.make(
             config: pipeline.bindConfig,
             conversations: pipeline.conversations,
             memoryEngine: pipeline.memoryEngine,
@@ -241,7 +270,8 @@ extension AppModel {
             mediaSecrets: pipeline.secrets,
             secrets: pipeline.secrets,
             runs: pipeline.runs,
-            hub: pipeline.hub
+            hub: pipeline.hub,
+            policyStore: pipeline.policyStore
         )
     }
 

@@ -32,7 +32,7 @@ struct FanOutStubError: Error, Equatable {
 /// Stub seam whose turns finish with canned output text so the merge pass has
 /// real worker output to review. The collecting witness returns the canned
 /// text and parked flag; the plain seam runs the same turn and discards it.
-private final class CollectingFanOutOrchestrator: OrchestratorFanOutSeam, @unchecked Sendable {
+private final class CollectingFanOutOrchestrator: OrchestratorFanOutSeam {
     /// Guarded captured inputs in arrival order.
     private let inputs = OSAllocatedUnfairLock<[UserInput]>(initialState: [])
     /// Output text per prompt; a prompt with no entry produces no output.
@@ -117,7 +117,7 @@ private struct StubReviewLLM: LLMProvider {
 /// trail the engine actually wrote, with a kind-filtered read mirroring the
 /// store's list semantics so the dashboard's fanout fetch is exercisable
 /// end-to-end through the seam.
-private final class CapturingMergeRunLogger: FanOutRunLogging, @unchecked Sendable {
+private final class CapturingMergeRunLogger: FanOutRunLogging {
     /// One recorded run row with its latest settled outcome.
     struct Row: Sendable {
         let id: UUID

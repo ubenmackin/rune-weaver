@@ -1,5 +1,6 @@
 // Rune Weaver CLI — Shared terminal helpers and tool-bus wiring.
 
+import ArgumentParser
 import Foundation
 import os
 import RuneWeaverCore
@@ -214,6 +215,14 @@ enum CLIShared {
     /// fan-out engine arrives (nil keeps it unregistered), and a disabled
     /// `[fanout]` section still registers through the same path and fails closed
     /// inside the tool with the honest disabled copy.
+    ///
+    /// The build fails closed: when the security policy cannot be verified the
+    /// reason prints and the command exits nonzero rather than registering a
+    /// supervisor-less `api.request`.
+    /// - Parameter policyStore: Shared security policy store; nil builds and
+    ///   loads the factory default.
+    /// - Returns: Tools in registration order.
+    /// - Throws: `ExitCode(1)` after printing the policy rejection reason.
     static func pluginTools(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -232,31 +241,38 @@ enum CLIShared {
         goalStore: GoalStore? = nil,
         goalConversations: ConversationManager? = nil,
         goalsConfig: GoalsConfig = GoalsConfig(),
-        fanOutEngine: FanOutEngine? = nil
-    ) -> [any Tool] {
+        fanOutEngine: FanOutEngine? = nil,
+        policyStore: PolicyStore? = nil
+    ) async throws -> [any Tool] {
         let browser = browserConfig ?? BrowserConfig()
         let baseOrigins = llmServerURLs
         let combinedOrigins = baseOrigins + Self.llmServerURLs(from: llmConfig).filter { !baseOrigins.contains($0) }
-        return BuiltinToolPlugins.makeAllTools(
-            emailConfig: emailConfig,
-            filesConfig: filesConfig,
-            bashConfig: bashConfig,
-            sandboxConfig: sandboxConfig,
-            browserConfig: browser,
-            mediaConfig: mediaConfig,
-            desktopConfig: desktopConfig,
-            llmServerURLs: combinedOrigins,
-            securityConfig: securityConfig,
-            memoryEngine: memoryEngine,
-            embedder: embedder,
-            mediaSecrets: secrets,
-            secrets: secrets,
-            goalEngine: goalEngine,
-            goalStore: goalStore,
-            goalConversations: goalConversations,
-            goalsConfig: goalsConfig,
-            fanOutEngine: fanOutEngine
-        )
+        do {
+            return try await BuiltinToolPlugins.makeAllTools(
+                emailConfig: emailConfig,
+                filesConfig: filesConfig,
+                bashConfig: bashConfig,
+                sandboxConfig: sandboxConfig,
+                browserConfig: browser,
+                mediaConfig: mediaConfig,
+                desktopConfig: desktopConfig,
+                llmServerURLs: combinedOrigins,
+                securityConfig: securityConfig,
+                memoryEngine: memoryEngine,
+                embedder: embedder,
+                mediaSecrets: secrets,
+                secrets: secrets,
+                goalEngine: goalEngine,
+                goalStore: goalStore,
+                goalConversations: goalConversations,
+                goalsConfig: goalsConfig,
+                fanOutEngine: fanOutEngine,
+                policyStore: policyStore
+            )
+        } catch {
+            cliPrintError(TerminalStyle.error("Security policy rejected: \(error.localizedDescription)"))
+            throw ExitCode(1)
+        }
     }
 
     /// Builds a `ToolBus` pre-populated from the shared plugin source.
@@ -275,6 +291,11 @@ enum CLIShared {
     /// through so a caller that wired one sees the fanout.run tool, while nil
     /// keeps it unregistered (the CLI builds no engine here because the
     /// orchestrator and run-log store arrive after the bus).
+    /// - Parameter policyStore: Shared security policy store; nil builds and
+    ///   loads the factory default. Callers that also boot a service pass
+    ///   their instance so one store backs both.
+    /// - Throws: `ExitCode(1)` after printing when the security policy cannot
+    ///   be verified.
     static func makeToolBus(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -298,8 +319,9 @@ enum CLIShared {
         goalStore: GoalStore? = nil,
         goalConversations: ConversationManager? = nil,
         goalLLM: (any LLMProvider)? = nil,
-        fanOutEngine: FanOutEngine? = nil
-    ) async -> ToolBus {
+        fanOutEngine: FanOutEngine? = nil,
+        policyStore: PolicyStore? = nil
+    ) async throws -> ToolBus {
         let bus = ToolBus(
             approvalHandler: approvalHandler,
             permissionGate: permissionGate
@@ -317,7 +339,7 @@ enum CLIShared {
             effectiveEngine = GoalEngine(store: store, llm: llm, config: goalsConfig)
         }
         let desktopNames = Set(DesktopTools.allToolNames)
-        for tool in pluginTools(
+        for tool in try await pluginTools(
             emailConfig: emailConfig,
             filesConfig: filesConfig,
             bashConfig: bashConfig,
@@ -335,7 +357,8 @@ enum CLIShared {
             goalStore: effectiveStore,
             goalConversations: goalConversations,
             goalsConfig: goalsConfig ?? GoalsConfig(),
-            fanOutEngine: fanOutEngine
+            fanOutEngine: fanOutEngine,
+            policyStore: policyStore
         ) {
             await bus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
         }

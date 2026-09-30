@@ -249,7 +249,7 @@ struct ChatCommand: AsyncParsableCommand {
         // One shared secrets instance per chat invocation so every tool on the
         // bus observes one fallback store instead of per-tool state.
         let sharedSecrets = SecretsManager()
-        let toolBus = await CLIShared.makeToolBus(
+        let toolBus = try await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
             bashConfig: loaded.config.bash,

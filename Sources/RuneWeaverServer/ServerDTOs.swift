@@ -77,6 +77,10 @@ public enum ServerPaths {
     public static let settings = "settings"
     /// Secrets subpath under `/settings`.
     public static let secrets = "secrets"
+    /// Policy subpath under `/settings`.
+    public static let policy = "policy"
+    /// Verification subpath under `/settings/policy`.
+    public static let verify = "verify"
     /// Status subpath under `/settings/secrets`.
     public static let status = "status"
     /// Single-owner bearer auth group.

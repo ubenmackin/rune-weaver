@@ -104,6 +104,21 @@ enum ToolsTestSupport {
         try? FileManager.default.removeItem(at: base)
     }
 
+    /// Builds a verified policy store backed by a throwaway file path.
+    ///
+    /// Registry tests must never read or seed the operator's real
+    /// `~/.runeweaver/policy.toml`, so every factory call injects this store
+    /// instead of taking the nil (factory default) path. `update` commits the
+    /// safe default posture without touching disk, which mirrors a successful
+    /// load and gives the supervisor factory a verified snapshot.
+    static func makeTestPolicyStore() async -> PolicyStore {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rw-test-policy-\(UUID().uuidString).toml")
+        let store = PolicyStore(fileURL: url)
+        await store.update(.safeDefault)
+        return store
+    }
+
     /// Box capturing the normalized query seen by the gateway without touching the network.
     final class QueryCapture: Sendable {
         /// Guard for the captured query.

@@ -607,11 +607,8 @@ struct GoalSettingsMergeTests {
         // An unknown mode fails with the closed-set validation error instead
         // of persisting a mode the gate could never match.
         var config = RuneWeaverConfig.default
-        do {
+        #expect(throws: ConfigError.self) {
             try UpdateSettingsRequest(proactive: ProactiveUpdate(mode: "sometimes")).apply(to: &config)
-            Issue.record("Expected an unknown proactive mode to throw")
-        } catch is ConfigError {
-            // Expected: the stored policy stays untouched on rejection.
         }
         #expect(config.proactive == RuneWeaverConfig.default.proactive)
     }

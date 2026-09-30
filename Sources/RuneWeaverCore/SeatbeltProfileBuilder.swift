@@ -50,7 +50,8 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         "~/.config/gcloud",
         "~/.netrc",
         "~/.runeweaver/memory",
-        "~/.runeweaver/config.toml"
+        "~/.runeweaver/config.toml",
+        "~/.runeweaver/policy.toml"
     ]
 
     /// Filename-level denies applied anywhere in the tree via SBPL regex.
