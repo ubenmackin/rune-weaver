@@ -40,6 +40,11 @@ public struct ToolInput: Sendable, Codable, Equatable {
 public struct ToolContext: Sendable, Equatable {
     /// Identifier of the owning conversation/session.
     public let conversationID: UUID
+    /// Alias for conversationID representing the active session.
+    public var sessionID: UUID {
+        conversationID
+    }
+
     /// When true, the tool must not mutate external state.
     public let dryRun: Bool
     /// When true, a prior approval decision authorizes the gated branch to execute.

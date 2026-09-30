@@ -92,14 +92,17 @@ public actor ApprovalQueue {
         description: String = "",
         input: ToolInput,
         intent: String? = nil,
-        assessment: ImpactAssessment? = nil
+        assessment: ImpactAssessment? = nil,
+        egressHost: String? = nil
     ) -> PermissionRequest {
+        let effectiveEgressHost = egressHost ?? Self.extractEgressHost(toolName: toolName, argumentsJSON: input.argumentsJSON)
         let request = PermissionRequest(
             toolName: toolName,
             description: description,
             input: input,
             intent: intent,
-            assessment: assessment
+            assessment: assessment,
+            egressHost: effectiveEgressHost
         )
         pending[request.id] = request
         return request
@@ -127,8 +130,10 @@ public actor ApprovalQueue {
         sessionID: UUID? = nil,
         intent: String? = nil,
         assessment: ImpactAssessment? = nil,
+        egressHost: String? = nil,
         onEnriched: (@Sendable (PermissionRequest) async -> Void)? = nil
     ) async -> PermissionRequest {
+        let effectiveEgressHost = egressHost ?? Self.extractEgressHost(toolName: tool.name, argumentsJSON: call.argumentsJSON)
         if let assessment {
             let request = PermissionRequest(
                 toolName: tool.name,
@@ -136,7 +141,8 @@ public actor ApprovalQueue {
                 input: call,
                 sessionID: sessionID,
                 intent: intent,
-                assessment: assessment
+                assessment: assessment,
+                egressHost: effectiveEgressHost
             )
             pending[request.id] = request
             return request
@@ -147,7 +153,8 @@ public actor ApprovalQueue {
             input: call,
             sessionID: sessionID,
             intent: intent,
-            assessment: nil
+            assessment: nil,
+            egressHost: effectiveEgressHost
         )
         pending[request.id] = request
         spawnEnrichment(
@@ -229,7 +236,8 @@ public actor ApprovalQueue {
             suggestedDurations: existing.suggestedDurations,
             sessionID: existing.sessionID,
             intent: existing.intent,
-            assessment: assessment
+            assessment: assessment,
+            egressHost: existing.egressHost
         )
         pending[id] = updated
         return updated

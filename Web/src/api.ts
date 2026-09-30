@@ -317,6 +317,13 @@ export interface ImpactAssessment {
   warnings?: string[];
 }
 
+export type EgressDecisionTier =
+  | "allowOnce"
+  | "allowSession"
+  | "alwaysAllow"
+  | "deny"
+  | "denyAlways";
+
 export interface PermissionRequest {
   id: string;
   toolName: string;
@@ -329,6 +336,8 @@ export interface PermissionRequest {
   sessionID?: string | null;
   intent?: string | null;
   assessment?: ImpactAssessment | null;
+  egressHost?: string | null;
+  egress_host?: string | null;
 }
 
 export interface ApprovalsResponse {
@@ -1341,12 +1350,13 @@ export function decideApproval(
   approved: boolean,
   duration: TrustDuration = "thisTime",
   widen?: boolean,
+  egressDecision?: EgressDecisionTier,
 ): Promise<ApprovalDecisionResponse> {
   return fetchJson<ApprovalDecisionResponse>(
     `/approvals/${encodeURIComponent(id)}/decide`,
     {
       method: "POST",
-      body: JSON.stringify({ approved, duration, widen }),
+      body: JSON.stringify({ approved, duration, widen, egressDecision }),
     },
   );
 }

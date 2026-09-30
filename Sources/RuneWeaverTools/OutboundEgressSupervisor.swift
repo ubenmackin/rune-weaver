@@ -1,15 +1,20 @@
 // Rune Weaver Tools — Outbound Egress Supervisor.
 //
-// Mandatory egress choke-point for `api.request`: `ApiRequestTool` is the only
-// downstream consumer, built with a live supervisor so every dial — the initial
-// URL and each redirect hop — passes `validate` before the transport runs. Hop
-// re-validation runs over the surrogate-form headers, so the network policy and
-// credential-binding gates are re-evaluated before any just-in-time injection;
-// the tool drops injected credential headers whenever the origin (scheme +
-// host + port) changes. Under the credential surrogation contract, surrogates
-// resolve at this boundary and are never model-visible, while `sweepResponse`
-// redacts any injected credential echoed back in tool output before it enters
-// the model context.
+// Multi-consumer mandatory egress choke-point: `api.request` plus `web.fetch`
+// (`WebFetchTool.validateHopSafety`), `browser.navigate`/`browser.act` (via
+// `BrowserValidation.EgressPolicy.validateURLAsync`), `bash.exec`
+// (`BashTool.screenExplicitURLs`), and `desktop.action`
+// (`DesktopControlBridge.screenBatchURLs`) all enter through `validate`
+// before any dial, DNS, or Keychain side effect. Hop re-validation runs over
+// the surrogate-form headers, so the network policy and credential-binding
+// gates are re-evaluated before any just-in-time injection; the tool drops
+// injected credential headers whenever the origin (scheme + host + port)
+// changes. Under the credential surrogation contract, surrogates resolve at
+// this boundary and are never model-visible, while `sweepResponse` redacts
+// any injected credential echoed back in tool output before it enters the
+// model context. Each consumer threads its calling session (`ToolContext`
+// session) into `validate`, so session and one-shot grants stay scoped to
+// the chat that approved them.
 //
 // `validate` runs the security gates in this order:
 //   1. Network Policy Gate — verify domain is allowed under NetworkEgressPolicy.
@@ -32,10 +37,12 @@ import RuneWeaverCore
 
 /// Unified outbound egress supervisor enforcing the security policy pipeline.
 ///
-/// `ApiRequestTool` is the only consumer: its outbound traffic routes through
-/// this supervisor, which layers the security policy's domain allowlist, the
-/// SSRF guard, and credential target-binding verification into a single,
-/// auditable choke-point.
+/// Multi-consumer choke-point for outbound traffic: `api.request`,
+/// `web.fetch`, `browser.navigate`/`browser.act`, `bash.exec`, and
+/// `desktop.action` all route through this supervisor, which layers the
+/// security policy's domain allowlist, the SSRF guard, and credential
+/// target-binding verification into a single, auditable gate with per-tool
+/// session threading.
 public actor OutboundEgressSupervisor {
     /// The policy store providing the active security policy.
     private let policyStore: PolicyStore
@@ -47,13 +54,54 @@ public actor OutboundEgressSupervisor {
     private let mediaConfig: MediaConfig?
     /// Configured LLM server URLs for loopback exemptions.
     private let llmServerURLs: [String]
+    /// Per-session allowed domains granted interactively during an active chat turn.
+    private var sessionAllowedDomains: [UUID: SessionGrant] = [:]
+    /// Ephemeral one-shot domains keyed by owning session (nil for grants
+    /// filed without a session context).
+    private var oneShotAllowedDomains: [UUID?: Set<String>] = [:]
+    /// Issue time per one-shot key for TTL eviction, including the nil key.
+    ///
+    /// Tracked separately because a one-shot grant without a session grant
+    /// never appears in `sessionAllowedDomains`, so session-only eviction
+    /// would leave it spendable without bound.
+    private var oneShotIssuedAt: [UUID?: Date] = [:]
+
+    /// One session's interactive grants with their issue time for TTL eviction.
+    private struct SessionGrant: Sendable {
+        var domains: Set<String>
+        var issuedAt: Date
+    }
+
+    /// Maximum age of an interactive session grant before it expires.
+    ///
+    /// Bounds the grant table when no explicit teardown arrives: chat turns
+    /// are minutes-scale, so a day-old grant is stale session residue rather
+    /// than live intent.
+    private static let sessionGrantTTL: TimeInterval = 24 * 60 * 60
+    /// Maximum age of an unconsumed one-shot grant before it expires.
+    ///
+    /// One-shot grants are single-use, but an unspent grant (a denied turn,
+    /// a client that never retries) must still age out: without its own TTL
+    /// the nil key and sessions without a session grant would linger
+    /// spendable past the session window.
+    private static let oneShotGrantTTL: TimeInterval = 24 * 60 * 60
+    /// Maximum sessions tracked before the oldest grants evict.
+    ///
+    /// Fail-closed bound on the grant table so a process that never reports
+    /// teardown still cannot grow this state without limit.
+    private static let maxTrackedSessions = 1000
 
     /// Creates an outbound egress supervisor.
+    ///
+    /// The email config stays accepted for call-site compatibility but no
+    /// longer feeds an exemption: every destination needs an explicit
+    /// allowlist entry or an interactive grant.
     public init(
         policyStore: PolicyStore,
         secrets: SecretsManager,
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
+        emailConfig _: EmailConfig? = nil,
         llmServerURLs: [String] = []
     ) {
         self.policyStore = policyStore
@@ -77,6 +125,7 @@ public actor OutboundEgressSupervisor {
     ///   - secrets: Shared secrets resolver; a fresh manager when nil.
     ///   - browserConfig: `[browser]` policy feeding the SSRF loopback exemption.
     ///   - mediaConfig: Optional media policy feeding the SSRF LAN exemption.
+    ///   - emailConfig: Accepted for compatibility; carries no exemption.
     ///   - llmServerURLs: Configured LLM `server_url` values exempted from the SSRF loopback deny.
     /// - Returns: A supervisor bound to the verified policy.
     /// - Throws: `PolicyInvariantError` when the store holds no verified policy.
@@ -85,6 +134,7 @@ public actor OutboundEgressSupervisor {
         secrets: SecretsManager? = nil,
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
+        emailConfig _: EmailConfig? = nil,
         llmServerURLs: [String] = []
     ) async throws -> OutboundEgressSupervisor {
         _ = try await policyStore.snapshot()
@@ -95,6 +145,138 @@ public actor OutboundEgressSupervisor {
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs
         )
+    }
+
+    /// Grants egress permission to a domain for the duration of a session.
+    public func allowDomainForSession(sessionID: UUID, domain: String) {
+        evictStaleSessionGrants()
+        let canonical = SensitiveAddressNormalization.normalizedHost(domain)
+        let existing = sessionAllowedDomains[sessionID]
+        sessionAllowedDomains[sessionID] = SessionGrant(
+            domains: (existing?.domains ?? []).union([canonical]),
+            issuedAt: Date()
+        )
+        enforceSessionGrantBound()
+    }
+
+    /// Grants one-time ephemeral egress permission scoped to one session.
+    ///
+    /// Triage handlers prefer this over any session-less grant whenever the
+    /// pending request carries a session: the grant is consumable only under
+    /// that session, so one chat cannot spend another's approval. Every
+    /// one-shot grant flows through this entry point so session scoping
+    /// cannot be bypassed by choosing a different overload.
+    public func allowDomainOnce(domain: String, sessionID: UUID?) {
+        evictStaleSessionGrants()
+        let canonical = SensitiveAddressNormalization.normalizedHost(domain)
+        oneShotAllowedDomains[sessionID, default: []].insert(canonical)
+        oneShotIssuedAt[sessionID] = Date()
+        enforceOneShotBound()
+    }
+
+    /// Clears any ephemeral domains granted for the given session.
+    ///
+    /// Session owners call this on teardown (chat close, session delete) so
+    /// grants die with the conversation that approved them. Grants also
+    /// expire via TTL eviction and the tracked-session bound below, so the
+    /// table cannot grow without bound when no explicit lifecycle signal
+    /// arrives.
+    public func clearSession(sessionID: UUID) {
+        sessionAllowedDomains.removeValue(forKey: sessionID)
+        oneShotAllowedDomains.removeValue(forKey: sessionID)
+        oneShotIssuedAt.removeValue(forKey: sessionID)
+    }
+
+    /// Drops session grants older than the grant TTL.
+    ///
+    /// Expired sessions clear through `clearSession` so session and one-shot
+    /// grants for the same conversation evict together instead of leaving a
+    /// stale one-shot spendable after its session grant aged out. One-shot
+    /// keys without a session grant (including the nil key) evict on their
+    /// own TTL below, so no key lingers spendable without a session anchor.
+    private func evictStaleSessionGrants(now: Date = Date()) {
+        let expired = sessionAllowedDomains.compactMap { id, grant in
+            now.timeIntervalSince(grant.issuedAt) < Self.sessionGrantTTL ? nil : id
+        }
+        for id in expired {
+            clearSession(sessionID: id)
+        }
+        evictStaleOneShotGrants(now: now)
+    }
+
+    /// Drops one-shot grants older than the one-shot TTL, including the nil key.
+    ///
+    /// Runs inside `evictStaleSessionGrants` so every validation pass that
+    /// ages session grants also ages session-less one-shots; an unconsumed
+    /// grant never stays spendable past its day-scale window.
+    private func evictStaleOneShotGrants(now: Date = Date()) {
+        let expired = oneShotIssuedAt.compactMap { id, issuedAt in
+            now.timeIntervalSince(issuedAt) < Self.oneShotGrantTTL ? nil : id
+        }
+        for id in expired {
+            oneShotAllowedDomains.removeValue(forKey: id)
+            oneShotIssuedAt.removeValue(forKey: id)
+        }
+        // Drop empty sets whose hosts were all consumed, so consumed keys
+        // do not pin an issued-at entry that would otherwise evict by TTL.
+        for id in Array(oneShotAllowedDomains.keys) where oneShotAllowedDomains[id]?.isEmpty == true {
+            oneShotAllowedDomains.removeValue(forKey: id)
+            oneShotIssuedAt.removeValue(forKey: id)
+        }
+    }
+
+    /// Evicts the oldest session grants when the table exceeds its bound.
+    private func enforceSessionGrantBound() {
+        guard sessionAllowedDomains.count > Self.maxTrackedSessions else { return }
+        let ordered = sessionAllowedDomains.sorted { $0.value.issuedAt < $1.value.issuedAt }
+        for (id, _) in ordered.prefix(sessionAllowedDomains.count - Self.maxTrackedSessions) {
+            clearSession(sessionID: id)
+        }
+    }
+
+    /// Evicts the oldest one-shot keys when the table exceeds its bound.
+    ///
+    /// Fail-closed bound on the session-less path: the nil key participates
+    /// like any session key, so a process that files session-less grants
+    /// without teardown still cannot grow this state without limit.
+    private func enforceOneShotBound() {
+        guard oneShotAllowedDomains.count > Self.maxTrackedSessions else { return }
+        let ordered = oneShotIssuedAt.sorted { $0.value < $1.value }
+        for (id, _) in ordered.prefix(oneShotAllowedDomains.count - Self.maxTrackedSessions) {
+            oneShotAllowedDomains.removeValue(forKey: id)
+            oneShotIssuedAt.removeValue(forKey: id)
+        }
+    }
+
+    /// Whether a one-shot grant covers this host for this session, consuming it.
+    ///
+    /// A grant filed under a concrete session is spendable only by that
+    /// session; a session-less grant is spendable once by any caller. Either
+    /// way the first validation consumes it, so callers must validate once
+    /// per tool call rather than pre-checking before the real gate. Emptied
+    /// keys drop their issue time so consumed entries do not linger for TTL.
+    private func consumeOneShot(host: String, sessionID: UUID?) -> Bool {
+        if let sessionID, var scoped = oneShotAllowedDomains[sessionID], scoped.contains(host) {
+            scoped.remove(host)
+            if scoped.isEmpty {
+                oneShotAllowedDomains.removeValue(forKey: sessionID)
+                oneShotIssuedAt.removeValue(forKey: sessionID)
+            } else {
+                oneShotAllowedDomains[sessionID] = scoped
+            }
+            return true
+        }
+        if var open = oneShotAllowedDomains[nil], open.contains(host) {
+            open.remove(host)
+            if open.isEmpty {
+                oneShotAllowedDomains.removeValue(forKey: nil)
+                oneShotIssuedAt.removeValue(forKey: nil)
+            } else {
+                oneShotAllowedDomains[nil] = open
+            }
+            return true
+        }
+        return false
     }
 
     /// Result of a successful egress verification. Contains wire-ready headers
@@ -118,6 +300,8 @@ public actor OutboundEgressSupervisor {
         case allowed(EgressResult)
         /// The request was denied. Contains a human-readable reason.
         case denied(String)
+        /// The host is unlisted in policy.toml (eligible for interactive triage prompt).
+        case unlistedDomain(host: String, reason: String)
     }
 
     /// Validates an outbound request against the full security policy pipeline.
@@ -154,15 +338,17 @@ public actor OutboundEgressSupervisor {
     ///   - url: The target URL to validate.
     ///   - method: HTTP method (GET, POST, etc.).
     ///   - headers: Headers possibly containing `rwsecret:<key>` surrogates.
+    ///   - sessionID: Optional active chat session ID for session-scoped allowances.
     ///   - resolvesCredentials: When false, the pipeline stops after the SSRF gate
     ///     and returns the headers unchanged with no injected secrets. Dry-run
     ///     previews use this so an approval card reflects the policy and binding
     ///     posture without ever touching the Keychain.
-    /// - Returns: `.allowed` with resolved headers and secrets, or `.denied` with reason.
+    /// - Returns: `.allowed` with resolved headers and secrets, or `.denied` / `.unlistedDomain` with reason.
     public func validate(
         url: URL,
-        method: String,
-        headers: [String: String],
+        method: String = "GET",
+        headers: [String: String] = [:],
+        sessionID: UUID? = nil,
         resolvesCredentials: Bool = true
     ) async -> EgressVerdict {
         // Every hop reads the verified snapshot rather than the displayable
@@ -179,8 +365,25 @@ public actor OutboundEgressSupervisor {
         guard let host = url.host, !host.isEmpty else {
             return .denied("Invalid URL: missing host component.")
         }
-        if let denyReason = policy.network.denyReason(for: host) {
-            return .denied(denyReason)
+        let canonicalHost = SensitiveAddressNormalization.normalizedHost(host)
+
+        switch policy.network.hostStatus(for: host) {
+        case let .explicitlyBlocked(reason):
+            return .denied(reason)
+        case .allowed:
+            break
+        case let .unlisted(reason):
+            // Unlisted hosts always park for interactive triage: even
+            // operator-configured infrastructure origins need an explicit
+            // allowlist entry or a triage grant, never an auto-allow.
+            evictStaleSessionGrants()
+            if consumeOneShot(host: canonicalHost, sessionID: sessionID) {
+                break
+            }
+            if let sessionID, sessionAllowedDomains[sessionID]?.domains.contains(canonicalHost) == true {
+                break
+            }
+            return .unlistedDomain(host: host, reason: reason)
         }
 
         // --- Step 2: Target-Binding Gate ---
@@ -253,12 +456,17 @@ public actor OutboundEgressSupervisor {
 
     /// Validates a URL for credential-free read-only checks.
     ///
-    /// Applies only the network policy gate and the SSRF guard — no credential
-    /// binding and no Keychain access.
+    /// Applies the network policy gate (including session and one-shot
+    /// grants) plus the SSRF guard — no credential binding and no Keychain
+    /// access. A read-only allow consumes a covering one-shot grant like the
+    /// full gate, so callers must validate once per tool call rather than
+    /// pre-checking before the real gate.
     ///
-    /// - Parameter url: The target URL to validate.
+    /// - Parameters:
+    ///   - url: The target URL to validate.
+    ///   - sessionID: Optional active chat session ID for session-scoped allowances.
     /// - Returns: `nil` when allowed, or a human-readable refusal reason.
-    public func validateReadOnly(url: URL) async -> String? {
+    public func validateReadOnly(url: URL, sessionID: UUID? = nil) async -> String? {
         // Read-only checks fail closed on the same verified snapshot so an
         // unverified store never reports a destination as reachable.
         let policy: SecurityPolicy
@@ -271,10 +479,24 @@ public actor OutboundEgressSupervisor {
         guard let host = url.host, !host.isEmpty else {
             return "Invalid URL: missing host component."
         }
+        let canonicalHost = SensitiveAddressNormalization.normalizedHost(host)
 
-        // Network policy gate
-        if let denyReason = policy.network.denyReason(for: host) {
-            return denyReason
+        // Network policy gate honors interactive grants like the full gate,
+        // so Allow During Session and Allow Once cover read-only checks.
+        switch policy.network.hostStatus(for: host) {
+        case .allowed:
+            break
+        case let .explicitlyBlocked(reason):
+            return reason
+        case let .unlisted(reason):
+            evictStaleSessionGrants()
+            if consumeOneShot(host: canonicalHost, sessionID: sessionID) {
+                break
+            }
+            if let sessionID, sessionAllowedDomains[sessionID]?.domains.contains(canonicalHost) == true {
+                break
+            }
+            return reason
         }
 
         // SSRF guard

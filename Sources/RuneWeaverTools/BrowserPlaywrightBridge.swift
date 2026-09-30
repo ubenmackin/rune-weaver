@@ -277,6 +277,8 @@ public enum BrowserValidation: Sendable {
         let mediaConfig: MediaConfig?
         let llmServerURLs: [String]
         let extraAllowlistedOrigins: Set<String>
+        let egressSupervisor: OutboundEgressSupervisor?
+        let sessionID: UUID?
 
         func effectiveOrigins() -> Set<String> {
             var effective = ApiSSRFGuard.allowlistedOrigins(
@@ -305,6 +307,9 @@ public enum BrowserValidation: Sendable {
         }
 
         func validateURL(_ url: String) throws -> String {
+            // Synchronous path stays SSRF-only by design: the supervisor
+            // rides solely on the async path so a sync caller can never
+            // believe policy was enforced.
             let trimmed = try BrowserValidation.validatedURLLiteral(url)
             if let refusal = denyReason(for: trimmed) {
                 throw BrowserError.invalidURL("Invalid URL: \(refusal)")
@@ -316,6 +321,17 @@ public enum BrowserValidation: Sendable {
             let trimmed = try BrowserValidation.validatedURLLiteral(url)
             if let refusal = await denyReasonAsync(for: trimmed) {
                 throw BrowserError.invalidURL("Invalid URL: \(refusal)")
+            }
+            if let supervisor = egressSupervisor, let parsed = URL(string: trimmed) {
+                let verdict = await supervisor.validate(url: parsed, sessionID: sessionID)
+                switch verdict {
+                case .allowed:
+                    break
+                case let .denied(reason):
+                    throw BrowserError.invalidURL("Egress blocked: \(reason)")
+                case let .unlistedDomain(host, reason):
+                    throw BrowserError.invalidURL("Egress blocked for unlisted host '\(host)': \(reason)")
+                }
             }
             return trimmed
         }
@@ -336,13 +352,17 @@ public enum BrowserValidation: Sendable {
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig?,
         llmServerURLs: [String],
-        extraAllowlistedOrigins: Set<String>
+        extraAllowlistedOrigins: Set<String>,
+        egressSupervisor: OutboundEgressSupervisor? = nil,
+        sessionID: UUID? = nil
     ) -> EgressPolicy {
         EgressPolicy(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
-            extraAllowlistedOrigins: extraAllowlistedOrigins
+            extraAllowlistedOrigins: extraAllowlistedOrigins,
+            egressSupervisor: egressSupervisor,
+            sessionID: sessionID
         )
     }
 
@@ -360,6 +380,9 @@ public enum BrowserValidation: Sendable {
     }
 
     /// Validates a navigation or act URL against the configured exemption set.
+    /// Synchronous SSRF-only check: never consults the declarative egress
+    /// policy. Callers needing policy enforcement must use
+    /// `validateURLAsync`, which remains the sole policy path.
     /// Delegates to the canonical guard so loopback stays dialable only for the
     /// configured search, media, and model origins while metadata, link-local,
     /// and private ranges stay denied; any refusal fails closed before the
@@ -388,17 +411,24 @@ public enum BrowserValidation: Sendable {
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
-        extraAllowlistedOrigins: Set<String> = []
+        extraAllowlistedOrigins: Set<String> = [],
+        egressSupervisor: OutboundEgressSupervisor? = nil,
+        sessionID: UUID? = nil
     ) async throws -> String {
         try await egressPolicy(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
-            extraAllowlistedOrigins: extraAllowlistedOrigins
+            extraAllowlistedOrigins: extraAllowlistedOrigins,
+            egressSupervisor: egressSupervisor,
+            sessionID: sessionID
         ).validateURLAsync(url)
     }
 
     /// Re-validates one bridge-reported URL before it enters tool output.
+    /// Synchronous SSRF-only check: never consults the declarative egress
+    /// policy. Callers needing policy enforcement must use
+    /// `validateEgressURLAsync`, which remains the sole policy path.
     /// Mirrors the fetch redirect chain: the shared allowlist rejects smuggled
     /// schemes first, then the canonical guard re-vets the hop so a public
     /// start cannot bounce into loopback, link-local, metadata, or private
@@ -426,17 +456,24 @@ public enum BrowserValidation: Sendable {
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
-        extraAllowlistedOrigins: Set<String> = []
+        extraAllowlistedOrigins: Set<String> = [],
+        egressSupervisor: OutboundEgressSupervisor? = nil,
+        sessionID: UUID? = nil
     ) async throws -> String {
         try await egressPolicy(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
-            extraAllowlistedOrigins: extraAllowlistedOrigins
+            extraAllowlistedOrigins: extraAllowlistedOrigins,
+            egressSupervisor: egressSupervisor,
+            sessionID: sessionID
         ).validateEgressURLAsync(url)
     }
 
     /// Re-validates a full bridge-reported redirect chain plus its final URL.
+    /// Synchronous SSRF-only check: never consults the declarative egress
+    /// policy. Callers needing policy enforcement must use
+    /// `validateRedirectChainAsync`, which remains the sole policy path.
     /// Every hop re-enters the allowlist plus the canonical guard, so a safe
     /// start cannot launder an unsafe hop through the helper's chain surfacing.
     public static func validateRedirectChain(
@@ -462,24 +499,53 @@ public enum BrowserValidation: Sendable {
     /// Async re-validation for a bridge-reported redirect chain plus its final URL.
     /// Hop checks share the bounded-pool DNS path with the entry check, keeping
     /// a wedged resolver from stalling shared tasks while staying fail-closed.
+    /// Single charge per host within the chain: every hop re-vets SSRF, while
+    /// the stateful policy gate runs once per fresh host.
     public static func validateRedirectChainAsync(
         _ chain: [BrowserRedirectStep],
         finalURL: String,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
-        extraAllowlistedOrigins: Set<String> = []
+        extraAllowlistedOrigins: Set<String> = [],
+        egressSupervisor: OutboundEgressSupervisor? = nil,
+        sessionID: UUID? = nil
     ) async throws {
         let policy = egressPolicy(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
-            extraAllowlistedOrigins: extraAllowlistedOrigins
+            extraAllowlistedOrigins: extraAllowlistedOrigins,
+            egressSupervisor: egressSupervisor,
+            sessionID: sessionID
         )
+        let ssrfPolicy = egressPolicy(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: extraAllowlistedOrigins,
+            egressSupervisor: nil,
+            sessionID: sessionID
+        )
+        // Single policy charge per host within the chain: every hop re-vets
+        // SSRF, while repeats of an already-vetted host skip the stateful
+        // gate so a one-shot grant is not consumed twice on an echoed host.
+        var vettedHosts = Set<String>()
         for step in chain {
+            if let host = normalizedURLHost(step.url), vettedHosts.contains(host) {
+                _ = try await ssrfPolicy.validateEgressURLAsync(step.url)
+                continue
+            }
             _ = try await policy.validateEgressURLAsync(step.url)
+            if let host = normalizedURLHost(step.url) {
+                vettedHosts.insert(host)
+            }
         }
-        _ = try await policy.validateEgressURLAsync(finalURL)
+        if let finalHost = normalizedURLHost(finalURL), vettedHosts.contains(finalHost) {
+            _ = try await ssrfPolicy.validateEgressURLAsync(finalURL)
+        } else {
+            _ = try await policy.validateEgressURLAsync(finalURL)
+        }
     }
 
     /// Shared literal URL checks without any resolver use.
@@ -505,6 +571,16 @@ public enum BrowserValidation: Sendable {
             throw BrowserError.invalidURL("Invalid URL: URL must be an http(s) URL with a host")
         }
         return trimmed
+    }
+
+    /// Canonical host for per-call redirect dedupe, nil when unparseable.
+    /// Single owner for browser redirect host normalization: the gateway
+    /// reuses this instead of keeping its own copy, so hop vetting shares one
+    /// normalization. Unparseable hops stay deny-by-default at the egress re-check.
+    static func normalizedURLHost(_ urlString: String) -> String? {
+        guard let host = URL(string: urlString)?.host, !host.isEmpty else { return nil }
+        let canonical = SensitiveAddressNormalization.normalizedHost(host)
+        return canonical.isEmpty ? nil : canonical
     }
 
     /// Whether a ref matches snapshot shape (`e` plus digits).
@@ -624,6 +700,29 @@ public protocol BrowserPlaywrightGateway: Sendable {
     /// Dry runs resolve the interpreter from the fast path only so validation
     /// never pays the venv, pip, or browser budgets.
     func navigate(url: String, includeScreenshot: Bool, dryRun: Bool) async throws -> BrowserSnapshot
+
+    /// Session-aware navigate threading the egress session grant.
+    /// Declared as a requirement (not an extension default) so the live
+    /// gateway's grant-aware implementation dispatches dynamically; stubs
+    /// inherit the session-less fallback below.
+    func navigate(
+        url: String,
+        includeScreenshot: Bool,
+        dryRun: Bool,
+        sessionID: UUID?
+    ) async throws -> BrowserSnapshot
+
+    /// Session-aware act threading the egress session grant.
+    /// Declared as a requirement so the live gateway's grant-aware
+    /// implementation dispatches dynamically; stubs inherit the session-less
+    /// fallback below.
+    func act(
+        action: BrowserActAction,
+        ref: String,
+        text: String?,
+        url: String,
+        sessionID: UUID?
+    ) async throws -> BrowserActResult
 }
 
 public extension BrowserPlaywrightGateway {
@@ -640,6 +739,31 @@ public extension BrowserPlaywrightGateway {
     func navigate(url: String, includeScreenshot: Bool, dryRun: Bool) async throws -> BrowserSnapshot {
         _ = dryRun
         return try await navigate(url: url, includeScreenshot: includeScreenshot)
+    }
+
+    /// Default session-aware navigate for stubs without grant handling.
+    /// Delegates to the session-less dry-run path so existing doubles keep
+    /// compiling; the live gateway overrides with grant-aware validation.
+    func navigate(
+        url: String,
+        includeScreenshot: Bool,
+        dryRun: Bool,
+        sessionID _: UUID?
+    ) async throws -> BrowserSnapshot {
+        try await navigate(url: url, includeScreenshot: includeScreenshot, dryRun: dryRun)
+    }
+
+    /// Default session-aware act for stubs without grant handling.
+    /// Delegates to the session-less path so existing doubles keep
+    /// compiling; the live gateway overrides with grant-aware validation.
+    func act(
+        action: BrowserActAction,
+        ref: String,
+        text: String?,
+        url: String,
+        sessionID _: UUID?
+    ) async throws -> BrowserActResult {
+        try await act(action: action, ref: ref, text: text, url: url)
     }
 }
 
@@ -666,6 +790,8 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     public let mediaConfig: MediaConfig?
     /// Configured model endpoints exempted from the loopback deny.
     public let llmServerURLs: [String]
+    /// Outbound egress supervisor screening destination URLs against policy.toml.
+    public let egressSupervisor: OutboundEgressSupervisor?
 
     /// Resolves the Python executable from the explicit path or the env override.
     /// Single-sourced so the legacy and config-bound inits cannot drift on
@@ -688,7 +814,8 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         pythonExecutable: String? = nil,
         timeoutSeconds: TimeInterval = ContainerMachineManager.defaultProcessTimeoutSeconds,
         maxOutputBytes: Int = ContainerMachineManager.maxProcessOutputBytes,
-        allowlistedOrigins: Set<String> = []
+        allowlistedOrigins: Set<String> = [],
+        egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
         self.init(
             pythonExecutable: pythonExecutable,
@@ -697,7 +824,8 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
             browserConfig: BrowserConfig(searxngURL: ""),
             mediaConfig: nil,
             llmServerURLs: [],
-            allowlistedOrigins: allowlistedOrigins
+            allowlistedOrigins: allowlistedOrigins,
+            egressSupervisor: egressSupervisor
         )
     }
 
@@ -712,7 +840,8 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
-        allowlistedOrigins: Set<String> = []
+        allowlistedOrigins: Set<String> = [],
+        egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
         self.pythonExecutable = Self.resolvePythonBin(explicit: pythonExecutable)
         self.timeoutSeconds = timeoutSeconds
@@ -721,6 +850,7 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         self.browserConfig = browserConfig
         self.mediaConfig = mediaConfig
         self.llmServerURLs = llmServerURLs
+        self.egressSupervisor = egressSupervisor
     }
 
     /// Navigates in a fresh isolated context and returns a bounded snapshot.
@@ -729,13 +859,25 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     }
 
     /// Navigates resolving the interpreter from the fast path only when dry-running.
-    public func navigate(url: String, includeScreenshot: Bool, dryRun: Bool) async throws -> BrowserSnapshot {
+    ///
+    /// Carries the calling session into every supervisor check so an
+    /// interactive grant applies to the entry URL and each fresh redirect
+    /// host exactly once; hosts already granted for this call never
+    /// re-consume a one-shot grant when the chain echoes them.
+    public func navigate(
+        url: String,
+        includeScreenshot: Bool,
+        dryRun: Bool,
+        sessionID: UUID? = nil
+    ) async throws -> BrowserSnapshot {
         let validated = try await BrowserValidation.validateURLAsync(
             url,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
-            extraAllowlistedOrigins: allowlistedOrigins
+            extraAllowlistedOrigins: allowlistedOrigins,
+            egressSupervisor: egressSupervisor,
+            sessionID: sessionID
         )
         var payload: [String: Any] = ["op": "navigate", "url": validated]
         if includeScreenshot {
@@ -746,16 +888,87 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         // The helper surfaces its redirect chain, so every reported hop
         // re-enters the allowlist plus the canonical guard before the
         // snapshot leaves the gateway; a public start cannot launder a
-        // sensitive hop through the bridge.
-        try await BrowserValidation.validateRedirectChainAsync(
+        // sensitive hop through the bridge. The entry host validated above
+        // is excluded from the fresh-host pass so a one-shot grant is
+        // consumed once per call, not once per echoed chain entry.
+        try await validateFreshRedirectChain(
             snapshot.redirectChain,
             finalURL: snapshot.url,
+            entryURL: validated,
+            sessionID: sessionID
+        )
+        return snapshot
+    }
+
+    /// Validates bridge-reported hops beyond the already-granted entry host.
+    ///
+    /// Single stateful pass for this navigation: every hop re-vets SSRF, and
+    /// every fresh host additionally vets the declarative policy with the
+    /// calling session. Hops back on the entry host reuse the pre-dial policy
+    /// verdict (SSRF-only) instead of charging a one-shot grant again, so the
+    /// chain still re-validates each hop without double-spending the grant.
+    private func validateFreshRedirectChain(
+        _ chain: [BrowserRedirectStep],
+        finalURL: String,
+        entryURL: String,
+        sessionID: UUID?
+    ) async throws {
+        let entryHost = BrowserValidation.normalizedURLHost(entryURL)
+        var fresh: [BrowserRedirectStep] = []
+        var entryHops: [BrowserRedirectStep] = []
+        var seenHosts = Set<String>()
+        if let entryHost {
+            seenHosts.insert(entryHost)
+        }
+        for step in chain {
+            guard let host = BrowserValidation.normalizedURLHost(step.url) else {
+                fresh.append(step)
+                continue
+            }
+            if host == entryHost {
+                entryHops.append(step)
+                continue
+            }
+            guard !seenHosts.contains(host) else { continue }
+            seenHosts.insert(host)
+            fresh.append(step)
+        }
+        for step in entryHops {
+            _ = try await BrowserValidation.validateEgressURLAsync(
+                step.url,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                extraAllowlistedOrigins: allowlistedOrigins,
+                egressSupervisor: nil
+            )
+        }
+        let freshFinal: String
+        if let finalHost = BrowserValidation.normalizedURLHost(finalURL), !seenHosts.contains(finalHost) {
+            freshFinal = finalURL
+        } else if let last = fresh.last {
+            freshFinal = last.url
+        } else {
+            _ = try await BrowserValidation.validateEgressURLAsync(
+                finalURL,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                extraAllowlistedOrigins: allowlistedOrigins,
+                egressSupervisor: nil
+            )
+            return
+        }
+        try await BrowserValidation.validateRedirectChainAsync(
+            fresh,
+            finalURL: freshFinal,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
-            extraAllowlistedOrigins: allowlistedOrigins
+            extraAllowlistedOrigins: allowlistedOrigins,
+            egressSupervisor: egressSupervisor,
+            sessionID: sessionID
         )
-        return snapshot
     }
 
     /// Re-navigates in a fresh isolated context and performs one action.
@@ -764,13 +977,37 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     /// here and every call below touches the browser. Navigate keeps its
     /// dry-run path because read-only opens still validate through the fast
     /// interpreter without provisioning.
-    public func act(action: BrowserActAction, ref: String, text: String?, url: String) async throws -> BrowserActResult {
+    ///
+    /// The calling session threads into the entry and landing checks so one
+    /// interactive grant covers the call; a landing back on the entry host
+    /// reuses the entry verdict instead of charging a one-shot grant twice.
+    /// Session-free entry satisfying the gateway protocol without a policy
+    /// grant; scoped callers use the session-threaded overload below.
+    public func act(
+        action: BrowserActAction,
+        ref: String,
+        text: String?,
+        url: String
+    ) async throws -> BrowserActResult {
+        try await act(action: action, ref: ref, text: text, url: url, sessionID: nil)
+    }
+
+    /// Session-threaded act keeping one grant across entry and landing checks.
+    public func act(
+        action: BrowserActAction,
+        ref: String,
+        text: String?,
+        url: String,
+        sessionID: UUID? = nil
+    ) async throws -> BrowserActResult {
         let validatedURL = try await BrowserValidation.validateURLAsync(
             url,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
-            extraAllowlistedOrigins: allowlistedOrigins
+            extraAllowlistedOrigins: allowlistedOrigins,
+            egressSupervisor: egressSupervisor,
+            sessionID: sessionID
         )
         let validatedRef = try BrowserValidation.validateRef(ref)
         let validatedText = try BrowserValidation.validateActText(action: action, text: text)
@@ -787,14 +1024,31 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         let result = try BrowserBridgeParsing.parseActPayload(data, action: action, ref: validatedRef, fallbackURL: validatedURL)
         // Post-action navigation can land elsewhere (click-through or
         // meta-refresh), so the reported URL re-vets before the result leaves
-        // the gateway rather than trusting the helper's landing page.
-        _ = try await BrowserValidation.validateEgressURLAsync(
-            result.url,
-            browserConfig: browserConfig,
-            mediaConfig: mediaConfig,
-            llmServerURLs: llmServerURLs,
-            extraAllowlistedOrigins: allowlistedOrigins
-        )
+        // the gateway rather than trusting the helper's landing page. A
+        // landing back on the granted entry host re-vets SSRF-only without a
+        // second policy charge; a fresh host vets fully with the session.
+        let entryHost = BrowserValidation.normalizedURLHost(validatedURL)
+        let landingHost = BrowserValidation.normalizedURLHost(result.url)
+        if entryHost != nil, landingHost == entryHost {
+            _ = try await BrowserValidation.validateEgressURLAsync(
+                result.url,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                extraAllowlistedOrigins: allowlistedOrigins,
+                egressSupervisor: nil
+            )
+        } else {
+            _ = try await BrowserValidation.validateEgressURLAsync(
+                result.url,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                extraAllowlistedOrigins: allowlistedOrigins,
+                egressSupervisor: egressSupervisor,
+                sessionID: sessionID
+            )
+        }
         return result
     }
 
@@ -868,274 +1122,6 @@ public struct StubBrowserGateway: BrowserPlaywrightGateway, Sendable {
     /// Always throws the explicit missing-dependency error.
     public func act(action _: BrowserActAction, ref _: String, text _: String?, url _: String) async throws -> BrowserActResult {
         throw BrowserError.playwrightMissing(message)
-    }
-}
-
-/// Pure JSON parsing for the Playwright bridge payloads.
-public enum BrowserBridgeParsing: Sendable {
-    /// Bridge `navigate` response shape.
-    struct NavigateResponse: Decodable {
-        /// Whether the operation succeeded.
-        let ok: Bool
-        /// Error detail when `ok` is false.
-        let error: String?
-        /// Final URL after redirects.
-        let url: String?
-        /// Page title.
-        let title: String?
-        /// Distilled visible text.
-        let text: String?
-        /// Snapshot refs.
-        let refs: [BrowserElementRef]?
-        /// Login-wall signal.
-        let authRequired: Bool?
-        /// Manifest-only downloads.
-        let downloads: [BrowserDownloadManifest]?
-        /// Ordered redirect chain (typed steps or plain URL strings).
-        let redirectChain: [BridgeRedirectEntry]?
-        /// Explicit redirect count, when reported.
-        let redirectCount: Int?
-        /// Screenshot payload: data URL or raw base64 JPEG.
-        let screenshot: String?
-        /// Precomputed audit hash, when the helper supplies one.
-        let screenshotHash: String?
-        /// Explicit data URL variant.
-        let screenshotDataURL: String?
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: NavigateResponseKeys.self)
-            ok = try container.decode(Bool.self, forKey: .ok)
-            error = try container.decodeIfPresent(String.self, forKey: .error)
-            url = try container.decodeIfPresent(String.self, forKey: .url)
-            title = try container.decodeIfPresent(String.self, forKey: .title)
-            text = try container.decodeIfPresent(String.self, forKey: .text)
-            refs = try container.decodeIfPresent([BrowserElementRef].self, forKey: .refs)
-            authRequired = try container.decodeIfPresent(Bool.self, forKey: .authRequired)
-            downloads = try container.decodeIfPresent([BrowserDownloadManifest].self, forKey: .downloads)
-            // Chain tolerates typed steps, plain strings, and the `redirects` alias.
-            // Single-sourced through `BrowserNavigateWire` so bridge parsing
-            // shares one alias table with tool output and display; mismatches
-            // are logged there instead of silently swallowed.
-            let typedChain: [BridgeRedirectEntry]? = BrowserNavigateWire.decodeFirst(
-                container,
-                keys: [.redirectChain, .redirectChainSnake, .redirects]
-            )
-            var chain: [BridgeRedirectEntry]? = typedChain
-            if chain == nil {
-                let strings: [String]? = BrowserNavigateWire.decodeFirst(
-                    container,
-                    keys: [.redirectChain, .redirectChainSnake, .redirects]
-                )
-                if let strings {
-                    chain = strings.map { BridgeRedirectEntry(url: $0, status: nil) }
-                }
-            }
-            redirectChain = chain
-            redirectCount = BrowserNavigateWire.decodeFirst(
-                container,
-                keys: [.redirectCount, .redirectCountSnake]
-            )
-            screenshot = try container.decodeIfPresent(String.self, forKey: .screenshot)
-            screenshotHash = BrowserNavigateWire.decodeFirst(
-                container,
-                keys: [.screenshotHash, .screenshotHashSnake]
-            )
-            screenshotDataURL = try container.decodeIfPresent(String.self, forKey: .screenshotDataURL)
-        }
-    }
-
-    /// Key set for `NavigateResponse`, kept beside (not inside) the struct
-    /// so type nesting stays within the one-level budget.
-    private enum NavigateResponseKeys: String, CodingKey {
-        case ok
-        case error
-        case url
-        case title
-        case text
-        case refs
-        case authRequired
-        case downloads
-        case redirectChain
-        // Snake-case aliases keep raw values so the case names stay alphanumeric.
-        case redirectChainSnake = "redirect_chain"
-        case redirects
-        case redirectCount
-        case redirectCountSnake = "redirect_count"
-        case screenshot
-        case screenshotHash
-        case screenshotHashSnake = "screenshot_hash"
-        case screenshotDataURL
-    }
-
-    /// One redirect entry tolerating string or object shapes.
-    struct BridgeRedirectEntry: Decodable {
-        /// Step URL.
-        let url: String
-        /// HTTP status, when known.
-        let status: Int?
-
-        init(url: String, status: Int? = nil) {
-            self.url = url
-            self.status = status
-        }
-
-        init(from decoder: Decoder) throws {
-            // Plain strings decode as URL-only steps so older helpers keep working.
-            if let single = try? decoder.singleValueContainer().decode(String.self) {
-                self.url = single
-                self.status = nil
-                return
-            }
-            let container = try decoder.container(keyedBy: BridgeRedirectEntryKeys.self)
-            url = try container.decode(String.self, forKey: .url)
-            status = try container.decodeIfPresent(Int.self, forKey: .status)
-        }
-    }
-
-    /// Key set for `BridgeRedirectEntry`, kept beside (not inside) the struct
-    /// so type nesting stays within the one-level budget.
-    private enum BridgeRedirectEntryKeys: String, CodingKey {
-        case url
-        case status
-    }
-
-    /// Bridge `act` response shape.
-    struct ActResponse: Decodable {
-        /// Whether the operation succeeded.
-        let ok: Bool
-        /// Error detail when `ok` is false.
-        let error: String?
-        /// Final URL after the action.
-        let url: String?
-        /// Echoed action.
-        let action: String?
-        /// Echoed ref.
-        let ref: String?
-        /// Manifest-only downloads.
-        let downloads: [BrowserDownloadManifest]?
-    }
-
-    /// Decodes a `navigate` payload into a bounded snapshot.
-    public static func parseSnapshotPayload(_ data: Data, fallbackURL: String) throws -> BrowserSnapshot {
-        let response: NavigateResponse
-        do {
-            response = try JSONDecoder().decode(NavigateResponse.self, from: data)
-        } catch {
-            throw BrowserError.decodeFailed(error.localizedDescription)
-        }
-        guard response.ok else {
-            throw classifiedBridgeError(response.error ?? "Browser navigation failed")
-        }
-        let url = NormalizedText.value(response.url, fallback: fallbackURL)
-        let title = response.title ?? ""
-        let rawText = response.text ?? ""
-        let bounded = BrowserValidation.boundedText(rawText)
-        let rawRefs = (response.refs ?? []).filter { BrowserValidation.isValidRef($0.ref) }
-        let capped = BrowserValidation.boundedRefs(rawRefs)
-        // Chain falls back to a single-step hop so the collapsed-chain UI
-        // always has an honest count even when the helper predates reporting.
-        let chain: [BrowserRedirectStep] = if let entries = response.redirectChain, !entries.isEmpty {
-            entries.map { BrowserRedirectStep(url: $0.url, status: $0.status) }
-        } else {
-            [BrowserRedirectStep(url: url)]
-        }
-        let screenshot = normalizedScreenshotDataURL(
-            direct: response.screenshotDataURL,
-            raw: response.screenshot,
-            fallbackHash: response.screenshotHash
-        )
-        return BrowserSnapshot(
-            url: url,
-            title: title,
-            text: bounded.text,
-            refs: capped.refs,
-            truncated: bounded.truncated || capped.truncated,
-            authRequired: response.authRequired ?? false,
-            downloads: response.downloads ?? [],
-            redirectChain: chain,
-            screenshotDataURL: screenshot.dataURL,
-            screenshotHash: screenshot.hash
-        )
-    }
-
-    /// Normalizes a screenshot payload to a budgeted data URL plus audit hash.
-    static func normalizedScreenshotDataURL(
-        direct: String?,
-        raw: String?,
-        fallbackHash: String?
-    ) -> (dataURL: String?, hash: String?) {
-        let candidate = NormalizedText.value(direct) ?? normalizedDataURL(raw)
-        guard let candidate, !candidate.isEmpty else { return (nil, nil) }
-        guard let bytes = screenshotBytes(from: candidate) else { return (nil, nil) }
-        // Over-budget captures stay text-only: pixels never enter history
-        // past the persistence budget.
-        guard BrowserScreenshotPolicy.isWithinBudget(byteCount: bytes.count) else { return (nil, nil) }
-        let hash = NormalizedText.value(fallbackHash)
-            ?? BrowserScreenshotPolicy.auditHash(for: bytes)
-        return (candidate, hash)
-    }
-
-    /// Normalizes raw helper screenshot text to a data URL.
-    /// Single-sourced through `BrowserNavigateWire` so bridge parsing, tool
-    /// output, and display/audit share one screenshot shape.
-    /// - Parameter raw: Helper `screenshot` field, if any.
-    /// - Returns: Data URL, or nil when absent.
-    static func normalizedDataURL(_ raw: String?) -> String? {
-        BrowserNavigateWire.normalizedDataURL(raw)
-    }
-
-    /// Decodes the bytes behind a data URL for budget and hash checks.
-    /// - Parameter dataURL: Candidate data URL.
-    /// - Returns: Decoded bytes, or nil when malformed.
-    static func screenshotBytes(from dataURL: String) -> Data? {
-        guard let comma = dataURL.firstIndex(of: ",") else { return nil }
-        let payload = String(dataURL[dataURL.index(after: comma)...])
-        guard !payload.isEmpty else { return nil }
-        return Data(base64Encoded: payload, options: .ignoreUnknownCharacters)
-    }
-
-    /// Decodes an `act` payload into a result.
-    public static func parseActPayload(_ data: Data, action: BrowserActAction, ref: String, fallbackURL: String) throws -> BrowserActResult {
-        let response: ActResponse
-        do {
-            response = try JSONDecoder().decode(ActResponse.self, from: data)
-        } catch {
-            throw BrowserError.decodeFailed(error.localizedDescription)
-        }
-        guard response.ok else {
-            throw classifiedBridgeError(response.error ?? "Browser action failed")
-        }
-        let url = NormalizedText.value(response.url, fallback: fallbackURL)
-        return BrowserActResult(url: url, action: action, ref: ref, downloads: response.downloads ?? [])
-    }
-
-    /// Maps helper stderr text to the explicit missing-dependency error when Playwright is absent.
-    /// The managed-copy flag travels typed from the caller instead of matching
-    /// banner wording, so a copy edit never re-nests the venv path twice.
-    /// - Parameters:
-    ///   - detail: Raw helper stderr or response error text.
-    ///   - isManagedCopy: True when `detail` already carries the managed venv
-    ///     path plus manual fallback and must pass through unwrapped.
-    /// - Returns: Typed bridge error sharing the missing classification.
-    public static func classifiedBridgeError(_ detail: String, isManagedCopy: Bool = false) -> BrowserError {
-        if detail.contains("Playwright is not installed") || detail.contains("No module named playwright") {
-            // Already actionable when the caller threaded the managed copy,
-            // so pass it through instead of nesting the venv path twice.
-            if isManagedCopy {
-                return .playwrightMissing(detail)
-            }
-            return .playwrightMissing(PlaywrightPythonEnsurer.missingMessage(stage: nil, detail: detail))
-        }
-        if detail.contains("Could not launch python3") {
-            if isManagedCopy {
-                return .playwrightMissing(detail)
-            }
-            return .playwrightMissing(PlaywrightPythonEnsurer.missingMessage(stage: nil, detail: detail))
-        }
-        if detail.contains("SSRF denied") {
-            return .invalidURL(detail)
-        }
-        return .bridgeFailed(detail)
     }
 }
 

@@ -31,10 +31,16 @@ import {
 import { NAV_GROUPS, formatBadgeCount, isGroupActive, normalizeBadgeCount, rolledUpBadge } from "./navigationConfig";
 import type { NavGroupId, NavTabId } from "./navigationConfig";
 
-// Dashboard sections reachable from the top nav. Goals is desktop-only: it
-// lives inside the Work dropdown and is intentionally absent from the mobile
-// bottom bar, which keeps its own five-tab contract.
-export type Tab = "chat" | "approvals" | "goals" | "memory" | "runs" | "schedules" | "settings";
+// Dashboard sections reachable from the top nav and mobile navigation.
+export type Tab =
+  | "chat"
+  | "approvals"
+  | "goals"
+  | "memory"
+  | "indexing"
+  | "runs"
+  | "schedules"
+  | "settings";
 
 interface TopNavProps {
   currentTab: Tab;

@@ -83,33 +83,40 @@ public enum BuiltinToolPlugins {
         apiTransport: (any ApiRequestTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil,
         secrets: SecretsManager? = nil,
-        policyStore: PolicyStore? = nil
+        policyStore: PolicyStore? = nil,
+        egressSupervisor: OutboundEgressSupervisor? = nil
     ) async throws -> [any Tool] {
         let origins = ApiSSRFGuard.allowlistedOrigins(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs
         )
-        let supervisor = try await makeEgressSupervisor(
-            policyStore: policyStore,
-            secrets: secrets,
-            browserConfig: browserConfig,
-            mediaConfig: mediaConfig,
-            llmServerURLs: llmServerURLs
-        )
+        let supervisor: OutboundEgressSupervisor = if let egressSupervisor {
+            egressSupervisor
+        } else {
+            try await makeEgressSupervisor(
+                policyStore: policyStore,
+                secrets: secrets,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs
+            )
+        }
         return WebTools.makeTools(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             searchTransport: searchTransport,
             fetchTransport: fetchTransport,
-            ensurer: ensurer
+            ensurer: ensurer,
+            supervisor: supervisor
         )
             + BrowserTools.makeTools(
                 gateway: gateway,
                 browserConfig: browserConfig,
                 mediaConfig: mediaConfig,
                 llmServerURLs: llmServerURLs,
-                allowlistedOrigins: origins
+                allowlistedOrigins: origins,
+                egressSupervisor: supervisor
             )
             + ApiRequestTools.makeTools(
                 supervisor: supervisor,
@@ -164,8 +171,21 @@ public enum BuiltinToolPlugins {
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         stagedFilesStore: StagedFilesStore? = nil,
         fanOutEngine: FanOutEngine? = nil,
-        policyStore: PolicyStore? = nil
+        policyStore: PolicyStore? = nil,
+        egressSupervisor: OutboundEgressSupervisor? = nil
     ) async throws -> [any Tool] {
+        let supervisor: OutboundEgressSupervisor = if let egressSupervisor {
+            egressSupervisor
+        } else {
+            try await makeEgressSupervisor(
+                policyStore: policyStore,
+                secrets: secrets,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                emailConfig: emailConfig
+            )
+        }
         var tools: [any Tool] = []
         if let emailConfig {
             // Forward the same `[files]` policy the Files tools use so the
@@ -181,7 +201,13 @@ public enum BuiltinToolPlugins {
         tools += FilesTools.makeTools(filesConfig: filesConfig ?? FilesConfig(), stagedFilesStore: stagedFilesStore)
         // Bash always registers so GET /tools stays stable; a disabled
         // config fails closed inside BashTool.execute via its enabled guard.
-        tools.append(BashTool(bashConfig: bashConfig, filesConfig: filesConfig ?? FilesConfig()))
+        tools.append(
+            BashTool(
+                bashConfig: bashConfig,
+                filesConfig: filesConfig ?? FilesConfig(),
+                egressSupervisor: supervisor
+            )
+        )
         if let memoryEngine {
             tools += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
         }
@@ -203,7 +229,8 @@ public enum BuiltinToolPlugins {
             apiTransport: apiTransport,
             ensurer: ensurer,
             secrets: secrets,
-            policyStore: policyStore
+            policyStore: policyStore,
+            egressSupervisor: supervisor
         )
         if let mediaConfig {
             tools += MediaTools.makeTools(mediaConfig: mediaConfig, transport: mediaTransport, secrets: mediaSecrets)
@@ -211,7 +238,8 @@ public enum BuiltinToolPlugins {
         tools += DesktopTools.makeTools(
             desktopConfig: desktopConfig,
             captureBridge: desktopCaptureBridge,
-            controlBridge: desktopControlBridge
+            controlBridge: desktopControlBridge,
+            egressSupervisor: supervisor
         )
         if let fanOutEngine {
             // The fan-out tool appends last so the read-only subset derives
@@ -247,7 +275,8 @@ public enum BuiltinToolPlugins {
         goalStore: GoalStore? = nil,
         goalConversations: ConversationManager? = nil,
         fanOutEngine: FanOutEngine? = nil,
-        policyStore: PolicyStore? = nil
+        policyStore: PolicyStore? = nil,
+        egressSupervisor: OutboundEgressSupervisor? = nil
     ) async throws -> [any Tool] {
         let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
         return try await makeAllTools(
@@ -275,7 +304,8 @@ public enum BuiltinToolPlugins {
             goalConversations: goalConversations,
             goalsConfig: config.goals,
             fanOutEngine: fanOutEngine,
-            policyStore: policyStore
+            policyStore: policyStore,
+            egressSupervisor: egressSupervisor
         )
     }
 
@@ -327,7 +357,8 @@ public enum BuiltinToolPlugins {
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         stagedFilesStore: StagedFilesStore? = nil,
         fanOutEngine: FanOutEngine? = nil,
-        policyStore: PolicyStore? = nil
+        policyStore: PolicyStore? = nil,
+        egressSupervisor: OutboundEgressSupervisor? = nil
     ) async throws {
         let shipsDisabled = Self.shipsDisabledToolNames
         for tool in try await makeAllTools(
@@ -360,7 +391,8 @@ public enum BuiltinToolPlugins {
             chatDatabasePath: chatDatabasePath,
             stagedFilesStore: stagedFilesStore,
             fanOutEngine: fanOutEngine,
-            policyStore: policyStore
+            policyStore: policyStore,
+            egressSupervisor: egressSupervisor
         ) {
             // Every other builtin keeps the enabled-by-default registration;
             // capabilities in `shipsDisabledToolNames` ship disabled so only an
@@ -387,7 +419,8 @@ public enum BuiltinToolPlugins {
         secrets: SecretsManager?,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig?,
-        llmServerURLs: [String]
+        llmServerURLs: [String],
+        emailConfig: EmailConfig? = nil
     ) async throws -> OutboundEgressSupervisor {
         let resolvedStore = await PolicyStore.makeLoaded(injected: policyStore)
         return try await OutboundEgressSupervisor.make(
@@ -395,6 +428,7 @@ public enum BuiltinToolPlugins {
             secrets: secrets,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
+            emailConfig: emailConfig,
             llmServerURLs: llmServerURLs
         )
     }

@@ -172,22 +172,35 @@ public struct DesktopActionTool: Tool, Sendable {
 
     private let controlBridge: any DesktopControlling
     private let blockedApps: [String]
+    /// Outbound egress supervisor for typed-URL screening.
+    /// Retained for construction parity with the bridge: screening itself
+    /// lives in the bridge's session-aware batch entry point, which the tool
+    /// reaches dynamically through the protocol requirement.
+    public let egressSupervisor: OutboundEgressSupervisor?
 
     /// Creates the action tool.
     /// - Parameters:
     ///   - controlBridge: Control implementation (live by default, stub for tests).
     ///   - blockedApps: Application names to block from receiving input.
+    ///   - egressSupervisor: Supervisor handed to the live bridge for typed-URL screening.
     public init(
         controlBridge: any DesktopControlling = DesktopControlBridge(),
-        blockedApps: [String] = DesktopConfig.defaultBlockedApps
+        blockedApps: [String] = DesktopConfig.defaultBlockedApps,
+        egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
         self.controlBridge = controlBridge
         self.blockedApps = blockedApps
+        self.egressSupervisor = egressSupervisor
     }
 
-    public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+    public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         let args = try DesktopActionArgs.decode(from: input.argumentsJSON)
 
+        // URL screening lives in the control bridge's session-aware batch
+        // entry point, reached dynamically through the protocol requirement
+        // so every bridge honors the calling session's grants. The tool never
+        // pre-screens: a pre-check would consume a one-shot grant the bridge
+        // check then re-parks.
         // Mark the batch active so the menu-bar indicator and Emergency Stop
         // appear for exactly the window the bridge is dispatching input.
         await DesktopControlMonitor.shared.beginBatch()
@@ -196,7 +209,8 @@ public struct DesktopActionTool: Tool, Sendable {
                 actions: args.actions,
                 scaleX: args.scaleX,
                 scaleY: args.scaleY,
-                blockedApps: blockedApps
+                blockedApps: blockedApps,
+                sessionID: context.sessionID
             )
             await DesktopControlMonitor.shared.endBatch()
             let envelope = DesktopActionEnvelope(
@@ -244,6 +258,8 @@ public struct DesktopActionTool: Tool, Sendable {
             "Action at step \(index) failed: \(reason)"
         case let .batchTooLarge(count, max):
             "Batch too large: \(count) actions submitted, maximum is \(max). Split into smaller batches."
+        case let .blockedURL(host, url, reason):
+            "SAFETY: Action contains blocked or unlisted network URL '\(url)' (host: '\(host)'). Reason: \(reason)"
         }
     }
 }
@@ -417,11 +433,13 @@ public enum DesktopTools {
     ///     capture knobs (dimensions, quality, blocklist).
     ///   - captureBridge: Optional capture bridge (for tests).
     ///   - controlBridge: Optional control bridge (for tests).
+    ///   - egressSupervisor: Optional supervisor screening typed URLs against policy.
     /// - Returns: Both desktop tools, in registration order.
     public static func makeTools(
         desktopConfig: DesktopConfig = DesktopConfig(),
         captureBridge: (any DesktopCapturing)? = nil,
-        controlBridge: (any DesktopControlling)? = nil
+        controlBridge: (any DesktopControlling)? = nil,
+        egressSupervisor: OutboundEgressSupervisor? = nil
     ) -> [any Tool] {
         [
             DesktopScreenshotTool(
@@ -430,8 +448,9 @@ public enum DesktopTools {
                 jpegQuality: desktopConfig.jpegQuality
             ),
             DesktopActionTool(
-                controlBridge: controlBridge ?? DesktopControlBridge(),
-                blockedApps: desktopConfig.blockedApps
+                controlBridge: controlBridge ?? DesktopControlBridge(egressSupervisor: egressSupervisor),
+                blockedApps: desktopConfig.blockedApps,
+                egressSupervisor: egressSupervisor
             )
         ]
     }

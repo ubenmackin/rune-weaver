@@ -435,6 +435,15 @@ describe("TopNav profile menu", () => {
       ),
     ).toEqual(["Goals", "Schedules", "Runs"]);
 
+    // The Memory trigger reveals its children in canonical order.
+    await user.click(screen.getByRole("button", { name: "Memory" }));
+    const memoryMenu = screen.getByRole("menu", { name: "Memory sections" });
+    expect(
+      Array.from(memoryMenu.querySelectorAll('[role="menuitem"]')).map((item) =>
+        item.textContent?.trim(),
+      ),
+    ).toEqual(["Search and Memory", "Index Status"]);
+
     // Opening the icon-only profile trigger reveals Settings inside that menu.
     await openProfile(user);
     expect(screen.getByRole("menuitem", { name: "Settings" })).toBeInTheDocument();

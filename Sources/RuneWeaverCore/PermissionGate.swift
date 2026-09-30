@@ -480,6 +480,8 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
     public let intent: String?
     /// Evaluated safety and impact outcome.
     public let assessment: ImpactAssessment?
+    /// Target host for unlisted network egress requests.
+    public let egressHost: String?
 
     /// Coding keys for the approval prompt.
     private enum CodingKeys: String, CodingKey {
@@ -499,6 +501,8 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         case intent
         /// Impact assessment.
         case assessment
+        /// Target host for egress requests.
+        case egressHost = "egress_host"
     }
 
     /// Creates a permission request.
@@ -510,7 +514,8 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         suggestedDurations: [TrustDuration] = TrustDuration.allCases,
         sessionID: UUID? = nil,
         intent: String? = nil,
-        assessment: ImpactAssessment? = nil
+        assessment: ImpactAssessment? = nil,
+        egressHost: String? = nil
     ) {
         self.id = id
         self.toolName = toolName
@@ -520,6 +525,7 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         self.sessionID = sessionID
         self.intent = intent
         self.assessment = assessment
+        self.egressHost = egressHost
     }
 
     /// Decodes a request, tolerating payloads written before session tagging or assessment.
@@ -534,6 +540,7 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
         self.intent = try container.decodeIfPresent(String.self, forKey: .intent)
         self.assessment = try container.decodeIfPresent(ImpactAssessment.self, forKey: .assessment)
+        self.egressHost = try container.decodeIfPresent(String.self, forKey: .egressHost)
     }
 
     /// Encodes a request, omitting optional fields when absent.
@@ -548,6 +555,7 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         try container.encodeIfPresent(sessionID, forKey: .sessionID)
         try container.encodeIfPresent(intent, forKey: .intent)
         try container.encodeIfPresent(assessment, forKey: .assessment)
+        try container.encodeIfPresent(egressHost, forKey: .egressHost)
     }
 }
 

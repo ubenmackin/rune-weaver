@@ -320,7 +320,22 @@ func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerCont
     case let .toolCancel(message):
         await handleWebSocketToolCancel(message, connectionID: connectionID, context: context)
     case let .decision(message):
-        await handleWebSocketDecision(message, connectionID: connectionID, context: context, connectionTasks: connectionTasks)
+        let egressOutcome = wsEgressDecisionTier(from: text)
+        if egressOutcome.invalid {
+            await sendWSError(
+                "Unknown egressDecision tier",
+                connectionID: connectionID,
+                context: context
+            )
+            return
+        }
+        await handleWebSocketDecision(
+            message,
+            egressDecision: egressOutcome.tier,
+            connectionID: connectionID,
+            context: context,
+            connectionTasks: connectionTasks
+        )
     case .unknown:
         let hint = "Expected a chat frame {\"text\": \"...\"}, a decision frame, a cancel frame, or a tool_cancel frame"
         await sendWSError(hint, connectionID: connectionID, context: context)
@@ -831,14 +846,54 @@ func handleWebSocketToolCancel(_ message: WSToolCancelMessage, connectionID: UUI
 }
 
 /// Resolves an approval decision received over WebSocket.
-func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, context: ServerContext, connectionTasks: ConnectionChatTasks) async {
+///
+/// Mirrors the REST tier-to-side-effect mapping: an egress tier derives the
+/// approval outcome and applies supervisor plus policy side effects through
+/// the shared handler, failing closed when the grant cannot be honored.
+func handleWebSocketDecision(
+    _ message: WSDecisionMessage,
+    egressDecision: EgressDecisionTier? = nil,
+    connectionID: UUID,
+    context: ServerContext,
+    connectionTasks: ConnectionChatTasks
+) async {
     guard !Task.isCancelled else {
         return
     }
     let pending = await context.approvals.request(id: message.id)
+    let effectiveApproved: Bool
+    if let tier = egressDecision {
+        let applied = await applyEgressDecision(tier: tier, pending: pending, context: context)
+        switch tier {
+        case .allowOnce, .allowSession, .alwaysAllow:
+            guard applied else {
+                await sendWSError(
+                    "Egress decision could not be applied for this approval",
+                    connectionID: connectionID,
+                    context: context
+                )
+                return
+            }
+            effectiveApproved = true
+        case .deny:
+            effectiveApproved = false
+        case .denyAlways:
+            guard applied else {
+                await sendWSError(
+                    "Egress decision could not be applied for this approval",
+                    connectionID: connectionID,
+                    context: context
+                )
+                return
+            }
+            effectiveApproved = false
+        }
+    } else {
+        effectiveApproved = message.approved
+    }
     let resolved = await context.approvals.decide(
         id: message.id,
-        approved: message.approved,
+        approved: effectiveApproved,
         duration: message.resolvedDuration,
         widen: message.resolvedWiden
     )
@@ -852,7 +907,7 @@ func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, c
     // approvals stay one-shot inside `decide` (coerced to thisTime
     // with no stored grant), so a durable vote on engine.continue
     // must not fire a refresh when nothing changed.
-    if message.approved, message.resolvedDuration != .thisTime, pending?.toolName != "engine.continue" {
+    if effectiveApproved, message.resolvedDuration != .thisTime, pending?.toolName != "engine.continue" {
         await context.hub.broadcastTrustGrantsChanged()
     }
     if pending?.sessionID != nil {
@@ -865,7 +920,7 @@ func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, c
         let trackingID = UUID()
         connectionTasks.reserve(id: trackingID)
         let approvalID = message.id
-        let approved = message.approved
+        let approved = effectiveApproved
         let resumeSessionID = pending?.sessionID
         let decidedCallID = pending?.input.callID
         let resumeTask: Task<Void, Never> = Task { [weak connectionTasks] in
@@ -881,6 +936,42 @@ func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, c
         }
         connectionTasks.insert(resumeTask, id: trackingID)
     }
+}
+
+/// Fail-closed decode of the egress decision tier from a raw decision frame.
+///
+/// The core decision shape carries no egress tier, so the tier rides as an
+/// optional sibling key the strict decoder ignores. A missing key means a
+/// plain approval; a present-but-undecodable value (unknown string, number)
+/// marks the frame invalid so the caller errors instead of approving without
+/// a grant, matching the REST 400 on a bad enum.
+private struct WSEgressDecisionOutcome: Sendable {
+    /// Decoded tier, nil for plain approvals and invalid frames.
+    let tier: EgressDecisionTier?
+    /// True when the key was present but failed strict decoding.
+    let invalid: Bool
+}
+
+private func wsEgressDecisionTier(from text: String) -> WSEgressDecisionOutcome {
+    guard let data = text.data(using: .utf8),
+          let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return WSEgressDecisionOutcome(tier: nil, invalid: false) }
+    guard raw.keys.contains("egressDecision") else {
+        return WSEgressDecisionOutcome(tier: nil, invalid: false)
+    }
+    // A JSON null tier reads as plain approval; any other present value
+    // must strictly decode or the frame fails closed.
+    if raw["egressDecision"] is NSNull {
+        return WSEgressDecisionOutcome(tier: nil, invalid: false)
+    }
+    struct EgressFields: Decodable {
+        var egressDecision: EgressDecisionTier?
+        enum CodingKeys: String, CodingKey { case egressDecision }
+    }
+    guard let fields = try? JSONDecoder().decode(EgressFields.self, from: data),
+          let tier = fields.egressDecision
+    else { return WSEgressDecisionOutcome(tier: nil, invalid: true) }
+    return WSEgressDecisionOutcome(tier: tier, invalid: false)
 }
 
 /// Sends one requester-scoped error frame through the hub, best-effort.

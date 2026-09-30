@@ -1164,7 +1164,7 @@ struct SettingsPolicyRouteTests {
             switch baseline {
             case .allowed:
                 Issue.record("Expected the seeded allowlist to refuse the public literal before the PUT")
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 #expect(reason.contains("not in the allowed domains"))
             }
 
@@ -1199,7 +1199,7 @@ struct SettingsPolicyRouteTests {
             switch verdict {
             case .allowed:
                 break
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 Issue.record("Expected the rebuilt supervisor to allow the policy-listed literal, got: \(reason)")
             }
         }

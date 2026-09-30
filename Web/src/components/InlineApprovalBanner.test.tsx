@@ -4,7 +4,11 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import InlineApprovalBanner, { splitAllowOptions } from "./InlineApprovalBanner";
+import InlineApprovalBanner, {
+  isEgressBlocked,
+  resolveEgressHost,
+  splitAllowOptions,
+} from "./InlineApprovalBanner";
 import { trustDurationOptions, type PermissionRequest } from "../api";
 
 // Explicit per-test DOM teardown: several suites below query generic controls
@@ -316,6 +320,165 @@ describe("InlineApprovalBanner pending assessment", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByText("Does something")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
+  });
+});
+
+describe("InlineApprovalBanner network egress approval", () => {
+  it("renders egress badge and 5-tier split combo for unlisted domain", async () => {
+    const onDecide = vi.fn();
+    const request: PermissionRequest = {
+      id: "app-egress-1",
+      toolName: "web.fetch",
+      description: "Fetch web content",
+      egressHost: "api.github.com",
+      input: {
+        toolName: "web.fetch",
+        argumentsJSON: '{"url":"https://api.github.com/repos"}',
+        callID: "call-egress-1",
+      },
+      suggestedDurations: ["thisTime"],
+    };
+
+    const user = userEvent.setup();
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    expect(screen.getByText("web.fetch")).toBeInTheDocument();
+    expect(screen.getByTestId("approval-egress-app-egress-1")).toHaveTextContent("🌐 api.github.com");
+    expect(screen.getByText(/is not in allowlist/)).toBeInTheDocument();
+
+    const allowOnceBtn = screen.getByRole("button", { name: "Allow Once" });
+    const denyBtn = screen.getByRole("button", { name: "Deny" });
+    expect(allowOnceBtn).toBeInTheDocument();
+    expect(denyBtn).toBeInTheDocument();
+
+    // Default Allow Once click
+    await user.click(allowOnceBtn);
+    expect(onDecide).toHaveBeenCalledWith("app-egress-1", true, "thisTime", false, "allowOnce");
+
+    // Deny click
+    await user.click(denyBtn);
+    expect(onDecide).toHaveBeenCalledWith("app-egress-1", false, "thisTime", false, "deny");
+
+    // Open chevron menu
+    const chevronBtn = screen.getByRole("button", {
+      name: "Allow options for web.fetch to api.github.com",
+    });
+    await user.click(chevronBtn);
+
+    expect(screen.getByRole("menuitem", { name: "Allow Once" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Allow During Session" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Always Allow" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Deny Always" })).toBeInTheDocument();
+
+    // Pick Always Allow
+    await user.click(screen.getByRole("menuitem", { name: "Always Allow" }));
+    expect(onDecide).toHaveBeenCalledWith("app-egress-1", true, "forever", false, "alwaysAllow");
+
+    // Reopen and pick Deny Always
+    await user.click(chevronBtn);
+    await user.click(screen.getByRole("menuitem", { name: "Deny Always" }));
+    expect(onDecide).toHaveBeenCalledWith("app-egress-1", false, "forever", false, "denyAlways");
+  });
+
+  it("reads the snake_case egress_host spelling for badge and allowlist copy", () => {
+    const onDecide = vi.fn();
+    const request: PermissionRequest = {
+      id: "app-egress-snake",
+      toolName: "web.fetch",
+      description: "Fetch web content",
+      egress_host: "api.github.com",
+      input: {
+        toolName: "web.fetch",
+        argumentsJSON: '{"url":"https://api.github.com/repos"}',
+        callID: "call-egress-snake",
+      },
+      suggestedDurations: ["thisTime"],
+    };
+
+    expect(resolveEgressHost(request)).toBe("api.github.com");
+
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("approval-egress-app-egress-snake"),
+    ).toHaveTextContent("🌐 api.github.com");
+    expect(screen.getByText(/is not in allowlist/)).toBeInTheDocument();
+    expect(screen.queryByText(/is blocked by policy/)).not.toBeInTheDocument();
+  });
+
+  it("names an explicit block instead of an allowlist miss", () => {
+    const onDecide = vi.fn();
+    const request = {
+      id: "app-egress-blocked",
+      toolName: "web.fetch",
+      description: "Fetch web content",
+      egressHost: "denied.example.com",
+      egressBlocked: true,
+      input: {
+        toolName: "web.fetch",
+        argumentsJSON: '{"url":"https://denied.example.com/secret"}',
+        callID: "call-egress-blocked",
+      },
+      suggestedDurations: ["thisTime"],
+    } as unknown as PermissionRequest;
+
+    expect(isEgressBlocked(request)).toBe(true);
+
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("approval-egress-app-egress-blocked"),
+    ).toHaveTextContent("🌐 denied.example.com");
+    expect(screen.getByText(/is blocked by policy/)).toBeInTheDocument();
+    expect(screen.queryByText(/is not in allowlist/)).not.toBeInTheDocument();
+  });
+
+  it("treats a block verdict reason as blocked copy", () => {
+    const onDecide = vi.fn();
+    const request = {
+      id: "app-egress-verdict",
+      toolName: "api.request",
+      description: "Call external api",
+      egressHost: "internal.example.com",
+      egressReason: "Blocked by policy: explicit deny rule",
+      input: {
+        toolName: "api.request",
+        argumentsJSON: '{"url":"https://internal.example.com/v1"}',
+        callID: "call-egress-verdict",
+      },
+      suggestedDurations: ["thisTime"],
+    } as unknown as PermissionRequest;
+
+    expect(isEgressBlocked(request)).toBe(true);
+
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    expect(screen.getByText(/is blocked by policy/)).toBeInTheDocument();
+    expect(screen.queryByText(/is not in allowlist/)).not.toBeInTheDocument();
   });
 });
 

@@ -15,6 +15,9 @@ describe("MemoryBrowser", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     resetSharedSocket();
+    if (typeof window !== "undefined") {
+      window.location.hash = "";
+    }
   });
 
   function stubFetch() {
@@ -236,38 +239,25 @@ describe("MemoryBrowser", () => {
     expect(dialog).not.toHaveTextContent(longContent);
   });
 
-  it("renders the constant Memory header with full-width underline tabs", async () => {
+  it("renders Memory search view by default without in-page tab bar", async () => {
     stubFetch();
     render(<MemoryBrowser />);
     await waitFor(() => {
       expect(screen.getByText("Dog named Biscuit")).toBeInTheDocument();
     });
-    // Constant header stays across tabs.
     expect(screen.getByRole("heading", { name: "Memory" })).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "Recall past conversations, manage stored facts, and monitor the local document index.",
-      ),
-    ).toBeInTheDocument();
-    // Underline tab bar with selected state.
-    const tablist = screen.getByRole("tablist", { name: "Memory views" });
-    expect(tablist).toBeInTheDocument();
-    const searchTab = screen.getByRole("tab", { name: "Search and Memory" });
-    const indexTab = screen.getByRole("tab", { name: "Index Status" });
-    expect(searchTab).toHaveAttribute("aria-selected", "true");
-    expect(indexTab).toHaveAttribute("aria-selected", "false");
-    // Search-view inner header copy.
     expect(
       screen.getByText(
         "Search episodic recall and semantic memory, manage stored user facts.",
       ),
     ).toBeInTheDocument();
+    // Tab bar is removed; views are driven by the Memory dropdown
+    expect(screen.queryByRole("tablist", { name: "Memory views" })).toBeNull();
   });
 
   it("offers no manual Refresh buttons on either view", async () => {
-    const user = userEvent.setup();
     stubFetch();
-    render(<MemoryBrowser />);
+    const { rerender } = render(<MemoryBrowser view="memory" />);
     await waitFor(() => {
       expect(screen.getByText("Dog named Biscuit")).toBeInTheDocument();
     });
@@ -275,8 +265,9 @@ describe("MemoryBrowser", () => {
     expect(
       screen.queryByRole("button", { name: /Refresh/i }),
     ).not.toBeInTheDocument();
+
     // Index view also has no manual refresh.
-    await user.click(screen.getByRole("tab", { name: "Index Status" }));
+    rerender(<MemoryBrowser view="indexing" />);
     await waitFor(() => {
       expect(
         screen.getByText("Monitor the local file, mail, and Messages index."),
@@ -287,26 +278,26 @@ describe("MemoryBrowser", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("switches to Index Status and shows its inner header", async () => {
-    const user = userEvent.setup();
+  it("renders Index Status view with view prop or indexing hash", async () => {
     stubFetch();
-    render(<MemoryBrowser />);
-    await waitFor(() => {
-      expect(screen.getByText("Dog named Biscuit")).toBeInTheDocument();
-    });
-    await user.click(screen.getByRole("tab", { name: "Index Status" }));
+    const { rerender } = render(<MemoryBrowser view="indexing" />);
     await waitFor(() => {
       expect(
         screen.getByText("Monitor the local file, mail, and Messages index."),
       ).toBeInTheDocument();
     });
-    expect(screen.getByRole("tab", { name: "Index Status" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-    expect(
-      screen.getByRole("tab", { name: "Search and Memory" }),
-    ).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("heading", { name: "Index Status" })).toBeInTheDocument();
+
+    // Also supports URL hash change when rendered standalone
+    rerender(<MemoryBrowser />);
+    window.location.hash = "#indexing";
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    await waitFor(() => {
+      expect(
+        screen.getByText("Monitor the local file, mail, and Messages index."),
+      ).toBeInTheDocument();
+    });
+    window.location.hash = "";
   });
 
   it("auto-reloads facts on run_completed without manual refresh", async () => {
