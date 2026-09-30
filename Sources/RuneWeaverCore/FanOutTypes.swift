@@ -22,6 +22,9 @@ public struct FanOutSubtask: Sendable, Codable, Equatable {
         case done
         /// Worker turn failed or exceeded its wall-clock timeout.
         case failed
+        /// The owner stopped the worker before it completed. A deliberate
+        /// stop is its own terminal state: it never reads as a failure.
+        case cancelled
     }
 
     /// Stable subtask identifier within its run.
@@ -88,6 +91,10 @@ public struct FanOutRun: Sendable, Codable, Equatable {
         case completed
         /// At least one subtask settled failed.
         case failed
+        /// The owner stopped at least one subtask before it completed; a
+        /// cancelled subtask outranks a failed one, because a deliberate stop
+        /// must never masquerade as an error.
+        case cancelled
     }
 
     /// Stable run identifier.
@@ -187,4 +194,30 @@ public enum FanOutError: Error, Equatable, Sendable {
     /// A fan-out without subtasks is meaningless; callers get an honest
     /// rejection instead of an empty run.
     case emptySubtasks
+}
+
+/// Answer to an owner-requested fan-out cancellation, keyed by an audit-row
+/// identifier so the same vocabulary the Runs tab shows is what the owner
+/// cancels.
+///
+/// A cancel targets either the parent row (stop the whole swarm) or one child
+/// worker row (stop that worker, leave its siblings running). Only three
+/// answers can be honest: a live run stopped, a live worker stopped, and a row
+/// that no live run or worker owns. A settled run is deliberately
+/// indistinguishable from an unknown row — neither accepts a cancel — so
+/// callers read `.notRunning` as "nothing to stop" rather than an error.
+public enum FanOutCancelOutcome: Sendable, Equatable {
+    /// The parent row carried the cancel: every in-flight worker was stopped
+    /// and every still-running subtask marked cancelled. The count reports how
+    /// many worker tasks were in flight and were cancelled by this call; a
+    /// cancel racing startup may legitimately report zero while still landing,
+    /// because the run's remaining subtasks settle cancelled without running.
+    case runCancelled(workerCount: Int)
+    /// A child row carried the cancel: that worker was stopped and its subtask
+    /// marked cancelled; sibling workers keep running.
+    case workerCancelled
+    /// No in-flight run or worker owns the row: the identifier is unknown, its
+    /// run already settled, or the worker already settled, so no cancel was
+    /// applied.
+    case notRunning
 }

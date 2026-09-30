@@ -20,6 +20,19 @@
 // or timeout degrades the summary to the raw concatenation with an honest
 // note, so worker output is never lost because review was flaky.
 //
+// Cancellation: the engine owns an active-run registry so an owner can stop a
+// swarm mid-flight through `cancel(rowID:)` — keyed by run-log row, the same
+// vocabulary the Runs tab speaks. The parent row stops every worker; a child
+// row stops exactly one worker and leaves its siblings running. A subtask the
+// owner marked cancelled settles `cancelled` with an honest note whatever the
+// worker reports, and an owner stop outranks a worker failure in the digest: a
+// cancelled swarm must read as a deliberate stop, never as `error`. A cancel
+// racing startup still lands because the run registers before its worker group
+// starts and late workers settle cancelled without being awaited. Whole-call
+// cancellation (the chat per-tool stop) reaches the same settle path, so
+// stopped workers produce cancelled statuses instead of failures. The registry
+// deregisters with the swarm, so a settled run never accepts a late cancel.
+//
 // Concurrency invariant: the orchestrator is an actor whose turns interleave
 // at await points without corrupting per-call state, each worker owns its own
 // session, and the shared stores (conversations, tool bus, run logs) are
@@ -182,6 +195,10 @@ private final class WorkerResumption: Sendable {
 private struct WorkerOutcome: Sendable {
     /// Whether the worker turn finished without error.
     let succeeded: Bool
+    /// Whether the turn ended because its task was cancelled rather than
+    /// failing on its own; the settle path keeps an owner stop out of the
+    /// failure vocabulary.
+    let cancelled: Bool
     /// Honest failure note, nil on success.
     let note: String?
     /// Collected output text and parked flag; empty when the turn failed or
@@ -191,6 +208,17 @@ private struct WorkerOutcome: Sendable {
     /// creation so the audit row keeps an honest duration even when the
     /// timeout side settled the race.
     let durationMs: Int
+
+    /// The settle shape for a worker stopped before its turn produced
+    /// anything: a cancel racing startup reports the same honest stop as one
+    /// that lands mid-turn.
+    static let cancelledBeforeStart = WorkerOutcome(
+        succeeded: false,
+        cancelled: true,
+        note: nil,
+        output: .empty,
+        durationMs: 0
+    )
 }
 
 /// One worker's settle payload from the task group: identity, outcome, and
@@ -201,6 +229,10 @@ private struct WorkerSettle: Sendable {
     let subtaskID: UUID
     /// Whether the worker turn finished without error.
     let succeeded: Bool
+    /// Whether the turn ended as a cancellation rather than a failure; the
+    /// settle path pairs this with whole-call cancellation to decide whether
+    /// the stop reads cancelled.
+    let cancelled: Bool
     /// Honest failure note, nil on success.
     let note: String?
     /// Collected output text and parked flag.
@@ -215,6 +247,7 @@ private struct WorkerSettle: Sendable {
     init(subtaskID: UUID, outcome: WorkerOutcome) {
         self.subtaskID = subtaskID
         self.succeeded = outcome.succeeded
+        self.cancelled = outcome.cancelled
         self.note = outcome.note
         self.output = outcome.output
         self.durationMs = outcome.durationMs
@@ -229,6 +262,42 @@ private struct RecordedSwarmRows: Sendable {
     let parentRowID: UUID
     /// Identifiers of child worker audit rows parallel to the subtask order.
     let childRowIDs: [UUID]
+}
+
+/// One worker task's cancellation surface inside a live run.
+private struct ActiveFanOutWorker: Sendable {
+    /// Child audit row the settle path flips to the terminal status.
+    let childRowID: UUID
+    /// Stops the worker's turn. `Task.cancel()` is idempotent and safe from
+    /// any thread, so the registry invokes it while the worker runs.
+    let cancel: @Sendable () -> Void
+}
+
+/// One in-flight run's cancellation surface.
+///
+/// Registered as soon as the parent audit row exists and removed only when the
+/// swarm and merge pass settle, so the window where a cancel can be lost is
+/// none: a cancel before the workers start marks their subtasks and each late
+/// worker settles cancelled without being awaited, and a cancel after the run
+/// settles finds no entry at all.
+private struct ActiveFanOutRun: Sendable {
+    /// Parent audit row that identifies the run to the owner.
+    let parentRowID: UUID
+    /// Every subtask id in run order; a parent cancel marks the not-yet-settled
+    /// ones whether or not their worker task exists yet.
+    let subtaskIDs: [UUID]
+    /// In-flight worker handles keyed by subtask id; entries leave as each
+    /// worker settles so an already-settled row reports not running.
+    var workers: [UUID: ActiveFanOutWorker]
+    /// Subtask id for every child row appended so far, so a child-row cancel
+    /// reaches its subtask even before the worker task exists.
+    var subtaskByChildRow: [UUID: UUID]
+    /// Subtasks already marked cancelled; the settle path settles these
+    /// `cancelled` whatever the worker reports.
+    var cancelledSubtaskIDs: Set<UUID>
+    /// Subtasks whose settle already applied, so a late cancel cannot rewrite
+    /// a terminal outcome.
+    var settledSubtaskIDs: Set<UUID>
 }
 
 /// Resumes a checked continuation exactly once across the background review
@@ -331,6 +400,12 @@ public actor FanOutEngine {
     /// and fail-open fallbacks instead of spending a review call.
     private let reviewer: (any LLMProvider)?
 
+    /// In-flight runs keyed by parent audit-row id, the cancellation surface
+    /// the owner drives through ``cancel(rowID:)``. A run registers before its
+    /// worker group starts and deregisters once the group and merge pass
+    /// settle, so a settled run can never accept a late cancel.
+    private var activeRuns: [UUID: ActiveFanOutRun] = [:]
+
     /// Creates a fan-out engine over shared collaborators.
     /// - Parameters:
     ///   - orchestrator: Seam running each worker turn; the same instance the
@@ -396,7 +471,10 @@ public actor FanOutEngine {
     /// run completes when all subtasks settle and never stays running past
     /// the last settle, so a timed-out worker cannot hold the caller hostage.
     /// An unlimited worker (zero timeout) can hold the parent run open until
-    /// it finishes or is cancelled, intentional for slow local models.
+    /// it finishes or is cancelled, intentional for slow local models. The
+    /// run is cancellable from the moment its parent row exists through
+    /// ``cancel(rowID:)``, and it deregisters before returning, so a settled
+    /// run ignores a late cancel.
     /// - Parameters:
     ///   - subtasks: Explicit subtask list; prompts are the caller's, never
     ///     decomposed here.
@@ -441,7 +519,9 @@ public actor FanOutEngine {
             updatedAt: startedAt
         )
         // Parent plus child audit rows land before the first turn so the
-        // Runs tab renders the swarm while workers are in flight.
+        // Runs tab renders the swarm while workers are in flight; the parent
+        // append also registers the run's cancel surface, so a cancel racing
+        // startup is never lost.
         let swarmRows = await recordSwarmRows(
             subtasks: subtasks,
             originSessionID: originSessionID,
@@ -450,6 +530,10 @@ public actor FanOutEngine {
         let workerInputs = swarmRows.inputs
         let parentRowID = swarmRows.parentRowID
         let childRowIDs = swarmRows.childRowIDs
+        // The cancel surface must never outlive the swarm: every exit path —
+        // including a cancelled caller — deregisters here, so a settled run
+        // rejects a late cancel.
+        defer { activeRuns[parentRowID] = nil }
 
         // Workers run concurrently under the group so a slow worker never
         // delays its siblings. Each child races the bounded wall-clock
@@ -459,48 +543,47 @@ public actor FanOutEngine {
         // collect per worker so the merge pass reviews real worker text.
         let orchestrator = self.orchestrator
         let timeoutSeconds = config.workerTimeoutSeconds
-        var failureNotes: [UUID: String] = [:]
+        var notes: [UUID: String] = [:]
         var outputs: [UUID: FanOutWorkerOutput] = [:]
         await withTaskGroup(of: WorkerSettle.self) { group in
             for index in subtasks.indices {
                 let subtaskID = subtasks[index].id
                 let input = workerInputs[index]
-                group.addTask {
-                    let outcome = await FanOutEngine.runWorker(
-                        input,
-                        orchestrator: orchestrator,
-                        timeoutSeconds: timeoutSeconds
-                    )
-                    return WorkerSettle(subtaskID: subtaskID, outcome: outcome)
+                // The turn is created up front so its handle exists to cancel.
+                // Registration runs before the pre-cancel check, so a cancel
+                // that landed while the worker was still starting is honored:
+                // the subtask is already marked and the task is cancelled now,
+                // settling cancelled without ever being awaited.
+                let worker = Self.makeWorkerTask(input: input, orchestrator: orchestrator)
+                registerWorkerHandle(
+                    parentRowID: parentRowID,
+                    subtaskID: subtaskID,
+                    childRowID: childRowIDs[index],
+                    cancel: { worker.cancel() }
+                )
+                if isSubtaskCancelled(parentRowID: parentRowID, subtaskID: subtaskID) {
+                    worker.cancel()
+                    group.addTask {
+                        WorkerSettle(subtaskID: subtaskID, outcome: .cancelledBeforeStart)
+                    }
+                } else {
+                    group.addTask {
+                        let outcome = await FanOutEngine.runWorker(worker, timeoutSeconds: timeoutSeconds)
+                        return WorkerSettle(subtaskID: subtaskID, outcome: outcome)
+                    }
                 }
             }
             for await settle in group {
-                guard let index = run.subtasks.firstIndex(where: { $0.id == settle.subtaskID }) else { continue }
-                run.subtasks[index].status = settle.succeeded ? .done : .failed
-                run.updatedAt = Date()
-                if !settle.succeeded {
-                    // The note travels into the run digest so a timeout reads
-                    // honestly instead of a bare failure with no cause.
-                    failureNotes[settle.subtaskID] = settle.note ?? "failed"
-                }
-                outputs[settle.subtaskID] = settle.output
-                if index < childRowIDs.count {
-                    // A parked worker persists as awaiting_approval like chat
-                    // and scheduler turns, resolving through the same inbox
-                    // resume path in its own session; the raw output and
-                    // duration ride the row so the audit trail stays complete.
-                    let rowStatus = if settle.succeeded {
-                        settle.output.isParked ? "awaiting_approval" : "ok"
-                    } else {
-                        "failed"
-                    }
-                    await runLogs.updateFanOutRow(
-                        id: childRowIDs[index],
-                        status: rowStatus,
-                        response: settle.output.text.isEmpty ? nil : settle.output.text,
-                        durationMs: settle.durationMs
-                    )
-                }
+                let index = run.subtasks.firstIndex(where: { $0.id == settle.subtaskID })
+                let childRowID = index.flatMap { $0 < childRowIDs.count ? childRowIDs[$0] : nil }
+                await applyWorkerSettle(
+                    settle,
+                    run: &run,
+                    notes: &notes,
+                    outputs: &outputs,
+                    parentRowID: parentRowID,
+                    childRowID: childRowID
+                )
             }
         }
 
@@ -511,11 +594,80 @@ public actor FanOutEngine {
         await settleParent(
             run: &run,
             outputs: outputs,
-            notes: failureNotes,
+            notes: notes,
             parentRowID: parentRowID,
             startedAt: startedAt
         )
         return run
+    }
+
+    /// Applies one settled worker's outcome to the in-flight run and audit row.
+    ///
+    /// The owner cancellation check outranks worker success and failure: an
+    /// aborted turn can surface as a rushed success, and an owner stop is
+    /// never a failure. Whole-call cancellation is the second signal: the
+    /// parent task is cancelled and a cooperative worker observed the stop
+    /// as a cancellation, so the swarm reads cancelled rather than failed
+    /// exactly where the old path reported failures.
+    /// - Parameters:
+    ///   - settle: Settle payload from the worker task.
+    ///   - run: In-flight run being updated.
+    ///   - notes: Failure or cancellation notes keyed by subtask identifier.
+    ///   - outputs: Collected worker outputs keyed by subtask identifier.
+    ///   - parentRowID: Run registry key.
+    ///   - childRowID: Child audit row identifier, if one exists for the subtask.
+    private func applyWorkerSettle(
+        _ settle: WorkerSettle,
+        run: inout FanOutRun,
+        notes: inout [UUID: String],
+        outputs: inout [UUID: FanOutWorkerOutput],
+        parentRowID: UUID,
+        childRowID: UUID?
+    ) async {
+        guard let index = run.subtasks.firstIndex(where: { $0.id == settle.subtaskID }) else { return }
+        let markedCancelled = isSubtaskCancelled(parentRowID: parentRowID, subtaskID: settle.subtaskID)
+        let stoppedByOwner = markedCancelled || (settle.cancelled && Task.isCancelled)
+        markWorkerSettled(parentRowID: parentRowID, subtaskID: settle.subtaskID)
+        if stoppedByOwner {
+            run.subtasks[index].status = .cancelled
+            run.updatedAt = Date()
+            notes[settle.subtaskID] = Self.ownerCancellationNote
+            outputs[settle.subtaskID] = .empty
+            if let childRowID {
+                await runLogs.updateFanOutRow(
+                    id: childRowID,
+                    status: Self.cancelledRowStatus,
+                    response: nil,
+                    durationMs: settle.durationMs
+                )
+            }
+            return
+        }
+        run.subtasks[index].status = settle.succeeded ? .done : .failed
+        run.updatedAt = Date()
+        if !settle.succeeded {
+            // The note travels into the run digest so a timeout reads
+            // honestly instead of a bare failure with no cause.
+            notes[settle.subtaskID] = settle.note ?? "failed"
+        }
+        outputs[settle.subtaskID] = settle.output
+        if let childRowID {
+            // A parked worker persists as awaiting_approval like chat
+            // and scheduler turns, resolving through the same inbox
+            // resume path in its own session; the raw output and
+            // duration ride the row so the audit trail stays complete.
+            let rowStatus = if settle.succeeded {
+                settle.output.isParked ? "awaiting_approval" : "ok"
+            } else {
+                "failed"
+            }
+            await runLogs.updateFanOutRow(
+                id: childRowID,
+                status: rowStatus,
+                response: settle.output.text.isEmpty ? nil : settle.output.text,
+                durationMs: settle.durationMs
+            )
+        }
     }
 
     // MARK: - Merge pass
@@ -527,14 +679,17 @@ public actor FanOutEngine {
     /// spending a model round — duplicate targets never depend on a flaky
     /// review to surface. One background reviewer call follows over the
     /// collected outputs; the reviewer judges content quality, never
-    /// permissions, and its output becomes the merged summary. The run-log
-    /// row settles into the executeJob vocabulary — `ok`, `awaiting_approval`
-    /// when a worker parked, `error` when work was lost — with the merged
-    /// summary as its response, exactly like the scheduler's job runs.
+    /// permissions, and its output becomes the merged summary. A run with
+    /// every subtask cancelled has nothing left to merge, so the reviewer
+    /// call is skipped and the digest states the owner stop plainly. The
+    /// run-log row settles into the executeJob vocabulary — `ok`,
+    /// `awaiting_approval` when a worker parked, `cancelled` when the owner
+    /// stopped work, `error` when work was lost — with the merged summary as
+    /// its response, exactly like the scheduler's job runs.
     /// - Parameters:
     ///   - run: Settled run to complete with the merged summary.
     ///   - outputs: Collected worker outputs keyed by subtask identifier.
-    ///   - notes: Failure notes keyed by subtask identifier.
+    ///   - notes: Settle notes keyed by subtask identifier.
     ///   - parentRowID: Parent audit row to flip in place.
     ///   - startedAt: Instant the run began, for the honest duration.
     private func settleParent(
@@ -544,29 +699,53 @@ public actor FanOutEngine {
         parentRowID: UUID,
         startedAt: Date
     ) async {
-        let conflictedIDs = Self.overlapConflictIDs(subtasks: run.subtasks, outputs: outputs)
-        let review = await reviewMerge(subtasks: run.subtasks, outputs: outputs, conflictedIDs: conflictedIDs)
-        run.summary = Self.mergedSummary(
-            subtasks: run.subtasks,
-            outputs: outputs,
-            conflictedIDs: conflictedIDs,
-            notes: notes,
-            review: review
-        )
+        // Cancellation reads first: a stopped swarm must never be dressed as a
+        // review of output that was never produced, so an entirely cancelled
+        // run skips the reviewer call and states the stop plainly instead.
+        let allCancelled = run.subtasks.allSatisfy { $0.status == .cancelled }
+        if allCancelled {
+            run.summary = Self.allCancelledSummary(for: run.subtasks)
+        } else {
+            let conflictedIDs = Self.overlapConflictIDs(subtasks: run.subtasks, outputs: outputs)
+            let review = await reviewMerge(subtasks: run.subtasks, outputs: outputs, conflictedIDs: conflictedIDs)
+            run.summary = Self.mergedSummary(
+                subtasks: run.subtasks,
+                outputs: outputs,
+                conflictedIDs: conflictedIDs,
+                notes: notes,
+                review: review
+            )
+        }
         // The parent never stays running past the last settle: all-done reads
         // completed and any failure reads failed so the returned digest stays
-        // honest; the run-log row carries the executeJob vocabulary so the
-        // Runs tab renders one pill vocabulary across run kinds.
+        // honest. An owner stop outranks a failure — cancelled is a deliberate
+        // outcome, error is a lost one — and the run-log row carries the same
+        // executeJob vocabulary so the Runs tab renders one pill across kinds.
+        let anyCancelled = run.subtasks.contains { $0.status == .cancelled }
         let allDone = run.subtasks.allSatisfy { $0.status == .done }
-        run.status = allDone ? .completed : .failed
+        if anyCancelled {
+            run.status = .cancelled
+        } else {
+            run.status = allDone ? .completed : .failed
+        }
         let anyFailed = run.subtasks.contains { $0.status == .failed }
         let anyParked = run.subtasks.contains { subtask in
             subtask.status == .done && (outputs[subtask.id]?.isParked ?? false)
         }
-        // A failure outranks a park: work that was lost is the more severe
-        // reading, and a parked worker still resolves through the approvals
-        // inbox while an error needs the owner's attention either way.
-        let rowStatus = anyFailed ? "error" : (anyParked ? "awaiting_approval" : "ok")
+        // A cancelled subtask outranks a failure and a park: the owner asked
+        // for the stop, so the row must not read as an error or as work that
+        // is merely parked. A failure outranks a park: work that was lost is
+        // the more severe reading, and a parked worker still resolves through
+        // the approvals inbox while an error needs the owner's attention.
+        let rowStatus: String = if anyCancelled {
+            Self.cancelledRowStatus
+        } else if anyFailed {
+            "error"
+        } else if anyParked {
+            "awaiting_approval"
+        } else {
+            "ok"
+        }
         await runLogs.updateFanOutRow(
             id: parentRowID,
             status: rowStatus,
@@ -575,17 +754,25 @@ public actor FanOutEngine {
         )
     }
 
-    /// Records the parent plus child audit rows and mints the worker inputs.
+    /// Records the parent plus child audit rows, registers the run's cancel
+    /// surface, and mints the worker inputs.
     ///
     /// The parent row stays content-free (joined titles) so subtask prompts
     /// never leak into the trail, and it travels on the caller's session so
-    /// the swarm links back to the turn that asked for it. Each worker owns a
-    /// fresh session: the UUID is minted here and the orchestrator creates
-    /// the session record when the turn runs, mirroring the per-run scheduler
-    /// isolation — the fresh identifiers are what keep concurrent worker
-    /// histories from interleaving with the caller's session or each other on
-    /// the shared conversation store. Child rows carry each worker's own
-    /// fresh session so live views open the turn that produced them.
+    /// the swarm links back to the turn that asked for it. The cancel entry
+    /// goes live immediately after the parent row exists — before the child
+    /// rows and the worker group — so a cancel racing startup still lands: a
+    /// parent cancel marks every subtask, and a worker created after that mark
+    /// settles cancelled without running. Each child row maps to its subtask
+    /// as soon as it is appended for the same reason: a child-row cancel
+    /// arriving before the worker task exists still reaches the subtask.
+    /// Each worker owns a fresh session: the UUID is minted here and the
+    /// orchestrator creates the session record when the turn runs, mirroring
+    /// the per-run scheduler isolation — the fresh identifiers are what keep
+    /// concurrent worker histories from interleaving with the caller's session
+    /// or each other on the shared conversation store. Child rows carry each
+    /// worker's own fresh session so live views open the turn that produced
+    /// them.
     /// - Parameters:
     ///   - subtasks: Explicit subtask list.
     ///   - originSessionID: Session that spawned the run.
@@ -604,6 +791,18 @@ public actor FanOutEngine {
             status: "running",
             message: Self.parentMessage(for: subtasks),
             sessionID: originSessionID
+        )
+        // Registration runs beside the parent row, before the child rows and
+        // the worker group, so a cancel arriving while the run is still
+        // starting cannot fall into a gap: it marks the subtasks and the
+        // late-created workers settle cancelled without running.
+        activeRuns[parentRowID] = ActiveFanOutRun(
+            parentRowID: parentRowID,
+            subtaskIDs: subtasks.map(\.id),
+            workers: [:],
+            subtaskByChildRow: [:],
+            cancelledSubtaskIDs: [],
+            settledSubtaskIDs: []
         )
         let workerInputs = subtasks.map { subtask in
             UserInput(
@@ -625,6 +824,7 @@ public actor FanOutEngine {
                 sessionID: workerInputs[index].sessionID
             )
             childRowIDs.append(rowID)
+            mapChildRow(parentRowID: parentRowID, childRowID: rowID, subtaskID: subtask.id)
         }
         return RecordedSwarmRows(
             inputs: workerInputs,
@@ -658,22 +858,56 @@ extension FanOutEngine {
     /// Worker prompt text never travels here — each worker's own session
     /// already carries it — so the digest names only counts and the reason
     /// each failure settled, letting the caller render an accurate summary
-    /// without leaking subtask content into the run record.
+    /// without leaking subtask content into the run record. A cancelled
+    /// subtask never reads as completed, so the all-done line is reserved for
+    /// runs where nothing was stopped; the cancellation note carries the
+    /// titles and reasons separately.
     /// - Parameters:
     ///   - subtasks: Settled subtasks.
-    ///   - notes: Failure notes keyed by subtask identifier.
+    ///   - notes: Settle notes keyed by subtask identifier.
     /// - Returns: The outcome digest line.
     static func outcomeSummary(subtasks: [FanOutSubtask], notes: [UUID: String]) -> String {
         let done = subtasks.filter { $0.status == .done }.count
         let failures = subtasks.filter { $0.status == .failed }
-        if failures.isEmpty {
+        let anyCancelled = subtasks.contains { $0.status == .cancelled }
+        if failures.isEmpty, !anyCancelled {
             return "All \(subtasks.count) subtasks completed."
         }
-        let reasons = failures.map { subtask in
-            let note = notes[subtask.id] ?? "failed"
-            return "\(subtask.title) (\(note))"
+        var summary = "\(done)/\(subtasks.count) subtasks completed"
+        if !failures.isEmpty {
+            let reasons = failures.map { subtask in
+                let note = notes[subtask.id] ?? "failed"
+                return "\(subtask.title) (\(note))"
+            }
+            summary += "; failed: \(reasons.joined(separator: ", "))"
         }
-        return "\(done)/\(subtasks.count) subtasks completed; failed: \(reasons.joined(separator: ", "))"
+        return summary
+    }
+
+    /// Composes the summary for a run whose every subtask was cancelled.
+    ///
+    /// Nothing survived to merge, so the reviewer call is skipped entirely and
+    /// the digest states the owner stop plainly instead of spending a model
+    /// round to summarize an empty result.
+    /// - Parameter subtasks: Settled subtasks (all cancelled).
+    /// - Returns: The cancelled-run summary line.
+    static func allCancelledSummary(for subtasks: [FanOutSubtask]) -> String {
+        "Cancelled by owner: all \(subtasks.count) subtasks stopped before completion."
+    }
+
+    /// Composes the cancellation note, or nil when no subtask was stopped.
+    /// Reasons travel so an owner stop keeps its cause beside the title.
+    /// - Parameters:
+    ///   - subtasks: Settled subtasks.
+    ///   - notes: Settle notes keyed by subtask identifier.
+    /// - Returns: The cancellation note, or nil when none apply.
+    static func cancellationNote(subtasks: [FanOutSubtask], notes: [UUID: String]) -> String? {
+        let cancelled = subtasks.filter { $0.status == .cancelled }
+        guard !cancelled.isEmpty else { return nil }
+        let reasons = cancelled.map { subtask in
+            "\(subtask.title) (\(notes[subtask.id] ?? Self.ownerCancellationNote))"
+        }
+        return "Cancelled subtasks: \(reasons.joined(separator: ", "))"
     }
 
     /// Normalizes one worker failure into an honest note.
@@ -702,41 +936,44 @@ extension FanOutEngine {
         return error.localizedDescription
     }
 
-    /// Runs one worker turn, bounded by the wall-clock timeout when positive.
+    /// Runs one already-created worker turn to its settle, bounded by the
+    /// wall-clock timeout when positive.
     ///
-    /// A positive budget races the orchestrator call against the timeout for
-    /// one continuation: the first side to settle wins and the loser is
+    /// The turn handle is created and registered by the caller so an owner
+    /// cancel can reach exactly one worker before this race starts; both an
+    /// owner cancel and whole-call cancellation stop the turn through that
+    /// same handle. A positive budget races the handle against the timeout
+    /// for one continuation: the first side to settle wins and the loser is
     /// cancelled (or abandoned if it never observes cancellation), so a
     /// worker settles within its budget without holding the parent run
     /// hostage. A zero timeout means no race at all — the worker awaits under
     /// the cancellation handler, so an unlimited worker can hold the parent
     /// run open until it finishes or is cancelled, intentional for slow local
     /// models and bounded by cancellation. A throwing turn reads as a failed
-    /// worker carrying the error's own reason. The collecting seam returns
-    /// the final assistant text and parked flag so the merge pass reviews
-    /// real worker output; a stub without the collecting witness still works
-    /// and reports an empty output.
+    /// worker carrying the error's own reason, except that a cancellation is
+    /// flagged so the settle path can keep an owner stop out of the failure
+    /// vocabulary. The collecting seam returns the final assistant text and
+    /// parked flag so the merge pass reviews real worker output; a stub
+    /// without the collecting witness still works and reports an empty output.
     /// - Parameters:
-    ///   - input: Worker turn input carrying the fresh session.
-    ///   - orchestrator: Seam running the turn.
+    ///   - worker: The worker turn handle created by the engine.
     ///   - timeoutSeconds: Wall-clock budget for the turn, or zero for no timeout.
     /// - Returns: Settled outcome with the collected output and an honest
     ///   failure note.
     private static func runWorker(
-        _ input: UserInput,
-        orchestrator: any OrchestratorFanOutSeam,
+        _ worker: Task<FanOutWorkerOutput, Error>,
         timeoutSeconds: Int
     ) async -> WorkerOutcome {
         // Unlimited workers skip the sleep/race entirely so a slow local model
         // is never cut off by a stale bound; cancellation still ends the turn.
         if timeoutSeconds <= 0 {
             let startedAt = Date()
-            let worker = Task { try await orchestrator.processCollecting(input) }
             return await withTaskCancellationHandler {
                 do {
                     let output = try await worker.value
                     return WorkerOutcome(
                         succeeded: true,
+                        cancelled: false,
                         note: nil,
                         output: output,
                         durationMs: Self.elapsedMs(since: startedAt)
@@ -744,6 +981,7 @@ extension FanOutEngine {
                 } catch {
                     return WorkerOutcome(
                         succeeded: false,
+                        cancelled: error is CancellationError,
                         note: Self.failureNote(for: error),
                         output: .empty,
                         durationMs: Self.elapsedMs(since: startedAt)
@@ -756,7 +994,6 @@ extension FanOutEngine {
         let seconds = max(1, timeoutSeconds)
         let timeoutNS = UInt64(seconds) * 1_000_000_000
         let startedAt = Date()
-        let worker = Task { try await orchestrator.processCollecting(input) }
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 let resumption = WorkerResumption(continuation: continuation)
@@ -765,6 +1002,7 @@ extension FanOutEngine {
                         let output = try await worker.value
                         resumption.resume(WorkerOutcome(
                             succeeded: true,
+                            cancelled: false,
                             note: nil,
                             output: output,
                             durationMs: Self.elapsedMs(since: startedAt)
@@ -772,6 +1010,7 @@ extension FanOutEngine {
                     } catch {
                         resumption.resume(WorkerOutcome(
                             succeeded: false,
+                            cancelled: error is CancellationError,
                             note: Self.failureNote(for: error),
                             output: .empty,
                             durationMs: Self.elapsedMs(since: startedAt)
@@ -783,6 +1022,7 @@ extension FanOutEngine {
                     worker.cancel()
                     resumption.resume(WorkerOutcome(
                         succeeded: false,
+                        cancelled: false,
                         note: "timed out after \(seconds)s",
                         output: .empty,
                         durationMs: Self.elapsedMs(since: startedAt)
@@ -800,6 +1040,140 @@ extension FanOutEngine {
     /// - Returns: Non-negative elapsed milliseconds.
     static func elapsedMs(since startedAt: Date) -> Int {
         max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
+    }
+
+    // MARK: - Cancellation registry
+
+    /// Note every owner-stopped settle carries, so the digest names the stop's
+    /// author instead of a bare status.
+    static let ownerCancellationNote = "cancelled by owner"
+    /// Run-log status for an owner-stopped run or worker row; it matches the
+    /// terminal vocabulary the scheduler's cancelled runs already use, so the
+    /// Runs tab renders one pill vocabulary across run kinds.
+    static let cancelledRowStatus = "cancelled"
+
+    /// Creates one worker turn as an unstructured task.
+    ///
+    /// The turn runs unstructured — not as a task-group child — because only
+    /// an owned handle lets the engine cancel exactly one worker; the group
+    /// child still carries the timeout race and structured cancellation.
+    /// Created through a nonisolated helper so the turn runs off the engine's
+    /// actor executor instead of serializing workers behind the swarm actor.
+    /// - Parameters:
+    ///   - input: Worker turn input carrying the fresh session.
+    ///   - orchestrator: Seam running the turn.
+    /// - Returns: The worker turn handle the registry cancels.
+    private static func makeWorkerTask(
+        input: UserInput,
+        orchestrator: any OrchestratorFanOutSeam
+    ) -> Task<FanOutWorkerOutput, Error> {
+        Task { try await orchestrator.processCollecting(input) }
+    }
+
+    /// Attaches a worker's live handle to its registry slot.
+    ///
+    /// The slot exists as soon as the child audit row lands, so this only
+    /// fills in the cancel closure; a subtask marked cancelled before this
+    /// point is caught by the caller's pre-cancel check right after.
+    /// - Parameters:
+    ///   - parentRowID: Run registry key.
+    ///   - subtaskID: Subtask the handle belongs to.
+    ///   - childRowID: Child row the settle path flips.
+    ///   - cancel: Stops the worker's turn.
+    private func registerWorkerHandle(
+        parentRowID: UUID,
+        subtaskID: UUID,
+        childRowID: UUID,
+        cancel: @escaping @Sendable () -> Void
+    ) {
+        guard var entry = activeRuns[parentRowID] else { return }
+        entry.workers[subtaskID] = ActiveFanOutWorker(childRowID: childRowID, cancel: cancel)
+        activeRuns[parentRowID] = entry
+    }
+
+    /// Maps one appended child audit row to its subtask.
+    ///
+    /// The mapping exists before the worker task does, so a child-row cancel
+    /// that races startup still reaches its subtask and marks it cancelled.
+    /// - Parameters:
+    ///   - parentRowID: Run registry key.
+    ///   - childRowID: Child audit row that just landed.
+    ///   - subtaskID: Subtask the child row belongs to.
+    private func mapChildRow(parentRowID: UUID, childRowID: UUID, subtaskID: UUID) {
+        guard var entry = activeRuns[parentRowID] else { return }
+        entry.subtaskByChildRow[childRowID] = subtaskID
+        activeRuns[parentRowID] = entry
+    }
+
+    /// Whether the run has marked this subtask cancelled.
+    /// - Parameters:
+    ///   - parentRowID: Run registry key.
+    ///   - subtaskID: Subtask to inspect.
+    /// - Returns: True when the subtask is marked cancelled.
+    private func isSubtaskCancelled(parentRowID: UUID, subtaskID: UUID) -> Bool {
+        activeRuns[parentRowID]?.cancelledSubtaskIDs.contains(subtaskID) ?? false
+    }
+
+    /// Removes a settled worker from the registry.
+    ///
+    /// The handle and its child-row lookup leave together as the settle
+    /// applies, so cancelling an already-settled row answers `.notRunning`
+    /// instead of rewriting a terminal outcome. The subtask id stays in
+    /// `settledSubtaskIDs`, so a parent cancel no longer counts it.
+    /// - Parameters:
+    ///   - parentRowID: Run registry key.
+    ///   - subtaskID: Subtask whose settle applied.
+    private func markWorkerSettled(parentRowID: UUID, subtaskID: UUID) {
+        guard var entry = activeRuns[parentRowID] else { return }
+        entry.settledSubtaskIDs.insert(subtaskID)
+        if let worker = entry.workers.removeValue(forKey: subtaskID) {
+            entry.subtaskByChildRow.removeValue(forKey: worker.childRowID)
+        }
+        activeRuns[parentRowID] = entry
+    }
+
+    /// Cancels the in-flight swarm or worker that owns an audit row.
+    ///
+    /// The parent row stops the whole swarm: every in-flight worker task is
+    /// cancelled and every still-running subtask is marked cancelled, so each
+    /// settle reads `.cancelled` and the run settles `cancelled` — an owner
+    /// stop outranks a worker failure rather than masquerading as an error. A
+    /// child row stops just that worker and leaves its siblings running. A row
+    /// that no live run or worker owns — unknown, already settled, or a run
+    /// whose workers all settled before the merge pass — answers
+    /// `.notRunning`: a settled run must never accept a late cancel.
+    /// - Parameter rowID: Run-log row identifier (parent or child).
+    /// - Returns: The honest cancel boundary the caller hit.
+    public func cancel(rowID: UUID) -> FanOutCancelOutcome {
+        if var entry = activeRuns[rowID] {
+            let running = entry.subtaskIDs.filter { !entry.settledSubtaskIDs.contains($0) }
+            guard !running.isEmpty else { return .notRunning }
+            // Only workers with a live task handle can be stopped now; the
+            // rest are marked so their registration path cancels them on
+            // arrival instead of letting them run.
+            let inFlight = running.filter { entry.workers[$0] != nil }
+            for subtaskID in inFlight {
+                if let worker = entry.workers[subtaskID] {
+                    worker.cancel()
+                }
+            }
+            entry.cancelledSubtaskIDs.formUnion(running)
+            activeRuns[rowID] = entry
+            return .runCancelled(workerCount: inFlight.count)
+        }
+        // A child row resolves through the row-to-subtask map, which exists as
+        // soon as the child audit row lands — before the worker task does — so
+        // a cancel racing startup still marks the subtask.
+        guard let match = activeRuns.first(where: { $0.value.subtaskByChildRow[rowID] != nil }),
+              let subtaskID = match.value.subtaskByChildRow[rowID]
+        else { return .notRunning }
+        var entry = match.value
+        if let worker = entry.workers[subtaskID] {
+            worker.cancel()
+        }
+        entry.cancelledSubtaskIDs.insert(subtaskID)
+        activeRuns[match.key] = entry
+        return .workerCancelled
     }
 
     // MARK: - Merge pass helpers
@@ -1033,12 +1407,13 @@ extension FanOutEngine {
     /// concatenation with an honest note, so worker output is never lost. An
     /// unwired reviewer keeps the pre-existing outcome digest shape so callers
     /// without review wiring see no summary change. The deterministic
-    /// conflict note travels in every posture.
+    /// conflict note and the cancellation note travel in every posture, so a
+    /// partially cancelled run states the stop even beside a merged review.
     /// - Parameters:
     ///   - subtasks: Settled subtasks.
     ///   - outputs: Collected outputs keyed by subtask identifier.
     ///   - conflictedIDs: Deterministic overlap conflicts.
-    ///   - notes: Failure notes keyed by subtask identifier.
+    ///   - notes: Settle notes keyed by subtask identifier.
     ///   - review: The merge-review outcome.
     /// - Returns: The summary line set stored on the run and its parent row.
     static func mergedSummary(
@@ -1049,6 +1424,7 @@ extension FanOutEngine {
         review: MergeReview
     ) -> String {
         let conflictNote = Self.conflictNote(subtasks: subtasks, conflictedIDs: conflictedIDs)
+        let cancellationNote = Self.cancellationNote(subtasks: subtasks, notes: notes)
         switch review {
         case let .parsed(parsed):
             var lines: [String] = [parsed.summary]
@@ -1072,6 +1448,10 @@ extension FanOutEngine {
                 lines.append("")
                 lines.append(conflictNote)
             }
+            if let cancellationNote {
+                lines.append("")
+                lines.append(cancellationNote)
+            }
             return lines.joined(separator: "\n")
         case .unavailable:
             // Fail-open: a wired reviewer flaked, so the raw concatenation
@@ -1090,15 +1470,21 @@ extension FanOutEngine {
             if let conflictNote {
                 parts.append(conflictNote)
             }
+            if let cancellationNote {
+                parts.append(cancellationNote)
+            }
             parts.append(Self.reviewUnavailableNote)
             return parts.joined(separator: "\n\n")
         case .unwired:
             // No reviewer wired: the pre-existing outcome digest stands, with
-            // the conflict note appended when any collisions exist, so the
-            // summary shape never shifts for callers without review wiring.
+            // the conflict and cancellation notes appended when they apply, so
+            // the summary shape never shifts for callers without review wiring.
             var summary = Self.outcomeSummary(subtasks: subtasks, notes: notes)
             if let conflictNote {
                 summary += "\n" + conflictNote
+            }
+            if let cancellationNote {
+                summary += "\n" + cancellationNote
             }
             return summary
         }

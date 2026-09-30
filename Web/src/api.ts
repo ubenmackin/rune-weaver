@@ -1450,6 +1450,37 @@ export function deleteRun(id: string): Promise<void> {
   });
 }
 
+// Response from `POST /runs/:id/cancel`, mirroring the engine's
+// `RunCancelResponse`. Treated as a request acknowledgement rather than as
+// state: settled badges always come from refetching the runs list, while an
+// already-settled run answers 409 (and a pruned row 404) with an honest reason
+// that the shared fetchJson surfaces as ApiError. `scope` names what was
+// stopped (`"run"` for a whole swarm, `"worker"` for one child whose siblings
+// keep running), and `workerCount` is present only on a whole-swarm stop.
+export interface CancelRunResponse {
+  cancelled: boolean;
+  scope: string;
+  workerCount?: number;
+}
+
+// Stops one in-flight run by row id. The engine owns swarm scope: cancelling a
+// fan-out parent stops the whole swarm while cancelling a worker row stops just
+// that worker, so the dashboard posts the exact row the operator chose and lets
+// the server decide how far the stop reaches instead of re-deriving scope from
+// the kind client-side.
+//
+// The route takes no request body, so none is sent: the shared fetch helper
+// only attaches the JSON content type when a body is present, and this handler
+// never decodes one.
+export function cancelRun(id: string): Promise<CancelRunResponse> {
+  return fetchJson<CancelRunResponse>(
+    `/runs/${encodeURIComponent(id)}/cancel`,
+    {
+      method: "POST",
+    },
+  );
+}
+
 export function listSessions(): Promise<SessionsResponse> {
   return fetchJson<SessionsResponse>("/sessions");
 }

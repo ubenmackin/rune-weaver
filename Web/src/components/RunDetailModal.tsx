@@ -24,6 +24,9 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
   const isSkipped = run.status === "skipped";
   const isAwaitingApproval = run.status === "awaiting_approval";
   const isRunning = run.status === "running";
+  // A cancelled run is a deliberate stop, never a failure: without this case
+  // it would fall through to the error copy and read as if execution broke.
+  const isCancelled = run.status === "cancelled";
   const isFanOutParent = run.kind === "fanout";
   // Fan-out rows read their own family so a worker's detail never opens
   // mislabeled as a chat turn, and a parent's merged summary is the response
@@ -169,9 +172,11 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
                     ? "Awaiting approval — no output yet."
                     : isRunning
                       ? "In progress…"
-                      : !isOk
-                        ? "Execution terminated with error before generating an assistant response."
-                        : "No textual response generated."}
+                      : isCancelled
+                        ? "Cancelled before completion — no output was recorded."
+                        : !isOk
+                          ? "Execution terminated with error before generating an assistant response."
+                          : "No textual response generated."}
               </div>
             )}
           </div>

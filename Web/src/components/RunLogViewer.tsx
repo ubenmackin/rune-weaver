@@ -1,9 +1,11 @@
 // Rune Weaver Dashboard — Audit log viewer for inspecting chat turns and scheduler job runs.
-// Features filter chips, clear status badges, duration/token metrics, and full detail modal.
+// Features filter chips, clear status badges, duration/token metrics, in-flight fan-out
+// cancellation with honest swarm-versus-worker scope copy, and full detail modal.
 
 import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
+  cancelRun,
   clearRuns,
   deleteRun,
   formatRunDuration,
@@ -20,6 +22,8 @@ import {
 import RunDetailModal from "./RunDetailModal";
 import Modal from "./Modal";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
+import { useToastStack } from "../hooks/useToastStack";
+import { ToastStack } from "./Toast";
 import { ChevronDownIcon, ChevronRightIcon, CloseIcon, RefreshIcon, TrashIcon, WrenchIcon } from "./icons";
 import {
   approvalSessionID,
@@ -126,6 +130,19 @@ export function runPendingApprovals(
   });
 }
 
+// Reports whether one row's in-flight work can be stopped from the runs
+// surface. Only fan-out rows carry the engine's swarm-aware cancel route:
+// stopping a parent stops the whole swarm and stopping a worker row stops that
+// worker alone, while chat and scheduler turns stop through their own surfaces.
+// Status must still be running — a settled row has nothing left to stop, and a
+// button there would only earn the engine's honest 409.
+export function canCancelRun(run: RunLogEntry): boolean {
+  return (
+    isActiveRunStatus(run.status) &&
+    (run.kind === "fanout" || run.kind === "fanout_worker")
+  );
+}
+
 export default function RunLogViewer() {
   const [runs, setRuns] = useState<RunLogEntry[]>([]);
   const [approvals, setApprovals] = useState<PermissionRequest[]>([]);
@@ -146,6 +163,19 @@ export default function RunLogViewer() {
   // currently render; one swarm stays expanded at a time so the list never
   // collapses into an unreadable wall of worker rows.
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  // Stop affordances for in-flight fan-out work: the parent row stages a
+  // confirmation because it stops the whole swarm, while a worker row fires
+  // directly for a one-click narrow stop. `cancellingId` disables the clicked
+  // control and swaps its label while the request and refetch settle.
+  const [pendingCancelRun, setPendingCancelRun] = useState<RunLogEntry | null>(
+    null,
+  );
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+  // Transient cancel feedback in a top-right stack so the honest scope copy
+  // never blocks the list; identical copies refresh one notice instead of
+  // stacking, matching the shared toast pattern used elsewhere.
+  const { toasts, pushSuccessToast, pushErrorToast, dismissToast } =
+    useToastStack();
 
   const handleFilterChange = (nextFilter: FilterKind) => {
     setFilter(nextFilter);
@@ -319,6 +349,62 @@ export default function RunLogViewer() {
     }
   }, [runs, selected]);
 
+  // Fires one stop request and refetches so settled badges appear as workers
+  // stop. Scope copy names how far the stop reaches (whole swarm versus one
+  // worker) so the operator never has to infer it from the row kind. A failure
+  // surfaces the server's honest reason (409 when the run already settled, 404
+  // when the row is gone) and leaves local state untouched — the next refetch
+  // stays the single source of truth instead of an optimistic flip.
+  async function performCancel(run: RunLogEntry, scope: "run" | "worker") {
+    setCancellingId(run.id);
+    try {
+      await cancelRun(run.id);
+      pushSuccessToast(
+        scope === "run"
+          ? "Cancel requested for this fan-out run — the whole swarm is stopping; completed worker output is kept."
+          : "Cancel requested for this worker — the rest of the swarm keeps running.",
+      );
+      // While any row still reads running the poller keeps converging the
+      // remaining workers, so one refetch here is enough to start the settle.
+      await refresh();
+    } catch (failure) {
+      pushErrorToast(
+        failure instanceof ApiError ? failure.message : "Failed to cancel run",
+      );
+    } finally {
+      setCancellingId(null);
+    }
+  }
+
+  // Row entry point: a whole-swarm stop is destructive enough to confirm before
+  // firing, while a worker stop fires immediately because its blast radius is
+  // one worker.
+  function handleCancelClick(run: RunLogEntry, e?: React.MouseEvent) {
+    if (e) e.stopPropagation();
+    if (run.kind === "fanout") {
+      setPendingCancelRun(run);
+      return;
+    }
+    void performCancel(run, "worker");
+  }
+
+  function dismissPendingCancel() {
+    // A stop already in flight must finish before the dialog can close so the
+    // honest outcome can never be swallowed by a dismissed confirmation.
+    if (pendingCancelRun && cancellingId === pendingCancelRun.id) return;
+    setPendingCancelRun(null);
+  }
+
+  async function confirmPendingCancel() {
+    if (!pendingCancelRun) return;
+    const target = pendingCancelRun;
+    await performCancel(target, "run");
+    // Close on success and on failure alike: a failure has already surfaced its
+    // honest reason through the error toast, and a stale dialog would invite a
+    // duplicate request against a run that may have settled.
+    setPendingCancelRun(null);
+  }
+
   // Groups form first (on the full fetched list) so a parent and its worker
   // children always travel together, then filters apply to the parent: a
   // group renders only when its parent passes the kind and time filters.
@@ -344,7 +430,9 @@ export default function RunLogViewer() {
         <div>
           <h2>Run Log</h2>
           <p className="muted text-sm">
-            Audit history of interactive chat turns and background scheduled jobs.
+            Audit history of interactive chat turns and background scheduled
+            jobs. Running fan-out runs can be stopped here; cancelling a
+            fan-out tool call from chat stops its whole swarm.
           </p>
         </div>
 
@@ -545,6 +633,17 @@ export default function RunLogViewer() {
                           {workerDuration ? (
                             <span className="run-time-muted">• {workerDuration}</span>
                           ) : null}
+                          {canCancelRun(worker) ? (
+                            <button
+                              type="button"
+                              className="ghost text-sm danger-hover"
+                              onClick={(e) => handleCancelClick(worker, e)}
+                              disabled={cancellingId === worker.id}
+                              title="Stop this worker only"
+                            >
+                              {cancellingId === worker.id ? "Cancelling…" : "Cancel"}
+                            </button>
+                          ) : null}
                         </div>
                       );
                     })}
@@ -553,6 +652,25 @@ export default function RunLogViewer() {
               </div>
 
               <div className="run-card-action">
+                {canCancelRun(run) ? (
+                  <button
+                    type="button"
+                    className="ghost text-sm danger-hover"
+                    onClick={(e) => handleCancelClick(run, e)}
+                    disabled={cancellingId === run.id}
+                    title={
+                      run.kind === "fanout"
+                        ? "Stop the whole swarm"
+                        : "Stop this worker only"
+                    }
+                  >
+                    {cancellingId === run.id
+                      ? "Cancelling…"
+                      : run.kind === "fanout"
+                        ? "Cancel run"
+                        : "Cancel"}
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="ghost text-sm"
@@ -635,6 +753,60 @@ export default function RunLogViewer() {
         </Modal>
       ) : null}
 
+      {/* Whole-swarm stop confirmation: cancelling a fan-out parent interrupts
+          every worker still in flight, so it never fires from a single click. */}
+      {pendingCancelRun ? (
+        <Modal
+          label="Confirm cancel run"
+          onClose={dismissPendingCancel}
+          onConfirm={() => {
+            if (cancellingId === pendingCancelRun.id) return;
+            void confirmPendingCancel();
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Cancel fan-out run?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={dismissPendingCancel}
+              disabled={cancellingId === pendingCancelRun.id}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              This stops the whole swarm — every worker still in flight is
+              asked to stop. Completed worker output is kept.
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={dismissPendingCancel}
+              disabled={cancellingId === pendingCancelRun.id}
+            >
+              Keep running
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void confirmPendingCancel()}
+              disabled={cancellingId === pendingCancelRun.id}
+              aria-label="Confirm cancel run"
+            >
+              {cancellingId === pendingCancelRun.id
+                ? "Cancelling…"
+                : "Cancel run"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
       {/* Clean up / Archive Confirmation Modal */}
       {clearModalOpen ? (
         <Modal
@@ -691,6 +863,8 @@ export default function RunLogViewer() {
           </div>
         </Modal>
       ) : null}
+
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </section>
   );
 }

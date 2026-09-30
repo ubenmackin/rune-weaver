@@ -1,7 +1,9 @@
 // Rune Weaver Dashboard — Component tests for RunLogViewer listing and details view.
 // Covers listing, filters, deletion, the fan-out swarm grouping (a parent
-// kind=fanout row expands to its worker children), and the sanitized merged
-// summary rendering.
+// kind=fanout row expands to its worker children), the sanitized merged
+// summary rendering, and in-flight fan-out cancellation (row-scoped buttons,
+// whole-swarm confirmation, worker-direct stops, honest 409 surfacing, and the
+// settled cancelled badge after refetch).
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -371,5 +373,333 @@ describe("RunLogViewer", () => {
     expect(screen.getByText("Merged Summary")).toBeInTheDocument();
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
     expect(screen.getByText(/Merged findings/)).toBeInTheDocument();
+  });
+
+  it("shows cancel actions only on running fan-out rows", async () => {
+    const user = userEvent.setup();
+    // Newest-first audit order: running worker, settled worker, running parent,
+    // settled parent, then a running chat turn that has no swarm cancel route.
+    const payload = {
+      runs: [
+        {
+          id: "worker-running",
+          kind: "fanout_worker",
+          status: "running",
+          message: "Research B",
+          timestamp: new Date().toISOString(),
+        },
+        {
+          id: "worker-done",
+          kind: "fanout_worker",
+          status: "ok",
+          message: "Research A",
+          timestamp: new Date().toISOString(),
+        },
+        {
+          id: "parent-running",
+          kind: "fanout",
+          status: "running",
+          message: "Running swarm",
+          timestamp: new Date().toISOString(),
+        },
+        {
+          id: "parent-done",
+          kind: "fanout",
+          status: "ok",
+          message: "Settled swarm",
+          timestamp: new Date().toISOString(),
+        },
+        {
+          id: "chat-running",
+          kind: "chat",
+          status: "running",
+          message: "Running chat turn",
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      count: 5,
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(payload)));
+
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("Running swarm")).toBeInTheDocument();
+    });
+
+    // Only the running fan-out parent offers the whole-swarm action; settled
+    // parents and running chat turns never get one.
+    expect(screen.getAllByRole("button", { name: "Cancel run" })).toHaveLength(1);
+    expect(screen.getByText("Settled swarm")).toBeInTheDocument();
+    expect(screen.getByText("Running chat turn")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Expand worker turns/ }));
+    // Of the two worker children only the running one can be stopped.
+    expect(screen.getAllByRole("button", { name: "Cancel" })).toHaveLength(1);
+  });
+
+  it("confirms the whole-swarm stop, posts the parent id, and refetches", async () => {
+    const user = userEvent.setup();
+    const runningPayload = {
+      runs: [
+        {
+          id: "parent-1",
+          kind: "fanout",
+          status: "running",
+          message: "Swarm prompt",
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      count: 1,
+    };
+    const settledPayload = {
+      runs: [
+        {
+          id: "parent-1",
+          kind: "fanout",
+          status: "cancelled",
+          message: "Swarm prompt",
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      count: 1,
+    };
+    let currentRuns = runningPayload;
+    const fetchMock = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        const path = String(url);
+        if (init?.method === "POST" && path.endsWith("/cancel")) {
+          return jsonResponse({
+            id: "parent-1",
+            status: "cancelled",
+            cancelled: true,
+          });
+        }
+        if (path.startsWith("/runs?")) return jsonResponse(currentRuns);
+        return jsonResponse({ approvals: [], count: 0 });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("Swarm prompt")).toBeInTheDocument();
+    });
+
+    // A parent stop stages confirmation first; the row click fires nothing.
+    await user.click(screen.getByRole("button", { name: "Cancel run" }));
+    expect(
+      screen.getByRole("dialog", { name: "Confirm cancel run" }),
+    ).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/cancel"),
+      expect.objectContaining({ method: "POST" }),
+    );
+
+    currentRuns = settledPayload;
+    await user.click(screen.getByRole("button", { name: "Confirm cancel run" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        `/runs/${encodeURIComponent("parent-1")}/cancel`,
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    // Success copy names the run scope, and the refetched list settles the badge.
+    expect(await screen.findByTestId("toast")).toHaveTextContent(/whole swarm/i);
+    await waitFor(() => {
+      expect(screen.getByText("CANCELLED")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("IN PROGRESS")).not.toBeInTheDocument();
+    const runListCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).startsWith("/runs?"),
+    );
+    expect(runListCalls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("stops one worker directly with the worker row id and worker-scope copy", async () => {
+    const user = userEvent.setup();
+    const payload = {
+      runs: [
+        {
+          id: "worker-1",
+          kind: "fanout_worker",
+          status: "running",
+          message: "Worker task",
+          timestamp: new Date().toISOString(),
+        },
+        {
+          id: "parent-1",
+          kind: "fanout",
+          status: "running",
+          message: "Worker swarm",
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      count: 2,
+    };
+    const postedPaths: string[] = [];
+    const fetchMock = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        const path = String(url);
+        if (init?.method === "POST" && path.endsWith("/cancel")) {
+          postedPaths.push(path);
+          return jsonResponse({
+            id: "worker-1",
+            status: "cancelled",
+            cancelled: true,
+          });
+        }
+        if (path.startsWith("/runs?")) return jsonResponse(payload);
+        return jsonResponse({ approvals: [], count: 0 });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("Worker swarm")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: /Expand worker turns/ }));
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    // A worker stop is narrow enough to fire without a confirmation dialog.
+    expect(
+      screen.queryByRole("dialog", { name: "Confirm cancel run" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        `/runs/${encodeURIComponent("worker-1")}/cancel`,
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    // Only the worker row was posted; the parent swarm keeps running.
+    expect(postedPaths).toEqual([
+      `/runs/${encodeURIComponent("worker-1")}/cancel`,
+    ]);
+    expect(await screen.findByTestId("toast")).toHaveTextContent(
+      /rest of the swarm keeps running/i,
+    );
+  });
+
+  it("surfaces the server's honest 409 reason without an optimistic state change", async () => {
+    const user = userEvent.setup();
+    const payload = {
+      runs: [
+        {
+          id: "parent-1",
+          kind: "fanout",
+          status: "running",
+          message: "Already settled swarm",
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      count: 1,
+    };
+    const fetchMock = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        const path = String(url);
+        if (init?.method === "POST" && path.endsWith("/cancel")) {
+          return jsonResponse({ reason: "Run already finished" }, 409);
+        }
+        if (path.startsWith("/runs?")) return jsonResponse(payload);
+        return jsonResponse({ approvals: [], count: 0 });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("Already settled swarm")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Cancel run" }));
+    await user.click(screen.getByRole("button", { name: "Confirm cancel run" }));
+
+    const errorToast = await screen.findByTestId("toast-error");
+    expect(errorToast).toHaveTextContent("Run already finished");
+    // No optimistic settle: the row still reads running until a refetch says
+    // otherwise.
+    expect(screen.getByText("IN PROGRESS")).toBeInTheDocument();
+    expect(screen.queryByText("CANCELLED")).not.toBeInTheDocument();
+    // The confirmation closes so the settled run cannot be re-fired from a
+    // hidden dialog.
+    expect(
+      screen.queryByRole("dialog", { name: "Confirm cancel run" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("settles the open detail modal after a cancel refetch", async () => {
+    const user = userEvent.setup();
+    const runningPayload = {
+      runs: [
+        {
+          id: "parent-1",
+          kind: "fanout",
+          status: "running",
+          message: "Stale swarm",
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      count: 1,
+    };
+    const settledPayload = {
+      runs: [
+        {
+          id: "parent-1",
+          kind: "fanout",
+          status: "cancelled",
+          message: "Stale swarm",
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      count: 1,
+    };
+    let currentRuns = runningPayload;
+    const fetchMock = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        const path = String(url);
+        if (init?.method === "POST" && path.endsWith("/cancel")) {
+          return jsonResponse({
+            id: "parent-1",
+            status: "cancelled",
+            cancelled: true,
+          });
+        }
+        if (path.startsWith("/runs?")) return jsonResponse(currentRuns);
+        return jsonResponse({ approvals: [], count: 0 });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("Stale swarm")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    expect(screen.getByLabelText("Run details")).toBeInTheDocument();
+    // The list row plus the open detail view both read running.
+    expect(screen.getAllByText("IN PROGRESS").length).toBeGreaterThanOrEqual(2);
+
+    currentRuns = settledPayload;
+    await user.click(screen.getByRole("button", { name: "Cancel run" }));
+    await user.click(screen.getByRole("button", { name: "Confirm cancel run" }));
+
+    // The refetched status flows into the open detail view, so its in-progress
+    // note is replaced by the honest cancelled copy.
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Cancelled before completion — no output was recorded.",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    // Closing the detail view leaves only the settled list badge behind.
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByLabelText("Run details")).not.toBeInTheDocument();
+    expect(screen.getByText("CANCELLED")).toBeInTheDocument();
+    expect(screen.queryByText("IN PROGRESS")).not.toBeInTheDocument();
   });
 });

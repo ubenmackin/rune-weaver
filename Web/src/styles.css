@@ -2453,6 +2453,14 @@ a {
   animation: pulseTool 2s infinite ease-in-out;
 }
 
+/* Cancelled is a deliberate stop, not a failure: a cool slate-blue reads as
+   settled and stays clearly distinct from the red error pill and the unstyled
+   failed base pill. No pulse — nothing is running anymore. */
+.status-pill.cancelled {
+  background: rgba(96, 165, 250, 0.2);
+  color: #93c5fd;
+}
+
 /* Search health line shows the tri-state pill only; the SearXNG URL input above
  * stays the single editor and display, so no endpoint repeats here. Wrapping
  * keeps the pill inside narrow panes without horizontal scrolling. */
