@@ -472,13 +472,13 @@ extension RuneWeaverConfig {
 
     /// Renders the additive `[fanout]` section.
     ///
-    /// Every key renders, including the opt-in default, so a saved file
-    /// documents the fan-out policy and a round-trip never depends on an
-    /// implicit default silently diverging from what was written.
+    /// Every knob renders so a saved file documents the fan-out policy and a
+    /// round-trip never depends on an implicit default silently diverging from
+    /// what was written. Availability flows through tool registration, so no
+    /// enablement line renders here.
     private func renderFanOutTOML() -> [String] {
         [
             "[fanout]",
-            "enabled = \(fanOut.enabled ? "true" : "false")",
             "max_workers = \(fanOut.maxWorkers)",
             "worker_timeout_seconds = \(fanOut.workerTimeoutSeconds)",
             "full_tools = \(fanOut.fullTools ? "true" : "false")",

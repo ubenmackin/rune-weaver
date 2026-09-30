@@ -48,7 +48,7 @@ struct CredentialBindingTests {
     // MARK: - Unauthorized Requests (Exfiltration Prevention)
 
     @Test
-    func `Binding denies unauthorized host`() throws {
+    func `Binding denies unauthorized host`() {
         let binding = CredentialBinding(
             allowedHosts: ["api.github.com"],
             allowedMethods: ["GET"],
@@ -56,12 +56,12 @@ struct CredentialBindingTests {
         )
         let result = binding.denyReason(key: "GITHUB_PAT", host: "evil-collector.io", method: "GET", path: "/steal")
         #expect(result != nil)
-        #expect(try #require(result?.contains("not authorized for host")))
-        #expect(try #require(result?.contains("evil-collector.io")))
+        #expect(result?.contains("not authorized for host") == true)
+        #expect(result?.contains("evil-collector.io") == true)
     }
 
     @Test
-    func `Binding denies unauthorized method`() throws {
+    func `Binding denies unauthorized method`() {
         let binding = CredentialBinding(
             allowedHosts: ["api.openai.com"],
             allowedMethods: ["POST"],
@@ -69,11 +69,11 @@ struct CredentialBindingTests {
         )
         let result = binding.denyReason(key: "OPENAI_KEY", host: "api.openai.com", method: "DELETE", path: "/v1/models")
         #expect(result != nil)
-        #expect(try #require(result?.contains("not authorized for method")))
+        #expect(result?.contains("not authorized for method") == true)
     }
 
     @Test
-    func `Binding denies unauthorized path prefix`() throws {
+    func `Binding denies unauthorized path prefix`() {
         let binding = CredentialBinding(
             allowedHosts: ["api.github.com"],
             allowedMethods: ["GET"],
@@ -81,11 +81,11 @@ struct CredentialBindingTests {
         )
         let result = binding.denyReason(key: "GITHUB_PAT", host: "api.github.com", method: "GET", path: "/admin/settings")
         #expect(result != nil)
-        #expect(try #require(result?.contains("not authorized for path")))
+        #expect(result?.contains("not authorized for path") == true)
     }
 
     @Test
-    func `Binding denies when allowedHosts is empty`() throws {
+    func `Binding denies when allowedHosts is empty`() {
         let binding = CredentialBinding(
             allowedHosts: [],
             allowedMethods: [],
@@ -93,7 +93,7 @@ struct CredentialBindingTests {
         )
         let result = binding.denyReason(key: "ORPHANED_KEY", host: "any.host.com", method: "GET", path: "/")
         #expect(result != nil)
-        #expect(try #require(result?.contains("no allowed hosts")))
+        #expect(result?.contains("no allowed hosts") == true)
     }
 
     @Test
@@ -121,7 +121,7 @@ struct CredentialBindingTests {
     // MARK: - Path Prefix Normalization (Traversal Regression)
 
     @Test
-    func `Binding denies literal dot-segment traversal out of the authorized prefix`() throws {
+    func `Binding denies literal dot-segment traversal out of the authorized prefix`() {
         let binding = CredentialBinding(
             allowedHosts: ["api.github.com"],
             allowedMethods: ["GET"],
@@ -129,8 +129,8 @@ struct CredentialBindingTests {
         )
         let result = binding.denyReason(key: "GITHUB_PAT", host: "api.github.com", method: "GET", path: "/v1/../admin/steal")
         #expect(result != nil)
-        #expect(try #require(result?.contains("not authorized for path")))
-        #expect(try #require(result?.contains("/admin/steal")))
+        #expect(result?.contains("not authorized for path") == true)
+        #expect(result?.contains("/admin/steal") == true)
     }
 
     @Test

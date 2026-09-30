@@ -127,12 +127,11 @@ public final class ServerContext: Sendable {
     /// so suggestion quality tracks the active model posture; the engine never
     /// mints its own backend.
     public let ideasEngine: IdeasEngine?
-    /// Parallel worker fan-out engine backing the `fanout.run` tool. Built
-    /// even when `[fanout]` is disabled so the tool registers and fails closed
-    /// with the honest disabled copy when called, mirroring the goal-tools
-    /// invariant; the serving provider doubles as the background reviewer so
-    /// review quality tracks the active model posture instead of minting a
-    /// second backend.
+    /// Parallel worker fan-out engine backing the `fanout.run` tool. Always
+    /// built so fanout.run registers disabled behind the tool-state toggle
+    /// with no config gate, mirroring the goal-tools invariant; the serving
+    /// provider doubles as the background reviewer so review quality tracks
+    /// the active model posture instead of minting a second backend.
     public let fanOut: FanOutEngine
     /// Active chat provider backing vision description for live index rebuilds.
     /// Stored at boot so a settings save can resolve the vision stage the same
@@ -317,9 +316,9 @@ public final class ServerContext: Sendable {
         // Fan-out resolves over the shared orchestrator and run-log store so
         // workers observe the same model posture as chat, with the serving
         // provider as the background reviewer; a hand-built engine still wins
-        // untouched for tests that wire their own collaborators. The engine
-        // always constructs (even for a disabled `[fanout]` section) so the
-        // fanout.run tool registers and fails closed when called.
+        // untouched for tests that wire their own collaborators. Always built
+        // so fanout.run registers disabled behind the tool-state toggle with
+        // no config gate.
         self.fanOut = fanOut ?? FanOutEngine(
             orchestrator: orchestrator,
             runLogs: runs,
@@ -763,9 +762,8 @@ extension ServerContext {
         let engines = makeExecutionEngines(args: engineArgs)
         // Fan-out resolves over the shared orchestrator and run-log store so
         // workers observe the same model posture as chat, with the serving
-        // provider as the background reviewer. The engine always constructs
-        // (even for a disabled `[fanout]` section) so the fanout.run tool
-        // registers and fails closed with the honest disabled copy when called.
+        // provider as the background reviewer. Always built so fanout.run
+        // registers disabled behind the tool-state toggle with no config gate.
         let fanOutEngine = FanOutEngine(
             orchestrator: engines.orchestrator,
             runLogs: services.durable.runs,

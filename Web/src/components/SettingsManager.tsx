@@ -80,6 +80,9 @@ import {
   BASH_TIMEOUT_MIN_SECONDS,
   DEFAULT_BASH_CONFIG,
   DEFAULT_BASH_RULES_TEXT,
+  DEFAULT_FANOUT_FULL_TOOLS,
+  DEFAULT_FANOUT_MAX_WORKERS,
+  DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS,
   formatBashRulesText,
   parseBashRulesText,
   type BashConfigData,
@@ -88,6 +91,8 @@ import {
   type DesktopConfigData,
   type DesktopSettingsUpdate,
   type EmailAccountData,
+  type FanoutConfigData,
+  type FanoutSettingsUpdate,
   type GoalsConfigData,
   type GoalsSettingsUpdate,
   type IdeasConfigData,
@@ -228,6 +233,7 @@ const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
   { id: "files", name: "Files & Workspace", description: "Allow and deny rules are managed under Security", icon: FolderIcon },
   { id: "memories", name: "Long-Term Memory", description: "Episodic and profile memory store and recall", icon: MemoryIcon },
   { id: "goal", name: "Autonomous Goals", description: "Multi-turn goal planning, tracking, and execution", icon: TargetIcon },
+  { id: "fanout", name: "Fan-Out Workers", description: "Concurrent worker turns for parallel subtasks", icon: WrenchIcon },
   { id: "media", name: "Media & Streaming", description: "Media search and client control", icon: WrenchIcon },
   { id: "api", name: "API & Integrations", description: "External REST calls and webhook triggers", icon: WrenchIcon },
   { id: "other", name: "Other Tools", description: "General utility tools and external plugins", icon: WrenchIcon },
@@ -270,6 +276,7 @@ const KNOWN_BUILTIN_TOOL_CATEGORIES: Record<string, string> = {
   "goal.create": "goal",
   "goal.status": "goal",
   "goal.progress": "goal",
+  "fanout.run": "fanout",
   "media.arr": "media",
   "media.arr.read": "media",
   "api.request": "api",
@@ -286,6 +293,7 @@ function resolveBuiltinCategoryByName(toolName: string): string {
   if (toolName.startsWith("files.")) return "files";
   if (toolName.startsWith("memories.") || toolName === "remember_fact" || toolName === "recall_memories") return "memories";
   if (toolName.startsWith("goal.")) return "goal";
+  if (toolName.startsWith("fanout.")) return "fanout";
   if (toolName.startsWith("media.")) return "media";
   if (toolName.startsWith("api.")) return "api";
   return "other";
@@ -307,7 +315,7 @@ export function getToolCategory(tool: ToolInfo | string): string {
 }
 
 // One Configure entry per integration surface keeps a single modal per editor:
-// desktop, media, and browser-web each own one existing modal, so the header
+// desktop, media, fanout, and browser-web each own one existing modal, so the header
 // button opens that editor whenever any rendered tool in the category reports
 // hasConfig. Files & Access is owned solely by the Security pane, so the
 // Tools Files category never offers a Configure modal. The server hasConfig
@@ -319,6 +327,7 @@ export function getToolCategory(tool: ToolInfo | string): string {
 function getCategoryConfigKey(categoryId: string): string | null {
   if (categoryId === "desktop") return "desktop";
   if (categoryId === "media") return "media.arr";
+  if (categoryId === "fanout") return "fanout.run";
   if (categoryId === "browser-web") return "browser.navigate";
   if (categoryId === "bash") return "bash.exec";
   if (categoryId === "files") return null;
@@ -1079,6 +1088,35 @@ export default function SettingsManager() {
   // (not bare setTimeout) so unmount or a second save clears the pending tick
   // instead of firing setState on an unmounted pane or closing a fresh edit.
   const bashSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Parallel worker fan-out ([fanout]): swarm knobs for fanout.run. Number
+  // inputs hold raw text (including empty) so clearing a field saves the
+  // modal default instead of preserving the stale value; the toggle stays a
+  // plain boolean. Enablement lives in the tool-state switch, so no enabled
+  // key travels here. The fresh form seeds from the modal defaults before the
+  // first settings fetch.
+  const [fanoutMaxWorkers, setFanoutMaxWorkers] = useState<number | string>(
+    DEFAULT_FANOUT_MAX_WORKERS
+  );
+  const [fanoutWorkerTimeoutSeconds, setFanoutWorkerTimeoutSeconds] = useState<
+    number | string
+  >(DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS);
+  const [fanoutFullTools, setFanoutFullTools] = useState<boolean>(
+    DEFAULT_FANOUT_FULL_TOOLS
+  );
+  // Last-loaded fan-out snapshot driving the changed-only patch: a field the
+  // operator never touches stays omitted so the stored value survives, while a
+  // cleared numeric field sends the modal default as an explicit change.
+  const fanoutLoadedRef = useRef<FanoutConfigData>({
+    max_workers: DEFAULT_FANOUT_MAX_WORKERS,
+    worker_timeout_seconds: DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS,
+    full_tools: DEFAULT_FANOUT_FULL_TOOLS,
+  });
+  const [fanoutSaveLoading, setFanoutSaveLoading] = useState(false);
+  const [fanoutModalError, setFanoutModalError] = useState<string | null>(null);
+  // Short-lived success-then-close timer for the fan-out modal: held in a ref
+  // (not bare setTimeout) so unmount or a second save clears the pending tick
+  // instead of firing setState on an unmounted pane or closing a fresh edit.
+  const fanoutSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Direct handle to the bash rules editor so Add Rule can return keyboard
   // focus without a document-wide lookup that breaks with multiple instances
   // or strict-mode remounts.
@@ -1921,6 +1959,73 @@ export default function SettingsManager() {
     return null;
   }, [bashDefaultAction, bashRulesText, bashTimeoutSeconds]);
 
+  // Copies one settings fetch into the fan-out knob fields, tolerating an
+  // absent [fanout] section from older engines by keeping the modal defaults.
+  // Only overwrites keys the engine returns so a stored value always wins over
+  // the empty-field fallback, and records the snapshot the changed-only patch
+  // compares against so untouched knobs stay omitted on save.
+  const populateFanoutSettings = useCallback(
+    (fanout: FanoutConfigData | undefined | null) => {
+      const next: FanoutConfigData = { ...fanoutLoadedRef.current };
+      if (typeof fanout?.max_workers === "number") {
+        setFanoutMaxWorkers(fanout.max_workers);
+        next.max_workers = fanout.max_workers;
+      }
+      if (typeof fanout?.worker_timeout_seconds === "number") {
+        setFanoutWorkerTimeoutSeconds(fanout.worker_timeout_seconds);
+        next.worker_timeout_seconds = fanout.worker_timeout_seconds;
+      }
+      if (typeof fanout?.full_tools === "boolean") {
+        setFanoutFullTools(fanout.full_tools);
+        next.full_tools = fanout.full_tools;
+      }
+      fanoutLoadedRef.current = next;
+    },
+    []
+  );
+
+  // Builds the changed-only [fanout] delta for the Configure modal: a knob
+  // matching its last-loaded value stays omitted so the stored value survives,
+  // while a cleared numeric input sends the modal default as an explicit
+  // change. Only snake_case keys travel; no enabled key, which lives in the
+  // tool-state toggles.
+  const buildFanoutPayload = useCallback(
+    (): FanoutSettingsUpdate => {
+      const patch: FanoutSettingsUpdate = {};
+      const loaded = fanoutLoadedRef.current;
+      const maxRaw = typeof fanoutMaxWorkers === "string" ? fanoutMaxWorkers.trim() : fanoutMaxWorkers;
+      if (maxRaw === "") {
+        if (loaded.max_workers !== DEFAULT_FANOUT_MAX_WORKERS) {
+          patch.max_workers = DEFAULT_FANOUT_MAX_WORKERS;
+        }
+      } else {
+        const maxNum = Number(maxRaw);
+        if (maxNum !== loaded.max_workers) {
+          patch.max_workers = maxNum;
+        }
+      }
+      const timeoutRaw =
+        typeof fanoutWorkerTimeoutSeconds === "string"
+          ? fanoutWorkerTimeoutSeconds.trim()
+          : fanoutWorkerTimeoutSeconds;
+      if (timeoutRaw === "") {
+        if (loaded.worker_timeout_seconds !== DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS) {
+          patch.worker_timeout_seconds = DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS;
+        }
+      } else {
+        const timeoutNum = Number(timeoutRaw);
+        if (timeoutNum !== loaded.worker_timeout_seconds) {
+          patch.worker_timeout_seconds = timeoutNum;
+        }
+      }
+      if (fanoutFullTools !== loaded.full_tools) {
+        patch.full_tools = fanoutFullTools;
+      }
+      return patch;
+    },
+    [fanoutMaxWorkers, fanoutWorkerTimeoutSeconds, fanoutFullTools]
+  );
+
   // Copies one settings fetch into the goals fields, tolerating both
   // snake_case and camelCase DTO aliases and an absent [goals] section from
   // older engines by keeping the form defaults. Only overwrites sections the
@@ -2201,6 +2306,9 @@ export default function SettingsManager() {
     // Proactivity fields share one helper so load and save stay symmetric; an
     // absent [proactive] keeps the form defaults instead of blanking the pane.
     populateProactiveSettings(data.proactive);
+    // Fan-out knobs share one helper so load and save stay symmetric; an
+    // absent [fanout] keeps the modal defaults instead of blanking the modal.
+    populateFanoutSettings(data.fanout);
     // Network bind tolerates older engines without [server]: absent keys keep
     // the loopback defaults so the pane never renders blank, and the textarea
     // formats the stored list so blank lines only exist while editing.
@@ -2247,7 +2355,7 @@ export default function SettingsManager() {
       prev ?? { hostname: fileBindHostname, port: fileBindPort, allowedHosts: fileBindHosts }
     );
     setServerRestartRequired(Boolean(data.requiresRestart));
-  }, [populateMediaSettings, populateDesktopSettings, populateBashSettings, populateGoalsSettings, populateIdeasSettings, populateProactiveSettings]);
+  }, [populateMediaSettings, populateDesktopSettings, populateBashSettings, populateGoalsSettings, populateIdeasSettings, populateProactiveSettings, populateFanoutSettings]);
 
   // Reconciles the boot snapshot from /health when the engine advertises its
   // live bind. Older engines omit the keys, in which case the pre-save file
@@ -2469,7 +2577,7 @@ export default function SettingsManager() {
     return () => clearInterval(timer);
   }, [activeTab, settings, liveServerBind, serverRestartRequired, refreshBootBind]);
 
-  // Unmount must never leave the browser provision poll or media/desktop/bash tick
+  // Unmount must never leave the browser provision poll or media/desktop/bash/fanout tick
   // running behind a closed pane.
   useEffect(() => {
     const pollRef = browserTimerRef;
@@ -2477,6 +2585,7 @@ export default function SettingsManager() {
     const browserSaveRef = browserSaveTimerRef;
     const desktopSaveRef = desktopSaveTimerRef;
     const bashSaveRef = bashSaveTimerRef;
+    const fanoutSaveRef = fanoutSaveTimerRef;
     return () => {
       if (pollRef.current !== null) {
         clearInterval(pollRef.current);
@@ -2497,6 +2606,10 @@ export default function SettingsManager() {
       if (bashSaveRef.current !== null) {
         clearTimeout(bashSaveRef.current);
         bashSaveRef.current = null;
+      }
+      if (fanoutSaveRef.current !== null) {
+        clearTimeout(fanoutSaveRef.current);
+        fanoutSaveRef.current = null;
       }
     };
   }, []);
@@ -3185,6 +3298,38 @@ export default function SettingsManager() {
       setError: setBashModalError,
       timerRef: bashSaveTimerRef,
     });
+  };
+
+  // Saves the changed-only [fanout] delta for the fan-out modal through PUT
+  // /settings, mirroring the media-only save shape so unsaved edits in other
+  // tabs survive. Only knobs travel here — enablement lives in the tool-state
+  // toggles — and untouched knobs stay omitted so the stored value survives.
+  // A cleared numeric input sends the modal default as an explicit change, and
+  // the honest server message surfaces on failure.
+  const handleSaveFanoutConfig = async () => {
+    setFanoutSaveLoading(true);
+    setFanoutModalError(null);
+    try {
+      const updated = await updateSettings({
+        fanout: buildFanoutPayload(),
+      });
+      populateForm(updated);
+      pushSuccessToast("Fan-out settings saved!");
+      // Re-arm the close tick through the ref so a repeat save replaces the
+      // pending tick and unmount clears it instead of leaking.
+      if (fanoutSaveTimerRef.current !== null) {
+        clearTimeout(fanoutSaveTimerRef.current);
+        fanoutSaveTimerRef.current = null;
+      }
+      fanoutSaveTimerRef.current = setTimeout(() => {
+        fanoutSaveTimerRef.current = null;
+        setConfiguringToolName(null);
+      }, 1000);
+    } catch (err) {
+      setFanoutModalError(err instanceof ApiError ? err.message : "Failed to save fan-out settings");
+    } finally {
+      setFanoutSaveLoading(false);
+    }
   };
 
   // Bash rules editing is a single textarea (small-screen friendly for long
@@ -4753,7 +4898,9 @@ export default function SettingsManager() {
                           ? "Configure Sonarr & Radarr"
                           : categoryConfigKey === "bash.exec"
                             ? "Configure Bash & Shell"
-                            : "Configure Browser & Web Automation";
+                            : categoryConfigKey === "fanout.run"
+                              ? "Configure Parallel Fan-Out"
+                              : "Configure Browser & Web Automation";
 
                     return (
                       <section key={cat.id} className="tool-category-section">
@@ -4788,6 +4935,7 @@ export default function SettingsManager() {
                                   setBrowserModalError(null);
                                   setDesktopModalError(null);
                                   setBashModalError(null);
+                                  setFanoutModalError(null);
                                   setConfiguringToolName(categoryConfigKey);
                                 }}
                                 style={{ padding: "4px 8px", fontSize: "0.78rem" }}
@@ -7414,6 +7562,122 @@ export default function SettingsManager() {
               disabled={bashSaveLoading}
             >
               {bashSaveLoading ? "Saving…" : "Save Configuration"}
+            </button>
+          </div>
+        </Modal>
+      ) : configuringToolName === "fanout.run" ||
+          (typeof configuringToolName === "string" &&
+            configuringToolName.startsWith("fanout.")) ? (
+        <Modal
+          label="Configure Parallel Fan-Out"
+          onClose={() => {
+            if (!fanoutSaveLoading) setConfiguringToolName(null);
+          }}
+          containerClassName="modal-container"
+        >
+          <div className="modal-header">
+            <h3>Configure Parallel Fan-Out</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => {
+                if (!fanoutSaveLoading) setConfiguringToolName(null);
+              }}
+              disabled={fanoutSaveLoading}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+            {fanoutModalError && (
+              <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <AlertTriangleIcon size={16} />
+                <span>{fanoutModalError}</span>
+              </div>
+            )}
+
+            <p className="muted text-sm" style={{ marginBottom: "16px" }}>
+              Tune the parallel worker swarm for <code>fanout.run</code>. Workers
+              fan out over caller-composed subtasks and merge through one
+              reviewer pass; these knobs take effect without a restart.
+            </p>
+
+            <div className="form-row" style={{ display: "flex", gap: "10px", marginBottom: "4px" }}>
+              <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                <label htmlFor="fanout-max-workers" style={{ fontSize: "0.82rem" }}>Max workers</label>
+                <input
+                  id="fanout-max-workers"
+                  type="number"
+                  min={1}
+                  max={8}
+                  step={1}
+                  className="input-field"
+                  value={fanoutMaxWorkers}
+                  onChange={(e) =>
+                    setFanoutMaxWorkers(
+                      e.target.value === "" ? "" : Number(e.target.value)
+                    )
+                  }
+                  placeholder="2 (default)"
+                />
+                <span className="form-group-hint">
+                  Maximum workers running at once. Clearing the field saves 2.
+                </span>
+              </div>
+              <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                <label htmlFor="fanout-worker-timeout" style={{ fontSize: "0.82rem" }}>Worker timeout (seconds)</label>
+                <input
+                  id="fanout-worker-timeout"
+                  type="number"
+                  min={0}
+                  step={1}
+                  className="input-field"
+                  value={fanoutWorkerTimeoutSeconds}
+                  onChange={(e) =>
+                    setFanoutWorkerTimeoutSeconds(
+                      e.target.value === "" ? "" : Number(e.target.value)
+                    )
+                  }
+                  placeholder="0 (unlimited)"
+                />
+                <span className="form-group-hint">
+                  0 = no timeout — recommended for local models. Clearing the field saves 0 (unlimited).
+                </span>
+              </div>
+            </div>
+
+            <div className="form-group checkbox-group" style={{ marginTop: "16px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                <input
+                  id="fanout-full-tools"
+                  type="checkbox"
+                  checked={fanoutFullTools}
+                  onChange={(e) => setFanoutFullTools(e.target.checked)}
+                />
+                <span>Full tools</span>
+              </label>
+              <span className="form-group-hint">
+                Lets workers call the full tool registry, not just read-only tools.
+              </span>
+            </div>
+          </div>
+          <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setConfiguringToolName(null)}
+              disabled={fanoutSaveLoading}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void handleSaveFanoutConfig()}
+              disabled={fanoutSaveLoading}
+            >
+              {fanoutSaveLoading ? "Saving…" : "Save Configuration"}
             </button>
           </div>
         </Modal>

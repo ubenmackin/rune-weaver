@@ -769,9 +769,189 @@ struct SettingsRouteTests {
         #expect(revDenied.allowed == false)
         #expect(fwdDenied.allowed == revDenied.allowed)
     }
+
+    @Test
+    func `UpdateSettingsRequest fanout patch preserves omitted fields`() throws {
+        var config = RuneWeaverConfig.default
+        config.fanOut = FanOutConfig(maxWorkers: 4, workerTimeoutSeconds: 300, fullTools: false)
+
+        // A patch carrying one key leaves the rest of the stored swarm policy
+        // untouched instead of resetting it, so a workers-only PUT never
+        // widens the tool subset or shortens the timeout by surprise.
+        try UpdateSettingsRequest(
+            fanout: FanOutSettingsUpdate(maxWorkers: 5)
+        ).apply(to: &config)
+        #expect(config.fanOut.maxWorkers == 5)
+        #expect(config.fanOut.workerTimeoutSeconds == 300)
+        #expect(config.fanOut.fullTools == false)
+
+        let response = SettingsResponse(config: config, configPath: "/test/config.toml")
+        #expect(response.fanout.maxWorkers == 5)
+        #expect(response.fanout.workerTimeoutSeconds == 300)
+        #expect(response.fanout.fullTools == false)
+    }
+
+    @Test
+    func `UpdateSettingsRequest nil fanout patch is a no-op`() throws {
+        var config = RuneWeaverConfig.default
+        config.fanOut = FanOutConfig(maxWorkers: 6, workerTimeoutSeconds: 120, fullTools: true)
+
+        // A nil patch preserves every stored fan-out value so a dashboard edit
+        // elsewhere never resets the swarm policy.
+        try UpdateSettingsRequest(engineName: "Kept Fanout").apply(to: &config)
+        #expect(config.engine.name == "Kept Fanout")
+        #expect(config.fanOut.maxWorkers == 6)
+        #expect(config.fanOut.workerTimeoutSeconds == 120)
+        #expect(config.fanOut.fullTools == true)
+    }
+
+    @Test
+    func `FanOutSettingsUpdate decodes snake_case wire keys`() throws {
+        // The dashboard PUT sends `{"fanout":{"max_workers":5}}`; the patch
+        // must land on the workers knob while the omitted knobs stay nil so
+        // the merge preserves them instead of resetting.
+        let payload = #"{"fanout":{"max_workers":5}}"#
+        let request = try JSONDecoder().decode(
+            UpdateSettingsRequest.self,
+            from: Data(payload.utf8)
+        )
+        #expect(request.fanout?.maxWorkers == 5)
+        #expect(request.fanout?.workerTimeoutSeconds == nil)
+        #expect(request.fanout?.fullTools == nil)
+
+        var config = RuneWeaverConfig.default
+        config.fanOut = FanOutConfig(maxWorkers: 4, workerTimeoutSeconds: 300, fullTools: false)
+        try request.apply(to: &config)
+        #expect(config.fanOut.maxWorkers == 5)
+        #expect(config.fanOut.workerTimeoutSeconds == 300)
+        #expect(config.fanOut.fullTools == false)
+    }
+
+    @Test
+    func `UpdateSettingsRequest fanout bounds fail validation`() throws {
+        // The worker cap stays 1-8 so a wide subtask list cannot oversubscribe
+        // the serving model; the merged file must refuse before persisting.
+        for invalid in [0, -1, 9, 99] {
+            var config = RuneWeaverConfig.default
+            do {
+                try UpdateSettingsRequest(
+                    fanout: FanOutSettingsUpdate(maxWorkers: invalid)
+                ).apply(to: &config)
+                try config.validate()
+                Issue.record("Expected a validation error for fanout max_workers \(invalid)")
+            } catch let error as ConfigError {
+                guard case let .validationError(field, _) = error, field == "fanout.max_workers" else {
+                    Issue.record("Expected fanout.max_workers validation, got \(error)")
+                    return
+                }
+            } catch {
+                Issue.record("Expected ConfigError, got \(type(of: error))")
+            }
+        }
+
+        // Negative and overlong timeouts fail closed matching the file-load
+        // path; zero is accepted as unlimited.
+        for invalid in [-1, -5, FanOutConfig.maxWorkerTimeoutSeconds + 1] {
+            var config = RuneWeaverConfig.default
+            do {
+                try UpdateSettingsRequest(
+                    fanout: FanOutSettingsUpdate(workerTimeoutSeconds: invalid)
+                ).apply(to: &config)
+                try config.validate()
+                Issue.record("Expected a validation error for fanout worker_timeout_seconds \(invalid)")
+            } catch let error as ConfigError {
+                guard case let .validationError(field, _) = error, field == "fanout.worker_timeout_seconds" else {
+                    Issue.record("Expected fanout.worker_timeout_seconds validation, got \(error)")
+                    return
+                }
+            } catch {
+                Issue.record("Expected ConfigError, got \(type(of: error))")
+            }
+        }
+
+        // Zero is accepted as unlimited, matching file-load and defaults.
+        var zeroConfig = RuneWeaverConfig.default
+        try UpdateSettingsRequest(
+            fanout: FanOutSettingsUpdate(workerTimeoutSeconds: 0)
+        ).apply(to: &zeroConfig)
+        try zeroConfig.validate()
+        #expect(zeroConfig.fanOut.workerTimeoutSeconds == 0)
+    }
+
+    @Test
+    func `FanOut engine live reload observes saved patch through accessor`() async throws {
+        // A saved workers-only patch must reach the live swarm without a
+        // restart: the engine accessor observes the merged snapshot after the
+        // settings save pushes it live.
+        let engine = FanOutEngine(
+            orchestrator: StubFanOutOrchestrator(),
+            runLogs: StubFanOutRunLogger(),
+            config: FanOutConfig(maxWorkers: 4, workerTimeoutSeconds: 300, fullTools: false)
+        )
+        var config = RuneWeaverConfig.default
+        config.fanOut = FanOutConfig(maxWorkers: 4, workerTimeoutSeconds: 300, fullTools: false)
+        try UpdateSettingsRequest(
+            fanout: FanOutSettingsUpdate(maxWorkers: 5)
+        ).apply(to: &config)
+        try config.validate()
+        await engine.updateConfig(config.fanOut)
+        let live = await engine.currentConfig
+        #expect(live.maxWorkers == 5)
+        #expect(live.workerTimeoutSeconds == 300)
+        #expect(live.fullTools == false)
+    }
+
+    @Test
+    func `Fanout tool reports settings support while staying approval-gated`() {
+        // The dashboard renders Configure from `hasConfig`, while the
+        // permission gate still parks every swarm for approval because it
+        // spends concurrent model rounds.
+        let engine = FanOutEngine(
+            orchestrator: StubFanOutOrchestrator(),
+            runLogs: StubFanOutRunLogger(),
+            config: FanOutConfig()
+        )
+        let tools = FanOutTools.makeTools(engine: engine)
+        #expect(tools.count == 1)
+        guard let tool = tools.first else {
+            Issue.record("Expected one fanout.run tool")
+            return
+        }
+        #expect(tool.name == "fanout.run")
+        #expect(tool.permissionLevel == .requiresApproval)
+        let info = buildToolInfo(for: tool, isEnabled: true, recordByPluginID: [:])
+        #expect(info.hasConfig == true)
+        #expect(info.isEnabled == true)
+
+        // Tools outside the allowlist keep no Configure action so the
+        // fan-out addition never widens unrelated rows.
+        let filesTools = FilesTools.makeTools(filesConfig: FilesConfig())
+        for filesTool in filesTools {
+            let listed = buildToolInfo(for: filesTool, isEnabled: true, recordByPluginID: [:])
+            #expect(listed.hasConfig == false)
+        }
+    }
 }
 
 // MARK: - Security Policy Routes
+
+/// Minimal orchestrator stub so fan-out live-reload tests can own an engine
+/// without the full LLM stack; turns never run in these tests.
+private struct StubFanOutOrchestrator: OrchestratorFanOutSeam, Sendable {
+    func process(_: UserInput) async throws {}
+}
+
+/// Minimal run-log stub so fan-out live-reload tests can own an engine
+/// without the durable store; rows are discarded because these tests pin
+/// config propagation, never the audit trail.
+private struct StubFanOutRunLogger: FanOutRunLogging, Sendable {
+    @discardableResult
+    func appendFanOutRow(kind _: String, status _: String, message _: String, sessionID _: UUID) async -> UUID {
+        UUID()
+    }
+
+    func updateFanOutRow(id _: UUID, status _: String) async {}
+}
 
 /// Builds an isolated policy store over a throwaway directory and loads it.
 ///

@@ -368,9 +368,8 @@ enabled = false
 max_per_cycle = 3
 
 [fanout]
-enabled = false
-max_workers = 4
-worker_timeout_seconds = 300
+max_workers = 2
+worker_timeout_seconds = 0   # 0 = unlimited
 full_tools = false
 ```
 
@@ -429,7 +428,7 @@ Every section is additive with defaults on absent keys, so existing `config.toml
 - Declarative egress policy: deny-by-default with explicit allowlist only; credentials bound to `allowed_hosts`/`allowed_methods`/`allowed_path_prefixes`; protected directories are never allowable roots; unverifiable `policy.toml` fails closed (CLI exits nonzero, serve refuses boot) — never permissive defaults.
 - Bounds: `memories.recall` limit 1–50 default 5; auto-recall bounded by `recall_auto_limit`, `recall_threshold`, `recall_max_chars`, `recall_per_hit_chars`; doc pool bounded by `recall_doc_pool_multiplier` (1–8); episodic weight 0–1; `messages.search` 1–50 default 10; `messages.read` 1–100 default 20; empty text rejected; AppleScript rejects null bytes.
 - Goals bounds: `step_interval_minutes` 5–20160; `max_active_goals` 1–50; `max_steps_per_goal` 1–24; `max_triggers_per_goal` 0–32; `plan_timeout_seconds` default 60.
-- Fan-out bounds: `max_workers` 1–8 default 4; `worker_timeout_seconds` default 300; `full_tools` default false.
+- Fan-out bounds: `max_workers` 1–8 default 2; `worker_timeout_seconds` 0=unlimited, 1–86400 otherwise; `full_tools` default false.
 - Ideas bound: `max_per_cycle` 1–10 default 3.
 - macOS Sequoia or later.
 

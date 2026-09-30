@@ -211,10 +211,9 @@ enum CLIShared {
     /// Goal tools join only when both the engine and store arrive (nil keeps them
     /// unregistered); a disabled `[goals]` section still registers through the same
     /// path and fails closed inside each tool so the surface stays inspectable.
-    /// Fan-out tools follow the same invariant: the tool joins only when the
-    /// fan-out engine arrives (nil keeps it unregistered), and a disabled
-    /// `[fanout]` section still registers through the same path and fails closed
-    /// inside the tool with the honest disabled copy.
+    /// Fan-out tools follow the ships-disabled invariant: the tool joins only when
+    /// the fan-out engine arrives (nil keeps it unregistered), and it registers
+    /// disabled behind the tool-state toggle with no config gate overriding it.
     ///
     /// The build fails closed: when the security policy cannot be verified the
     /// reason prints and the command exits nonzero rather than registering a
@@ -277,20 +276,22 @@ enum CLIShared {
 
     /// Builds a `ToolBus` pre-populated from the shared plugin source.
     ///
-    /// Desktop tools register disabled like every other boot path, then the
-    /// persisted tool-state rows re-apply (the same restore the service runs),
-    /// so the CLI sees exactly the tool set the dashboard governs instead of
-    /// a permissive side door. The tool-state toggle is the sole authority.
+    /// Capabilities in `BuiltinToolPlugins.shipsDisabledToolNames` register
+    /// disabled like every other boot path, then the persisted tool-state rows
+    /// re-apply (the same restore the service runs), so the CLI sees exactly the
+    /// tool set the dashboard governs instead of a permissive side door. The
+    /// tool-state toggle is the sole authority.
     /// Goal tools follow the shared registration path: callers pass a store built
     /// from `config.memory.episodes_db_path` plus its engine (and the live
     /// conversations manager for chip linkage); nil keeps them unregistered while
     /// a disabled `[goals]` section still registers and fails closed inside each
     /// tool. When only the policy plus an LLM arrive, the store and engine build
     /// here from the episodes path so chat and serve need no second wiring step.
-    /// Fan-out tools follow the same invariant: the optional engine passes
-    /// through so a caller that wired one sees the fanout.run tool, while nil
-    /// keeps it unregistered (the CLI builds no engine here because the
-    /// orchestrator and run-log store arrive after the bus).
+    /// Fan-out tools follow the same ships-disabled posture: the optional engine
+    /// passes through so a caller that wired one sees the fanout.run tool
+    /// registered disabled, while nil keeps it unregistered (the CLI builds no
+    /// engine here because the orchestrator and run-log store arrive after the
+    /// bus).
     /// - Parameter policyStore: Shared security policy store; nil builds and
     ///   loads the factory default. Callers that also boot a service pass
     ///   their instance so one store backs both.
@@ -338,7 +339,7 @@ enum CLIShared {
         if effectiveEngine == nil, let store = effectiveStore, let goalsConfig, let llm = goalLLM {
             effectiveEngine = GoalEngine(store: store, llm: llm, config: goalsConfig)
         }
-        let desktopNames = Set(DesktopTools.allToolNames)
+        let shipsDisabled = BuiltinToolPlugins.shipsDisabledToolNames
         for tool in try await pluginTools(
             emailConfig: emailConfig,
             filesConfig: filesConfig,
@@ -360,7 +361,7 @@ enum CLIShared {
             fanOutEngine: fanOutEngine,
             policyStore: policyStore
         ) {
-            await bus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
+            await bus.register(tool: tool, isEnabled: !shipsDisabled.contains(tool.name))
         }
         if memoryEngine != nil {
             await MemoryTools.registerMemoryAliases(on: bus)

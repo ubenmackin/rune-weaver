@@ -7,9 +7,9 @@
 // rows, and the merge pass live in FanOutEngine. Architectural role: the
 // agent's lever for parallel autonomous work — the call itself parks for
 // approval because it spends model rounds, workers get the read-only tool
-// subset unless the `[fanout]` full_tools policy widens it, and real-world
-// actions still ride their own permission-gated tools so a worker swarm
-// cannot mutate state by surprise.
+// subset unless the fanout tool settings widen them to the full registry,
+// and real-world actions still ride their own permission-gated tools so a
+// worker swarm cannot mutate state by surprise.
 
 import Foundation
 import RuneWeaverCore
@@ -155,18 +155,6 @@ public enum FanOutToolEncoding {
     }
 }
 
-// MARK: - Shared helpers
-
-/// Honest fail-closed copy returned when fan-out is off.
-///
-/// Kept in one place so the disabled rejection reads as its own guidance
-/// instead of a generic engine failure; it mirrors the engine's disabled
-/// error so tool and direct-engine callers hear the same instruction.
-private enum FanOutDisabledMessage {
-    /// Disabled copy naming the `[fanout]` opt-in.
-    static let text = "Fan-out is disabled. Enable [fanout] to run parallel worker subtasks."
-}
-
 // MARK: - Tool
 
 /// `fanout.run` tool: spawns bounded parallel worker turns through the
@@ -178,12 +166,13 @@ public struct FanOutTool: Tool, Sendable {
     ///
     /// The description teaches the model the worker bargain up front so it
     /// plans subtasks knowing what its workers can and cannot do: the
-    /// read-only subset unless the `[fanout]` full_tools policy widens it,
-    /// and real-world actions still ride their own permission-gated tools.
+    /// read-only subset unless the fanout tool settings widen it to the full
+    /// registry, and real-world actions still ride their own permission-gated
+    /// tools.
     public let description =
         "Spawns parallel worker subagents that run their own subtask prompts concurrently and returns one merged summary. "
             + "Use when independent research or investigation steps can run at the same time. "
-            + "Workers get the read-only tool subset unless the [fanout] full_tools policy widens it; "
+            + "Workers get the read-only tool subset unless the fanout tool settings widen them to the full registry; "
             + "real-world actions still ride their own permission-gated tools, so a worker cannot mutate state without approval. "
             + "Pass explicit subtasks; the engine executes the list it is handed and never decomposes for you."
     /// Function-calling contract for the explicit subtask list.
@@ -205,9 +194,9 @@ public struct FanOutTool: Tool, Sendable {
     /// Sessions owner verifying the origin link; nil keeps the tool usable
     /// without a manager (the envelope then never claims a session link).
     private let conversations: ConversationManager?
-    /// Read-only tool names the workers get unless the fanout policy widens
-    /// to the full registry, derived once at registration from the built
-    /// registry snapshot so the subset stays deterministic; names for tools
+    /// Read-only tool names the workers get unless the fanout tool settings
+    /// widen workers to the full registry, derived once at registration from
+    /// the built registry snapshot so the subset stays deterministic; names for tools
     /// disabled on the bus simply filter to nothing in the orchestrator's
     /// enabled-only snapshot, so they are harmless to carry.
     private let allowedToolNames: [String]
@@ -244,8 +233,8 @@ public struct FanOutTool: Tool, Sendable {
                 callID: input.callID
             )
         }
-        // Workers get the read-only subset unless the fanout policy widens to
-        // the full registry, so research fan-out cannot mutate state.
+        // Workers get the read-only subset unless the fanout tool settings
+        // widen them to the full registry, so research fan-out cannot mutate state.
         let fullTools = await engine.fullTools
         let allowedTools = fullTools ? nil : allowedToolNames
         if context.dryRun {
@@ -293,8 +282,6 @@ public struct FanOutTool: Tool, Sendable {
     /// - Returns: The honest failure copy.
     static func failureMessage(for error: FanOutError) -> String {
         switch error {
-        case .disabled:
-            FanOutDisabledMessage.text
         case let .maxWorkersReached(limit):
             "Fan-out subtask list exceeds the configured worker cap of \(limit). Reduce the subtask count or raise [fanout] max_workers."
         case .emptySubtasks:
@@ -312,13 +299,13 @@ public enum FanOutTools {
 
     /// Builds the fan-out tool for a shared engine.
     ///
-    /// The tool builds whenever an engine arrives; enablement lives in the
-    /// engine's `[fanout]` policy (a disabled install still registers through
-    /// the same path and fails closed inside the tool with the honest disabled
-    /// copy, keeping `GET /tools` stable instead of shape-shifting with
-    /// config). Session-link verification rides the optional conversations
-    /// manager; nil keeps the envelope's session link off so engine-only
-    /// callers still work.
+    /// The tool builds whenever an engine arrives; enablement lives solely in
+    /// the tool-state toggle — the tool ships disabled (see
+    /// `BuiltinToolPlugins.shipsDisabledToolNames`) and an operator enable is
+    /// the only gate before it runs, keeping `GET /tools` stable instead of
+    /// shape-shifting with config. Session-link verification rides the optional
+    /// conversations manager; nil keeps the envelope's session link off so
+    /// engine-only callers still work.
     /// - Parameters:
     ///   - engine: Fan-out engine running the swarm.
     ///   - conversations: Sessions owner for the origin-link verification.

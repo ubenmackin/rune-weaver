@@ -53,18 +53,16 @@ struct PolicyStoreTests {
         #expect(policy.network.blockedDomains.contains("169.254.169.254"))
 
         #expect(policy.credentials.count == 2)
-        let github = policy.credentials["GITHUB_PAT"]
-        #expect(github != nil)
-        #expect(try #require(github?.allowedHosts.contains("api.github.com")))
-        #expect(try #require(github?.allowedMethods.contains("GET")))
-        #expect(try #require(github?.allowedMethods.contains("POST")))
-        #expect(github?.allowedPathPrefixes == ["/repos/", "/user"])
+        let github = try #require(policy.credentials["GITHUB_PAT"])
+        #expect(github.allowedHosts.contains("api.github.com"))
+        #expect(github.allowedMethods.contains("GET"))
+        #expect(github.allowedMethods.contains("POST"))
+        #expect(github.allowedPathPrefixes == ["/repos/", "/user"])
 
-        let openai = policy.credentials["OPENAI_KEY"]
-        #expect(openai != nil)
-        #expect(try #require(openai?.allowedHosts.contains("api.openai.com")))
-        #expect(try #require(openai?.allowedMethods.contains("POST")))
-        #expect(try #require(openai?.allowedPathPrefixes.isEmpty))
+        let openai = try #require(policy.credentials["OPENAI_KEY"])
+        #expect(openai.allowedHosts.contains("api.openai.com"))
+        #expect(openai.allowedMethods.contains("POST"))
+        #expect(openai.allowedPathPrefixes.isEmpty)
 
         #expect(policy.filesystem.allowRoots == ["~/Documents/Projects"])
         #expect(policy.filesystem.denyPaths.contains("~/.ssh"))
@@ -220,9 +218,8 @@ struct PolicyStoreTests {
             mode: .allowlistOnly,
             allowedDomains: ["api.github.com"]
         )
-        let result = policy.denyReason(for: "evil.com")
-        #expect(result != nil)
-        #expect(try #require(result?.contains("not in the allowed domains")))
+        let result = try #require(policy.denyReason(for: "evil.com"))
+        #expect(result.contains("not in the allowed domains"))
     }
 
     @Test
@@ -232,9 +229,8 @@ struct PolicyStoreTests {
             allowedDomains: [],
             blockedDomains: ["evil.com"]
         )
-        let result = policy.denyReason(for: "evil.com")
-        #expect(result != nil)
-        #expect(try #require(result?.contains("explicitly blocked")))
+        let result = try #require(policy.denyReason(for: "evil.com"))
+        #expect(result.contains("explicitly blocked"))
     }
 
     @Test
@@ -263,9 +259,8 @@ struct PolicyStoreTests {
             mode: .unrestricted,
             blockedDomains: ["*.evil.com"]
         )
-        let result = policy.denyReason(for: "sub.evil.com")
-        #expect(result != nil)
-        #expect(try #require(result?.contains("blocked pattern")))
+        let result = try #require(policy.denyReason(for: "sub.evil.com"))
+        #expect(result.contains("blocked pattern"))
     }
 
     @Test

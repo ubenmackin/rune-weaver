@@ -3,7 +3,7 @@
 // Exercises the fan-out stack with a stub orchestrator seam and a stub run
 // logger: concurrent worker turns on fresh sessions carrying the
 // fanout_worker source, the parent plus child run rows with their terminal
-// status flips, the cap and disabled rejections, the bounded wall-clock
+// status flips, the cap and empty-list rejections, the bounded wall-clock
 // timeout marking a worker failed with an honest note, the allowedTools
 // subset carried verbatim to workers plus the deterministic registry filter,
 // and the parent settling when every subtask settles. Configuration coverage
@@ -152,14 +152,15 @@ private struct FakeFanOutTool: Tool {
     }
 }
 
-/// Creates an enabled fan-out engine over the given stubs.
+/// Creates a fan-out engine over the given stubs with the default behavior
+/// knobs (workers=2, unlimited timeout, read-only subset) unless the caller
+/// widens them.
 private func makeFanOutEngine(
     orchestrator: OrchestratorFanOutSeam,
     runLogger: FanOutRunLogging,
     configure: (inout FanOutConfig) -> Void = { _ in }
 ) -> FanOutEngine {
     var config = FanOutConfig()
-    config.enabled = true
     configure(&config)
     return FanOutEngine(orchestrator: orchestrator, runLogs: runLogger, config: config)
 }
@@ -172,11 +173,10 @@ private func makeSubtask(title: String, prompt: String? = nil) -> FanOutSubtask 
 @Suite("FanOutEngine")
 struct FanOutEngineTests {
     @Test
-    func `FanOutConfig defaults stay opt-in with a bounded worker cap`() {
+    func `FanOutConfig defaults carry behavior knobs only with a bounded worker cap`() {
         let config = FanOutConfig()
-        #expect(config.enabled == false)
-        #expect(config.maxWorkers == 4)
-        #expect(config.workerTimeoutSeconds == 300)
+        #expect(config.maxWorkers == 2)
+        #expect(config.workerTimeoutSeconds == 0)
         #expect(config.fullTools == false)
         #expect(RuneWeaverConfig.default.fanOut == FanOutConfig())
     }
@@ -206,13 +206,11 @@ struct FanOutEngineTests {
         model = "gemma-4-9b"
         server_url = "http://localhost:8080"
         [fanout]
-        enabled = true
         max_workers = 6
         worker_timeout_seconds = 120
         full_tools = true
         """
         let config = try RuneWeaverConfig(decoding: TOMLParser.parse(text))
-        #expect(config.fanOut.enabled == true)
         #expect(config.fanOut.maxWorkers == 6)
         #expect(config.fanOut.workerTimeoutSeconds == 120)
         #expect(config.fanOut.fullTools == true)
@@ -234,16 +232,18 @@ struct FanOutEngineTests {
     func `Fanout validation bounds the worker cap and timeout`() {
         expectFanOutValidationFailure({ $0.maxWorkers = 0 }, field: "fanout.max_workers")
         expectFanOutValidationFailure({ $0.maxWorkers = FanOutConfig.maxMaxWorkers + 1 }, field: "fanout.max_workers")
-        expectFanOutValidationFailure({ $0.workerTimeoutSeconds = 0 }, field: "fanout.worker_timeout_seconds")
         expectFanOutValidationFailure({ $0.workerTimeoutSeconds = -5 }, field: "fanout.worker_timeout_seconds")
+        expectFanOutValidationFailure(
+            { $0.workerTimeoutSeconds = FanOutConfig.maxWorkerTimeoutSeconds + 1 },
+            field: "fanout.worker_timeout_seconds"
+        )
     }
 
     @Test
     func `Fanout clamped pulls hand-built values inside bounds`() {
-        let clamped = FanOutConfig(enabled: true, maxWorkers: 99, workerTimeoutSeconds: 0, fullTools: true).clamped()
-        #expect(clamped.enabled == true)
+        let clamped = FanOutConfig(maxWorkers: 99, workerTimeoutSeconds: 0, fullTools: true).clamped()
         #expect(clamped.maxWorkers == FanOutConfig.maxMaxWorkers)
-        #expect(clamped.workerTimeoutSeconds == 1)
+        #expect(clamped.workerTimeoutSeconds == FanOutConfig.unlimitedWorkerTimeoutSeconds)
         #expect(clamped.fullTools == true)
     }
 
@@ -251,7 +251,9 @@ struct FanOutEngineTests {
     func `Fan-out spawns worker turns on fresh sessions with the fanout_worker source and run rows`() async throws {
         let orchestrator = CapturingFanOutOrchestrator()
         let runLogger = CapturingFanOutRunLogger()
-        let engine = makeFanOutEngine(orchestrator: orchestrator, runLogger: runLogger)
+        let engine = makeFanOutEngine(orchestrator: orchestrator, runLogger: runLogger) {
+            $0.maxWorkers = 3
+        }
         let origin = UUID()
         let subtasks = [
             makeSubtask(title: "Research A"),
@@ -345,21 +347,21 @@ struct FanOutEngineTests {
     }
 
     @Test
-    func `Disabled install rejects fan-out before any worker turn`() async throws {
+    func `Default config runs without an availability gate`() async throws {
         let orchestrator = CapturingFanOutOrchestrator()
         let runLogger = CapturingFanOutRunLogger()
-        // Hand-built config keeps the disabled default, unlike the helper.
+        // Single-gate contract: availability flows through tool registration
+        // alone, so a default-config engine always runs its subtasks.
         let engine = FanOutEngine(orchestrator: orchestrator, runLogs: runLogger, config: FanOutConfig())
-        #expect(await engine.isEnabled == false)
 
-        do {
-            _ = try await engine.runFanOut(subtasks: [makeSubtask(title: "A")], originSessionID: UUID())
-            Issue.record("Expected disabled rejection")
-        } catch let error as FanOutError {
-            #expect(error == .disabled)
-        }
-        #expect(orchestrator.capturedInputs.isEmpty)
-        #expect(runLogger.recordedRows.isEmpty)
+        let run = try await engine.runFanOut(
+            subtasks: [makeSubtask(title: "A")],
+            originSessionID: UUID()
+        )
+
+        #expect(run.status == .completed)
+        #expect(orchestrator.capturedInputs.count == 1)
+        #expect(runLogger.recordedRows.count == 2)
     }
 
     @Test
@@ -381,7 +383,6 @@ struct FanOutEngineTests {
     func `Timeout marks a worker failed with an honest note`() async throws {
         let runLogger = CapturingFanOutRunLogger()
         var config = FanOutConfig()
-        config.enabled = true
         config.workerTimeoutSeconds = 1
         let engine = FanOutEngine(orchestrator: HangingFanOutOrchestrator(), runLogs: runLogger, config: config)
 
@@ -404,7 +405,9 @@ struct FanOutEngineTests {
     func `Workers run concurrently under the worker cap`() async throws {
         let orchestrator = ConcurrentProbeOrchestrator(delaySeconds: 0.15)
         let runLogger = CapturingFanOutRunLogger()
-        let engine = makeFanOutEngine(orchestrator: orchestrator, runLogger: runLogger)
+        let engine = makeFanOutEngine(orchestrator: orchestrator, runLogger: runLogger) {
+            $0.maxWorkers = 3
+        }
 
         _ = try await engine.runFanOut(
             subtasks: [makeSubtask(title: "A"), makeSubtask(title: "B"), makeSubtask(title: "C")],
