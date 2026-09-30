@@ -133,9 +133,16 @@ private func withRunCancelApp<T>(
         )
         // The route reads liveness from the engine, not the row, so the run
         // store must be the same instance the engine records through and both
-        // must ride the context under test.
+        // must ride the context under test. The hub-aware adapter carries that
+        // store plus the hub the context serves, mirroring production wiring so
+        // cancellation settles broadcast to live sockets.
         let runs = RunLogStore()
-        let engine = FanOutEngine(orchestrator: orchestrator, runLogs: runs, config: fanOutConfig)
+        let hub = WSHub()
+        let engine = FanOutEngine(
+            orchestrator: orchestrator,
+            runLogs: FanOutRunLogAdapter(runs: runs, hub: hub),
+            config: fanOutConfig
+        )
         let context = ServerContext(
             conversations: conversations,
             toolBus: bus,
@@ -145,7 +152,7 @@ private func withRunCancelApp<T>(
             approvals: approvals,
             scheduler: SchedulerStore(),
             runs: runs,
-            hub: WSHub(),
+            hub: hub,
             pluginStore: ToolRegistryStore(dbPath: dbPath),
             toolStates: ToolStateStore(dbPath: dbPath),
             stagedFiles: StagedFilesStore(dbPath: dbPath),

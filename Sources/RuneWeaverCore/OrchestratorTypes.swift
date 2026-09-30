@@ -29,6 +29,14 @@ public struct UserInput: Sendable, Codable, Equatable {
     /// by this list before the loop, so the prompt and the wire advertise only
     /// the callable subset.
     public let allowedTools: [String]?
+    /// Optional display title this turn stamps on its session, when the caller
+    /// names the work (e.g. a fan-out subtask title). Nil leaves an existing
+    /// stored title alone.
+    public let title: String?
+    /// Session that spawned this turn's session, when the caller nests it
+    /// (e.g. a fan-out worker under the session that invoked the swarm).
+    /// Nil never clears a stored parent link.
+    public let parentSessionID: UUID?
 
     /// Coding keys matching the persisted and wire shape, with the goal tag on
     /// the shared `goalId` spelling plus a tolerant legacy fallback.
@@ -40,6 +48,8 @@ public struct UserInput: Sendable, Codable, Equatable {
         case goalID = "goalId"
         case goalIDLegacy = "goalID"
         case allowedTools
+        case title
+        case parentSessionID
     }
 
     /// Creates user input.
@@ -49,7 +59,9 @@ public struct UserInput: Sendable, Codable, Equatable {
         source: String = "text",
         systemPrompt: String? = nil,
         goalID: UUID? = nil,
-        allowedTools: [String]? = nil
+        allowedTools: [String]? = nil,
+        title: String? = nil,
+        parentSessionID: UUID? = nil
     ) {
         self.text = text
         self.sessionID = sessionID
@@ -57,11 +69,13 @@ public struct UserInput: Sendable, Codable, Equatable {
         self.systemPrompt = systemPrompt
         self.goalID = goalID
         self.allowedTools = allowedTools
+        self.title = title
+        self.parentSessionID = parentSessionID
     }
 
-    /// Decodes user input, defaulting a missing goal tag to untagged and a
-    /// missing tool subset to the full registry so inputs encoded before
-    /// goal linkage or fan-out still decode.
+    /// Decodes user input, defaulting a missing goal tag to untagged, a missing
+    /// tool subset to the full registry, and missing origin fields to nil so
+    /// inputs encoded before goal linkage, fan-out, or worker nesting decode.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -72,10 +86,12 @@ public struct UserInput: Sendable, Codable, Equatable {
         self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
             ?? container.decodeIfPresent(UUID.self, forKey: .goalIDLegacy)
         self.allowedTools = try container.decodeIfPresent([String].self, forKey: .allowedTools)
+        self.title = try container.decodeIfPresent(String.self, forKey: .title)
+        self.parentSessionID = try container.decodeIfPresent(UUID.self, forKey: .parentSessionID)
     }
 
-    /// Encodes user input, omitting an absent goal tag and an absent tool
-    /// subset so older decoders see no new key.
+    /// Encodes user input, omitting absent goal, tool-subset, title, and parent
+    /// fields so older decoders see no new keys.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -85,6 +101,8 @@ public struct UserInput: Sendable, Codable, Equatable {
         try container.encodeIfPresent(systemPrompt, forKey: .systemPrompt)
         try container.encodeIfPresent(goalID, forKey: .goalID)
         try container.encodeIfPresent(allowedTools, forKey: .allowedTools)
+        try container.encodeIfPresent(title, forKey: .title)
+        try container.encodeIfPresent(parentSessionID, forKey: .parentSessionID)
     }
 
     /// Filters a tool snapshot down to the input's allowed subset.

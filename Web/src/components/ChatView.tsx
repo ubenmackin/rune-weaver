@@ -1036,6 +1036,12 @@ interface ChatViewProps {
   // Shell tab selector so the goal drawer can jump to the full Goals surface.
   // Optional so standalone ChatView renders (and tests) stay shell-free.
   onSelectTab?: (tab: "goals") => void;
+  // Shell activation flag for the Chat tab. The shell keeps this view mounted
+  // behind `display: none`, so activation is a state transition rather than a
+  // mount; children that revalidate when the tab is shown watch the
+  // false→true edge. Optional, and absent means active, so standalone renders
+  // (and tests) behave exactly as they did before the flag existed.
+  isActive?: boolean;
 }
 
 // Indexes server-derived per-message groups by parent message ID, oldest message
@@ -1375,7 +1381,7 @@ function getURLSessionID(): string | null {
   return null;
 }
 
-export default function ChatView({ health, onSelectTab }: ChatViewProps) {
+export default function ChatView({ health, onSelectTab, isActive }: ChatViewProps) {
   const {
     settings: chatSettings,
     updateSettings: updateChatSettings,
@@ -4499,6 +4505,7 @@ export default function ChatView({ health, onSelectTab }: ChatViewProps) {
         pendingApprovals={pendingApprovals}
         runningSessionIDs={backgroundRunningIDs}
         isMobile={isMobile}
+        isActive={isActive ?? true}
         onClose={handleCloseSidebar}
         historyButtonRef={historyButtonRef}
       />

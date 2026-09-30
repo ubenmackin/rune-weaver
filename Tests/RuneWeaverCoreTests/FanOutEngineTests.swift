@@ -271,6 +271,12 @@ struct FanOutEngineTests {
         #expect(Set(captured.map(\.sessionID)).count == 3)
         #expect(captured.allSatisfy { $0.sessionID != origin })
         #expect(captured.allSatisfy { $0.source == FanOutEngine.workerSource })
+        // Each worker input also carries its subtask title plus the origin
+        // session as parent, so the created session is classifiable in history
+        // and nests under the caller that asked for the swarm.
+        let titleByPrompt = Dictionary(uniqueKeysWithValues: subtasks.map { ($0.prompt, $0.title) })
+        #expect(captured.allSatisfy { titleByPrompt[$0.text] == $0.title })
+        #expect(captured.allSatisfy { $0.parentSessionID == origin })
 
         // Parent run: the origin link rides the parent session field.
         #expect(run.parentSessionID == origin)

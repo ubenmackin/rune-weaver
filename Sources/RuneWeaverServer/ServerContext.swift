@@ -319,12 +319,13 @@ public final class ServerContext: Sendable {
         // Fan-out resolves over the shared orchestrator and run-log store so
         // workers observe the same model posture as chat, with the serving
         // provider as the background reviewer; a hand-built engine still wins
-        // untouched for tests that wire their own collaborators. Always built
-        // so fanout.run registers disabled behind the tool-state toggle with
-        // no config gate.
+        // untouched for tests that wire their own collaborators. Rows travel
+        // through the hub-aware adapter so the swarm's audit trail broadcasts
+        // like every other run kind. Always built so fanout.run registers
+        // disabled behind the tool-state toggle with no config gate.
         self.fanOut = fanOut ?? FanOutEngine(
             orchestrator: orchestrator,
-            runLogs: runs,
+            runLogs: FanOutRunLogAdapter(runs: runs, hub: hub),
             config: fanOutConfig,
             reviewer: servingLLM
         )
@@ -769,11 +770,13 @@ extension ServerContext {
         let engines = makeExecutionEngines(args: engineArgs)
         // Fan-out resolves over the shared orchestrator and run-log store so
         // workers observe the same model posture as chat, with the serving
-        // provider as the background reviewer. Always built so fanout.run
-        // registers disabled behind the tool-state toggle with no config gate.
+        // provider as the background reviewer. Rows travel through the
+        // hub-aware adapter so the swarm's audit trail broadcasts like every
+        // other run kind. Always built so fanout.run registers disabled behind
+        // the tool-state toggle with no config gate.
         let fanOutEngine = FanOutEngine(
             orchestrator: engines.orchestrator,
-            runLogs: services.durable.runs,
+            runLogs: FanOutRunLogAdapter(runs: services.durable.runs, hub: services.durable.hub),
             config: fanOutConfig,
             reviewer: llm
         )

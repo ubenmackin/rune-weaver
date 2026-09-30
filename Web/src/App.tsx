@@ -300,7 +300,7 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
             style={{ display: tab === "chat" ? "block" : "none", height: tab === "chat" ? "100%" : undefined }}
             aria-hidden={tab !== "chat"}
           >
-            <ChatView health={health} onSelectTab={handleSelectTab} />
+            <ChatView health={health} onSelectTab={handleSelectTab} isActive={tab === "chat"} />
           </div>
 
           {tab === "approvals" ? <ApprovalsInbox /> : null}
