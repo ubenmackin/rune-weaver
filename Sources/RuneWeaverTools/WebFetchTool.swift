@@ -316,15 +316,19 @@ public struct WebFetchTool: Tool, Sendable {
     private let mediaConfig: MediaConfig?
     /// HTTP transport (live session by default, stub in tests).
     private let transport: any WebFetchTransport
+    /// Optional egress supervisor enforcing declarative security policy.
+    private let egressSupervisor: OutboundEgressSupervisor?
 
     /// Creates a fetch tool.
     public init(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
-        transport: (any WebFetchTransport)? = nil
+        transport: (any WebFetchTransport)? = nil,
+        egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
         self.browserConfig = browserConfig
         self.mediaConfig = mediaConfig
+        self.egressSupervisor = egressSupervisor
         if let transport {
             self.transport = transport
         } else {
@@ -333,7 +337,7 @@ public struct WebFetchTool: Tool, Sendable {
     }
 
     /// Fetches the URL, following redirects with per-hop validation.
-    public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+    public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         let args: WebFetchArgs
         do {
             args = try JSONDecoder().decode(WebFetchArgs.self, from: Data(input.argumentsJSON.utf8))
@@ -355,6 +359,10 @@ public struct WebFetchTool: Tool, Sendable {
                 callID: input.callID
             )
         }
+        // Declarative policy enforcement runs per hop inside `fetchChain`
+        // (including this initial URL as its first hop) under the live
+        // session, so no pre-check runs here: a duplicate would consume a
+        // one-shot grant the hop gate then re-parks.
         // Approval-free fetch must not dial loopback, link-local, metadata, or private ranges:
         // prompt-injected content could otherwise exfiltrate the loopback-only no-auth service into
         // tool output. Configured search, media, and allowed origins are exempt.
@@ -372,13 +380,13 @@ public struct WebFetchTool: Tool, Sendable {
             return .failure("Invalid web.fetch arguments: 'url' is not a valid URL.", callID: input.callID)
         }
         do {
-            let envelope = try await fetchChain(from: initialURL, originalURL: rawURL)
+            let envelope = try await fetchChain(from: initialURL, originalURL: rawURL, sessionID: context.sessionID)
             let content = try ToolEnvelopeEncoding.encode(envelope)
             // Typed non-ok outcomes still return success so the model can
             // read `status`/`suggestedNext`; only invalid input is a failure.
-            // Unsafe-hop and SSRF denials surface as failures below with the same shape.
+            // Unsafe-hop, policy denials, and SSRF denials surface as failures below with the same shape.
             if envelope.status == WebFetchEnvelope.statusUnsupported,
-               envelope.reason?.contains("Unsafe") == true || envelope.reason?.contains("SSRF") == true
+               envelope.reason?.contains("Unsafe") == true || envelope.reason?.contains("SSRF") == true || envelope.reason?.contains("policy") == true
             {
                 return .failure(content, callID: input.callID)
             }
@@ -389,14 +397,56 @@ public struct WebFetchTool: Tool, Sendable {
             return .failure("web.fetch failed for \(rawURL): \(error.localizedDescription)", callID: input.callID)
         }
     }
+}
 
-    // MARK: - Chain
+// MARK: - Redirect Chain & Helpers
+
+extension WebFetchTool {
+    /// Validates hop safety against scheme, egress supervisor, and SSRF guard.
+    ///
+    /// Hosts already granted earlier in the chain skip the stateful
+    /// supervisor charge while every hop still vets SSRF, so a one-shot
+    /// grant covers same-host redirects without being consumed twice.
+    private func validateHopSafety(url: URL, sessionID: UUID?, vettedHosts: inout Set<String>) async -> String? {
+        guard WebURLSafety.isSafeUrl(url.absoluteString) else {
+            return "Unsafe redirect target: refusing to dereference \(url.absoluteString)."
+        }
+        let canonicalHost = url.host.map { SensitiveAddressNormalization.normalizedHost($0) } ?? ""
+        let freshHost = !canonicalHost.isEmpty && !vettedHosts.contains(canonicalHost)
+        if freshHost, let supervisor = egressSupervisor {
+            let verdict = await supervisor.validate(
+                url: url,
+                method: "GET",
+                headers: [:],
+                sessionID: sessionID,
+                resolvesCredentials: false
+            )
+            switch verdict {
+            case .allowed:
+                break
+            case let .denied(reason), let .unlistedDomain(_, reason):
+                return reason
+            }
+        }
+        if let refusal = await WebFetchSSRFGuard.denyReasonAsync(
+            for: url.absoluteString,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig
+        ) {
+            return refusal
+        }
+        if freshHost, !canonicalHost.isEmpty {
+            vettedHosts.insert(canonicalHost)
+        }
+        return nil
+    }
 
     /// Follows the redirect chain manually with per-hop validation.
-    private func fetchChain(from initialURL: URL, originalURL: String) async throws -> WebFetchEnvelope {
+    private func fetchChain(from initialURL: URL, originalURL: String, sessionID: UUID? = nil) async throws -> WebFetchEnvelope {
         var currentURL = initialURL
         var hops = 0
         var chain: [String] = [initialURL.absoluteString]
+        var vettedHosts = Set<String>()
         func chainEnvelope(
             status: String,
             finalURL: String,
@@ -421,19 +471,7 @@ public struct WebFetchTool: Tool, Sendable {
             )
         }
         while true {
-            // Re-validate every hop so a safe start cannot launder an unsafe redirect target
-            // through the automatic follower, and re-apply the SSRF guard so a public start cannot
-            // redirect into loopback, link-local, metadata, or private ranges.
-            guard WebURLSafety.isSafeUrl(currentURL.absoluteString) else {
-                return chainEnvelope(
-                    status: WebFetchEnvelope.statusUnsupported,
-                    finalURL: currentURL.absoluteString,
-                    reason: "Unsafe redirect target: refusing to dereference \(currentURL.absoluteString)."
-                )
-            }
-            // Hop checks hop to the bounded pool for the same wedged-resolver
-            // reason as the entry check, keeping redirects off shared tasks.
-            if let refusal = await WebFetchSSRFGuard.denyReasonAsync(for: currentURL.absoluteString, browserConfig: browserConfig, mediaConfig: mediaConfig) {
+            if let refusal = await validateHopSafety(url: currentURL, sessionID: sessionID, vettedHosts: &vettedHosts) {
                 return chainEnvelope(
                     status: WebFetchEnvelope.statusUnsupported,
                     finalURL: currentURL.absoluteString,
@@ -468,19 +506,7 @@ public struct WebFetchTool: Tool, Sendable {
                         reason: failure.reason
                     )
                 }
-                // Fail closed before dialing: an unsafe hop never leaves the box.
-                guard WebURLSafety.isSafeUrl(next.absoluteString) else {
-                    return chainEnvelope(
-                        status: WebFetchEnvelope.statusUnsupported,
-                        finalURL: next.absoluteString,
-                        reason: "Unsafe redirect target: refusing to dereference \(next.absoluteString)."
-                    )
-                }
-                // Redirects re-enter the SSRF guard so a public page cannot
-                // bounce the approval-free fetcher into a loopback or
-                // private target. The async shape keeps a wedged resolver
-                // from stalling shared tasks on redirect chains.
-                if let refusal = await WebFetchSSRFGuard.denyReasonAsync(for: next.absoluteString, browserConfig: browserConfig, mediaConfig: mediaConfig) {
+                if let refusal = await validateHopSafety(url: next, sessionID: sessionID, vettedHosts: &vettedHosts) {
                     return chainEnvelope(
                         status: WebFetchEnvelope.statusUnsupported,
                         finalURL: next.absoluteString,
@@ -740,9 +766,17 @@ public enum WebFetchTools {
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
-        transport: (any WebFetchTransport)? = nil
+        transport: (any WebFetchTransport)? = nil,
+        supervisor: OutboundEgressSupervisor? = nil
     ) -> [any Tool] {
-        [WebFetchTool(browserConfig: browserConfig, mediaConfig: mediaConfig, transport: transport)]
+        [
+            WebFetchTool(
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                transport: transport,
+                egressSupervisor: supervisor
+            )
+        ]
     }
 
     /// Registers the fetch tool, replacing same-named entries.
@@ -750,9 +784,15 @@ public enum WebFetchTools {
         on bus: ToolBus,
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
-        transport: (any WebFetchTransport)? = nil
+        transport: (any WebFetchTransport)? = nil,
+        supervisor: OutboundEgressSupervisor? = nil
     ) async {
-        for tool in makeTools(browserConfig: browserConfig, mediaConfig: mediaConfig, transport: transport) {
+        for tool in makeTools(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            transport: transport,
+            supervisor: supervisor
+        ) {
             await bus.register(tool: tool)
         }
     }

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   trustDurationOptions,
+  type EgressDecisionTier,
   type PermissionRequest,
   type TrustDuration,
 } from "../api";
@@ -15,8 +16,24 @@ export interface InlineApprovalBannerProps {
     approved: boolean,
     duration: TrustDuration,
     widen?: boolean,
+    egressDecision?: EgressDecisionTier,
   ) => void;
 }
+
+export interface SplitEgressOption {
+  value: TrustDuration;
+  label: string;
+  tier: EgressDecisionTier;
+  approved: boolean;
+  isDanger?: boolean;
+}
+
+export const splitEgressOptions: SplitEgressOption[] = [
+  { value: "thisTime", label: "Allow Once", tier: "allowOnce", approved: true },
+  { value: "thisTime", label: "Allow During Session", tier: "allowSession", approved: true },
+  { value: "forever", label: "Always Allow", tier: "alwaysAllow", approved: true },
+  { value: "forever", label: "Deny Always", tier: "denyAlways", approved: false, isDanger: true },
+];
 
 interface SplitAllowOption {
   value: TrustDuration;
@@ -53,6 +70,57 @@ const MAX_INLINE_ARGS_CHARS = 280;
 function truncateArgs(value: string): string {
   if (value.length <= MAX_INLINE_ARGS_CHARS) return value;
   return `${value.slice(0, MAX_INLINE_ARGS_CHARS)}…`;
+}
+
+// Forward-compatible blocked signal for egress triage. The engine currently
+// tags only the host, so absent fields read as unlisted; when the payload
+// carries an explicit blocked flag or a verdict/reason naming a block, the
+// banner names the denial instead of understating it as an allowlist miss.
+interface EgressVerdictShape {
+  egressBlocked?: unknown;
+  egress_blocked?: unknown;
+  egressDenied?: unknown;
+  egress_denied?: unknown;
+  egressVerdict?: unknown;
+  egress_verdict?: unknown;
+  egressReason?: unknown;
+  egress_reason?: unknown;
+}
+
+// Reads the egress host across both wire spellings. Both fields are typed on
+// the shared request, so the fallback needs no cast and stays null when
+// neither spelling carries a host.
+export function resolveEgressHost(request: PermissionRequest): string | null {
+  return request.egressHost ?? request.egress_host ?? null;
+}
+
+// Reports whether an egress request was denied by an explicit block rather
+// than parked as unlisted. Strict boolean flags win; verdict and reason
+// strings count only when they name a block, so drifted text never flips
+// the copy. Unknown shapes stay unlisted.
+export function isEgressBlocked(request: PermissionRequest): boolean {
+  const extra = request as PermissionRequest & EgressVerdictShape;
+  const flags = [
+    extra.egressBlocked,
+    extra.egress_blocked,
+    extra.egressDenied,
+    extra.egress_denied,
+  ];
+  for (const flag of flags) {
+    if (flag === true) return true;
+  }
+  const texts = [
+    extra.egressVerdict,
+    extra.egress_verdict,
+    extra.egressReason,
+    extra.egress_reason,
+  ];
+  for (const text of texts) {
+    if (typeof text === "string" && text.toLowerCase().includes("block")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export default function InlineApprovalBanner({
@@ -104,6 +172,13 @@ export default function InlineApprovalBanner({
     }
   }
 
+  const egressHost = resolveEgressHost(request);
+  const isEgress = Boolean(egressHost);
+  const egressBlocked = isEgress ? isEgressBlocked(request) : false;
+  const currentOptionsCount = isEgress
+    ? splitEgressOptions.length
+    : splitAllowOptions.length;
+
   function handleMenuKeyDown(event: React.KeyboardEvent) {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -112,7 +187,7 @@ export default function InlineApprovalBanner({
     }
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      const next = (focusedIndex + 1) % splitAllowOptions.length;
+      const next = (focusedIndex + 1) % currentOptionsCount;
       setFocusedIndex(next);
       itemRefs.current[next]?.focus();
       return;
@@ -120,8 +195,8 @@ export default function InlineApprovalBanner({
     if (event.key === "ArrowUp") {
       event.preventDefault();
       const next =
-        (focusedIndex - 1 + splitAllowOptions.length) %
-        splitAllowOptions.length;
+        (focusedIndex - 1 + currentOptionsCount) %
+        currentOptionsCount;
       setFocusedIndex(next);
       itemRefs.current[next]?.focus();
       return;
@@ -134,7 +209,7 @@ export default function InlineApprovalBanner({
     }
     if (event.key === "End") {
       event.preventDefault();
-      const last = splitAllowOptions.length - 1;
+      const last = currentOptionsCount - 1;
       setFocusedIndex(last);
       itemRefs.current[last]?.focus();
     }
@@ -144,6 +219,11 @@ export default function InlineApprovalBanner({
     // Chevron picks are Allow-only grants; Deny always records nothing.
     setMenuOpen(false);
     onDecide(request.id, true, option.value, option.widen);
+  }
+
+  function handlePickEgressOption(option: SplitEgressOption) {
+    setMenuOpen(false);
+    onDecide(request.id, option.approved, option.value, false, option.tier);
   }
 
   const isContinuation = request.toolName === "engine.continue";
@@ -194,6 +274,14 @@ export default function InlineApprovalBanner({
     >
       <div className="inline-approval-header">
         <span className="badge approval-tool-badge">{request.toolName}</span>
+        {isEgress ? (
+          <span
+            className="badge approval-egress-badge"
+            data-testid={`approval-egress-${request.id}`}
+          >
+            🌐 {egressHost}
+          </span>
+        ) : null}
         {request.assessment ? (
           // Fail-closed on unknown tiers: only the three engine-known
           // severities render a badge so a drifted value never guesses a
@@ -227,6 +315,14 @@ export default function InlineApprovalBanner({
           </span>
         )}
       </div>
+
+      {isEgress ? (
+        <div className="approval-narrative" style={{ color: "var(--text-muted)" }}>
+          <span className="approval-section-label">Target host:</span>{" "}
+          <code style={{ color: "var(--accent-purple, #a78bfa)" }}>{egressHost}</code>{" "}
+          {egressBlocked ? "is blocked by policy." : "is not in allowlist."}
+        </div>
+      ) : null}
 
       {request.intent ? (
         <div className="approval-narrative approval-intent">
@@ -274,58 +370,109 @@ export default function InlineApprovalBanner({
           ref={menuRef}
           onKeyDown={handleMenuKeyDown}
         >
-          {/* Split allow: the main face is the one-click path and always
-              stays a single-use grant, while the chevron exposes graduated
-              trust without adding a second full-width control. */}
-          <button
-            type="button"
-            className="primary split-allow-main"
-            disabled={deciding}
-            onClick={() => onDecide(request.id, true, "thisTime", false)}
-          >
-            Allow
-          </button>
-          <button
-            ref={chevronRef}
-            type="button"
-            className="primary split-allow-chevron"
-            disabled={deciding}
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            aria-label={`Allow options for ${request.toolName}`}
-            onClick={() => setMenuOpen((open) => !open)}
-          >
-            <span aria-hidden="true">▾</span>
-          </button>
-          {menuOpen && !deciding ? (
-            <ul className="split-allow-menu" role="menu">
-              {splitAllowOptions.map((option, index) => (
-                <li key={`${option.value}-${option.widen}`} role="none">
-                  <button
-                    ref={(node) => {
-                      itemRefs.current[index] = node;
-                    }}
-                    type="button"
-                    role="menuitem"
-                    className="split-allow-menu-item"
-                    onClick={() => handlePickOption(option)}
-                    onFocus={() => setFocusedIndex(index)}
-                  >
-                    {option.label}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          ) : null}
+          {isEgress ? (
+            <>
+              <button
+                type="button"
+                className="primary split-allow-main"
+                disabled={deciding}
+                onClick={() =>
+                  onDecide(request.id, true, "thisTime", false, "allowOnce")
+                }
+              >
+                Allow Once
+              </button>
+              <button
+                ref={chevronRef}
+                type="button"
+                className="primary split-allow-chevron"
+                disabled={deciding}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                aria-label={`Allow options for ${request.toolName} to ${egressHost}`}
+                onClick={() => setMenuOpen((open) => !open)}
+              >
+                <span aria-hidden="true">▾</span>
+              </button>
+              {menuOpen && !deciding ? (
+                <ul className="split-allow-menu" role="menu">
+                  {splitEgressOptions.map((option, index) => (
+                    <li key={option.tier} role="none">
+                      {option.isDanger ? (
+                        <div className="split-allow-menu-divider" />
+                      ) : null}
+                      <button
+                        ref={(node) => {
+                          itemRefs.current[index] = node;
+                        }}
+                        type="button"
+                        role="menuitem"
+                        className={`split-allow-menu-item${option.isDanger ? " split-allow-menu-item-danger" : ""}`}
+                        onClick={() => handlePickEgressOption(option)}
+                        onFocus={() => setFocusedIndex(index)}
+                      >
+                        {option.label}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="primary split-allow-main"
+                disabled={deciding}
+                onClick={() => onDecide(request.id, true, "thisTime", false)}
+              >
+                Allow
+              </button>
+              <button
+                ref={chevronRef}
+                type="button"
+                className="primary split-allow-chevron"
+                disabled={deciding}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                aria-label={`Allow options for ${request.toolName}`}
+                onClick={() => setMenuOpen((open) => !open)}
+              >
+                <span aria-hidden="true">▾</span>
+              </button>
+              {menuOpen && !deciding ? (
+                <ul className="split-allow-menu" role="menu">
+                  {splitAllowOptions.map((option, index) => (
+                    <li key={`${option.value}-${option.widen}`} role="none">
+                      <button
+                        ref={(node) => {
+                          itemRefs.current[index] = node;
+                        }}
+                        type="button"
+                        role="menuitem"
+                        className="split-allow-menu-item"
+                        onClick={() => handlePickOption(option)}
+                        onFocus={() => setFocusedIndex(index)}
+                      >
+                        {option.label}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          )}
         </div>
 
-        {/* Deny records nothing: always send a one-shot marker since
-            durations apply to Allow grants only. */}
         <button
           type="button"
           className="danger"
           disabled={deciding}
-          onClick={() => onDecide(request.id, false, "thisTime", false)}
+          onClick={() =>
+            isEgress
+              ? onDecide(request.id, false, "thisTime", false, "deny")
+              : onDecide(request.id, false, "thisTime", false)
+          }
         >
           Deny
         </button>

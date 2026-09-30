@@ -194,7 +194,7 @@ describe("App mobile shell clearance", () => {
     Reflect.deleteProperty(window as unknown as Record<string, unknown>, "matchMedia");
   });
 
-  it("mounts the five-tab bottom bar with content clearance on a 375px phone", async () => {
+  it("mounts the four-group bottom bar with content clearance on a 375px phone", async () => {
     installViewport(375);
     stubAuthenticatedHealth();
     render(<App />);
@@ -207,7 +207,7 @@ describe("App mobile shell clearance", () => {
     const tabs = Array.from(bar.querySelectorAll("button")).map((tab) =>
       tab.getAttribute("aria-label"),
     );
-    expect(tabs).toEqual(["Chat", "Approvals", "Memory", "Runs", "Schedules"]);
+    expect(tabs).toEqual(["Chat", "Approvals", "Work", "Memory"]);
     expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
     // Clearance sibling stays mounted so the fixed bar never covers content.
     expect(document.querySelector(".app-main-content")).not.toBeNull();

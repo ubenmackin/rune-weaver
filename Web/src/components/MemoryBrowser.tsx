@@ -1,6 +1,7 @@
 // Rune Weaver Dashboard — Memory browser for searching episodic/semantic recall and managing facts.
-// Hosts the Memory section's Search and Memory view plus the Index Status dashboard (run controls,
-// stat cards, and frontend-only charts) under one tabbed header; policy editing stays in Settings.
+// Renders one dedicated section per view prop: the Search and Memory view or the Index Status
+// dashboard (run controls, stat cards, and frontend-only charts) with no inner tab bar; section
+// selection stays with the app shell and policy editing stays in Settings.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -23,16 +24,20 @@ import MarkdownText from "./MarkdownText";
 import Modal from "./Modal";
 import { CloseIcon, PlusIcon, SearchIcon, TrashIcon } from "./icons";
 
-// Memory section sub-views: recall/facts browsing and the local index status
-// dashboard. Keeping both under one top-level Memory tab shows the whole memory
-// surface without adding another primary nav entry.
-type MemoryTab = "memory" | "indexing";
+// Memory section sub-views: recall/facts browsing or the local index status
+// dashboard. Each mount renders one dedicated section selected by the view
+// prop with no inner tab bar.
+export type MemoryTab = "memory" | "indexing";
+
+export interface MemoryBrowserProps {
+  view?: MemoryTab;
+}
 
 // Initial inner tab from the dashboard deep link: the menu-bar Index Status
 // entry navigates to the memory fragment carrying the indexing subpath, so a
 // fresh load with that suffix (or an indexing query) opens selected on the
 // status pane instead of the default Search and Memory view.
-function getInitialMemoryTab(): MemoryTab {
+export function getInitialMemoryTab(): MemoryTab {
   if (typeof window === "undefined") return "memory";
   if (window.location.hash.toLowerCase().includes("indexing")) return "indexing";
   if (window.location.search.toLowerCase().includes("indexing")) return "indexing";
@@ -74,8 +79,11 @@ function baseResultKey(result: MemoryResult): string {
   return fingerprint ? `${base}-${hashContent(fingerprint)}` : base;
 }
 
-export default function MemoryBrowser() {
-  const [activeTab, setActiveTab] = useState<MemoryTab>(() => getInitialMemoryTab());
+export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
+  const [localTab, setLocalTab] = useState<MemoryTab>(() =>
+    view !== undefined ? view : getInitialMemoryTab(),
+  );
+  const activeTab: MemoryTab = view ?? localTab;
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<MemoryResult[]>([]);
   const [facts, setFacts] = useState<FactsResponse | null>(null);
@@ -117,14 +125,16 @@ export default function MemoryBrowser() {
   // ways so leaving the deep link (back navigation or a plain memory link)
   // returns to the Search and Memory view instead of stranding the status
   // pane. Hash edits fire hashchange while query-only history moves fire
-  // popstate, so both are observed.
+  // popstate, so both are observed. Skipped when the view prop controls the
+  // tab so the URL never overrides the selected view.
   useEffect(() => {
+    if (view !== undefined) return;
     function syncTabFromUrl() {
       if (typeof window === "undefined") return;
       const isIndexing =
         window.location.hash.toLowerCase().includes("indexing") ||
         window.location.search.toLowerCase().includes("indexing");
-      setActiveTab(isIndexing ? "indexing" : "memory");
+      setLocalTab(isIndexing ? "indexing" : "memory");
     }
     window.addEventListener("hashchange", syncTabFromUrl);
     window.addEventListener("popstate", syncTabFromUrl);
@@ -132,7 +142,7 @@ export default function MemoryBrowser() {
       window.removeEventListener("hashchange", syncTabFromUrl);
       window.removeEventListener("popstate", syncTabFromUrl);
     };
-  }, []);
+  }, [view]);
 
   useEffect(() => {
     let cancelled = false;
@@ -218,70 +228,34 @@ export default function MemoryBrowser() {
 
   return (
     <>
-      <section className="panel memory-panel" aria-label="Memory browser">
-      <div className="panel-header-row">
-        <div>
-          <h2>Memory</h2>
-          <p className="muted text-sm">
-            Recall past conversations, manage stored facts, and monitor the
-            local document index.
-          </p>
-        </div>
-      </div>
-
-      <div className="memory-tabs" role="tablist" aria-label="Memory views">
-        <button
-          type="button"
-          role="tab"
-          id="memory-tab-search"
-          aria-selected={activeTab === "memory"}
-          aria-controls="memory-panel-search"
-          className={`memory-tab ${activeTab === "memory" ? "active" : ""}`}
-          onClick={() => setActiveTab("memory")}
-        >
-          Search and Memory
-        </button>
-        <button
-          type="button"
-          role="tab"
-          id="memory-tab-index"
-          aria-selected={activeTab === "indexing"}
-          aria-controls="memory-panel-index"
-          className={`memory-tab ${activeTab === "indexing" ? "active" : ""}`}
-          onClick={() => setActiveTab("indexing")}
-        >
-          Index Status
-        </button>
-      </div>
-
-      {activeTab === "indexing" ? (
-        <div
-          role="tabpanel"
-          id="memory-panel-index"
-          aria-labelledby="memory-tab-index"
-        >
-          <div className="memory-view-header">
-            <h3>Index Status</h3>
+      <section
+        className="panel memory-panel"
+        aria-label={activeTab === "indexing" ? "Index Status" : "Memory browser"}
+      >
+        <div className="panel-header-row">
+          <div>
+            <h2>{activeTab === "indexing" ? "Index Status" : "Memory"}</h2>
             <p className="muted text-sm">
-              Monitor the local file, mail, and Messages index.
+              {activeTab === "indexing"
+                ? "Monitor the local file, mail, and Messages index."
+                : "Search episodic recall and semantic memory, manage stored user facts."}
             </p>
           </div>
-          <IndexingPanel hideHeader />
         </div>
-      ) : (
-        <div
-          role="tabpanel"
-          id="memory-panel-search"
-          aria-labelledby="memory-tab-search"
-        >
-          <div className="memory-view-header">
-            <h3>Search and Memory</h3>
-            <p className="muted text-sm">
-              Search episodic recall and semantic memory, manage stored user
-              facts.
-            </p>
+
+        {activeTab === "indexing" ? (
+          <div
+            id="memory-panel-index"
+            aria-label="Index Status"
+          >
+            <IndexingPanel hideHeader />
           </div>
-          {error ? <p className="error">{error}</p> : null}
+        ) : (
+          <div
+            id="memory-panel-search"
+            aria-label="Search and Memory"
+          >
+            {error ? <p className="error">{error}</p> : null}
 
           <div className="memory-search-section">
             <h3>Search</h3>

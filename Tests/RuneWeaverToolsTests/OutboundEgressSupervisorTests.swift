@@ -78,7 +78,7 @@ struct OutboundEgressSupervisorTests {
             let result = await supervisor.validate(url: url, method: "GET", headers: [:])
             switch result {
             case .allowed: break // expected
-            case let .denied(reason): Issue.record("Expected success, got: \(reason)")
+            case let .denied(reason), let .unlistedDomain(_, reason): Issue.record("Expected success, got: \(reason)")
             }
         }
     }
@@ -96,7 +96,7 @@ struct OutboundEgressSupervisorTests {
             let result = await supervisor.validate(url: url, method: "GET", headers: [:])
             switch result {
             case .allowed: Issue.record("Expected failure for unlisted domain")
-            case let .denied(reason): #expect(reason.contains("not in the allowed domains"))
+            case let .denied(reason), let .unlistedDomain(_, reason): #expect(reason.contains("not in the allowed domains"))
             }
         }
     }
@@ -114,7 +114,7 @@ struct OutboundEgressSupervisorTests {
             let result = await supervisor.validate(url: url, method: "GET", headers: [:])
             switch result {
             case .allowed: Issue.record("Expected failure for blocked domain")
-            case let .denied(reason): #expect(reason.contains("blocked"))
+            case let .denied(reason), let .unlistedDomain(_, reason): #expect(reason.contains("blocked"))
             }
         }
     }
@@ -134,7 +134,7 @@ struct OutboundEgressSupervisorTests {
             let result = await supervisor.validate(url: url, method: "GET", headers: [:])
             switch result {
             case .allowed: Issue.record("Expected failure for trailing-dot blocked host")
-            case let .denied(reason): #expect(reason.contains("blocked"))
+            case let .denied(reason), let .unlistedDomain(_, reason): #expect(reason.contains("blocked"))
             }
         }
     }
@@ -152,7 +152,7 @@ struct OutboundEgressSupervisorTests {
             let result = await supervisor.validate(url: url, method: "GET", headers: [:])
             switch result {
             case .allowed: break // expected
-            case let .denied(reason): Issue.record("Expected success, got: \(reason)")
+            case let .denied(reason), let .unlistedDomain(_, reason): Issue.record("Expected success, got: \(reason)")
             }
         }
     }
@@ -182,7 +182,7 @@ struct OutboundEgressSupervisorTests {
             )
             switch result {
             case .allowed: break // expected — binding authorized
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 // May fail due to missing secret in test environment, but NOT due to binding
                 #expect(!reason.contains("Security Policy Violation"))
             }
@@ -211,7 +211,7 @@ struct OutboundEgressSupervisorTests {
             )
             switch result {
             case .allowed: break // expected — binding authorized
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 // May fail resolving the missing test secret, but never the binding.
                 #expect(!reason.contains("Security Policy Violation"))
             }
@@ -238,7 +238,7 @@ struct OutboundEgressSupervisorTests {
             )
             switch result {
             case .allowed: Issue.record("Expected failure — lookalike host not authorized")
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 #expect(reason.contains("Security Policy Violation"))
                 #expect(reason.contains("not authorized for host"))
             }
@@ -267,7 +267,7 @@ struct OutboundEgressSupervisorTests {
             )
             switch result {
             case .allowed: Issue.record("Expected failure — credential sent to unauthorized host")
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 #expect(reason.contains("Security Policy Violation"))
                 #expect(reason.contains("not authorized for host"))
             }
@@ -289,7 +289,7 @@ struct OutboundEgressSupervisorTests {
             )
             switch result {
             case .allowed: Issue.record("Expected failure — no binding for UNKNOWN_KEY")
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 #expect(reason.contains("Security Policy Violation"))
                 #expect(reason.contains("no binding"))
             }
@@ -320,7 +320,7 @@ struct OutboundEgressSupervisorTests {
             switch result {
             case .allowed:
                 Issue.record("CRITICAL: a dot-segment traversal satisfied the credential path-prefix binding")
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 #expect(reason.contains("Security Policy Violation"))
                 #expect(reason.contains("not authorized for path"))
             }
@@ -351,7 +351,7 @@ struct OutboundEgressSupervisorTests {
                 switch result {
                 case .allowed:
                     Issue.record("CRITICAL: '\(spelling)' satisfied the credential path-prefix binding")
-                case let .denied(reason):
+                case let .denied(reason), let .unlistedDomain(_, reason):
                     #expect(reason.contains("Security Policy Violation"), "unexpected reason for '\(spelling)': \(reason)")
                 }
             }
@@ -385,7 +385,7 @@ struct OutboundEgressSupervisorTests {
                 switch result {
                 case let .allowed(outcome):
                     #expect(outcome.resolvedHeaders["Authorization"] == "Bearer live-path-secret")
-                case let .denied(reason):
+                case let .denied(reason), let .unlistedDomain(_, reason):
                     Issue.record("Expected an authorized prefix path for '\(spelling)', got: \(reason)")
                 }
             }
@@ -405,7 +405,7 @@ struct OutboundEgressSupervisorTests {
             switch result {
             case .allowed:
                 Issue.record("CRITICAL: an ambiguous traversal path reached the transport")
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 #expect(reason.contains("Security Policy Violation"))
             }
         }
@@ -440,7 +440,7 @@ struct OutboundEgressSupervisorTests {
             )
             switch result {
             case .allowed: Issue.record("CRITICAL: Prompt injection exfiltration was NOT blocked!")
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 // Must fail on domain allowlist BEFORE reaching credential binding
                 #expect(reason.contains("not in the allowed domains") || reason.contains("Security Policy Violation"))
             }
@@ -473,7 +473,7 @@ struct OutboundEgressSupervisorTests {
             )
             switch result {
             case .allowed: Issue.record("CRITICAL: Credential reached unauthorized redirect target!")
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 #expect(reason.contains("Security Policy Violation"))
                 #expect(reason.contains("not authorized for host"))
             }
@@ -502,7 +502,7 @@ struct OutboundEgressSupervisorTests {
             )
             switch result {
             case .allowed: Issue.record("Expected failure — KEY_B not authorized for api.example.com")
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 #expect(reason.contains("KEY_B"))
                 #expect(reason.contains("not authorized"))
             }

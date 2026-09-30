@@ -246,7 +246,7 @@ struct ApiRequestToolSupervisionTests {
         switch verdict {
         case .allowed:
             Issue.record("Seeded safe defaults must deny public hosts")
-        case let .denied(reason):
+        case let .denied(reason), let .unlistedDomain(_, reason):
             #expect(reason.contains("not in the allowed domains"))
         }
     }
@@ -273,7 +273,7 @@ struct ApiRequestToolSupervisionTests {
         switch verdict {
         case .allowed:
             Issue.record("Deny-all policy must refuse every destination")
-        case let .denied(reason):
+        case let .denied(reason), let .unlistedDomain(_, reason):
             #expect(reason.contains("not in the allowed domains"))
         }
     }
@@ -921,7 +921,7 @@ struct ApiRequestToolSupervisionTests {
             let initial = await supervisor.validate(url: allowedURL, method: "GET", headers: [:])
             switch initial {
             case .allowed: break
-            case let .denied(reason): Issue.record("Expected initial validation to pass, got: \(reason)")
+            case let .denied(reason), let .unlistedDomain(_, reason): Issue.record("Expected initial validation to pass, got: \(reason)")
             }
             let baselineLookups = dnsRecorder.recorded.count
             // Corrupt the file so the next load clears the verified snapshot
@@ -932,7 +932,7 @@ struct ApiRequestToolSupervisionTests {
             switch afterCorruption {
             case .allowed:
                 Issue.record("Supervisor authorized from the unverified fallback after corruption")
-            case let .denied(reason):
+            case let .denied(reason), let .unlistedDomain(_, reason):
                 #expect(reason.contains("not verified"))
             }
             #expect(dnsRecorder.recorded.count == baselineLookups)

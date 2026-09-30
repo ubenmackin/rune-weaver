@@ -413,6 +413,7 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
     } else {
         nil
     }
+    let effectiveSupervisor = context.egressSupervisor ?? supervisor
     if let gatewayForReload = gatewayForLiveReload(
         stored: context.browserGateway,
         busGateway: busGateway,
@@ -426,7 +427,8 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
             browserConfig: config.browser,
             mediaConfig: config.media,
             llmServerURLs: appLLMOrigins,
-            allowlistedOrigins: browserOrigins
+            allowlistedOrigins: browserOrigins,
+            egressSupervisor: effectiveSupervisor
         ) {
             await reregisterPreservingToggle(tool, on: context)
         }
@@ -435,7 +437,8 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
             browserConfig: config.browser,
             mediaConfig: config.media,
             llmServerURLs: appLLMOrigins,
-            allowlistedOrigins: browserOrigins
+            allowlistedOrigins: browserOrigins,
+            egressSupervisor: effectiveSupervisor
         ) {
             await reregisterPreservingToggle(tool, on: context)
         }
@@ -445,7 +448,8 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
         mediaConfig: config.media,
         searchTransport: context.searchTransport,
         fetchTransport: context.fetchTransport,
-        ensurer: context.searchEnsurer
+        ensurer: context.searchEnsurer,
+        supervisor: effectiveSupervisor
     ) {
         await reregisterPreservingToggle(tool, on: context)
     }
@@ -470,7 +474,8 @@ private func reloadLiveDesktopTools(body: UpdateSettingsRequest, config: RuneWea
     for tool in DesktopTools.makeTools(
         desktopConfig: config.desktop,
         captureBridge: context.desktopCaptureBridge,
-        controlBridge: context.desktopControlBridge
+        controlBridge: context.desktopControlBridge,
+        egressSupervisor: context.egressSupervisor
     ) {
         await reregisterPreservingToggle(tool, on: context)
     }
@@ -502,7 +507,11 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
             await reregisterPreservingToggle(tool, on: context)
         }
     }
-    let bashTool = BashTool(bashConfig: live.bash, filesConfig: live.files)
+    let bashTool = BashTool(
+        bashConfig: live.bash,
+        filesConfig: live.files,
+        egressSupervisor: context.egressSupervisor
+    )
     await reregisterPreservingToggle(bashTool, on: context)
     if hasFilesPatch, !config.email.accounts.isEmpty {
         if await context.toolBus.tool(named: "email.search") != nil {

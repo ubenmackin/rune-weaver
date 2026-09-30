@@ -193,6 +193,8 @@ public enum DesktopControlError: Error, Sendable, Equatable {
     case actionFailed(index: Int, reason: String)
     /// The batch was too large.
     case batchTooLarge(count: Int, max: Int)
+    /// A typed or pasted URL target was blocked or unlisted by security policy.
+    case blockedURL(host: String, url: String, reason: String)
 }
 
 // MARK: - Shared emergency state
@@ -265,6 +267,33 @@ public protocol DesktopControlling: Sendable {
         scaleY: Double,
         blockedApps: [String]
     ) async throws -> [DesktopActionStepResult]
+
+    /// Session-aware batch entry point threading the egress session grant.
+    /// Declared as a requirement (not an extension-only helper) so the live
+    /// bridge's grant-aware implementation dispatches dynamically; stubs
+    /// inherit the session-less fallback below.
+    func executeBatch(
+        actions: [DesktopAction],
+        scaleX: Double,
+        scaleY: Double,
+        blockedApps: [String],
+        sessionID: UUID?
+    ) async throws -> [DesktopActionStepResult]
+}
+
+extension DesktopControlling {
+    /// Default session-aware batch for stubs without grant handling.
+    /// Delegates to the session-less batch so existing conformers keep
+    /// compiling; the live bridge overrides with grant-aware screening.
+    func executeBatch(
+        actions: [DesktopAction],
+        scaleX: Double,
+        scaleY: Double,
+        blockedApps: [String],
+        sessionID _: UUID?
+    ) async throws -> [DesktopActionStepResult] {
+        try await executeBatch(actions: actions, scaleX: scaleX, scaleY: scaleY, blockedApps: blockedApps)
+    }
 }
 
 // MARK: - Live control bridge
@@ -286,6 +315,8 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
 
     /// Silent Accessibility gate injected for tests; live turns query TCC.
     private let accessibilityAccess: @Sendable () async -> Bool
+    /// Outbound egress supervisor screening URLs typed into apps against policy.toml.
+    public let egressSupervisor: OutboundEgressSupervisor?
 
     /// Creates the live bridge.
     ///
@@ -295,9 +326,19 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     public init(
         accessibilityAccess: @escaping @Sendable () async -> Bool = {
             await MainActor.run { DesktopPermissionCheck.isAccessibilityTrusted() }
-        }
+        },
+        egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
         self.accessibilityAccess = accessibilityAccess
+        self.egressSupervisor = egressSupervisor
+    }
+
+    /// Extracts explicit HTTP/HTTPS URLs present in text.
+    ///
+    /// Delegates to the approval queue's shared link scanner so desktop
+    /// screening and inbox triage cannot drift on detector shape.
+    public static func extractURLs(from text: String) -> [String] {
+        ApprovalQueue.extractLinkURLs(from: text)
     }
 
     public func executeBatch(
@@ -305,6 +346,17 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
         scaleX: Double,
         scaleY: Double,
         blockedApps: [String]
+    ) async throws -> [DesktopActionStepResult] {
+        try await executeBatch(actions: actions, scaleX: scaleX, scaleY: scaleY, blockedApps: blockedApps, sessionID: nil)
+    }
+
+    /// Executes a batch screened against one session's egress grants.
+    public func executeBatch(
+        actions: [DesktopAction],
+        scaleX: Double,
+        scaleY: Double,
+        blockedApps: [String],
+        sessionID: UUID?
     ) async throws -> [DesktopActionStepResult] {
         // Cancellation and operator stop win over the permission gate so a
         // cancelled turn never pays a TCC syscall or masks cancellation
@@ -337,6 +389,8 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
                 index: 0, reason: "Invalid scale factors (scale_x: \(scaleX), scale_y: \(scaleY)): must be finite, positive, and at most \(Self.maxScaleFactor)"
             )
         }
+
+        try await screenBatchURLs(actions: actions, sessionID: sessionID)
 
         #if canImport(CoreGraphics) && canImport(AppKit)
             var results: [DesktopActionStepResult] = []
@@ -411,6 +465,57 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
         #else
             throw DesktopControlError.unsupportedPlatform
         #endif
+    }
+
+    /// Screens all typed URLs in a batch against the egress supervisor before execution.
+    ///
+    /// Single stateful gate for the batch under the calling session: hosts
+    /// repeat-screened within the batch vet once, so a grant consumed for one
+    /// action still covers the identical host later in the same batch.
+    /// Triage badges the first host only while this gate screens every host
+    /// in every action, so multi-host batches re-park iteratively instead of
+    /// approving the whole batch on one badge.
+    private func screenBatchURLs(actions: [DesktopAction], sessionID: UUID?) async throws {
+        guard let supervisor = egressSupervisor else { return }
+        var validatedHosts = Set<String>()
+        for action in actions {
+            guard case let .typeText(text) = action else { continue }
+            var candidates: [(display: String, url: URL)] = []
+            for rawURL in Self.extractURLs(from: text) {
+                guard let parsed = URL(string: rawURL) else { continue }
+                candidates.append((display: rawURL, url: parsed))
+            }
+            // Typed bare hosts (`example.com`) never form a link match, so
+            // the schemeless pass loops every match like `bash.exec`: each
+            // uncovered bare host screens alongside the link hosts.
+            for bareHost in ApprovalQueue.extractAllSchemelessHosts(in: text) {
+                guard let assumed = URL(string: "https://" + bareHost),
+                      let assumedHost = assumed.host, !assumedHost.isEmpty
+                else { continue }
+                let canonicalAssumed = SensitiveAddressNormalization.normalizedHost(assumedHost)
+                guard !candidates.contains(where: {
+                    $0.url.host.map { SensitiveAddressNormalization.normalizedHost($0) } == canonicalAssumed
+                })
+                else { continue }
+                candidates.append((display: bareHost, url: assumed))
+            }
+            for (display, parsed) in candidates {
+                guard let host = parsed.host, !host.isEmpty
+                else { continue }
+                let canonical = SensitiveAddressNormalization.normalizedHost(host)
+                guard !validatedHosts.contains(canonical) else { continue }
+                validatedHosts.insert(canonical)
+                let verdict = await supervisor.validate(url: parsed, sessionID: sessionID)
+                switch verdict {
+                case .allowed:
+                    break
+                case let .denied(reason):
+                    throw DesktopControlError.blockedURL(host: parsed.host ?? display, url: display, reason: reason)
+                case let .unlistedDomain(host, reason):
+                    throw DesktopControlError.blockedURL(host: host, url: display, reason: reason)
+                }
+            }
+        }
     }
 }
 

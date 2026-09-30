@@ -692,7 +692,7 @@ extension ApiRequestTool {
                 secrets: outcome.resolvedSecrets,
                 pin: outcome.dialPin
             )
-        case let .denied(reason):
+        case let .denied(reason), let .unlistedDomain(_, reason):
             RuneWeaverLog.tools.warning("api.request denied by egress supervisor: \(reason)")
             throw ApiRequestError.invalidArguments(reason)
         }

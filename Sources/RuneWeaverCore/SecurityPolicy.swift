@@ -57,6 +57,55 @@ public struct SecurityPolicy: Sendable, Equatable {
     /// Immutable factory-safe posture: deny-by-default network, no credential
     /// bindings, standard filesystem denials, no tool overrides.
     public static let safeDefault = SecurityPolicy()
+
+    /// Returns a copy of the policy with an additional allowed domain.
+    ///
+    /// Trims surrounding whitespace and stores the canonical comparison form
+    /// so `"  Evil.COM  "` lands exactly as the matcher evaluates it. Blank
+    /// input is a no-op returning the policy unchanged: callers that must
+    /// fail closed on empty (triage handlers) validate before calling.
+    public func appendingAllowedDomain(_ domain: String) -> SecurityPolicy {
+        guard let canonical = Self.canonicalDomainEntry(domain) else { return self }
+        var updated = self
+        var allowed = updated.network.allowedDomains
+        allowed.insert(canonical)
+        updated.network = NetworkEgressPolicy(
+            mode: updated.network.mode,
+            allowedDomains: allowed,
+            blockedDomains: updated.network.blockedDomains
+        )
+        return updated
+    }
+
+    /// Returns a copy of the policy with an additional blocked domain.
+    ///
+    /// Trims surrounding whitespace and stores the canonical comparison form;
+    /// blank input is a no-op returning the policy unchanged.
+    public func appendingBlockedDomain(_ domain: String) -> SecurityPolicy {
+        guard let canonical = Self.canonicalDomainEntry(domain) else { return self }
+        var updated = self
+        var blocked = updated.network.blockedDomains
+        blocked.insert(canonical)
+        updated.network = NetworkEgressPolicy(
+            mode: updated.network.mode,
+            allowedDomains: updated.network.allowedDomains,
+            blockedDomains: blocked
+        )
+        return updated
+    }
+
+    /// Canonicalizes one caller-supplied domain for storage.
+    ///
+    /// Single-sourced through `NetworkEgressPolicy.canonicalEntry` so stored
+    /// values compare equal to what `hostStatus(for:)` evaluates: the `*.`
+    /// edge passes through with a normalized base while every other entry
+    /// normalizes whole. Nil for blank input so appenders no-op instead of
+    /// persisting an entry that could only match an empty host.
+    private static func canonicalDomainEntry(_ domain: String) -> String? {
+        let canonical = NetworkEgressPolicy.canonicalEntry(domain)
+        guard !canonical.isEmpty, canonical != "*." else { return nil }
+        return canonical
+    }
 }
 
 // MARK: - Network Egress
@@ -101,41 +150,45 @@ public struct NetworkEgressPolicy: Sendable, Equatable {
     /// Factory safe default: allowlist-only with only loopback permitted.
     public static let safeDefault = NetworkEgressPolicy()
 
-    /// Whether a given host is permitted under this policy.
+    /// Granular status of a host under this network egress policy.
+    public enum HostStatus: Sendable, Equatable {
+        /// Permitted by allowlist or unrestricted mode.
+        case allowed
+        /// Explicitly blocked by blocklist.
+        case explicitlyBlocked(String)
+        /// Not permitted by allowlist (unlisted).
+        case unlisted(String)
+    }
+
+    /// Evaluates the granular status of a host.
     ///
     /// Evaluation order:
     /// 1. Blocked domains always refuse.
     /// 2. Unrestricted mode allows all non-blocked hosts.
     /// 3. Allowlist modes check exact match and wildcard suffix match.
-    ///
-    /// The request host and every configured entry canonicalize through the
-    /// shared address normalizer before comparison, so a trailing dot,
-    /// casing, bracketed IPv6, or an alternate numeric spelling cannot turn
-    /// one destination into two verdicts and slip a blocked host through.
-    /// - Parameter host: Raw host component (name or address literal) to evaluate.
-    /// - Returns: `nil` when allowed, or a human-readable refusal reason.
-    public func denyReason(for host: String) -> String? {
+    /// - Parameter host: Raw host component to evaluate.
+    /// - Returns: `HostStatus` indicating allowed, explicitly blocked, or unlisted.
+    public func hostStatus(for host: String) -> HostStatus {
         let canonicalHost = SensitiveAddressNormalization.normalizedHost(host)
 
-        // 1. Blocked domains always refuse. A wildcard entry covers the base
-        // domain plus subdomains, mirroring allowlist matching below.
+        // 1. Blocked domains always refuse.
         for blocked in blockedDomains {
             let canonicalBlocked = Self.canonicalEntry(blocked)
             guard canonicalBlocked.hasPrefix("*.") else {
                 if canonicalBlocked == canonicalHost {
-                    return "Host '\(host)' is explicitly blocked by security policy."
+                    return .explicitlyBlocked("Host '\(host)' is explicitly blocked by security policy.")
                 }
                 continue
             }
-            let suffix = String(canonicalBlocked.dropFirst(1)) // ".evil.com"
+            let suffix = String(canonicalBlocked.dropFirst(1))
             if canonicalHost.hasSuffix(suffix) || canonicalHost == String(canonicalBlocked.dropFirst(2)) {
-                return "Host '\(host)' matches blocked pattern '\(blocked)' in security policy."
+                return .explicitlyBlocked("Host '\(host)' matches blocked pattern '\(blocked)' in security policy.")
             }
         }
 
         // 2. Unrestricted mode allows all non-blocked.
         if mode == .unrestricted {
-            return nil
+            return .allowed
         }
 
         // 3. Allowlist check.
@@ -143,27 +196,43 @@ public struct NetworkEgressPolicy: Sendable, Equatable {
             let canonicalAllowed = Self.canonicalEntry(allowed)
             guard canonicalAllowed.hasPrefix("*.") else {
                 if canonicalAllowed == canonicalHost {
-                    return nil
+                    return .allowed
                 }
                 continue
             }
             let suffix = String(canonicalAllowed.dropFirst(1))
             if canonicalHost.hasSuffix(suffix) || canonicalHost == String(canonicalAllowed.dropFirst(2)) {
-                return nil
+                return .allowed
             }
         }
 
-        return "Host '\(host)' is not in the allowed domains list. Add it to [network].allowed_domains in policy.toml."
+        return .unlisted("Host '\(host)' is not in the allowed domains list. Add it to [network].allowed_domains in policy.toml.")
+    }
+
+    /// Whether a given host is permitted under this policy.
+    ///
+    /// Delegates to `hostStatus(for:)`.
+    /// - Parameter host: Raw host component (name or address literal) to evaluate.
+    /// - Returns: `nil` when allowed, or a human-readable refusal reason.
+    public func denyReason(for host: String) -> String? {
+        switch hostStatus(for: host) {
+        case .allowed:
+            nil
+        case let .explicitlyBlocked(reason), let .unlisted(reason):
+            reason
+        }
     }
 
     /// Canonicalizes one declared domain entry for comparison.
     ///
-    /// Only the suffix of a `*.` entry names a host, so the wildcard edge
-    /// passes through untouched; every other entry reuses the same normalizer
-    /// the SSRF guard trusts. A malformed entry that normalizes to nothing
-    /// can only equal an empty host, so it fails closed instead of matching
-    /// broadly.
-    private static func canonicalEntry(_ entry: String) -> String {
+    /// Single owner for domain canonicalization: appenders reuse this instead
+    /// of keeping a second copy, so storage and matching cannot drift on the
+    /// `*.` edge. Only the suffix of a `*.` entry names a host, so the
+    /// wildcard edge passes through untouched; every other entry reuses the
+    /// same normalizer the SSRF guard trusts. A malformed entry that
+    /// normalizes to nothing can only equal an empty host, so it fails closed
+    /// instead of matching broadly.
+    static func canonicalEntry(_ entry: String) -> String {
         let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("*.") else {
             return SensitiveAddressNormalization.normalizedHost(trimmed)

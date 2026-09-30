@@ -31,7 +31,7 @@ import StagedChangesDrawer from "./components/StagedChangesDrawer";
 import TopNav, { type Tab } from "./components/TopNav";
 import { useWebNotifications } from "./hooks/useWebNotifications";
 
-const VALID_TABS: Tab[] = ["chat", "approvals", "goals", "memory", "runs", "schedules", "settings"];
+const VALID_TABS: Tab[] = ["chat", "approvals", "goals", "memory", "indexing", "runs", "schedules", "settings"];
 
 export function isStandaloneMode(): boolean {
   if (typeof window === "undefined") return false;
@@ -305,14 +305,15 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
 
           {tab === "approvals" ? <ApprovalsInbox /> : null}
           {tab === "goals" ? <GoalsManager attentionCount={goalsAttention} /> : null}
-          {tab === "memory" ? <MemoryBrowser /> : null}
+          {tab === "memory" ? <MemoryBrowser view="memory" /> : null}
+          {tab === "indexing" ? <MemoryBrowser view="indexing" /> : null}
           {tab === "runs" ? <RunLogViewer /> : null}
           {tab === "schedules" ? <SchedulerManager /> : null}
           {tab === "settings" ? <SettingsManager /> : null}
         </div>
       </main>
 
-      {/* Mobile bottom tab bar: five canonical tabs with unread badges. Both
+      {/* Mobile bottom tab bar: four canonical groups with unread badges and drop-up menus. Both
           tab surfaces stay mounted on every viewport while the stylesheet
           owns visibility (max-width reveals the bar and hides the top links,
           min-width does the inverse), so a missing or fail-closed viewport
@@ -324,6 +325,7 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
         onSelectTab={(selected) => handleSelectTab(selected)}
         runsBadge={runsBadge}
         approvalsBadge={approvalsBadge}
+        goalsBadge={goalsAttention}
       />
     </div>
   );

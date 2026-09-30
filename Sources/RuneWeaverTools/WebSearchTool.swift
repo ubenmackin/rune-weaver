@@ -1008,10 +1008,16 @@ public enum WebTools {
         mediaConfig: MediaConfig? = nil,
         searchTransport: (any WebSearchTransport)? = nil,
         fetchTransport: (any WebFetchTransport)? = nil,
-        ensurer: (any SearXNGEnsuring)? = nil
+        ensurer: (any SearXNGEnsuring)? = nil,
+        supervisor: OutboundEgressSupervisor? = nil
     ) -> [any Tool] {
         WebSearchTools.makeTools(browserConfig: browserConfig, transport: searchTransport, ensurer: ensurer)
-            + WebFetchTools.makeTools(browserConfig: browserConfig, mediaConfig: mediaConfig, transport: fetchTransport)
+            + WebFetchTools.makeTools(
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                transport: fetchTransport,
+                supervisor: supervisor
+            )
     }
 
     /// Registers both web tools, replacing same-named entries.
@@ -1021,14 +1027,16 @@ public enum WebTools {
         mediaConfig: MediaConfig? = nil,
         searchTransport: (any WebSearchTransport)? = nil,
         fetchTransport: (any WebFetchTransport)? = nil,
-        ensurer: (any SearXNGEnsuring)? = nil
+        ensurer: (any SearXNGEnsuring)? = nil,
+        supervisor: OutboundEgressSupervisor? = nil
     ) async {
         for tool in makeTools(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             searchTransport: searchTransport,
             fetchTransport: fetchTransport,
-            ensurer: ensurer
+            ensurer: ensurer,
+            supervisor: supervisor
         ) {
             await bus.register(tool: tool)
         }

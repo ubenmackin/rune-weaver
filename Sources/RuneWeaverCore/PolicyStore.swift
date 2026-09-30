@@ -217,6 +217,49 @@ public actor PolicyStore {
         try toml.write(to: fileURL, atomically: true, encoding: .utf8)
     }
 
+    /// Appends an allowed domain to the policy, verifying invariants, updating state, and saving to disk.
+    ///
+    /// Fail-closed and atomic: the candidate verifies before any file write,
+    /// the file writes before any in-memory commit, so a disk-write throw
+    /// leaves memory and file agreeing instead of diverging with memory
+    /// mutated while the file stayed behind.
+    @discardableResult
+    public func appendAllowedDomain(_ domain: String) throws -> SecurityPolicy {
+        let updated = current.appendingAllowedDomain(domain)
+        let violations = PolicyInvariantVerifier.verify(updated)
+        guard violations.isEmpty else {
+            throw PolicyInvariantError.invariantViolations(violations)
+        }
+        let toml = Self.serialize(updated)
+        let directory = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try toml.write(to: fileURL, atomically: true, encoding: .utf8)
+        current = updated
+        verifiedPolicy = updated
+        return updated
+    }
+
+    /// Appends a blocked domain to the policy, verifying invariants, updating state, and saving to disk.
+    ///
+    /// Fail-closed and atomic like `appendAllowedDomain`: file-first commit
+    /// keeps a throwing write from leaving an unpersisted policy masquerading
+    /// as applied.
+    @discardableResult
+    public func appendBlockedDomain(_ domain: String) throws -> SecurityPolicy {
+        let updated = current.appendingBlockedDomain(domain)
+        let violations = PolicyInvariantVerifier.verify(updated)
+        guard violations.isEmpty else {
+            throw PolicyInvariantError.invariantViolations(violations)
+        }
+        let toml = Self.serialize(updated)
+        let directory = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try toml.write(to: fileURL, atomically: true, encoding: .utf8)
+        current = updated
+        verifiedPolicy = updated
+        return updated
+    }
+
     // MARK: - TOML Parsing
 
     /// Parses a TOML string into a `SecurityPolicy`.

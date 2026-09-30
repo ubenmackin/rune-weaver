@@ -17,21 +17,27 @@ public struct BashArgs: Codable, Sendable, Equatable {
     public let cwd: String?
     /// Execution timeout in seconds (optional).
     public let timeoutSeconds: Int?
+    /// Optional flag to request network access in Seatbelt sandbox.
+    public let requestNetwork: Bool
 
     public init(
         command: String,
         cwd: String? = nil,
-        timeoutSeconds: Int? = nil
+        timeoutSeconds: Int? = nil,
+        requestNetwork: Bool = false
     ) {
         self.commandArgs = BashCommandArgs(command: command)
         self.cwd = cwd
         self.timeoutSeconds = timeoutSeconds
+        self.requestNetwork = requestNetwork
     }
 
     private enum CodingKeys: String, CodingKey {
         case command
         case cwd
         case timeoutSeconds
+        case requestNetwork
+        case requestNetworkSnake = "request_network"
     }
 
     public init(from decoder: Decoder) throws {
@@ -42,6 +48,9 @@ public struct BashArgs: Codable, Sendable, Equatable {
         self.commandArgs = BashCommandArgs(command: command)
         self.cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
         self.timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
+        let camelNet = try container.decodeIfPresent(Bool.self, forKey: .requestNetwork)
+        let snakeNet = try container.decodeIfPresent(Bool.self, forKey: .requestNetworkSnake)
+        self.requestNetwork = camelNet ?? snakeNet ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -49,6 +58,9 @@ public struct BashArgs: Codable, Sendable, Equatable {
         try container.encode(commandArgs.command, forKey: .command)
         try container.encodeIfPresent(cwd, forKey: .cwd)
         try container.encodeIfPresent(timeoutSeconds, forKey: .timeoutSeconds)
+        if requestNetwork {
+            try container.encode(requestNetwork, forKey: .requestNetworkSnake)
+        }
     }
 }
 
@@ -149,6 +161,10 @@ public struct BashTool: Tool {
         "timeoutSeconds": {
           "type": "integer",
           "description": "Optional timeout in seconds."
+        },
+        "request_network": {
+          "type": "boolean",
+          "description": "Optional flag to request network access in Seatbelt sandbox (gates on operator approval)."
         }
       },
       "required": ["command"]
@@ -171,16 +187,20 @@ public struct BashTool: Tool {
     /// Defaults to false so commands never inherit host privileges silently;
     /// bypassing confinement must be a deliberate choice at the construction site.
     public let allowUnsandboxedFallback: Bool
+    /// Outbound egress supervisor screening URLs and targets against policy.toml.
+    public let egressSupervisor: OutboundEgressSupervisor?
 
     /// Creates a bash execution tool.
     public init(
         bashConfig: BashConfig = BashConfig(),
         filesConfig: FilesConfig = FilesConfig(),
-        allowUnsandboxedFallback: Bool = false
+        allowUnsandboxedFallback: Bool = false,
+        egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
         self.bashConfig = bashConfig
         self.filesConfig = filesConfig
         self.allowUnsandboxedFallback = allowUnsandboxedFallback
+        self.egressSupervisor = egressSupervisor
     }
 
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
@@ -247,6 +267,24 @@ public struct BashTool: Tool {
             return .failure(encodeEnvelope(envelope), callID: input.callID)
         }
 
+        if let networkEnvelope = validateNetworkAccess(
+            command: trimmedCommand,
+            args: args,
+            decision: decision,
+            context: context
+        ) {
+            return .failure(encodeEnvelope(networkEnvelope), callID: input.callID)
+        }
+
+        let effectiveAllowNetwork = bashConfig.allowNetwork || (args.requestNetwork && context.approved)
+
+        // Screen explicit URLs if network is allowed
+        if effectiveAllowNetwork,
+           let envelope = await screenExplicitURLs(command: trimmedCommand, sessionID: context.sessionID)
+        {
+            return .failure(encodeEnvelope(envelope), callID: input.callID)
+        }
+
         // Validate cwd if supplied
         var workingDirURL: URL?
         if let rawCwd = args.cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !rawCwd.isEmpty {
@@ -285,6 +323,7 @@ public struct BashTool: Tool {
             command: trimmedCommand,
             workingDirURL: workingDirURL,
             timeoutSeconds: timeout,
+            allowNetwork: effectiveAllowNetwork,
             callID: input.callID
         )
     }
@@ -293,6 +332,7 @@ public struct BashTool: Tool {
         command: String,
         workingDirURL: URL?,
         timeoutSeconds: TimeInterval,
+        allowNetwork: Bool,
         callID: String
     ) async throws -> ToolOutput {
         let sandboxExecPath = "/usr/bin/sandbox-exec"
@@ -306,7 +346,7 @@ public struct BashTool: Tool {
                 allowedReadPaths: SeatbeltProfileBuilder.defaultSystemReadPaths + [effectiveWorkingDir.path],
                 allowedWritePaths: SeatbeltProfileBuilder.defaultSystemWritePaths + [effectiveWorkingDir.path],
                 deniedPaths: SeatbeltProfileBuilder.defaultDeniedPaths,
-                allowNetwork: bashConfig.allowNetwork
+                allowNetwork: allowNetwork
             )
             let profile = profileBuilder.buildProfile()
             process.executableURL = URL(fileURLWithPath: sandboxExecPath)
@@ -399,9 +439,115 @@ public struct BashTool: Tool {
                 taskBox.task?.cancel()
                 stdoutHandle.readabilityHandler = nil
                 stderrHandle.readabilityHandler = nil
-                continuation.resume(returning: .failure("Failed to spawn process: \(error.localizedDescription)", callID: callID))
+                continuation.resume(
+                    returning: .failure("Failed to spawn process: \(error.localizedDescription)", callID: callID)
+                )
             }
         }
+    }
+
+    private func validateNetworkAccess(
+        command: String,
+        args: BashArgs,
+        decision: BashDecision,
+        context: ToolContext
+    ) -> BashResultEnvelope? {
+        let requiresNetwork = BashNetworkGuard.requiresNetworkAccess(command)
+        if requiresNetwork, !bashConfig.allowNetwork, !args.requestNetwork {
+            let diagnostic = "Command requires network access, but network access is disabled in Seatbelt sandbox "
+                + "(bash.allow_network = false). Retry with request_network: true to request operator approval."
+            return BashResultEnvelope(
+                command: command,
+                approvalRequired: false,
+                isChained: false,
+                denied: true,
+                error: diagnostic,
+                reason: diagnostic
+            )
+        }
+        if args.requestNetwork, !context.approved {
+            return BashResultEnvelope(
+                command: command,
+                approvalRequired: true,
+                isChained: decision.isChained,
+                denied: false,
+                error: "Command requests network access and requires operator approval.",
+                reason: "request_network enabled"
+            )
+        }
+        return nil
+    }
+
+    private func screenExplicitURLs(command: String, sessionID: UUID) async -> BashResultEnvelope? {
+        guard let supervisor = egressSupervisor else { return nil }
+        // Explicit URLs screen individually; the schemeless fallback covers
+        // `curl example.com` spellings with no link match, both resolved
+        // through the approval queue's single-owner extraction.
+        var hosts: [(display: String, url: URL)] = []
+        for rawURL in BashNetworkGuard.extractURLs(from: command) {
+            if let parsed = URL(string: rawURL) {
+                hosts.append((display: rawURL, url: parsed))
+            }
+        }
+        // Commands mixing explicit links and bare hosts (`curl https://a.com
+        // && curl b.com`) screen every bare host: the schemeless pass loops
+        // all regex matches instead of the first, so a second schemeless
+        // host cannot execute unscreened after the first is approved.
+        for bareHost in Self.schemelessHosts(in: command) {
+            guard let assumed = URL(string: "https://" + bareHost),
+                  let assumedHost = assumed.host,
+                  !hosts.contains(where: {
+                      $0.url.host.map { SensitiveAddressNormalization.normalizedHost($0) }
+                          == SensitiveAddressNormalization.normalizedHost(assumedHost)
+                  })
+            else { continue }
+            hosts.append((display: bareHost, url: assumed))
+        }
+        var validatedHosts = Set<String>()
+        for (display, parsed) in hosts {
+            // One charge per host per command: repeats reuse the verdict
+            // instead of consuming a one-shot grant twice in the same check.
+            if let host = parsed.host, !host.isEmpty {
+                let canonical = SensitiveAddressNormalization.normalizedHost(host)
+                if validatedHosts.contains(canonical) {
+                    continue
+                }
+                validatedHosts.insert(canonical)
+            }
+            let verdict = await supervisor.validate(url: parsed, sessionID: sessionID)
+            switch verdict {
+            case .allowed:
+                break
+            case let .denied(reason):
+                return BashResultEnvelope(
+                    command: command,
+                    approvalRequired: false,
+                    isChained: false,
+                    denied: true,
+                    error: "Command contains blocked network target '\(display)': \(reason)",
+                    reason: reason
+                )
+            case let .unlistedDomain(host, reason):
+                return BashResultEnvelope(
+                    command: command,
+                    approvalRequired: true,
+                    isChained: false,
+                    denied: true,
+                    error: "Command targets unlisted network host '\(host)': \(reason)",
+                    reason: reason
+                )
+            }
+        }
+        return nil
+    }
+
+    /// Resolves schemeless hosts from a command through single-owner extraction.
+    ///
+    /// Loops every bare-host match so multi-host commands screen each host
+    /// with per-host dedupe at the call site instead of screening only the
+    /// first while the second runs unscreened.
+    private static func schemelessHosts(in command: String) -> [String] {
+        ApprovalQueue.extractAllSchemelessHosts(in: command)
     }
 
     private func encodeEnvelope(_ envelope: BashResultEnvelope) -> String {

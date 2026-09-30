@@ -32,6 +32,7 @@ import {
   toolCancel,
   updateSessionTitle,
   type ChatSegment,
+  type EgressDecisionTier,
   type Goal,
   type HealthResponse,
   type PermissionRequest,
@@ -2378,10 +2379,11 @@ export default function ChatView({ health, onSelectTab }: ChatViewProps) {
       approved: boolean,
       duration: TrustDuration,
       widen?: boolean,
+      egressDecision?: EgressDecisionTier,
     ) => {
       setDecidingApprovalIDs((previous) => new Set(previous).add(id));
       try {
-        await decideApproval(id, approved, duration, widen);
+        await decideApproval(id, approved, duration, widen, egressDecision);
         setPendingApprovals((previous) =>
           previous.filter((item) => item.id !== id),
         );
@@ -4959,8 +4961,14 @@ export default function ChatView({ health, onSelectTab }: ChatViewProps) {
                 key={request.id}
                 request={request}
                 deciding={decidingApprovalIDs.has(request.id)}
-                onDecide={(id, approved, duration, widen) =>
-                  void handleDecideApproval(id, approved, duration, widen)
+                onDecide={(id, approved, duration, widen, egressDecision) =>
+                  void handleDecideApproval(
+                    id,
+                    approved,
+                    duration,
+                    widen,
+                    egressDecision,
+                  )
                 }
               />
             ))}

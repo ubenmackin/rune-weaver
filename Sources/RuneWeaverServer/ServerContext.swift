@@ -186,6 +186,8 @@ public final class ServerContext: Sendable {
     /// watcher and no restart. Held even when the tools were injected (app and
     /// serve build their own registry), so every route reads one instance.
     public let policyStore: PolicyStore
+    /// Mandatory outbound egress supervisor backing runtime domain triage and dynamic allows.
+    public let egressSupervisor: OutboundEgressSupervisor?
     /// Hermetic desktop capture bridge preserved across live-reloads so a
     /// settings PUT refreshes capture knobs without dropping test doubles.
     public let desktopCaptureBridge: (any DesktopCapturing)?
@@ -261,7 +263,8 @@ public final class ServerContext: Sendable {
         stagedFiles: StagedFilesStore? = nil,
         fanOut: FanOutEngine? = nil,
         fanOutConfig: FanOutConfig = FanOutConfig(),
-        policyStore: PolicyStore? = nil
+        policyStore: PolicyStore? = nil,
+        egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -368,6 +371,7 @@ public final class ServerContext: Sendable {
         // routes share one store. Read-only fallback contexts never register
         // `api.request`, so the unloaded default is never a supervisor source.
         self.policyStore = policyStore ?? PolicyStore()
+        self.egressSupervisor = egressSupervisor
         self.desktopCaptureBridge = desktopCaptureBridge
         self.desktopControlBridge = desktopControlBridge
         self.desktopConfigBox = OSAllocatedUnfairLock(initialState: desktopConfig)
@@ -573,6 +577,8 @@ extension ServerContext {
         /// The one policy store for this process, shared by the supervisor
         /// built for `api.request` and the settings policy routes.
         let policyStore: PolicyStore
+        /// Mandatory egress supervisor backing runtime domain triage and dynamic allows.
+        let egressSupervisor: OutboundEgressSupervisor?
     }
 
     private static func registerBuiltinTools(_ args: BuiltinToolArgs) async throws {
@@ -605,7 +611,8 @@ extension ServerContext {
             goalsConfig: args.configs.goals,
             stagedFilesStore: args.stagedFiles,
             fanOutEngine: args.fanOutEngine,
-            policyStore: args.policyStore
+            policyStore: args.policyStore,
+            egressSupervisor: args.egressSupervisor
         )
     }
 
@@ -770,11 +777,20 @@ extension ServerContext {
             config: fanOutConfig,
             reviewer: llm
         )
+        let egressSupervisor = try await OutboundEgressSupervisor.make(
+            policyStore: resolvedPolicyStore,
+            secrets: secrets,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            emailConfig: emailConfig,
+            llmServerURLs: llmServerURLs
+        )
         try await registerBuiltinTools(BuiltinToolArgs(
             bus: services.bus, configs: toolConfigs, transports: transports,
             memoryEngine: memoryEngine, embedder: embedder,
             goals: goalComponents, stagedFiles: stagedFilesStore,
-            fanOutEngine: fanOutEngine, policyStore: resolvedPolicyStore
+            fanOutEngine: fanOutEngine, policyStore: resolvedPolicyStore,
+            egressSupervisor: egressSupervisor
         ))
         let context = ServerContext(
             config: config, conversations: conversations, toolBus: services.bus,
@@ -800,7 +816,8 @@ extension ServerContext {
             goalsConfig: goalsConfig, ideas: services.ideasStore,
             ideasEngine: services.ideasEngine, ideasConfig: ideasConfig,
             proactiveConfig: proactiveConfig, stagedFiles: stagedFilesStore,
-            fanOut: fanOutEngine, policyStore: resolvedPolicyStore
+            fanOut: fanOutEngine, policyStore: resolvedPolicyStore,
+            egressSupervisor: egressSupervisor
         )
         await finalizeServerContext(context, sandboxConfig: sandboxConfig, onApprovalRequested: onApprovalRequested)
         return context

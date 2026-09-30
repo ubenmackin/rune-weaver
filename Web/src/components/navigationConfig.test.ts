@@ -38,6 +38,21 @@ describe("navigation contract", () => {
       "Schedules",
       "Runs",
     ]);
+
+    const memory = NAV_GROUPS.find((entry) => entry.id === "memory");
+    expect(memory?.kind).toBe("group");
+    if (!memory || memory.kind !== "group") {
+      throw new Error("Memory must be a folding group");
+    }
+    expect(memory.label).toBe("Memory");
+    expect(memory.children.map((child) => child.id)).toEqual([
+      "memory",
+      "indexing",
+    ]);
+    expect(memory.children.map((child) => child.label)).toEqual([
+      "Search and Memory",
+      "Index Status",
+    ]);
   });
 
   it("treats group membership as active and unknown groups as inactive", () => {
@@ -45,6 +60,9 @@ describe("navigation contract", () => {
     expect(isGroupActive("work", "schedules")).toBe(true);
     expect(isGroupActive("work", "runs")).toBe(true);
     expect(isGroupActive("work", "chat")).toBe(false);
+    expect(isGroupActive("memory", "memory")).toBe(true);
+    expect(isGroupActive("memory", "indexing")).toBe(true);
+    expect(isGroupActive("memory", "chat")).toBe(false);
     expect(isGroupActive("approvals", "approvals")).toBe(true);
     expect(isGroupActive("approvals", "runs")).toBe(false);
   });

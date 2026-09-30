@@ -3964,6 +3964,29 @@ button:disabled {
   outline: none;
 }
 
+.split-allow-menu-divider {
+  height: 1px;
+  background: var(--border-color);
+  margin: 4px 0;
+}
+
+.split-allow-menu-item-danger {
+  color: #fca5a5;
+}
+
+.split-allow-menu-item-danger:hover,
+.split-allow-menu-item-danger:focus-visible {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ffffff;
+  outline: none;
+}
+
+.approval-egress-badge {
+  background: rgba(59, 130, 246, 0.18);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+
 .inline-approval-deciding {
   display: inline-flex;
   align-items: center;
@@ -4479,8 +4502,9 @@ button.danger:hover:not(:disabled) {
   bottom: 0;
   left: 0;
   right: 0;
-  height: calc(64px + env(safe-area-inset-bottom));
-  padding-bottom: env(safe-area-inset-bottom);
+  min-height: calc(64px + 8px + env(safe-area-inset-bottom, 0px));
+  height: auto;
+  padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
   background: #15151b;
   border-top: 1px solid var(--border-color);
   z-index: 40;
@@ -4564,6 +4588,153 @@ button.danger:hover:not(:disabled) {
   pointer-events: none;
 }
 
+.mobile-bottom-group-wrap {
+  flex: 1 1 0;
+  display: flex;
+  position: relative;
+}
+
+.mobile-bottom-group-wrap .mobile-bottom-tab {
+  width: 100%;
+}
+
+.mobile-bottom-tab-label-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+
+.mobile-bottom-tab-chevron {
+  color: var(--text-muted);
+  transition: transform 0.2s ease;
+  margin-top: 1px;
+}
+
+.mobile-bottom-tab.active .mobile-bottom-tab-chevron,
+.mobile-bottom-tab.open .mobile-bottom-tab-chevron {
+  color: #ffffff;
+}
+
+.mobile-bottom-tab-chevron.rotate-180 {
+  transform: rotate(180deg);
+}
+
+/* Mobile drop-up backdrop: dismisses menu when tapping outside */
+.mobile-dropup-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 38;
+}
+
+/* Drop-up popover menu anchored above the bottom bar */
+.mobile-dropup-menu {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  min-width: 190px;
+  max-width: calc(100vw - 24px);
+  background: #14141d;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  padding: 6px;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  animation: fadeInUp 0.15s ease-out;
+}
+
+/* Anchoring: Work is center-left, Memory is right-aligned */
+.mobile-dropup-work {
+  left: 50%;
+  transform: translateX(-50%);
+  animation: fadeInUpWork 0.15s ease-out;
+}
+
+.mobile-dropup-memory {
+  right: 4px;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeInUpWork {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+/* Item inside mobile drop-up */
+.mobile-dropup-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  width: 100%;
+}
+
+.mobile-dropup-item:hover,
+.mobile-dropup-item:active {
+  background: rgba(255, 255, 255, 0.06);
+  color: #ffffff;
+}
+
+.mobile-dropup-item.active {
+  background: var(--accent-purple-glow);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.mobile-dropup-item.active .mobile-dropup-item-icon {
+  color: var(--accent-purple);
+}
+
+.mobile-dropup-item-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.mobile-dropup-item-label {
+  flex: 1;
+  white-space: nowrap;
+}
+
+.mobile-dropup-item-badge {
+  background: var(--accent-purple);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
 /* Mobile reveals the bar as a space-around flex row; desktop explicitly keeps
  * it hidden so wide viewports never show a duplicate tab surface. */
 @media (max-width: 640px) {
@@ -4626,10 +4797,10 @@ button.danger:hover:not(:disabled) {
   }
 
   /* Handheld shell uses an exact 8px gutter on every side: the bottom adds
-   * the 64px bar plus an 8px gap and the home-indicator inset so the input
+   * the 72px padded bar plus an 8px gap and the home-indicator inset so the input
    * never slides under the fixed bar while side gutters stay at 8px. */
   .app-main-content {
-    padding: 8px 8px calc(72px + env(safe-area-inset-bottom));
+    padding: 8px 8px calc(80px + env(safe-area-inset-bottom, 0px));
   }
 }
 
@@ -4637,7 +4808,7 @@ button.danger:hover:not(:disabled) {
    Session History Drawer (max-width 640px / min-width 641px)
    ========================================================================== */
 
-/* Handheld drawer sits between the 52px top nav and the 64px bottom bar with
+/* Handheld drawer sits between the 52px top nav and the padded bottom bar with
  * safe-area clearance, sliding in from the left above a dim backdrop. The
  * fixed offsets keep the nav surfaces tappable while the drawer is open, and
  * the width bound keeps the conversation partially visible on wide phones so
@@ -4646,7 +4817,7 @@ button.danger:hover:not(:disabled) {
   .session-sidebar {
     position: fixed;
     top: 52px;
-    bottom: calc(64px + env(safe-area-inset-bottom));
+    bottom: calc(72px + env(safe-area-inset-bottom, 0px));
     left: 0;
     width: min(320px, 85vw);
     z-index: 50;

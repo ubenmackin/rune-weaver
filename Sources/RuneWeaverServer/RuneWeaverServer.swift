@@ -431,6 +431,59 @@ private func registerMemoryRoutes(_ app: Application) {
     }
 }
 
+/// Applies network egress decision side effects to the supervisor and policy store.
+///
+/// Fail-closed: returns false when the grant cannot be honored (missing host,
+/// session-less `allowSession`, missing supervisor, or a rejected policy
+/// write), and the caller must deny the tool call instead of approving it.
+/// The context holds the supervisor as optional only for fallback and test
+/// doubles; production `ServerContext.make` always injects a verified
+/// supervisor or throws at boot, so a nil supervisor here means a
+/// non-production context and must deny rather than approve supervisor-less.
+/// REST and WebSocket triage share this handler so tier-to-side-effect mapping
+/// cannot drift between transports.
+/// - Returns: True when the side effects applied (or no persistence was needed).
+func applyEgressDecision(
+    tier: EgressDecisionTier,
+    pending: PermissionRequest?,
+    context: ServerContext
+) async -> Bool {
+    let resolvedHost = pending?.egressHost ?? ApprovalQueue.extractEgressHost(
+        toolName: pending?.toolName ?? "",
+        argumentsJSON: pending?.input.argumentsJSON ?? ""
+    )
+    guard let host = resolvedHost, !host.isEmpty else { return false }
+    switch tier {
+    case .allowOnce:
+        guard let supervisor = context.egressSupervisor else { return false }
+        await supervisor.allowDomainOnce(domain: host, sessionID: pending?.sessionID)
+        return true
+    case .allowSession:
+        guard let sessionID = pending?.sessionID else { return false }
+        guard let supervisor = context.egressSupervisor else { return false }
+        await supervisor.allowDomainForSession(sessionID: sessionID, domain: host)
+        return true
+    case .alwaysAllow:
+        do {
+            try await context.policyStore.appendAllowedDomain(host)
+        } catch {
+            return false
+        }
+        await context.hub.broadcastTrustGrantsChanged()
+        return true
+    case .deny:
+        return true
+    case .denyAlways:
+        do {
+            try await context.policyStore.appendBlockedDomain(host)
+        } catch {
+            return false
+        }
+        await context.hub.broadcastTrustGrantsChanged()
+        return true
+    }
+}
+
 /// Registers approvals list plus decision routes.
 /// Durable trust-grants routes live in the dedicated grants file alongside
 /// their change broadcast; both sets register on the same paths.
@@ -459,9 +512,35 @@ private func registerApprovalRoutes(_ app: Application) {
             // the pending entry, so the resume path would otherwise lose
             // which conversation to continue.
             let pending = await context.approvals.request(id: id)
+            let effectiveApproved: Bool
+            if let egressDecision = body.egressDecision {
+                // Persistence or grant failures never approve a run the
+                // policy did not record: allow tiers surface an error while
+                // deny tiers stand denied.
+                let applied = await applyEgressDecision(tier: egressDecision, pending: pending, context: context)
+                switch egressDecision {
+                case .allowOnce, .allowSession, .alwaysAllow:
+                    guard applied else {
+                        throw Abort(.unprocessableEntity, reason: "Egress decision could not be applied for this approval")
+                    }
+                    effectiveApproved = true
+                case .deny:
+                    effectiveApproved = false
+                case .denyAlways:
+                    // A dropped blocklist write must surface instead of
+                    // resolving as a one-time deny: the next identical call
+                    // would otherwise re-park instead of auto-denying.
+                    guard applied else {
+                        throw Abort(.unprocessableEntity, reason: "Egress decision could not be applied for this approval")
+                    }
+                    effectiveApproved = false
+                }
+            } else {
+                effectiveApproved = body.approved
+            }
             let resolved = await context.approvals.decide(
                 id: id,
-                approved: body.approved,
+                approved: effectiveApproved,
                 duration: body.resolvedDuration,
                 widen: body.resolvedWiden
             )
@@ -474,21 +553,21 @@ private func registerApprovalRoutes(_ app: Application) {
             // approvals stay one-shot inside `decide` (coerced to thisTime
             // with no stored grant), so a durable vote on engine.continue
             // must not fire a refresh when nothing changed.
-            if body.approved, body.resolvedDuration != .thisTime, pending?.toolName != "engine.continue" {
+            if effectiveApproved, body.resolvedDuration != .thisTime, pending?.toolName != "engine.continue" {
                 await context.hub.broadcastTrustGrantsChanged()
             }
             if pending?.sessionID != nil {
                 Task {
                     await resumeNarratedApproval(
                         id: id,
-                        approved: body.approved,
+                        approved: effectiveApproved,
                         context: context,
                         sessionID: pending?.sessionID,
                         decidedCallID: pending?.input.callID
                     )
                 }
             }
-            return ApprovalDecisionResponse(id: id, approved: body.approved, duration: body.resolvedDuration)
+            return ApprovalDecisionResponse(id: id, approved: effectiveApproved, duration: body.resolvedDuration)
         }
 }
 
