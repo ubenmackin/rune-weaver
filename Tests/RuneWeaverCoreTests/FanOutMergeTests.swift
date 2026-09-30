@@ -24,9 +24,13 @@ import Testing
 /// Shared stub error for the fan-out suites: one typed reason a stub turn can
 /// throw so the failure note and the fail-open paths stay exercisable.
 /// Internal to the test target so every fan-out suite shares one stub type.
-struct FanOutStubError: Error, Equatable {
+struct FanOutStubError: LocalizedError, Equatable {
     /// Canned failure reason.
     let reason: String
+
+    var errorDescription: String? {
+        reason
+    }
 }
 
 /// Stub seam whose turns finish with canned output text so the merge pass has

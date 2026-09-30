@@ -393,11 +393,15 @@ struct FanOutEngineTests {
 
         // The timed-out worker reads failed and the digest names the timeout
         // honestly; the parent settles (never stays running) once it lands.
+        // A timeout is a failure, never an owner cancellation: the cancelled
+        // state is reserved for stops the owner asked for.
         #expect(run.subtasks.first?.status == .failed)
-        #expect(run.status != .running)
+        #expect(run.status == .failed)
+        #expect(run.subtasks.allSatisfy { $0.status != .cancelled })
         #expect(run.summary?.contains("timed out after 1s") == true)
         let rows = runLogger.recordedRows
         #expect(rows.count == 2)
+        #expect(rows.first?.status == "error")
         #expect(rows.dropFirst().allSatisfy { $0.status == "failed" })
     }
 

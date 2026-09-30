@@ -67,6 +67,8 @@ public enum ServerPaths {
     public static let browserEnsure = "ensure"
     /// Run log group.
     public static let runs = "runs"
+    /// Fan-out cancellation subpath under `/runs/:id`.
+    public static let runCancel = "cancel"
     /// Sessions group.
     public static let sessions = "sessions"
     /// Structured tool actions subpath under `/sessions/:id`.
@@ -926,21 +928,6 @@ public struct SchedulerJobsResponse: Content, Equatable {
     public init(jobs: [SchedulerJob]) {
         self.jobs = jobs
         self.count = jobs.count
-    }
-}
-
-/// Run log list response for `GET /runs`.
-public struct RunLogsResponse: Content, Equatable {
-    /// Entries, newest first.
-    public let runs: [RunLogEntry]
-    /// Number of entries in `runs`.
-    public let count: Int
-
-    /// Creates a run logs response.
-    /// - Parameter runs: Stored entries.
-    public init(runs: [RunLogEntry]) {
-        self.runs = runs
-        self.count = runs.count
     }
 }
 
