@@ -9,9 +9,10 @@
 // when both the engine and store arrive (nil means unregistered); a disabled
 // `[goals]` section still registers and fails closed inside each tool so the
 // surface stays visible instead of shape-shifting. Fan-out tools follow the
-// same invariant: registration rides the optional fan-out engine (nil means
-// unregistered), and a disabled `[fanout]` section still registers and fails
-// closed inside the tool with the honest disabled copy.
+// ships-disabled invariant: registration rides the optional fan-out engine
+// (nil means unregistered), and the tool registers disabled behind the
+// tool-state toggle like the desktop tools, so a stock install never puts
+// parallel worker fan-out in front of the model until the operator enables it.
 //
 // `api.request` is the one exception to silent-nil defaults: the factory takes
 // `policyStore:` (nil builds and loads the factory default) and fails the
@@ -41,6 +42,18 @@ public enum BuiltinToolPlugins {
             + DesktopTools.allToolNames
             + FanOutTools.toolNames
     }
+
+    /// Tool names that ship disabled on every fresh registration.
+    ///
+    /// The tool-state toggle is the sole authority for these capabilities: boot
+    /// paths register them with `isEnabled: false`, persisted rows restore
+    /// operator intent right after, and no config gate overrides that state. A
+    /// stock install therefore never puts these tools in front of the model
+    /// until the operator enables them. Every fresh-registration site consumes
+    /// this set so the boot paths cannot drift.
+    public static let shipsDisabledToolNames: Set<String> = Set(
+        DesktopTools.allToolNames + FanOutTools.toolNames
+    )
 
     /// Builds the shared five-tool set for one `[browser]` policy.
     /// - Parameters:
@@ -111,10 +124,10 @@ public enum BuiltinToolPlugins {
     /// unregistered so callers without pursuit wiring see no shape change. A disabled
     /// `[goals]` section still registers through the same path and fails closed inside
     /// each tool, keeping `GET /tools` stable instead of shape-shifting with config.
-    /// Fan-out tools follow the same invariant: the tool joins only when the fan-out
-    /// engine arrives (nil keeps it unregistered), and a disabled `[fanout]` section
-    /// still registers through the same path and fails closed inside the tool with
-    /// the honest disabled copy. The read-only subset the workers get derives from
+    /// Fan-out tools follow the ships-disabled invariant: the tool joins only when
+    /// the fan-out engine arrives (nil keeps it unregistered), and it registers
+    /// disabled behind the tool-state toggle (see `shipsDisabledToolNames`) with
+    /// no config gate overriding that state. The read-only subset the workers get derives from
     /// the built registry snapshot at this point, so the fan-out tool is appended
     /// after every other suite and the subset covers everything this install ships.
     /// - Parameter policyStore: Shared security policy store; nil builds and
@@ -270,15 +283,15 @@ public enum BuiltinToolPlugins {
     /// The single registration surface for built-in tools; callers that need a
     /// custom subset build from `makeTools`/`makeAllTools` and register directly.
     ///
-    /// Desktop tools always register but arrive disabled: persisted
-    /// tool-state rows re-apply via `restoreToolStates`, so a stock install
-    /// never puts approval-free screen capture in front of the model at boot
-    /// until the operator enables the tool-state toggle. Goal tools register only
-    /// when both the engine and store arrive, and they arrive enabled even when
-    /// `[goals]` is off so the honest disabled copy (not a bus-disabled line) answers.
-    /// Fan-out tools follow the same invariant: they register only when the
-    /// fan-out engine arrives, and a disabled `[fanout]` section still registers
-    /// with the engine so the honest disabled copy (not a bus-disabled line) answers.
+    /// Capabilities in `shipsDisabledToolNames` always register but arrive
+    /// disabled: persisted tool-state rows re-apply via `restoreToolStates`, so a
+    /// stock install never puts screen capture or parallel worker fan-out in front
+    /// of the model at boot until the operator enables the tool-state toggle. Goal
+    /// tools register only when both the engine and store arrive, and they arrive
+    /// enabled even when `[goals]` is off so the honest disabled copy (not a
+    /// bus-disabled line) answers. Fan-out tools follow the same ships-disabled
+    /// posture: they register only when the fan-out engine arrives, and they arrive
+    /// disabled with the tool-state toggle as the sole authority — no second gate.
     /// - Parameter policyStore: Shared security policy store; nil builds and
     ///   loads the factory default before any tool registers, so a boot can
     ///   never leave an unsupervised `api.request` on the bus.
@@ -316,7 +329,7 @@ public enum BuiltinToolPlugins {
         fanOutEngine: FanOutEngine? = nil,
         policyStore: PolicyStore? = nil
     ) async throws {
-        let desktopNames = Set(DesktopTools.allToolNames)
+        let shipsDisabled = Self.shipsDisabledToolNames
         for tool in try await makeAllTools(
             emailConfig: emailConfig,
             filesConfig: filesConfig,
@@ -350,9 +363,10 @@ public enum BuiltinToolPlugins {
             policyStore: policyStore
         ) {
             // Every other builtin keeps the enabled-by-default registration;
-            // desktop tools ship disabled so only an operator-enabled tool
-            // goes live (stored rows restore right after registration).
-            await bus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
+            // capabilities in `shipsDisabledToolNames` ship disabled so only an
+            // operator-enabled tool goes live (stored rows restore right after
+            // registration).
+            await bus.register(tool: tool, isEnabled: !shipsDisabled.contains(tool.name))
         }
         if memoryEngine != nil {
             await MemoryTools.registerMemoryAliases(on: bus)

@@ -120,9 +120,12 @@ extension AppModel {
         await permissionGate.updateBashConfig(config.bash)
         await permissionGate.startPeriodicCleanup()
         let previewBus = ToolBus(permissionGate: permissionGate)
-        let desktopNames = Set(DesktopTools.allToolNames)
+        // Capabilities in the shared ships-disabled set arrive disabled here like
+        // every other boot path; stored rows restore operator intent right after,
+        // so the preview prompt never advertises a tool the toggle has not enabled.
+        let shipsDisabled = BuiltinToolPlugins.shipsDisabledToolNames
         for tool in plugins {
-            await previewBus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
+            await previewBus.register(tool: tool, isEnabled: !shipsDisabled.contains(tool.name))
         }
         let previewPluginsURL = URL(fileURLWithPath: (config.plugins.pluginsDir as NSString).expandingTildeInPath)
         let previewStore = ToolRegistryStore(dbPath: (config.memory.episodesDBPath as NSString).expandingTildeInPath)

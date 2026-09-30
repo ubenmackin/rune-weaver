@@ -23,12 +23,15 @@
 // Concurrency invariant: the orchestrator is an actor whose turns interleave
 // at await points without corrupting per-call state, each worker owns its own
 // session, and the shared stores (conversations, tool bus, run logs) are
-// actors already — so workers run CONCURRENTLY via a task group. A worker
-// that never observes cancellation is still bounded: each turn races the
-// configured wall-clock timeout and the first side of the race settles the
-// worker while the losing task is abandoned. The parent run never stays
-// running past the last subtask settle; all-done reads completed and any
-// failure reads failed so the digest stays honest.
+// actors already — so workers run CONCURRENTLY via a task group. A positive
+// wall-clock timeout bounds a worker that never observes cancellation: each
+// turn races the configured budget and the first side of the race settles the
+// worker while the losing task is abandoned. A zero timeout means no race at
+// all — the worker awaits under the cancellation handler, so an unlimited
+// worker can hold the parent run open until it finishes or is cancelled,
+// intentional for slow local models and bounded by cancellation. The parent
+// run never stays running past the last subtask settle; all-done reads
+// completed and any failure reads failed so the digest stays honest.
 
 import Foundation
 import os
@@ -316,9 +319,12 @@ public actor FanOutEngine {
     private let orchestrator: any OrchestratorFanOutSeam
     /// Run-audit seam injected from the shared run-log store.
     private let runLogs: any FanOutRunLogging
-    /// Fanout policy clamped at init so hand-built configs degrade to the
-    /// nearest sane bound instead of refusing to run or oversubscribing.
-    private let config: FanOutConfig
+    /// Fanout policy backing the worker cap, timeout, and tool-subset reads.
+    /// Mutable so a settings save can push fresh values live without
+    /// rebuilding the engine; every write goes through `clamped()` so a
+    /// persisted-but-unvalidated hand-built config still degrades to the
+    /// nearest sane bound instead of oversubscribing the serving model.
+    private var config: FanOutConfig
     /// Background reviewer over the collected worker outputs, injected from
     /// the same serving instance the Muse uses so review quality tracks the
     /// active model posture; nil keeps the merge pass on its deterministic
@@ -344,18 +350,29 @@ public actor FanOutEngine {
         self.reviewer = reviewer
     }
 
-    /// Whether fan-out is enabled by configuration. Callers consult this
-    /// before composing subtasks so a disabled install stays silent instead
-    /// of spending planning effort on a swarm that will be rejected.
-    public var isEnabled: Bool {
-        config.enabled
-    }
-
     /// Whether the fanout policy widens workers to the full tool registry.
     /// The fanout.run tool consults this per call so a settings change takes
     /// effect without re-registering, mirroring the per-turn config reads.
     public var fullTools: Bool {
         config.fullTools
+    }
+
+    /// Current fanout policy backing live workers.
+    /// Exposes the clamped snapshot so settings callers can observe a saved
+    /// patch without re-running a swarm; the engine remains the sole writer
+    /// through `updateConfig`.
+    public var currentConfig: FanOutConfig {
+        config
+    }
+
+    /// Pushes a freshly persisted `[fanout]` policy into the live engine so a
+    /// settings save takes effect without a restart.
+    /// Clamps defensively so a hand-built config degrades to the nearest sane
+    /// bound; the settings route validates before persisting, so a clamped
+    /// live value never masks a 400 on the durable file.
+    /// - Parameter newConfig: Persisted fanout policy from the settings save.
+    public func updateConfig(_ newConfig: FanOutConfig) {
+        config = newConfig.clamped()
     }
 
     /// Derives the read-only tool names from a tool snapshot so the calling
@@ -371,13 +388,15 @@ public actor FanOutEngine {
 
     /// Runs the explicit subtasks as concurrent worker turns.
     ///
-    /// Disabled installs and over-cap lists are rejected before any worker
-    /// turn spends a model round. Each subtask becomes one orchestrator turn
+    /// Over-cap lists are rejected before any worker turn spends a model
+    /// round. Each subtask becomes one orchestrator turn
     /// on a fresh session; the run audit trail records the parent row
     /// (content-free joined titles) plus one child row per worker so the
     /// Runs tab renders the swarm and the audit trail is complete. The parent
     /// run completes when all subtasks settle and never stays running past
     /// the last settle, so a timed-out worker cannot hold the caller hostage.
+    /// An unlimited worker (zero timeout) can hold the parent run open until
+    /// it finishes or is cancelled, intentional for slow local models.
     /// - Parameters:
     ///   - subtasks: Explicit subtask list; prompts are the caller's, never
     ///     decomposed here.
@@ -388,7 +407,7 @@ public actor FanOutEngine {
     ///     fan-out cannot mutate.
     /// - Returns: The settled run with per-subtask statuses and an honest
     ///   outcome digest.
-    /// - Throws: ``FanOutError`` when fan-out is disabled, the list is empty,
+    /// - Throws: ``FanOutError`` when the list is empty,
     ///   or the list exceeds the configured worker cap.
     @discardableResult
     public func runFanOut(
@@ -396,10 +415,8 @@ public actor FanOutEngine {
         originSessionID: UUID,
         allowedTools: [String]? = nil
     ) async throws -> FanOutRun {
-        // Gate before any worker turn so a disabled install or an over-cap
-        // list cannot spend model rounds; the typed errors are the caller's
-        // only honest signal for both rejections.
-        guard config.enabled else { throw FanOutError.disabled }
+        // Gate before any worker turn so an over-cap list cannot spend model
+        // rounds; the typed errors are the caller's only honest signal.
         guard !subtasks.isEmpty else { throw FanOutError.emptySubtasks }
         let maxWorkers = config.maxWorkers
         guard subtasks.count <= maxWorkers else {
@@ -685,20 +702,24 @@ extension FanOutEngine {
         return error.localizedDescription
     }
 
-    /// Runs one worker turn under the bounded wall-clock timeout.
+    /// Runs one worker turn, bounded by the wall-clock timeout when positive.
     ///
-    /// The orchestrator call and the timeout race for one continuation: the
-    /// first side to settle wins and the loser is cancelled (or abandoned if
-    /// it never observes cancellation), so a worker settles within its budget
-    /// without holding the parent run hostage. A throwing turn reads as a
-    /// failed worker carrying the error's own reason. The collecting seam
-    /// returns the final assistant text and parked flag so the merge pass
-    /// reviews real worker output; a stub without the collecting witness
-    /// still works and reports an empty output.
+    /// A positive budget races the orchestrator call against the timeout for
+    /// one continuation: the first side to settle wins and the loser is
+    /// cancelled (or abandoned if it never observes cancellation), so a
+    /// worker settles within its budget without holding the parent run
+    /// hostage. A zero timeout means no race at all — the worker awaits under
+    /// the cancellation handler, so an unlimited worker can hold the parent
+    /// run open until it finishes or is cancelled, intentional for slow local
+    /// models and bounded by cancellation. A throwing turn reads as a failed
+    /// worker carrying the error's own reason. The collecting seam returns
+    /// the final assistant text and parked flag so the merge pass reviews
+    /// real worker output; a stub without the collecting witness still works
+    /// and reports an empty output.
     /// - Parameters:
     ///   - input: Worker turn input carrying the fresh session.
     ///   - orchestrator: Seam running the turn.
-    ///   - timeoutSeconds: Wall-clock budget for the turn.
+    ///   - timeoutSeconds: Wall-clock budget for the turn, or zero for no timeout.
     /// - Returns: Settled outcome with the collected output and an honest
     ///   failure note.
     private static func runWorker(
@@ -706,6 +727,32 @@ extension FanOutEngine {
         orchestrator: any OrchestratorFanOutSeam,
         timeoutSeconds: Int
     ) async -> WorkerOutcome {
+        // Unlimited workers skip the sleep/race entirely so a slow local model
+        // is never cut off by a stale bound; cancellation still ends the turn.
+        if timeoutSeconds <= 0 {
+            let startedAt = Date()
+            let worker = Task { try await orchestrator.processCollecting(input) }
+            return await withTaskCancellationHandler {
+                do {
+                    let output = try await worker.value
+                    return WorkerOutcome(
+                        succeeded: true,
+                        note: nil,
+                        output: output,
+                        durationMs: Self.elapsedMs(since: startedAt)
+                    )
+                } catch {
+                    return WorkerOutcome(
+                        succeeded: false,
+                        note: Self.failureNote(for: error),
+                        output: .empty,
+                        durationMs: Self.elapsedMs(since: startedAt)
+                    )
+                }
+            } onCancel: {
+                worker.cancel()
+            }
+        }
         let seconds = max(1, timeoutSeconds)
         let timeoutNS = UInt64(seconds) * 1_000_000_000
         let startedAt = Date()
@@ -1086,15 +1133,27 @@ extension FanOutEngine {
         return "Failed subtasks: \(reasons.joined(separator: ", "))"
     }
 
-    /// Collects one review reply under a wall-clock timeout.
+    /// Collects one review reply, bounded by the wall-clock timeout when positive.
     ///
-    /// Exactly one chat call runs. The timeout resumes the caller, cancels
-    /// the provider task, and returns nil on its own budget without awaiting
-    /// the losing task, so a provider stream that ignores cooperative
+    /// Exactly one chat call runs. A positive budget races the provider
+    /// against the timeout: the timeout resumes the caller, cancels the
+    /// provider task, and returns nil on its own budget without awaiting the
+    /// losing task, so a provider stream that ignores cooperative
     /// cancellation cannot stretch the merge pass past the configured worker
-    /// budget. Every failure degrades to nil, which the caller turns into the
-    /// fail-open summary.
+    /// budget. A zero timeout means no race — the review awaits under the
+    /// cancellation handler, mirroring the unlimited worker posture. Every
+    /// failure degrades to nil, which the caller turns into the fail-open summary.
     private func collectReviewText(prompt: String) async -> String? {
+        // Unlimited policy skips the review race too, mirroring the worker
+        // posture so a slow local model still gets its single review pass.
+        if config.workerTimeoutSeconds <= 0 {
+            let provider = Task { await self.collectOnce(prompt: prompt) }
+            return await withTaskCancellationHandler {
+                await provider.value
+            } onCancel: {
+                provider.cancel()
+            }
+        }
         let timeoutSeconds = max(1, config.workerTimeoutSeconds)
         let timeoutNS = UInt64(timeoutSeconds) * 1_000_000_000
         let provider = Task { await self.collectOnce(prompt: prompt) }

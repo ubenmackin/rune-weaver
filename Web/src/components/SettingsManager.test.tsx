@@ -3072,6 +3072,399 @@ describe("SettingsManager", () => {
     expect(putCount).toBe(putsAfterSave);
   });
 
+  it("renders the fan-out Configure modal from the server hasConfig flag", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "fanout.run",
+        description: "Fan out subtasks to parallel workers",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: false,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const settingsWithFanout = {
+      ...mockSettings,
+      fanout: {
+        max_workers: 4,
+        worker_timeout_seconds: 300,
+        full_tools: false,
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: mockTools });
+        }
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        return jsonResponse(settingsWithFanout);
+      })
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    // Fan-out groups under its own section rather than falling through to
+    // Other Tools; the header owns the single Configure entry point.
+    await waitFor(() => {
+      expect(screen.getByText("Fan-Out Workers")).toBeDefined();
+    });
+    expect(screen.getByText("fanout.run")).toBeDefined();
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
+    expect(configureButtons[0].closest(".builtin-tool-card")).toBeNull();
+    await user.click(configureButtons[0]);
+
+    // The fan-out modal carries its knobs and never the fallback copy.
+    expect(screen.getByRole("heading", { name: /Configure Parallel Fan-Out/i })).toBeDefined();
+    expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
+    expect(screen.getByLabelText(/Max workers/i)).toBeDefined();
+    expect(screen.getByLabelText(/Worker timeout/i)).toBeDefined();
+    expect(screen.getByLabelText(/Full tools/i)).toBeDefined();
+    // Stored values round-trip into the form.
+    expect(screen.getByDisplayValue("4")).toBeDefined();
+    expect(screen.getByDisplayValue("300")).toBeDefined();
+    expect(screen.getByText(/Lets workers call the full tool registry/i)).toBeDefined();
+  });
+
+  it("hides the fan-out Configure button when the server reports no config", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "fanout.run",
+        description: "Fan out subtasks to parallel workers",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: false,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: false,
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: mockTools });
+        }
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    // The tool still lists with its enablement switch, but no Configure
+    // renders without the server hasConfig flag.
+    await waitFor(() => {
+      expect(screen.getByText("fanout.run")).toBeDefined();
+    });
+    expect(screen.queryByRole("button", { name: /^Configure$/ })).toBeNull();
+  });
+
+  it("saves cleared fan-out fields as the default constants with a changed-only patch", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "fanout.run",
+        description: "Fan out subtasks to parallel workers",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const settingsWithFanout = {
+      ...mockSettings,
+      fanout: {
+        max_workers: 4,
+        worker_timeout_seconds: 300,
+        full_tools: false,
+      },
+    };
+    let sentPayload: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        // Deep-merge the partial fan-out patch like the engine does so the
+        // reloaded form sees the full stored section.
+        const sentFanout = (sentPayload["fanout"] ?? {}) as Record<string, unknown>;
+        return jsonResponse({
+          ...settingsWithFanout,
+          ...sentPayload,
+          fanout: { ...settingsWithFanout.fanout, ...sentFanout },
+        });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithFanout);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    await user.click(configureButtons[0]);
+    expect(screen.getByRole("heading", { name: /Configure Parallel Fan-Out/i })).toBeDefined();
+
+    // Placeholders name the empty-field fallbacks.
+    const maxInput = screen.getByLabelText(/Max workers/i) as HTMLInputElement;
+    const timeoutInput = screen.getByLabelText(/Worker timeout/i) as HTMLInputElement;
+    expect(maxInput.placeholder).toContain("2 (default)");
+    expect(timeoutInput.placeholder).toContain("0 (unlimited)");
+    expect(screen.getByText(/0 = no timeout/i)).toBeDefined();
+
+    // Clearing both fields saves the defaults as explicit changes.
+    await user.clear(maxInput);
+    await user.clear(timeoutInput);
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    const fanout = (sentPayload as unknown as Record<string, unknown>)["fanout"] as Record<
+      string,
+      unknown
+    >;
+    expect(fanout).toBeDefined();
+    expect(fanout["max_workers"]).toBe(2);
+    expect(fanout["worker_timeout_seconds"]).toBe(0);
+    // Untouched toggle stays omitted so the stored value survives; the modal
+    // never carries an enablement key.
+    expect(fanout).not.toHaveProperty("full_tools");
+    expect(fanout).not.toHaveProperty("enabled");
+    await waitFor(() => {
+      expect(screen.getByText(/Fan-out settings saved/i)).toBeDefined();
+    });
+  });
+
+  it("sends only the changed fan-out knob and round-trips the full-tools toggle", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "fanout.run",
+        description: "Fan out subtasks to parallel workers",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const settingsWithFanout = {
+      ...mockSettings,
+      fanout: {
+        max_workers: 4,
+        worker_timeout_seconds: 300,
+        full_tools: false,
+      },
+    };
+    let sentPayload: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        // Deep-merge the partial fan-out patch like the engine does so the
+        // reloaded form sees the full stored section.
+        const sentFanout = (sentPayload["fanout"] ?? {}) as Record<string, unknown>;
+        return jsonResponse({
+          ...settingsWithFanout,
+          ...sentPayload,
+          fanout: { ...settingsWithFanout.fanout, ...sentFanout },
+        });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithFanout);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    await user.click(configureButtons[0]);
+    expect(screen.getByRole("heading", { name: /Configure Parallel Fan-Out/i })).toBeDefined();
+
+    // The toggle starts off and flips on as a boolean round-trip.
+    const fullToolsToggle = screen.getByLabelText(/Full tools/i) as HTMLInputElement;
+    expect(fullToolsToggle.checked).toBe(false);
+    await user.click(fullToolsToggle);
+    expect(fullToolsToggle.checked).toBe(true);
+
+    // Editing only the worker cap keeps the patch to that knob plus the
+    // flipped toggle.
+    const maxInput = screen.getByLabelText(/Max workers/i) as HTMLInputElement;
+    await user.clear(maxInput);
+    await user.type(maxInput, "6");
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    const fanout = (sentPayload as unknown as Record<string, unknown>)["fanout"] as Record<
+      string,
+      unknown
+    >;
+    expect(fanout).toEqual({ max_workers: 6, full_tools: true });
+    expect(fanout).not.toHaveProperty("worker_timeout_seconds");
+    expect(fanout).not.toHaveProperty("enabled");
+  });
+
+  it("surfaces an honest server error from the fan-out save", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "fanout.run",
+        description: "Fan out subtasks to parallel workers",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const settingsWithFanout = {
+      ...mockSettings,
+      fanout: {
+        max_workers: 4,
+        worker_timeout_seconds: 300,
+        full_tools: false,
+      },
+    };
+    const serverReason = "fanout.max_workers must be between 1 and 8 (got 99)";
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        return jsonResponse({ reason: serverReason }, 400);
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithFanout);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    await user.click(configureButtons[0]);
+    expect(screen.getByRole("heading", { name: /Configure Parallel Fan-Out/i })).toBeDefined();
+
+    const maxInput = screen.getByLabelText(/Max workers/i) as HTMLInputElement;
+    await user.clear(maxInput);
+    await user.type(maxInput, "99");
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    // The honest server message surfaces in the modal instead of a generic
+    // failure, and the modal stays open for repair.
+    await waitFor(() => {
+      expect(screen.getByText(serverReason)).toBeDefined();
+    });
+    expect(screen.getByRole("heading", { name: /Configure Parallel Fan-Out/i })).toBeDefined();
+    expect(screen.queryByText(/Fan-out settings saved/i)).toBeNull();
+  });
+
+  it("routes fanout.run to the Fan-Out category while keeping external names in Other", () => {
+    const builtinFanout = {
+      name: "fanout.run",
+      description: "Fan out subtasks",
+      permissionLevel: "requiresApproval",
+      inputSchema: "{}",
+      isEnabled: true,
+      isBuiltIn: true,
+      pluginID: null,
+      source: "builtin",
+      integrityStatus: "valid",
+      hasConfig: true,
+    };
+    const pluginFanoutEvil = {
+      name: "fanout.evil",
+      description: "External colliding name",
+      permissionLevel: "readOnly",
+      inputSchema: "{}",
+      isEnabled: true,
+      isBuiltIn: false,
+      pluginID: "external.plugin",
+      source: "plugin",
+      integrityStatus: "valid",
+    };
+    expect(getToolCategory(builtinFanout)).toBe("fanout");
+    expect(getToolCategory(pluginFanoutEvil)).toBe("other");
+    expect(getToolCategory("fanout.run")).toBe("fanout");
+    expect(getToolCategory("fanout.evil")).toBe("other");
+  });
+
   it("points Tools Files to Security with no Configure button", async () => {
     const user = userEvent.setup();
     const mockTools = [

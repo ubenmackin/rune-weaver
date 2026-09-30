@@ -2546,6 +2546,46 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfigData = {
   blocked_apps: [...DEFAULT_DESKTOP_BLOCKED_APPS],
 };
 
+// Parallel worker fan-out policy mirroring the engine `FanOutConfig`
+// (Sources/RuneWeaverCore/Config.swift). Workers stay on the read-only subset
+// unless full_tools widens them to the full registry; the modal owns these
+// knobs while tool enablement lives in the tool-state toggles. The dashboard
+// defaults below are the modal empty-field fallbacks so a cleared input saves
+// an explicit value instead of omitting the key; the engine file defaults may
+// differ and the server remains the authoritative enforcer.
+export interface FanoutConfigData {
+  max_workers: number;
+  worker_timeout_seconds: number;
+  full_tools: boolean;
+}
+
+// Partial fan-out patch for `PUT /settings`, mirroring the engine fan-out
+// update shape. Every field is optional so a request carrying one key leaves
+// the rest of the stored `[fanout]` section untouched; the JSON keys are the
+// snake_case names the engine persists.
+export interface FanoutSettingsUpdate {
+  max_workers?: number;
+  worker_timeout_seconds?: number;
+  full_tools?: boolean;
+}
+
+// Modal empty-field fallbacks for the fan-out knobs: a cleared Max workers
+// input saves the small-swarm default and a cleared timeout saves unlimited
+// (0) so local models are never held to a stale budget by accident. Full
+// tools stays off so workers keep the read-only subset until explicitly
+// widened.
+export const DEFAULT_FANOUT_MAX_WORKERS = 2;
+export const DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS = 0;
+export const DEFAULT_FANOUT_FULL_TOOLS = false;
+
+// Combined fan-out default seeding the fresh form before the first fetch so
+// the editor matches the modal empty-field boundary.
+export const DEFAULT_FANOUT_CONFIG: FanoutConfigData = {
+  max_workers: DEFAULT_FANOUT_MAX_WORKERS,
+  worker_timeout_seconds: DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS,
+  full_tools: DEFAULT_FANOUT_FULL_TOOLS,
+};
+
 // One source's enablement row on `GET /index/status`. Global enablement gates
 // every row server-side, so a source reads as live only when the indexer as a
 // whole is on.
@@ -3248,6 +3288,9 @@ export interface SettingsResponse {
   // Proactive Muse suggestion policy under [ideas]; optional for back-compat
   // with older engines that predate the section.
   ideas?: IdeasConfigData;
+  // Parallel worker fan-out policy under [fanout]; optional for back-compat
+  // with older engines that predate the section.
+  fanout?: FanoutConfigData;
   // HTTP bind from [server]; optional for back-compat with older engines that
   // predate the bind keys. Absent degrades to the loopback defaults so the
   // Network pane never renders blank.
@@ -3311,6 +3354,8 @@ export interface UpdateSettingsInput {
   proactive?: ProactiveSettingsUpdate;
   // Partial ideas patch; an omitted patch preserves the stored [ideas] section.
   ideas?: IdeasSettingsUpdate;
+  // Partial fan-out patch; an omitted patch preserves the stored [fanout] section.
+  fanout?: FanoutSettingsUpdate;
   // Bind patch for [server]; an omitted patch preserves the stored section.
   // The engine persists these to the file and returns requiresRestart without
   // live-reloading the bind, so the dashboard shows a restart banner.

@@ -11,9 +11,9 @@
 // concatenation with an honest note, never losing worker output), the parent
 // row settling into the executeJob vocabulary (ok, awaiting_approval, error)
 // with a parked worker, the fanout.run permission-level assertion via
-// PermissionGate, the disabled fail-closed message, and the kind filter
-// end-to-end through the seam. Tests never touch the real run-log store or
-// the live orchestrator.
+// PermissionGate, the single-gate default run without opt-in, and the kind
+// filter end-to-end through the seam. Tests never touch the real run-log
+// store or the live orchestrator.
 
 import Foundation
 import os
@@ -176,7 +176,7 @@ private final class CapturingMergeRunLogger: FanOutRunLogging {
     }
 }
 
-/// Creates an enabled fan-out engine over the given stubs.
+/// Creates a fan-out engine over the given stubs.
 private func makeMergeEngine(
     orchestrator: OrchestratorFanOutSeam,
     runLogger: FanOutRunLogging,
@@ -184,7 +184,6 @@ private func makeMergeEngine(
     configure: (inout FanOutConfig) -> Void = { _ in }
 ) -> FanOutEngine {
     var config = FanOutConfig()
-    config.enabled = true
     configure(&config)
     return FanOutEngine(orchestrator: orchestrator, runLogs: runLogger, config: config, reviewer: reviewer)
 }
@@ -350,12 +349,12 @@ struct FanOutMergeTests {
     }
 
     @Test
-    func `Disabled fanout fails closed with the honest message`() async throws {
-        let orchestrator = CollectingFanOutOrchestrator()
+    func `Default fanout runs without opt-in under the single gate`() async throws {
+        let orchestrator = CollectingFanOutOrchestrator(outputs: ["p": "Done."])
         let runLogger = CapturingMergeRunLogger()
-        // Hand-built config keeps the disabled default, unlike the helper.
+        // Single-gate policy: availability flows through tool registration
+        // alone, so the default config runs without an opt-in flag.
         let engine = FanOutEngine(orchestrator: orchestrator, runLogs: runLogger, config: FanOutConfig())
-        #expect(await engine.isEnabled == false)
         let tool = try #require(FanOutTools.makeTools(engine: engine).first)
 
         let output = try await tool.execute(
@@ -363,12 +362,12 @@ struct FanOutMergeTests {
             context: ToolContext(conversationID: UUID())
         )
 
-        // The honest disabled copy names the [fanout] opt-in so the rejection
-        // reads as its own guidance; no worker turn or audit row was spent.
-        #expect(output.isError)
-        #expect(output.content.contains("Fan-out is disabled. Enable [fanout] to run parallel worker subtasks."))
-        #expect(orchestrator.capturedInputs.isEmpty)
-        #expect(runLogger.recordedRows.isEmpty)
+        // The default engine spends a worker turn and records audit rows;
+        // the envelope carries the settled run.
+        #expect(!output.isError)
+        #expect(output.content.contains("All 1 subtasks completed."))
+        #expect(orchestrator.capturedInputs.count == 1)
+        #expect(!runLogger.recordedRows.isEmpty)
     }
 
     @Test

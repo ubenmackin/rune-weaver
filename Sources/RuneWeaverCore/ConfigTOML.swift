@@ -1081,17 +1081,16 @@ extension RuneWeaverConfig {
 
     /// Decodes the additive `[fanout]` section, defaulting omitted keys.
     ///
-    /// An absent table keeps the opt-in defaults so existing files load
+    /// An absent table keeps the single-gate defaults so existing files load
     /// untouched; present-but-wrong-typed values throw instead of silently
     /// defaulting, matching the `[ideas]` decode style, and range checks land
-    /// in validation so decode stays type-only. The live engine clamps the
-    /// worker cap at init so a stray digit degrades to the nearest bound
-    /// instead of oversubscribing the serving model.
+    /// in validation so decode stays type-only. A legacy `enabled` key is
+    /// tolerated and ignored because reads are per-key: availability flows
+    /// through tool registration alone, so the stale knob never gates a run.
+    /// The live engine clamps the worker cap at init so a stray digit
+    /// degrades to the nearest bound instead of oversubscribing the serving model.
     static func decodeFanout(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let fanout = root.tables["fanout"] else { return }
-        if let enabled = try fanout.strictBool("enabled", field: "fanout.enabled") {
-            config.fanOut.enabled = enabled
-        }
         if let maxWorkers = try fanout.strictInt("max_workers", field: "fanout.max_workers") {
             config.fanOut.maxWorkers = maxWorkers
         }

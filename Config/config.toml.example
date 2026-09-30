@@ -426,6 +426,15 @@ max_per_cycle = 3
 # Seconds the review waits on the model before returning no ideas (1-120).
 timeout_seconds = 20
 
+[fanout]
+# Parallel worker fan-out tuning. The `fanout.run` tool toggle in
+# Settings → Tools is the single gate for running fan-out, not a config key.
+# The knobs below apply live without a restart; absent keys keep the
+# documented defaults so existing files load untouched.
+# max_workers = 2  # Max workers running at once (1-8).
+# worker_timeout_seconds = 0  # Wall-clock budget per worker turn; 0 = no timeout.
+# full_tools = false  # True widens workers to the full tool registry; false keeps the read-only subset.
+
 [security]
 # Harness-level defense policy for external content. Both keys default ON;
 # an absent [security] section loads hardened so existing files need no

@@ -3,7 +3,7 @@
 // Purpose: carries the full settings snapshot for `GET /settings` plus the
 // partial update for `PUT /settings` so dashboard edits preserve every field
 // the request omits while engine, server bind, media, index, desktop, goals,
-// proactive, browser, bash, and files patches merge in one place.
+// proactive, ideas, fanout, browser, bash, and files patches merge in one place.
 // Scope: REST bodies and merge policy only; range and shape checks stay with
 // the config validation layer and live-reload decisions stay with the
 // settings routes.
@@ -78,6 +78,8 @@ public struct SettingsResponse: Content, Equatable {
     public let proactive: ProactiveConfig
     /// Proactive Muse suggestion policy.
     public let ideas: IdeasConfig
+    /// Parallel worker fan-out policy backing `fanout.run`.
+    public let fanout: FanOutConfig
     /// HTTP bind interface from `[server] hostname`. Changing it needs a restart
     /// because the socket and the Host gate are fixed at boot.
     public let serverHostname: String
@@ -138,6 +140,7 @@ public struct SettingsResponse: Content, Equatable {
         self.goals = config.goals
         self.proactive = config.proactive
         self.ideas = config.ideas
+        self.fanout = config.fanOut
         self.serverHostname = config.server.hostname
         self.serverPort = config.server.port
         self.serverAllowedHosts = config.server.allowedHosts
@@ -191,6 +194,7 @@ public struct SettingsResponse: Content, Equatable {
         case goals
         case proactive
         case ideas
+        case fanout
         case serverHostname
         case serverPort
         case serverAllowedHosts
@@ -252,6 +256,7 @@ public struct SettingsResponse: Content, Equatable {
         goals = try container.decodeIfPresent(GoalsConfig.self, forKey: .goals) ?? GoalsConfig()
         proactive = try container.decodeIfPresent(ProactiveConfig.self, forKey: .proactive) ?? ProactiveConfig()
         ideas = try container.decodeIfPresent(IdeasConfig.self, forKey: .ideas) ?? IdeasConfig()
+        fanout = try container.decodeIfPresent(FanOutConfig.self, forKey: .fanout) ?? FanOutConfig()
         serverHostname = try container.decodeIfPresent(String.self, forKey: .serverHostname) ?? ServerEndpointConfig.defaultHostname
         serverPort = try container.decodeIfPresent(Int.self, forKey: .serverPort) ?? ServerEndpointConfig.defaultPort
         serverAllowedHosts = try container.decodeIfPresent([String].self, forKey: .serverAllowedHosts) ?? []
@@ -308,6 +313,7 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(goals, forKey: .goals)
         try container.encode(proactive, forKey: .proactive)
         try container.encode(ideas, forKey: .ideas)
+        try container.encode(fanout, forKey: .fanout)
         try container.encode(serverHostname, forKey: .serverHostname)
         try container.encode(serverPort, forKey: .serverPort)
         try container.encode(serverAllowedHosts, forKey: .serverAllowedHosts)
@@ -378,6 +384,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let proactive: ProactiveUpdate?
     /// Partial ideas patch; a nil patch preserves the stored `[ideas]` section.
     public let ideas: IdeasUpdate?
+    /// Partial fan-out patch; a nil patch preserves the stored `[fanout]` section.
+    public let fanout: FanOutSettingsUpdate?
     /// Bind interface override for `[server] hostname`. Nil preserves the stored value.
     public let serverHostname: String?
     /// Bind port override for `[server] port`. Nil preserves the stored value.
@@ -431,6 +439,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         goals: GoalsUpdate? = nil,
         proactive: ProactiveUpdate? = nil,
         ideas: IdeasUpdate? = nil,
+        fanout: FanOutSettingsUpdate? = nil,
         serverHostname: String? = nil,
         serverPort: Int? = nil,
         serverAllowedHosts: [String]? = nil
@@ -480,6 +489,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.goals = goals
         self.proactive = proactive
         self.ideas = ideas
+        self.fanout = fanout
         self.serverHostname = serverHostname
         self.serverPort = serverPort
         self.serverAllowedHosts = serverAllowedHosts
@@ -505,32 +515,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
         applyGoals(to: &config.goals)
         try applyProactive(to: &config.proactive)
         applyIdeas(to: &config.ideas)
+        applyFanOut(to: &config.fanOut)
         try applyServer(to: &config.server)
-    }
-
-    /// Whether this request carries any bind-affecting `[server]` key.
-    /// The settings route uses this to mark `requiresRestart` without
-    /// live-reloading the socket or the middleware set.
-    public var carriesServerPatch: Bool {
-        serverHostname != nil || serverPort != nil || serverAllowedHosts != nil
-    }
-
-    /// Whether this request carries any `[memory] recall_*` budget key.
-    /// The settings route uses this to push the merged budgets into the live
-    /// orchestrator without a restart; a save without recall keys leaves the
-    /// live engine untouched.
-    public var carriesRecallPatch: Bool {
-        memoryRecallPerTierLimit != nil || memoryRecallAutoLimit != nil || memoryRecallThreshold != nil
-            || memoryRecallMaxChars != nil || memoryRecallPerHitChars != nil
-            || memoryRecallDocPoolMultiplier != nil || memoryRecallEpisodicWeight != nil
-    }
-
-    /// Whether a hostname binds loopback only. Non-loopback binds need a
-    /// resolvable owner token and fail closed otherwise. Single-sourced through
-    /// `ServerConfig.isLoopbackHostname` so a hostname that saves as loopback
-    /// also boots as loopback.
-    public static func isLoopbackHostname(_ hostname: String) -> Bool {
-        ServerConfig.isLoopbackHostname(hostname)
     }
 
     private func applyEngine(to engine: inout EngineConfig) throws {
@@ -740,6 +726,37 @@ public struct UpdateSettingsRequest: Content, Equatable {
             server.allowedHosts = deduped
         }
     }
+}
+
+/// Request flags and hostname helpers for `UpdateSettingsRequest`.
+///
+/// Kept in an extension so the request struct body stays within the type
+/// length budget; the route reads these without touching the stored patch.
+public extension UpdateSettingsRequest {
+    /// Whether this request carries any bind-affecting `[server]` key.
+    /// The settings route uses this to mark `requiresRestart` without
+    /// live-reloading the socket or the middleware set.
+    var carriesServerPatch: Bool {
+        serverHostname != nil || serverPort != nil || serverAllowedHosts != nil
+    }
+
+    /// Whether this request carries any `[memory] recall_*` budget key.
+    /// The settings route uses this to push the merged budgets into the live
+    /// orchestrator without a restart; a save without recall keys leaves the
+    /// live engine untouched.
+    var carriesRecallPatch: Bool {
+        memoryRecallPerTierLimit != nil || memoryRecallAutoLimit != nil || memoryRecallThreshold != nil
+            || memoryRecallMaxChars != nil || memoryRecallPerHitChars != nil
+            || memoryRecallDocPoolMultiplier != nil || memoryRecallEpisodicWeight != nil
+    }
+
+    /// Whether a hostname binds loopback only. Non-loopback binds need a
+    /// resolvable owner token and fail closed otherwise. Single-sourced through
+    /// `ServerConfig.isLoopbackHostname` so a hostname that saves as loopback
+    /// also boots as loopback.
+    static func isLoopbackHostname(_ hostname: String) -> Bool {
+        ServerConfig.isLoopbackHostname(hostname)
+    }
 
     /// Normalizes one `allowed_hosts` entry to the compared Host form.
     /// Single-sourced through `ServerEndpointConfig.normalizeHost` in Core so
@@ -749,7 +766,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
     /// hide behind the strip.
     /// - Parameter entry: Raw configured entry.
     /// - Returns: Lowercased, port-stripped host.
-    static func normalizedAllowedHost(_ entry: String) -> String {
+    internal static func normalizedAllowedHost(_ entry: String) -> String {
         ServerEndpointConfig.normalizeHost(entry)
     }
 }

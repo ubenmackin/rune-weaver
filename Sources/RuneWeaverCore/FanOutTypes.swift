@@ -181,9 +181,6 @@ public struct FanOutRun: Sendable, Codable, Equatable {
 /// subtask statuses — so these cases are the caller's only error surface and
 /// each reads as its own honest reason.
 public enum FanOutError: Error, Equatable, Sendable {
-    /// Fan-out is disabled by configuration; the engine never runs a swarm
-    /// for a disabled install.
-    case disabled
     /// The subtask list exceeds the configured worker cap, so a run can
     /// never oversubscribe the serving model.
     case maxWorkersReached(limit: Int)

@@ -1011,10 +1011,13 @@ extension RuneWeaverConfig {
     /// Validates the `[fanout]` section.
     ///
     /// The worker cap bounds simultaneous model rounds so a wide subtask list
-    /// cannot oversubscribe the serving model, and a non-positive timeout
-    /// would either cancel workers immediately or hold the parent run forever.
-    /// The engine clamps again at init so an unvalidated hand-built config
-    /// degrades to the nearest sane bound instead of refusing to run.
+    /// cannot oversubscribe the serving model. The timeout accepts zero for
+    /// unlimited (no wall-clock bound, intentional for slow local models and
+    /// ended by cancellation) and otherwise stays within
+    /// `1...maxWorkerTimeoutSeconds` so a stray digit fails at load instead of
+    /// holding a run open beyond any plausible model round. The engine clamps
+    /// again at init so an unvalidated hand-built config degrades to the
+    /// nearest sane bound instead of refusing to run.
     private func validateFanoutSection() throws {
         if fanOut.maxWorkers < FanOutConfig.minMaxWorkers || fanOut.maxWorkers > FanOutConfig.maxMaxWorkers {
             throw ConfigError.validationError(
@@ -1022,10 +1025,14 @@ extension RuneWeaverConfig {
                 message: "must be between \(FanOutConfig.minMaxWorkers) and \(FanOutConfig.maxMaxWorkers) (got \(fanOut.maxWorkers))"
             )
         }
-        if fanOut.workerTimeoutSeconds <= 0 {
+        // Local bounds keep the range check and its diagnostic on short lines.
+        let lower = FanOutConfig.unlimitedWorkerTimeoutSeconds
+        let upper = FanOutConfig.maxWorkerTimeoutSeconds
+        let timeout = fanOut.workerTimeoutSeconds
+        if timeout < lower || timeout > upper {
             throw ConfigError.validationError(
                 field: "fanout.worker_timeout_seconds",
-                message: "must be positive (got \(fanOut.workerTimeoutSeconds))"
+                message: "must be between \(lower) and \(upper) (got \(timeout))"
             )
         }
     }

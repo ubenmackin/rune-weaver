@@ -2,8 +2,8 @@
 //
 // Owns `GET`/`PUT /settings`: load, merge, validate, and persist the engine
 // config, then push the saved values into the live engine so orchestrator
-// budgets, media/browser/web/API tools, desktop, bash/files policies, and
-// index policy take effect without a restart. `[goals]` and `[proactive]`
+// budgets, media/browser/web/API tools, desktop, bash/files policies, fan-out
+// policy, and index policy take effect without a restart. `[goals]` and `[proactive]`
 // persist to the file through the same partial-patch merge but take effect on
 // restart: the pursuit engine and the scheduler worker hold their policy from
 // boot with no live-reload path. `[server]` bind keys persist
@@ -139,6 +139,7 @@ private func handlePutSettings(req: Request) async throws -> Response {
         try await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
         await reloadLiveDesktopTools(body: body, config: config, context: liveContext)
         await reloadLiveBashFilesTools(body: body, config: config, context: liveContext)
+        await reloadLiveFanOut(body: body, config: config, context: liveContext)
         try await reloadLiveIndexPolicy(body: body, config: config, context: liveContext, prebuilt: prebuiltIndexComponents)
         // The bind and the Host middleware stay on the boot values: a
         // `[server]` save persists to the file and returns `requiresRestart`
@@ -515,6 +516,16 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
             }
         }
     }
+}
+
+/// Applies the saved `[fanout]` policy to the live engine so the next swarm uses new values without a restart.
+/// Follows the recall-budget pattern: a nil fanout patch is a no-op so
+/// unrelated edits never touch the live swarm, while a present patch pushes
+/// the validated persisted snapshot. The engine clamps defensively on write,
+/// so the live value and the durable file agree even on edge inputs.
+private func reloadLiveFanOut(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
+    guard body.fanout != nil else { return }
+    await context.fanOut.updateConfig(config.fanOut)
 }
 
 /// Applies the saved `[index]` policy to the live engine so the next run uses new values without a restart.

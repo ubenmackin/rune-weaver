@@ -971,43 +971,50 @@ extension IdeasConfig: Codable {
 }
 
 /// Parallel worker fan-out policy.
+///
+/// Single-gate policy: availability flows through tool registration alone,
+/// so this section only tunes the swarm shape. The worker cap keeps a swarm
+/// cheap on a local model, the timeout bounds one worker turn (zero means no
+/// timeout, intentional for slow local models), and the tool-subset switch
+/// stays off so research fan-out cannot mutate state unless explicitly widened.
 public struct FanOutConfig: Sendable, Equatable {
-    /// Whether parallel worker fan-out runs at all. Off by default so a
-    /// stock install never spends concurrent model rounds.
-    public var enabled: Bool
     /// Maximum workers running at once. Clamped `1...8` so a wide subtask
     /// list cannot oversubscribe the serving model.
     public var maxWorkers: Int
     /// Wall-clock budget for one worker turn before it is marked failed.
+    /// Zero means no timeout; positive values clamp to
+    /// `1...maxWorkerTimeoutSeconds`.
     public var workerTimeoutSeconds: Int
     /// Whether workers may call the full tool registry. Off by default so
     /// research fan-out runs with the read-only subset and cannot mutate
     /// state; the widening switch is an explicit operator choice.
     public var fullTools: Bool
 
-    /// Default keeps fan-out off so stock installs stay quiet.
-    public static let defaultEnabled = false
     /// Default worker cap keeps a swarm cheap on a local model.
-    public static let defaultMaxWorkers = 4
+    public static let defaultMaxWorkers = 2
     /// Lower worker bound; a zero or negative cap is meaningless.
     public static let minMaxWorkers = 1
     /// Upper worker bound before a swarm oversubscribes the serving model.
     public static let maxMaxWorkers = 8
-    /// Default worker budget waits out slow local models without holding
-    /// the parent run hostage.
-    public static let defaultWorkerTimeoutSeconds = 300
+    /// Zero means a worker runs with no wall-clock timeout, so slow local
+    /// models can finish without the parent run timing them out.
+    public static let unlimitedWorkerTimeoutSeconds = 0
+    /// Default worker budget is unlimited so slow local models settle without
+    /// an arbitrary bound; cancellation still ends the turn.
+    public static let defaultWorkerTimeoutSeconds = 0
+    /// Upper timeout bound (24h) before a stray digit holds a run open
+    /// beyond any plausible model round.
+    public static let maxWorkerTimeoutSeconds = 86400
     /// Default keeps workers on the read-only subset so research fan-out
     /// cannot mutate.
     public static let defaultFullTools = false
 
     /// Creates a fanout config.
     public init(
-        enabled: Bool = defaultEnabled,
         maxWorkers: Int = defaultMaxWorkers,
         workerTimeoutSeconds: Int = defaultWorkerTimeoutSeconds,
         fullTools: Bool = defaultFullTools
     ) {
-        self.enabled = enabled
         self.maxWorkers = maxWorkers
         self.workerTimeoutSeconds = workerTimeoutSeconds
         self.fullTools = fullTools
@@ -1018,19 +1025,23 @@ public struct FanOutConfig: Sendable, Equatable {
     /// nearest sane bound instead of refusing to run or oversubscribing;
     /// load-time validation fails closed, and both postures share the same
     /// range constants so they cannot drift.
-    /// - Returns: Config with the worker cap pulled inside bounds and the
-    ///   timeout held at one second minimum.
+    /// - Returns: Config with the worker cap pulled inside bounds and a
+    ///   non-positive timeout folded to unlimited (zero), otherwise clamped
+    ///   to `1...maxWorkerTimeoutSeconds`.
     public func clamped() -> FanOutConfig {
-        FanOutConfig(
-            enabled: enabled,
+        let timeout: Int = if workerTimeoutSeconds <= 0 {
+            Self.unlimitedWorkerTimeoutSeconds
+        } else {
+            min(max(workerTimeoutSeconds, 1), Self.maxWorkerTimeoutSeconds)
+        }
+        return FanOutConfig(
             maxWorkers: min(max(maxWorkers, Self.minMaxWorkers), Self.maxMaxWorkers),
-            workerTimeoutSeconds: max(1, workerTimeoutSeconds),
+            workerTimeoutSeconds: timeout,
             fullTools: fullTools
         )
     }
 
     private enum CodingKeys: String, CodingKey {
-        case enabled
         case maxWorkers = "max_workers"
         case workerTimeoutSeconds = "worker_timeout_seconds"
         case fullTools = "full_tools"
@@ -1042,7 +1053,6 @@ extension FanOutConfig: Codable {
     /// - Parameter decoder: Decoder for the config document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? Self.defaultEnabled
         maxWorkers = try container.decodeIfPresent(Int.self, forKey: .maxWorkers) ?? Self.defaultMaxWorkers
         workerTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .workerTimeoutSeconds) ?? Self.defaultWorkerTimeoutSeconds
         fullTools = try container.decodeIfPresent(Bool.self, forKey: .fullTools) ?? Self.defaultFullTools
@@ -1052,7 +1062,6 @@ extension FanOutConfig: Codable {
     /// - Parameter encoder: Encoder for the config document.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(enabled, forKey: .enabled)
         try container.encode(maxWorkers, forKey: .maxWorkers)
         try container.encode(workerTimeoutSeconds, forKey: .workerTimeoutSeconds)
         try container.encode(fullTools, forKey: .fullTools)
@@ -1107,7 +1116,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var proactive = ProactiveConfig()
     /// Proactive Muse idea suggestions. Off by default.
     public var ideas = IdeasConfig()
-    /// Parallel worker fan-out policy. Off by default.
+    /// Parallel worker fan-out policy. Availability flows through tool registration.
     public var fanOut = FanOutConfig()
 
     /// Creates a root config from section configs.
