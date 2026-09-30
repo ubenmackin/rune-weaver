@@ -224,7 +224,17 @@ public actor Orchestrator {
         // Goal-tagged turns overwrite the session link so an explicit tag wins
         // over a stale link and runs stay joinable; a nil tag never clears, so
         // plain chat turns keep a link set by an earlier tagged turn.
-        _ = await conversations.ensureSession(id: sessionID, overwrite: input.goalID != nil, goalID: input.goalID)
+        // The session record also keeps the turn's honest origin — title,
+        // source, and parent link — so history can classify worker sessions
+        // and nest them under the session that spawned them.
+        _ = await conversations.ensureSession(
+            id: sessionID,
+            title: input.title,
+            source: OrchestratorToolLoop.resolvedSource(input.source),
+            overwrite: input.goalID != nil,
+            goalID: input.goalID,
+            parentSessionID: input.parentSessionID
+        )
         // Raw pre-turn copy (messages plus rolling summary, never the
         // synthetic summary-prefix view) so cancellation restores both
         // without duplicating the summary or keeping truncated growth.

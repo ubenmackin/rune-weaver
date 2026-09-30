@@ -772,7 +772,9 @@ public actor FanOutEngine {
     /// concurrent worker histories from interleaving with the caller's session
     /// or each other on the shared conversation store. Child rows carry each
     /// worker's own fresh session so live views open the turn that produced
-    /// them.
+    /// them. Each worker input also carries its subtask title and the origin
+    /// session as its parent, so the created session is classifiable in
+    /// history and nests under the caller that asked for the swarm.
     /// - Parameters:
     ///   - subtasks: Explicit subtask list.
     ///   - originSessionID: Session that spawned the run.
@@ -809,7 +811,9 @@ public actor FanOutEngine {
                 text: subtask.prompt,
                 sessionID: UUID(),
                 source: Self.workerSource,
-                allowedTools: allowedTools
+                allowedTools: allowedTools,
+                title: subtask.title,
+                parentSessionID: originSessionID
             )
         }
         // Sequential appends keep the row order deterministic (oldest first)

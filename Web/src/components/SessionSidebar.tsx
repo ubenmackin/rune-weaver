@@ -1,10 +1,19 @@
 // Rune Weaver Dashboard — Collapsible session history sidebar for Chat.
 // Lists past sessions, supports instant switching, inline renaming, and session deletion.
+// Fan-out workers nest under the session that spawned them behind a collapsed
+// disclosure with an agent count, so a swarm stays one row until inspected;
+// the viewed session's entire ancestor chain force-opens transitively, with a
+// cycle guard so malformed parent links cannot spin expansion, and workers
+// whose parent is gone fall back to top-level rows rather than vanishing.
 // Renders as a static inline column on desktop and as a dismissible fixed drawer
 // with a dim backdrop on handheld widths, closing on backdrop, Escape, or
 // session select with focus returned to the History trigger.
+// The shell keeps its chat surface mounted behind `display: none`, so the
+// sidebar also revalidates history on each Chat-tab activation edge instead of
+// relying on a mount that a tab switch never performs.
 
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -12,6 +21,7 @@ import {
   useState,
   type FormEvent,
   type MouseEvent,
+  type ReactElement,
   type RefObject,
 } from "react";
 import {
@@ -37,13 +47,21 @@ import {
   AlertTriangleIcon,
   ChatIcon,
   CheckIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
   ClockIcon,
   CloseIcon,
   EditIcon,
+  FanOutIcon,
   PlusIcon,
   TrashIcon,
 } from "./icons";
 import Modal from "./Modal";
+
+// Run-lifecycle frames arrive in bursts (a swarm emits parent plus child
+// start/settle updates), so they coalesce into one `listSessions()` refetch
+// instead of one request per frame.
+const SESSION_REFRESH_COALESCE_MS = 750;
 
 export type SessionFilter = "all" | "chat" | "scheduler";
 
@@ -54,6 +72,13 @@ interface SessionSidebarProps {
   isOpen: boolean;
   onToggleOpen: () => void;
   refreshTrigger?: number;
+  // Shell activation flag for the Chat tab. The shell keeps this sidebar's
+  // parent mounted behind `display: none`, so returning to Chat is a state
+  // transition rather than a remount; the view watches the false→true edge to
+  // revalidate history that may have changed while another tab was showing.
+  // Optional, and absent means active, so standalone renders (and tests)
+  // behave exactly as they did before the flag existed.
+  isActive?: boolean;
   pendingApprovals?: PermissionRequest[];
   // Live interactive turns parked in the chat view while the user browses
   // other sessions. The sidebar merges these with polled run rows so a
@@ -143,11 +168,24 @@ function isScheduledSession(session: SessionSummary | null | undefined): boolean
   return typeof raw === "string" && raw.trim().toLowerCase() === "scheduler";
 }
 
-// Resolved props for the presentational view. The handheld flag is required
-// here because the wrapper below resolves it from exactly one source: either
-// the explicit owner prop or the shared hook, never both at once.
-type SessionSidebarViewProps = Omit<SessionSidebarProps, "isMobile"> & {
+// Classifies a session spawned as a fan-out worker. Workers normally nest via
+// `parentSessionID`, but the source stays the classifier so an orphaned worker
+// (parent deleted) still reads as a swarm branch instead of a plain chat.
+function isFanOutWorkerSession(session: SessionSummary | null | undefined): boolean {
+  const raw = session?.source;
+  return typeof raw === "string" && raw.trim().toLowerCase() === "fanout_worker";
+}
+
+// Resolved props for the presentational view. The handheld flag and the
+// activation flag are both required here because the wrapper below resolves
+// each from exactly one source: either the explicit owner prop or its default,
+// never both at once.
+type SessionSidebarViewProps = Omit<
+  SessionSidebarProps,
+  "isMobile" | "isActive"
+> & {
   isMobile: boolean;
+  isActive: boolean;
 };
 
 function SessionSidebarView({
@@ -160,6 +198,9 @@ function SessionSidebarView({
   pendingApprovals,
   runningSessionIDs,
   isMobile,
+  // Aliased because the group renderer below already uses `isActive` for the
+  // per-row highlight, which is a different concept from tab activation.
+  isActive: active,
   onClose,
   historyButtonRef,
 }: SessionSidebarViewProps) {
@@ -173,6 +214,12 @@ function SessionSidebarView({
   // Non-blocking delete confirmation: the pending id renders a true modal.
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  // Fan-out parents whose worker children are revealed. Expansion is ephemeral
+  // view state by design: it defaults to collapsed, is never persisted, and
+  // deleting a row never cascades it, so a swarm opens only when asked.
+  const [expandedParentKeys, setExpandedParentKeys] = useState<Set<string>>(
+    () => new Set<string>(),
+  );
   // Submit blurs the input, so `onSubmit` and `onBlur` fire for one save.
   // The in-flight marker drops the second invocation before it can issue
   // a duplicate PATCH.
@@ -353,44 +400,118 @@ function SessionSidebarView({
     [sharedRunningIDs],
   );
 
-  const handleRunBroadcast = useCallback((data: unknown) => {
-    const frame = data as WSGenericFrame | null;
-    if (!frame || typeof frame !== "object") return;
-    const frameType = typeof frame.type === "string" ? frame.type : undefined;
-    if (frameType !== "run_started" && frameType !== "run_completed") return;
-    const nested = (frame as Record<string, unknown>).run;
-    if (!nested || typeof nested !== "object") return;
-    const owner = runSessionID(
-      nested as Parameters<typeof runSessionID>[0],
-    );
-    const normalized = normalizeSessionID(owner);
-    if (!normalized) return;
-    // Single active contract with the polled run log: only a live running
-    // status keeps the badge lit. A parked awaiting_approval turn arrives as
-    // completed and surfaces through the approvals icon instead, so live and
-    // polled views agree after reload without double-badging.
-    const nestedStatus =
-      typeof (nested as Record<string, unknown>).status === "string"
-        ? ((nested as Record<string, unknown>).status as string)
-        : undefined;
-    if (frameType === "run_started" && isActiveRunStatus(nestedStatus)) {
-      setLiveRunningIDs((previous) => {
-        if (previous.has(normalized)) return previous;
-        const next = new Set(previous);
-        next.add(normalized);
-        return next;
-      });
-    } else {
-      setLiveRunningIDs((previous) => {
-        if (!previous.has(normalized)) return previous;
-        const next = new Set(previous);
-        next.delete(normalized);
-        return next;
-      });
+  // Pending trailing-coalesce timer for session-list revalidation. Held in a
+  // ref so a frame arriving inside the window is absorbed rather than queuing a
+  // second refetch, and so unmount can drop a tick bound for a detached view.
+  const refreshTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(
+    null,
+  );
+
+  const refreshSessions = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await listSessions();
+      if (response && Array.isArray(response.sessions)) {
+        setSessions(response.sessions);
+      } else {
+        setSessions([]);
+      }
+    } catch {
+      // Keep existing list on transient failure
+    } finally {
+      setLoading(false);
     }
   }, []);
 
-  useSharedWebSocket(handleRunBroadcast);
+  // Trailing coalesce: the first frame schedules, frames inside the window are
+  // absorbed, and a later frame schedules again.
+  const scheduleSessionsRefresh = useCallback(() => {
+    if (refreshTimerRef.current !== null) return;
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refreshSessions();
+    }, SESSION_REFRESH_COALESCE_MS);
+  }, [refreshSessions]);
+
+  // A detached sidebar must never refetch, so the pending tick is cleared on
+  // unmount instead of firing against a view that no longer exists.
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleRunBroadcast = useCallback(
+    (data: unknown) => {
+      const frame = data as WSGenericFrame | null;
+      if (!frame || typeof frame !== "object") return;
+      const frameType = typeof frame.type === "string" ? frame.type : undefined;
+      if (frameType !== "run_started" && frameType !== "run_completed") return;
+      // The lifecycle frame itself is the refresh signal: a start or settle can
+      // add, retitle, or reprioritize a row, so the coalesced refetch must not
+      // depend on the nested run parsing.
+      scheduleSessionsRefresh();
+      const nested = (frame as Record<string, unknown>).run;
+      if (!nested || typeof nested !== "object") return;
+      const owner = runSessionID(
+        nested as Parameters<typeof runSessionID>[0],
+      );
+      const normalized = normalizeSessionID(owner);
+      if (!normalized) return;
+      // Single active contract with the polled run log: only a live running
+      // status keeps the badge lit. A parked awaiting_approval turn arrives as
+      // completed and surfaces through the approvals icon instead, so live and
+      // polled views agree after reload without double-badging.
+      const nestedStatus =
+        typeof (nested as Record<string, unknown>).status === "string"
+          ? ((nested as Record<string, unknown>).status as string)
+          : undefined;
+      if (frameType === "run_started" && isActiveRunStatus(nestedStatus)) {
+        setLiveRunningIDs((previous) => {
+          if (previous.has(normalized)) return previous;
+          const next = new Set(previous);
+          next.add(normalized);
+          return next;
+        });
+      } else {
+        setLiveRunningIDs((previous) => {
+          if (!previous.has(normalized)) return previous;
+          const next = new Set(previous);
+          next.delete(normalized);
+          return next;
+        });
+      }
+    },
+    [scheduleSessionsRefresh],
+  );
+
+  // A reconnect may have missed lifecycle frames while the socket was down, so
+  // the open event revalidates a possibly-stale history through the same
+  // coalescing window instead of trusting cached rows.
+  const handleSocketOpen = useCallback(() => {
+    scheduleSessionsRefresh();
+  }, [scheduleSessionsRefresh]);
+
+  useSharedWebSocket(handleRunBroadcast, undefined, handleSocketOpen);
+
+  // Browsers throttle or suspend hidden tabs, and a backgrounded dashboard may
+  // miss both frames and socket events, so returning to the foreground
+  // revalidates the list; the shared coalescer folds a near-simultaneous
+  // reconnect into the same refetch.
+  useEffect(() => {
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        scheduleSessionsRefresh();
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [scheduleSessionsRefresh]);
 
   // Revalidate the shared poller when the viewed session changes so a switch
   // badges without waiting for the next tick; the interval itself stays owned
@@ -412,25 +533,26 @@ function SessionSidebarView({
     at: string;
   } | null>(null);
 
-  const refreshSessions = useCallback(async () => {
-    setLoading(true);
-    try {
-      const response = await listSessions();
-      if (response && Array.isArray(response.sessions)) {
-        setSessions(response.sessions);
-      } else {
-        setSessions([]);
-      }
-    } catch {
-      // Keep existing list on transient failure
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
   useEffect(() => {
     void refreshSessions();
   }, [refreshSessions, currentSessionID, refreshTrigger]);
+
+  // The shell keeps ChatView mounted behind `display: none`, so a tab return
+  // never remounts this sidebar: without an edge-triggered refetch, sessions
+  // created while another tab was showing would stay invisible until the next
+  // socket frame or socket reopen. The ref captures the previous value so
+  // exactly the false→true activation transition refetches, while the initial
+  // mount and repeated active renders stay silent (a mount merely seeds the
+  // list, and every other refresh path keeps its own trigger).
+  const wasActiveRef = useRef(active);
+
+  useEffect(() => {
+    const wasActive = wasActiveRef.current;
+    wasActiveRef.current = active;
+    if (!wasActive && active) {
+      void refreshSessions();
+    }
+  }, [active, refreshSessions]);
 
   function handleStartRename(session: SessionSummary, e: MouseEvent) {
     e.stopPropagation();
@@ -508,14 +630,91 @@ function SessionSidebarView({
     return [draft, ...sessions];
   }, [sessions, currentSessionID, hasCurrentSession, draftStamp]);
 
-  const filteredSessions = useMemo(() => {
-    return activeSessions.filter((session) => {
+  // Fan-out tree derivation over the filtered candidates. A row nests only when
+  // its parent is itself a candidate, so a worker whose parent was deleted (or
+  // hidden by the active filter) stays top-level instead of disappearing.
+  // Children are removed from the date grouping so each swarm renders exactly
+  // once — indented under its parent — regardless of the worker's own update
+  // time. All keys normalize because the engine spells UUIDs uppercase while
+  // the dashboard mints lowercase.
+  const {
+    candidateSessions,
+    childrenByParent,
+    parentKeyByChildKey,
+    topLevelSessions,
+  } = useMemo(() => {
+    const candidates = activeSessions.filter((session) => {
       const isScheduled = isScheduledSession(session);
       if (filter === "chat") return !isScheduled;
       if (filter === "scheduler") return isScheduled;
       return true;
     });
+    const candidateKeys = new Set(
+      candidates.map((session) => normalizeSessionID(session.id)),
+    );
+    const children = new Map<string, SessionSummary[]>();
+    const parents = new Map<string, string>();
+    for (const session of candidates) {
+      const sessionKey = normalizeSessionID(session.id);
+      const parentKey = normalizeSessionID(session.parentSessionID);
+      // An empty or self-referential parent is not nesting; treating it as one
+      // would detach the row from every group.
+      if (!parentKey || parentKey === sessionKey) continue;
+      if (!candidateKeys.has(parentKey)) continue;
+      const siblings = children.get(parentKey);
+      if (siblings) {
+        siblings.push(session);
+      } else {
+        children.set(parentKey, [session]);
+      }
+      parents.set(sessionKey, parentKey);
+    }
+    // Ascending creation order keeps siblings in the order the swarm spawned
+    // them, independent of when each worker last updated.
+    for (const siblings of children.values()) {
+      siblings.sort(
+        (a, b) =>
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+      );
+    }
+    return {
+      candidateSessions: candidates,
+      childrenByParent: children,
+      parentKeyByChildKey: parents,
+      topLevelSessions: candidates.filter(
+        (session) => !parents.has(normalizeSessionID(session.id)),
+      ),
+    };
   }, [activeSessions, filter]);
+
+  // The active session's entire ancestor chain stays open while its descendant
+  // is being viewed, so switching to a worker (or reloading on one) never
+  // hides the row the owner is reading, however deep the swarm nests. The walk
+  // follows the child→parent map transitively and stops at the first repeated
+  // key, so malformed or cyclic parent links terminate instead of looping. The
+  // union is additive: the explicit set is only widened.
+  const activeAncestorKeys = useMemo(() => {
+    const ancestors = new Set<string>();
+    const visited = new Set<string>();
+    let key = normalizeSessionID(currentSessionID);
+    while (key.length > 0 && !visited.has(key)) {
+      visited.add(key);
+      const parentKey = parentKeyByChildKey.get(key);
+      if (!parentKey) break;
+      ancestors.add(parentKey);
+      key = parentKey;
+    }
+    return ancestors;
+  }, [parentKeyByChildKey, currentSessionID]);
+
+  const expandedParentSet = useMemo(() => {
+    if (activeAncestorKeys.size === 0) return expandedParentKeys;
+    const effective = new Set(expandedParentKeys);
+    for (const key of activeAncestorKeys) {
+      effective.add(key);
+    }
+    return effective;
+  }, [expandedParentKeys, activeAncestorKeys]);
 
   // Union of every running signal so one missed transport never hides a
   // background turn: live broadcasts for immediacy, polled runs for reloads,
@@ -539,138 +738,211 @@ function SessionSidebarView({
     return merged;
   }, [liveRunningIDs, polledRunningIDs, runningSessionIDs]);
 
-  const grouped = groupSessionsByDate(filteredSessions);
+  const grouped = groupSessionsByDate(topLevelSessions);
+
+  // One row renderer shared by both tree levels. Children differ only by
+  // indentation and the worker glyph; rename, delete, running badge, and
+  // selection reuse the same handlers, and deleting a child never touches its
+  // parent because parentage is origin metadata, not ownership. The explicit
+  // return type is required because the renderer nests its own children
+  // recursively, which inference alone cannot resolve.
+  const renderSessionRow = (
+    session: SessionSummary,
+    { isChild }: { isChild: boolean },
+  ): ReactElement => {
+    const isActive = isSameSession(session.id, currentSessionID);
+    const isEditing = editingId === session.id;
+    const isScheduled = isScheduledSession(session);
+    const sessionKey = normalizeSessionID(session.id);
+    const childSessions = childrenByParent.get(sessionKey) ?? [];
+    const hasChildren = childSessions.length > 0;
+    const isExpanded = hasChildren && expandedParentSet.has(sessionKey);
+    // Background turns keep their badge even while viewed elsewhere so
+    // the user can spot a still-running session without opening Runs.
+    // The active session keeps its typing indicator in chat; the row
+    // badge stays as the cross-session signal.
+    const isBackgroundRunning = backgroundRunning.has(sessionKey);
+
+    return (
+      <Fragment key={session.id}>
+        <div
+          className={`session-item ${isActive ? "active" : ""} ${isChild ? "session-item-child" : ""}`}
+          onClick={() => !isEditing && handleSelectAndMaybeClose(session.id)}
+          role="button"
+          tabIndex={0}
+          aria-label={`Open session ${session.title}`}
+          onKeyDown={(e) => {
+            // Nested controls (disclosure, rename, delete) act on their own
+            // Enter/Space; only a key event targeting the row itself may select,
+            // so bubbling activations never open the session behind them.
+            if (e.target !== e.currentTarget) return;
+            if (isEditing) return;
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              handleSelectAndMaybeClose(session.id);
+            }
+          }}
+        >
+          {hasChildren ? (
+            <button
+              type="button"
+              className="session-disclosure-btn"
+              data-testid="session-fanout-disclosure"
+              aria-expanded={isExpanded}
+              aria-label={`${isExpanded ? "Collapse" : "Expand"} ${childSessions.length} fan-out agent session${childSessions.length === 1 ? "" : "s"} for ${session.title}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpandedParentKeys((previous) => {
+                  const next = new Set(previous);
+                  if (next.has(sessionKey)) {
+                    next.delete(sessionKey);
+                  } else {
+                    next.add(sessionKey);
+                  }
+                  return next;
+                });
+              }}
+            >
+              {isExpanded ? (
+                <ChevronDownIcon size={12} />
+              ) : (
+                <ChevronRightIcon size={12} />
+              )}
+            </button>
+          ) : null}
+          {(() => {
+            const hasPendingApproval = pendingApprovals?.some((req) =>
+              isSameSession(req.sessionID, session.id),
+            );
+            if (hasPendingApproval) {
+              return (
+                <AlertTriangleIcon
+                  size={14}
+                  className="session-item-icon pending-approval"
+                  title="Approval pending"
+                  data-testid="session-approval-pending-icon"
+                />
+              );
+            }
+            if (isScheduled) {
+              return (
+                <ClockIcon
+                  size={14}
+                  className="session-item-icon scheduled"
+                  title="Scheduled run"
+                />
+              );
+            }
+            // A nested row or a spawned worker is always a swarm branch, even
+            // when its parent is gone and it has to stand on its own.
+            if (isChild || isFanOutWorkerSession(session)) {
+              return (
+                <FanOutIcon
+                  size={14}
+                  className="session-item-icon fanout"
+                  title="Fan-out agent session"
+                  data-testid="session-fanout-child-icon"
+                />
+              );
+            }
+            return <ChatIcon size={14} className="session-item-icon" />;
+          })()}
+          {isEditing ? (
+            <form
+              className="session-rename-form"
+              onSubmit={(e) => void handleSaveRename(session.id, e)}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <input
+                type="text"
+                value={editingTitle}
+                onChange={(e) => setEditingTitle(e.target.value)}
+                ref={focusRenameInput}
+                onBlur={() => void handleSaveRename(session.id)}
+                className="session-rename-input"
+                aria-label={`Rename session ${session.title}`}
+              />
+              <button
+                type="submit"
+                className="session-icon-btn"
+                title="Save title"
+              >
+                <CheckIcon size={12} />
+              </button>
+              <button
+                type="button"
+                className="session-icon-btn"
+                onClick={() => setEditingId(null)}
+                title="Cancel"
+              >
+                <CloseIcon size={12} />
+              </button>
+            </form>
+          ) : (
+            <>
+              <span className="session-title" title={session.title}>
+                {session.title}
+              </span>
+              {hasChildren ? (
+                <span
+                  className="session-fanout-count"
+                  data-testid="session-fanout-count"
+                >
+                  {childSessions.length} agent{childSessions.length === 1 ? "" : "s"}
+                </span>
+              ) : null}
+              {isBackgroundRunning ? (
+                <span
+                  className="session-running-badge"
+                  data-testid="session-running-badge"
+                  title="Turn running in background"
+                  aria-label={`Turn running in background for ${session.title}`}
+                >
+                  Running
+                </span>
+              ) : null}
+              <div className="session-item-actions">
+                <button
+                  type="button"
+                  className="session-icon-btn"
+                  title="Rename session"
+                  onClick={(e) => handleStartRename(session, e)}
+                >
+                  <EditIcon size={12} />
+                </button>
+                <button
+                  type="button"
+                  className="session-icon-btn delete"
+                  title="Delete session"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPendingDeleteId(session.id);
+                  }}
+                >
+                  <TrashIcon size={12} />
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+        {/* Children render inside the parent's own fragment so a worker that
+            itself spawned workers nests one level deeper instead of dropping
+            out of the tree. */}
+        {isExpanded
+          ? childSessions.map((child) =>
+              renderSessionRow(child, { isChild: true }),
+            )
+          : null}
+      </Fragment>
+    );
+  };
 
   const renderGroup = (label: string, items: SessionSummary[]) => {
     if (items.length === 0) return null;
     return (
       <div className="session-group" key={label}>
         <div className="session-group-label">{label}</div>
-        {items.map((session) => {
-          const isActive = isSameSession(session.id, currentSessionID);
-          const isEditing = editingId === session.id;
-          const isScheduled = isScheduledSession(session);
-          // Background turns keep their badge even while viewed elsewhere so
-          // the user can spot a still-running session without opening Runs.
-          // The active session keeps its typing indicator in chat; the row
-          // badge stays as the cross-session signal.
-          const isBackgroundRunning = backgroundRunning.has(
-            normalizeSessionID(session.id),
-          );
-
-          return (
-            <div
-              key={session.id}
-              className={`session-item ${isActive ? "active" : ""}`}
-              onClick={() => !isEditing && handleSelectAndMaybeClose(session.id)}
-              role="button"
-              tabIndex={0}
-              aria-label={`Open session ${session.title}`}
-              onKeyDown={(e) => {
-                if (isEditing) return;
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  handleSelectAndMaybeClose(session.id);
-                }
-              }}
-            >
-              {(() => {
-                const hasPendingApproval = pendingApprovals?.some((req) =>
-                  isSameSession(req.sessionID, session.id),
-                );
-                if (hasPendingApproval) {
-                  return (
-                    <AlertTriangleIcon
-                      size={14}
-                      className="session-item-icon pending-approval"
-                      title="Approval pending"
-                      data-testid="session-approval-pending-icon"
-                    />
-                  );
-                }
-                if (isScheduled) {
-                  return (
-                    <ClockIcon
-                      size={14}
-                      className="session-item-icon scheduled"
-                      title="Scheduled run"
-                    />
-                  );
-                }
-                return <ChatIcon size={14} className="session-item-icon" />;
-              })()}
-              {isEditing ? (
-                <form
-                  className="session-rename-form"
-                  onSubmit={(e) => void handleSaveRename(session.id, e)}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <input
-                    type="text"
-                    value={editingTitle}
-                    onChange={(e) => setEditingTitle(e.target.value)}
-                    ref={focusRenameInput}
-                    onBlur={() => void handleSaveRename(session.id)}
-                    className="session-rename-input"
-                    aria-label={`Rename session ${session.title}`}
-                  />
-                  <button
-                    type="submit"
-                    className="session-icon-btn"
-                    title="Save title"
-                  >
-                    <CheckIcon size={12} />
-                  </button>
-                  <button
-                    type="button"
-                    className="session-icon-btn"
-                    onClick={() => setEditingId(null)}
-                    title="Cancel"
-                  >
-                    <CloseIcon size={12} />
-                  </button>
-                </form>
-              ) : (
-                <>
-                  <span className="session-title" title={session.title}>
-                    {session.title}
-                  </span>
-                  {isBackgroundRunning ? (
-                    <span
-                      className="session-running-badge"
-                      data-testid="session-running-badge"
-                      title="Turn running in background"
-                      aria-label={`Turn running in background for ${session.title}`}
-                    >
-                      Running
-                    </span>
-                  ) : null}
-                  <div className="session-item-actions">
-                    <button
-                      type="button"
-                      className="session-icon-btn"
-                      title="Rename session"
-                      onClick={(e) => handleStartRename(session, e)}
-                    >
-                      <EditIcon size={12} />
-                    </button>
-                    <button
-                      type="button"
-                      className="session-icon-btn delete"
-                      title="Delete session"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setPendingDeleteId(session.id);
-                      }}
-                    >
-                      <TrashIcon size={12} />
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          );
-        })}
+        {items.map((session) => renderSessionRow(session, { isChild: false }))}
       </div>
     );
   };
@@ -753,7 +1025,7 @@ function SessionSidebarView({
           {loading && sessions.length === 0 ? (
             <p className="sidebar-muted">Loading history…</p>
           ) : null}
-          {filteredSessions.length === 0 && !loading ? (
+          {candidateSessions.length === 0 && !loading ? (
             <p className="sidebar-muted">
               {filter === "scheduler"
                 ? "No scheduled runs"
@@ -821,9 +1093,14 @@ function SessionSidebarView({
 }
 
 // Hook-backed entry for standalone renders without an owner flag. Owns the
-// single MediaQueryList subscription for those renders only.
+// single MediaQueryList subscription for those renders only; the public
+// wrapper has already defaulted the activation flag, so no shell state is
+// needed here.
 function SessionSidebarHooked(
-  props: Omit<SessionSidebarProps, "isMobile"> & { isMobile?: undefined },
+  props: Omit<SessionSidebarProps, "isMobile" | "isActive"> & {
+    isMobile?: undefined;
+    isActive: boolean;
+  },
 ) {
   const hookIsMobile = useIsMobile();
   return <SessionSidebarView {...props} isMobile={hookIsMobile} />;
@@ -831,14 +1108,20 @@ function SessionSidebarHooked(
 
 export default function SessionSidebar({
   isMobile: isMobileProp,
+  isActive: isActiveProp,
   ...rest
 }: SessionSidebarProps) {
   // Single-owner handheld truth: ChatView always passes its live `isMobile`
   // flag, so render directly with no second subscription here. Only
   // standalone renders without a prop mount the shared hook, keeping exactly
   // one MediaQueryList listener per mounted sidebar.
+  //
+  // Activation resolves in the same wrapper role: absent means active, so a
+  // caller with no shell tab state (a standalone render or a test) has no
+  // inactive phase to transition from and behaves exactly as before.
+  const active = isActiveProp ?? true;
   if (isMobileProp !== undefined) {
-    return <SessionSidebarView {...rest} isMobile={isMobileProp} />;
+    return <SessionSidebarView {...rest} isMobile={isMobileProp} isActive={active} />;
   }
-  return <SessionSidebarHooked {...rest} />;
+  return <SessionSidebarHooked {...rest} isActive={active} />;
 }

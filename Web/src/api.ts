@@ -822,6 +822,11 @@ export interface ConversationSession {
   createdAt: string;
   updatedAt: string;
   source?: string | null;
+  // Session that spawned this one (a fan-out worker's origin). The engine
+  // serializes the canonical `parentSessionID` spelling, and identifiers
+  // compare case-insensitively because UUID casing drifts between the engine
+  // and the dashboard. Absent on top-level sessions and older payloads.
+  parentSessionID?: string | null;
   // Linked goal when this session pursues a tracked one. The engine emits the
   // goal link under the canonical `goalId` spelling, so the chat header can
   // resolve a session-to-goal chip from the same detail fetch that hydrates
@@ -838,6 +843,10 @@ export interface SessionSummary {
   createdAt: string;
   updatedAt: string;
   source?: string | null;
+  // Session that spawned this one, carried on the listing payload so the
+  // sidebar can nest fan-out workers under their origin without a second
+  // fetch. Absent on top-level sessions and older payloads.
+  parentSessionID?: string | null;
   // Linked goal when this session pursues a tracked one, carried on the listing
   // payload so clients resolve a session-to-goal badge without querying run
   // history. Absent on unlinked sessions and older payloads.

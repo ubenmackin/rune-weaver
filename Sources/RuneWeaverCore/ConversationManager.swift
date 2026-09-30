@@ -21,13 +21,19 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
     public let createdAt: Date
     /// Last mutation timestamp.
     public var updatedAt: Date
-    /// Originating source of this session (e.g. "chat", "scheduler").
+    /// Originating source of this session (e.g. "chat", "scheduler",
+    /// "fanout_worker").
     public var source: String?
     /// Linked goal identifier, when this session works toward a tracked goal.
     /// Nil for unlinked sessions; persisted in the `sessions.goal_id` column and
     /// surfaced on list/detail payloads so clients can badge a session without
     /// joining against run history.
     public var goalID: UUID?
+    /// Session that spawned this session, when one did (e.g. a fan-out worker
+    /// nests under the session that invoked the swarm). Nil for unparented
+    /// sessions; a nil incoming value never clears a stored link, so untagged
+    /// turns cannot drop the nesting.
+    public var parentSessionID: UUID?
 
     /// Coding keys matching the persisted and wire shape. The goal link rides
     /// the `goalId` spelling so dashboard payloads read one key; the legacy
@@ -42,6 +48,7 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         case source
         case goalID = "goalId"
         case goalIDLegacy = "goalID"
+        case parentSessionID
     }
 
     /// Prefix for auto-generated titles so the fallback, the auto-title guard,
@@ -88,7 +95,8 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         source: String? = nil,
-        goalID: UUID? = nil
+        goalID: UUID? = nil,
+        parentSessionID: UUID? = nil
     ) {
         self.id = id
         self.title = title
@@ -98,10 +106,12 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         self.updatedAt = updatedAt
         self.source = source
         self.goalID = goalID
+        self.parentSessionID = parentSessionID
     }
 
-    /// Decodes a session, defaulting a missing goal link to unlinked so rows
-    /// written before goal linkage load instead of failing the whole history.
+    /// Decodes a session, defaulting a missing goal link to unlinked and a
+    /// missing parent link to unparented so rows written before either link
+    /// load instead of failing the whole history.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -114,10 +124,11 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         self.source = try container.decodeIfPresent(String.self, forKey: .source)
         self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
             ?? container.decodeIfPresent(UUID.self, forKey: .goalIDLegacy)
+        self.parentSessionID = try container.decodeIfPresent(UUID.self, forKey: .parentSessionID)
     }
 
-    /// Encodes a session, omitting an absent goal link so older readers see no
-    /// new key and keep loading the row.
+    /// Encodes a session, omitting absent links so older readers see no new
+    /// keys and keep loading the row.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -129,6 +140,7 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(source, forKey: .source)
         try container.encodeIfPresent(goalID, forKey: .goalID)
+        try container.encodeIfPresent(parentSessionID, forKey: .parentSessionID)
     }
 }
 
@@ -145,6 +157,11 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
     /// Carried on the listing payload so the dashboard can resolve a
     /// session-to-goal chip without querying run history.
     public let goalID: UUID?
+    /// Parent session identifier, when this session was spawned by another
+    /// (e.g. a fan-out worker nesting under the session that invoked the
+    /// swarm). Carried on the listing payload so clients can nest workers
+    /// without querying run history; nil for unparented sessions.
+    public let parentSessionID: UUID?
 
     /// Coding keys matching the wire shape, with the goal link on the shared
     /// `goalId` spelling plus a tolerant legacy fallback.
@@ -158,6 +175,7 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         case source
         case goalID = "goalId"
         case goalIDLegacy = "goalID"
+        case parentSessionID
     }
 
     public init(
@@ -168,7 +186,8 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         createdAt: Date,
         updatedAt: Date,
         source: String? = nil,
-        goalID: UUID? = nil
+        goalID: UUID? = nil,
+        parentSessionID: UUID? = nil
     ) {
         self.id = id
         self.title = title
@@ -178,10 +197,12 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         self.updatedAt = updatedAt
         self.source = source
         self.goalID = goalID
+        self.parentSessionID = parentSessionID
     }
 
-    /// Decodes a summary, defaulting a missing goal link to unlinked so
-    /// payloads from engines that predate goal linkage still parse.
+    /// Decodes a summary, defaulting a missing goal link to unlinked and a
+    /// missing parent link to unparented so payloads from engines that predate
+    /// either link still parse.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -194,10 +215,11 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         self.source = try container.decodeIfPresent(String.self, forKey: .source)
         self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
             ?? container.decodeIfPresent(UUID.self, forKey: .goalIDLegacy)
+        self.parentSessionID = try container.decodeIfPresent(UUID.self, forKey: .parentSessionID)
     }
 
-    /// Encodes a summary, omitting an absent goal link so older dashboards see
-    /// no new key.
+    /// Encodes a summary, omitting absent links so older dashboards see no new
+    /// keys.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -209,6 +231,7 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(source, forKey: .source)
         try container.encodeIfPresent(goalID, forKey: .goalID)
+        try container.encodeIfPresent(parentSessionID, forKey: .parentSessionID)
     }
 }
 
@@ -340,16 +363,18 @@ public actor ConversationManager {
         await readSingleMerged(id: id)
     }
 
-    /// Single merge point for title/source/goal fills so the memory, disk-hit, and
+    /// Single merge point for title/source/goal/parent fills so the memory, disk-hit, and
     /// disk-miss paths converge instead of drifting when one path gains a fix.
     /// Fill preserves an already-stored value unless overwrite requests
     /// replacement, keeping a raced-in name from being clobbered. A nil goal
-    /// never clears a stored link, so untagged turns cannot drop goal linkage.
+    /// or parent never clears a stored link, so untagged turns cannot drop goal
+    /// linkage or worker nesting.
     private func mergeTitleSource(
         into session: ConversationSession,
         title: String?,
         source: String?,
         goalID: UUID?,
+        parentSessionID: UUID?,
         overwrite: Bool
     ) -> (session: ConversationSession, changed: Bool) {
         var merged = session
@@ -366,6 +391,10 @@ public actor ConversationManager {
             merged.goalID = goalID
             changed = true
         }
+        if let parentSessionID, overwrite ? merged.parentSessionID != parentSessionID : merged.parentSessionID == nil {
+            merged.parentSessionID = parentSessionID
+            changed = true
+        }
         return (merged, changed)
     }
 
@@ -375,9 +404,23 @@ public actor ConversationManager {
     /// existing-session hits stay free of warm-up work while creation still
     /// returns instantly without ever failing on warm-up.
     @discardableResult
-    public func ensureSession(id: UUID, title: String? = nil, source: String? = nil, overwrite: Bool = false, goalID: UUID? = nil) async -> ConversationSession {
+    public func ensureSession(
+        id: UUID,
+        title: String? = nil,
+        source: String? = nil,
+        overwrite: Bool = false,
+        goalID: UUID? = nil,
+        parentSessionID: UUID? = nil
+    ) async -> ConversationSession {
         if let existing = sessions[id] {
-            let (merged, changed) = mergeTitleSource(into: existing, title: title, source: source, goalID: goalID, overwrite: overwrite)
+            let (merged, changed) = mergeTitleSource(
+                into: existing,
+                title: title,
+                source: source,
+                goalID: goalID,
+                parentSessionID: parentSessionID,
+                overwrite: overwrite
+            )
             if changed {
                 sessions[id] = merged
                 // Persist title/source fills so in-memory updates survive
@@ -388,14 +431,28 @@ public actor ConversationManager {
         }
         if let diskSession = await readSingleMerged(id: id) {
             if let concurrent = sessions[id] {
-                let (merged, changed) = mergeTitleSource(into: concurrent, title: title, source: source, goalID: goalID, overwrite: overwrite)
+                let (merged, changed) = mergeTitleSource(
+                    into: concurrent,
+                    title: title,
+                    source: source,
+                    goalID: goalID,
+                    parentSessionID: parentSessionID,
+                    overwrite: overwrite
+                )
                 if changed {
                     sessions[id] = merged
                     await persist(merged)
                 }
                 return merged
             }
-            let (mergedDisk, diskChanged) = mergeTitleSource(into: diskSession, title: title, source: source, goalID: goalID, overwrite: overwrite)
+            let (mergedDisk, diskChanged) = mergeTitleSource(
+                into: diskSession,
+                title: title,
+                source: source,
+                goalID: goalID,
+                parentSessionID: parentSessionID,
+                overwrite: overwrite
+            )
             if diskChanged {
                 sessions[id] = mergedDisk
                 await persist(mergedDisk)
@@ -403,7 +460,14 @@ public actor ConversationManager {
             return mergedDisk
         }
         if let concurrent = sessions[id] {
-            let (merged, changed) = mergeTitleSource(into: concurrent, title: title, source: source, goalID: goalID, overwrite: overwrite)
+            let (merged, changed) = mergeTitleSource(
+                into: concurrent,
+                title: title,
+                source: source,
+                goalID: goalID,
+                parentSessionID: parentSessionID,
+                overwrite: overwrite
+            )
             if changed {
                 sessions[id] = merged
                 await persist(merged)
@@ -426,7 +490,7 @@ public actor ConversationManager {
         // New sessions defer disk persistence until the first message append so empty/ghost
         // sessions are not written to episodes.db if a turn aborts before generation. Tracked in
         // unpersistedIDs to guard against reconciliation eviction in listSessions.
-        let session = ConversationSession(id: id, title: title, source: source, goalID: goalID)
+        let session = ConversationSession(id: id, title: title, source: source, goalID: goalID, parentSessionID: parentSessionID)
         sessions[id] = session
         unpersistedIDs.insert(id)
         // Warm-up for newly created sessions only; the entry debounces
@@ -482,7 +546,8 @@ public actor ConversationManager {
                     createdAt: session.createdAt,
                     updatedAt: session.updatedAt,
                     source: session.source,
-                    goalID: session.goalID
+                    goalID: session.goalID,
+                    parentSessionID: session.parentSessionID
                 )
             }
     }

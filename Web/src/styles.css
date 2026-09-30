@@ -740,6 +740,49 @@ a {
   color: #fbbf24;
 }
 
+/* Fan-out tree: a parent row's disclosure reveals its worker children as
+ * indented rows. The chevron, agent count, and worker glyph share one violet
+ * accent so a swarm grouping reads as a distinct origin at a glance without
+ * minting a new global token. */
+.session-item-child {
+  padding-left: 24px;
+}
+
+.session-disclosure-btn {
+  display: flex;
+  align-items: center;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.session-disclosure-btn:hover {
+  color: #ffffff;
+}
+
+.session-item-icon.fanout {
+  color: #a78bfa;
+}
+
+.session-item.active .session-item-icon.fanout {
+  color: #c4b5fd;
+}
+
+.session-fanout-count {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  background: rgba(167, 139, 250, 0.15);
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  border-radius: 6px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
 /* Background-turn badge for sessions with a live turn parked elsewhere.
  * Colors live here instead of inline so the running token stays in one place
  * with the other session icons above. */

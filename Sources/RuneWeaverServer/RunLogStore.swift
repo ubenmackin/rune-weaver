@@ -464,20 +464,6 @@ public actor RunLogStore {
     }
 }
 
-// MARK: - Fan-out settle witness
-
-/// Settle witness for the core fan-out engine carrying a worker's raw output
-/// and duration (or the parent's merged summary) into the row. The conformance
-/// itself lives beside the service entry types; this extension is the witness
-/// that keeps child rows fully auditable — raw output and duration stay in the
-/// row instead of only a flipped badge — and lets the parent row render the
-/// merged summary beside the rest of the audit trail.
-public extension RunLogStore {
-    func updateFanOutRow(id: UUID, status: String, response: String?, durationMs: Int?) async {
-        _ = await update(id: id, status: status, response: response, durationMs: durationMs)
-    }
-}
-
 /// Shared SQLite open helper for the server stores.
 /// Centralizes the open-plus-log fallback so every read/write/clear/delete
 /// degrades to in-memory state with one consistent log line instead of each
