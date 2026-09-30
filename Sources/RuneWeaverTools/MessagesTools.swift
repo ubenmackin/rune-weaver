@@ -647,7 +647,7 @@ public struct MessagesReadTool: Tool, Sendable {
 
         let chatID = args.chatID?.trimmingCharacters(in: .whitespacesAndNewlines)
         let recipient = args.recipient?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if chatID == nil || chatID!.isEmpty, recipient == nil || recipient!.isEmpty {
+        if chatID?.isEmpty ?? true, recipient?.isEmpty ?? true {
             let errorMsg = "Invalid messages.read arguments: either 'chatId' or 'recipient' must be specified."
             return .failure(errorMsg, callID: input.callID)
         }

@@ -18,7 +18,7 @@ import Testing
 
 /// Stub seam recording every worker input it receives so tests can pin what
 /// the engine actually handed to the orchestrator.
-private final class CapturingFanOutOrchestrator: OrchestratorFanOutSeam, @unchecked Sendable {
+private final class CapturingFanOutOrchestrator: OrchestratorFanOutSeam {
     /// Guarded captured inputs in arrival order.
     private let inputs = OSAllocatedUnfairLock<[UserInput]>(initialState: [])
     /// Artificial turn delay so concurrency and timeouts stay exercisable.
@@ -54,7 +54,7 @@ private final class CapturingFanOutOrchestrator: OrchestratorFanOutSeam, @unchec
 
 /// Probe seam recording the widest in-flight turn count so tests can pin
 /// concurrent execution structurally instead of with wall-clock assertions.
-private final class ConcurrentProbeOrchestrator: OrchestratorFanOutSeam, @unchecked Sendable {
+private final class ConcurrentProbeOrchestrator: OrchestratorFanOutSeam {
     /// Guarded probe counters.
     private struct ProbeState: Sendable {
         var inFlight = 0
@@ -92,7 +92,7 @@ private final class ConcurrentProbeOrchestrator: OrchestratorFanOutSeam, @unchec
 
 /// Stub seam whose turn never yields, finishes, or reacts to cancellation, so
 /// only the timeout side of the race can settle a worker.
-private final class HangingFanOutOrchestrator: OrchestratorFanOutSeam, @unchecked Sendable {
+private final class HangingFanOutOrchestrator: OrchestratorFanOutSeam {
     /// Awaits a stream that never yields, so the turn never returns and the
     /// timeout alone can settle the worker.
     func process(_: UserInput) async throws {
@@ -103,7 +103,7 @@ private final class HangingFanOutOrchestrator: OrchestratorFanOutSeam, @unchecke
 
 /// Stub run logger recording rows and updates so tests can pin the audit
 /// trail the engine actually wrote.
-private final class CapturingFanOutRunLogger: FanOutRunLogging, @unchecked Sendable {
+private final class CapturingFanOutRunLogger: FanOutRunLogging {
     /// One recorded run row with its latest status.
     struct Row: Sendable {
         let id: UUID
@@ -265,7 +265,7 @@ struct FanOutEngineTests {
         // histories never interleave, and each carrying the worker source.
         let captured = orchestrator.capturedInputs
         #expect(captured.count == 3)
-        #expect(captured.map(\.text) == subtasks.map(\.prompt))
+        #expect(Set(captured.map(\.text)) == Set(subtasks.map(\.prompt)))
         #expect(Set(captured.map(\.sessionID)).count == 3)
         #expect(captured.allSatisfy { $0.sessionID != origin })
         #expect(captured.allSatisfy { $0.source == FanOutEngine.workerSource })

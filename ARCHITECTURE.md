@@ -14,6 +14,8 @@ The name comes from JRPG lore: a Rune Weaver is a mage who inscribes and channel
 - **Apple-native where it counts**: Deep macOS integration (Keychain, AppKit/SwiftUI, Messages snapshot reads, ScreenCaptureKit) — not bolted on, but foundational. iOS is planned, not built.
 - **Swappable LLMs**: The brain is model-agnostic. Run Gemma 4 on MLX locally, switch to Qwen 3.8 via llama.cpp, or fall back to a cloud API — the tools and memory don't care which model is thinking.
 - **Fast recall without exfiltration**: An opt-in on-device index over files, mail, and Apple Messages makes everyday questions fast — chunked, keyword-searchable, and optionally vectorized — while live reads remain the freshness fallback. Nothing is indexed until the owner turns it on.
+- **Durable goals over one-shot prompts**: The agent holds long-horizon goals — a plan, step statuses, an event log, and a cadence — and keeps working toward them between conversations. A goal is a first-class entity; the scheduler merely executes toward it.
+- **Proactive, but interrupt-worthy**: Background completions are gated by a surfacing judgment so notifications stay rare enough to be trusted, while run history and the approvals inbox record everything regardless.
 
 **Delivery status lives in `ROADMAP.md`.** This document describes what the architecture *is* (decisions, protocols, component responsibilities, constraints) — not what shipped in which release. Items below are explicitly marked **shipped**, **partial**, or **planned** where the distinction matters.
 
@@ -51,9 +53,9 @@ LANGUAGE: Swift (core engine + macOS client), Python (embedded bridge scripts an
 │  │ iOS Client   │  │  macOS Client│  │   Web Dashboard    │    │
 │  │  (planned)   │  │ (shipped:    │  │   (shipped: React  │    │
 │  │              │  │  menu bar)   │  │   + Vite bundle)   │    │
-│  │ Push-to-talk │  │ Menu bar app │  │  Chat interface    │    │
+│  │ Push-to-talk │  │ Menu bar app │  │  Chat + goal chip  │    │
 │  │ TTS playback │  │ TTS playback │  │  Approvals inbox   │    │
-│  │ Notifications│  │ Voice toggle │  │  Memory / Schedules│    │
+│  │ Notifications│  │ Voice toggle │  │  Goals/Schedules/  │    │
 │  └──────┬───────┘  └──────┬───────┘  └────────┬───────────┘    │
 │         │                 │                     │                │
 │         └─────────────────┼─────────────────────┘                │
@@ -82,12 +84,12 @@ LANGUAGE: Swift (core engine + macOS client), Python (embedded bridge scripts an
 │  │                                                          │    │
 │  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐  │    │
 │  │  │   Memory    │  │  Permission  │  │  Scheduler   │  │    │
-│  │  │   Engine    │  │  Gate        │  │              │  │    │
-│  │  │             │  │              │  │  Cron-like   │  │    │
-│  │  │ Short-term  │  │  Graduated   │  │  triggers &  │  │    │
-│  │  │ Long-term   │  │  trust model │  │  event hooks │  │    │
-│  │  │ Vector +    │  │  Sandboxing  │  │              │  │    │
-│  │  │ Structured  │  │              │  │              │  │    │
+│  │  │   Engine    │  │  Gate        │  │  & Goals     │  │    │
+│  │  │             │  │              │  │              │  │    │
+│  │  │ Short-term  │  │  Graduated   │  │  Cron/poll & │  │    │
+│  │  │ Long-term   │  │  trust model │  │  event trigs │  │    │
+│  │  │ Vector +    │  │  Sandboxing  │  │  GoalEngine  │  │    │
+│  │  │ Structured  │  │              │  │  Ideas       │  │    │
 │  │  └─────────────┘  └──────────────┘  └──────────────┘  │    │
 │  │                                                          │    │
 │  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐  │    │
@@ -95,9 +97,14 @@ LANGUAGE: Swift (core engine + macOS client), Python (embedded bridge scripts an
 │  │  │  Manager    │  │  Pipeline    │  │  Index       │  │    │
 │  │  │             │  │              │  │              │  │    │
 │  │  │ Keychain +  │  │  Whisper STT │  │  SQLite FTS5 │  │    │
-│  │  │ Docker vault│  │  TTS output  │  │  + vectors   │  │    │
+│  │  │ surrogates  │  │  TTS output  │  │  + vectors   │  │    │
 │  │  └─────────────┘  └──────────────┘  └──────────────┘  │    │
 │  │                                                          │    │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐  │    │
+│  │  │  Declarative│  │  Policy      │  │  Egress      │  │    │
+│  │  │  Policy     │  │  Invariants  │  │  Supervisor  │  │    │
+│  │  │  (policy.toml)  │  (4 proofs)  │  │  (api.request)  │    │
+│  │  └─────────────┘  └──────────────┘  └──────────────┘  │    │
 │  └──────────────────────────────────────────────────────────┘    │
 │                                                                  │
 ├──────────────────────────────────────────────────────────────────┤
@@ -113,24 +120,24 @@ LANGUAGE: Swift (core engine + macOS client), Python (embedded bridge scripts an
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-The Document Index is not a separate process: it is an actor-backed local store inside the core engine, sitting beside the other Support Services and feeding `memories.recall`. See Component Details §10.
+The Document Index is not a separate process: it is an actor-backed local store inside the core engine, sitting beside the other Support Services and feeding `memories.recall`. See Component Details §14. Goals, the proactive surfacing gate, the Ideas engine, and multi-agent fan-out are likewise actor-backed sub-systems inside the core engine rather than separate processes. The declarative policy engine (§15) is the third such in-process security subsystem: policy store, invariant verifier, and egress supervisor are all actors in the core engine.
 
-Shipped tool set: Email IMAP/SMTP (`email.search`, `email.read`, `email.attachment`, `email.send`, `email.listMailboxes`, `email.move`), web + browser (`web.search`, `web.fetch`, `browser.navigate`, `browser.act`, `api.request`), files (`files.read`, `files.grep`, `files.glob`), memory (`memories.store` canonical with `remember_fact` alias, `memories.recall` canonical with `recall_memories` alias), Apple Messages (`messages.search` read-only, `messages.read` read-only, `messages.send` approval-gated with dry-run preview), media automation (`media.arr` approval-gated plus `media.arr.read` read-only), desktop perception and control (`desktop.screenshot` read-only plus `desktop.action` approval-gated; always registered but fail-closed — ships disabled and runs only when the persisted tool-state toggle enables it).
+Shipped tool set: Email IMAP/SMTP (`email.search`, `email.read`, `email.attachment`, `email.send`, `email.listMailboxes`, `email.move`), web + browser (`web.search`, `web.fetch`, `browser.navigate`, `browser.act`, `api.request`), files (`files.read`, `files.grep`, `files.glob`), memory (`memories.store` canonical with `remember_fact` alias, `memories.recall` canonical with `recall_memories` alias), Apple Messages (`messages.search` read-only, `messages.read` read-only, `messages.send` approval-gated with dry-run preview), media automation (`media.arr` approval-gated plus `media.arr.read` read-only), desktop perception and control (`desktop.screenshot` read-only plus `desktop.action` approval-gated; always registered but fail-closed), goals (`goal.create` approval-gated plus `goal.status`/`goal.progress` read-only), and multi-agent fan-out (`fanout.run` approval-gated).
 
 ### Engine-to-Service Shift
 
 The core engine is shifting from a CLI-only tool to a local service that other UIs drive through one HTTP surface.
 
-- **Vapor API layer**: A Vapor service fronts the core engine and exposes chat, health, tools, memory, approvals, runs, and scheduler operations as JSON routes. The CLI remains direct-core for v1. The service launches from the CLI binary via `rune-weaver serve`, which builds a `ServerContext` with `ServerContext.make(...)`.
+- **Vapor API layer**: A Vapor service fronts the core engine and exposes chat, health, tools, memory, approvals, runs, scheduler, goals, ideas, and settings operations as JSON routes. The CLI remains direct-core for v1. The service launches from the CLI binary via `rune-weaver serve`, which builds a `ServerContext` with `ServerContext.make(...)`.
 - **CLI index wiring (shipped)**: The CLI chat loop inspects `config.index.enabled`. When enabled it resolves `config.index.databasePath(in: stateDir)` and passes `docIndexDBPath` into the memory engine, so terminal turns get the same indexed candidates as the service.
-- **WebSocket event hub & real-time streaming**: The service maintains `/ws` managed by `WSHub`. In-flight turns support mid-turn cancellation via WebSocket or REST, aborting via `ActiveTurnTracker`.
-- **Authoritative concurrent-turn cap**: `ActiveTurnTracker.maxConcurrentTurns = 3` bounds simultaneous chat turns. `GET /health` advertises the cap.
-- **Durable SQLite persistence for scheduler & run history**: Jobs and run logs persist in `episodes.db`. `config.toml` jobs are bootstrap seed only when the database has zero jobs.
-- **Static dashboard bundle**: Served by the engine itself with chat, memory, scheduler, run history, approvals inbox, and index status surfaces.
+- **WebSocket event hub & real-time streaming**: The service maintains `/ws` managed by `WSHub`. Chat turns stream text deltas, tool invocations, and outcomes tagged by `sessionID`; in-flight turns support mid-turn cancellation via WebSocket or REST, aborting via `ActiveTurnTracker`. Scheduler, goal, and idea events broadcast on the same hub (`run_started`/`run_completed`, `goal_updated`, `proactive_message`).
+- **Authoritative concurrent-turn cap**: `ActiveTurnTracker.maxConcurrentTurns = 3` bounds simultaneous chat turns. `GET /health` advertises the cap and the live SearXNG start flight.
+- **Durable SQLite persistence for scheduler, goals & run history**: Jobs, run logs, goals, goal steps/events/triggers, and ideas persist in `episodes.db`. `config.toml` jobs are bootstrap seed only when the database has zero jobs.
+- **Static dashboard bundle**: Served by the engine itself with chat, grouped nav (Chat, Approvals, Work → Goals/Schedules/Runs, Memory), approvals inbox, run history, and index status surfaces.
 - **Same trust boundary**: Every service-triggered write still flows through the permission gate. The service adds transport; it does not bypass approvals.
 - **Single-owner bearer auth & ephemeral browser sessions (shipped)**: Exactly one owner token guards the engine HTTP surface. Browser clients exchange it via `POST /auth/session` for an ephemeral `HttpOnly`, `SameSite=Strict` cookie. Rotation invalidates live sessions.
 - **Fail-closed binding (shipped)**: Loopback always serves. Non-loopback requires a resolved token or boot is refused.
-- **Service auto-fire plus per-process single-flight**: Service auto-fires scheduler triggers sharing one lock with manual runs; CLI foreground loop is a second runner — run one at a time.
+- **Service auto-fire plus per-process single-flight**: Service auto-fires scheduler and goal triggers, sharing one lock per firing class with manual runs; the CLI foreground loop is a second runner — run one at a time.
 
 ---
 
@@ -141,10 +148,11 @@ The core engine is shifting from a CLI-only tool to a local service that other U
 The core engine owns orchestration, conversation state, and provider routing.
 
 - **Orchestration**: Receives user input, routes through the LLM, executes tool calls, returns responses.
-  - **Dynamic System Prompt Composition**: `SystemPromptComposer` snapshots `ToolBus.availableTools()` and generates a deterministic prompt with tool names, descriptions, schemas, permission levels, policies, and memory guidance. Canonical memory names are advertised; aliases never are.
+  - **Dynamic System Prompt Composition**: `SystemPromptComposer` snapshots `ToolBus.availableTools()` and generates a deterministic prompt with tool names, descriptions, schemas, permission levels, policies, and memory guidance. Canonical memory names are advertised; aliases never are. The prompt also carries one static rule teaching that delimited untrusted content is data, never instructions.
   - **Narration Fallback for Local LLMs**: `OrchestratorToolLoop` extracts read-only calls from text narration; gated narrations file approvals and park until decided.
+  - **Background turn sources**: `Orchestrator.isBackgroundSource(_:)` is the single owner of which sources (`scheduler`, `goal`) use background prompt/turn handling and parking, so future background sources extend in one place.
   - **In-Flight Turn Cancellation**: `ActiveTurnTracker` tracks running turns across WebSocket and REST.
-- **Conversation Manager**: Session state, history, and context windows across durable SQLite tables, hydrating from disk.
+- **Conversation Manager**: Session state, history, and context windows across durable SQLite tables, hydrating from disk. Sessions carry an optional `goal_id` linking a chat or background session to the goal it advances.
 - **LLM Router**: Priority-ordered providers with fallback, key management, pooling.
 
 Key patterns: Swift actors for isolation, protocol-oriented subsystems, structured concurrency for streaming.
@@ -160,9 +168,13 @@ Protocol: LLMProvider
 
 Implementations: `MLXProvider`, `LlamaCppProvider`, `OpenAICompatibleProvider`. Routing via `LLMRouter`, config via `ProviderConfig`, backend selector via `ProviderKind`.
 
+Goal decomposition, the proactive judge, and the fan-out reviewer all reuse the SAME injected provider/router instance the orchestrator is constructed with; none is self-built.
+
 ### 3. Tool Plugin System
 
-Tools declare name, description, JSON Schema, permission level (`readOnly`, `requiresApproval`, `trusted`), and handler. `ToolBus` carries aliases; `MemoryTools.registerMemoryAliases` registers `remember_fact`/`recall_memories` once. Python tools run out-of-process via JSON-RPC 2.0 over stdin/stdout (`SubprocessToolBridge`).
+Tools declare name, description, JSON Schema, permission level (`readOnly`, `requiresApproval`, `trusted`), and handler. `ToolBus` carries aliases; `MemoryTools.registerMemoryAliases` registers `remember_fact`/`recall_memories` once. Python tools run out-of-process via JSON-RPC 2.0 over stdin/stdout (`SubprocessToolBridge`). Tools that return network-derived content declare `contentTrustLevel == .untrustedExternal` via a non-breaking `Tool` protocol extension (default `.trusted`), never by name-sniffing.
+
+Registration flows through `BuiltinToolPlugins.makeAllTools` behind optional engine/store parameters (`nil` = not registered) so CLI, menu-bar app, and serve share one registration path with no drift. A disabled subsystem's tools still register (visible in `GET /tools`) and return the honest disabled error when called. `api.request` is the one exception to silent-nil defaults: it is constructed only with a live `OutboundEgressSupervisor` (§15) — supervisor construction is fail-closed at boot.
 
 ### 4. Memory Engine (shipped)
 
@@ -190,27 +202,86 @@ Three tiers plus routed automatic injection:
 
 ### 5. Permission Gate & Sandboxing (shipped)
 
-Levels `readOnly`, `requiresApproval`, `trusted` with graduated trust (this time / 5m / 1h / 1d / forever). `memories.store`/`recall` are `trusted`; `messages.send`, `desktop.action`, `browser.act`, `api.request`, `media.arr`, `goal.create/progress` require approval.
+Levels `readOnly`, `requiresApproval`, `trusted` with graduated trust (this time / 5m / 1h / 1d / forever). `memories.store`/`recall` are `trusted`; `messages.send`, `desktop.action`, `browser.act`, `api.request`, `media.arr`, `goal.create`, and `fanout.run` require approval. Goal ledger bookkeeping (`goal.status`, `goal.progress`) is `readOnly` — the same bargain as `remember_fact`: it mutates only the local ledger, never the world.
 
-### 6. Secrets Manager (shipped)
+Every action a goal step or fan-out worker takes while advancing still flows through the permission gate exactly like any other turn. The gate does not bypass approvals for background work. Declarative egress supervision (§15) is layered beneath this gate for `api.request` and never relaxes it: approval is still required, and the supervisor can deny on top of any approval.
+
+### 6. Secrets Manager & Surrogation (shipped)
 
 Keychain primary, Docker vault optional, `config.toml` for non-sensitive settings only. Secrets never enter logs, prompts, or index.
 
-### 7. Scheduler & Run Execution Engine (shipped)
+**Credential surrogation**: `api.request` header values may reference `rwsecret:<key>` surrogates. `SecretsManager` issues (`surrogate(for:)`), resolves (`resolve(_:)`), and sweeps (`redactResolved(_:)`) them. Resolution happens just-in-time at the transport boundary so the real value is never model-visible; the surrogate is a reference, not a copy, and dry-run previews never show the real value. A surrogate with inner whitespace is rejected so issuance and resolution agree. `ApiHeaderPolicy.redacted` also redacts any resolved secret values that echo into outputs. Surrogate resolution is now performed under the mandatory `OutboundEgressSupervisor` choke-point (§15), which also sweeps responses for echoed secrets.
 
-Cron plus polling, SQLite source of truth, per-run sessions (`source: scheduler`), parked `awaiting_approval` resume, single-flight per process.
+### 7. Scheduler, Goals & Run Execution Engine (shipped)
 
-### 8. Voice Pipeline (partial)
+Cron plus polling plus goal cadence and event triggers, with SQLite as source of truth. Per-run sessions (`source: scheduler` or `source: goal`) with fresh `UUID()` per execution, parked `awaiting_approval` resume through the inbox, and per-firing-class single-flight per process (a dedicated goal run lock so goal and job firings never collide). Downtime semantics: `next_due_at` drives firing; there is no catch-up stacking after a long sleep — a skipped-while-down firing simply re-dueues on the next interval. Each run persists a `run_logs` row (`kind` = `scheduler`, `goal`, `fanout`, or `fanout_worker`) linked to its session and, where applicable, its goal.
+
+**Event triggers**: `goal_triggers` rows (goal id, event kind, optional substring pattern, cooldown, last-fired) arm a goal for event wake-up. `GoalTriggerBridge` runs in the worker tick, polls recent goal and episode events within a bounded lookback, and on a kind/pattern match whose cooldown has elapsed sets `next_due_at = now`. The existing due-firing path then picks it up unchanged. The bridge stays event-kind-agnostic so future event sources extend in one place; there is no catch-up stacking (one match per cooldown window).
+
+### 8. Goals Subsystem (shipped)
+
+Goals are durable first-class entities: each owns a plan (ordered steps with statuses), an event log, and a cadence. State lives in `episodes.db` (`goals`, `goal_steps`, `goal_events`, `goal_triggers`), opened via the shared Core store idiom with additive, best-effort migrations (`sessions.goal_id`, `run_logs.goal_id`).
+
+- **Model**: `GoalStatus` (`active`, `paused`, `needs_input`, `achieved`, `abandoned`), `StepStatus` (`pending`, `inProgress`, `done`, `blocked`, `skipped`), `GoalEventKind` (`created`, `planReady`, `stepStarted`, `stepDone`, `stepBlocked`, `needsInput`, `completed`, `resumed`, `paused`, `note`). `GoalStore` is an actor behind a `GoalStoring` seam; `nextActionableStep` deterministically selects the lowest-ordinal pending/in-progress step.
+- **Engine**: `GoalEngine` (actor) with an injected LLM. `create` enforces `[goals] enabled` plus the active-goal cap, persists one placeholder step, then decomposes via ONE LLM call bounded to `maxStepsPerGoal`. Defensive parse (strip fences, outermost array); on parse failure/timeout it falls back to a single "Work toward: …" step plus a note — a goal is never lost because planning was flaky. `postAdvance` re-reads steps after the turn and, when no actionable step remains, marks the goal achieved; the cadence advances `next_due_at`.
+- **Advance composition**: dynamic goal state never enters the cached system-prompt prefix. `advancePrompt(goal:steps:events:)` composes the per-run prompt into the `UserInput` text (plan with statuses, last 5 events, instructions to advance exactly one step and record blockers honestly).
+- **Firing**: an ordinary orchestrator turn with a fresh per-run session (`source: "goal"`, `goal_id` stamped), a `run_logs` row `kind="goal"`, WSHub broadcast, and parked `requiresApproval` turns resuming through the inbox. No bypass of the permission gate.
+- **Tools**: `goal.create` (`requiresApproval` — commits recurring autonomous work) and `goal.status`/`goal.progress` (`readOnly` ledger bookkeeping). `goal.progress` resolves the current session's linked goal, falls back to the single active goal, and returns typed guidance on ambiguity rather than guessing.
+- **REST**: `GET /goals` (status filter), `POST /goals`, `GET /goals/:id`, `PATCH /goals/:id` (edits + pause/resume), `DELETE /goals/:id` (abandoned tombstone; `?purge=true` hard-delete), `POST /goals/:id/advance` (single-flight contention → `409`), `PATCH /goals/:id/steps/:stepId`, `GET /goals/summary`. Emits `goal_updated` WS frames on create/plan-ready/progress/status-change/advance.
+- **Surfaces**: a CLI `goals` command (list/add/show/pause/resume/advance/abandon/steps, direct-core, no session linking) and the dashboard (see §13).
+
+### 9. Proactive Surfacing Gate (shipped)
+
+`OutcomeGate` (Core) decides `(surface, headline)` for every scheduler/goal completion that would otherwise notify unconditionally. Modes come from `[proactive] mode`:
+
+- **all** (default — preserves prior behavior): surface everything.
+- **milestones**: goal milestones (step-done/achieved/needs-input/blocked) plus errors plus parked approvals only.
+- **guarded**: milestones, plus one cheap LLM judgment (with timeout) for everything else; a judge error or unparseable result fails OPEN to surface — never silently swallow something the owner might need.
+- **off**: never surface.
+
+The gate filters interruptions ONLY — run history, WSHub run frames, and the approvals inbox record regardless of mode. Surfacing to the browser goes over the `proactive_message` WS frame on the existing hub (no new transport), so the dashboard can raise a Web Notification/badge even with no macOS notifier.
+
+### 10. Ideas Engine (shipped, opt-in)
+
+`IdeasStore` (actor, `episodes.db`, `ideas` table) and `IdeasEngine` (actor, injected LLM) proactively suggest next moves. One cheap LLM call reviews recent goal outcomes plus a memory-facts summary and produces `0..maxPerCycle` ideas (`planAdjustment`, `newGoal`, `tip`). Defensive parse; on failure/timeout it returns an EMPTY array (never hallucinate because planning was flaky). Dedup skips titles equal to an existing non-dismissed idea. Generation is triggered after a goal is achieved (the natural "what next?" moment) and on a nightly cadence hook, both behind `[ideas] enabled` (default false).
+
+REST: `GET /ideas`, `GET /ideas/summary`, `POST /ideas/:id/dismiss`, `POST /ideas/:id/accept`. Accept routes through the engine with the same honest errors as `POST /goals`: a `planAdjustment` applies via `replacePlan` on the linked goal (only when it still exists and is active, else `409`), a `newGoal` creates via `engine.create`. Ideas surface on the dashboard and ride the `proactive_message` frame with kind `idea_proposed`.
+
+### 11. Multi-Agent Fan-Out (shipped, opt-in)
+
+`FanOutEngine` (actor) behind a narrow `OrchestratorFanOutSeam` spawns concurrent worker turns for a set of caller-composed subtasks. Each worker gets a fresh per-run session (`source: "fanout_worker"`), a read-only tool subset via `UserInput.allowedTools` (nil = full registry; `fanout.run` passes the read-only names unless `[fanout] full_tools`), and `run_logs` rows — a `kind="fanout"` parent plus `kind="fanout_worker"` children — so the swarm is fully auditable in the Runs tab. Workers fan out via a `TaskGroup`; if the orchestrator serializes concurrent turns, workers stay sequential-but-bounded rather than forcing a core rewrite. A worker exceeding `workerTimeoutSeconds` is marked failed with an honest note; the parent completes when all subtasks settle.
+
+**Merge**: deterministic overlap detection first (exact file-path/URL collisions between outputs are flagged conflict), then ONE background reviewer LLM pass over the collected outputs producing a merged summary plus per-subtask verdicts (keep/drop/conflict). The reviewer judges content quality, not permissions. Fail-open: a reviewer error yields the raw concatenation with an honest note, so worker output is never lost. `fanout.run` is `requiresApproval` (it spawns autonomous work).
+
+### 12. Voice Pipeline (partial)
 
 Local Whisper STT, system TTS; push-to-talk planned.
 
-### 9. Client Layer
+### 13. Client Layer
 
-**macOS App — shipped**: Menu-bar chat, approvals, scheduler summary, dashboard/settings shortcuts, Desktop Control section when enabled. **Web Dashboard — shipped**: chat, memory, scheduler, runs, approvals, index status, tools config. **iOS — planned**.
+**macOS App — shipped**: Menu-bar chat, approvals, scheduler summary, dashboard/settings shortcuts, Desktop Control section when enabled.
 
-### 10. Document Index (shipped, opt-in)
+**Web Dashboard — shipped**: chat with session sidebar and clock-badged background sessions, memory, run history (with fan-out worker grouping), approvals, index status, tools config, declarative security policy (visual overview, invariant-status banner, and a raw-TOML editor with real-time candidate verification), goals management, and an ideas panel. Navigation is grouped — **Chat** and **Approvals** are attention surfaces; **Work** groups Goals/Schedules/Runs; **Memory** stands alone — using click/keyboard-only dropdown mechanics (click-toggle, click-outside, Escape closes and returns focus, `aria-haspopup`/menu; no hover-open path). The active goal is surfaced inline in chat as a header chip that opens a right-side `GoalDrawer` (plan checklist, recent events, linked runs, pause/resume, advance-now, "Open in Goals"). A `goal_updated` WS frame refreshes the chip/summary list; `proactive_message` raises a Web Notification with the headline and bumps the goals-attention badge (which clears when the Goals tab opens), falling back to badge-only when notification permission is absent. All model-authored content renders through the sanitized `MarkdownText` (zero `dangerouslySetInnerHTML`, protocol-whitelisted URLs).
 
-Local single-owner pre-built index: pay once, answer from index, fall back to live reads. Off by default with per-source files/mail/messages toggles. SQLite `indexed_documents` + `indexed_chunks` + FTS5 porter plus embedding BLOB, content-hash skip, per-mailbox UID and Messages ROWID watermarks, best-effort extraction with status, `BODY.PEEK` mail reads, bounded vectorization (`mail_vector_window`, size rule), nightly plus on-demand `IndexCoordinator` runs with `liveTotals`, `index_as_of` watermark, and prune/reset maintenance. Vector pool width and fusion weights are governed by recall budgets; injected hits always preserve file/mail citations so the model can answer with paths and dates without re-walking.
+**iOS — planned**.
+
+### 14. Document Index (shipped, opt-in)
+
+Local single-owner pre-built index: pay once, answer from index, fall back to live reads. Off by default with per-source files/mail/messages toggles. SQLite `indexed_documents` + `indexed_chunks` + FTS5 porter plus embedding BLOB, content-hash skip, per-mailbox UID and Messages ROWID watermarks, best-effort extraction with status, `BODY.PEEK` mail reads, bounded vectorization (`mail_vector_window`, size rule), nightly plus on-demand `IndexCoordinator` runs with `liveTotals`, `index_as_of` watermark, and prune/reset maintenance. Vector pool width and fusion weights are governed by recall budgets; injected hits always preserve file/mail citations so the model can answer with paths and dates without re-walking. Indexed mail is stored in its credential-redacted form so search recall cannot resurrect a redacted link.
+
+### 15. Declarative Security Policy & Outbound Egress Supervision (shipped)
+
+A declarative, owner-editable `~/.runeweaver/policy.toml` governs outbound network egress and credential use for `api.request`. Three fail-closed actor components own it:
+
+- **`PolicyStore`** (`PolicyStore.swift`, Core): the single owner of the policy file. Every load and every update runs `PolicyInvariantVerifier.verify` before the policy is accepted; an unreadable or failing file seeds factory-safe defaults (deny-by-default) rather than permissive ones. `snapshot()` returns the verified in-memory policy or throws — there is no permissive fallback state.
+- **`PolicyInvariantVerifier`** (`PolicyInvariantVerifier.swift`, Core): four formal invariants checked at the storage boundary (on load and on every update) and on demand — (1) **path containment**: no allow root covers protected directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/Library/Keychains`, `~/.runeweaver/memory`, `~/.runeweaver/config.toml`, `~/.runeweaver/policy.toml`), and that protected set always applies even when `deny_paths` is narrowed or emptied; (2) **credential confinement**: credentials cannot target unbounded wildcards (a single leading `*.` edge authorizes its base domain plus subdomains, with the base checked like an exact host), cloud metadata (`169.254.169.254`, `metadata.google.internal`), loopback, or private RFC 1918 ranges; (3) **rule-shadow prevention**: broad allowlists never shadow or conflict with specific deny rules; (4) **critical tool lock**: `messages.send`, `desktop.action`, `desktop.screenshot` cannot be raised to `trusted` via policy.
+- **`OutboundEgressSupervisor`** (actor, `OutboundEgressSupervisor.swift`, Tools): the single choke-point for `api.request` outbound traffic. `validate()` gate order: (1) network policy gate (canonicalized exact and wildcard domain match), (2) credential target-binding gate (verify credential host, method, path prefix), (3) SSRF guard (`ApiSSRFGuard`), (4) just-in-time wire injection (swap `rwsecret:<key>` for the live Keychain value), followed by `sweepResponse` redaction of echoed secrets. Network and binding checks run BEFORE Keychain access or DNS resolution, so a denied destination never causes a network side effect. The SSRF gate returns a **dial pin** — the numeric addresses it proved plus the original host identity — and the `api.request` transport (`PinnedDialTransport.swift`) dials only those pinned addresses, presenting the original `Host` header and TLS server name and validating the peer certificate against that host. The hostname is never resolved again after vetting, so a rebinding answer cannot steer a hop to a destination the gate refused; every redirect hop carries its own pin from its own supervised pass, and the transport fails closed when a dial arrives without a pin.
+
+**Production wiring contract**: the supervisor is mandatory at every production entry point. `ApiRequestTool` takes a non-optional supervisor (no default-nil); `BuiltinToolPlugins.makeAllTools(config:policyStore:)` uses exactly ONE `PolicyStore` instance per process (the caller injects it, or the factory constructs it when nil), builds the supervisor via `OutboundEgressSupervisor.make(policyStore:)`, and threads it through `ApiRequestTools.makeTools`. CLI and menu-bar app exit nonzero at boot when the policy cannot be verified — no supervisor-less fallback path exists. The server's `ServerSettingsRoutes` shares the SAME store instance between the tool-rebuild path and the `GET/PUT/POST /settings/policy` routes, so an HTTP policy write is visible to the supervisor immediately without a restart; there is no filesystem watcher — the actor state is authoritative within the process and the file is source of truth at first construction. Seatbelt profiles deny `~/.runeweaver/policy.toml` to sandboxed subprocesses so policy cannot be altered from inside a sandboxed shell.
+
+**Surfaces**: CLI `rune-weaver policy show/verify/init` (verify runs all four invariants on demand); dashboard Security tab (visual egress-boundaries overview, target-bound credentials table, invariant-status banner, and a raw-TOML editor with real-time candidate verification); REST `GET /settings/policy` (parsed DTO + raw TOML + live invariant status), `PUT /settings/policy` (atomically validates invariants then persists), and `POST /settings/policy/verify` (candidate verification for editors).
+
+Scope note: `web.fetch` and browser egress keep their existing SSRF/redirect guard stacks (sensitive-range table single-sourced with `api.request`) and are NOT routed through the supervisor in this cycle; extending declarative policy to them would be new behavior and a separate decision.
 
 ---
 
@@ -218,7 +289,7 @@ Local single-owner pre-built index: pay once, answer from index, fall back to li
 
 ### Shipped
 
-**Email**: IMAP search/read via `BODY.PEEK`, attachment staging, approval-gated send. **Apple Messages**: snapshot-copy search/read plus gated send. **Browser/web**: `web.search`, `web.fetch`, `browser.navigate` + `act`, `api.request`. **Desktop**: `desktop.screenshot` plus gated `desktop.action`, off by default behind tool-state toggle. **Media**: `media.arr` gated plus `media.arr.read`. **Files & documents**: direct reads plus grep/glob via `FilesAccessGuard`. **Local document index**: opt-in FTS5 plus vectors feeding `memories.recall`.
+**Email**: IMAP search/read via `BODY.PEEK`, attachment staging, approval-gated send, with deterministic redaction of credential-bearing mail at the agent-visible boundary. **Apple Messages**: snapshot-copy search/read plus gated send. **Browser/web**: `web.search`, `web.fetch`, `browser.navigate` + `act` (SSRF-guarded egress), `api.request` (surrogate-aware headers supervised by the mandatory `OutboundEgressSupervisor`, §15). **Desktop**: `desktop.screenshot` plus gated `desktop.action`, off by default behind tool-state toggle. **Media**: `media.arr` gated plus `media.arr.read`. **Files & documents**: direct reads plus grep/glob via `FilesAccessGuard`. **Local document index**: opt-in FTS5 plus vectors feeding `memories.recall`. **Goals/ideas/fan-out**: durable goals with proactive surfacing, an opt-in ideas engine, and opt-in multi-agent fan-out. **Declarative policy**: `~/.runeweaver/policy.toml` with CLI/dashboard/REST management surfaces (§15).
 
 ### Planned
 
@@ -233,14 +304,16 @@ Apple Mail native, HomeKit/Home Assistant control, Discord, GitHub, Calendar (co
 3. **Sandbox before trust**.
 4. **No secrets in prompts**.
 5. **Audit trail** locally with timestamps and inputs.
+6. **Defense in depth for external content**: declaration-driven untrusted labeling, deterministic credential filtering, single-sourced SSRF egress, and surrogate credential references.
+7. **Declarative deny-by-default egress**: `~/.runeweaver/policy.toml` verified by formal invariants at the storage boundary and enforced at a single mandatory choke-point (`OutboundEgressSupervisor`) for `api.request`; unverifiable policy fails closed at boot, and supervisor denial is evaluated before Keychain or DNS side effects.
 
-Sandbox paths under `~/.runeweaver/` for config, `index.db`, `memory/episodes.db`, `memory/vectors/`, logs, plugins, voice models.
+Sandbox paths under `~/.runeweaver/` for config, `policy.toml`, `index.db`, `memory/episodes.db`, `memory/vectors/`, logs, plugins, voice models. The policy file itself is additionally denied to sandboxed subprocesses via the Seatbelt profile.
 
 ---
 
 ## MVP SCOPE (with build status — detail in ROADMAP.md)
 
-Phase 1 Foundation — shipped. Phase 2 Memory — shipped (now routed recall with budgets, starter pack, diagnostics). Phase 3 Email — shipped except Apple Mail native. Phase 4 Browser & Multi-step — tools shipped. Phase 5 Home & Communication — partial (Messages shipped). Phase 6 Voice & Polish — partial. Phase 7 Self-Improvement — partial. Phase 8 Service & Runtime — shipped except launchd/iOS.
+Phase 1 Foundation — shipped. Phase 2 Memory — shipped (routed recall with budgets, starter pack, diagnostics). Phase 3 Email — shipped except Apple Mail native. Phase 4 Browser & Multi-step — tools shipped. Phase 5 Home & Communication — partial (Messages shipped). Phase 6 Voice & Polish — partial. Phase 7 Self-Improvement — partial. Phase 8 Service & Runtime — shipped except launchd/iOS, and now includes the Goals subsystem, proactive surfacing gate, Ideas engine, and multi-agent fan-out.
 
 ---
 
@@ -273,9 +346,37 @@ icloud_evicted = "skip"
 describe_images_with_llm = false
 nightly_budget = 0
 db_path = "~/.runeweaver/index.db"
+
+[security]
+untrusted_labeling = true
+email_credential_filter = true
+
+[goals]
+enabled = false
+step_interval_minutes = 1440
+max_active_goals = 10
+max_steps_per_goal = 12
+plan_timeout_seconds = 60
+max_triggers_per_goal = 8
+
+[proactive]
+mode = "all"          # all | milestones | guarded | off
+judge_timeout_seconds = 15
+
+[ideas]
+enabled = false
+max_per_cycle = 3
+
+[fanout]
+enabled = false
+max_workers = 4
+worker_timeout_seconds = 300
+full_tools = false
 ```
 
-Full sample retains `[engine]`, `[auth]`, `[llm]`, `[voice]`, `[sandbox]`, `[files]`, `[browser]`, `[desktop]`, `[email]`, `[home]`, `[media.*]`, `[scheduler]`, `[plugins]`, `[security]` as previously documented; only `[memory]` gains the `recall_*` budget keys above.
+Every section is additive with defaults on absent keys, so existing `config.toml` files load untouched. Full sample retains `[engine]`, `[auth]`, `[llm]`, `[voice]`, `[sandbox]`, `[files]`, `[browser]`, `[desktop]`, `[email]`, `[home]`, `[media.*]`, `[scheduler]`, and `[plugins]` as previously documented. All of these sections round-trip through `Config`/`ConfigTOML`/`Config+Serialization`/`Config+Validation`.
+
+**Separate declarative policy file (`~/.runeweaver/policy.toml`, not part of `config.toml`)**: top-level `version`; `[network]` with `mode` (`allowlist_only` | `deny_by_default` | `unrestricted`), `allowed_domains`, `blocked_domains`; `[credentials."<key>"]` with `allowed_hosts` (exact hosts plus a single leading `*.` subdomain edge), `allowed_methods`, `allowed_path_prefixes`; `[filesystem]` with `allow_roots` and `deny_paths` (declared paths are always enforced together with the fixed protected set); `[tools."<name>"]` with `level` and `allow_graduated_trust`. TOML arrays are single-line per element-list convention (enforced by the parser). The file is owned by `PolicyStore`, editable via CLI `rune-weaver policy` commands or the dashboard raw-TOML editor, and is never written by tools at runtime.
 
 ---
 
@@ -290,7 +391,7 @@ Full sample retains `[engine]`, `[auth]`, `[llm]`, `[voice]`, `[sandbox]`, `[fil
 5. **Playwright over Selenium**.
 6. **Graduated trust over binary permissions**.
 7. **Native WebSocket notifications; osascript only for CLI foreground**.
-8. **SQLite as source of truth for scheduler and runs**.
+8. **SQLite as source of truth for scheduler, goals, and runs**.
 9. **Per-run job sessions & badged history**.
 10. **Dynamic system prompt plus narration fallback**.
 11. **Spec-compliant markdown sanitization**.
@@ -311,6 +412,13 @@ Full sample retains `[engine]`, `[auth]`, `[llm]`, `[voice]`, `[sandbox]`, `[fil
 26. **Native Messages read plus gated send**.
 27. **Dashboard tools category contract**.
 28. **Routed, budgeted, freshness-aware recall with starter pack**: automatic recall is governed by `[memory] recall_*` budgets owned by `MemoryConfig`, planned by `MemoryQueryRouter` (temporal + freshness inference, no LLM), footed by `RecallStarterPack` (`Profile:`, `Index as of:`, `Goal:`), fused with widened-pool RRF plus citation-preserving truncation, and observed via content-free diagnostics. Placement stays before the last user message; retrieval stays fail-closed; labeling stays declaration-driven.
+29. **Goals are durable first-class entities, not scheduler jobs**: a goal owns a plan, step statuses, an event log, and a cadence in `episodes.db`; the scheduler executes toward it. Dynamic goal state composes into the advance prompt (UserInput text), never the cached system-prompt prefix. Goal advances are ordinary orchestrator turns and never bypass the permission gate.
+30. **Proactive surfacing is gated, default-all**: `OutcomeGate` decides interruptions with modes `all`/`milestones`/`guarded`/`off`, guarded failing open; the gate filters interruptions only and never suppresses run history, WS frames, or the approvals inbox.
+31. **Ideas are opt-in, fail-empty**: one cheap LLM call over goal outcomes plus memory facts; a flaky parse yields no ideas rather than fabricated ones; dedup by title.
+32. **Event triggers reuse the firing path**: a trigger match sets `next_due_at = now`; no parallel firing machinery, no catch-up stacking (one match per cooldown window).
+33. **Multi-agent fan-out is opt-in with read-only workers**: concurrent worker turns get fresh sessions and a read-only tool subset; merge is deterministic overlap flagging first, then one background reviewer pass that fails open to the raw concatenation, and workers never exceed their permission gate.
+34. **Grouped navigation, click-only menus**: navigation groups tab-state (no router); dropdowns are click/keyboard-only — hover-open is deliberately excluded.
+35. **Declarative deny-by-default egress with mandatory supervision**: `~/.runeweaver/policy.toml` is owned by a verifying `PolicyStore` actor (four formal invariants at the storage boundary; factory-safe defaults on failure); `OutboundEgressSupervisor` is the single choke-point for `api.request` egress (network gate → binding gate → SSRF → JIT secret injection → response sweep), non-optional at every production call site, sharing one `PolicyStore` per process with the settings routes so HTTP policy writes apply immediately without restart. Each allowed verdict carries a **dial pin** (the numeric addresses the SSRF gate proved plus the original host identity), and the transport dials that pin with the original `Host` header and TLS server name instead of resolving the hostname again — so the pre-dial gate order also closes the connect-time DNS-rebinding race on the initial URL and every redirect hop, and a missing pin fails closed.
 
 ### Constraints
 
@@ -318,7 +426,11 @@ Full sample retains `[engine]`, `[auth]`, `[llm]`, `[voice]`, `[sandbox]`, `[fil
 - Single-owner, fail-closed binding and host enforcement, auth-before-exposure, ATS local-networking only.
 - Local-first; opt-in indexing; opt-in desktop with OS permissions; Messages send always gated.
 - Default-ON hardening; no live secrets in context; fail-closed transport.
+- Declarative egress policy: deny-by-default with explicit allowlist only; credentials bound to `allowed_hosts`/`allowed_methods`/`allowed_path_prefixes`; protected directories are never allowable roots; unverifiable `policy.toml` fails closed (CLI exits nonzero, serve refuses boot) — never permissive defaults.
 - Bounds: `memories.recall` limit 1–50 default 5; auto-recall bounded by `recall_auto_limit`, `recall_threshold`, `recall_max_chars`, `recall_per_hit_chars`; doc pool bounded by `recall_doc_pool_multiplier` (1–8); episodic weight 0–1; `messages.search` 1–50 default 10; `messages.read` 1–100 default 20; empty text rejected; AppleScript rejects null bytes.
+- Goals bounds: `step_interval_minutes` 5–20160; `max_active_goals` 1–50; `max_steps_per_goal` 1–24; `max_triggers_per_goal` 0–32; `plan_timeout_seconds` default 60.
+- Fan-out bounds: `max_workers` 1–8 default 4; `worker_timeout_seconds` default 300; `full_tools` default false.
+- Ideas bound: `max_per_cycle` 1–10 default 3.
 - macOS Sequoia or later.
 
 ### Code Commenting Guidelines
@@ -335,3 +447,5 @@ Full sample retains `[engine]`, `[auth]`, `[llm]`, `[voice]`, `[sandbox]`, `[fil
 2. Plugin updates propagation.
 3. Offline behavior when Mac Studio unreachable.
 4. Index freshness: nightly plus on-demand now supplemented by freshness-aware live fallback and watermark surfacing; whether hot-path filesystem watchers are still needed remains open.
+5. Proactive-gate tuning: whether `guarded` should also judge non-`schedulerOk` events (e.g. ideas) in addition to milestones.
+6. Fan-out concurrency: whether the orchestrator should admit truly concurrent turns or remain sequential-but-bounded under load.

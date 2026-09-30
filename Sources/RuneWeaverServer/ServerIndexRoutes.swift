@@ -175,8 +175,18 @@ private func registerIndexResetRoute(_ app: Application) {
             throw Abort(.serviceUnavailable, reason: "Indexing is not configured.")
         }
         try await store.reset()
-        try? await context.indexCoordinator?.reset()
-        try? MailIndexCheckpointStore.reset()
+        if let coordinator = context.indexCoordinator {
+            do {
+                try await coordinator.reset()
+            } catch {
+                RuneWeaverLog.server.warning("ServerIndexRoutes: failed to reset index coordinator: \(error.localizedDescription)")
+            }
+        }
+        do {
+            try MailIndexCheckpointStore.reset()
+        } catch {
+            RuneWeaverLog.server.warning("ServerIndexRoutes: failed to reset mail checkpoints: \(error.localizedDescription)")
+        }
         return IndexResetResponse(reset: true)
     }
 }

@@ -123,7 +123,7 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             print(TerminalStyle.error("Unknown provider '\(provider ?? "")'. Available: \(names)."))
             throw ExitCode(1)
         }
-        let runtime = await Self.makeHeadlessRuntime(
+        let runtime = try await Self.makeHeadlessRuntime(
             jobs: schedulerJobs,
             loaded: loaded,
             providers: providers,
@@ -184,12 +184,14 @@ struct SchedulerRunCommand: AsyncParsableCommand {
     private typealias GoalHeadlessTurnRunner = @Sendable (String, UUID, UUID) async throws -> GoalAdvancementTurn
 
     /// Wires headless collaborators for the foreground loop.
+    /// - Throws: `ExitCode(1)` when the security policy cannot be verified, so
+    ///   the headless loop never runs with an unsupervised `api.request`.
     private static func makeHeadlessRuntime(
         jobs: [SchedulerJobConfig],
         loaded: CLIConfigLoader.LoadedConfig,
         providers: [any LLMProvider],
         selected: any LLMProvider
-    ) async -> HeadlessRuntime {
+    ) async throws -> HeadlessRuntime {
         let memoryEngine = CLIShared.memoryEngine(for: loaded.config.memory)
         let conversations = ConversationManager(episodesDBPath: loaded.config.memory.episodesDBPath)
         do {
@@ -232,7 +234,7 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             memoryFacts: { await memoryEngine.getUserProfile().facts.map(\.content) }
         )
         let goalEngine = GoalEngine(store: goalStore, llm: selected, config: loaded.config.goals, ideasEngine: headlessIdeasEngine)
-        let toolBus = await CLIShared.makeToolBus(
+        let toolBus = try await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
             bashConfig: loaded.config.bash,

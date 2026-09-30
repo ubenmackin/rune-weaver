@@ -11,6 +11,11 @@
 // return `requiresRestart` so the dashboard shows a pending-vs-live restart
 // banner instead of pretending the new bind is live. `[files]` saves apply
 // live the same way and never claim a restart.
+//
+// The `/settings/policy` routes read and write the context's shared
+// `PolicyStore`, the same instance backing the mandatory `api.request` egress
+// supervisor, so an HTTP policy write is live in-process with no filesystem
+// watcher and no restart.
 
 import Foundation
 import RuneWeaverCore
@@ -22,6 +27,7 @@ func registerSettingsRoutes(_ app: Application) {
     let settings = app.grouped(PathComponent.constant(ServerPaths.settings))
     registerSettingsConfigRoutes(settings)
     registerSettingsSecretsRoutes(settings)
+    registerSettingsPolicyRoutes(settings)
 }
 
 private func registerSettingsConfigRoutes(_ settings: RoutesBuilder) {
@@ -130,7 +136,7 @@ private func handlePutSettings(req: Request) async throws -> Response {
         await applyLiveOrchestratorTuning(body: body, context: liveContext)
         await applyLiveRecallBudgets(body: body, config: config, context: liveContext)
         await reloadLiveMediaTools(body: body, config: config, context: liveContext)
-        await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
+        try await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
         await reloadLiveDesktopTools(body: body, config: config, context: liveContext)
         await reloadLiveBashFilesTools(body: body, config: config, context: liveContext)
         try await reloadLiveIndexPolicy(body: body, config: config, context: liveContext, prebuilt: prebuiltIndexComponents)
@@ -371,7 +377,9 @@ private func gatewayForLiveReload(
 
 /// Reloads browser, web, and API tools when origins may have changed so homelab hosts apply immediately.
 /// The stored gateway and transports ride along so a settings PUT refreshes origins without dropping the bridge.
-private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
+/// The rebuilt supervisor reads the shared policy store, so an origin refresh
+/// keeps the same declarative policy as the boot-time choke-point.
+private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async throws {
     // Provider endpoints feed the SSRF exemption set, so an LLM-endpoint change
     // must refresh live tools immediately rather than waiting for a restart.
     guard body.media != nil || body.browserAllowedOrigins != nil || body.browserSearxngURL != nil
@@ -382,6 +390,17 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
     }
     let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
     let browserOrigins = ApiSSRFGuard.allowlistedOrigins(
+        browserConfig: config.browser,
+        mediaConfig: config.media,
+        llmServerURLs: appLLMOrigins
+    )
+    // The rebuild goes through the same supervisor factory as boot, reading
+    // the shared policy store so an origin refresh never swaps in an
+    // unsupervised api.request; a store that lost its verified policy fails
+    // the PUT instead of degrading the live tool.
+    let supervisor = try await OutboundEgressSupervisor.make(
+        policyStore: context.policyStore,
+        secrets: context.secrets,
         browserConfig: config.browser,
         mediaConfig: config.media,
         llmServerURLs: appLLMOrigins
@@ -430,11 +449,8 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
         await reregisterPreservingToggle(tool, on: context)
     }
     for tool in ApiRequestTools.makeTools(
-        browserConfig: config.browser,
-        mediaConfig: config.media,
-        llmServerURLs: appLLMOrigins,
-        transport: context.apiTransport,
-        secrets: context.secrets
+        supervisor: supervisor,
+        transport: context.apiTransport
     ) {
         await reregisterPreservingToggle(tool, on: context)
     }
@@ -674,4 +690,161 @@ private func probedIndexComponents(savedConfig: RuneWeaverConfig, context: Serve
         throw Abort(.badRequest, reason: "Index database is not usable at '\(savedConfig.index.dbPath)': \(error.localizedDescription)")
     }
     return components
+}
+
+// MARK: - Security Policy Routes
+
+private func registerSettingsPolicyRoutes(_ settings: RoutesBuilder) {
+    let policyGroup = settings.grouped(PathComponent.constant(ServerPaths.policy))
+
+    // GET /settings/policy
+    policyGroup.get { req async throws -> PolicyResponse in
+        // The context's shared store is the in-process authority: it accepted
+        // a policy at boot and every HTTP write updates the same actor state
+        // the egress supervisor reads, so no filesystem watcher is needed.
+        let store = req.application.runeWeaver.policyStore
+        let fileURL = await store.fileURL
+        let policy = await store.current
+        let rawToml: String = if FileManager.default.fileExists(atPath: fileURL.path),
+                                 let contents = try? String(contentsOf: fileURL, encoding: .utf8)
+        {
+            contents
+        } else {
+            PolicyStore.serialize(policy)
+        }
+        let loadedFromDisk = await store.loadedFromDisk
+        // A present-but-rejected file leaves the fallback in `current`, so
+        // verifying the fallback would launder the rejection as healthy.
+        // Surface the load diagnostics instead, matching the CLI rejection
+        // path; a seeded first run still verifies clean because its snapshot
+        // was accepted.
+        let violations: [String]
+        if !loadedFromDisk, FileManager.default.fileExists(atPath: fileURL.path) {
+            do {
+                let verified = try await store.snapshot()
+                violations = PolicyInvariantVerifier.verify(verified)
+            } catch {
+                let diagnostics = await store.lastLoadDiagnostics
+                violations = diagnostics.isEmpty ? [error.localizedDescription] : diagnostics
+            }
+        } else {
+            violations = PolicyInvariantVerifier.verify(policy)
+        }
+
+        let dto = makePolicyDTO(from: policy)
+        return PolicyResponse(
+            policy: dto,
+            rawToml: rawToml,
+            path: fileURL.path,
+            loadedFromDisk: loadedFromDisk,
+            violations: violations
+        )
+    }
+
+    // PUT /settings/policy
+    policyGroup.put { req async throws -> PolicyResponse in
+        let body = try req.content.decode(UpdatePolicyRequest.self)
+        let store = req.application.runeWeaver.policyStore
+        let fileURL = await store.fileURL
+
+        guard let rawToml = body.rawToml, !rawToml.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw Abort(.badRequest, reason: "Missing raw_toml field in update request.")
+        }
+
+        let parsed: SecurityPolicy
+        do {
+            parsed = try PolicyStore.parse(rawToml)
+        } catch {
+            throw Abort(.badRequest, reason: "Invalid TOML syntax: \(error)")
+        }
+
+        let violations = PolicyInvariantVerifier.verify(parsed)
+        guard violations.isEmpty else {
+            throw Abort(.badRequest, reason: "Security policy violates formal invariants: " + violations.joined(separator: "; "))
+        }
+
+        let directory = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try rawToml.write(to: fileURL, atomically: true, encoding: .utf8)
+
+        // Re-load into the shared store so the accepted snapshot — and every
+        // egress supervisor reading it — observes the write immediately.
+        // The response mirrors the store's authoritative flags rather than
+        // assuming the reload succeeded, so the dashboard never diverges
+        // from the supervisor's view.
+        let loaded = await store.load()
+        let loadedFromDisk = await store.loadedFromDisk
+        let dto = makePolicyDTO(from: loaded)
+        let responseViolations: [String]
+        if !loadedFromDisk, FileManager.default.fileExists(atPath: fileURL.path) {
+            do {
+                let verified = try await store.snapshot()
+                responseViolations = PolicyInvariantVerifier.verify(verified)
+            } catch {
+                let diagnostics = await store.lastLoadDiagnostics
+                responseViolations = diagnostics.isEmpty ? [error.localizedDescription] : diagnostics
+            }
+        } else {
+            responseViolations = PolicyInvariantVerifier.verify(loaded)
+        }
+        return PolicyResponse(
+            policy: dto,
+            rawToml: rawToml,
+            path: fileURL.path,
+            loadedFromDisk: loadedFromDisk,
+            violations: responseViolations
+        )
+    }
+
+    // POST /settings/policy/verify
+    policyGroup.post(PathComponent.constant(ServerPaths.verify)) { req async throws -> VerifyPolicyResponse in
+        let body = try req.content.decode(VerifyPolicyRequest.self)
+        let parsed: SecurityPolicy
+        do {
+            parsed = try PolicyStore.parse(body.rawToml)
+        } catch {
+            return VerifyPolicyResponse(valid: false, violations: ["TOML Syntax Error: \(error)"])
+        }
+
+        let violations = PolicyInvariantVerifier.verify(parsed)
+        return VerifyPolicyResponse(valid: violations.isEmpty, violations: violations)
+    }
+}
+
+private func makePolicyDTO(from policy: SecurityPolicy) -> SecurityPolicyDTO {
+    let networkDTO = NetworkEgressPolicyDTO(
+        mode: policy.network.mode.rawValue,
+        allowedDomains: policy.network.allowedDomains.sorted(),
+        blockedDomains: policy.network.blockedDomains.sorted()
+    )
+
+    var credsDTO: [String: CredentialBindingDTO] = [:]
+    for (credentialKey, binding) in policy.credentials {
+        credsDTO[credentialKey] = CredentialBindingDTO(
+            allowedHosts: binding.allowedHosts.sorted(),
+            allowedMethods: binding.allowedMethods.sorted(),
+            allowedPathPrefixes: binding.allowedPathPrefixes
+        )
+    }
+
+    let fsDTO = FilesystemPolicyDTO(
+        allowRoots: policy.filesystem.allowRoots,
+        denyPaths: policy.filesystem.denyPaths
+    )
+
+    var toolsDTO: [String: ToolPolicyDTO] = [:]
+    for (toolName, toolPolicy) in policy.tools {
+        toolsDTO[toolName] = ToolPolicyDTO(
+            level: toolPolicy.level.rawValue,
+            allowGraduatedTrust: toolPolicy.allowGraduatedTrust
+        )
+    }
+
+    return SecurityPolicyDTO(
+        version: policy.version,
+        network: networkDTO,
+        credentials: credsDTO,
+        filesystem: fsDTO,
+        tools: toolsDTO
+    )
 }

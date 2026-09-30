@@ -209,6 +209,24 @@ struct SurrogateResolutionTests {
 
 @Suite("API Transport Surrogation", .serialized)
 struct ApiSurrogateTransportTests {
+    /// Builds the mandatory supervisor over a verified policy that allows one
+    /// host and binds one surrogate key, mirroring the production factory's
+    /// requirement so the transport tests exercise the supervised path.
+    private func makeSupervisor(host: String, key: String?) async -> OutboundEgressSupervisor {
+        let store = PolicyStore(fileURL: URL(fileURLWithPath: "/tmp/rw-api-supervision-\(UUID().uuidString).toml"))
+        var credentials: [String: CredentialBinding] = [:]
+        if let key {
+            credentials[key] = CredentialBinding(allowedHosts: [host])
+        }
+        await store.update(
+            SecurityPolicy(
+                network: NetworkEgressPolicy(mode: .allowlistOnly, allowedDomains: [host]),
+                credentials: credentials
+            )
+        )
+        return OutboundEgressSupervisor(policyStore: store, secrets: SecretsManager(), browserConfig: BrowserConfig())
+    }
+
     @Test
     func `Args carry the surrogate while the wire request carries the real value`() async throws {
         let key = "RW_TEST_API_TRANSPORT_TOKEN"
@@ -217,7 +235,8 @@ struct ApiSurrogateTransportTests {
             defer { clearDNS() }
             let box = CapturedRequestBox()
             let transport = CapturingApiTransport(box: box, body: Data(#"{"hello":"world"}"#.utf8))
-            let tool = ApiRequestTool(transport: transport)
+            let supervisor = await makeSupervisor(host: "example.com", key: key)
+            let tool = ApiRequestTool(transport: transport, egressSupervisor: supervisor)
             let arguments = #"{"method":"GET","url":"https://example.com/ping","headers":{"Authorization":"Bearer rwsecret:\#(key)"}}"#
             #expect(arguments.contains("rwsecret:"))
             #expect(!arguments.contains("live-secret-abc-123"))
@@ -240,7 +259,11 @@ struct ApiSurrogateTransportTests {
         stubPublicDNS()
         defer { clearDNS() }
         let box = CapturedRequestBox()
-        let tool = ApiRequestTool(transport: CapturingApiTransport(box: box, body: Data(#"{}"#.utf8)))
+        let supervisor = await makeSupervisor(host: "example.com", key: missing)
+        let tool = ApiRequestTool(
+            transport: CapturingApiTransport(box: box, body: Data(#"{}"#.utf8)),
+            egressSupervisor: supervisor
+        )
         let output = try await tool.execute(
             input: ToolInput(
                 toolName: "api.request",
@@ -260,7 +283,11 @@ struct ApiSurrogateTransportTests {
             stubPublicDNS()
             defer { clearDNS() }
             let box = CapturedRequestBox()
-            let tool = ApiRequestTool(transport: CapturingApiTransport(box: box, body: Data(#"{}"#.utf8)))
+            let supervisor = await makeSupervisor(host: "example.com", key: key)
+            let tool = ApiRequestTool(
+                transport: CapturingApiTransport(box: box, body: Data(#"{}"#.utf8)),
+                egressSupervisor: supervisor
+            )
             let output = try await tool.execute(
                 input: ToolInput(
                     toolName: "api.request",

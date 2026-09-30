@@ -586,7 +586,10 @@ public struct FilesWriteTool: Tool, Sendable {
                     // The store row is already gone, so an orphan sibling would
                     // turn invisible with no crawl to surface it; surface the
                     // failure instead of swallowing it.
-                    RuneWeaverLog.tools.error("files.write: failed removing superseded staging sibling at \(target.stagingURL.path): \(error.localizedDescription)")
+                    let stagingPath = target.stagingURL.path
+                    RuneWeaverLog.tools.error(
+                        "files.write: failed removing superseded staging sibling at \(stagingPath): \(error.localizedDescription)"
+                    )
                 }
             }
 

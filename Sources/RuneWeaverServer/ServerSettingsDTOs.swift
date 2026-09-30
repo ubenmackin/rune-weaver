@@ -782,3 +782,166 @@ public struct SecretStatusResponse: Content, Sendable, Equatable {
         self.status = status
     }
 }
+
+// MARK: - Policy Settings DTOs
+
+/// DTO mirroring NetworkEgressPolicy.
+public struct NetworkEgressPolicyDTO: Content, Sendable, Equatable {
+    public let mode: String
+    public let allowedDomains: [String]
+    public let blockedDomains: [String]
+
+    public init(mode: String, allowedDomains: [String], blockedDomains: [String]) {
+        self.mode = mode
+        self.allowedDomains = allowedDomains
+        self.blockedDomains = blockedDomains
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case mode
+        case allowedDomains = "allowed_domains"
+        case blockedDomains = "blocked_domains"
+    }
+}
+
+/// DTO mirroring CredentialBinding.
+public struct CredentialBindingDTO: Content, Sendable, Equatable {
+    public let allowedHosts: [String]
+    public let allowedMethods: [String]
+    public let allowedPathPrefixes: [String]
+
+    public init(allowedHosts: [String], allowedMethods: [String], allowedPathPrefixes: [String]) {
+        self.allowedHosts = allowedHosts
+        self.allowedMethods = allowedMethods
+        self.allowedPathPrefixes = allowedPathPrefixes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case allowedHosts = "allowed_hosts"
+        case allowedMethods = "allowed_methods"
+        case allowedPathPrefixes = "allowed_path_prefixes"
+    }
+}
+
+/// DTO mirroring FilesystemPolicy.
+public struct FilesystemPolicyDTO: Content, Sendable, Equatable {
+    public let allowRoots: [String]
+    public let denyPaths: [String]
+
+    public init(allowRoots: [String], denyPaths: [String]) {
+        self.allowRoots = allowRoots
+        self.denyPaths = denyPaths
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case allowRoots = "allow_roots"
+        case denyPaths = "deny_paths"
+    }
+}
+
+/// DTO mirroring ToolPolicy.
+public struct ToolPolicyDTO: Content, Sendable, Equatable {
+    public let level: String
+    public let allowGraduatedTrust: Bool
+
+    public init(level: String, allowGraduatedTrust: Bool) {
+        self.level = level
+        self.allowGraduatedTrust = allowGraduatedTrust
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case level
+        case allowGraduatedTrust = "allow_graduated_trust"
+    }
+}
+
+/// DTO mirroring SecurityPolicy.
+public struct SecurityPolicyDTO: Content, Sendable, Equatable {
+    public let version: Int
+    public let network: NetworkEgressPolicyDTO
+    public let credentials: [String: CredentialBindingDTO]
+    public let filesystem: FilesystemPolicyDTO
+    public let tools: [String: ToolPolicyDTO]
+
+    public init(
+        version: Int = 1,
+        network: NetworkEgressPolicyDTO,
+        credentials: [String: CredentialBindingDTO],
+        filesystem: FilesystemPolicyDTO,
+        tools: [String: ToolPolicyDTO]
+    ) {
+        self.version = version
+        self.network = network
+        self.credentials = credentials
+        self.filesystem = filesystem
+        self.tools = tools
+    }
+}
+
+/// Response returned by GET /settings/policy.
+public struct PolicyResponse: Content, Sendable, Equatable {
+    public let policy: SecurityPolicyDTO
+    public let rawToml: String
+    public let path: String
+    public let loadedFromDisk: Bool
+    public let violations: [String]
+
+    public init(
+        policy: SecurityPolicyDTO,
+        rawToml: String,
+        path: String,
+        loadedFromDisk: Bool,
+        violations: [String]
+    ) {
+        self.policy = policy
+        self.rawToml = rawToml
+        self.path = path
+        self.loadedFromDisk = loadedFromDisk
+        self.violations = violations
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case policy
+        case rawToml = "raw_toml"
+        case path
+        case loadedFromDisk = "loaded_from_disk"
+        case violations
+    }
+}
+
+/// Request for PUT /settings/policy.
+public struct UpdatePolicyRequest: Content, Sendable, Equatable {
+    public let rawToml: String?
+
+    public init(rawToml: String? = nil) {
+        self.rawToml = rawToml
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case rawToml = "raw_toml"
+    }
+}
+
+/// Request for POST /settings/policy/verify.
+public struct VerifyPolicyRequest: Content, Sendable, Equatable {
+    public let rawToml: String
+
+    public init(rawToml: String) {
+        self.rawToml = rawToml
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case rawToml = "raw_toml"
+    }
+}
+
+/// Response returned by POST /settings/policy/verify.
+public struct VerifyPolicyResponse: Content, Sendable, Equatable {
+    public let valid: Bool
+    public let violations: [String]
+
+    public init(valid: Bool, violations: [String]) {
+        self.valid = valid
+        self.violations = violations
+    }
+}

@@ -1020,6 +1020,7 @@ extension ServerSchedulerWorker {
             }
         } catch {
             // Classification never fails a turn; routine is the quiet fallback.
+            RuneWeaverLog.scheduler.debug("ServerSchedulerWorker: failed to evaluate steps for goal \(goal.id): \(error.localizedDescription)")
         }
         return .goalStepDone
     }

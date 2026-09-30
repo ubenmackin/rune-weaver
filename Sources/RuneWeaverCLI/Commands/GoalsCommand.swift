@@ -610,7 +610,7 @@ enum GoalsCLIHelpers {
             router: LLMRouter(providers: providers)
         )
         let sharedSecrets = SecretsManager()
-        let toolBus = await CLIShared.makeToolBus(
+        let toolBus = try await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
             bashConfig: loaded.config.bash,

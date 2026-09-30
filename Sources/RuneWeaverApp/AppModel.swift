@@ -477,7 +477,7 @@ extension AppModel {
             self.providerName = pipeline.selectedProvider.name
             bootGate = pipeline.permissionGate
 
-            let context = await makeBootServerContext(pipeline: pipeline)
+            let context = try await makeBootServerContext(pipeline: pipeline)
             await registerBootTools(context: context, plugins: pipeline.plugins)
 
             self.serverContext = context

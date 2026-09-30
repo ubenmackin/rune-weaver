@@ -258,58 +258,10 @@ public actor Orchestrator {
                 return earlyResponse
             }
 
-            // Single registry snapshot shared by the prompt and the wire so both omit the
-            // same disabled tools; sorted order mirrors the prompt so leading bytes stay
-            // identical for server prefix caching. Both branches recompose from this snapshot
-            // (vision-aware) so a mid-run tool toggle reaches the next turn's prompt as well
-            // as its wire; mid-loop rounds reuse the snapshot, so a toggle takes effect on
-            // the next user message. An explicit operator override bypasses composition verbatim.
-            // A turn carrying an explicit allowedTools subset filters the snapshot here,
-            // before the loop, so the prompt and the wire advertise only the callable subset
-            // and a worker can never narrate or call outside it; nil keeps the full registry
-            // so plain turns pay nothing.
-            let availableTools = await toolBus.availableTools()
-            let sortedTools = VisionSchemaFilter.sortedByName(availableTools, name: { $0.name })
-            let tools = UserInput.filteredTools(
-                sortedTools,
-                allowed: input.allowedTools
-            )
-            let effectiveSystemPrompt = resolveEffectiveSystemPrompt(input: input, tools: tools)
-            // Temporal plus freshness-aware auto-recall through the shared
-            // turn wiring: one plan plus recall plus starter so service and
-            // CLI turns cannot drift. No date math here; the router owns every
-            // calendar derivation inside the shared helper.
-            let (recall, starterPack) = try await resolveTurnRecall(
+            let (request, turnWarnings) = try await prepareTurnLoopRequest(
+                input: input,
                 text: text,
-                sessionID: sessionID,
-                didEmitRecallDiagnostics: &didEmitRecallDiagnostics
-            )
-            let reservedToolTokens = ConversationManager.estimateToolTokens(in: tools)
-            await conversations.compactHistoryIfNeeded(
-                for: sessionID,
-                contextLength: llm.modelInfo.contextLength,
-                thresholdPercent: compactionThresholdPercent,
-                reservedTokens: reservedToolTokens
-            )
-            let workingMessages = await Self.stableHistoryWithRecallAndStarter(
-                conversations.workingHistory(for: sessionID, systemPrompt: effectiveSystemPrompt),
-                recall: recall,
-                starterPack: starterPack
-            )
-            // Degraded tools stay out of the model request but must not fail the turn:
-            // surface one static warning per skipped tool name mid-turn and again
-            // on the terminal response so streaming and polling clients agree.
-            let turnWarnings = OrchestratorToolLoop.degradedToolWarnings(for: tools)
-            for warning in turnWarnings {
-                await onEvent?(.warning(warning))
-            }
-            let request = TurnLoopRequest(
-                workingMessages: workingMessages,
-                tools: tools,
-                recall: recall,
-                starterPack: starterPack,
-                sessionID: sessionID,
-                systemPrompt: effectiveSystemPrompt,
+                didEmitRecallDiagnostics: &didEmitRecallDiagnostics,
                 onEvent: onEvent
             )
             let outcome = try await runTurnLoop(request, pendingEpisodic: &pendingEpisodic)
@@ -531,6 +483,80 @@ extension Orchestrator {
     /// - Returns: True for known background sources.
     public static func isBackgroundSource(_ source: String?) -> Bool {
         source == "scheduler" || source == "goal"
+    }
+
+    /// Prepares the tool-loop request and degraded-tool warnings for one turn.
+    ///
+    /// Resolves the tool snapshot filtered by caller permissions, the effective
+    /// system prompt, turn recall and starter pack, history compaction, and
+    /// degraded tool warnings before dispatching into the tool loop.
+    /// - Parameters:
+    ///   - input: User input driving this turn.
+    ///   - text: Trimmed prompt text.
+    ///   - didEmitRecallDiagnostics: Whether recall diagnostics were emitted.
+    ///   - onEvent: Stream event callback.
+    /// - Returns: Prepared turn loop request and degraded-tool warnings.
+    private func prepareTurnLoopRequest(
+        input: UserInput,
+        text: String,
+        didEmitRecallDiagnostics: inout Bool,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+    ) async throws -> (request: TurnLoopRequest, warnings: [String]) {
+        // Single registry snapshot shared by the prompt and the wire so both omit the
+        // same disabled tools; sorted order mirrors the prompt so leading bytes stay
+        // identical for server prefix caching. Both branches recompose from this snapshot
+        // (vision-aware) so a mid-run tool toggle reaches the next turn's prompt as well
+        // as its wire; mid-loop rounds reuse the snapshot, so a toggle takes effect on
+        // the next user message. An explicit operator override bypasses composition verbatim.
+        // A turn carrying an explicit allowedTools subset filters the snapshot here,
+        // before the loop, so the prompt and the wire advertise only the callable subset
+        // and a worker can never narrate or call outside it; nil keeps the full registry
+        // so plain turns pay nothing.
+        let availableTools = await toolBus.availableTools()
+        let sortedTools = VisionSchemaFilter.sortedByName(availableTools, name: { $0.name })
+        let tools = UserInput.filteredTools(
+            sortedTools,
+            allowed: input.allowedTools
+        )
+        let effectiveSystemPrompt = resolveEffectiveSystemPrompt(input: input, tools: tools)
+        // Temporal plus freshness-aware auto-recall through the shared
+        // turn wiring: one plan plus recall plus starter so service and
+        // CLI turns cannot drift. No date math here; the router owns every
+        // calendar derivation inside the shared helper.
+        let (recall, starterPack) = try await resolveTurnRecall(
+            text: text,
+            sessionID: input.sessionID,
+            didEmitRecallDiagnostics: &didEmitRecallDiagnostics
+        )
+        let reservedToolTokens = ConversationManager.estimateToolTokens(in: tools)
+        await conversations.compactHistoryIfNeeded(
+            for: input.sessionID,
+            contextLength: llm.modelInfo.contextLength,
+            thresholdPercent: compactionThresholdPercent,
+            reservedTokens: reservedToolTokens
+        )
+        let workingMessages = await Self.stableHistoryWithRecallAndStarter(
+            conversations.workingHistory(for: input.sessionID, systemPrompt: effectiveSystemPrompt),
+            recall: recall,
+            starterPack: starterPack
+        )
+        // Degraded tools stay out of the model request but must not fail the turn:
+        // surface one static warning per skipped tool name mid-turn and again
+        // on the terminal response so streaming and polling clients agree.
+        let turnWarnings = OrchestratorToolLoop.degradedToolWarnings(for: tools)
+        for warning in turnWarnings {
+            await onEvent?(.warning(warning))
+        }
+        let request = TurnLoopRequest(
+            workingMessages: workingMessages,
+            tools: tools,
+            recall: recall,
+            starterPack: starterPack,
+            sessionID: input.sessionID,
+            systemPrompt: effectiveSystemPrompt,
+            onEvent: onEvent
+        )
+        return (request, turnWarnings)
     }
 
     /// Resolves the effective system prompt for one turn.

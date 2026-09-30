@@ -1250,13 +1250,13 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
     ///
     /// Decimal dotted quads only: hex, octal, or short forms never open the LAN
     /// path and stay on the explicit allowlist instead, so obfuscated spellings
-    /// cannot slip past the range check. Range membership itself is
-    /// single-sourced through the SSRF guard's sensitive-range table so the two
-    /// gates cannot drift on RFC 1918 or link-local boundaries; loopback and
-    /// the unspecified block are carved out first because they belong on the
-    /// explicit allowlist, leaving only the LAN family (`10/8`, `172.16/12`,
-    /// `192.168/16`, `169.254/16`). A future range-table change that widens the
-    /// shared table must re-audit this carve-out before it can widen the gate.
+    /// cannot slip past the range check. The LAN family is exactly `10/8`,
+    /// `172.16/12`, `192.168/16`, and `169.254/16`, composed from the
+    /// sensitive-range table's per-family predicates so a widening of that
+    /// table (shared address space, TEST-NET, benchmarking, multicast,
+    /// reserved) can never silently widen this gate; loopback and the
+    /// unspecified block stay off the LAN path because they belong on the
+    /// explicit allowlist.
     /// - Parameter host: Lowercased, port-stripped Host.
     /// - Returns: True for `10/8`, `172.16/12`, `192.168/16`, or `169.254/16`.
     public static func isPrivateIPv4LANHost(_ host: String) -> Bool {
@@ -1266,7 +1266,10 @@ public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
         // value tested here is exactly the spelling the shape gate approved.
         let value = (UInt32(octets[0]) << 24) | (UInt32(octets[1]) << 16)
             | (UInt32(octets[2]) << 8) | UInt32(octets[3])
-        return ApiSSRFGuard.isSensitiveIPv4Value(value)
+        // Deliberately narrower than the sensitive-egress table: composing the
+        // two per-family predicates keeps the masks single-sourced without
+        // inheriting shared/reserved blocks as LAN hosts.
+        return ApiSSRFGuard.isPrivateIPv4Value(value) || ApiSSRFGuard.isLinkLocalIPv4Value(value)
     }
 
     /// Parses a decimal dotted quad without resolver-accepted obfuscation.

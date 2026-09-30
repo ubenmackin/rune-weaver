@@ -272,11 +272,13 @@ struct ToolBusTests {
     }
 
     @Test
-    func `BuiltinToolPlugins makeAllTools includes files email and web tools`() {
-        let tools = BuiltinToolPlugins.makeAllTools(
+    func `BuiltinToolPlugins makeAllTools includes files email and web tools`() async throws {
+        let policyStore = await ToolsTestSupport.makeTestPolicyStore()
+        let tools = try await BuiltinToolPlugins.makeAllTools(
             emailConfig: EmailConfig(),
             filesConfig: FilesConfig(),
-            browserConfig: BrowserConfig()
+            browserConfig: BrowserConfig(),
+            policyStore: policyStore
         )
         let names = Set(tools.map(\.name))
         #expect(names.contains("files.read"))
@@ -301,10 +303,12 @@ struct ToolBusTests {
             allowRoots: ["/tmp/runeweaver-email-policy-unused-root"],
             requireApprovalOnDeny: false
         )
-        let tools = BuiltinToolPlugins.makeAllTools(
+        let policyStore = await ToolsTestSupport.makeTestPolicyStore()
+        let tools = try await BuiltinToolPlugins.makeAllTools(
             emailConfig: EmailConfig(),
             filesConfig: restrictive,
-            browserConfig: BrowserConfig()
+            browserConfig: BrowserConfig(),
+            policyStore: policyStore
         )
         guard let attachment = tools.first(where: { $0.name == "email.attachment" }) else {
             Issue.record("email.attachment was not registered")

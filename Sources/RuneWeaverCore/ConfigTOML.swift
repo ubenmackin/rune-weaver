@@ -135,11 +135,36 @@ enum TOMLParser {
     }
 
     private static func tablePath(_ text: String, line: Int) throws -> [String] {
-        let parts = text.split(separator: ".").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard !parts.isEmpty, parts.allSatisfy({ !$0.isEmpty }) else {
+        var parts: [String] = []
+        var current = ""
+        var inQuotes = false
+        for char in text {
+            if char == "\"" || char == "'" {
+                inQuotes.toggle()
+                current.append(char)
+            } else if char == ".", !inQuotes {
+                var trimmed = current.trimmingCharacters(in: .whitespaces)
+                if (trimmed.hasPrefix("\"") && trimmed.hasSuffix("\"")) || (trimmed.hasPrefix("'") && trimmed.hasSuffix("'")), trimmed.count >= 2 {
+                    trimmed = String(trimmed.dropFirst().dropLast())
+                }
+                guard !trimmed.isEmpty else {
+                    throw ConfigError.parseError(line: line, message: "malformed table header: \(text)")
+                }
+                parts.append(trimmed)
+                current = ""
+            } else {
+                current.append(char)
+            }
+        }
+        var trimmed = current.trimmingCharacters(in: .whitespaces)
+        if (trimmed.hasPrefix("\"") && trimmed.hasSuffix("\"")) || (trimmed.hasPrefix("'") && trimmed.hasSuffix("'")), trimmed.count >= 2 {
+            trimmed = String(trimmed.dropFirst().dropLast())
+        }
+        guard !trimmed.isEmpty else {
             throw ConfigError.parseError(line: line, message: "malformed table header: \(text)")
         }
-        return parts.map { String($0) }
+        parts.append(trimmed)
+        return parts
     }
 
     /// Appends a new entry for the array-of-tables at `path`.

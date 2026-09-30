@@ -26,13 +26,16 @@ private struct BrokenSchemaTool: Tool, Sendable {
 @Suite("Tool Schemas")
 struct ToolSchemaTests {
     /// Single-sources the production registry so prompt and wire agree on the
-    /// same nineteen tools; isolated memory keeps the suite hermetic.
-    private func makeFullBuiltinTools(engine: MemoryEngine) -> [any Tool] {
-        EmailTools.makeTools(emailConfig: ToolsTestSupport.testEmailConfig())
+    /// same nineteen tools; isolated memory keeps the suite hermetic and the
+    /// injected policy store keeps the mandatory `api.request` supervisor off
+    /// the operator's real `policy.toml`.
+    private func makeFullBuiltinTools(engine: MemoryEngine, policyStore: PolicyStore) async throws -> [any Tool] {
+        let networkTools = try await BuiltinToolPlugins.makeTools(policyStore: policyStore)
+        return EmailTools.makeTools(emailConfig: ToolsTestSupport.testEmailConfig())
             + MemoryTools.makeTools(engine: engine)
             + FilesTools.makeTools()
             + MessagesTools.makeTools()
-            + BuiltinToolPlugins.makeTools()
+            + networkTools
     }
 
     private var expectedBuiltinNames: Set<String> {
@@ -49,8 +52,9 @@ struct ToolSchemaTests {
     func `All registered plugin tools expose valid JSON Schemas`() async throws {
         let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
+        let policyStore = await ToolsTestSupport.makeTestPolicyStore()
         let bus = ToolBus()
-        for tool in makeFullBuiltinTools(engine: engine) {
+        for tool in try await makeFullBuiltinTools(engine: engine, policyStore: policyStore) {
             await bus.register(tool: tool)
         }
         let tools = await bus.availableTools()
@@ -67,10 +71,11 @@ struct ToolSchemaTests {
     }
 
     @Test
-    func `Every builtin schema parses as a strict object`() throws {
+    func `Every builtin schema parses as a strict object`() async throws {
         let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
-        let tools = makeFullBuiltinTools(engine: engine)
+        let policyStore = await ToolsTestSupport.makeTestPolicyStore()
+        let tools = try await makeFullBuiltinTools(engine: engine, policyStore: policyStore)
         #expect(Set(tools.map(\.name)) == expectedBuiltinNames)
         for tool in tools {
             let parsed = try encodeToolParameters(ToolDefinition(tool))
@@ -82,10 +87,11 @@ struct ToolSchemaTests {
     }
 
     @Test
-    func `Builtin schemas advertise required alias groups`() throws {
+    func `Builtin schemas advertise required alias groups`() async throws {
         let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
-        let tools = makeFullBuiltinTools(engine: engine)
+        let policyStore = await ToolsTestSupport.makeTestPolicyStore()
+        let tools = try await makeFullBuiltinTools(engine: engine, policyStore: policyStore)
         for tool in tools {
             let parsed = try encodeToolParameters(ToolDefinition(tool))
             let properties = try #require(parsed["properties"] as? [String: Any], "Missing properties for \(tool.name)")
@@ -215,10 +221,11 @@ struct ToolSchemaTests {
     }
 
     @Test
-    func `Chat and Responses bodies succeed with the full tool set`() throws {
+    func `Chat and Responses bodies succeed with the full tool set`() async throws {
         let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
-        let tools = makeFullBuiltinTools(engine: engine)
+        let policyStore = await ToolsTestSupport.makeTestPolicyStore()
+        let tools = try await makeFullBuiltinTools(engine: engine, policyStore: policyStore)
         let definitions = tools.map { ToolDefinition($0) }
         let wireMessages = [Message(role: .user, content: "Full registry wire check")]
         let chatBody = try openAIChatRequestBody(model: "test-model", messages: wireMessages, tools: definitions, stream: true)
@@ -252,10 +259,11 @@ struct ToolSchemaTests {
     }
 
     @Test
-    func `Broken schemas degrade to fewer tools while direct encoding throws`() throws {
+    func `Broken schemas degrade to fewer tools while direct encoding throws`() async throws {
         let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
-        let validTools = makeFullBuiltinTools(engine: engine)
+        let policyStore = await ToolsTestSupport.makeTestPolicyStore()
+        let validTools = try await makeFullBuiltinTools(engine: engine, policyStore: policyStore)
         let validDefinitions = validTools.map { ToolDefinition($0) }
         let brokenDefinition = ToolDefinition(
             name: "broken.tool",

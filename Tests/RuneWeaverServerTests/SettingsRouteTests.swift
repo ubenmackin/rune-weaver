@@ -1,10 +1,22 @@
 // Rune Weaver Tests — Settings REST API integration and configuration tests.
+//
+// Purpose: pins the settings config merge and DTO contracts plus the
+// security-critical `/settings/policy` HTTP surface: the parsed GET shape,
+// PUT validation (TOML syntax then formal invariants) before any file write,
+// the shared-store visibility that lets a rebuilt egress supervisor observe an
+// accepted write with no restart, and the candidate verify route.
+// Scope: route status codes, DTO shapes, and policy file/store effects;
+// invariant math and the supervisor gate internals stay with their own suites.
+// Architectural role: guards the one owner surface whose writes steer the
+// mandatory egress choke-point, so a route edit cannot persist an unverified
+// policy or claim a write that never landed.
 
 import Foundation
 import RuneWeaverCore
 @testable import RuneWeaverServer
 import RuneWeaverTools
 import Testing
+import Vapor
 
 @Suite("Settings Configuration and DTOs")
 struct SettingsRouteTests {
@@ -756,5 +768,401 @@ struct SettingsRouteTests {
         #expect(fwdDenied.allowed == false)
         #expect(revDenied.allowed == false)
         #expect(fwdDenied.allowed == revDenied.allowed)
+    }
+}
+
+// MARK: - Security Policy Routes
+
+/// Builds an isolated policy store over a throwaway directory and loads it.
+///
+/// The route tests must exercise the real file read/write boundary, so the
+/// store points at a temp `policy.toml` instead of the operator's file. The
+/// load mirrors boot: a missing file seeds the factory-safe default and still
+/// counts as accepted, so the routes always start from a verified posture.
+/// - Parameter contents: Optional file contents written before the load.
+/// - Returns: The loaded store, the policy file URL, and the temp directory.
+private func makePolicyRouteStore(contents: String? = nil) async throws -> (store: PolicyStore, fileURL: URL, directory: URL) {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("rw-policy-routes-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let fileURL = directory.appendingPathComponent("policy.toml")
+    if let contents {
+        try contents.write(to: fileURL, atomically: true, encoding: .utf8)
+    }
+    let store = PolicyStore(fileURL: fileURL)
+    await store.load()
+    return (store, fileURL, directory)
+}
+
+/// Builds the lean route context for the policy surface.
+///
+/// Borrows the fallback context's collaborators — the policy routes read only
+/// the shared store, so no turn machinery is involved — and injects the
+/// isolated store under test as the one instance the app serves.
+/// - Parameter store: The one policy store this app's routes must serve.
+/// - Returns: A context wired for the `/settings/policy` routes.
+private func makePolicyRouteContext(store: PolicyStore) -> ServerContext {
+    let base = ServerContext.fallbackUnconfigured
+    return ServerContext(
+        config: .default,
+        conversations: base.conversations,
+        toolBus: base.toolBus,
+        orchestrator: base.orchestrator,
+        memoryEngine: base.memoryEngine,
+        permissionGate: base.permissionGate,
+        approvals: base.approvals,
+        steeringQueue: base.steeringQueue,
+        policyStore: store
+    )
+}
+
+/// Runs one test body against an application serving the policy routes.
+/// - Parameters:
+///   - store: The shared store the routes must serve.
+///   - body: Test body receiving the configured app.
+/// - Returns: Whatever `body` returns.
+private func withPolicyRouteApp<T>(
+    store: PolicyStore,
+    _ body: (Application) async throws -> T
+) async throws -> T {
+    let app = try await Application.make(.testing)
+    do {
+        app.runeWeaver = makePolicyRouteContext(store: store)
+        registerRuneWeaverRoutes(app)
+        let value = try await body(app)
+        try await app.asyncShutdown()
+        return value
+    } catch {
+        try? await app.asyncShutdown()
+        throw error
+    }
+}
+
+/// Sends one in-process request through the registered policy surface.
+/// - Parameters:
+///   - app: Configured application.
+///   - method: HTTP verb.
+///   - path: Request path.
+///   - body: JSON body for PUT and POST probes; GET sends no body.
+/// - Returns: The route response, without binding a socket.
+private func policyRequest(
+    app: Application,
+    method: HTTPMethod,
+    path: String,
+    body: [String: String]? = nil
+) async throws -> Response {
+    let request = Request(
+        application: app,
+        method: method,
+        url: URI(string: path),
+        on: app.eventLoopGroup.next()
+    )
+    if let body {
+        try request.content.encode(body)
+    }
+    return try await app.responder.respond(to: request).get()
+}
+
+@Suite("Settings Policy Routes")
+struct SettingsPolicyRouteTests {
+    @Test
+    func `GET serves the parsed policy, raw TOML, and live invariant status`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withPolicyRouteApp(store: store) { app in
+            let response = try await policyRequest(app: app, method: .GET, path: "/settings/policy")
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+
+            // A first-run install serves the seeded deny-by-default posture:
+            // inspectable, invariant-clean, and honest that it never came from
+            // an operator-authored file.
+            #expect(payload.policy.network.mode == EgressMode.allowlistOnly.rawValue)
+            #expect(payload.policy.network.allowedDomains == ["127.0.0.1"])
+            #expect(payload.policy.network.blockedDomains == ["169.254.169.254"])
+            #expect(payload.loadedFromDisk == false)
+            #expect(payload.violations.isEmpty)
+            #expect(payload.path == fileURL.path)
+            #expect(payload.rawToml.contains("[network]"))
+        }
+    }
+
+    @Test
+    func `PUT refuses a missing or blank raw_toml without writing the file`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withPolicyRouteApp(store: store) { app in
+            let before = try String(contentsOf: fileURL, encoding: .utf8)
+
+            // An absent key and a whitespace-only payload both fail the same
+            // gate: an empty body must never be treated as an empty policy.
+            let missing = try await policyRequest(app: app, method: .PUT, path: "/settings/policy", body: [:])
+            #expect(missing.status == .badRequest)
+            #expect((missing.body.string ?? "").contains("Missing raw_toml"))
+
+            let blank = try await policyRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: ["raw_toml": "   \n"]
+            )
+            #expect(blank.status == .badRequest)
+            #expect((blank.body.string ?? "").contains("Missing raw_toml"))
+
+            let after = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(after == before)
+        }
+    }
+
+    @Test
+    func `PUT refuses invalid TOML and leaves the file and live store untouched`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withPolicyRouteApp(store: store) { app in
+            let before = try String(contentsOf: fileURL, encoding: .utf8)
+            let beforePolicy = await store.current
+
+            // The unclosed table header would widen the allowlist if it were
+            // persisted, so a parse failure must reject before any write.
+            let response = try await policyRequest(
+                app: app,
+                method: .PUT,
+                path: "/settings/policy",
+                body: ["raw_toml": "[network\nmode = \"unrestricted\""]
+            )
+            #expect(response.status == .badRequest)
+            #expect((response.body.string ?? "").contains("Invalid TOML"))
+
+            let after = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(after == before)
+            let livePolicy = await store.current
+            #expect(livePolicy == beforePolicy)
+            let loadedFromDisk = await store.loadedFromDisk
+            #expect(loadedFromDisk == false)
+        }
+    }
+
+    @Test
+    func `PUT refuses an invariant violation and leaves the file and live store untouched`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withPolicyRouteApp(store: store) { app in
+            let before = try String(contentsOf: fileURL, encoding: .utf8)
+            let beforePolicy = await store.current
+
+            // An emptied deny list must not widen the always-on protected set:
+            // allowing `~` would expose `~/.ssh`, so the invariant gate refuses
+            // the candidate before the file write.
+            let response = try await policyRequest(
+                app: app,
+                method: .PUT,
+                path: "/settings/policy",
+                body: ["raw_toml": "[filesystem]\nallow_roots = [\"~\"]\ndeny_paths = []"]
+            )
+            #expect(response.status == .badRequest)
+            #expect((response.body.string ?? "").contains("invariants"))
+
+            let after = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(after == before)
+            let livePolicy = await store.current
+            #expect(livePolicy == beforePolicy)
+        }
+    }
+
+    @Test
+    func `PUT accepts a valid policy and a rebuilt supervisor observes it without a restart`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withPolicyRouteApp(store: store) { app in
+            // A public literal settles in the policy and SSRF gates without a
+            // resolver hop, so the rebuilt supervisor probes hermetically.
+            let destination = try #require(URL(string: "https://93.184.216.34/v1/status"))
+            let baselineSupervisor = try await OutboundEgressSupervisor.make(policyStore: store)
+            let baseline = await baselineSupervisor.validate(url: destination, method: "GET", headers: [:])
+            switch baseline {
+            case .allowed:
+                Issue.record("Expected the seeded allowlist to refuse the public literal before the PUT")
+            case let .denied(reason):
+                #expect(reason.contains("not in the allowed domains"))
+            }
+
+            let updatedTOML = """
+            [network]
+            mode = "allowlist_only"
+            allowed_domains = ["93.184.216.34"]
+            blocked_domains = ["169.254.169.254"]
+            """
+            let response = try await policyRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: ["raw_toml": updatedTOML]
+            )
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(payload.policy.network.mode == EgressMode.allowlistOnly.rawValue)
+            #expect(payload.policy.network.allowedDomains == ["93.184.216.34"])
+            #expect(payload.loadedFromDisk == true)
+            #expect(payload.violations.isEmpty)
+            #expect(payload.rawToml == updatedTOML)
+            let saved = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(saved == updatedTOML)
+
+            // The route re-loads the SAME store instance in place, so a
+            // supervisor rebuilt over the shared store — the live tool-rebuild
+            // path — observes the accepted write with no restart and no watcher.
+            let livePolicy = await store.current
+            #expect(livePolicy.network.allowedDomains == ["93.184.216.34"])
+            let acceptedFromDisk = await store.loadedFromDisk
+            #expect(acceptedFromDisk == true)
+            let rebuiltSupervisor = try await OutboundEgressSupervisor.make(policyStore: store)
+            let verdict = await rebuiltSupervisor.validate(url: destination, method: "GET", headers: [:])
+            switch verdict {
+            case .allowed:
+                break
+            case let .denied(reason):
+                Issue.record("Expected the rebuilt supervisor to allow the policy-listed literal, got: \(reason)")
+            }
+        }
+    }
+
+    @Test
+    func `POST verify accepts a valid candidate without persisting it`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withPolicyRouteApp(store: store) { app in
+            let before = try String(contentsOf: fileURL, encoding: .utf8)
+            let beforePolicy = await store.current
+
+            let candidate = """
+            [network]
+            mode = "unrestricted"
+            allowed_domains = []
+            blocked_domains = ["169.254.169.254"]
+            """
+            let response = try await policyRequest(
+                app: app, method: .POST, path: "/settings/policy/verify", body: ["raw_toml": candidate]
+            )
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(VerifyPolicyResponse.self)
+            #expect(payload.valid == true)
+            #expect(payload.violations.isEmpty)
+
+            // Verification is a pure candidate check: neither the store nor the
+            // file moves until an explicit PUT is accepted.
+            let livePolicy = await store.current
+            #expect(livePolicy == beforePolicy)
+            let after = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(after == before)
+        }
+    }
+
+    @Test
+    func `POST verify reports syntax errors and invariant violations without persisting`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withPolicyRouteApp(store: store) { app in
+            let before = try String(contentsOf: fileURL, encoding: .utf8)
+
+            let syntax = try await policyRequest(
+                app: app, method: .POST, path: "/settings/policy/verify", body: ["raw_toml": "not -> toml"]
+            )
+            #expect(syntax.status == .ok)
+            let syntaxPayload = try syntax.content.decode(VerifyPolicyResponse.self)
+            #expect(syntaxPayload.valid == false)
+            #expect(syntaxPayload.violations.contains { $0.contains("TOML Syntax Error") })
+
+            // The critical tool lock is a distinct invariant from the PUT
+            // suite's containment probe, so the verify route reports whichever
+            // gate the candidate trips.
+            let violating = try await policyRequest(
+                app: app,
+                method: .POST,
+                path: "/settings/policy/verify",
+                body: ["raw_toml": "[tools.\"messages.send\"]\nlevel = \"trusted\""]
+            )
+            #expect(violating.status == .ok)
+            let violatingPayload = try violating.content.decode(VerifyPolicyResponse.self)
+            #expect(violatingPayload.valid == false)
+            #expect(violatingPayload.violations.contains { $0.contains("Invariant 4") })
+
+            let after = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(after == before)
+        }
+    }
+
+    @Test
+    func `GET surfaces rejection diagnostics instead of a false healthy banner`() async throws {
+        // A present-but-rejected file keeps the safe fallback in `current`,
+        // so verifying the fallback would report zero violations while the
+        // CLI exits nonzero for the same file. The route must surface the
+        // store diagnostics so the dashboard banner stays red.
+        let violating = "[credentials.LEAK]\nallowed_hosts = [\"*\"]\n"
+        let (store, fileURL, directory) = try await makePolicyRouteStore(contents: violating)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(FileManager.default.fileExists(atPath: fileURL.path))
+        #expect(await store.loadedFromDisk == false)
+
+        try await withPolicyRouteApp(store: store) { app in
+            let response = try await policyRequest(app: app, method: .GET, path: "/settings/policy")
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(payload.loadedFromDisk == false)
+            #expect(!payload.violations.isEmpty)
+            let joined = payload.violations.joined(separator: " ")
+            #expect(joined.contains("invariant") || joined.contains("Invariant") || joined.contains("Policy"))
+            // The served posture is the displayable fallback, never the
+            // rejected file content laundered as healthy.
+            #expect(payload.policy.network.mode == EgressMode.allowlistOnly.rawValue)
+        }
+    }
+
+    @Test
+    func `GET surfaces parse-error diagnostics instead of a false healthy banner`() async throws {
+        // An unreadable spelling must trip the same honesty path as an
+        // invariant violation: the fallback verifies clean, so only the
+        // load diagnostics keep the banner honest.
+        let (store, fileURL, directory) = try await makePolicyRouteStore(contents: "[network\nmode = \"unrestricted\"")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(FileManager.default.fileExists(atPath: fileURL.path))
+        #expect(await store.loadedFromDisk == false)
+
+        try await withPolicyRouteApp(store: store) { app in
+            let response = try await policyRequest(app: app, method: .GET, path: "/settings/policy")
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(payload.loadedFromDisk == false)
+            #expect(!payload.violations.isEmpty)
+            #expect(payload.violations.joined(separator: " ").contains("Parse") || payload.violations.joined(separator: " ").contains("parse"))
+        }
+    }
+
+    @Test
+    func `PUT reports the store authoritative loadedFromDisk`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withPolicyRouteApp(store: store) { app in
+            let updatedTOML = """
+            [network]
+            mode = "allowlist_only"
+            allowed_domains = ["93.184.216.34"]
+            blocked_domains = ["169.254.169.254"]
+            """
+            let response = try await policyRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: ["raw_toml": updatedTOML]
+            )
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            // The response mirrors the shared store instead of assuming the
+            // reload, so the dashboard and the supervisor never diverge.
+            let authoritative = await store.loadedFromDisk
+            #expect(payload.loadedFromDisk == authoritative)
+            #expect(authoritative == true)
+            #expect(payload.violations.isEmpty)
+            let saved = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(saved == updatedTOML)
+        }
     }
 }

@@ -652,6 +652,51 @@ struct SearXNGEnsurerRuntimeTests {
     }
 
     @Test
+    func `CGNAT metadata and special-purpose literals are refused so the runtime table matches the verifier`() {
+        let browser = BrowserConfig(allowedOrigins: [])
+        // Alibaba's metadata service answers in CGNAT shared space
+        // (`100.100.100.200`), which the policy verifier already lists as a
+        // forbidden credential target; the runtime guard must reach the same
+        // verdict for the literal and for every obfuscated spelling of it.
+        let denied = [
+            "http://100.100.100.200/latest/meta-data",
+            "http://100.64.0.1/",
+            "http://100.127.255.255:8080/",
+            "http://0x64.0x64.0x64.0xc8/latest/meta-data",
+            "http://1684301000/latest/meta-data",
+            "http://192.0.2.10/",
+            "http://198.18.0.1/",
+            "http://203.0.113.5/",
+            "http://224.0.0.1/",
+            "http://240.0.0.1/"
+        ]
+        for url in denied {
+            #expect(ApiSSRFGuard.denyReason(for: url, browserConfig: browser) != nil, "expected a refusal for \(url)")
+        }
+        // Only `100.64.0.0/10` widened: its boundary neighbors are ordinary
+        // public unicast and stay dialable.
+        #expect(!ApiSSRFGuard.isSensitiveIPv4Value(0x643F_FFFF)) // 100.63.255.255
+        #expect(!ApiSSRFGuard.isSensitiveIPv4Value(0x6480_0000)) // 100.128.0.0
+        for url in ["http://100.63.255.255/", "http://100.128.0.0/", "http://93.184.216.34/"] {
+            #expect(ApiSSRFGuard.denyReason(for: url, browserConfig: browser) == nil, "expected \(url) to stay dialable")
+        }
+    }
+
+    @Test
+    func `Resolved metadata literal stays refused through an allowlisted name`() {
+        // Metadata refusals ignore allowlist exemptions, so a rebinding name
+        // cannot launder the CGNAT metadata literal behind an allowed suffix.
+        let origins: Set = ["nas.homelab.local", "nas.homelab.local:443"]
+        #expect(ApiSSRFGuard.vettedIPListDenial(
+            host: "nas.homelab.local", addresses: ["100.100.100.200"], origins: origins
+        ) != nil)
+        // The same allowlisted name still proves ordinary private resolutions.
+        #expect(ApiSSRFGuard.vettedIPListDenial(
+            host: "nas.homelab.local", addresses: ["192.168.1.10"], origins: origins
+        ) == nil)
+    }
+
+    @Test
     func `Universal wildcard never authorizes a host`() {
         #expect(ApiSSRFGuard.isHostAllowed("example.com", origins: ["*"]) == false)
         #expect(ApiSSRFGuard.isHostAllowed("192.168.1.10", origins: ["*.*"]) == false)
@@ -698,5 +743,139 @@ struct SearXNGEnsurerRuntimeTests {
         #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.50:8989/api/v3", browserConfig: browser) != nil)
         // With media config, Sonarr is auto-allowed
         #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.50:8989/api/v3", browserConfig: browser, mediaConfig: media) == nil)
+    }
+}
+
+@Suite("SSRF IPv4-Embedded IPv6 Spellings")
+struct SSRFEmbeddedIPv4SpellingTests {
+    /// Origin set allowlisting one public name, so decoded targets can be
+    /// checked against the same exemption path their dotted twins use.
+    private static let allowlistedName: Set<String> = ["api.example.com", "api.example.com:443"]
+
+    @Test
+    func `NAT64 6to4 and IPv4-compatible hextet literals are refused`() {
+        let browser = BrowserConfig(allowedOrigins: [])
+        // Each hextet spelling embeds a metadata, link-local, private, or
+        // loopback address, so none may pass as a plain public IPv6 literal.
+        let deniedURLs = [
+            "http://[64:ff9b::a9fe:a9fe]/latest/meta-data", // NAT64 → 169.254.169.254
+            "http://[64:ff9b::a00:1]/", // NAT64 → 10.0.0.1
+            "http://[64:ff9b::7f00:1]/", // NAT64 → 127.0.0.1
+            "http://[64:ff9b:1:a9fe:a9:fe00::]/", // local-use NAT64 → 169.254.169.254
+            "http://[2002:a9fe:a9fe::]/", // 6to4 → 169.254.169.254
+            "http://[2002:a00:1::]/", // 6to4 → 10.0.0.1
+            "http://[::a9fe:a9fe]/", // IPv4-compatible → 169.254.169.254
+            "http://[::7f00:1]/", // IPv4-compatible → 127.0.0.1
+            "http://[::a00:1]/" // IPv4-compatible → 10.0.0.1
+        ]
+        for url in deniedURLs {
+            #expect(ApiSSRFGuard.denyReason(for: url, browserConfig: browser) != nil, "expected a refusal for \(url)")
+        }
+    }
+
+    @Test
+    func `Dotted and hextet spellings of an embedded address decide alike`() {
+        // Regression: `[64:ff9b::169.254.169.254]` was denied while the
+        // equivalent hextet spelling was waved through as a public literal.
+        // Metadata and link-local targets are never exempt, so those spellings
+        // must refuse together, and like the direct dotted twin they decode to,
+        // under any browser config.
+        let browser = BrowserConfig(allowedOrigins: [])
+        let neverExemptPairs = [
+            ("http://[64:ff9b::169.254.169.254]/", "http://[64:ff9b::a9fe:a9fe]/", "http://169.254.169.254/"),
+            ("http://[::169.254.169.254]/", "http://[::a9fe:a9fe]/", "http://169.254.169.254/")
+        ]
+        for (dotted, hextet, twin) in neverExemptPairs {
+            #expect(ApiSSRFGuard.denyReason(for: dotted, browserConfig: browser) != nil, "expected a refusal for \(dotted)")
+            #expect(ApiSSRFGuard.denyReason(for: hextet, browserConfig: browser) != nil, "expected a refusal for \(hextet)")
+            #expect(ApiSSRFGuard.denyReason(for: twin, browserConfig: browser) != nil, "expected a refusal for \(twin)")
+        }
+        // Loopback is exemptible rather than never-dialable, and the default
+        // searxng origin lives on `127.0.0.1`, so every mapped spelling must
+        // inherit the decision of the direct loopback twin it decodes to.
+        let loopbackTwin = "http://127.0.0.1/"
+        let mappedLoopbackSpellings = ["http://[::ffff:127.0.0.1]/", "http://[::ffff:7f00:1]/"]
+        let exemptedTwin = ApiSSRFGuard.denyReason(for: loopbackTwin, browserConfig: browser)
+        #expect(exemptedTwin == nil, "expected the configured searxng loopback origin to exempt \(loopbackTwin)")
+        for spelling in mappedLoopbackSpellings {
+            #expect(ApiSSRFGuard.denyReason(for: spelling, browserConfig: browser) == nil, "expected \(spelling) to decide like its dotted twin \(loopbackTwin)")
+        }
+        // With the search origin off loopback the same spellings refuse
+        // together: neither embedded form launders a verdict its dotted twin
+        // would not get.
+        let publicSearch = BrowserConfig(searxngURL: "https://search.example.com", allowedOrigins: [])
+        let refusedTwin = ApiSSRFGuard.denyReason(for: loopbackTwin, browserConfig: publicSearch)
+        #expect(refusedTwin != nil, "expected \(loopbackTwin) to refuse without a loopback origin")
+        for spelling in mappedLoopbackSpellings {
+            #expect(ApiSSRFGuard.denyReason(for: spelling, browserConfig: publicSearch) != nil, "expected \(spelling) to decide like its dotted twin \(loopbackTwin)")
+        }
+    }
+
+    @Test
+    func `Decoded sensitive targets refuse before the public-literal fast path`() {
+        // The literal fast path exists to skip DNS, not to authorize a
+        // decoded address: the range verdict runs first.
+        #expect(ApiSSRFGuard.isIPAddressLiteral("64:ff9b::a9fe:a9fe") == true)
+        #expect(ApiSSRFGuard.denyReason(for: "http://[64:ff9b::6464:64c8]/", browserConfig: BrowserConfig(allowedOrigins: [])) != nil)
+    }
+
+    @Test
+    func `Public IPv6 destinations stay dialable`() {
+        let browser = BrowserConfig(allowedOrigins: [])
+        let allowedURLs = [
+            "http://[2606:4700:4700::1111]/", // native public
+            "http://[64:ff9b::5db8:d822]/", // NAT64 → 93.184.216.34
+            "http://[64:ff9b:1:5db8:d8:2200::]/", // local-use NAT64 → 93.184.216.34
+            "http://[2002:5db8:d822::]/", // 6to4 → 93.184.216.34
+            "http://[::ffff:5db8:d822]/" // mapped → 93.184.216.34
+        ]
+        for url in allowedURLs {
+            #expect(ApiSSRFGuard.denyReason(for: url, browserConfig: browser) == nil, "expected \(url) to stay dialable")
+        }
+    }
+
+    @Test
+    func `Resolved embedded never-exempt targets cannot ride an allowlisted name`() {
+        // Regression: a *.example.com name whose DNS64 answer is the NAT64
+        // spelling of the metadata endpoint passed vettedIPListDenial.
+        let neverExempt = [
+            "64:ff9b::a9fe:a9fe", // NAT64 → 169.254.169.254
+            "64:ff9b::169.254.169.254", // dotted NAT64 twin
+            "64:ff9b:1:a9fe:a9:fe00::", // local-use NAT64 → 169.254.169.254
+            "2002:a9fe:a9fe::", // 6to4 → 169.254.169.254
+            "::a9fe:a9fe", // IPv4-compatible → 169.254.169.254
+            "64:ff9b::6464:64c8" // NAT64 → 100.100.100.200 metadata literal
+        ]
+        for address in neverExempt {
+            let denial = ApiSSRFGuard.vettedIPListDenial(host: "api.example.com", addresses: [address], origins: Self.allowlistedName)
+            #expect(denial != nil, "expected a refusal for embedded address \(address)")
+        }
+    }
+
+    @Test
+    func `Resolved private and public embedded addresses follow their dotted twins`() {
+        // The exemption semantics stay spelling-independent: a private
+        // embedded address rides an allowlisted name exactly like its dotted
+        // twin, and a public embedded address stays dialable.
+        let twins = [
+            "64:ff9b::c0a8:178", // NAT64 → 192.168.1.120
+            "192.168.1.120", // dotted twin
+            "64:ff9b::a00:1", // NAT64 → 10.0.0.1
+            "10.0.0.1" // dotted twin
+        ]
+        for address in twins {
+            let denial = ApiSSRFGuard.vettedIPListDenial(host: "api.example.com", addresses: [address], origins: Self.allowlistedName)
+            #expect(denial == nil, "expected the allowlisted-name exemption for '\(address)'")
+        }
+        let publicAddresses = [
+            "64:ff9b::5db8:d822", // NAT64 → 93.184.216.34
+            "64:ff9b:1:5db8:d8:2200::", // local-use NAT64 → 93.184.216.34
+            "2002:5db8:d822::", // 6to4 → 93.184.216.34
+            "2606:4700:4700::1111" // native public
+        ]
+        for address in publicAddresses {
+            let denial = ApiSSRFGuard.vettedIPListDenial(host: "example.com", addresses: [address])
+            #expect(denial == nil, "expected '\(address)' to stay dialable")
+        }
     }
 }

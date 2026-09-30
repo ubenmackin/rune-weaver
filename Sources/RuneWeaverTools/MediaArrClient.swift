@@ -337,11 +337,13 @@ extension MediaArrClient {
     /// Resolves a media hostname off the cooperative pool.
     /// The system resolver blocks its thread with no kernel cancellation, so
     /// the lookup hops to a utility queue while the caller suspends; hermetic
-    /// debug suites resolve through the shared canned proof instead of the
-    /// network so redirect vetting stays deterministic under test.
+    /// debug suites resolve through the effective canned proof instead of the
+    /// network so redirect vetting stays deterministic under test. A
+    /// task-scoped binding wins over the process-global hook, matching the
+    /// SSRF guard's resolution order.
     private static func resolveMediaHostAddresses(_ host: String) async -> [String] {
         #if DEBUG
-            if let stub = ApiSSRFGuard.testDNSResolver {
+            if let stub = ApiSSRFGuard.activeTestDNSResolver {
                 return stub(host)
             }
         #endif

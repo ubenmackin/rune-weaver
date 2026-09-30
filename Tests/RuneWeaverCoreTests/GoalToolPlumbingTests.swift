@@ -379,22 +379,38 @@ struct GoalToolPlumbingTests {
     }
 
     @Test
-    func `Builtin registration stays nil-gated with disabled visibility`() {
+    func `Builtin registration stays nil-gated with disabled visibility`() async throws {
         let (path, base) = makeGoalToolDBPath()
         defer { try? FileManager.default.removeItem(at: base) }
         let llm = GoalToolStubLLM(texts: ["[]"])
         let enabled = makeGoalToolEnabledConfig()
         let store = GoalStore(dbPath: path)
         let engine = GoalEngine(store: store, llm: llm, config: enabled)
+        // A throwaway policy store keeps the mandatory egress supervisor off
+        // the operator's real policy.toml while still verifying at the factory.
+        let policyURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rw-goal-plumbing-policy-\(UUID().uuidString).toml")
+        let policyStore = PolicyStore(fileURL: policyURL)
+        await policyStore.update(.safeDefault)
         // Nil collaborators keep the suite unchanged so unwired callers see no drift.
-        let withoutGoals = BuiltinToolPlugins.makeAllTools()
+        let withoutGoals = try await BuiltinToolPlugins.makeAllTools(policyStore: policyStore)
         #expect(!withoutGoals.map(\.name).contains("goal.create"))
         // Wired collaborators register through the single shared path.
-        let withGoals = BuiltinToolPlugins.makeAllTools(goalEngine: engine, goalStore: store, goalsConfig: enabled)
+        let withGoals = try await BuiltinToolPlugins.makeAllTools(
+            goalEngine: engine,
+            goalStore: store,
+            goalsConfig: enabled,
+            policyStore: policyStore
+        )
         #expect(Set(GoalTools.toolNames).isSubset(of: Set(withGoals.map(\.name))))
         #expect(Set(GoalTools.toolNames).isSubset(of: Set(BuiltinToolPlugins.allToolNames)))
         // Disabled still registers so GET /tools stays stable and calls fail honest.
-        let disabledWired = BuiltinToolPlugins.makeAllTools(goalEngine: engine, goalStore: store, goalsConfig: GoalsConfig())
+        let disabledWired = try await BuiltinToolPlugins.makeAllTools(
+            goalEngine: engine,
+            goalStore: store,
+            goalsConfig: GoalsConfig(),
+            policyStore: policyStore
+        )
         #expect(Set(GoalTools.toolNames).isSubset(of: Set(disabledWired.map(\.name))))
     }
 

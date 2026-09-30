@@ -51,14 +51,23 @@ struct ServeCommand: AsyncParsableCommand {
         let auth = resolved.auth
         let serverConfig = resolved.serverConfig
         let (selected, allProviders) = try await resolveProvider(loaded: loaded)
-        let (context, permissionGate) = await buildContext(
-            loaded: loaded,
-            selected: selected,
-            allProviders: allProviders,
-            serverConfig: serverConfig,
-            auth: auth,
-            mediaConfig: loaded.config.media
-        )
+        let contextBundle: (context: ServerContext, permissionGate: PermissionGate)
+        do {
+            contextBundle = try await buildContext(
+                loaded: loaded,
+                selected: selected,
+                allProviders: allProviders,
+                serverConfig: serverConfig,
+                auth: auth,
+                mediaConfig: loaded.config.media
+            )
+        } catch let error as PolicyInvariantError {
+            // Fail-closed boot: the declarative policy could not be verified,
+            // so the service never starts with an unsupervised api.request.
+            print(TerminalStyle.error("Security policy rejected at boot: \(error.localizedDescription)"))
+            throw ExitCode(1)
+        }
+        let (context, permissionGate) = contextBundle
         var env = try Environment.detect()
         try LoggingSystem.bootstrap(from: &env)
         let app = try await Application.make(env)
@@ -207,6 +216,21 @@ extension ServeCommand {
         let conversations: ConversationManager
     }
 
+    /// Shared seed for the preview and served tool registries.
+    ///
+    /// Bundles the resolved media policy, the one secrets instance, and the one
+    /// security policy store per serve invocation so the preview bus, the
+    /// served registry, and the settings policy routes observe the same
+    /// instances instead of diverging on per-path defaults.
+    private struct ToolBuildSeed {
+        /// Resolved `[media]` policy feeding Sonarr/Radarr tool registration.
+        let mediaConfig: MediaConfig
+        /// Shared secrets backing surrogate resolution for every built tool.
+        let secrets: SecretsManager
+        /// The one security policy store for this process.
+        let policyStore: PolicyStore
+    }
+
     private func loadConversations(episodesDBPath: String) async -> ConversationManager {
         let conversations = ConversationManager(episodesDBPath: episodesDBPath)
         do {
@@ -241,12 +265,11 @@ extension ServeCommand {
     private func makePreviewBus(
         loaded: CLIConfigLoader.LoadedConfig,
         selected: any LLMProvider,
-        mediaConfig: MediaConfig,
-        sharedSecrets: SecretsManager,
         permissionGate: PermissionGate,
-        deps: ToolBootstrapDependencies
-    ) async -> ToolBus {
-        await CLIShared.makeToolBus(
+        deps: ToolBootstrapDependencies,
+        seed: ToolBuildSeed
+    ) async throws -> ToolBus {
+        try await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
             bashConfig: loaded.config.bash,
@@ -258,15 +281,16 @@ extension ServeCommand {
             episodesDBPath: loaded.config.memory.episodesDBPath,
             browserConfig: loaded.config.browser,
             llmConfig: loaded.config.llm,
-            mediaConfig: mediaConfig,
+            mediaConfig: seed.mediaConfig,
             desktopConfig: loaded.config.desktop,
             securityConfig: loaded.config.security,
-            secrets: sharedSecrets,
+            secrets: seed.secrets,
             goalsConfig: loaded.config.goals,
             goalEngine: deps.goalEngine,
             goalStore: deps.goalStore,
             goalConversations: deps.conversations,
-            goalLLM: selected
+            goalLLM: selected,
+            policyStore: seed.policyStore
         )
     }
 
@@ -309,7 +333,7 @@ extension ServeCommand {
         serverConfig: ServerConfig,
         auth: ServerAuth?,
         mediaConfig: MediaConfig? = nil
-    ) async -> (context: ServerContext, permissionGate: PermissionGate) {
+    ) async throws -> (context: ServerContext, permissionGate: PermissionGate) {
         // Point recall at the configured document index when `[index]` is
         // enabled; a disabled section keeps the keyword-and-vector engine.
         let docIndexDBPath: String? = loaded.config.index.enabled ? loaded.config.index.dbPath : nil
@@ -350,6 +374,13 @@ extension ServeCommand {
         // the plugin snapshot, and the served context observe one fallback
         // store instead of minting per-tool instances that diverge.
         let sharedSecrets = SecretsManager()
+        // One security policy store per serve process: the preview bus, the
+        // served registry, and the settings policy routes read this same
+        // instance, so an HTTP policy write is visible to the egress
+        // supervisor without a restart. Loading here seeds the factory-safe
+        // posture on a missing file and leaves corruption to fail the first
+        // tool build closed below.
+        let policyStore = await PolicyStore.makeLoaded(injected: nil)
         let (goalStore, goalEngine) = makeGoalStack(
             memoryConfig: loaded.config.memory,
             goalsConfig: loaded.config.goals,
@@ -362,27 +393,28 @@ extension ServeCommand {
             goalEngine: goalEngine,
             conversations: conversations
         )
+        // One seed shared by the prompt preview and the served registry so both
+        // builds observe the same media policy, secrets, and policy store.
+        let seed = ToolBuildSeed(
+            mediaConfig: resolvedMediaConfig,
+            secrets: sharedSecrets,
+            policyStore: policyStore
+        )
         // Compose the default system prompt from the live registry so the
         // served model sees every registered tool; an explicit
         // --system-prompt still overrides it verbatim.
-        let plugins = makePlugins(
-            loaded: loaded,
-            deps: deps,
-            resolvedMediaConfig: resolvedMediaConfig,
-            sharedSecrets: sharedSecrets
-        )
+        let plugins = try await makePlugins(loaded: loaded, deps: deps, seed: seed)
         // Snapshot discovered runes before the service owns the registry so
         // external tools reach the served prompt; the service syncs the same
         // directory again on boot, keeping both views consistent.
-        let effectiveSystemPrompt = await resolveEffectiveSystemPrompt(
+        let effectiveSystemPrompt = try await resolveEffectiveSystemPrompt(
             loaded: loaded,
             selected: selected,
-            resolvedMediaConfig: resolvedMediaConfig,
-            sharedSecrets: sharedSecrets,
             permissionGate: permissionGate,
-            deps: deps
+            deps: deps,
+            seed: seed
         )
-        let context = await ServerContext.make(
+        let context = try await ServerContext.make(
             config: serverConfig,
             conversations: conversations,
             memoryEngine: memoryEngine,
@@ -413,7 +445,8 @@ extension ServeCommand {
             mediaSecrets: sharedSecrets,
             secrets: sharedSecrets,
             runs: runs,
-            hub: hub
+            hub: hub,
+            policyStore: policyStore
         )
         await registerAndVerifyTools(
             context: context,
@@ -450,10 +483,9 @@ extension ServeCommand {
     private func makePlugins(
         loaded: CLIConfigLoader.LoadedConfig,
         deps: ToolBootstrapDependencies,
-        resolvedMediaConfig: MediaConfig,
-        sharedSecrets: SecretsManager
-    ) -> [any Tool] {
-        CLIShared.pluginTools(
+        seed: ToolBuildSeed
+    ) async throws -> [any Tool] {
+        try await CLIShared.pluginTools(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
             bashConfig: loaded.config.bash,
@@ -462,31 +494,30 @@ extension ServeCommand {
             embedder: deps.embedder,
             browserConfig: loaded.config.browser,
             llmConfig: loaded.config.llm,
-            mediaConfig: resolvedMediaConfig,
+            mediaConfig: seed.mediaConfig,
             securityConfig: loaded.config.security,
-            secrets: sharedSecrets,
+            secrets: seed.secrets,
             goalEngine: deps.goalEngine,
             goalStore: deps.goalStore,
             goalConversations: deps.conversations,
-            goalsConfig: loaded.config.goals
+            goalsConfig: loaded.config.goals,
+            policyStore: seed.policyStore
         )
     }
 
     private func resolveEffectiveSystemPrompt(
         loaded: CLIConfigLoader.LoadedConfig,
         selected: any LLMProvider,
-        resolvedMediaConfig: MediaConfig,
-        sharedSecrets: SecretsManager,
         permissionGate: PermissionGate,
-        deps: ToolBootstrapDependencies
-    ) async -> String {
-        let previewBus = await makePreviewBus(
+        deps: ToolBootstrapDependencies,
+        seed: ToolBuildSeed
+    ) async throws -> String {
+        let previewBus = try await makePreviewBus(
             loaded: loaded,
             selected: selected,
-            mediaConfig: resolvedMediaConfig,
-            sharedSecrets: sharedSecrets,
             permissionGate: permissionGate,
-            deps: deps
+            deps: deps,
+            seed: seed
         )
         return await SystemPromptComposer.resolve(
             flag: systemPrompt,

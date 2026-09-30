@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Component tests for SettingsManager.
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsManager, { SECRET_STATUS_CHUNK_SIZE, getToolCategory } from "./SettingsManager";
@@ -8,12 +8,14 @@ import {
   BASH_PERMISSION_ACTIONS,
   BASH_TIMEOUT_MAX_SECONDS,
   BASH_TIMEOUT_MIN_SECONDS,
+  clearAuthToken,
   DEFAULT_BASH_ALLOW_NETWORK,
   DEFAULT_BASH_CONFIG,
   DEFAULT_BASH_DEFAULT_ACTION,
   DEFAULT_BASH_ENABLED,
   DEFAULT_BASH_RULES,
   DEFAULT_BASH_TIMEOUT_SECONDS,
+  setAuthToken,
 } from "../api";
 import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
@@ -3159,6 +3161,253 @@ describe("SettingsManager", () => {
     expect(screen.getByText(/Allow roots bound/i)).toBeDefined();
     expect(screen.getByText(/do not affect index coverage/i)).toBeDefined();
     expect(screen.queryByTestId("files-consumer-note")).toBeNull();
+  });
+});
+
+// Declarative security policy (policy.toml) editor: load, save, and verify all
+// sit behind the owner gate, so coverage pins honest server-truth rendering
+// plus the dashboard's shared same-origin auth convention on every call.
+const policyPayload = {
+  policy: {
+    version: 1,
+    network: {
+      mode: "allowlist_only",
+      allowed_domains: ["api.example.com"],
+      blocked_domains: ["metadata.google.internal"],
+    },
+    credentials: {
+      GITHUB_TOKEN: {
+        allowed_hosts: ["api.github.com"],
+        allowed_methods: ["GET"],
+        allowed_path_prefixes: ["/repos"],
+      },
+    },
+  },
+  raw_toml: 'version = 1\n[network]\nmode = "allowlist_only"\n',
+  path: "/Users/test/.runeweaver/policy.toml",
+  loaded_from_disk: true,
+  violations: [],
+};
+
+const policyCandidateToml = 'version = 1\n[network]\nmode = "deny_by_default"\n';
+
+describe("SettingsManager declarative policy editor", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    clearAuthToken();
+    resetSharedRunsForTesting();
+  });
+
+  // Routes the settings shell plus both policy routes so each case overrides
+  // only the response it exercises; unrelated boot probes stay benign.
+  function stubPolicyFetch(
+    policyResponse: (init?: RequestInit) => Response | Promise<Response>
+  ) {
+    const fetchMock = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const urlStr = String(url);
+        if (urlStr === "/settings/policy" || urlStr === "/settings/policy/verify") {
+          return policyResponse(init);
+        }
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        return jsonResponse(mockSettings);
+      }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  async function openPolicySection() {
+    const user = userEvent.setup();
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /Security/i }));
+    await waitFor(() => {
+      expect(screen.getByTestId("security-policy-section")).toBeDefined();
+    });
+    return user;
+  }
+
+  // Waits for the policy fetch to settle: the mode badge proves the DTO landed
+  // and the enabled Save proves the loading guard released, so a disabled
+  // button never swallows the next click.
+  async function waitForPolicyLoaded() {
+    await waitFor(() => {
+      expect(screen.getByText(/Mode: allowlist_only/)).toBeDefined();
+      expect(
+        (screen.getByRole("button", { name: /Save Policy/i }) as HTMLButtonElement).disabled
+      ).toBe(false);
+    });
+  }
+
+  it("loads the policy into the visual overview and the raw editor", async () => {
+    const fetchMock = stubPolicyFetch(() => jsonResponse(policyPayload));
+    const user = await openPolicySection();
+
+    await waitForPolicyLoaded();
+    // The header names the real file state instead of claiming defaults, and
+    // the overview reads the file's allow/deny sets and credential bindings.
+    expect(screen.getByText(/Customized/)).toBeDefined();
+    expect(screen.getByText("api.example.com")).toBeDefined();
+    expect(screen.getByText("metadata.google.internal")).toBeDefined();
+    expect(screen.getByText("GITHUB_TOKEN")).toBeDefined();
+    expect(screen.getByText(/All 4 Formal Security Invariants Verified/)).toBeDefined();
+
+    // The raw editor starts from the exact server TOML so edits are applied
+    // to file truth rather than a locally reconstructed approximation.
+    await user.click(screen.getByRole("button", { name: /Raw TOML Editor/i }));
+    expect(
+      (screen.getByLabelText(/Edit policy\.toml directly/i) as HTMLTextAreaElement).value
+    ).toBe(policyPayload.raw_toml);
+
+    const loadCall = fetchMock.mock.calls.find(
+      ([url]) => String(url) === "/settings/policy"
+    );
+    expect(loadCall?.[1]).toMatchObject({ credentials: "same-origin" });
+  });
+
+  it("reports a failed policy load in the section error banner", async () => {
+    stubPolicyFetch(() => jsonResponse({ reason: "policy file unreadable" }, 500));
+    await openPolicySection();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Failed to load policy/i)).toBeDefined();
+    });
+  });
+
+  it("surfaces the server reason when a policy save is rejected", async () => {
+    const fetchMock = stubPolicyFetch((init) => {
+      if (init?.method === "PUT") {
+        return jsonResponse(
+          { reason: "Invariant violation: credential targets loopback." },
+          422
+        );
+      }
+      return jsonResponse(policyPayload);
+    });
+    const user = await openPolicySection();
+    await waitForPolicyLoaded();
+
+    await user.click(screen.getByRole("button", { name: /Raw TOML Editor/i }));
+    const editor = screen.getByLabelText(/Edit policy\.toml directly/i);
+    fireEvent.change(editor, { target: { value: policyCandidateToml } });
+    await user.click(screen.getByRole("button", { name: /Save Policy/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Invariant violation: credential targets loopback\./)
+      ).toBeDefined();
+    });
+    // A rejected candidate stays in the editor so the owner can fix it in
+    // place, and the write itself carried the shared auth convention.
+    expect((editor as HTMLTextAreaElement).value).toBe(policyCandidateToml);
+    const putCall = fetchMock.mock.calls.find(
+      ([url, init]) => String(url) === "/settings/policy" && init?.method === "PUT"
+    );
+    expect(putCall?.[1]?.credentials).toBe("same-origin");
+    expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({
+      raw_toml: policyCandidateToml,
+    });
+  });
+
+  it("renders violations returned by a candidate verify", async () => {
+    const violation = "Credential binding targets loopback (127.0.0.1).";
+    const fetchMock = stubPolicyFetch((init) => {
+      if (init?.method === "POST") {
+        return jsonResponse({ valid: false, violations: [violation] });
+      }
+      return jsonResponse(policyPayload);
+    });
+    const user = await openPolicySection();
+    await waitForPolicyLoaded();
+
+    await user.click(screen.getByRole("button", { name: /Verify/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/1 Invariant Violation\(s\) Detected/)).toBeDefined();
+    });
+    expect(screen.getByText(violation)).toBeDefined();
+
+    const verifyCall = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url) === "/settings/policy/verify" && init?.method === "POST"
+    );
+    expect(verifyCall?.[1]?.credentials).toBe("same-origin");
+    expect(JSON.parse(String(verifyCall?.[1]?.body))).toEqual({
+      raw_toml: policyPayload.raw_toml,
+    });
+  });
+
+  it("confirms a clean candidate verify and clears prior violations", async () => {
+    const loadedPolicy = {
+      ...policyPayload,
+      violations: ["Stale violation from a hand-edited file."],
+    };
+    stubPolicyFetch((init) => {
+      if (init?.method === "POST") {
+        return jsonResponse({ valid: true, violations: [] });
+      }
+      return jsonResponse(loadedPolicy);
+    });
+    const user = await openPolicySection();
+    await waitFor(() => {
+      expect(screen.getByText(/1 Invariant Violation\(s\) Detected/)).toBeDefined();
+    });
+    expect(screen.getByText(/Stale violation from a hand-edited file\./)).toBeDefined();
+
+    await user.click(screen.getByRole("button", { name: /Verify/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/All 4 Formal Security Invariants Verified/)).toBeDefined();
+      expect(screen.getByText(/saved successfully/i)).toBeDefined();
+    });
+  });
+
+  it("carries the owner bearer on policy load, save, and verify", async () => {
+    // Token mode is exactly where a bare fetch 401s, so pin the convention on
+    // all three policy calls: same-origin credentials plus the configured
+    // bearer alongside any JSON content type.
+    setAuthToken("policy-owner-token");
+    try {
+      const fetchMock = stubPolicyFetch((init) => {
+        if (init?.method === "POST") {
+          return jsonResponse({ valid: true, violations: [] });
+        }
+        return jsonResponse(policyPayload);
+      });
+      const user = await openPolicySection();
+      await waitForPolicyLoaded();
+
+      await user.click(screen.getByRole("button", { name: /Save Policy/i }));
+      await waitFor(() => {
+        expect(screen.getByText(/saved successfully/i)).toBeDefined();
+      });
+      await user.click(screen.getByRole("button", { name: /Verify/i }));
+      await waitFor(() => {
+        expect(
+          fetchMock.mock.calls.filter(([url]) =>
+            String(url).startsWith("/settings/policy")
+          )
+        ).toHaveLength(3);
+      });
+
+      const policyCalls = fetchMock.mock.calls.filter(([url]) =>
+        String(url).startsWith("/settings/policy")
+      );
+      for (const [, init] of policyCalls) {
+        expect(init?.credentials).toBe("same-origin");
+        expect((init?.headers as Record<string, string>).Authorization).toBe(
+          "Bearer policy-owner-token"
+        );
+      }
+    } finally {
+      clearAuthToken();
+    }
   });
 });
 

@@ -502,11 +502,8 @@ struct IdeaWireContractTests {
             "updatedAt": now.timeIntervalSince1970
         ]
         let data = try JSONSerialization.data(withJSONObject: payload)
-        do {
+        #expect(throws: DecodingError.self) {
             _ = try JSONDecoder().decode(IdeaDTO.self, from: data)
-            Issue.record("Expected a blank wire title to fail decoding")
-        } catch is DecodingError {
-            // Expected: fail-closed on blank titles.
         }
     }
 
