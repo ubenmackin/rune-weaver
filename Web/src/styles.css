@@ -5633,11 +5633,36 @@ input.tools-search-input[type="search"] {
   flex-wrap: wrap;
 }
 
+/* Chevron that collapses the card's diff body; it sits in the header so the
+ * filename, stats, and status pill stay readable while the body is hidden. */
+.diff-card-collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  min-height: 20px;
+  padding: 2px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.diff-card-collapse-toggle:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
 .diff-card-meta {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  /* Keep the meta group packed beside the prepended collapse chevron instead
+   * of letting space-between center it between chevron and review controls. */
+  margin-right: auto;
 }
 
 .diff-card-filename {
@@ -5693,6 +5718,36 @@ input.tools-search-input[type="search"] {
   border: 1px solid rgba(59, 130, 246, 0.3);
 }
 
+.diff-status-pill.accepted {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.diff-status-pill.discarded {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.diff-status-pill.superseded {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
+.diff-status-pill.reverted {
+  background: rgba(20, 184, 166, 0.15);
+  color: #2dd4bf;
+  border: 1px solid rgba(20, 184, 166, 0.3);
+}
+
+.diff-status-pill.neutral {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
 .diff-btn-group {
   display: flex;
   gap: 6px;
@@ -5732,25 +5787,9 @@ input.tools-search-input[type="search"] {
   cursor: not-allowed;
 }
 
-.diff-resolved-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 8px;
-  border-radius: 5px;
+.diff-review-note {
   font-size: 11px;
-  font-weight: 600;
-}
-
-.diff-resolved-badge.accepted {
-  background: rgba(16, 185, 129, 0.15);
-  color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.3);
-}
-
-.diff-resolved-badge.discarded {
-  background: rgba(239, 68, 68, 0.15);
-  color: #f87171;
-  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--text-muted, #8e8e9f);
 }
 
 /* Staged Changes Drawer */
@@ -5848,6 +5887,16 @@ input.tools-search-input[type="search"] {
   cursor: not-allowed;
 }
 
+/* Compact ghost companion to the batch actions: expand/collapse is a view
+ * concern, so it reads lighter than Accept All / Discard All and keeps the
+ * header row on one line at narrow widths. */
+button.ghost.staged-expand-all-btn {
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .staged-drawer-close-btn {
   background: transparent;
   border: none;
@@ -5884,55 +5933,62 @@ input.tools-search-input[type="search"] {
   color: var(--text-muted, #8e8e9f);
 }
 
-.staged-drawer-layout {
-  display: flex;
+.staged-drawer-body {
   flex: 1;
-  overflow: hidden;
-}
-
-.staged-files-list {
-  width: 240px;
-  border-right: 1px solid var(--border-color, #2c2c36);
-  background: #111116;
-  overflow-y: auto;
-  padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
+  padding: 12px;
+  overflow-y: auto;
 }
 
-.staged-file-item {
-  padding: 10px;
-  border-radius: 6px;
+.staged-change-card {
   background: #171720;
-  border: 1px solid transparent;
+  border: 1px solid var(--border-color, #2c2c36);
+  border-radius: 6px;
+}
+
+.staged-change-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.staged-change-toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-muted, #8e8e9f);
   cursor: pointer;
   transition: all 0.15s ease;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
 }
 
-.staged-file-item:hover {
-  background: #20202c;
-  border-color: #3b3b4d;
-}
-
-.staged-file-item.selected {
-  background: #241d33;
-  border-color: rgba(139, 92, 246, 0.5);
-}
-
-.staged-file-item-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+.staged-change-toggle:hover {
+  background: var(--bg-subtle, #23232d);
+  color: #ffffff;
 }
 
 .staged-file-name {
   font-size: 13px;
   font-weight: 600;
   color: #ffffff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.staged-change-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-muted, #8e8e9f);
+  font-family: monospace;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5953,18 +6009,10 @@ input.tools-search-input[type="search"] {
   color: #f87171;
 }
 
-.staged-file-dir {
-  font-size: 11px;
-  color: var(--text-muted, #8e8e9f);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.staged-file-item-actions {
+.staged-change-actions {
+  flex: none;
   display: flex;
   gap: 6px;
-  margin-top: 4px;
 }
 
 .staged-item-btn {
@@ -5995,70 +6043,9 @@ input.tools-search-input[type="search"] {
   background: #39394a;
 }
 
-.staged-diff-viewer {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-}
-
-.staged-selected-file-pane {
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  box-sizing: border-box;
-}
-
-.staged-selected-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-color, #2c2c36);
-}
-
-.staged-selected-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: #ffffff;
-  margin: 0 0 4px 0;
-}
-
-.staged-selected-path {
-  font-size: 11px;
-  color: var(--text-muted, #8e8e9f);
-  margin: 0;
-  font-family: monospace;
-}
-
-.staged-selected-stats {
-  display: flex;
-  gap: 6px;
-}
-
-.stat-badge {
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 700;
-  font-family: monospace;
-}
-
-.stat-badge.add {
-  background: rgba(34, 197, 94, 0.15);
-  color: #4ade80;
-}
-
-.stat-badge.del {
-  background: rgba(239, 68, 68, 0.15);
-  color: #f87171;
-}
-
-.staged-diff-scroll {
-  flex: 1;
-  overflow-y: auto;
+.staged-change-card-body {
+  border-top: 1px solid var(--border-color, #2c2c36);
+  padding: 8px 12px 12px;
 }
 
 /* Top Navigation Staged Files Trigger */

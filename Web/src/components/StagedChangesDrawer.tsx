@@ -1,6 +1,9 @@
 // Rune Weaver Dashboard — Collapsible right-hand drawer for staged changes review.
-// Shows all un-actioned staged files (.rune_*), full unified diffs, and provides
-// per-file Accept/Discard controls as well as batch [Accept All] and [Discard All].
+// Shows all un-actioned staged files (.rune_*), one collapsible card per file
+// with its full unified diff, and provides per-file Accept/Discard controls as
+// well as batch [Accept All] and [Discard All]. Cards start collapsed so a long
+// review queue scans by filename first; expansion is keyed by path so live
+// refetches never reopen the wrong file.
 
 import { useState, useEffect, useCallback } from "react";
 import {
@@ -11,7 +14,14 @@ import {
 } from "../api";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import UnifiedDiffView from "./UnifiedDiffView";
-import { CloseIcon, CheckIcon, TrashIcon, FileDiffIcon } from "./icons";
+import {
+  CloseIcon,
+  CheckIcon,
+  TrashIcon,
+  FileDiffIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+} from "./icons";
 
 interface StagedChangesDrawerProps {
   isOpen: boolean;
@@ -25,7 +35,9 @@ export default function StagedChangesDrawer({
   onCountChange,
 }: StagedChangesDrawerProps) {
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  // Expansion is keyed by path rather than index so a live refetch that
+  // reorders or removes files never reopens the wrong card.
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
   const [itemLoading, setItemLoading] = useState<Record<string, boolean>>({});
@@ -39,16 +51,11 @@ export default function StagedChangesDrawer({
       const files = res.files || [];
       setStagedFiles(files);
       onCountChange?.(files.length);
-      if (files.length > 0) {
-        setSelectedPath((prev) => {
-          if (prev && files.some((f) => f.path === prev)) {
-            return prev;
-          }
-          return files[0].path;
-        });
-      } else {
-        setSelectedPath(null);
-      }
+      // Drop expansion keys for files that are no longer staged so a path
+      // re-staged later starts collapsed instead of inheriting stale state.
+      setExpandedPaths((prev) =>
+        new Set([...prev].filter((p) => files.some((f) => f.path === p))),
+      );
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Failed loading staged files");
     } finally {
@@ -125,9 +132,29 @@ export default function StagedChangesDrawer({
     }
   };
 
-  if (!isOpen) return null;
+  // One derived flag drives the batch toggle's label and direction: expanding
+  // every path only when the set is not already complete, so a partially
+  // expanded queue always converges to fully expanded on the first click.
+  const allExpanded =
+    stagedFiles.length > 0 && stagedFiles.every((f) => expandedPaths.has(f.path));
 
-  const selectedFile = stagedFiles.find((f) => f.path === selectedPath) || stagedFiles[0];
+  const handleToggleAll = () => {
+    setExpandedPaths(allExpanded ? new Set<string>() : new Set(stagedFiles.map((f) => f.path)));
+  };
+
+  const toggleExpanded = (path: string) => {
+    setExpandedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  };
+
+  if (!isOpen) return null;
 
   return (
     <aside className="staged-drawer-backdrop" onClick={onClose}>
@@ -145,6 +172,13 @@ export default function StagedChangesDrawer({
           <div className="staged-drawer-header-actions">
             {stagedFiles.length > 0 && (
               <>
+                <button
+                  type="button"
+                  className="ghost staged-expand-all-btn"
+                  onClick={handleToggleAll}
+                >
+                  {allExpanded ? "Collapse all" : "Expand all"}
+                </button>
                 <button
                   type="button"
                   className="staged-batch-btn accept"
@@ -190,35 +224,39 @@ export default function StagedChangesDrawer({
             </p>
           </div>
         ) : (
-          <div className="staged-drawer-layout">
-            {/* File List Navigation */}
-            <div className="staged-files-list">
-              {stagedFiles.map((file) => {
-                const filename = file.path.split("/").pop() || file.path;
-                const isSelected = selectedFile?.path === file.path;
-                const isItemBusy = itemLoading[file.path] || batchLoading;
+          <div className="staged-drawer-body">
+            {stagedFiles.map((file) => {
+              const filename = file.path.split("/").pop() || file.path;
+              const isExpanded = expandedPaths.has(file.path);
+              const isItemBusy = itemLoading[file.path] || batchLoading;
 
-                return (
-                  <div
-                    key={file.path}
-                    className={`staged-file-item ${isSelected ? "selected" : ""}`}
-                    onClick={() => setSelectedPath(file.path)}
-                  >
-                    <div className="staged-file-item-header">
-                      <span className="staged-file-name" title={file.path}>
-                        {filename}
-                      </span>
-                      <div className="staged-file-stats">
-                        <span className="stat-add">+{file.additions}</span>
-                        <span className="stat-del">-{file.deletions}</span>
-                      </div>
-                    </div>
+              return (
+                <div key={file.path} className="staged-change-card">
+                  <div className="staged-change-card-header">
+                    <button
+                      type="button"
+                      className="staged-change-toggle"
+                      aria-expanded={isExpanded}
+                      aria-label={`${isExpanded ? "Collapse" : "Expand"} diff for ${filename}`}
+                      onClick={() => toggleExpanded(file.path)}
+                    >
+                      {isExpanded ? <ChevronDownIcon size={14} /> : <ChevronRightIcon size={14} />}
+                    </button>
 
-                    <span className="staged-file-dir text-xs text-neutral-500 truncate" title={file.path}>
+                    <span className="staged-file-name" title={file.path}>
+                      {filename}
+                    </span>
+
+                    <span className="staged-change-path" title={file.path}>
                       {file.path}
                     </span>
 
-                    <div className="staged-file-item-actions" onClick={(e) => e.stopPropagation()}>
+                    <div className="staged-file-stats">
+                      <span className="stat-add">+{file.additions}</span>
+                      <span className="stat-del">-{file.deletions}</span>
+                    </div>
+
+                    <div className="staged-change-actions">
                       <button
                         type="button"
                         className="staged-item-btn accept"
@@ -237,33 +275,15 @@ export default function StagedChangesDrawer({
                       </button>
                     </div>
                   </div>
-                );
-              })}
-            </div>
 
-            {/* Diff Viewer for Selected File */}
-            <div className="staged-diff-viewer">
-              {selectedFile ? (
-                <div className="staged-selected-file-pane">
-                  <div className="staged-selected-header">
-                    <div>
-                      <h3 className="staged-selected-title">
-                        {selectedFile.path.split("/").pop()}
-                      </h3>
-                      <p className="staged-selected-path">{selectedFile.path}</p>
+                  {isExpanded && (
+                    <div className="staged-change-card-body">
+                      <UnifiedDiffView diff={file.diff} maxCollapsedLines={1000} />
                     </div>
-                    <div className="staged-selected-stats">
-                      <span className="stat-badge add">+{selectedFile.additions}</span>
-                      <span className="stat-badge del">-{selectedFile.deletions}</span>
-                    </div>
-                  </div>
-
-                  <div className="staged-diff-scroll">
-                    <UnifiedDiffView diff={selectedFile.diff} maxCollapsedLines={1000} />
-                  </div>
+                  )}
                 </div>
-              ) : null}
-            </div>
+              );
+            })}
           </div>
         )}
       </div>

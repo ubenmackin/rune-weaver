@@ -20,19 +20,28 @@ struct ToolRouteTests {
     @Test
     func `Files tools report settings support through buildToolInfo`() throws {
         let tools = FilesTools.makeTools(filesConfig: FilesConfig())
-        // Files & Access lives under Security, so every `files.*` tool
-        // reports no Configure action.
+        // The Files category exposes only the files.write write review mode;
+        // Files & Access (allow roots, deny patterns, approval on deny) lives
+        // under Security, so every other `files.*` tool reports no Configure
+        // action.
         for tool in tools {
             let listed = buildToolInfo(for: tool, isEnabled: true, recordByPluginID: [:])
-            #expect(listed.hasConfig == false)
+            #expect(listed.hasConfig == (tool.name == "files.write"))
             #expect(listed.isEnabled == true)
         }
+        let write = tools.first { $0.name == "files.write" }
+        let writeTool = try #require(write)
+        let writeInfo = buildToolInfo(for: writeTool, isEnabled: true, recordByPluginID: [:])
+        #expect(writeInfo.name == "files.write")
+        #expect(writeInfo.hasConfig == true)
+        #expect(writeInfo.isEnabled == true)
+
         let read = tools.first { $0.name == "files.read" }
         let readTool = try #require(read)
-        let info = buildToolInfo(for: readTool, isEnabled: true, recordByPluginID: [:])
-        #expect(info.name == "files.read")
-        #expect(info.hasConfig == false)
-        #expect(info.isEnabled == true)
+        let readInfo = buildToolInfo(for: readTool, isEnabled: true, recordByPluginID: [:])
+        #expect(readInfo.name == "files.read")
+        #expect(readInfo.hasConfig == false)
+        #expect(readInfo.isEnabled == true)
     }
 
     @Test

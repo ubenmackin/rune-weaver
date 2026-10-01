@@ -3465,7 +3465,7 @@ describe("SettingsManager", () => {
     expect(getToolCategory("fanout.evil")).toBe("other");
   });
 
-  it("points Tools Files to Security with no Configure button", async () => {
+  it("opens the Files write-mode editor from Tools while access rules stay in Security", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -3478,12 +3478,24 @@ describe("SettingsManager", () => {
         pluginID: null,
         source: "builtin",
         integrityStatus: "valid",
-        hasConfig: true,
+        hasConfig: false,
       },
       {
         name: "files.grep",
         description: "Search files",
         permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: false,
+      },
+      {
+        name: "files.write",
+        description: "Write a file",
+        permissionLevel: "requiresApproval",
         inputSchema: "{}",
         isEnabled: true,
         isBuiltIn: true,
@@ -3498,20 +3510,26 @@ describe("SettingsManager", () => {
       filesDenyPatterns: [".env*"],
       filesAllowRoots: ["~"],
       filesRequireApprovalOnDeny: true,
+      filesWriteMode: "model",
     };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string | URL | Request) => {
-        const urlStr = String(url);
-        if (urlStr.includes("/tools")) {
-          return jsonResponse({ tools: mockTools });
-        }
-        if (urlStr.includes("/plugins")) {
-          return jsonResponse({ plugins: [] });
-        }
-        return jsonResponse(settingsWithFiles);
-      })
-    );
+    let sentPayload: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        // Merge the write-mode change like the engine does so the reloaded
+        // form reflects the saved posture.
+        return jsonResponse({ ...settingsWithFiles, ...sentPayload });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithFiles);
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
     render(<SettingsManager />);
 
@@ -3519,28 +3537,59 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Tools owns the Files & Workspace category for toggles only: both file
-    // tools share one section with bulk actions but no header Configure, even
-    // though the server flags them with hasConfig. Security owns the editor,
-    // so the Tools section points there instead of opening a modal.
+    // Tools owns the Files & Workspace category; files.write's hasConfig flag
+    // earns the category header one Configure button with no per-card buttons,
+    // while files.read and files.grep report no settings surface.
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
     await waitFor(() => {
       expect(screen.getByText("Files & Workspace")).toBeDefined();
     });
+    expect(screen.getByText("files.write")).toBeDefined();
     expect(screen.getByText("files.read")).toBeDefined();
     expect(screen.getByText("files.grep")).toBeDefined();
-    expect(
-      screen.queryAllByRole("button", { name: /^Configure$/ }).length
-    ).toBe(0);
-    expect(screen.queryByRole("button", { name: /^Configure$/ })).toBeNull();
+    expect(screen.getByText(/Write review mode is configured above/i)).toBeDefined();
+    const configureButtons = screen.getAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    expect(configureButtons[0].getAttribute("title")).toBe("Configure Files & Workspace");
+    expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
+    expect(configureButtons[0].closest(".builtin-tool-card")).toBeNull();
     expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
-    expect(
-      screen.getAllByRole("button", { name: /Enable All|Disable All/ }).length
-    ).toBeGreaterThan(0);
-    // No inline file editors live in Tools: the roots textarea stays in Security.
+    // No inline access-rule editors live in Tools: the roots and deny textareas
+    // stay in Security, which is the single access-policy editor.
     expect(screen.queryByLabelText(/Allowed roots, one per line/i)).toBeNull();
     expect(screen.queryByLabelText(/Deny patterns, one per line/i)).toBeNull();
+
+    // The write-mode editor names all three postures and explains what each
+    // enforces before anything is saved.
+    await user.click(configureButtons[0]);
+    expect(
+      screen.getByRole("heading", { name: /Configure Files & Workspace/i })
+    ).toBeDefined();
+    expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
+    expect(screen.getByLabelText(/Let the model decide/i)).toBeDefined();
+    expect(screen.getByLabelText(/Always stage for review/i)).toBeDefined();
+    expect(screen.getByLabelText(/Always write live/i)).toBeDefined();
+    expect(screen.getByText(/live in Security -> Files & Access/i)).toBeDefined();
+
+    // Saving the staged posture sends only filesWriteMode, so the access rules
+    // keep their Security-owned values.
+    await user.click(screen.getByLabelText(/Always stage for review/i));
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    expect(sentPayload?.["filesWriteMode"]).toBe("staged");
+    expect(sentPayload).not.toHaveProperty("filesAllowRoots");
+    expect(sentPayload).not.toHaveProperty("filesDenyPatterns");
+    expect(sentPayload).not.toHaveProperty("filesRequireApprovalOnDeny");
+    await waitFor(() => {
+      expect(screen.getByText(/File write settings saved/i)).toBeDefined();
+    });
+    // Close explicitly: the success tick is timing-based, so Cancel owns the
+    // deterministic exit before the Security pane is opened.
+    await user.click(screen.getByRole("button", { name: /^Cancel$/ }));
 
     // The pointer target renders in Security as the single Files & Access editor.
     // The header scope note states the sharing boundary once directly under

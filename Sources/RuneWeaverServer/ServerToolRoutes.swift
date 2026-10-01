@@ -41,10 +41,10 @@ func buildToolInfo(
     // configure capture dimensions, quality, and the control blocklist,
     // fanout.run configures the worker cap, timeout, and tool-subset widening,
     // and bash.exec exposes its shell policy alongside desktop, media, and
-    // browser/web. Files & Access lives under Security, so every `files.*`
-    // tool reports no Configure action. Provenance gates the flag
-    // alongside the name so an external rune reusing a `files.` prefix never
-    // gains a Configure action.
+    // browser/web. files.write exposes its write review mode; Files & Access
+    // (allow roots, deny patterns, approval on deny) remains under Security.
+    // Provenance gates the flag alongside the name so an external rune reusing
+    // a `files.` prefix or the files.write name never gains a Configure action.
     let configurableName = tool.name == "media.arr"
         || tool.name == "media.arr.read"
         || tool.name == "browser.navigate"
@@ -54,6 +54,7 @@ func buildToolInfo(
         || tool.name == "desktop.action"
         || tool.name == "bash.exec"
         || tool.name == "fanout.run"
+        || tool.name == "files.write"
     let hasConfig = isBuiltIn && configurableName
 
     return ToolInfo(

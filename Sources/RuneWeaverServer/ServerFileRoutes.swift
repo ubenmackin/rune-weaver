@@ -1,4 +1,4 @@
-// Rune Weaver Server — Staged files review and resolution routes.
+// Rune Weaver Server — Staged and live file review and resolution routes.
 
 import Foundation
 import RuneWeaverCore
@@ -7,11 +7,6 @@ import Vapor
 
 /// Scans for and manages .rune_* staged files.
 enum StagedFilesManager {
-    /// Canonical staging marker beside each live file.
-    private static let stagedPrefix = ".rune_"
-    /// Live-write rollback marker that must never surface in the review inbox.
-    private static let backupPrefix = ".rune_backup_"
-
     /// Reads UTF-8 text, collapsing every unreadable case to nil.
     /// - Parameter url: File to read.
     /// - Returns: Text when the file exists and decodes as UTF-8, otherwise nil.
@@ -26,14 +21,6 @@ enum StagedFilesManager {
             return nil
         }
         return text
-    }
-
-    /// Reports whether a URL points at a regular file.
-    /// - Parameter url: Candidate staging or live path.
-    /// - Returns: True only for regular files, so directories and other
-    ///   node types cannot ride a replace/move/remove across types.
-    static func isRegularFile(at url: URL) -> Bool {
-        (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
     }
 
     /// Derives the shared default scan root from the `[files]` policy.
@@ -93,9 +80,11 @@ enum StagedFilesManager {
     ///   entry does not sit beside its live file as `.rune_<name>`.
     static func guardedStagingPair(for rawPath: String, filesConfig: FilesConfig) throws -> (live: URL, staging: URL) {
         let liveURL = URL(fileURLWithPath: FilesAccessGuard.resolvedURL(for: rawPath).path)
-        let stagingURL = liveURL.deletingLastPathComponent().appendingPathComponent(stagedPrefix + liveURL.lastPathComponent)
-        // Rollback copies are restore points, not reviewable proposals.
-        guard !stagingURL.lastPathComponent.hasPrefix(backupPrefix) else {
+        let stagingURL = ReviewArtifacts.stagingURL(forLiveURL: liveURL)
+        // Rollback copies are restore points, not reviewable proposals. The
+        // shared predicate folds case so a differently-cased target cannot
+        // derive a staging name that lands on a rollback copy.
+        guard !ReviewArtifacts.isRollbackArtifactFilename(stagingURL.lastPathComponent) else {
             throw Abort(.forbidden, reason: "Backup entries are not reviewable staged files.")
         }
         // Denied paths never reach disk: both sides fail closed before any move.
@@ -112,8 +101,8 @@ enum StagedFilesManager {
         let canonicalLive = URL(fileURLWithPath: liveDecision.resolvedPath)
         let canonicalStaging = URL(fileURLWithPath: stagingDecision.resolvedPath)
         guard canonicalStaging.deletingLastPathComponent().path == canonicalLive.deletingLastPathComponent().path,
-              canonicalStaging.lastPathComponent == stagedPrefix + canonicalLive.lastPathComponent,
-              !canonicalStaging.lastPathComponent.hasPrefix(backupPrefix)
+              canonicalStaging.lastPathComponent == ReviewArtifacts.stagingPrefix + canonicalLive.lastPathComponent,
+              !ReviewArtifacts.isRollbackArtifactFilename(canonicalStaging.lastPathComponent)
         else {
             throw Abort(.forbidden, reason: "Staged file must sit beside its live file as .rune_<name>.")
         }
@@ -168,13 +157,13 @@ enum StagedFilesManager {
         return results
     }
 
-    /// Atomically replaces the live file with the staged file and removes the staging file and table entry.
+    /// Atomically replaces the live file with the staged file and resolves its review row.
     /// - Parameters:
     ///   - livePath: Caller-supplied live path for the file to restore.
     ///   - stagingPath: Caller-supplied staging path beside the live file.
     ///   - filesConfig: `[files]` policy re-enforced here so a direct call
     ///     cannot bypass the route-level guard.
-    ///   - store: `StagedFilesStore` to clean up upon acceptance.
+    ///   - store: `StagedFilesStore` recording the terminal acceptance.
     /// - Throws: `Abort(.forbidden)` when either path is denied or the pair
     ///   is not a same-directory `.rune_<name>` couple; `Abort(.notFound)`
     ///   when the staging entry is missing.
@@ -199,8 +188,8 @@ enum StagedFilesManager {
         let liveURL = URL(fileURLWithPath: liveDecision.resolvedPath)
         let stagingURL = URL(fileURLWithPath: stagingDecision.resolvedPath)
         guard stagingURL.deletingLastPathComponent().path == liveURL.deletingLastPathComponent().path,
-              stagingURL.lastPathComponent == stagedPrefix + liveURL.lastPathComponent,
-              !stagingURL.lastPathComponent.hasPrefix(backupPrefix)
+              stagingURL.lastPathComponent == ReviewArtifacts.stagingPrefix + liveURL.lastPathComponent,
+              !ReviewArtifacts.isRollbackArtifactFilename(stagingURL.lastPathComponent)
         else {
             throw Abort(.forbidden, reason: "Staged file must sit beside its live file as .rune_<name>.")
         }
@@ -210,7 +199,7 @@ enum StagedFilesManager {
         // Staged entries must be regular files and live targets must not be
         // directories, so a crafted pair cannot cross file/dir types on
         // replace or move.
-        guard isRegularFile(at: stagingURL) else {
+        guard LiveFileBackup.isRegularFile(stagingURL) else {
             throw Abort(.forbidden, reason: "Staged entry is not a regular file.")
         }
         if (try? liveURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
@@ -226,15 +215,20 @@ enum StagedFilesManager {
         }
 
         let effectiveStore = store ?? StagedFilesStore()
-        await effectiveStore.removeStaged(pathOrStagingPath: liveURL.path)
+        // The staging file was moved onto the live path above, and rows are
+        // recorded under the live path, so resolving by it marks the pending
+        // review accepted. The row survives as a durable terminal answer
+        // instead of vanishing, which is what lets a reloaded dashboard still
+        // explain the outcome.
+        await effectiveStore.resolveStaged(pathOrStagingPath: liveURL.path, resolution: .accepted)
     }
 
-    /// Deletes the staging file and cleans up the table entry.
+    /// Deletes the staging file and resolves its review row as discarded.
     /// - Parameters:
     ///   - stagingPath: Caller-supplied staging path to remove.
     ///   - filesConfig: `[files]` policy re-enforced here so a direct call
     ///     cannot bypass the route-level guard.
-    ///   - store: `StagedFilesStore` to clean up upon discard.
+    ///   - store: `StagedFilesStore` recording the terminal discard.
     /// - Throws: `Abort(.forbidden)` when the staging path (or its derived
     ///   live counterpart) is denied or not a `.rune_<name>` entry.
     static func discard(
@@ -251,13 +245,14 @@ enum StagedFilesManager {
         }
         let stagingURL = URL(fileURLWithPath: stagingDecision.resolvedPath)
         let stagingName = stagingURL.lastPathComponent
-        guard stagingName.hasPrefix(stagedPrefix), stagingName.count > stagedPrefix.count,
-              !stagingName.hasPrefix(backupPrefix)
+        guard stagingName.hasPrefix(ReviewArtifacts.stagingPrefix),
+              stagingName.count > ReviewArtifacts.stagingPrefix.count,
+              !ReviewArtifacts.isRollbackArtifactFilename(stagingName)
         else {
             throw Abort(.forbidden, reason: "Staged file must sit beside its live file as .rune_<name>.")
         }
         let liveURL = stagingURL.deletingLastPathComponent()
-            .appendingPathComponent(String(stagingName.dropFirst(stagedPrefix.count)))
+            .appendingPathComponent(String(stagingName.dropFirst(ReviewArtifacts.stagingPrefix.count)))
         let liveDecision = FilesAccessGuard.evaluate(path: liveURL.path, filesConfig: filesConfig)
         guard liveDecision.allowed else {
             throw Abort(.forbidden, reason: liveDecision.reason ?? "Access denied for path.")
@@ -265,14 +260,153 @@ enum StagedFilesManager {
         if FileManager.default.fileExists(atPath: stagingURL.path) {
             // Removing a directory through a staging name would recursively
             // delete, so only regular files reach removeItem.
-            guard isRegularFile(at: stagingURL) else {
+            guard LiveFileBackup.isRegularFile(stagingURL) else {
                 throw Abort(.forbidden, reason: "Staged entry is not a regular file.")
             }
             try FileManager.default.removeItem(at: stagingURL)
         }
 
         let effectiveStore = store ?? StagedFilesStore()
-        await effectiveStore.removeStaged(pathOrStagingPath: stagingURL.path)
+        // Resolve by the staging path: rows carry it alongside the live path,
+        // so a discard leaves the same durable terminal state an accept does.
+        await effectiveStore.resolveStaged(pathOrStagingPath: stagingURL.path, resolution: .discarded)
+    }
+}
+
+/// Resolves live-write reviews by keeping the live bytes or rolling them back.
+///
+/// A live review owns at most one `.rune_backup_<name>` rollback copy beside
+/// the live file (see `LiveFileBackup`). Accept keeps the live file and clears
+/// the copy; decline restores the copy or, for a new-file review, deletes the
+/// file. Both decisions re-evaluate the live path and the derived backup path
+/// through the shared access guard first, so a denied path fails closed before
+/// any filesystem mutation.
+enum LiveReviewManager {
+    /// Resolves a live path to its canonical live/rollback pair after policy checks.
+    /// - Parameters:
+    ///   - rawPath: Caller-supplied live path (tilde and relative forms accepted).
+    ///   - filesConfig: `[files]` policy enforced on both resolved paths.
+    /// - Returns: Canonical live URL plus the derived rollback-copy URL.
+    /// - Throws: `Abort(.forbidden)` when the live path or its derived
+    ///   rollback sibling is denied.
+    static func guardedLivePair(for rawPath: String, filesConfig: FilesConfig) throws -> (live: URL, backup: URL) {
+        let liveDecision = FilesAccessGuard.evaluate(path: rawPath, filesConfig: filesConfig)
+        guard liveDecision.allowed else {
+            throw Abort(.forbidden, reason: liveDecision.reason ?? "Access denied for path.")
+        }
+        let liveURL = URL(fileURLWithPath: liveDecision.resolvedPath)
+        // The copy path is derived, never caller-supplied, so a request can only
+        // name a live file and the guard decides which sibling may be mutated.
+        let backupURL = ReviewArtifacts.backupURL(forLiveURL: liveURL)
+        // A decision removes or moves the rollback copy, so a denied backup path
+        // fails closed too even when the live path itself passed the guard. The
+        // guard is an allow/deny gate only: the mutation target stays the
+        // derived sibling, because resolving a link planted at its reserved
+        // name would redirect the decision onto whatever the link points at.
+        let backupDecision = FilesAccessGuard.evaluate(path: backupURL.path, filesConfig: filesConfig)
+        guard backupDecision.allowed else {
+            throw Abort(.forbidden, reason: backupDecision.reason ?? "Access denied for rollback path.")
+        }
+        return (liveURL, backupURL)
+    }
+
+    /// Keeps the live file and clears its rollback copy.
+    ///
+    /// The decision runs as one atomic store-owned section: the pending row is
+    /// read, the copy is cleared, and the terminal state is recorded without
+    /// yielding the serialized lane, so a concurrent live write can only join
+    /// the review by observing it still pending before the decision, or start
+    /// a fresh series after it. The joined write runs inside that same section
+    /// (see `startLiveReview`), so the ledger can never settle terminal while
+    /// the live file holds a later write.
+    /// - Parameters:
+    ///   - livePath: Caller-supplied live path under review.
+    ///   - filesConfig: `[files]` policy re-enforced here so a direct call
+    ///     cannot bypass the route-level guard.
+    ///   - store: `StagedFilesStore` recording the terminal acceptance.
+    /// - Returns: `"accepted"` for the response and broadcast frame.
+    /// - Throws: `Abort(.forbidden)` when either path is denied;
+    ///   `Abort(.notFound)` when no pending row exists.
+    static func accept(
+        livePath: String,
+        filesConfig: FilesConfig = FilesConfig(),
+        store: StagedFilesStore? = nil
+    ) async throws -> String {
+        let pair = try guardedLivePair(for: livePath, filesConfig: filesConfig)
+        let effectiveStore = store ?? StagedFilesStore()
+        let resolution = try await effectiveStore.resolveLiveReviewAtomically(path: pair.live.path) { record in
+            if record.backupPath != nil {
+                // Accept is the keep path: the live bytes stay as written, so
+                // the rollback copy is only cleared. A copy an out-of-band
+                // delete already removed is tolerated so the review still
+                // settles.
+                try LiveFileBackup.removeBackup(at: pair.backup)
+            }
+            return .accepted
+        }
+        guard let resolution else {
+            throw Abort(.notFound, reason: "No pending live review for \(pair.live.path).")
+        }
+        return resolution.rawValue
+    }
+
+    /// Rolls the live file back to its rollback copy, or discards a new file.
+    ///
+    /// The decision runs as one atomic store-owned section: the pending row is
+    /// read, the copy is consumed (or the created file removed), and the
+    /// terminal state is recorded without yielding the serialized lane, so a
+    /// concurrent live write can only join the review by observing it still
+    /// pending before the decision, or start a fresh series after it. The
+    /// joined write runs inside that same section (see `startLiveReview`), so
+    /// the ledger can never report a revert while the file holds a later
+    /// write.
+    /// - Parameters:
+    ///   - livePath: Caller-supplied live path under review.
+    ///   - filesConfig: `[files]` policy re-enforced here so a direct call
+    ///     cannot bypass the route-level guard.
+    ///   - store: `StagedFilesStore` recording the terminal resolution.
+    /// - Returns: `"reverted"` when the rollback copy was restored onto the
+    ///   live path, `"discarded"` when a new-file review removed the file.
+    /// - Throws: `Abort(.forbidden)` when either path is denied or the live
+    ///   entry is not a regular file; `Abort(.notFound)` when no pending row
+    ///   exists or the row's rollback copy is missing.
+    static func decline(
+        livePath: String,
+        filesConfig: FilesConfig = FilesConfig(),
+        store: StagedFilesStore? = nil
+    ) async throws -> String {
+        let pair = try guardedLivePair(for: livePath, filesConfig: filesConfig)
+        let effectiveStore = store ?? StagedFilesStore()
+        let resolution = try await effectiveStore.resolveLiveReviewAtomically(path: pair.live.path) { record in
+            if record.backupPath != nil {
+                // The ledger records the derived sibling, and the guard already
+                // vetted that URL, so the restore can only ever consume the
+                // copy beside the live file even if the row were tampered
+                // with.
+                guard FileManager.default.fileExists(atPath: pair.backup.path) else {
+                    throw Abort(.notFound, reason: "Rollback copy not found for \(pair.live.path).")
+                }
+                // Atomic replace when the live file still exists, move when an
+                // external delete removed it; both branches consume the copy,
+                // so no separate backup removal is needed.
+                try LiveFileBackup.restore(liveURL: pair.live, backupURL: pair.backup)
+                return .reverted
+            }
+            // A new-file review owns no rollback copy, so declining it removes
+            // the created file. An already-missing file is tolerated because
+            // the review outcome is what matters, not the file's survival.
+            if FileManager.default.fileExists(atPath: pair.live.path) {
+                guard LiveFileBackup.isRegularFile(pair.live) else {
+                    throw Abort(.forbidden, reason: "Live entry is not a regular file.")
+                }
+                try FileManager.default.removeItem(at: pair.live)
+            }
+            return .discarded
+        }
+        guard let resolution else {
+            throw Abort(.notFound, reason: "No pending live review for \(pair.live.path).")
+        }
+        return resolution == .reverted ? "reverted" : "discarded"
     }
 }
 
@@ -280,8 +414,11 @@ enum StagedFilesManager {
 func registerFileRoutes(_ app: Application) {
     let filesGroup = app.grouped(PathComponent.constant(ServerPaths.files))
     registerFileStagedRoute(filesGroup)
+    registerFileReviewStatusRoute(filesGroup)
     registerFileAcceptRoute(filesGroup)
     registerFileDiscardRoute(filesGroup)
+    registerFileLiveAcceptRoute(filesGroup)
+    registerFileLiveDeclineRoute(filesGroup)
 }
 
 private func registerFileStagedRoute(_ filesGroup: RoutesBuilder) {
@@ -296,6 +433,59 @@ private func registerFileStagedRoute(_ filesGroup: RoutesBuilder) {
         let scanRoot = try StagedFilesManager.resolvedScanRoot(requestedPath: requested, filesConfig: filesConfig)
         let entries = await StagedFilesManager.findStagedFiles(under: scanRoot, filesConfig: filesConfig, store: store)
         return StagedFilesResponse(files: entries)
+    }
+}
+
+/// Registers the batch review-status query route.
+///
+/// The route answers from the SQLite review ledgers only — no filesystem walk
+/// and no access-guard evaluation — so a requested path outside every allow
+/// root still reads back as `"unknown"` instead of a refusal. A ledger the
+/// store cannot read fails the request with a non-2xx rather than filling
+/// every key with `"unknown"`: absence is a definitive answer that would strip
+/// a still-pending review's controls, while the failure response leaves the
+/// dashboard's pending UI in place.
+private func registerFileReviewStatusRoute(_ filesGroup: RoutesBuilder) {
+    // POST /files/review-status
+    filesGroup.post(PathComponent.constant(ServerPaths.filesReviewStatus)) { req async throws -> ReviewStatusResponse in
+        let statusReq = try req.content.decode(ReviewStatusRequest.self)
+        // Trim first so padded spellings map to the same canonical ledger keys
+        // the store looks up, then reject blank and runaway lists in one guard:
+        // a blank entry would key the response under a path no client can
+        // match, and an unbounded list would fan one request into unbounded
+        // sequential lookups.
+        let paths = statusReq.paths.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !paths.isEmpty, paths.count <= 200, paths.allSatisfy({ !$0.isEmpty }) else {
+            throw Abort(.badRequest, reason: "Body must carry 1 to 200 non-empty paths.")
+        }
+
+        let store = req.application.runeWeaver.stagedFiles
+        let staged: [String: FileReviewState]
+        let live: [String: FileReviewState]
+        do {
+            staged = try await store.states(forPaths: paths)
+            live = try await store.liveStates(forPaths: paths)
+        } catch {
+            // The batched reads throw so a store failure cannot be mistaken
+            // for absent rows; surface it as a non-2xx and let the client keep
+            // the pending UI it already shows.
+            RuneWeaverLog.stores.error(
+                "files/review-status: could not read the review ledger: \(error.localizedDescription)"
+            )
+            throw Abort(.internalServerError, reason: "Could not read the review ledger; retry the status query.")
+        }
+        // Echo every requested path in both maps, defaulting a missing row to
+        // "unknown", so a client renders each row's review posture from this
+        // response alone instead of guessing from an omitted key.
+        var stagedStates: [String: String] = [:]
+        var liveStates: [String: String] = [:]
+        stagedStates.reserveCapacity(paths.count)
+        liveStates.reserveCapacity(paths.count)
+        for path in paths {
+            stagedStates[path] = staged[path]?.rawValue ?? "unknown"
+            liveStates[path] = live[path]?.rawValue ?? "unknown"
+        }
+        return ReviewStatusResponse(stagedStates: stagedStates, liveStates: liveStates)
     }
 }
 
@@ -332,11 +522,7 @@ private func registerFileAcceptRoute(_ filesGroup: RoutesBuilder) {
             let hub = req.application.runeWeaver.hub
             Task { [hub, acceptedPaths] in
                 for path in acceptedPaths {
-                    if let data = try? JSONEncoder().encode(WSFileActionEvent(type: "file_accepted", path: path)),
-                       let text = String(data: data, encoding: .utf8)
-                    {
-                        await hub.broadcast(text: text)
-                    }
+                    await hub.broadcastFileAction(WSFileActionEvent(type: "file_accepted", path: path))
                 }
             }
             if !failures.isEmpty {
@@ -362,11 +548,7 @@ private func registerFileAcceptRoute(_ filesGroup: RoutesBuilder) {
         let hub = req.application.runeWeaver.hub
         let livePath = liveURL.path
         Task { [hub, livePath] in
-            if let data = try? JSONEncoder().encode(WSFileActionEvent(type: "file_accepted", path: livePath)),
-               let text = String(data: data, encoding: .utf8)
-            {
-                await hub.broadcast(text: text)
-            }
+            await hub.broadcastFileAction(WSFileActionEvent(type: "file_accepted", path: livePath))
         }
 
         return FileActionResponse(status: "accepted", count: 1)
@@ -406,11 +588,7 @@ private func registerFileDiscardRoute(_ filesGroup: RoutesBuilder) {
             let hub = req.application.runeWeaver.hub
             Task { [hub, discardedPaths] in
                 for path in discardedPaths {
-                    if let data = try? JSONEncoder().encode(WSFileActionEvent(type: "file_discarded", path: path)),
-                       let text = String(data: data, encoding: .utf8)
-                    {
-                        await hub.broadcast(text: text)
-                    }
+                    await hub.broadcastFileAction(WSFileActionEvent(type: "file_discarded", path: path))
                 }
             }
             if !failures.isEmpty {
@@ -436,13 +614,87 @@ private func registerFileDiscardRoute(_ filesGroup: RoutesBuilder) {
         let hub = req.application.runeWeaver.hub
         let livePath = liveURL.path
         Task { [hub, livePath] in
-            if let data = try? JSONEncoder().encode(WSFileActionEvent(type: "file_discarded", path: livePath)),
-               let text = String(data: data, encoding: .utf8)
-            {
-                await hub.broadcast(text: text)
-            }
+            await hub.broadcastFileAction(WSFileActionEvent(type: "file_discarded", path: livePath))
         }
 
         return FileActionResponse(status: "discarded", count: 1)
+    }
+}
+
+/// Guards one live review request and returns its canonical live path.
+///
+/// Shared by the accept and decline routes so both reject bulk requests and
+/// missing paths identically and both fail closed before any ledger read or
+/// filesystem mutation; denial never reveals whether a review row exists.
+private func guardedLiveReviewPath(_ actionReq: FileActionRequest, filesConfig: FilesConfig) throws -> String {
+    guard actionReq.all != true else {
+        throw Abort(.badRequest, reason: "Live reviews resolve one file at a time.")
+    }
+    guard let rawPath = actionReq.path, !rawPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        throw Abort(.badRequest, reason: "A live review requires a 'path'.")
+    }
+    return try LiveReviewManager.guardedLivePair(for: rawPath, filesConfig: filesConfig).live.path
+}
+
+/// Broadcasts one detached `live_resolved` frame for a completed live review.
+/// - Parameters:
+///   - req: Request whose application owns the hub.
+///   - path: Canonical live path that was resolved.
+///   - state: Terminal state (`accepted`, `reverted`, or `discarded`).
+private func broadcastLiveResolved(_ req: Request, path: String, state: String) {
+    // The HTTP response carries the mutation truth; the frame follows from a
+    // detached task so a slow viewer never delays the review decision.
+    let hub = req.application.runeWeaver.hub
+    Task { [hub, path, state] in
+        await hub.broadcastFileAction(WSFileActionEvent(type: "live_resolved", path: path, state: state))
+    }
+}
+
+/// Builds the propagation hook reporting a live write that superseded a
+/// staged review.
+///
+/// A live write resolves the staged row inside the `files.write` tool rather
+/// than a route, so the serving process hands the tool this hook and every
+/// connected dashboard receives a `file_superseded` frame naming the live path
+/// and the terminal `superseded` state — the same frame the resolution routes
+/// would have sent for a route-owned decision. Direct-core writers (CLI,
+/// menu-bar app) hand nil and stay silent.
+/// - Parameter hub: Hub fanning the frame out to every live socket.
+/// - Returns: Hook receiving the canonical live path of the superseded row.
+func makeStagedSupersedeNotifier(hub: WSHub) -> @Sendable (String) async -> Void {
+    { path in
+        await hub.broadcastFileAction(
+            WSFileActionEvent(
+                type: "file_superseded",
+                path: path,
+                state: FileReviewState.superseded.rawValue
+            )
+        )
+    }
+}
+
+private func registerFileLiveAcceptRoute(_ filesGroup: RoutesBuilder) {
+    // POST /files/live-accept
+    filesGroup.post(PathComponent.constant(ServerPaths.filesLiveAccept)) { req async throws -> FileActionResponse in
+        let actionReq = try req.content.decode(FileActionRequest.self)
+        let filesConfig = req.application.runeWeaver.filesConfig
+        let store = req.application.runeWeaver.stagedFiles
+        let livePath = try guardedLiveReviewPath(actionReq, filesConfig: filesConfig)
+        let state = try await LiveReviewManager.accept(livePath: livePath, filesConfig: filesConfig, store: store)
+        broadcastLiveResolved(req, path: livePath, state: state)
+        return FileActionResponse(status: state, count: 1)
+    }
+}
+
+private func registerFileLiveDeclineRoute(_ filesGroup: RoutesBuilder) {
+    // POST /files/live-decline
+    filesGroup.post(PathComponent.constant(ServerPaths.filesLiveDecline)) { req async throws -> FileActionResponse in
+        let actionReq = try req.content.decode(FileActionRequest.self)
+        let filesConfig = req.application.runeWeaver.filesConfig
+        let store = req.application.runeWeaver.stagedFiles
+        let livePath = try guardedLiveReviewPath(actionReq, filesConfig: filesConfig)
+        let state = try await LiveReviewManager.decline(livePath: livePath, filesConfig: filesConfig, store: store)
+        broadcastLiveResolved(req, path: livePath, state: state)
+        return FileActionResponse(status: state, count: 1)
     }
 }

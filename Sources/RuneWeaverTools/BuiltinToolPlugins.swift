@@ -140,6 +140,10 @@ public enum BuiltinToolPlugins {
     /// - Parameter policyStore: Shared security policy store; nil builds and
     ///   loads the factory default. Either way exactly one store instance and
     ///   one egress supervisor back the `api.request` registration.
+    /// - Parameter supersededReviewNotifier: Optional propagation hook the
+    ///   serving process hands to `files.write` so a live write that
+    ///   supersedes a staged review reaches connected dashboards; nil keeps
+    ///   direct-core writers silent.
     /// - Throws: `PolicyInvariantError` when no verified policy is available.
     public static func makeAllTools(
         emailConfig: EmailConfig? = nil,
@@ -170,6 +174,7 @@ public enum BuiltinToolPlugins {
         messagesGateway: (any MessagesGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         stagedFilesStore: StagedFilesStore? = nil,
+        supersededReviewNotifier: (@Sendable (String) async -> Void)? = nil,
         fanOutEngine: FanOutEngine? = nil,
         policyStore: PolicyStore? = nil,
         egressSupervisor: OutboundEgressSupervisor? = nil
@@ -198,7 +203,11 @@ public enum BuiltinToolPlugins {
             )
         }
         tools += MessagesTools.makeTools(chatDatabasePath: chatDatabasePath, gateway: messagesGateway)
-        tools += FilesTools.makeTools(filesConfig: filesConfig ?? FilesConfig(), stagedFilesStore: stagedFilesStore)
+        tools += FilesTools.makeTools(
+            filesConfig: filesConfig ?? FilesConfig(),
+            stagedFilesStore: stagedFilesStore,
+            supersededReviewNotifier: supersededReviewNotifier
+        )
         // Bash always registers so GET /tools stays stable; a disabled
         // config fails closed inside BashTool.execute via its enabled guard.
         tools.append(
@@ -356,6 +365,7 @@ public enum BuiltinToolPlugins {
         messagesGateway: (any MessagesGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         stagedFilesStore: StagedFilesStore? = nil,
+        supersededReviewNotifier: (@Sendable (String) async -> Void)? = nil,
         fanOutEngine: FanOutEngine? = nil,
         policyStore: PolicyStore? = nil,
         egressSupervisor: OutboundEgressSupervisor? = nil
@@ -390,6 +400,7 @@ public enum BuiltinToolPlugins {
             messagesGateway: messagesGateway,
             chatDatabasePath: chatDatabasePath,
             stagedFilesStore: stagedFilesStore,
+            supersededReviewNotifier: supersededReviewNotifier,
             fanOutEngine: fanOutEngine,
             policyStore: policyStore,
             egressSupervisor: egressSupervisor

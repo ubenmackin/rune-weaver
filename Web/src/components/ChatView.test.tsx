@@ -3,7 +3,9 @@
 // Covers sending turns and token display plus the handheld matrix: the session
 // history drawer stays closed on narrow viewports and inline on wide ones,
 // dismissing via backdrop, Escape, or session select, while the footer
-// collapses to a glanceable line on mobile and expands to full metrics.
+// collapses to a glanceable line on mobile and expands to full metrics. Also
+// pins the transcript's batched write-review hydration: every rendered
+// files.write card hydrates through one review-status request per card set.
 
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -3824,6 +3826,130 @@ describe("ChatView goal chip", () => {
       expect(screen.queryByTestId("goal-drawer")).not.toBeInTheDocument();
     });
     expect(document.activeElement).toBe(chip);
+  });
+});
+
+// The chat transcript hydrates every rendered write card through one batched
+// review-status read per card set, so a transcript with several write cards
+// never performs one request per card.
+describe("ChatView batched write-review hydration", () => {
+  const SESSION_ID = "batch-write-session-1";
+  const FIRST_PATH = "/tmp/batch-first.txt";
+  const SECOND_PATH = "/tmp/batch-second.txt";
+
+  function stagedWriteAction(
+    callID: string,
+    path: string,
+  ): Record<string, unknown> {
+    return {
+      toolName: "files.write",
+      callID,
+      argumentsJSON: "{}",
+      result: {
+        toolCallID: callID,
+        content: JSON.stringify({
+          status: "staged",
+          path,
+          backupPath: null,
+          diff: "@@ -1 +1 @@\n-old\n+new\n",
+          additions: 1,
+          deletions: 1,
+          message: "staged",
+        }),
+        isError: false,
+      },
+    };
+  }
+
+  // Routes the session detail, tool-actions, review-status, and sibling reads
+  // a mounted ChatView issues, returning the fetch mock so each case can count
+  // the batch requests. Explicit input/init params keep mock.calls typed as a
+  // 2-tuple so the request-body assertion below typechecks.
+  function installFetch() {
+    const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
+      if (input === "/sessions") {
+        return jsonResponse({ sessions: [], count: 0 });
+      }
+      if (input.endsWith("/tool-actions")) {
+        return jsonResponse({
+          sessionID: SESSION_ID,
+          actions: [
+            {
+              messageID: "m-write",
+              actions: [
+                stagedWriteAction("call-write-1", FIRST_PATH),
+                stagedWriteAction("call-write-2", SECOND_PATH),
+              ],
+            },
+          ],
+          count: 1,
+        });
+      }
+      if (input === `/sessions/${SESSION_ID}`) {
+        return jsonResponse({
+          id: SESSION_ID,
+          title: "batch session",
+          messages: [
+            {
+              id: "m-write",
+              role: "assistant",
+              content: "wrote two files",
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        });
+      }
+      if (input === "/files/review-status") {
+        return jsonResponse({
+          stagedStates: { [FIRST_PATH]: "accepted", [SECOND_PATH]: "pending" },
+          liveStates: {},
+        });
+      }
+      if (input.startsWith("/approvals")) {
+        return jsonResponse({ approvals: [], count: 0 });
+      }
+      if (input.startsWith("/runs")) {
+        return jsonResponse({ runs: [], count: 0 });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+    localStorage.setItem("rw_active_session_id", SESSION_ID);
+  });
+
+  it("hydrates every write card with one batched review-status request", async () => {
+    const fetchMock = installFetch();
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(screen.getByText("batch-first.txt")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Accepted")).toBeInTheDocument();
+    });
+
+    // Both kind/path entries rode one request for this surface's card set.
+    const reviewCalls = fetchMock.mock.calls.filter(
+      ([url]) => url === "/files/review-status",
+    );
+    expect(reviewCalls).toHaveLength(1);
+    const body = JSON.parse(
+      String(reviewCalls[0][1]?.body),
+    ) as { paths: string[] };
+    expect([...body.paths].sort()).toEqual([FIRST_PATH, SECOND_PATH].sort());
+
+    // Each card read its own entry from the shared response: the accepted card
+    // settles with no controls while the pending sibling stays actionable.
+    expect(screen.getByText("Staged (Review Required)")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Accept" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Discard" })).toHaveLength(1);
   });
 });
 

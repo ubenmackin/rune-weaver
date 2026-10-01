@@ -1,18 +1,25 @@
 // Rune Weaver Dashboard — Client-side chat preferences and settings store.
 //
 // Manages user-configurable chat options such as default thinking expansion,
-// message submission shortcut, and streaming auto-scroll. Backed by localStorage
-// with event-driven synchronization across components and tabs.
+// default file write card expansion, message submission shortcut, and streaming
+// auto-scroll. Backed by localStorage with event-driven synchronization across
+// components and tabs.
 
 import { useCallback, useEffect, useState } from "react";
 
 export type ThinkingDefaultState = "expanded" | "collapsed";
+export type FileWriteDefaultState = "expanded" | "collapsed";
 
 export interface ChatSettings {
   /**
    * Whether thought/reasoning blocks should be expanded or collapsed by default.
    */
   thinkingDefault: ThinkingDefaultState;
+  /**
+   * Whether in-chat files.write diff cards should show their diff body by
+   * default; collapsed keeps write cards to their header until clicked.
+   */
+  fileWriteDefault: FileWriteDefaultState;
   /**
    * Whether pressing Enter sends the message (Shift+Enter for newline)
    * vs Cmd/Ctrl+Enter to send (Enter for newline).
@@ -29,6 +36,7 @@ export const CHAT_SETTINGS_CHANGE_EVENT = "rw_chat_settings_changed";
 
 export const DEFAULT_CHAT_SETTINGS: Readonly<ChatSettings> = Object.freeze({
   thinkingDefault: "collapsed",
+  fileWriteDefault: "collapsed",
   sendOnEnter: true,
   autoScrollOnStream: true,
 });
@@ -45,6 +53,9 @@ export function normalizeChatSettings(raw: unknown): ChatSettings {
   const thinkingDefault: ThinkingDefaultState =
     obj.thinkingDefault === "expanded" ? "expanded" : "collapsed";
 
+  const fileWriteDefault: FileWriteDefaultState =
+    obj.fileWriteDefault === "expanded" ? "expanded" : "collapsed";
+
   const sendOnEnter =
     typeof obj.sendOnEnter === "boolean"
       ? obj.sendOnEnter
@@ -57,6 +68,7 @@ export function normalizeChatSettings(raw: unknown): ChatSettings {
 
   return {
     thinkingDefault,
+    fileWriteDefault,
     sendOnEnter,
     autoScrollOnStream,
   };

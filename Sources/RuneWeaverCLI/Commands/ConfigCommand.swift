@@ -171,6 +171,7 @@ struct ConfigShowCommand: AsyncParsableCommand {
         print("deny_patterns = \(denyPatterns)")
         print("allow_roots = \(allowRoots)")
         print("require_approval_on_deny = \(config.files.requireApprovalOnDeny ? "true" : "false")")
+        print("write_mode = \(RuneWeaverConfig.tomlQuoted(config.files.writeMode.rawValue))")
     }
 }
 

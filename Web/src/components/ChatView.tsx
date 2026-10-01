@@ -47,9 +47,15 @@ import InlineApprovalBanner from "./InlineApprovalBanner";
 import MarkdownText from "./MarkdownText";
 import { appendLiveDelta } from "./liveTextBuffer";
 import ToolActionRow from "./ToolActionRow";
+import {
+  collectWriteHydrationTargets,
+  collectWriteReviewOwners,
+  isWriteReviewOwner,
+} from "./writeReviewOwnership";
 import { AlertTriangleIcon, SettingsIcon, TargetIcon, WrenchIcon } from "./icons";
 import GoalDrawer from "./GoalDrawer";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
+import { useFileReviewHydration } from "../hooks/useFileReviewHydration";
 import { useChatSettings } from "../chatSettings";
 import ChatSettingsModal from "./ChatSettingsModal";
 import ThoughtContainer from "./ThoughtContainer";
@@ -1379,6 +1385,41 @@ function getURLSessionID(): string | null {
   const hashParam = new URLSearchParams(hashQuery).get("session");
   if (hashParam && strictSessionIDPattern.test(hashParam)) return hashParam;
   return null;
+}
+
+// Collects every tool action a rendered transcript shows, in display order:
+// persisted messages in order, then the in-flight turn, which always renders
+// last. The shared write-review scan filters this sequence down to files.write
+// cards, so ownership and batched hydration read one list and can never
+// disagree on which cards the user actually sees.
+function renderedToolActions(
+  messages: MessageItem[],
+  inFlightTurn: InFlightTurn | null,
+): ToolAction[] {
+  const actions: ToolAction[] = [];
+  const scan = (list: ToolAction[]) => {
+    for (const action of list) actions.push(action);
+  };
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    if (message.segments && message.segments.length > 0) {
+      for (const segment of message.segments) {
+        if (segment.kind === "tools") scan(segment.actions);
+      }
+    } else if (message.toolActions) {
+      scan(message.toolActions);
+    }
+  }
+  if (inFlightTurn) {
+    if (inFlightTurn.segments.length > 0) {
+      for (const segment of inFlightTurn.segments) {
+        if (segment.kind === "tools") scan(segment.actions);
+      }
+    } else {
+      scan(inFlightTurn.toolActions);
+    }
+  }
+  return actions;
 }
 
 export default function ChatView({ health, onSelectTab, isActive }: ChatViewProps) {
@@ -4492,6 +4533,22 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
     }
   }
 
+  // Newest-card rule for the rendered transcript: only the last files.write
+  // card per (path, envelope kind) keeps review controls, so an older card can
+  // never resolve a review the newer write already replaced. The in-flight turn
+  // participates only while the live bubble actually renders, matching the JSX
+  // condition below, and both write-review scans read this one ordered list.
+  const renderedActions = renderedToolActions(
+    messages,
+    pending ? inFlightTurn : null,
+  );
+  const writeReviewOwners = collectWriteReviewOwners(renderedActions);
+  // Batched hydration for every write card the transcript renders: one
+  // review-status request per card-set change, with each nested DiffCard
+  // adopting its own kind/path entry from the result.
+  const writeHydrationTargets = collectWriteHydrationTargets(renderedActions);
+  const writeReviewStates = useFileReviewHydration(writeHydrationTargets);
+
   return (
     <div className="chat-layout">
       {/* Session History Sidebar */}
@@ -4671,6 +4728,11 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
                                 key={action.callID || `${segmentIndex}-${i}`}
                                 action={action}
                                 isLive={false}
+                                ownsFileReview={isWriteReviewOwner(writeReviewOwners, action)}
+                                fileWriteDefaultExpanded={
+                                  chatSettings.fileWriteDefault === "expanded"
+                                }
+                                fileReviewStates={writeReviewStates}
                               />
                             ))}
                           </div>
@@ -4712,6 +4774,11 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
                               key={action.callID || i}
                               action={action}
                               isLive={false}
+                              ownsFileReview={isWriteReviewOwner(writeReviewOwners, action)}
+                              fileWriteDefaultExpanded={
+                                chatSettings.fileWriteDefault === "expanded"
+                              }
+                              fileReviewStates={writeReviewStates}
                             />
                           ))}
                         </div>
@@ -4800,6 +4867,14 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
                                 action.callID,
                               )}
                               onCancelTool={handleCancelTool}
+                              ownsFileReview={isWriteReviewOwner(
+                                writeReviewOwners,
+                                action,
+                              )}
+                              fileWriteDefaultExpanded={
+                                chatSettings.fileWriteDefault === "expanded"
+                              }
+                              fileReviewStates={writeReviewStates}
                             />
                           ))}
                         </div>
@@ -4854,6 +4929,14 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
                             }
                             cancelling={cancellingToolCallIDs.has(action.callID)}
                             onCancelTool={handleCancelTool}
+                            ownsFileReview={isWriteReviewOwner(
+                              writeReviewOwners,
+                              action,
+                            )}
+                            fileWriteDefaultExpanded={
+                              chatSettings.fileWriteDefault === "expanded"
+                            }
+                            fileReviewStates={writeReviewStates}
                           />
                         ))}
                       </div>

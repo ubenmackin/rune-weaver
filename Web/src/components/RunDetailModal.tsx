@@ -10,6 +10,12 @@ import {
 import { CloseIcon } from "./icons";
 import MarkdownText from "./MarkdownText";
 import ToolActionRow from "./ToolActionRow";
+import {
+  collectWriteHydrationTargets,
+  collectWriteReviewOwners,
+  isWriteReviewOwner,
+} from "./writeReviewOwnership";
+import { useFileReviewHydration } from "../hooks/useFileReviewHydration";
 import Modal from "./Modal";
 
 interface RunDetailModalProps {
@@ -18,6 +24,14 @@ interface RunDetailModalProps {
 }
 
 export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
+  // Hooks run before the null-run short-circuit so the modal obeys the rules
+  // of hooks when a parent mounts it with a run that can flip to null. Batched
+  // hydration reads one review-status request for every write card the run
+  // carries, resolved before the cards themselves mount.
+  const toolActions = run?.toolActions ?? [];
+  const writeReviewOwners = collectWriteReviewOwners(toolActions);
+  const writeHydrationTargets = collectWriteHydrationTargets(toolActions);
+  const writeReviewStates = useFileReviewHydration(writeHydrationTargets);
   if (!run) return null;
 
   const isOk = run.status === "ok";
@@ -149,7 +163,14 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
               <h4>Tool Executions ({run.toolActions.length})</h4>
               <div className="tool-actions-list">
                 {run.toolActions.map((action, idx) => (
-                  <ToolActionRow key={action.callID || idx} action={action} variant="card" isLive={false} />
+                  <ToolActionRow
+                    key={action.callID || idx}
+                    action={action}
+                    variant="card"
+                    isLive={false}
+                    ownsFileReview={isWriteReviewOwner(writeReviewOwners, action)}
+                    fileReviewStates={writeReviewStates}
+                  />
                 ))}
               </div>
             </div>

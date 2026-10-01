@@ -651,8 +651,17 @@ struct DesktopToolsTests {
         // cancellation signal under test.
         await DesktopControlMonitor.shared.clearEmergencyStop()
         let denied = DesktopControlBridge(accessibilityAccess: { false })
+        // Gate the batch behind a signal the test opens only after
+        // cancelling, so `executeBatch` always begins with cancellation
+        // latched. Letting a fast start run first instead races the bridge's
+        // opening checkpoint: a denial observed before the cancel lands
+        // would mask the cancellation signal this test exists to protect.
+        let (gate, gateContinuation) = AsyncStream.makeStream(of: Void.self)
         let task = Task {
-            try await denied.executeBatch(
+            for await _ in gate {
+                break
+            }
+            return try await denied.executeBatch(
                 actions: [.delay(milliseconds: 10)],
                 scaleX: 1.0,
                 scaleY: 1.0,
@@ -660,6 +669,8 @@ struct DesktopToolsTests {
             )
         }
         task.cancel()
+        gateContinuation.yield()
+        gateContinuation.finish()
         let result = await task.result
         switch result {
         case .success:

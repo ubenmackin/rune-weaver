@@ -54,6 +54,8 @@ public struct SettingsResponse: Content, Equatable {
     public let filesDenyPatterns: [String]
     public let filesAllowRoots: [String]
     public let filesRequireApprovalOnDeny: Bool
+    /// Forced `files.write` posture from `[files] write_mode` (`model`, `staged`, or `live`).
+    public let filesWriteMode: String
     public let browserSearxngURL: String
     public let browserSearchTimeoutSeconds: Int
     public let browserMaxResults: Int
@@ -122,6 +124,7 @@ public struct SettingsResponse: Content, Equatable {
         self.filesDenyPatterns = config.files.denyPatterns
         self.filesAllowRoots = config.files.allowRoots
         self.filesRequireApprovalOnDeny = config.files.requireApprovalOnDeny
+        self.filesWriteMode = config.files.writeMode.rawValue
         self.browserSearxngURL = config.browser.searxngURL
         self.browserSearchTimeoutSeconds = config.browser.searchTimeoutSeconds
         self.browserMaxResults = config.browser.maxResults
@@ -176,6 +179,7 @@ public struct SettingsResponse: Content, Equatable {
         case filesDenyPatterns
         case filesAllowRoots
         case filesRequireApprovalOnDeny
+        case filesWriteMode
         case browserSearxngURL
         case browserSearchTimeoutSeconds
         case browserMaxResults
@@ -238,6 +242,7 @@ public struct SettingsResponse: Content, Equatable {
         filesDenyPatterns = try container.decodeIfPresent([String].self, forKey: .filesDenyPatterns) ?? []
         filesAllowRoots = try container.decodeIfPresent([String].self, forKey: .filesAllowRoots) ?? []
         filesRequireApprovalOnDeny = try container.decodeIfPresent(Bool.self, forKey: .filesRequireApprovalOnDeny) ?? true
+        filesWriteMode = try container.decodeIfPresent(String.self, forKey: .filesWriteMode) ?? "model"
         browserSearxngURL = try container.decodeIfPresent(String.self, forKey: .browserSearxngURL) ?? ""
         browserSearchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .browserSearchTimeoutSeconds) ?? 10
         browserMaxResults = try container.decodeIfPresent(Int.self, forKey: .browserMaxResults) ?? 10
@@ -295,6 +300,7 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(filesDenyPatterns, forKey: .filesDenyPatterns)
         try container.encode(filesAllowRoots, forKey: .filesAllowRoots)
         try container.encode(filesRequireApprovalOnDeny, forKey: .filesRequireApprovalOnDeny)
+        try container.encode(filesWriteMode, forKey: .filesWriteMode)
         try container.encode(browserSearxngURL, forKey: .browserSearxngURL)
         try container.encode(browserSearchTimeoutSeconds, forKey: .browserSearchTimeoutSeconds)
         try container.encode(browserMaxResults, forKey: .browserMaxResults)
@@ -360,6 +366,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let filesDenyPatterns: [String]?
     public let filesAllowRoots: [String]?
     public let filesRequireApprovalOnDeny: Bool?
+    /// Forced `files.write` posture override (`model`, `staged`, or `live`). Nil preserves the stored value.
+    public let filesWriteMode: String?
     public let browserSearxngURL: String?
     public let browserSearchTimeoutSeconds: Int?
     public let browserMaxResults: Int?
@@ -421,6 +429,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         filesDenyPatterns: [String]? = nil,
         filesAllowRoots: [String]? = nil,
         filesRequireApprovalOnDeny: Bool? = nil,
+        filesWriteMode: String? = nil,
         browserSearxngURL: String? = nil,
         browserSearchTimeoutSeconds: Int? = nil,
         browserMaxResults: Int? = nil,
@@ -471,6 +480,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.filesDenyPatterns = filesDenyPatterns
         self.filesAllowRoots = filesAllowRoots
         self.filesRequireApprovalOnDeny = filesRequireApprovalOnDeny
+        self.filesWriteMode = filesWriteMode
         self.browserSearxngURL = browserSearxngURL
         self.browserSearchTimeoutSeconds = browserSearchTimeoutSeconds
         self.browserMaxResults = browserMaxResults
@@ -645,6 +655,12 @@ public struct UpdateSettingsRequest: Content, Equatable {
         }
         if let filesRequireApprovalOnDeny {
             files.requireApprovalOnDeny = filesRequireApprovalOnDeny
+        }
+        if let filesWriteMode {
+            // Single-sourced through the core validator so the route's 400 and
+            // the TOML load path agree on accepted spellings and message; a bad
+            // value throws before the merge reaches the persisted file.
+            files.writeMode = try RuneWeaverConfig.validateFilesWriteMode(filesWriteMode)
         }
     }
 

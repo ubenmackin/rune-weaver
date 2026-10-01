@@ -169,9 +169,10 @@ function TerminalIcon(props: { size?: number; className?: string }) {
 }
 
 // Vertical navigation keeps every category visible without horizontal scrolling; Security
-// owns sandbox isolation plus Files & Access plus access management, while Tools
-// has no Files editor so Security stays the single home and the sidebar stays
-// within the width budget as settings grow. The `search` id stays verbatim while the pane displays as Web: the search* API aliases and
+// owns sandbox isolation plus Files & Access (allow roots, deny patterns, approval on deny)
+// plus access management, while the Tools Files category surfaces only the files.write
+// write review mode, so Security stays the single access-policy home and the sidebar
+// stays within the width budget as settings grow. The `search` id stays verbatim while the pane displays as Web: the search* API aliases and
 // the /search/* health routes are keyed to that id, so only the label moves. The `network` pane
 // owns the [server] bind (hostname, port, allowed_hosts) plus the restart banner.
 type SettingsTab =
@@ -230,7 +231,7 @@ const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
   { id: "email", name: "Email & Mailboxes", description: "IMAP search, message read, attachment inspection, and drafts", icon: MailIcon },
   { id: "browser-web", name: "Browser & Web", description: "Web search, page fetch, navigation, and interaction", icon: GlobeIcon },
   { id: "bash", name: "Bash & Shell", description: "Sandboxed shell execution with per-command approval policy", icon: TerminalIcon },
-  { id: "files", name: "Files & Workspace", description: "Allow and deny rules are managed under Security", icon: FolderIcon },
+  { id: "files", name: "Files & Workspace", description: "File write review mode; allow and deny rules remain under Security", icon: FolderIcon },
   { id: "memories", name: "Long-Term Memory", description: "Episodic and profile memory store and recall", icon: MemoryIcon },
   { id: "goal", name: "Autonomous Goals", description: "Multi-turn goal planning, tracking, and execution", icon: TargetIcon },
   { id: "fanout", name: "Fan-Out Workers", description: "Concurrent worker turns for parallel subtasks", icon: WrenchIcon },
@@ -315,11 +316,12 @@ export function getToolCategory(tool: ToolInfo | string): string {
 }
 
 // One Configure entry per integration surface keeps a single modal per editor:
-// desktop, media, fanout, and browser-web each own one existing modal, so the header
-// button opens that editor whenever any rendered tool in the category reports
-// hasConfig. Files & Access is owned solely by the Security pane, so the
-// Tools Files category never offers a Configure modal. The server hasConfig
-// flag is the sole authority — a null key or
+// desktop, media, fanout, browser-web, bash, and files each own one existing
+// modal, so the header button opens that editor whenever any rendered tool in
+// the category reports hasConfig. The Files category's Configure opens the
+// files.write write-mode editor while Security remains the single
+// access-policy editor for allow roots, deny patterns, and approval on deny.
+// The server hasConfig flag is the sole authority — a null key or
 // no flagged tool hides the button, which keeps unconfigurable categories
 // clean and avoids stale per-tool buttons when new tools gain editors later.
 // Edge case: a filtered view with zero flagged tools in a configurable
@@ -330,8 +332,56 @@ function getCategoryConfigKey(categoryId: string): string | null {
   if (categoryId === "fanout") return "fanout.run";
   if (categoryId === "browser-web") return "browser.navigate";
   if (categoryId === "bash") return "bash.exec";
-  if (categoryId === "files") return null;
+  if (categoryId === "files") return "files.write";
   return null;
+}
+
+// Closed write-mode vocabulary for files.write ([files] write_mode). The engine
+// stays the validator of record: it rejects anything outside this set, so the
+// editor only ever surfaces these three postures and a drifted loaded value
+// normalizes back to the model posture instead of opening on an unknown radio.
+type FilesWriteMode = "model" | "staged" | "live";
+
+const DEFAULT_FILES_WRITE_MODE: FilesWriteMode = "model";
+
+interface FilesWriteModeOption {
+  value: FilesWriteMode;
+  label: string;
+  description: string;
+}
+
+// Option copy explains the enforcement each posture applies, pinned to the
+// server's contract: `model` keeps per-call mode selection with an omitted mode
+// defaulting to staged review, `staged` forces every write through Staged
+// Changes, and `live` writes immediately leaving a `.rune_backup_` rollback copy.
+const FILES_WRITE_MODE_OPTIONS: readonly FilesWriteModeOption[] = [
+  {
+    value: "model",
+    label: "Let the model decide",
+    description:
+      "The agent picks staged or live per call; omitted mode defaults to staged review.",
+  },
+  {
+    value: "staged",
+    label: "Always stage for review",
+    description:
+      "Every write waits in Staged Changes; live writes are disabled.",
+  },
+  {
+    value: "live",
+    label: "Always write live",
+    description:
+      "Writes apply immediately with a .rune_backup_ rollback copy; review staging is disabled.",
+  },
+];
+
+// Normalizes a loaded or raw write-mode value into the closed editor
+// vocabulary. Older engines omit the key and a hand-edited config can carry
+// casing, so the editor falls back to the model posture rather than rendering
+// an unknown selection.
+function normalizeFilesWriteMode(value: string | undefined | null): FilesWriteMode {
+  const normalized = (value ?? "").trim().toLowerCase();
+  return normalized === "staged" || normalized === "live" ? normalized : DEFAULT_FILES_WRITE_MODE;
 }
 
 interface ProviderEntry {
@@ -782,6 +832,20 @@ export default function SettingsManager() {
     formatAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS)
   );
   const [filesRequireApprovalOnDeny, setFilesRequireApprovalOnDeny] = useState(true);
+  // files.write posture ([files] write_mode) for the Tools -> Files & Workspace
+  // write-mode editor. The draft holds a closed-set value only: a load outside
+  // `model|staged|live` normalizes back to the model posture, and access rules
+  // (allow roots, deny patterns, approval on deny) stay owned by Security.
+  const [filesWriteModeDraft, setFilesWriteModeDraft] = useState<FilesWriteMode>(
+    DEFAULT_FILES_WRITE_MODE
+  );
+  const [filesSaveLoading, setFilesSaveLoading] = useState(false);
+  const [filesModalError, setFilesModalError] = useState<string | null>(null);
+  // Short-lived success-then-close timer for the Files & Workspace modal: held
+  // in a ref (not bare setTimeout) so unmount or a second save clears the
+  // pending tick instead of firing setState on an unmounted pane or closing a
+  // fresh edit.
+  const filesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Declarative Security Policy (policy.toml)
   const [policyData, setPolicyData] = useState<any>(null);
   const [policyRawToml, setPolicyRawToml] = useState<string>("");
@@ -2252,6 +2316,10 @@ export default function SettingsManager() {
     setFilesDenyText(formatDenyPatternsText(data.filesDenyPatterns));
     setFilesAllowRootsText(formatAllowRootsText(data.filesAllowRoots));
     setFilesRequireApprovalOnDeny(data.filesRequireApprovalOnDeny ?? true);
+    // Normalize the loaded write posture through the closed set so an older
+    // engine omitting the key or a drifted value opens the editor on the model
+    // posture instead of leaving an unknown radio selection.
+    setFilesWriteModeDraft(normalizeFilesWriteMode(data.filesWriteMode));
     setMemoryVectorDBPath(data.memoryVectorDBPath);
     setMemoryEpisodesDBPath(data.memoryEpisodesDBPath);
     setMemoryEmbeddingModel(data.memoryEmbeddingModel);
@@ -2577,7 +2645,7 @@ export default function SettingsManager() {
     return () => clearInterval(timer);
   }, [activeTab, settings, liveServerBind, serverRestartRequired, refreshBootBind]);
 
-  // Unmount must never leave the browser provision poll or media/desktop/bash/fanout tick
+  // Unmount must never leave the browser provision poll or media/desktop/bash/fanout/files tick
   // running behind a closed pane.
   useEffect(() => {
     const pollRef = browserTimerRef;
@@ -2586,6 +2654,7 @@ export default function SettingsManager() {
     const desktopSaveRef = desktopSaveTimerRef;
     const bashSaveRef = bashSaveTimerRef;
     const fanoutSaveRef = fanoutSaveTimerRef;
+    const filesSaveRef = filesSaveTimerRef;
     return () => {
       if (pollRef.current !== null) {
         clearInterval(pollRef.current);
@@ -2610,6 +2679,10 @@ export default function SettingsManager() {
       if (fanoutSaveRef.current !== null) {
         clearTimeout(fanoutSaveRef.current);
         fanoutSaveRef.current = null;
+      }
+      if (filesSaveRef.current !== null) {
+        clearTimeout(filesSaveRef.current);
+        filesSaveRef.current = null;
       }
     };
   }, []);
@@ -3329,6 +3402,37 @@ export default function SettingsManager() {
       setFanoutModalError(err instanceof ApiError ? err.message : "Failed to save fan-out settings");
     } finally {
       setFanoutSaveLoading(false);
+    }
+  };
+
+  // Saves the [files] write_mode posture for the Files & Workspace modal through
+  // PUT /settings, mirroring the fan-out save shape so unsaved edits in other
+  // tabs survive. Only the closed-set posture travels — access rules stay under
+  // Security, so this payload never carries allow or deny keys — and the server
+  // re-validates, with the honest message surfacing in the modal on failure.
+  const handleSaveFilesWriteConfig = async () => {
+    setFilesSaveLoading(true);
+    setFilesModalError(null);
+    try {
+      const updated = await updateSettings({
+        filesWriteMode: filesWriteModeDraft,
+      });
+      populateForm(updated);
+      pushSuccessToast("File write settings saved!");
+      // Re-arm the close tick through the ref so a repeat save replaces the
+      // pending tick and unmount clears it instead of leaking.
+      if (filesSaveTimerRef.current !== null) {
+        clearTimeout(filesSaveTimerRef.current);
+        filesSaveTimerRef.current = null;
+      }
+      filesSaveTimerRef.current = setTimeout(() => {
+        filesSaveTimerRef.current = null;
+        setConfiguringToolName(null);
+      }, 1000);
+    } catch (err) {
+      setFilesModalError(err instanceof ApiError ? err.message : "Failed to save file write settings");
+    } finally {
+      setFilesSaveLoading(false);
     }
   };
 
@@ -4900,7 +5004,9 @@ export default function SettingsManager() {
                             ? "Configure Bash & Shell"
                             : categoryConfigKey === "fanout.run"
                               ? "Configure Parallel Fan-Out"
-                              : "Configure Browser & Web Automation";
+                              : categoryConfigKey === "files.write"
+                                ? "Configure Files & Workspace"
+                                : "Configure Browser & Web Automation";
 
                     return (
                       <section key={cat.id} className="tool-category-section">
@@ -4936,6 +5042,12 @@ export default function SettingsManager() {
                                   setDesktopModalError(null);
                                   setBashModalError(null);
                                   setFanoutModalError(null);
+                                  setFilesModalError(null);
+                                  // Re-seed the draft from the last loaded settings so a
+                                  // cancelled edit never reopens as a stale selection.
+                                  setFilesWriteModeDraft(
+                                    normalizeFilesWriteMode(settings?.filesWriteMode)
+                                  );
                                   setConfiguringToolName(categoryConfigKey);
                                 }}
                                 style={{ padding: "4px 8px", fontSize: "0.78rem" }}
@@ -4948,7 +5060,7 @@ export default function SettingsManager() {
                         </div>
                         {cat.id === "files" ? (
                           <p className="settings-section-hint" style={{ margin: "0 0 12px 0" }}>
-                            Allow and deny rules are managed under Security
+                            Write review mode is configured above; allow and deny rules are managed under Security
                           </p>
                         ) : null}
 
@@ -7678,6 +7790,89 @@ export default function SettingsManager() {
               disabled={fanoutSaveLoading}
             >
               {fanoutSaveLoading ? "Saving…" : "Save Configuration"}
+            </button>
+          </div>
+        </Modal>
+      ) : configuringToolName === "files.write" ? (
+        <Modal
+          label="Configure Files & Workspace"
+          onClose={() => {
+            if (!filesSaveLoading) setConfiguringToolName(null);
+          }}
+          containerClassName="modal-container"
+        >
+          <div className="modal-header">
+            <h3>Configure Files & Workspace</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => {
+                if (!filesSaveLoading) setConfiguringToolName(null);
+              }}
+              disabled={filesSaveLoading}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+            {filesModalError && (
+              <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <AlertTriangleIcon size={16} />
+                <span>{filesModalError}</span>
+              </div>
+            )}
+
+            <p className="muted text-sm" style={{ marginBottom: "16px" }}>
+              Choose how <code>files.write</code> handles every write. Changes
+              apply live without a restart.
+            </p>
+
+            {/* The radio group surfaces only the closed model|staged|live set;
+                the server re-validates the same vocabulary on save. */}
+            <div className="form-group" role="radiogroup" aria-label="Files write mode" style={{ marginBottom: 0 }}>
+              {FILES_WRITE_MODE_OPTIONS.map((option) => (
+                <label
+                  key={option.value}
+                  className="toggle-label"
+                  style={{ display: "flex", alignItems: "flex-start", gap: "8px", marginBottom: "10px", cursor: "pointer" }}
+                >
+                  <input
+                    type="radio"
+                    name="filesWriteMode"
+                    value={option.value}
+                    checked={filesWriteModeDraft === option.value}
+                    onChange={() => setFilesWriteModeDraft(option.value)}
+                  />
+                  <span style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+                    <span>{option.label}</span>
+                    <span className="muted text-sm">{option.description}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+
+            <p className="form-group-hint" style={{ marginTop: "14px", display: "block" }}>
+              Access rules (allow roots, deny patterns, approval on deny) live
+              in Security -&gt; Files & Access.
+            </p>
+          </div>
+          <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setConfiguringToolName(null)}
+              disabled={filesSaveLoading}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void handleSaveFilesWriteConfig()}
+              disabled={filesSaveLoading}
+            >
+              {filesSaveLoading ? "Saving…" : "Save Configuration"}
             </button>
           </div>
         </Modal>
