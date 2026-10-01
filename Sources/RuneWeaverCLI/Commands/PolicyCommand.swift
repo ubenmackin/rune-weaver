@@ -1,7 +1,10 @@
-// Rune Weaver CLI — Security policy management and verification surface.
+// Rune Weaver CLI — Network plus credential policy management surface.
 //
-// Provides commands to inspect, verify, and initialize ~/.runeweaver/policy.toml.
-// Verifies mathematical safety invariants using PolicyInvariantVerifier.
+// Inspects, verifies, and seeds the two-section declarative policy
+// (`~/.runeweaver/policy.toml`): network egress boundaries plus per-secret
+// credential bindings. The command layer is a thin display over the shared
+// PolicyStore, so legacy filesystem and tool sections never surface here and
+// every write flows through the store's verified persistence path.
 
 import ArgumentParser
 import Foundation
@@ -75,56 +78,59 @@ struct PolicyShowCommand: AsyncParsableCommand {
         } else {
             print(TerminalStyle.dim("Policy: \(fileURL.path)"))
         }
+        print("version = \(loaded.version)")
         print("")
 
-        // Network
+        // Network egress is the first of the two owned sections: mode plus
+        // allow/block counts keep the summary scannable while the full sorted
+        // lists preserve the exact match surface the supervisor enforces.
         print("[network]")
         print("mode = \(loaded.network.mode.rawValue)")
-        let allowed = loaded.network.allowedDomains.sorted().joined(separator: ", ")
-        print("allowed_domains = [\(allowed)]")
-        let blocked = loaded.network.blockedDomains.sorted().joined(separator: ", ")
-        print("blocked_domains = [\(blocked)]")
+        let allowedDomains = loaded.network.allowedDomains.sorted()
+        print("allowed_domains (\(allowedDomains.count)) = [\(allowedDomains.joined(separator: ", "))]")
+        let blockedDomains = loaded.network.blockedDomains.sorted()
+        print("blocked_domains (\(blockedDomains.count)) = [\(blockedDomains.joined(separator: ", "))]")
         print("")
 
-        // Credentials
-        if !loaded.credentials.isEmpty {
-            print("[credentials]")
+        // Credentials are the second owned section. Each binding pairs one key
+        // with hosts plus methods plus path prefixes: an empty method or prefix
+        // list authorizes any value, while an empty host list authorizes
+        // nothing, so the display always names all three to avoid implying a
+        // narrower grant than the supervisor checks. Legacy filesystem and tool
+        // tables are intentionally never printed here.
+        print("[credentials]")
+        if loaded.credentials.isEmpty {
+            print("(no credentials configured)")
+        } else {
             for key in loaded.credentials.keys.sorted() {
                 guard let binding = loaded.credentials[key] else { continue }
                 print("  \(key):")
-                print("    allowed_hosts = [\(binding.allowedHosts.sorted().joined(separator: ", "))]")
-                if !binding.allowedMethods.isEmpty {
+                let hosts = binding.allowedHosts.sorted().joined(separator: ", ")
+                if binding.allowedHosts.isEmpty {
+                    print("    allowed_hosts = [] (unusable: no destination authorized)")
+                } else {
+                    print("    allowed_hosts = [\(hosts)]")
+                }
+                if binding.allowedMethods.isEmpty {
+                    print("    allowed_methods = (any)")
+                } else {
                     print("    allowed_methods = [\(binding.allowedMethods.sorted().joined(separator: ", "))]")
                 }
-                if !binding.allowedPathPrefixes.isEmpty {
+                if binding.allowedPathPrefixes.isEmpty {
+                    print("    allowed_path_prefixes = (any)")
+                } else {
                     print("    allowed_path_prefixes = [\(binding.allowedPathPrefixes.joined(separator: ", "))]")
                 }
             }
-            print("")
         }
-
-        // Filesystem
-        print("[filesystem]")
-        if !loaded.filesystem.allowRoots.isEmpty {
-            print("allow_roots = [\(loaded.filesystem.allowRoots.joined(separator: ", "))]")
-        }
-        print("deny_paths = [\(loaded.filesystem.denyPaths.count) protected paths]")
         print("")
 
-        // Tools
-        if !loaded.tools.isEmpty {
-            print("[tools]")
-            for key in loaded.tools.keys.sorted() {
-                guard let tool = loaded.tools[key] else { continue }
-                print("  \(key): level=\(tool.level.rawValue), graduated_trust=\(tool.allowGraduatedTrust)")
-            }
-            print("")
-        }
-
-        // Invariant status check
+        // The aggregate verifier owns exactly the two invariants this surface
+        // reports — credential confinement and rule-shadow prevention — so a
+        // legacy filesystem or tool table can never flip the reported status.
         let violations = PolicyInvariantVerifier.verify(loaded)
         if violations.isEmpty {
-            print(TerminalStyle.success("✓ All formal security invariants verified."))
+            print(TerminalStyle.success("✓ All 2 formal security invariants verified (credential confinement, rule-shadow prevention)."))
         } else {
             print(TerminalStyle.error("✗ Invariant violations detected (\(violations.count)):"))
             for violation in violations {
@@ -152,11 +158,11 @@ struct PolicyShowCommand: AsyncParsableCommand {
     }
 }
 
-/// Statically verifies a policy file against formal safety invariants.
+/// Verifies the two owned policy invariants on demand for a policy file.
 struct PolicyVerifyCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "verify",
-        abstract: "Formally verify security policy invariants."
+        abstract: "Formally verify credential confinement and rule-shadow prevention."
     )
 
     @Option(name: .long, help: "Path to policy.toml to verify (defaults to ~/.runeweaver/policy.toml).")
@@ -175,7 +181,7 @@ struct PolicyVerifyCommand: AsyncParsableCommand {
             print(TerminalStyle.dim("File does not exist. Verifying safe factory default posture..."))
             let violations = PolicyInvariantVerifier.verify(.safeDefault)
             if violations.isEmpty {
-                print(TerminalStyle.success("✓ Safe default posture satisfies all formal invariants."))
+                print(TerminalStyle.success("✓ Safe default posture satisfies credential confinement and rule-shadow prevention."))
             } else {
                 print(TerminalStyle.error("✗ Invariant violations in safe default:"))
                 for violation in violations {
@@ -198,13 +204,15 @@ struct PolicyVerifyCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        // Only the two owned invariants decide the verdict: legacy filesystem
+        // and tool tables parse for compatibility but never fail verification,
+        // so an old file with those sections still verifies when its network
+        // and credential bindings are sound.
         let violations = PolicyInvariantVerifier.verify(parsed)
         if violations.isEmpty {
-            print(TerminalStyle.success("✓ PASSED: All 4 formal security invariants verified successfully."))
-            print("  1. Path Containment Safety: Verified")
-            print("  2. Credential Binding Confinement: Verified")
-            print("  3. Rule Shadow Prevention: Verified")
-            print("  4. Critical Tool Lock: Verified")
+            print(TerminalStyle.success("✓ PASSED: All 2 formal security invariants verified successfully."))
+            print("  1. Credential Confinement: Verified")
+            print("  2. Rule Shadow Prevention: Verified")
         } else {
             print(TerminalStyle.error("✗ FAILED: Policy violates \(violations.count) formal security invariant(s):"))
             for (idx, violation) in violations.enumerated() {
@@ -215,7 +223,7 @@ struct PolicyVerifyCommand: AsyncParsableCommand {
     }
 }
 
-/// Initializes a fresh policy.toml with safe defaults if none exists.
+/// Seeds a fresh two-section policy.toml with safe defaults if none exists.
 struct PolicyInitCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "init",
@@ -240,10 +248,15 @@ struct PolicyInitCommand: AsyncParsableCommand {
             return
         }
 
+        // The store owns serialization, so the seeded file carries exactly the
+        // network-plus-credentials schema with no filesystem or tool sections;
+        // no raw TOML is composed on this path, keeping the verified
+        // persistence boundary as the single writer.
         let store = PolicyStore(fileURL: fileURL)
         do {
             try await store.save()
             print(TerminalStyle.success("Created default policy file at \(fileURL.path)"))
+            print(TerminalStyle.dim("Default policy carries network + credentials only (credential confinement, rule-shadow prevention verified)."))
         } catch {
             print(TerminalStyle.error("Failed to write policy file: \(error.localizedDescription)"))
             throw ExitCode.failure

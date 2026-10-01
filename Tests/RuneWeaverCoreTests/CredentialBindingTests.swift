@@ -45,6 +45,22 @@ struct CredentialBindingTests {
         #expect(result == nil)
     }
 
+    @Test
+    func `Binding applies path prefixes to every host in the same binding`() {
+        // Prefixes scope the whole binding, not one host: a request to the
+        // second host with a route outside the prefix must refuse exactly
+        // like the first host, or a multi-host binding would leak one origin.
+        let binding = CredentialBinding(
+            allowedHosts: ["api.github.com", "uploads.github.com"],
+            allowedMethods: ["GET"],
+            allowedPathPrefixes: ["/repos/"]
+        )
+        #expect(binding.denyReason(key: "GITHUB_PAT", host: "uploads.github.com", method: "GET", path: "/repos/owner/repo") == nil)
+        let denied = binding.denyReason(key: "GITHUB_PAT", host: "uploads.github.com", method: "GET", path: "/admin/settings")
+        #expect(denied != nil)
+        #expect(denied?.contains("not authorized for path") == true)
+    }
+
     // MARK: - Unauthorized Requests (Exfiltration Prevention)
 
     @Test

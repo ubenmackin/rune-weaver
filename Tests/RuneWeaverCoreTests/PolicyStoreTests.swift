@@ -1,11 +1,14 @@
 // Rune Weaver Core Tests — PolicyStore lifecycle, parsing, and serialization.
 //
-// Pins the contract that policy.toml is loaded, parsed, validated, serialized,
-// and round-tripped correctly. Malformed or invariant-violating policies fall
-// back to the safe factory default.
+// Pins the contract that policy.toml owns network plus credentials only:
+// parsed, validated, serialized, and round-tripped correctly. Legacy
+// filesystem and tool tables are tolerated on load and ignored without
+// error so older files keep booting. Malformed or invariant-violating
+// policies fall back to the safe factory default.
 
 import Foundation
 @testable import RuneWeaverCore
+import RuneWeaverTools
 import Testing
 
 @Suite("PolicyStore")
@@ -64,14 +67,9 @@ struct PolicyStoreTests {
         #expect(openai.allowedMethods.contains("POST"))
         #expect(openai.allowedPathPrefixes.isEmpty)
 
-        #expect(policy.filesystem.allowRoots == ["~/Documents/Projects"])
-        #expect(policy.filesystem.denyPaths.contains("~/.ssh"))
-
-        #expect(policy.tools.count == 2)
-        #expect(policy.tools["api.request"]?.level == .requiresApproval)
-        #expect(policy.tools["api.request"]?.allowGraduatedTrust == true)
-        #expect(policy.tools["messages.send"]?.level == .requiresApproval)
-        #expect(policy.tools["messages.send"]?.allowGraduatedTrust == false)
+        // The file owns network plus credentials only: legacy filesystem and
+        // tool sections parse without error but never contribute to the held
+        // posture, so an older file boots with its egress bindings intact.
     }
 
     @Test
@@ -84,8 +82,6 @@ struct PolicyStoreTests {
         #expect(policy.version == 1)
         #expect(policy.network.mode == .allowlistOnly)
         #expect(policy.credentials.isEmpty)
-        #expect(policy.filesystem.allowRoots.isEmpty)
-        #expect(policy.tools.isEmpty)
     }
 
     @Test
@@ -112,6 +108,42 @@ struct PolicyStoreTests {
         #expect(policy.network.mode == .allowlistOnly)
     }
 
+    @Test
+    func `Legacy deny_by_default mode parses as allowlist_only`() throws {
+        // Older files stored the fail-closed posture under a retired name;
+        // the parse boundary maps it to the surviving spelling so its intent
+        // survives the rename instead of falling through to a default.
+        let toml = """
+        [network]
+        mode = "deny_by_default"
+        """
+
+        let policy = try PolicyStore.parse(toml)
+        #expect(policy.network.mode == .allowlistOnly)
+    }
+
+    @Test
+    func `Legacy filesystem and tool tables are ignored on load`() throws {
+        // A file carrying only retired sections must still load: the tables
+        // are tolerated and dropped, leaving the network-plus-credentials
+        // posture at its deny-by-default shape rather than failing the boot.
+        let toml = """
+        version = 1
+
+        [filesystem]
+        allow_roots = ["~/Documents/Projects"]
+        deny_paths = ["~/.ssh"]
+
+        [tools."messages.send"]
+        level = "trusted"
+        """
+
+        let policy = try PolicyStore.parse(toml)
+        #expect(policy.network.mode == .allowlistOnly)
+        #expect(policy.credentials.isEmpty)
+        #expect(PolicyInvariantVerifier.verify(policy).isEmpty)
+    }
+
     // MARK: - Serialization Round-Trip
 
     @Test
@@ -129,17 +161,14 @@ struct PolicyStoreTests {
                     allowedMethods: ["GET", "POST"],
                     allowedPathPrefixes: ["/repos/"]
                 )
-            ],
-            filesystem: FilesystemPolicy(
-                allowRoots: ["~/Documents"],
-                denyPaths: ["~/.ssh", "~/.aws"]
-            ),
-            tools: [
-                "api.request": ToolPolicy(level: .requiresApproval, allowGraduatedTrust: true)
             ]
         )
 
         let toml = PolicyStore.serialize(original)
+        // The file owns network plus credentials only, so a resaved document
+        // never resurrects retired sections even when the input once had them.
+        #expect(!toml.contains("[filesystem]"))
+        #expect(!toml.contains("[tools."))
         let reparsed = try PolicyStore.parse(toml)
 
         #expect(reparsed.version == original.version)
@@ -148,8 +177,6 @@ struct PolicyStoreTests {
         #expect(reparsed.network.blockedDomains == original.network.blockedDomains)
         #expect(reparsed.credentials.count == original.credentials.count)
         #expect(reparsed.credentials["GITHUB_PAT"]?.allowedHosts == original.credentials["GITHUB_PAT"]?.allowedHosts)
-        #expect(reparsed.filesystem.allowRoots == original.filesystem.allowRoots)
-        #expect(reparsed.tools["api.request"]?.level == original.tools["api.request"]?.level)
     }
 
     @Test
@@ -159,6 +186,50 @@ struct PolicyStoreTests {
         #expect(reparsed.version == 1)
         #expect(reparsed.network.mode == .allowlistOnly)
         #expect(reparsed.credentials.isEmpty)
+    }
+
+    @Test
+    func `Serialized policy points editors at the Policy tab`() {
+        // The dashboard editor lives on the dedicated Policy tab, so the
+        // seeded guidance line must not send operators to the retired tab.
+        let toml = PolicyStore.serialize(.safeDefault)
+        #expect(toml.contains("Policy tab"))
+        #expect(!toml.contains("Security tab"))
+    }
+
+    @Test
+    func `Store-owned round-trip proof returns bytes that reparse identically`() throws {
+        // The settings PUT route serializes through this shared proof, so a
+        // clean candidate must come back as bytes the parser reads as the
+        // exact accepted policy, while a document that would change meaning on
+        // reload must throw instead of reaching disk.
+        let policy = SecurityPolicy(
+            network: NetworkEgressPolicy(
+                mode: .allowlistOnly,
+                allowedDomains: ["api.github.com"],
+                blockedDomains: ["169.254.169.254"]
+            ),
+            credentials: [
+                "GITHUB_PAT": CredentialBinding(
+                    allowedHosts: ["api.github.com"],
+                    allowedMethods: ["GET"],
+                    allowedPathPrefixes: ["/repos/"]
+                )
+            ]
+        )
+
+        let toml = try PolicyStore.verifiedTOML(for: policy)
+        let reparsed = try PolicyStore.parse(toml)
+        #expect(reparsed == policy)
+
+        let hostileKey = "EVIL\"\n[credentials.INJECTED]\nallowed_hosts = [\"*\"]"
+        let hostile = SecurityPolicy(
+            network: NetworkEgressPolicy(mode: .unrestricted),
+            credentials: [hostileKey: CredentialBinding(allowedHosts: ["api.example.com"])]
+        )
+        #expect(throws: PolicyInvariantError.self) {
+            _ = try PolicyStore.verifiedTOML(for: hostile)
+        }
     }
 
     @Test
@@ -499,5 +570,176 @@ struct PolicyStoreTests {
         for violation in violations {
             #expect(description.contains(violation))
         }
+    }
+
+    // MARK: - TOML Injection Guards
+
+    @Test
+    func `Append allowed domain rejects quotes and control characters`() async throws {
+        // A percent-decoded `URL.host` can carry a quote or newline; writing it
+        // raw would close the array element and inject real policy content, so
+        // the append must refuse before touching the file.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rw-policy-hostile-allow-\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = PolicyStore(fileURL: url)
+        let before = await store.current
+
+        for hostile in [
+            "evil.example\"\n[credentials.INJECTED]",
+            "evil\u{01}.example.com",
+            "evil\r.example.com",
+            "evil\u{7F}.example.com",
+            "evil\t.example.com"
+        ] {
+            await #expect(throws: PolicyInvariantError.self) {
+                _ = try await store.appendAllowedDomain(hostile)
+            }
+        }
+
+        let after = await store.current
+        #expect(after == before)
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test
+    func `Append blocked domain rejects quotes and control characters`() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rw-policy-hostile-block-\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = PolicyStore(fileURL: url)
+
+        await #expect(throws: PolicyInvariantError.self) {
+            _ = try await store.appendBlockedDomain("evil.example\"\n[tools.\"api.request\"]")
+        }
+
+        let after = await store.current
+        #expect(after == .safeDefault)
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test
+    func `Append allowed domain persists a canonical entry`() async throws {
+        // The hostile-input guards must not disturb the ordinary interactive
+        // path: a valid host still lands canonically and survives a reload.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rw-policy-append-clean-\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = PolicyStore(fileURL: url)
+
+        _ = try await store.appendAllowedDomain("API.GitHub.com")
+
+        #expect(FileManager.default.fileExists(atPath: url.path))
+        let reloaded = PolicyStore(fileURL: url)
+        await reloaded.load()
+        let snapshot = try await reloaded.snapshot()
+        #expect(snapshot.network.allowedDomains.contains("api.github.com"))
+    }
+
+    @Test
+    func `Ensure service domains skips hosts that cannot be serialized`() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rw-policy-service-hosts-\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = PolicyStore(fileURL: url)
+
+        _ = await store.ensureServiceDomainsAllowed(
+            urlsOrHosts: ["evil.example\"\n[credentials.INJECTED]", "api.github.com"]
+        )
+
+        let current = await store.current
+        #expect(current.network.allowedDomains.contains("api.github.com"))
+        #expect(!current.network.allowedDomains.contains { $0.contains("\"") || $0.contains("\n") })
+        let text = try String(contentsOf: url, encoding: .utf8)
+        #expect(!text.contains("\n[credentials.INJECTED]"))
+    }
+
+    @Test
+    func `Ensure service domains never overwrites a present-but-rejected policy file`() async throws {
+        // A rejected file leaves the store without an accepted posture;
+        // auto-population must refuse instead of writing safe-default plus
+        // service hosts over the operator's content and then claiming the
+        // result as verified. The snapshot must keep throwing so the egress
+        // supervisor factory still refuses boot for the same file.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rw-policy-rejected-ensure-\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let rejected = "[credentials.LEAK]\nallowed_hosts = [\"*\"]\n"
+        try rejected.write(to: url, atomically: true, encoding: .utf8)
+        let store = PolicyStore(fileURL: url)
+        await store.load()
+        #expect(await store.loadedFromDisk == false)
+
+        _ = await store.ensureServiceDomainsAllowed(urlsOrHosts: ["sonarr.example.net", "smtp.example.net"])
+
+        let after = try String(contentsOf: url, encoding: .utf8)
+        #expect(after == rejected)
+        let current = await store.current
+        #expect(current == .safeDefault)
+        #expect(await store.loadedFromDisk == false)
+        await #expect(throws: PolicyInvariantError.self) {
+            _ = try await store.snapshot()
+        }
+        await #expect(throws: PolicyInvariantError.self) {
+            _ = try await OutboundEgressSupervisor.make(policyStore: store)
+        }
+    }
+
+    @Test
+    func `Serialize escapes hostile domain strings without policy injection`() throws {
+        // Pins the byte-level guard: a hostile entry survives only as escaped
+        // text inside its own string element and reparses to the same value.
+        let hostile = "evil.example\"\n[credentials.INJECTED]\nallowed_hosts = [\"*\"]"
+        let original = SecurityPolicy(
+            network: NetworkEgressPolicy(mode: .allowlistOnly, allowedDomains: [hostile], blockedDomains: [])
+        )
+
+        let toml = PolicyStore.serialize(original)
+
+        #expect(!toml.contains("\n[credentials.INJECTED]"))
+        #expect(toml.contains("evil.example\\\"\\n[credentials.INJECTED]"))
+
+        let reparsed = try PolicyStore.parse(toml)
+        #expect(reparsed.network.allowedDomains == [hostile])
+        #expect(reparsed.credentials.isEmpty)
+    }
+
+    @Test
+    func `Serialize escapes hostile credential table keys`() {
+        // Table keys interpolate directly into headers, so a hostile key must
+        // render as escaped text rather than a second real table.
+        let key = "EVIL\"\n[credentials.INJECTED]\nallowed_hosts = [\"*\"]"
+        let original = SecurityPolicy(
+            network: NetworkEgressPolicy(mode: .unrestricted),
+            credentials: [key: CredentialBinding(allowedHosts: ["api.example.com"])]
+        )
+
+        let toml = PolicyStore.serialize(original)
+
+        #expect(!toml.contains("\n[credentials.INJECTED]"))
+        #expect(toml.contains("[credentials.\(RuneWeaverConfig.tomlQuoted(key))]"))
+    }
+
+    @Test
+    func `Save refuses a policy whose bytes would not reparse identically`() async throws {
+        // Escaping alone cannot save a key the parser reads back as different
+        // content; the storage boundary must refuse the write rather than
+        // persist a document that changes meaning on the next boot.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rw-policy-roundtrip-\(UUID().uuidString).toml")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = PolicyStore(fileURL: url)
+        let hostileKey = "EVIL\"\n[credentials.INJECTED]\nallowed_hosts = [\"*\"]"
+        let policy = SecurityPolicy(
+            network: NetworkEgressPolicy(mode: .unrestricted),
+            credentials: [hostileKey: CredentialBinding(allowedHosts: ["api.example.com"])]
+        )
+        let violations = await store.update(policy)
+        #expect(violations.isEmpty)
+
+        await #expect(throws: PolicyInvariantError.self) {
+            _ = try await store.save()
+        }
+        #expect(!FileManager.default.fileExists(atPath: url.path))
     }
 }

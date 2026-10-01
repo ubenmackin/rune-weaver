@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Component tests for SettingsManager.
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsManager, { SECRET_STATUS_CHUNK_SIZE, getToolCategory } from "./SettingsManager";
@@ -15,7 +15,6 @@ import {
   DEFAULT_BASH_ENABLED,
   DEFAULT_BASH_RULES,
   DEFAULT_BASH_TIMEOUT_SECONDS,
-  setAuthToken,
 } from "../api";
 import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
@@ -1250,11 +1249,10 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    // Browser and web prefixes share one section, so both tools render under a
-    // single Browser & Web heading with no leftover split sections. The split
-    // would strand web.fetch away from the allowlist editor its calls need.
+    // Browser, web, and api prefixes share one section, so tools render under a
+    // single Browser, Web & API heading with no leftover split sections.
     await waitFor(() => {
-      expect(screen.getByText("Browser & Web")).toBeDefined();
+      expect(screen.getByText("Browser, Web & API")).toBeDefined();
     });
     expect(screen.queryByText("Browser Automation")).toBeNull();
     expect(document.querySelectorAll(".tool-category-section").length).toBe(1);
@@ -1279,10 +1277,179 @@ describe("SettingsManager", () => {
     expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
     await user.click(configureButton);
 
-    // Should open "Configure Browser & Web Automation" modal
-    expect(screen.getByRole("heading", { name: /Configure Browser & Web Automation/i })).toBeDefined();
+    // Should open "Configure Web, Browser & API Automation" modal
+    expect(screen.getByRole("heading", { name: /Configure Web, Browser & API Automation/i })).toBeDefined();
     // Must NOT show the fallback error message
     expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
+  });
+
+  it("restores the homelab allowed origins editor and persists browser.allowed_origins from the modal", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "browser.navigate",
+        description: "Navigate a page",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const settingsWithOrigins = {
+      ...mockSettings,
+      browserAllowedOrigins: ["http://192.168.1.50:11434"],
+      browserTimeoutSeconds: 30,
+      browserFetchTimeoutSeconds: 45,
+    };
+    let sentPayload: Record<string, unknown> | null = null;
+    let putCount = 0;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        putCount += 1;
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({ ...settingsWithOrigins, ...sentPayload });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithOrigins);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+    await waitFor(() => {
+      expect(screen.getByText("Browser, Web & API")).toBeDefined();
+    });
+    await user.click((await screen.findAllByRole("button", { name: /^Configure$/ }))[0]);
+
+    // The restored editor loads the stored allowlist on open, and the Security
+    // card points private-LAN authorization at it instead of the Policy tab.
+    const originsTextarea = screen.getByLabelText(
+      /Allowed Origins \(one per line\)/i
+    ) as HTMLTextAreaElement;
+    expect(originsTextarea.value).toBe("http://192.168.1.50:11434");
+    expect(screen.getByText(/SSRF guard reads that list/i)).toBeDefined();
+
+    // Blank lines and surrounding whitespace collapse on save while order is
+    // preserved, so the wire shape matches the engine's allowed_origins array.
+    await user.clear(originsTextarea);
+    await user.type(
+      originsTextarea,
+      "  http://192.168.1.50:11434  \n\nhttp://homeassistant.local:8123\n"
+    );
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    expect(putCount).toBe(1);
+    expect((sentPayload as unknown as Record<string, unknown>)["browserAllowedOrigins"]).toEqual([
+      "http://192.168.1.50:11434",
+      "http://homeassistant.local:8123",
+    ]);
+    expect((sentPayload as unknown as Record<string, unknown>)["browserFetchTimeoutSeconds"]).toBe(45);
+  });
+
+  it("validates browser fetch timeout bounds in the modal and full-save paths", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "browser.navigate",
+        description: "Navigate a page",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const settingsWithTimeouts = {
+      ...mockSettings,
+      browserTimeoutSeconds: 30,
+      browserFetchTimeoutSeconds: 45,
+    };
+    let sentPayload: Record<string, unknown> | null = null;
+    let putCount = 0;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        putCount += 1;
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({ ...settingsWithTimeouts, ...sentPayload });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithTimeouts);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+    await waitFor(() => {
+      expect(screen.getByText("Browser, Web & API")).toBeDefined();
+    });
+    await user.click((await screen.findAllByRole("button", { name: /^Configure$/ }))[0]);
+
+    // Modal path: an out-of-range HTTP request timeout fails on the client
+    // before any PUT, matching the server's 1-120 bound.
+    const fetchTimeoutInput = screen.getByLabelText(/HTTP Request Timeout/i);
+    await user.clear(fetchTimeoutInput);
+    await user.type(fetchTimeoutInput, "121");
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/Invalid HTTP request timeout/i)).toBeDefined();
+    });
+    expect(putCount).toBe(0);
+
+    // Full-save path shares the helper: closing the modal keeps the draft, so
+    // the page Save rejects the same value before the network write.
+    await user.click(screen.getByRole("button", { name: /Cancel/i }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(screen.getByText(/Invalid HTTP request timeout/i)).toBeDefined();
+    });
+    expect(putCount).toBe(0);
+
+    // A valid value saves through the modal and persists to the browser section.
+    await user.click((await screen.findAllByRole("button", { name: /^Configure$/ }))[0]);
+    const reopenedFetchTimeoutInput = screen.getByLabelText(/HTTP Request Timeout/i);
+    await user.clear(reopenedFetchTimeoutInput);
+    await user.type(reopenedFetchTimeoutInput, "60");
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    expect(putCount).toBe(1);
+    expect((sentPayload as unknown as Record<string, unknown>)["browserFetchTimeoutSeconds"]).toBe(60);
   });
 
   it("drops count-only badges while keeping pending and tampered attention badges", async () => {
@@ -1979,7 +2146,7 @@ describe("SettingsManager", () => {
     // Browser & Web, desktop), so the count follows categories rather than
     // tools. The combined section proves browser.* and web.* stay together.
     await waitFor(() => {
-      expect(screen.getByText("Browser & Web")).toBeDefined();
+      expect(screen.getByText("Browser, Web & API")).toBeDefined();
     });
     expect(screen.getByText("Desktop & Automation")).toBeDefined();
     expect(screen.getByText("Media & Streaming")).toBeDefined();
@@ -2151,9 +2318,9 @@ describe("SettingsManager", () => {
     await user.click(toolsTabBtn);
 
     // Combined pill and section stay singular: one Browser pill covers both
-    // prefixes, and the grid holds one Browser & Web section plus email.
+    // prefixes, and the grid holds one Browser, Web & API section plus email.
     await waitFor(() => {
-      expect(screen.getByText("Browser & Web")).toBeDefined();
+      expect(screen.getByText("Browser, Web & API")).toBeDefined();
     });
     expect(document.querySelectorAll(".tool-category-section").length).toBe(2);
     expect(screen.getByText("browser.navigate")).toBeDefined();
@@ -2189,7 +2356,7 @@ describe("SettingsManager", () => {
     });
     await user.click(screen.getByRole("button", { name: /Reset filters/i }));
     await waitFor(() => {
-      expect(screen.getByText("Browser & Web")).toBeDefined();
+      expect(screen.getByText("Browser, Web & API")).toBeDefined();
     });
     expect(screen.getByText("browser.navigate")).toBeDefined();
   });
@@ -2753,6 +2920,9 @@ describe("SettingsManager", () => {
     // resolve; colliding or unknown names fall through to Other.
     expect(getToolCategory("bash.exec")).toBe("bash");
     expect(getToolCategory("files.read")).toBe("files");
+    // api.* collapses into browser-web like browser.* and web.*, so the removed
+    // dead API category entry can never strand a pill or section.
+    expect(getToolCategory("api.request")).toBe("browser-web");
     expect(getToolCategory("bash.evil")).toBe("other");
     expect(getToolCategory("files.evil")).toBe("other");
     expect(getToolCategory("custom.widget")).toBe("other");
@@ -3606,10 +3776,11 @@ describe("SettingsManager", () => {
   });
 });
 
-// Declarative security policy (policy.toml) editor: load, save, and verify all
-// sit behind the owner gate, so coverage pins honest server-truth rendering
-// plus the dashboard's shared same-origin auth convention on every call.
-const policyPayload = {
+// Declarative security policy (policy.toml) tab: the structured network plus
+// credentials editor lives on its own Policy tab outside the shared config
+// form, so coverage pins the tab wiring, the structured fetch shape, and the
+// absence of the retired raw-text contract.
+const structuredPolicyPayload = {
   policy: {
     version: 1,
     network: {
@@ -3625,30 +3796,27 @@ const policyPayload = {
       },
     },
   },
-  raw_toml: 'version = 1\n[network]\nmode = "allowlist_only"\n',
   path: "/Users/test/.runeweaver/policy.toml",
   loaded_from_disk: true,
   violations: [],
 };
 
-const policyCandidateToml = 'version = 1\n[network]\nmode = "deny_by_default"\n';
-
-describe("SettingsManager declarative policy editor", () => {
+describe("SettingsManager policy tab", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     clearAuthToken();
     resetSharedRunsForTesting();
   });
 
-  // Routes the settings shell plus both policy routes so each case overrides
-  // only the response it exercises; unrelated boot probes stay benign.
-  function stubPolicyFetch(
+  // Routes the settings shell plus the structured policy fetch so each case
+  // overrides only the response it exercises; unrelated boot probes stay benign.
+  function stubPolicyTabFetch(
     policyResponse: (init?: RequestInit) => Response | Promise<Response>
   ) {
     const fetchMock = vi.fn(
       async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
         const urlStr = String(url);
-        if (urlStr === "/settings/policy" || urlStr === "/settings/policy/verify") {
+        if (urlStr === "/settings/policy") {
           return policyResponse(init);
         }
         if (urlStr.includes("/tools")) {
@@ -3664,50 +3832,47 @@ describe("SettingsManager declarative policy editor", () => {
     return fetchMock;
   }
 
-  async function openPolicySection() {
+  async function openPolicyTab() {
     const user = userEvent.setup();
     render(<SettingsManager />);
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    await user.click(screen.getByRole("tab", { name: /Security/i }));
+    await user.click(screen.getByRole("tab", { name: "Policy" }));
     await waitFor(() => {
-      expect(screen.getByTestId("security-policy-section")).toBeDefined();
+      expect(screen.getByTestId("policy-pane")).toBeDefined();
     });
     return user;
   }
 
-  // Waits for the policy fetch to settle: the mode badge proves the DTO landed
-  // and the enabled Save proves the loading guard released, so a disabled
-  // button never swallows the next click.
-  async function waitForPolicyLoaded() {
+  it("renders the structured pane on its own tab with no raw editor and no Verify button", async () => {
+    const fetchMock = stubPolicyTabFetch(() => jsonResponse(structuredPolicyPayload));
+    await openPolicyTab();
+
+    // Structured network editors own the egress posture: mode select plus one
+    // textarea per domain list.
     await waitFor(() => {
-      expect(screen.getByText(/Mode: allowlist_only/)).toBeDefined();
-      expect(
-        (screen.getByRole("button", { name: /Save Policy/i }) as HTMLButtonElement).disabled
-      ).toBe(false);
+      expect((screen.getByLabelText("Mode") as HTMLSelectElement).value).toBe("allowlist_only");
     });
-  }
-
-  it("loads the policy into the visual overview and the raw editor", async () => {
-    const fetchMock = stubPolicyFetch(() => jsonResponse(policyPayload));
-    const user = await openPolicySection();
-
-    await waitForPolicyLoaded();
-    // The header names the real file state instead of claiming defaults, and
-    // the overview reads the file's allow/deny sets and credential bindings.
-    expect(screen.getByText(/Customized/)).toBeDefined();
-    expect(screen.getByText("api.example.com")).toBeDefined();
-    expect(screen.getByText("metadata.google.internal")).toBeDefined();
-    expect(screen.getByText("GITHUB_TOKEN")).toBeDefined();
-    expect(screen.getByText(/All 4 Formal Security Invariants Verified/)).toBeDefined();
-
-    // The raw editor starts from the exact server TOML so edits are applied
-    // to file truth rather than a locally reconstructed approximation.
-    await user.click(screen.getByRole("button", { name: /Raw TOML Editor/i }));
     expect(
-      (screen.getByLabelText(/Edit policy\.toml directly/i) as HTMLTextAreaElement).value
-    ).toBe(policyPayload.raw_toml);
+      (screen.getByLabelText("Allowed domains") as HTMLTextAreaElement).value
+    ).toContain("api.example.com");
+    expect(
+      (screen.getByLabelText("Blocked domains") as HTMLTextAreaElement).value
+    ).toContain("metadata.google.internal");
+
+    // Credentials read as a bound list, not text: the seeded key renders a row.
+    expect(screen.getByTestId("credentials-list")).toBeDefined();
+    expect(screen.getByTestId("credential-row")).toBeDefined();
+    expect(screen.getByText("GITHUB_TOKEN")).toBeDefined();
+    expect(screen.getByTestId("policy-save")).toBeDefined();
+
+    // Two surviving invariants banner the pane; the retired raw editor and the
+    // candidate Verify button are gone from the new contract.
+    expect(screen.getByText(/All 2 Formal Security Invariants Verified/)).toBeDefined();
+    expect(screen.queryByText(/Raw TOML/i)).toBeNull();
+    expect(screen.queryByLabelText(/Edit policy\.toml directly/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Verify$/i })).toBeNull();
 
     const loadCall = fetchMock.mock.calls.find(
       ([url]) => String(url) === "/settings/policy"
@@ -3715,141 +3880,48 @@ describe("SettingsManager declarative policy editor", () => {
     expect(loadCall?.[1]).toMatchObject({ credentials: "same-origin" });
   });
 
-  it("reports a failed policy load in the section error banner", async () => {
-    stubPolicyFetch(() => jsonResponse({ reason: "policy file unreadable" }, 500));
-    await openPolicySection();
-
-    await waitFor(() => {
-      expect(screen.getByText(/Failed to load policy/i)).toBeDefined();
-    });
-  });
-
-  it("surfaces the server reason when a policy save is rejected", async () => {
-    const fetchMock = stubPolicyFetch((init) => {
+  it("saves the structured draft without ever sending raw TOML", async () => {
+    let sentBody: Record<string, unknown> | null = null;
+    stubPolicyTabFetch((init) => {
       if (init?.method === "PUT") {
-        return jsonResponse(
-          { reason: "Invariant violation: credential targets loopback." },
-          422
-        );
+        sentBody = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({ ...structuredPolicyPayload, policy: (sentBody as { policy: unknown }).policy });
       }
-      return jsonResponse(policyPayload);
+      return jsonResponse(structuredPolicyPayload);
     });
-    const user = await openPolicySection();
-    await waitForPolicyLoaded();
-
-    await user.click(screen.getByRole("button", { name: /Raw TOML Editor/i }));
-    const editor = screen.getByLabelText(/Edit policy\.toml directly/i);
-    fireEvent.change(editor, { target: { value: policyCandidateToml } });
-    await user.click(screen.getByRole("button", { name: /Save Policy/i }));
+    const user = await openPolicyTab();
 
     await waitFor(() => {
-      expect(
-        screen.getByText(/Invariant violation: credential targets loopback\./)
-      ).toBeDefined();
+      expect(screen.getByTestId("policy-save")).toBeDefined();
     });
-    // A rejected candidate stays in the editor so the owner can fix it in
-    // place, and the write itself carried the shared auth convention.
-    expect((editor as HTMLTextAreaElement).value).toBe(policyCandidateToml);
-    const putCall = fetchMock.mock.calls.find(
-      ([url, init]) => String(url) === "/settings/policy" && init?.method === "PUT"
-    );
-    expect(putCall?.[1]?.credentials).toBe("same-origin");
-    expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({
-      raw_toml: policyCandidateToml,
+    await user.click(screen.getByTestId("policy-save"));
+
+    // The pane persists the DTO only; the retired text field never rides along.
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-saved")).toBeDefined();
     });
+    expect(sentBody).not.toBeNull();
+    expect(sentBody).toHaveProperty("policy");
+    expect(sentBody).not.toHaveProperty("raw_toml");
+    expect(sentBody).not.toHaveProperty("rawToml");
+    const sentPolicy = (sentBody as unknown as { policy: { network: { mode: string } } }).policy;
+    expect(sentPolicy.network.mode).toBe("allowlist_only");
+
+    // Policy writes apply live: the saved banner promises no restart and no
+    // restart banner ever appears for policy.
+    expect(screen.getByTestId("policy-saved").textContent).toContain("no restart");
+    expect(screen.queryByText(/needs a restart/i)).toBeNull();
+    expect(screen.queryByText(/restart to apply/i)).toBeNull();
   });
 
-  it("renders violations returned by a candidate verify", async () => {
-    const violation = "Credential binding targets loopback (127.0.0.1).";
-    const fetchMock = stubPolicyFetch((init) => {
-      if (init?.method === "POST") {
-        return jsonResponse({ valid: false, violations: [violation] });
-      }
-      return jsonResponse(policyPayload);
-    });
-    const user = await openPolicySection();
-    await waitForPolicyLoaded();
+  it("reports a failed structured load in the pane error banner", async () => {
+    stubPolicyTabFetch(() => jsonResponse({ reason: "policy file unreadable" }, 500));
+    await openPolicyTab();
 
-    await user.click(screen.getByRole("button", { name: /Verify/i }));
     await waitFor(() => {
-      expect(screen.getByText(/1 Invariant Violation\(s\) Detected/)).toBeDefined();
+      expect(screen.getByTestId("policy-error")).toBeDefined();
     });
-    expect(screen.getByText(violation)).toBeDefined();
-
-    const verifyCall = fetchMock.mock.calls.find(
-      ([url, init]) =>
-        String(url) === "/settings/policy/verify" && init?.method === "POST"
-    );
-    expect(verifyCall?.[1]?.credentials).toBe("same-origin");
-    expect(JSON.parse(String(verifyCall?.[1]?.body))).toEqual({
-      raw_toml: policyPayload.raw_toml,
-    });
-  });
-
-  it("confirms a clean candidate verify and clears prior violations", async () => {
-    const loadedPolicy = {
-      ...policyPayload,
-      violations: ["Stale violation from a hand-edited file."],
-    };
-    stubPolicyFetch((init) => {
-      if (init?.method === "POST") {
-        return jsonResponse({ valid: true, violations: [] });
-      }
-      return jsonResponse(loadedPolicy);
-    });
-    const user = await openPolicySection();
-    await waitFor(() => {
-      expect(screen.getByText(/1 Invariant Violation\(s\) Detected/)).toBeDefined();
-    });
-    expect(screen.getByText(/Stale violation from a hand-edited file\./)).toBeDefined();
-
-    await user.click(screen.getByRole("button", { name: /Verify/i }));
-    await waitFor(() => {
-      expect(screen.getByText(/All 4 Formal Security Invariants Verified/)).toBeDefined();
-      expect(screen.getByText(/saved successfully/i)).toBeDefined();
-    });
-  });
-
-  it("carries the owner bearer on policy load, save, and verify", async () => {
-    // Token mode is exactly where a bare fetch 401s, so pin the convention on
-    // all three policy calls: same-origin credentials plus the configured
-    // bearer alongside any JSON content type.
-    setAuthToken("policy-owner-token");
-    try {
-      const fetchMock = stubPolicyFetch((init) => {
-        if (init?.method === "POST") {
-          return jsonResponse({ valid: true, violations: [] });
-        }
-        return jsonResponse(policyPayload);
-      });
-      const user = await openPolicySection();
-      await waitForPolicyLoaded();
-
-      await user.click(screen.getByRole("button", { name: /Save Policy/i }));
-      await waitFor(() => {
-        expect(screen.getByText(/saved successfully/i)).toBeDefined();
-      });
-      await user.click(screen.getByRole("button", { name: /Verify/i }));
-      await waitFor(() => {
-        expect(
-          fetchMock.mock.calls.filter(([url]) =>
-            String(url).startsWith("/settings/policy")
-          )
-        ).toHaveLength(3);
-      });
-
-      const policyCalls = fetchMock.mock.calls.filter(([url]) =>
-        String(url).startsWith("/settings/policy")
-      );
-      for (const [, init] of policyCalls) {
-        expect(init?.credentials).toBe("same-origin");
-        expect((init?.headers as Record<string, string>).Authorization).toBe(
-          "Bearer policy-owner-token"
-        );
-      }
-    } finally {
-      clearAuthToken();
-    }
+    expect(screen.getByText(/Failed to load policy/i)).toBeDefined();
   });
 });
 

@@ -1,17 +1,33 @@
 // Rune Weaver Core — Declarative security policy types for policy.toml.
 //
-// Decouples security boundaries (credential bindings, network egress rules,
-// filesystem allow/deny, and tool permission overrides) from application code
-// into a versionable, auditable schema stored at `~/.runeweaver/policy.toml`.
+// Decouples security boundaries (network egress rules plus per-secret
+// credential bindings) from application code into a versionable, auditable
+// schema stored at `~/.runeweaver/policy.toml`. The file owns network plus
+// credentials only: legacy filesystem and tool tables are ignored on load and
+// never serialized back, so one store stays authoritative for egress and
+// secret routing and a resaved file sheds retired sections.
+//
+// The two owned invariants are credential confinement plus rule-shadow
+// prevention: bindings refuse forbidden, loopback, link-local, and private
+// targets except through a single leading `*.` edge whose base is checked
+// like an exact host, and a blocked domain always refuses even when an allow
+// entry would otherwise cover it. `EgressMode` lists exactly `allowlist_only`
+// plus `unrestricted`; a legacy `deny_by_default` string maps to
+// `allowlist_only` at the parse boundary, preserving its fail-closed intent.
 //
 // Every type is `Sendable` and `Equatable` to match the repo-wide concurrency
-// standard. The policy engine reads these at startup and before any hot-reload;
-// invariant violations fall back to the immutable safe factory posture.
+// standard. The dashboard edits the structured shape while the server owns
+// serialization with a reparse round-trip proof, so the bytes on disk always
+// reload to the verified object and quoting edges cannot split file from
+// supervisor. Writes apply live through the shared `PolicyStore` with no
+// restart plus no watcher.
 //
 // The file also carries `EffectiveRequestPath`, the shared resolver that turns
 // a raw request destination into the route path a credential binding
 // authorizes, so every enforcement point compares what an origin server
-// actually routes.
+// actually routes. One binding pairs one key with hosts plus methods plus
+// path prefixes: empty hosts authorizes nothing while empty methods or
+// prefixes authorize any value.
 
 import Foundation
 
@@ -33,29 +49,20 @@ public struct SecurityPolicy: Sendable, Equatable {
     /// Per-secret credential-to-destination bindings.
     public var credentials: [String: CredentialBinding]
 
-    /// Filesystem sandbox boundaries.
-    public var filesystem: FilesystemPolicy
-
-    /// Per-tool permission overrides.
-    public var tools: [String: ToolPolicy]
-
     /// Creates a security policy.
     public init(
         version: Int = 1,
         network: NetworkEgressPolicy = .safeDefault,
-        credentials: [String: CredentialBinding] = [:],
-        filesystem: FilesystemPolicy = .safeDefault,
-        tools: [String: ToolPolicy] = [:]
+        credentials: [String: CredentialBinding] = [:]
     ) {
         self.version = version
         self.network = network
         self.credentials = credentials
-        self.filesystem = filesystem
-        self.tools = tools
     }
 
-    /// Immutable factory-safe posture: deny-by-default network, no credential
-    /// bindings, standard filesystem denials, no tool overrides.
+    /// Immutable factory-safe posture: allowlist-only network with no
+    /// credential bindings, so a missing file boots with nothing reachable
+    /// and no secret routable.
     public static let safeDefault = SecurityPolicy()
 
     /// Returns a copy of the policy with an additional allowed domain.
@@ -111,12 +118,13 @@ public struct SecurityPolicy: Sendable, Equatable {
 // MARK: - Network Egress
 
 /// Outbound network mode for the egress supervisor.
+///
+/// Exactly two postures exist. A stored `deny_by_default` string from an
+/// older file no longer constructs a distinct mode and falls back to
+/// `allowlistOnly` at the parse boundary, preserving its fail-closed intent.
 public enum EgressMode: String, Sendable, Equatable, CaseIterable {
     /// Only destinations in `allowedDomains` may be dialed.
     case allowlistOnly = "allowlist_only"
-    /// All destinations are denied unless explicitly allowed.
-    /// Functionally identical to `allowlistOnly` with an empty list.
-    case denyByDefault = "deny_by_default"
     /// No domain restrictions (SSRF guard and credential bindings still apply).
     case unrestricted
 }
@@ -522,56 +530,5 @@ public struct CredentialBinding: Sendable, Equatable {
         case .trailing, .invalidShape, .invalidSuffix, .invalidStem:
             return false
         }
-    }
-}
-
-// MARK: - Filesystem Policy
-
-/// `[filesystem]` — sandbox filesystem boundaries for the policy.
-///
-/// These boundaries are layered on top of the existing `SeatbeltProfileBuilder`
-/// and `FilesAccessGuard`: the policy provides the declarative source of truth
-/// while the existing guards enforce the actual kernel-level restrictions.
-public struct FilesystemPolicy: Sendable, Equatable {
-    /// Directories the agent may read and write within.
-    public var allowRoots: [String]
-    /// Directories always denied, overriding allow roots. Defaults to
-    /// `SeatbeltProfileBuilder.defaultDeniedPaths`; that fixed protected set
-    /// is also enforced independently by the invariant verifier and the
-    /// sandbox builder, so narrowing this list can never widen access.
-    public var denyPaths: [String]
-
-    /// Creates a filesystem policy.
-    public init(
-        allowRoots: [String] = [],
-        denyPaths: [String] = SeatbeltProfileBuilder.defaultDeniedPaths
-    ) {
-        self.allowRoots = allowRoots
-        self.denyPaths = denyPaths
-    }
-
-    /// Factory safe default: no explicit allow roots, standard denials.
-    public static let safeDefault = FilesystemPolicy()
-}
-
-// MARK: - Tool Policy
-
-/// Per-tool permission override declared in `policy.toml`.
-///
-/// Allows the policy file to set a tool's default permission level and
-/// whether it may participate in graduated trust, without changing Swift code.
-public struct ToolPolicy: Sendable, Equatable {
-    /// Override permission level for this tool.
-    public var level: PermissionLevel
-    /// Whether graduated trust (time-decay grants) is permitted.
-    public var allowGraduatedTrust: Bool
-
-    /// Creates a tool policy.
-    public init(
-        level: PermissionLevel = .requiresApproval,
-        allowGraduatedTrust: Bool = true
-    ) {
-        self.level = level
-        self.allowGraduatedTrust = allowGraduatedTrust
     }
 }

@@ -1,12 +1,10 @@
 // Rune Weaver Core Tests — Formal policy invariant verifier.
 //
-// Pins the four mathematical safety invariants proven by PolicyInvariantVerifier:
-//   1. Path Containment — no allow root encompasses a declared deny path or a
-//      member of the always-on protected set.
-//   2. Credential Confinement — no credential targets forbidden hosts, and a
+// Pins the two safety invariants proven by PolicyInvariantVerifier over the
+// network-plus-credentials scope:
+//   1. Credential Confinement — no credential targets forbidden hosts, and a
 //      leading `*.` wildcard's base is checked like an exact host.
-//   3. Rule Shadow Prevention — no allowed domain conflicts with blocked domain.
-//   4. Critical Tool Lock — sensitive tools cannot be set to trusted.
+//   2. Rule Shadow Prevention — no allowed domain conflicts with blocked domain.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -14,86 +12,7 @@ import Testing
 
 @Suite("PolicyInvariantVerifier")
 struct PolicyInvariantVerifierTests {
-    // MARK: - Invariant 1: Path Containment Safety
-
-    @Test
-    func `Clean policy passes path containment`() {
-        let policy = SecurityPolicy(
-            filesystem: FilesystemPolicy(
-                allowRoots: ["~/Documents/Projects"],
-                denyPaths: SeatbeltProfileBuilder.defaultDeniedPaths
-            )
-        )
-        let violations = PolicyInvariantVerifier.verifyPathContainment(policy)
-        #expect(violations.isEmpty)
-    }
-
-    @Test
-    func `Allow root encompassing home catches deny paths`() {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let policy = SecurityPolicy(
-            filesystem: FilesystemPolicy(
-                allowRoots: [home],
-                denyPaths: ["~/.ssh", "~/.aws"]
-            )
-        )
-        let violations = PolicyInvariantVerifier.verifyPathContainment(policy)
-        #expect(violations.count >= 2)
-        #expect(violations.contains(where: { $0.contains(".ssh") }))
-        #expect(violations.contains(where: { $0.contains(".aws") }))
-    }
-
-    @Test
-    func `Allow root encompassing tilde home catches deny paths`() {
-        let policy = SecurityPolicy(
-            filesystem: FilesystemPolicy(
-                allowRoots: ["~"],
-                denyPaths: ["~/.ssh", "~/.gnupg"]
-            )
-        )
-        let violations = PolicyInvariantVerifier.verifyPathContainment(policy)
-        #expect(violations.count >= 2)
-    }
-
-    @Test
-    func `Disjoint roots and denies pass`() {
-        let policy = SecurityPolicy(
-            filesystem: FilesystemPolicy(
-                allowRoots: ["~/Desktop/Projects", "/tmp/workspace"],
-                denyPaths: ["~/.ssh", "~/.aws"]
-            )
-        )
-        let violations = PolicyInvariantVerifier.verifyPathContainment(policy)
-        #expect(violations.isEmpty)
-    }
-
-    @Test
-    func `Empty deny list cannot make home an allowable root`() {
-        // Regression: the user-supplied deny list used to be the only source of
-        // containment, so `allow_roots = ["~"], deny_paths = []` passed every
-        // invariant. The fixed protected set must always apply.
-        let policy = SecurityPolicy(
-            filesystem: FilesystemPolicy(allowRoots: ["~"], denyPaths: [])
-        )
-        let violations = PolicyInvariantVerifier.verify(policy)
-        #expect(!violations.isEmpty)
-        #expect(violations.contains(where: { $0.contains(".ssh") }))
-        #expect(violations.contains(where: { $0.contains("policy.toml") }))
-    }
-
-    @Test
-    func `Narrowed deny list still enforces the protected set`() {
-        let policy = SecurityPolicy(
-            filesystem: FilesystemPolicy(
-                allowRoots: ["~/Library"],
-                denyPaths: ["~/Documents/private"]
-            )
-        )
-        let violations = PolicyInvariantVerifier.verifyPathContainment(policy)
-        #expect(violations.contains(where: { $0.contains("Keychains") }))
-    }
-
-    // MARK: - Invariant 2: Credential Binding Confinement
+    // MARK: - Invariant 1: Credential Binding Confinement
 
     @Test
     func `Credential targeting public host passes`() {
@@ -236,7 +155,7 @@ struct PolicyInvariantVerifierTests {
         #expect(violations.contains(where: { $0.contains("no allowed_hosts") }))
     }
 
-    // MARK: - Invariant 2: IPv6, mapped, and alternate spelling coverage
+    // MARK: - Invariant 1: IPv6, mapped, and alternate spelling coverage
 
     @Test
     func `Credential targeting IPv6 loopback fails`() {
@@ -370,7 +289,7 @@ struct PolicyInvariantVerifierTests {
         #expect(violations.isEmpty)
     }
 
-    // MARK: - Invariant 3: Rule Shadow Prevention
+    // MARK: - Invariant 2: Rule Shadow Prevention
 
     @Test
     func `No conflicts between allowed and blocked passes`() {
@@ -409,56 +328,6 @@ struct PolicyInvariantVerifierTests {
         #expect(!violations.isEmpty)
     }
 
-    // MARK: - Invariant 4: Critical Tool Lock
-
-    @Test
-    func `Normal tool policies pass`() {
-        let policy = SecurityPolicy(
-            tools: [
-                "api.request": ToolPolicy(level: .requiresApproval, allowGraduatedTrust: true),
-                "files.read": ToolPolicy(level: .readOnly, allowGraduatedTrust: true)
-            ]
-        )
-        let violations = PolicyInvariantVerifier.verifyCriticalToolLock(policy)
-        #expect(violations.isEmpty)
-    }
-
-    @Test
-    func `messages.send set to trusted fails`() {
-        let policy = SecurityPolicy(
-            tools: [
-                "messages.send": ToolPolicy(level: .trusted, allowGraduatedTrust: false)
-            ]
-        )
-        let violations = PolicyInvariantVerifier.verifyCriticalToolLock(policy)
-        #expect(!violations.isEmpty)
-        #expect(violations.contains(where: { $0.contains("messages.send") && $0.contains("trusted") }))
-    }
-
-    @Test
-    func `desktop.action set to trusted fails`() {
-        let policy = SecurityPolicy(
-            tools: [
-                "desktop.action": ToolPolicy(level: .trusted, allowGraduatedTrust: true)
-            ]
-        )
-        let violations = PolicyInvariantVerifier.verifyCriticalToolLock(policy)
-        #expect(!violations.isEmpty)
-        #expect(violations.contains(where: { $0.contains("desktop.action") }))
-    }
-
-    @Test
-    func `Critical tool set to requiresApproval passes`() {
-        let policy = SecurityPolicy(
-            tools: [
-                "messages.send": ToolPolicy(level: .requiresApproval, allowGraduatedTrust: false),
-                "desktop.action": ToolPolicy(level: .requiresApproval, allowGraduatedTrust: false)
-            ]
-        )
-        let violations = PolicyInvariantVerifier.verifyCriticalToolLock(policy)
-        #expect(violations.isEmpty)
-    }
-
     // MARK: - Full Verification
 
     @Test
@@ -469,7 +338,9 @@ struct PolicyInvariantVerifierTests {
 
     @Test
     func `Multiple violations from a malicious policy`() {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        // A hostile posture trips both surviving invariants at once: the
+        // bindings smuggle forbidden targets while the allowlist shadows its
+        // own block entry, so one verify call names every failing gate.
         let policy = SecurityPolicy(
             network: NetworkEgressPolicy(
                 allowedDomains: ["evil.com"],
@@ -478,16 +349,9 @@ struct PolicyInvariantVerifierTests {
             credentials: [
                 "LEAKED": CredentialBinding(allowedHosts: ["*"]),
                 "META": CredentialBinding(allowedHosts: ["169.254.169.254"])
-            ],
-            filesystem: FilesystemPolicy(
-                allowRoots: [home],
-                denyPaths: ["~/.ssh"]
-            ),
-            tools: [
-                "messages.send": ToolPolicy(level: .trusted)
             ]
         )
         let violations = PolicyInvariantVerifier.verify(policy)
-        #expect(violations.count >= 4)
+        #expect(violations.count >= 3)
     }
 }
