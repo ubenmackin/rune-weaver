@@ -183,6 +183,7 @@ extension RuneWeaverConfig {
             "deny_patterns = \(Self.tomlStringArray(files.denyPatterns))",
             "allow_roots = \(Self.tomlStringArray(files.allowRoots))",
             "require_approval_on_deny = \(files.requireApprovalOnDeny ? "true" : "false")",
+            "write_mode = \(Self.tomlQuoted(files.writeMode.rawValue))",
             ""
         ]
     }

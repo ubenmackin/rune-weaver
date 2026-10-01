@@ -1,12 +1,17 @@
 // Rune Weaver Dashboard — Chat settings configuration dialog.
 //
-// Offers user controls for chat behavior including default thinking process expansion,
-// keyboard send shortcuts, and auto-scrolling preferences.
+// Offers user controls for chat behavior including default thinking process and
+// file write card expansion, keyboard send shortcuts, and auto-scrolling
+// preferences.
 
 import { type FC } from "react";
 import Modal from "./Modal";
 import { CloseIcon, SparklesIcon } from "./icons";
-import type { ChatSettings, ThinkingDefaultState } from "../chatSettings";
+import type {
+  ChatSettings,
+  FileWriteDefaultState,
+  ThinkingDefaultState,
+} from "../chatSettings";
 
 interface ChatSettingsModalProps {
   isOpen: boolean;
@@ -27,6 +32,10 @@ export const ChatSettingsModal: FC<ChatSettingsModalProps> = ({
 
   const handleThinkingChange = (mode: ThinkingDefaultState) => {
     onUpdateSettings({ thinkingDefault: mode });
+  };
+
+  const handleFileWriteChange = (mode: FileWriteDefaultState) => {
+    onUpdateSettings({ fileWriteDefault: mode });
   };
 
   const handleToggleSendOnEnter = () => {
@@ -117,7 +126,65 @@ export const ChatSettingsModal: FC<ChatSettingsModalProps> = ({
           </div>
         </div>
 
-        {/* Section 2: Keyboard & Input Preferences */}
+        {/* Section 2: File Write Card Display */}
+        <div className="chat-settings-section">
+          <div className="chat-settings-section-header">
+            <h4>File Write Cards</h4>
+            <p className="chat-settings-hint">
+              Control whether files.write diff cards start expanded or collapsed in chat.
+            </p>
+          </div>
+
+          <div
+            className="chat-settings-radio-group"
+            role="radiogroup"
+            aria-label="Default file write card display"
+          >
+            <label
+              className={`chat-settings-radio-card ${
+                settings.fileWriteDefault === "collapsed" ? "active" : ""
+              }`}
+            >
+              <input
+                type="radio"
+                name="fileWriteDefault"
+                value="collapsed"
+                checked={settings.fileWriteDefault === "collapsed"}
+                onChange={() => handleFileWriteChange("collapsed")}
+                className="chat-settings-radio-input"
+              />
+              <div className="chat-settings-radio-content">
+                <span className="chat-settings-option-title">Collapsed by default</span>
+                <span className="chat-settings-option-desc">
+                  Keep write cards to a compact header; click to expand the diff.
+                </span>
+              </div>
+            </label>
+
+            <label
+              className={`chat-settings-radio-card ${
+                settings.fileWriteDefault === "expanded" ? "active" : ""
+              }`}
+            >
+              <input
+                type="radio"
+                name="fileWriteDefault"
+                value="expanded"
+                checked={settings.fileWriteDefault === "expanded"}
+                onChange={() => handleFileWriteChange("expanded")}
+                className="chat-settings-radio-input"
+              />
+              <div className="chat-settings-radio-content">
+                <span className="chat-settings-option-title">Expanded by default</span>
+                <span className="chat-settings-option-desc">
+                  Show the full diff for every write card in chat.
+                </span>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        {/* Section 3: Keyboard & Input Preferences */}
         <div className="chat-settings-section">
           <div className="chat-settings-section-header">
             <h4>Message Input</h4>
@@ -153,7 +220,7 @@ export const ChatSettingsModal: FC<ChatSettingsModalProps> = ({
           </div>
         </div>
 
-        {/* Section 3: Viewport & Scrolling */}
+        {/* Section 4: Viewport & Scrolling */}
         <div className="chat-settings-section">
           <div className="chat-settings-section-header">
             <h4>Display & Scrolling</h4>

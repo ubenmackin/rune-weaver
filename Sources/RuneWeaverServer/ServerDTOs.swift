@@ -105,10 +105,16 @@ public enum ServerPaths {
     public static let files = "files"
     /// Staged files subpath under `/files`.
     public static let filesStaged = "staged"
+    /// File review status subpath under `/files`.
+    public static let filesReviewStatus = "review-status"
     /// Accept staged file subpath under `/files`.
     public static let filesAccept = "accept"
     /// Discard staged file subpath under `/files`.
     public static let filesDiscard = "discard"
+    /// Accept live write review subpath under `/files`.
+    public static let filesLiveAccept = "live-accept"
+    /// Decline live write review subpath under `/files`.
+    public static let filesLiveDecline = "live-decline"
     /// Goals group backing steady pursuit tracking.
     public static let goals = "goals"
     /// Goals summary subpath under `/goals`.
@@ -192,14 +198,55 @@ public struct FileActionResponse: Content, Sendable {
     }
 }
 
+/// Batch review-status request for `POST /files/review-status`.
+///
+/// The caller names the live paths it is rendering so the response can carry
+/// one answer per requested path even when a path has no ledger row at all.
+public struct ReviewStatusRequest: Content, Sendable {
+    /// Live file paths to look up; 1-200 non-empty entries.
+    public let paths: [String]
+
+    /// Creates a batch review-status request.
+    public init(paths: [String]) {
+        self.paths = paths
+    }
+}
+
+/// Batch review-status response for `POST /files/review-status`.
+///
+/// Both maps key on the requested path strings exactly, so a client hydrates
+/// every row from one round trip; a path absent from a ledger reads `"unknown"`
+/// rather than being omitted, which keeps staged and live lookups symmetric.
+public struct ReviewStatusResponse: Content, Sendable {
+    /// Staged-ledger state per requested path, `"unknown"` when no row exists.
+    public let stagedStates: [String: String]
+    /// Live-write-ledger state per requested path, `"unknown"` when no row exists.
+    public let liveStates: [String: String]
+
+    /// Creates a batch review-status response.
+    public init(stagedStates: [String: String], liveStates: [String: String]) {
+        self.stagedStates = stagedStates
+        self.liveStates = liveStates
+    }
+}
+
 /// WebSocket broadcast payload for file actions.
+///
+/// Staged actions carry only type and path; a `live_resolved` frame also names
+/// its terminal state so one event type covers acceptance, revert, and discard
+/// without a second frame shape the dashboard would have to learn. A
+/// `file_superseded` frame reuses the same shape with state `superseded` to
+/// report a live write that resolved a pending staged row in-session — a
+/// transition the write tool owns, so no resolution route broadcasts it.
 public struct WSFileActionEvent: Content, Sendable {
     public let type: String
     public let path: String?
+    public let state: String?
 
-    public init(type: String, path: String? = nil) {
+    public init(type: String, path: String? = nil, state: String? = nil) {
         self.type = type
         self.path = path
+        self.state = state
     }
 }
 

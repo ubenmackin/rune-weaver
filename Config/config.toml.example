@@ -168,6 +168,11 @@ deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.k
 allow_roots = ["~"]
 # Whether deny hits escalate to the approvals inbox (true) or fail closed.
 require_approval_on_deny = true
+# Forced write posture for files.write. "model" (default) lets the agent pick
+# per call (omitted -> staged review); "staged" forces every write through
+# Staged Changes; "live" writes immediately with a .rune_backup_ rollback copy.
+# Changes apply live without a restart.
+write_mode = "model"
 
 [index]
 # Local background indexer for files, mail, and messages. Off by default so a

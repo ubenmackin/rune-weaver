@@ -5,7 +5,12 @@
 // affordance while a tool is genuinely executing.
 
 import { useState, useEffect, useRef } from "react";
-import type { ToolAction, ToolProgress, ToolResult } from "../api";
+import type {
+  FileReviewStates,
+  ToolAction,
+  ToolProgress,
+  ToolResult,
+} from "../api";
 import { formatToolProgressCounts } from "../api";
 import { ChevronDownIcon, ChevronRightIcon, WrenchIcon } from "./icons";
 import DiffCard from "./DiffCard";
@@ -28,6 +33,16 @@ export interface ToolActionRowProps {
   // Requests cancellation of this one call by identity. Optional so card and
   // history surfaces render a plain row with no cancel affordance.
   onCancelTool?: (callID: string, reason?: string) => void;
+  // False when a newer files.write row for the same live path and envelope kind
+  // owns the file's review; the nested DiffCard then shows a note instead of
+  // review controls. Defaults true so single-card surfaces stay actionable.
+  ownsFileReview?: boolean;
+  // Whether a chat-variant files.write DiffCard starts with its diff body
+  // expanded. The card variant ignores it so run details stay fully expanded.
+  fileWriteDefaultExpanded?: boolean;
+  // Batched review-ledger posture from the rendered surface, forwarded to the
+  // nested DiffCard. Undefined keeps the card's own single-path fallback read.
+  fileReviewStates?: FileReviewStates | null;
 }
 
 interface BrowserRedirect {
@@ -725,6 +740,9 @@ export default function ToolActionRow({
   progress = null,
   cancelling = false,
   onCancelTool,
+  ownsFileReview = true,
+  fileWriteDefaultExpanded = true,
+  fileReviewStates,
 }: ToolActionRowProps) {
   const [open, setOpen] = useState(false);
   const result = action.result;
@@ -792,7 +810,12 @@ export default function ToolActionRow({
             {browser ? <BrowserDetails browser={browser} /> : null}
             {action.toolName === "files.write" && result && !result.isError ? (
               <div className="tool-section">
-                <DiffCard action={action} result={result} />
+                <DiffCard
+                  action={action}
+                  result={result}
+                  ownsFileReview={ownsFileReview}
+                  fileReviewStates={fileReviewStates}
+                />
               </div>
             ) : result ? (
               <div className="tool-section">
@@ -869,7 +892,13 @@ export default function ToolActionRow({
 
       {action.toolName === "files.write" && result && !result.isError ? (
         <div style={{ marginTop: 8 }}>
-          <DiffCard action={action} result={result} />
+          <DiffCard
+            action={action}
+            result={result}
+            ownsFileReview={ownsFileReview}
+            defaultExpanded={fileWriteDefaultExpanded}
+            fileReviewStates={fileReviewStates}
+          />
         </div>
       ) : null}
 

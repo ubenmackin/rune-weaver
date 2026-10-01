@@ -1,4 +1,8 @@
-// Rune Weaver Dashboard — Component tests for honest pending indicators,
+// Rune Weaver Dashboard — Component tests for honest pending indicators.
+// Covers approvals filtering by session, the session/run pending badges, the
+// no-ghost-chip narration rule, debug identifiers in the run detail modal, and
+// the run detail's surface-batched write-review hydration (one review-status
+// request per rendered card set, with each card reading its own entry).
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -8,7 +12,11 @@ import RunLogViewer, { runPendingApprovals } from "./RunLogViewer";
 import RunDetailModal from "./RunDetailModal";
 import { resetSharedSocket } from "../hooks/useSharedWebSocket";
 import { jsonResponse } from "../test-utils/http";
-import type { PermissionRequest, RunLogEntry } from "../api";
+import {
+  createMockWebSocket,
+  createMockWebSocketCapture,
+} from "../test-utils/mockWebSocket";
+import type { PermissionRequest, RunLogEntry, ToolAction } from "../api";
 
 describe("approvals filtering by session", () => {
   it("keeps only approvals owned by the session", () => {
@@ -388,5 +396,102 @@ describe("run pending badge and debug data", () => {
     // A completed entry without a result is pending, never running.
     expect(screen.getByText("Pending")).toBeInTheDocument();
     expect(screen.queryByText("Running")).not.toBeInTheDocument();
+  });
+});
+
+// The run detail hydrates every write card the run carries through one batched
+// review-status read, prepared before any collapsed row is expanded.
+describe("run detail batched write-review hydration", () => {
+  const FIRST_PATH = "/tmp/run-batch-first.txt";
+  const SECOND_PATH = "/tmp/run-batch-second.txt";
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  function stagedWriteAction(callID: string, path: string): ToolAction {
+    return {
+      toolName: "files.write",
+      callID,
+      argumentsJSON: "{}",
+      result: {
+        toolCallID: callID,
+        content: JSON.stringify({
+          status: "staged",
+          path,
+          backupPath: null,
+          diff: "@@ -1 +1 @@\n-old\n+new\n",
+          additions: 1,
+          deletions: 1,
+          message: "staged",
+        }),
+        isError: false,
+      },
+    };
+  }
+
+  it("hydrates every write card with one batched review-status request", async () => {
+    const user = userEvent.setup();
+    const run: RunLogEntry = {
+      id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      sessionID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      jobID: null,
+      kind: "chat",
+      status: "ok",
+      message: "two writes",
+      timestamp: new Date(0).toISOString(),
+      response: "done",
+      toolActions: [
+        stagedWriteAction("call-run-1", FIRST_PATH),
+        stagedWriteAction("call-run-2", SECOND_PATH),
+      ],
+    };
+    // Explicit input/init params keep mock.calls typed as a 2-tuple so the
+    // request-body assertion below typechecks.
+    const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
+      if (input === "/files/review-status") {
+        return jsonResponse({
+          stagedStates: { [FIRST_PATH]: "superseded", [SECOND_PATH]: "pending" },
+          liveStates: {},
+        });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal(
+      "WebSocket",
+      createMockWebSocket(createMockWebSocketCapture()),
+    );
+
+    render(<RunDetailModal run={run} onClose={() => {}} />);
+
+    // The surface batches hydration for the whole run, not per mounted card;
+    // the read starts even while both cards are still collapsed.
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.filter(([url]) => url === "/files/review-status"),
+      ).toHaveLength(1);
+    });
+    const reviewCalls = fetchMock.mock.calls.filter(
+      ([url]) => url === "/files/review-status",
+    );
+    const body = JSON.parse(String(reviewCalls[0][1]?.body)) as {
+      paths: string[];
+    };
+    expect([...body.paths].sort()).toEqual([FIRST_PATH, SECOND_PATH].sort());
+
+    // Expanding each row mounts its card, which adopts its own batch entry:
+    // the superseded row settles terminally with no controls while the pending
+    // sibling stays actionable.
+    const rowButtons = screen.getAllByRole("button", { name: /files\.write/ });
+    expect(rowButtons).toHaveLength(2);
+    await user.click(rowButtons[0]);
+    await user.click(rowButtons[1]);
+    expect(await screen.findByText("Superseded")).toBeInTheDocument();
+    expect(screen.getByText("Staged (Review Required)")).toBeInTheDocument();
+    // Only the pending sibling keeps its review controls.
+    expect(screen.getAllByRole("button", { name: "Accept" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Discard" })).toHaveLength(1);
   });
 });

@@ -627,6 +627,31 @@ extension RuneWeaverConfig {
         }
     }
 
+    /// Parses a raw `files.write_mode` string into the closed posture set.
+    ///
+    /// The single source of truth for `files.write_mode` acceptance: the TOML
+    /// decoder and the settings route both delegate here, so trim/lowercase
+    /// normalization and the rejection field/message cannot drift between
+    /// file-load and runtime updates. An unknown value throws instead of
+    /// falling back to the model posture, because a typo would otherwise read
+    /// as "agent chooses" and silently unforce the owner's posture.
+    /// - Parameters:
+    ///   - raw: Raw value from TOML or the settings payload.
+    ///   - field: Dotted field name carried by the thrown error.
+    /// - Returns: The matching write mode after trim and lowercase normalization.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when the value
+    ///   is not one of `model`, `staged`, or `live`.
+    public static func validateFilesWriteMode(_ raw: String, field: String = "files.write_mode") throws -> FilesWriteMode {
+        let lowered = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let mode = FilesWriteMode(rawValue: lowered) else {
+            throw ConfigError.validationError(
+                field: field,
+                message: "must be one of \(FilesWriteMode.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(raw)')"
+            )
+        }
+        return mode
+    }
+
     /// Validates the Trash-class mailbox denylist as non-blank globs.
     ///
     /// Empty opts every mailbox back in, so only blank entries fail: a blank

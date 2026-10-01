@@ -495,7 +495,7 @@ private func reloadLiveDesktopTools(body: UpdateSettingsRequest, config: RuneWea
 ///   - context: Live server context receiving the swap.
 private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
     let hasBashPatch = body.bash != nil
-    let hasFilesPatch = body.filesDenyPatterns != nil || body.filesAllowRoots != nil || body.filesRequireApprovalOnDeny != nil
+    let hasFilesPatch = body.filesDenyPatterns != nil || body.filesAllowRoots != nil || body.filesRequireApprovalOnDeny != nil || body.filesWriteMode != nil
     guard hasBashPatch || hasFilesPatch else { return }
     context.setBashFiles(bash: config.bash, files: config.files)
     if hasBashPatch {
@@ -503,7 +503,15 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
     }
     let live = context.bashFilesSnapshot()
     if hasFilesPatch {
-        for tool in FilesTools.makeTools(filesConfig: live.files, stagedFilesStore: context.stagedFiles) {
+        // The rebuilt write tool keeps the same supersede propagation hook so
+        // a saved `write_mode` cannot silently drop the `file_superseded`
+        // broadcast that settles already-mounted review cards.
+        let supersededReviewNotifier = makeStagedSupersedeNotifier(hub: context.hub)
+        for tool in FilesTools.makeTools(
+            filesConfig: live.files,
+            stagedFilesStore: context.stagedFiles,
+            supersededReviewNotifier: supersededReviewNotifier
+        ) {
             await reregisterPreservingToggle(tool, on: context)
         }
     }

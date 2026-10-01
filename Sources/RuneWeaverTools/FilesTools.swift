@@ -1204,16 +1204,26 @@ public enum FilesTools {
     public static let toolNames = ["files.read", "files.grep", "files.glob", "files.list", "files.write"]
 
     /// Builds the file tools.
+    /// - Parameter supersededReviewNotifier: Optional propagation hook the
+    ///   serving process hands to `files.write` so a live write that
+    ///   supersedes a staged review reaches connected dashboards; nil in
+    ///   direct-core paths.
     public static func makeTools(
         homeDirectoryURL: URL? = nil,
         filesConfig: FilesConfig = FilesConfig(),
-        stagedFilesStore: StagedFilesStore? = nil
+        stagedFilesStore: StagedFilesStore? = nil,
+        supersededReviewNotifier: (@Sendable (String) async -> Void)? = nil
     ) -> [any Tool] {
         let read: any Tool = FilesReadTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
         let grep: any Tool = FilesGrepTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
         let glob: any Tool = FilesGlobTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
         let list: any Tool = FilesListTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
-        let write: any Tool = FilesWriteTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig, stagedFilesStore: stagedFilesStore)
+        let write: any Tool = FilesWriteTool(
+            homeDirectoryURL: homeDirectoryURL,
+            filesConfig: filesConfig,
+            stagedFilesStore: stagedFilesStore,
+            supersededReviewNotifier: supersededReviewNotifier
+        )
         return [read, grep, glob, list, write]
     }
 
@@ -1222,9 +1232,15 @@ public enum FilesTools {
         on bus: ToolBus,
         homeDirectoryURL: URL? = nil,
         filesConfig: FilesConfig = FilesConfig(),
-        stagedFilesStore: StagedFilesStore? = nil
+        stagedFilesStore: StagedFilesStore? = nil,
+        supersededReviewNotifier: (@Sendable (String) async -> Void)? = nil
     ) async {
-        for tool in makeTools(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig, stagedFilesStore: stagedFilesStore) {
+        for tool in makeTools(
+            homeDirectoryURL: homeDirectoryURL,
+            filesConfig: filesConfig,
+            stagedFilesStore: stagedFilesStore,
+            supersededReviewNotifier: supersededReviewNotifier
+        ) {
             await bus.register(tool: tool)
         }
     }

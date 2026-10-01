@@ -664,6 +664,12 @@ extension RuneWeaverConfig {
         if let flag = try files.strictBool("require_approval_on_deny", field: "files.require_approval_on_deny") {
             config.files.requireApprovalOnDeny = flag
         }
+        if let rawMode = try files.strictString("write_mode", field: "files.write_mode") {
+            // Present-but-unknown fails closed instead of silently degrading a
+            // forced posture to model choice; acceptance is single-sourced in
+            // `validateFilesWriteMode` so file-load and settings cannot drift.
+            config.files.writeMode = try RuneWeaverConfig.validateFilesWriteMode(rawMode)
+        }
     }
 
     private static func decodeIndex(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {

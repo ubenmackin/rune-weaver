@@ -531,6 +531,64 @@ struct SettingsRouteTests {
     }
 
     @Test
+    func `UpdateSettingsRequest files write mode patch applies and reports`() throws {
+        var config = RuneWeaverConfig.default
+        #expect(config.files.writeMode == .model)
+
+        // A valid mode PUT merges into the stored posture and the response
+        // mirrors it; the route maps a successful apply to 200.
+        try UpdateSettingsRequest(filesWriteMode: "staged").apply(to: &config)
+        #expect(config.files.writeMode == .staged)
+
+        let response = SettingsResponse(config: config, configPath: "/test/config.toml")
+        #expect(response.filesWriteMode == "staged")
+
+        // The dashboard wire key stays camelCase like its sibling files fields.
+        let decoded = try JSONDecoder().decode(
+            UpdateSettingsRequest.self,
+            from: Data(#"{"filesWriteMode":"live"}"#.utf8)
+        )
+        #expect(decoded.filesWriteMode == "live")
+
+        // An unknown mode fails closed as ConfigError, which the route maps to
+        // 400, and the stored posture survives the rejected save.
+        do {
+            try UpdateSettingsRequest(filesWriteMode: "bogus").apply(to: &config)
+            Issue.record("Expected a validation error for an unknown files write mode")
+        } catch let error as ConfigError {
+            guard case let .validationError(field, _) = error, field == "files.write_mode" else {
+                Issue.record("Expected files.write_mode validation, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected ConfigError, got \(type(of: error))")
+        }
+        #expect(config.files.writeMode == .staged)
+
+        // A files patch carrying other keys never disturbs the stored mode.
+        try UpdateSettingsRequest(filesDenyPatterns: [".env*"]).apply(to: &config)
+        #expect(config.files.writeMode == .staged)
+    }
+
+    @Test
+    func `Files write mode survives a save and reload through the settings merge`() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("settings_write_mode_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // A forced posture written through the same merge the route uses must
+        // reload intact, so a mode save is durable rather than live-only.
+        let fileURL = tempDir.appendingPathComponent("config.toml")
+        var config = RuneWeaverConfig.default
+        try UpdateSettingsRequest(filesWriteMode: "live").apply(to: &config)
+        try config.save(to: fileURL)
+
+        let reloaded = try RuneWeaverConfig.load(from: fileURL)
+        #expect(reloaded.files.writeMode == .live)
+        #expect(SettingsResponse(config: reloaded, configPath: fileURL.path).filesWriteMode == "live")
+    }
+
+    @Test
     func `Bash and files reload preserves enabled state`() async {
         // Boot ships bash disabled in this probe, so a policy reload never
         // has to re-introduce an absent tool. The tool-state toggle stays
@@ -923,12 +981,13 @@ struct SettingsRouteTests {
         #expect(info.hasConfig == true)
         #expect(info.isEnabled == true)
 
-        // Tools outside the allowlist keep no Configure action so the
-        // fan-out addition never widens unrelated rows.
+        // Unrelated tools keep no Configure action so the fan-out addition
+        // never widens other rows; files.write is the one files tool exposing
+        // its own write review mode, and every other files tool stays clean.
         let filesTools = FilesTools.makeTools(filesConfig: FilesConfig())
         for filesTool in filesTools {
             let listed = buildToolInfo(for: filesTool, isEnabled: true, recordByPluginID: [:])
-            #expect(listed.hasConfig == false)
+            #expect(listed.hasConfig == (filesTool.name == "files.write"))
         }
     }
 }

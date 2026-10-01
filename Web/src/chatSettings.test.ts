@@ -18,6 +18,7 @@ describe("chatSettings", () => {
     const settings = loadChatSettings();
     expect(settings).toEqual(DEFAULT_CHAT_SETTINGS);
     expect(settings.thinkingDefault).toBe("collapsed");
+    expect(settings.fileWriteDefault).toBe("collapsed");
     expect(settings.sendOnEnter).toBe(true);
     expect(settings.autoScrollOnStream).toBe(true);
   });
@@ -31,6 +32,7 @@ describe("chatSettings", () => {
   it("saves and loads custom chat settings", () => {
     const custom: ChatSettings = {
       thinkingDefault: "expanded",
+      fileWriteDefault: "expanded",
       sendOnEnter: false,
       autoScrollOnStream: false,
     };
@@ -39,6 +41,7 @@ describe("chatSettings", () => {
     const loaded = loadChatSettings();
     expect(loaded).toEqual(custom);
     expect(loaded.thinkingDefault).toBe("expanded");
+    expect(loaded.fileWriteDefault).toBe("expanded");
     expect(loaded.sendOnEnter).toBe(false);
     expect(loaded.autoScrollOnStream).toBe(false);
   });
@@ -49,6 +52,7 @@ describe("chatSettings", () => {
 
     const loaded = loadChatSettings();
     expect(loaded.thinkingDefault).toBe("expanded");
+    expect(loaded.fileWriteDefault).toBe("collapsed");
     expect(loaded.sendOnEnter).toBe(true);
     expect(loaded.autoScrollOnStream).toBe(true);
   });
@@ -57,8 +61,25 @@ describe("chatSettings", () => {
     const invalid = { thinkingDefault: "unknown-mode", sendOnEnter: "not-bool" };
     const normalized = normalizeChatSettings(invalid);
     expect(normalized.thinkingDefault).toBe("collapsed");
+    expect(normalized.fileWriteDefault).toBe("collapsed");
     expect(normalized.sendOnEnter).toBe(true);
     expect(normalized.autoScrollOnStream).toBe(true);
+  });
+
+  it("normalizes fileWriteDefault to expanded only for the exact value", () => {
+    expect(
+      normalizeChatSettings({ fileWriteDefault: "expanded" }).fileWriteDefault,
+    ).toBe("expanded");
+    expect(
+      normalizeChatSettings({ fileWriteDefault: "collapsed" }).fileWriteDefault,
+    ).toBe("collapsed");
+    // Stored junk (wrong type, unknown mode) collapses rather than expanding.
+    expect(
+      normalizeChatSettings({ fileWriteDefault: "always" }).fileWriteDefault,
+    ).toBe("collapsed");
+    expect(
+      normalizeChatSettings({ fileWriteDefault: true }).fileWriteDefault,
+    ).toBe("collapsed");
   });
 
   it("normalizes non-object input to defaults", () => {
@@ -71,6 +92,7 @@ describe("chatSettings", () => {
   it("resets chat settings back to defaults", () => {
     saveChatSettings({
       thinkingDefault: "expanded",
+      fileWriteDefault: "expanded",
       sendOnEnter: false,
       autoScrollOnStream: false,
     });

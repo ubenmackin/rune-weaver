@@ -571,6 +571,10 @@ extension ServerContext {
         let embedder: (any EmbeddingsBackend)?
         let goals: GoalComponents
         let stagedFiles: StagedFilesStore
+        /// Propagation hook reporting a live write that superseded a staged
+        /// review, so the serve process broadcasts `file_superseded` to live
+        /// dashboards; nil keeps the tool silent.
+        let supersededReviewNotifier: (@Sendable (String) async -> Void)?
         /// Fan-out engine riding the live orchestrator, or nil when the
         /// caller did not wire one (the fanout.run tool then stays
         /// unregistered, mirroring the goal-tools invariant).
@@ -611,6 +615,7 @@ extension ServerContext {
             goalConversations: args.goals.conversations,
             goalsConfig: args.configs.goals,
             stagedFilesStore: args.stagedFiles,
+            supersededReviewNotifier: args.supersededReviewNotifier,
             fanOutEngine: args.fanOutEngine,
             policyStore: args.policyStore,
             egressSupervisor: args.egressSupervisor
@@ -792,6 +797,7 @@ extension ServerContext {
             bus: services.bus, configs: toolConfigs, transports: transports,
             memoryEngine: memoryEngine, embedder: embedder,
             goals: goalComponents, stagedFiles: stagedFilesStore,
+            supersededReviewNotifier: makeStagedSupersedeNotifier(hub: services.durable.hub),
             fanOutEngine: fanOutEngine, policyStore: resolvedPolicyStore,
             egressSupervisor: egressSupervisor
         ))

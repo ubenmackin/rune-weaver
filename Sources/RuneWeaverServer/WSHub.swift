@@ -264,6 +264,27 @@ public actor WSHub {
         await fanOut(text)
     }
 
+    /// Broadcasts one file-review action frame to every connected socket.
+    ///
+    /// Shared by the staged/live resolution routes and the live-write
+    /// supersede hook so every `file_*` frame — `file_accepted`,
+    /// `file_discarded`, `file_superseded`, `live_resolved` — encodes through
+    /// one path.
+    /// - Parameter event: Frame carrying the event type, live path, and
+    ///   optional terminal review state.
+    public func broadcastFileAction(_ event: WSFileActionEvent) async {
+        let text: String
+        do {
+            let data = try JSONEncoder().encode(event)
+            guard let encodedText = String(data: data, encoding: .utf8) else { return }
+            text = encodedText
+        } catch {
+            RuneWeaverLog.server.error("WSHub: failed to encode file action frame: \(error.localizedDescription)")
+            return
+        }
+        await fanOut(text)
+    }
+
     /// Broadcasts an arbitrary text frame to every connected socket.
     public func broadcast(text: String) async {
         await fanOut(text)

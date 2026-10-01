@@ -3305,6 +3305,11 @@ export interface SettingsResponse {
   filesDenyPatterns?: string[];
   filesAllowRoots?: string[];
   filesRequireApprovalOnDeny?: boolean;
+  // Forced files.write posture from [files] write_mode (`model` | `staged` |
+  // `live`); optional for back-compat with older engines that predate the key.
+  // `model` keeps per-call mode selection with an omitted mode defaulting to
+  // staged review; the engine remains the validator of record.
+  filesWriteMode?: string;
   // Web search policy persisted under [browser] (searxng_url, timeout, max_results). The engine
   // encodes both the canonical `browser*` keys and the `search*` aliases with identical values so
   // either contract reads without falling back to defaults; older engines may carry only `browser*`.
@@ -3379,6 +3384,10 @@ export interface UpdateSettingsInput {
   filesDenyPatterns?: string[];
   filesAllowRoots?: string[];
   filesRequireApprovalOnDeny?: boolean;
+  // Owner-forced write posture for files.write; the engine re-validates the
+  // closed `model` | `staged` | `live` set and rejects an unknown value instead
+  // of silently falling back to the model posture.
+  filesWriteMode?: string;
   // Dual-write both contracts so old and new engines persist the [browser] values tools dial.
   browserSearxngURL?: string;
   browserSearchTimeoutSeconds?: number;
@@ -4330,6 +4339,78 @@ export async function discardStagedFile(path?: string, all?: boolean, signal?: A
     body: JSON.stringify({ path, all }),
     signal,
   });
+}
+
+// Accepts one live write review: the live bytes stay as written and the
+// rollback copy is cleared. Mirrors the staged accept timeout contract so an
+// inline card can bound the request with a client-side abort signal.
+export async function acceptLiveReview(
+  path: string,
+  signal?: AbortSignal,
+): Promise<FileActionResponse> {
+  return fetchJson<FileActionResponse>("/files/live-accept", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+    signal,
+  });
+}
+
+// Declines one live write review: the engine restores the rollback copy when
+// the review owns one and deletes the created file otherwise. The branch is
+// the ledger row's to decide, so the caller names only the path instead of
+// choosing between revert and discard client-side.
+export async function declineLiveReview(
+  path: string,
+  signal?: AbortSignal,
+): Promise<FileActionResponse> {
+  return fetchJson<FileActionResponse>("/files/live-decline", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+    signal,
+  });
+}
+
+// Review states shared with the engine's durable review ledger. `pending` means
+// a row exists with no resolution yet; `unknown` means no row exists at all,
+// and the two stay distinct so a card can tell "still reviewable" apart from
+// "the ledger no longer tracks this path".
+export type FileReviewState =
+  | "pending"
+  | "accepted"
+  | "discarded"
+  | "superseded"
+  | "reverted"
+  | "unknown";
+
+// Both ledger maps of the batch review-status response, keyed by live path. A
+// rendered surface hands this shape down to its cards so every card reads its
+// own posture from one shared response instead of issuing its own request.
+export interface FileReviewStates {
+  stagedStates: Record<string, FileReviewState>;
+  liveStates: Record<string, FileReviewState>;
+}
+
+// Batch-hydrates review posture for the given live paths in one round trip.
+// The engine echoes a key for every requested path in both maps, so a reloaded
+// card can render its stored outcome; a response that omits either map degrades
+// to an empty map instead of throwing, keeping the caller's actionable
+// fallback intact when an older engine predates the route.
+export async function getFileReviewStates(
+  paths: string[],
+  signal?: AbortSignal,
+): Promise<FileReviewStates> {
+  const response = await fetchJson<{
+    stagedStates?: Record<string, FileReviewState>;
+    liveStates?: Record<string, FileReviewState>;
+  }>("/files/review-status", {
+    method: "POST",
+    body: JSON.stringify({ paths }),
+    signal,
+  });
+  return {
+    stagedStates: response?.stagedStates ?? {},
+    liveStates: response?.liveStates ?? {},
+  };
 }
 
 

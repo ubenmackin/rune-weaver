@@ -444,6 +444,101 @@ struct ConfigIndexTests {
     }
 
     @Test
+    func `Files write mode defaults to model`() {
+        // Defaulting to the model posture keeps existing files behavior
+        // byte-identical: absent key, per-call choice, no forced override.
+        #expect(RuneWeaverConfig.default.files.writeMode == .model)
+        #expect(FilesConfig().writeMode == FilesConfig.defaultWriteMode)
+        #expect(FilesWriteMode.allCases.map(\.rawValue) == ["model", "staged", "live"])
+    }
+
+    @Test
+    func `Explicit files write mode decodes normalized`() throws {
+        let text = """
+        [llm]
+        default_provider = "mlx"
+
+        [llm.providers.mlx]
+        enabled = true
+        model = "gemma-4-9b"
+        server_url = "http://localhost:8080"
+
+        [files]
+        write_mode = "  STAGED  "
+        """
+        let root = try TOMLParser.parse(text)
+        let config = try RuneWeaverConfig(decoding: root)
+        #expect(config.files.writeMode == .staged)
+        try config.validate()
+    }
+
+    @Test
+    func `Files write mode round-trips through TOML`() throws {
+        var config = RuneWeaverConfig.default
+        #expect(config.renderTOML().contains("write_mode = \"model\""))
+
+        for mode in [FilesWriteMode.staged, .live] {
+            config.files.writeMode = mode
+            try config.validate()
+
+            let rendered = config.renderTOML()
+            #expect(rendered.contains("write_mode = \(RuneWeaverConfig.tomlQuoted(mode.rawValue))"))
+
+            let reparsed = try RuneWeaverConfig(decoding: TOMLParser.parse(rendered))
+            #expect(reparsed.files.writeMode == mode)
+            #expect(reparsed.files == config.files)
+            try reparsed.validate()
+        }
+    }
+
+    @Test
+    func `Invalid files write mode fails closed`() throws {
+        let text = """
+        [llm]
+        default_provider = "mlx"
+
+        [llm.providers.mlx]
+        enabled = true
+        model = "gemma-4-9b"
+        server_url = "http://localhost:8080"
+
+        [files]
+        write_mode = "bogus"
+        """
+        let root = try TOMLParser.parse(text)
+        do {
+            _ = try RuneWeaverConfig(decoding: root)
+            Issue.record("Expected a files.write_mode validation error")
+        } catch let error as ConfigError {
+            guard case let .validationError(field, message) = error else {
+                Issue.record("Expected validationError, got \(error)")
+                return
+            }
+            #expect(field == "files.write_mode")
+            #expect(message == "must be one of model, staged, live (got 'bogus')")
+        } catch {
+            Issue.record("Expected ConfigError, got \(error)")
+        }
+
+        // The decoder and the settings route both delegate to the shared core
+        // validator, so field and message parity is structural rather than a copy.
+        do {
+            _ = try RuneWeaverConfig.validateFilesWriteMode("livewire")
+            Issue.record("Expected validateFilesWriteMode to reject an unknown value")
+        } catch let error as ConfigError {
+            guard case let .validationError(field, message) = error else {
+                Issue.record("Expected validationError, got \(error)")
+                return
+            }
+            #expect(field == "files.write_mode")
+            #expect(message == "must be one of model, staged, live (got 'livewire')")
+        } catch {
+            Issue.record("Expected ConfigError, got \(error)")
+        }
+        #expect(try RuneWeaverConfig.validateFilesWriteMode(" LIVE ") == .live)
+    }
+
+    @Test
     func `Mailbox deny defaults to Trash-class globs`() {
         #expect(IndexConfig.defaultMailboxDeny == ["Trash", "Junk", "Spam", "Deleted*"])
         #expect(IndexConfig().mailboxDeny == IndexConfig.defaultMailboxDeny)

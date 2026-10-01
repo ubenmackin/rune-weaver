@@ -220,6 +220,30 @@ export interface WSFileDiscardedFrame {
   sessionID?: string;
 }
 
+// Terminal broadcast for one resolved live write review. The optional state
+// names which branch ran so a card reconciles without re-reading the ledger:
+// `accepted` keeps the write, `reverted` restores the rollback copy, and
+// `discarded` removes a newly created file. TypeScript mirror of the engine
+// `live_resolved` frame (WSFileActionEvent); update both sides together so the
+// wire shape never drifts.
+export interface WSLiveResolvedFrame {
+  type: "live_resolved";
+  path?: string;
+  state?: "accepted" | "reverted" | "discarded";
+}
+
+// Terminal broadcast for one pending staged write review that a live write
+// superseded. A superseding live write resolves the staged ledger row inside
+// the write tool rather than a route, so the frame carries the canonical live
+// path plus the staged row's terminal state. TypeScript mirror of the engine
+// `file_superseded` frame (WSFileActionEvent); update both sides together so
+// the wire shape never drifts.
+export interface WSFileSupersededFrame {
+  type: "file_superseded";
+  path?: string;
+  state?: "superseded";
+}
+
 export interface WSRunFrame {
   type: "run_started" | "run_completed";
   run?: unknown;
@@ -271,7 +295,9 @@ export type WSIncomingFrame =
   | WSRunFrame
   | WSApprovalLifecycleFrame
   | WSFileAcceptedFrame
-  | WSFileDiscardedFrame;
+  | WSFileDiscardedFrame
+  | WSLiveResolvedFrame
+  | WSFileSupersededFrame;
 
 export type MessageHandler = (data: WSIncomingFrame) => void;
 

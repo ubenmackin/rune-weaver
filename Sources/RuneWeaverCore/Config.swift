@@ -595,6 +595,23 @@ extension SandboxConfig: Codable {
     }
 }
 
+/// Write posture for the `files.write` tool.
+///
+/// `model` keeps per-call mode selection, so an omitted call mode means staged
+/// review; `staged` and `live` force every write through that posture even when
+/// the call asks for the other mode, because the durable owner setting
+/// outranks a model-authored request. A forced write is never rejected for
+/// contradicting the setting — it proceeds in the forced mode and names the
+/// override in its envelope so the outcome stays honest.
+public enum FilesWriteMode: String, Sendable, Codable, Equatable, CaseIterable {
+    /// The agent picks per call; an omitted call mode stages for review.
+    case model
+    /// Every write is staged for review, even when the call asks for live.
+    case staged
+    /// Every write applies live with a `.rune_backup_` rollback copy.
+    case live
+}
+
 /// `[files]` — file-tool access policy.
 public struct FilesConfig: Sendable, Equatable {
     /// Glob deny patterns enforced by the shared file access guard.
@@ -603,6 +620,8 @@ public struct FilesConfig: Sendable, Equatable {
     public var allowRoots: [String]
     /// Whether deny hits escalate to approval instead of hard denial.
     public var requireApprovalOnDeny: Bool
+    /// Forced write posture for `files.write`; `.model` defers to the per-call mode.
+    public var writeMode: FilesWriteMode
 
     /// Default deny patterns enforced by the shared file access guard.
     public static let defaultDenyPatterns = [
@@ -635,22 +654,27 @@ public struct FilesConfig: Sendable, Equatable {
     public static let defaultAllowRoots = ["~"]
     /// Default escalation for deny hits.
     public static let defaultRequireApprovalOnDeny = true
+    /// Default write posture: the agent chooses the mode per call.
+    public static let defaultWriteMode: FilesWriteMode = .model
 
     /// Creates a files config.
     public init(
         denyPatterns: [String] = defaultDenyPatterns,
         allowRoots: [String] = defaultAllowRoots,
-        requireApprovalOnDeny: Bool = defaultRequireApprovalOnDeny
+        requireApprovalOnDeny: Bool = defaultRequireApprovalOnDeny,
+        writeMode: FilesWriteMode = defaultWriteMode
     ) {
         self.denyPatterns = denyPatterns
         self.allowRoots = allowRoots
         self.requireApprovalOnDeny = requireApprovalOnDeny
+        self.writeMode = writeMode
     }
 
     private enum CodingKeys: String, CodingKey {
         case denyPatterns = "deny_patterns"
         case allowRoots = "allow_roots"
         case requireApprovalOnDeny = "require_approval_on_deny"
+        case writeMode = "write_mode"
     }
 }
 
@@ -662,6 +686,7 @@ extension FilesConfig: Codable {
         denyPatterns = try container.decodeIfPresent([String].self, forKey: .denyPatterns) ?? Self.defaultDenyPatterns
         allowRoots = try container.decodeIfPresent([String].self, forKey: .allowRoots) ?? Self.defaultAllowRoots
         requireApprovalOnDeny = try container.decodeIfPresent(Bool.self, forKey: .requireApprovalOnDeny) ?? Self.defaultRequireApprovalOnDeny
+        writeMode = try container.decodeIfPresent(FilesWriteMode.self, forKey: .writeMode) ?? Self.defaultWriteMode
     }
 
     /// Encodes a files config including deny patterns and roots.
@@ -671,6 +696,7 @@ extension FilesConfig: Codable {
         try container.encode(denyPatterns, forKey: .denyPatterns)
         try container.encode(allowRoots, forKey: .allowRoots)
         try container.encode(requireApprovalOnDeny, forKey: .requireApprovalOnDeny)
+        try container.encode(writeMode, forKey: .writeMode)
     }
 }
 
