@@ -60,6 +60,8 @@ public struct SettingsResponse: Content, Equatable {
     public let browserSearchTimeoutSeconds: Int
     public let browserMaxResults: Int
     public let browserAllowedOrigins: [String]
+    public let browserTimeoutSeconds: Int
+    public let browserFetchTimeoutSeconds: Int
     public let searchSearxngURL: String
     public let searchTimeoutSeconds: Int
     public let searchMaxResults: Int
@@ -129,6 +131,8 @@ public struct SettingsResponse: Content, Equatable {
         self.browserSearchTimeoutSeconds = config.browser.searchTimeoutSeconds
         self.browserMaxResults = config.browser.maxResults
         self.browserAllowedOrigins = config.browser.allowedOrigins
+        self.browserTimeoutSeconds = config.browser.timeoutSeconds
+        self.browserFetchTimeoutSeconds = config.browser.fetchTimeoutSeconds
         self.searchSearxngURL = config.browser.searxngURL
         self.searchTimeoutSeconds = config.browser.searchTimeoutSeconds
         self.searchMaxResults = config.browser.maxResults
@@ -184,6 +188,8 @@ public struct SettingsResponse: Content, Equatable {
         case browserSearchTimeoutSeconds
         case browserMaxResults
         case browserAllowedOrigins
+        case browserTimeoutSeconds
+        case browserFetchTimeoutSeconds
         case searchSearxngURL
         case searchTimeoutSeconds
         case searchMaxResults
@@ -247,6 +253,8 @@ public struct SettingsResponse: Content, Equatable {
         browserSearchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .browserSearchTimeoutSeconds) ?? 10
         browserMaxResults = try container.decodeIfPresent(Int.self, forKey: .browserMaxResults) ?? 10
         browserAllowedOrigins = try container.decodeIfPresent([String].self, forKey: .browserAllowedOrigins) ?? []
+        browserTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .browserTimeoutSeconds) ?? BrowserConfig.defaultTimeoutSeconds
+        browserFetchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .browserFetchTimeoutSeconds) ?? BrowserConfig.defaultFetchTimeoutSeconds
         searchSearxngURL = try container.decodeIfPresent(String.self, forKey: .searchSearxngURL) ?? browserSearxngURL
         searchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .searchTimeoutSeconds) ?? browserSearchTimeoutSeconds
         searchMaxResults = try container.decodeIfPresent(Int.self, forKey: .searchMaxResults) ?? browserMaxResults
@@ -305,6 +313,8 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(browserSearchTimeoutSeconds, forKey: .browserSearchTimeoutSeconds)
         try container.encode(browserMaxResults, forKey: .browserMaxResults)
         try container.encode(browserAllowedOrigins, forKey: .browserAllowedOrigins)
+        try container.encode(browserTimeoutSeconds, forKey: .browserTimeoutSeconds)
+        try container.encode(browserFetchTimeoutSeconds, forKey: .browserFetchTimeoutSeconds)
         try container.encode(searchSearxngURL, forKey: .searchSearxngURL)
         try container.encode(searchTimeoutSeconds, forKey: .searchTimeoutSeconds)
         try container.encode(searchMaxResults, forKey: .searchMaxResults)
@@ -372,6 +382,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let browserSearchTimeoutSeconds: Int?
     public let browserMaxResults: Int?
     public let browserAllowedOrigins: [String]?
+    public let browserTimeoutSeconds: Int?
+    public let browserFetchTimeoutSeconds: Int?
     public let searchSearxngURL: String?
     public let searchTimeoutSeconds: Int?
     public let searchMaxResults: Int?
@@ -434,6 +446,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
         browserSearchTimeoutSeconds: Int? = nil,
         browserMaxResults: Int? = nil,
         browserAllowedOrigins: [String]? = nil,
+        browserTimeoutSeconds: Int? = nil,
+        browserFetchTimeoutSeconds: Int? = nil,
         searchSearxngURL: String? = nil,
         searchTimeoutSeconds: Int? = nil,
         searchMaxResults: Int? = nil,
@@ -485,6 +499,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.browserSearchTimeoutSeconds = browserSearchTimeoutSeconds
         self.browserMaxResults = browserMaxResults
         self.browserAllowedOrigins = browserAllowedOrigins
+        self.browserTimeoutSeconds = browserTimeoutSeconds
+        self.browserFetchTimeoutSeconds = browserFetchTimeoutSeconds
         self.searchSearxngURL = searchSearxngURL
         self.searchTimeoutSeconds = searchTimeoutSeconds
         self.searchMaxResults = searchMaxResults
@@ -504,7 +520,13 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.serverPort = serverPort
         self.serverAllowedHosts = serverAllowedHosts
     }
+}
 
+/// Configuration application methods for `UpdateSettingsRequest`.
+///
+/// Kept in an extension so the request struct body stays within the type
+/// length budget.
+extension UpdateSettingsRequest {
     /// Applies this update onto a loaded config, preserving every field
     /// the request omits.
     public func apply(to config: inout RuneWeaverConfig) throws {
@@ -674,6 +696,12 @@ public struct UpdateSettingsRequest: Content, Equatable {
         if let browserMaxResults = browserMaxResults ?? searchMaxResults {
             browser.maxResults = browserMaxResults
         }
+        if let browserTimeoutSeconds {
+            browser.timeoutSeconds = browserTimeoutSeconds
+        }
+        if let browserFetchTimeoutSeconds {
+            browser.fetchTimeoutSeconds = browserFetchTimeoutSeconds
+        }
         if let browserAllowedOrigins {
             browser.allowedOrigins = browserAllowedOrigins
         }
@@ -819,6 +847,10 @@ public struct SecretStatusResponse: Content, Sendable, Equatable {
 // MARK: - Policy Settings DTOs
 
 /// DTO mirroring NetworkEgressPolicy.
+///
+/// Only `allowlist_only` and `unrestricted` persist. The retired
+/// `deny_by_default` name maps to the fail-closed posture on load and at the
+/// REST boundary so older callers keep their intent without storing ambiguity.
 public struct NetworkEgressPolicyDTO: Content, Sendable, Equatable {
     public let mode: String
     public let allowedDomains: [String]
@@ -838,6 +870,13 @@ public struct NetworkEgressPolicyDTO: Content, Sendable, Equatable {
 }
 
 /// DTO mirroring CredentialBinding.
+///
+/// One binding pairs one key with its hosts, methods, and path prefixes. The
+/// secret rides only when the request host matches, the method matches (or
+/// the binding leaves methods empty for Any), and the effective route path
+/// matches a prefix (or prefixes stay empty for Any). Prefixes apply to every
+/// host in the same binding, so scoping is per-key rather than per-host. An
+/// empty host list authorizes nothing and is rejected as unusable.
 public struct CredentialBindingDTO: Content, Sendable, Equatable {
     public let allowedHosts: [String]
     public let allowedMethods: [String]
@@ -856,78 +895,48 @@ public struct CredentialBindingDTO: Content, Sendable, Equatable {
     }
 }
 
-/// DTO mirroring FilesystemPolicy.
-public struct FilesystemPolicyDTO: Content, Sendable, Equatable {
-    public let allowRoots: [String]
-    public let denyPaths: [String]
-
-    public init(allowRoots: [String], denyPaths: [String]) {
-        self.allowRoots = allowRoots
-        self.denyPaths = denyPaths
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case allowRoots = "allow_roots"
-        case denyPaths = "deny_paths"
-    }
-}
-
-/// DTO mirroring ToolPolicy.
-public struct ToolPolicyDTO: Content, Sendable, Equatable {
-    public let level: String
-    public let allowGraduatedTrust: Bool
-
-    public init(level: String, allowGraduatedTrust: Bool) {
-        self.level = level
-        self.allowGraduatedTrust = allowGraduatedTrust
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case level
-        case allowGraduatedTrust = "allow_graduated_trust"
-    }
-}
-
 /// DTO mirroring SecurityPolicy.
+///
+/// The policy file owns network plus credentials only. Filesystem and tool
+/// sections no longer exist as declarative policy; older files may still
+/// carry them but the store ignores those tables on load and never writes
+/// them back, so the DTO carries exactly what the file can persist.
 public struct SecurityPolicyDTO: Content, Sendable, Equatable {
     public let version: Int
     public let network: NetworkEgressPolicyDTO
     public let credentials: [String: CredentialBindingDTO]
-    public let filesystem: FilesystemPolicyDTO
-    public let tools: [String: ToolPolicyDTO]
 
     public init(
         version: Int = 1,
         network: NetworkEgressPolicyDTO,
-        credentials: [String: CredentialBindingDTO],
-        filesystem: FilesystemPolicyDTO,
-        tools: [String: ToolPolicyDTO]
+        credentials: [String: CredentialBindingDTO]
     ) {
         self.version = version
         self.network = network
         self.credentials = credentials
-        self.filesystem = filesystem
-        self.tools = tools
     }
 }
 
 /// Response returned by GET /settings/policy.
+///
+/// Carries the structured policy plus where it came from and its live
+/// invariant status. There is no raw TOML on the wire: the dashboard edits
+/// the structured shape and the server owns serialization, so the file and
+/// the supervisor can never disagree on quoting. Writes apply live through
+/// the shared store, so the response never advertises a restart for policy.
 public struct PolicyResponse: Content, Sendable, Equatable {
     public let policy: SecurityPolicyDTO
-    public let rawToml: String
     public let path: String
     public let loadedFromDisk: Bool
     public let violations: [String]
 
     public init(
         policy: SecurityPolicyDTO,
-        rawToml: String,
         path: String,
         loadedFromDisk: Bool,
         violations: [String]
     ) {
         self.policy = policy
-        self.rawToml = rawToml
         self.path = path
         self.loadedFromDisk = loadedFromDisk
         self.violations = violations
@@ -935,7 +944,6 @@ public struct PolicyResponse: Content, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case policy
-        case rawToml = "raw_toml"
         case path
         case loadedFromDisk = "loaded_from_disk"
         case violations
@@ -943,28 +951,76 @@ public struct PolicyResponse: Content, Sendable, Equatable {
 }
 
 /// Request for PUT /settings/policy.
+///
+/// Carries the structured candidate the caller wants persisted. The legacy
+/// raw-TOML shape is rejected with a 400 naming the field so an old editor
+/// learns the new contract instead of silently persisting unvalidated text.
 public struct UpdatePolicyRequest: Content, Sendable, Equatable {
-    public let rawToml: String?
+    public let policy: SecurityPolicyDTO
 
-    public init(rawToml: String? = nil) {
-        self.rawToml = rawToml
+    public init(policy: SecurityPolicyDTO) {
+        self.policy = policy
     }
 
     private enum CodingKeys: String, CodingKey {
+        case policy
         case rawToml = "raw_toml"
+        case rawTomlCamel = "rawToml"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Fail closed on the retired shape: accepting both keys would let an
+        // old dashboard keep sending unvalidated text alongside the new shape.
+        if container.contains(.rawToml) || container.contains(.rawTomlCamel) {
+            throw Abort(
+                .badRequest,
+                reason: "Invalid policy field 'raw_toml': raw TOML is no longer supported. "
+                    + "Send a structured 'policy' object with version, network, and credentials."
+            )
+        }
+        self.policy = try container.decode(SecurityPolicyDTO.self, forKey: .policy)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(policy, forKey: .policy)
     }
 }
 
 /// Request for POST /settings/policy/verify.
+///
+/// Carries a structured candidate for a pure check with no persistence. The
+/// retired raw-TOML shape is rejected the same way as PUT so editors get one
+/// consistent migration signal.
 public struct VerifyPolicyRequest: Content, Sendable, Equatable {
-    public let rawToml: String
+    public let policy: SecurityPolicyDTO
 
-    public init(rawToml: String) {
-        self.rawToml = rawToml
+    public init(policy: SecurityPolicyDTO) {
+        self.policy = policy
     }
 
     private enum CodingKeys: String, CodingKey {
+        case policy
         case rawToml = "raw_toml"
+        case rawTomlCamel = "rawToml"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if container.contains(.rawToml) || container.contains(.rawTomlCamel) {
+            throw Abort(
+                .badRequest,
+                reason: "Invalid policy field 'raw_toml': raw TOML is no longer supported. "
+                    + "Send a structured 'policy' object with version, network, and credentials."
+            )
+        }
+        self.policy = try container.decode(SecurityPolicyDTO.self, forKey: .policy)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(policy, forKey: .policy)
     }
 }
 

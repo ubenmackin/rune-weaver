@@ -61,7 +61,15 @@ import {
   DEFAULT_GOALS_ENABLED,
   DEFAULT_GOALS_MAX_ACTIVE_GOALS,
   DEFAULT_GOALS_STEP_INTERVAL_MINUTES,
+  DEFAULT_GOALS_MAX_STEPS_PER_GOAL,
+  DEFAULT_GOALS_PLAN_TIMEOUT_SECONDS,
+  DEFAULT_GOALS_MAX_TRIGGERS_PER_GOAL,
   DEFAULT_IDEAS_ENABLED,
+  DEFAULT_IDEAS_MAX_PER_CYCLE,
+  DEFAULT_IDEAS_TIMEOUT_SECONDS,
+  DEFAULT_BROWSER_TIMEOUT_SECONDS,
+  DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS,
+  DEFAULT_MEDIA_TIMEOUT_SECONDS,
   DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS,
   DEFAULT_PROACTIVE_MODE,
   GOALS_MAX_ACTIVE_MAX,
@@ -138,6 +146,7 @@ import {
 import Modal from "./Modal";
 import RuneMarketplaceModal from "./RuneMarketplaceModal";
 import { IndexPolicyPanel } from "./IndexingPanel";
+import { PolicyPane } from "./PolicyPane";
 import { ToastStack } from "./Toast";
 import { useRunningRuns } from "../hooks/useRunningRuns";
 import { useToastStack } from "../hooks/useToastStack";
@@ -175,11 +184,15 @@ function TerminalIcon(props: { size?: number; className?: string }) {
 // stays within the width budget as settings grow. The `search` id stays verbatim while the pane displays as Web: the search* API aliases and
 // the /search/* health routes are keyed to that id, so only the label moves. The `network` pane
 // owns the [server] bind (hostname, port, allowed_hosts) plus the restart banner.
+// The `policy` pane owns the declarative policy.toml editor outside the shared
+// config form, following the indexing panel precedent, so policy writes apply
+// live with no restart and never share the config save path.
 type SettingsTab =
   | "providers"
   | "engine"
   | "tools"
   | "security"
+  | "policy"
   | "memory"
   | "voice"
   | "search"
@@ -195,6 +208,7 @@ const SETTINGS_TABS: readonly SettingsTab[] = [
   "engine",
   "tools",
   "security",
+  "policy",
   "memory",
   "voice",
   "search",
@@ -229,25 +243,25 @@ const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
   { id: "desktop", name: "Desktop & Automation", description: "Screen capture, OCR, and approval-gated mouse/keyboard control", icon: MonitorIcon },
   { id: "messages", name: "Messages & SMS", description: "Search, read, and send macOS iMessages and text messages", icon: MessageSquareIcon },
   { id: "email", name: "Email & Mailboxes", description: "IMAP search, message read, attachment inspection, and drafts", icon: MailIcon },
-  { id: "browser-web", name: "Browser & Web", description: "Web search, page fetch, navigation, and interaction", icon: GlobeIcon },
+  { id: "browser-web", name: "Browser, Web & API", description: "Web search, page fetch, browser automation, and API requests", icon: GlobeIcon },
   { id: "bash", name: "Bash & Shell", description: "Sandboxed shell execution with per-command approval policy", icon: TerminalIcon },
   { id: "files", name: "Files & Workspace", description: "File write review mode; allow and deny rules remain under Security", icon: FolderIcon },
   { id: "memories", name: "Long-Term Memory", description: "Episodic and profile memory store and recall", icon: MemoryIcon },
   { id: "goal", name: "Autonomous Goals", description: "Multi-turn goal planning, tracking, and execution", icon: TargetIcon },
   { id: "fanout", name: "Fan-Out Workers", description: "Concurrent worker turns for parallel subtasks", icon: WrenchIcon },
   { id: "media", name: "Media & Streaming", description: "Media search and client control", icon: WrenchIcon },
-  { id: "api", name: "API & Integrations", description: "External REST calls and webhook triggers", icon: WrenchIcon },
   { id: "other", name: "Other Tools", description: "General utility tools and external plugins", icon: WrenchIcon },
 ];
 
 // Prefix routing keeps the category vocabulary closed: every builtin lands in
-// exactly one section, with browser.* and web.* intentionally collapsed so the
-// single Browser & Web editor owns both. External plugin tools stay in Other
-// regardless of name prefix, so a colliding bash.evil or files.evil never
-// joins a builtin section; only builtin names route by prefix. Bare names
-// without a dot (including the remember_fact/recall_memories aliases) fall
-// through to their explicit branches or to other, so a future unprefixed tool
-// never joins a category by accident.
+// exactly one section, with browser.*, web.*, and api.* intentionally collapsed
+// into browser-web so the single Browser, Web & API editor owns all three.
+// External plugin tools stay in Other regardless of name prefix, so a
+// colliding bash.evil or files.evil never joins a builtin section; only builtin
+// names route by prefix. Bare names without a dot (including the
+// remember_fact/recall_memories aliases) fall through to their explicit
+// branches or to other, so a future unprefixed tool never joins a category by
+// accident.
 const KNOWN_BUILTIN_TOOL_CATEGORIES: Record<string, string> = {
   "desktop.screenshot": "desktop",
   "desktop.action": "desktop",
@@ -280,7 +294,7 @@ const KNOWN_BUILTIN_TOOL_CATEGORIES: Record<string, string> = {
   "fanout.run": "fanout",
   "media.arr": "media",
   "media.arr.read": "media",
-  "api.request": "api",
+  "api.request": "browser-web",
 };
 
 // Routes a builtin tool name by prefix. Callers must gate on provenance
@@ -289,14 +303,13 @@ function resolveBuiltinCategoryByName(toolName: string): string {
   if (toolName.startsWith("desktop.")) return "desktop";
   if (toolName.startsWith("messages.")) return "messages";
   if (toolName.startsWith("email.")) return "email";
-  if (toolName.startsWith("browser.") || toolName.startsWith("web.")) return "browser-web";
+  if (toolName.startsWith("browser.") || toolName.startsWith("web.") || toolName.startsWith("api.")) return "browser-web";
   if (toolName === "bash.exec" || toolName.startsWith("bash.")) return "bash";
   if (toolName.startsWith("files.")) return "files";
   if (toolName.startsWith("memories.") || toolName === "remember_fact" || toolName === "recall_memories") return "memories";
   if (toolName.startsWith("goal.")) return "goal";
   if (toolName.startsWith("fanout.")) return "fanout";
   if (toolName.startsWith("media.")) return "media";
-  if (toolName.startsWith("api.")) return "api";
   return "other";
 }
 
@@ -417,6 +430,42 @@ function validateDesktopCaptureBounds(
   const qualityNum = Number(jpegQuality);
   if (!Number.isFinite(qualityNum) || qualityNum < 0.1 || qualityNum > 1.0) {
     return "Invalid desktop JPEG quality: jpeg quality must be between 0.1 and 1.0.";
+  }
+  return null;
+}
+
+// Shared browser automation timeout bounds check for the full-save and the
+// browser modal-save paths so an out-of-range value fails on the client
+// instead of returning a server 400 from load validation. Mirrors the
+// Config+Validation browser.timeout_seconds bound (5-300).
+function validateBrowserTimeoutSeconds(value: number | string): string | null {
+  const timeoutNum = Number(value);
+  if (!Number.isInteger(timeoutNum) || timeoutNum < 5 || timeoutNum > 300) {
+    return "Invalid browser timeout: automation timeout must be between 5 and 300 seconds.";
+  }
+  return null;
+}
+
+// Shared direct HTTP request timeout bounds check for the full-save and the
+// browser modal-save paths so an out-of-range value fails on the client
+// instead of returning a server 400 from load validation. Mirrors the
+// Config+Validation browser.fetch_timeout_seconds bound (1-120).
+function validateBrowserFetchTimeoutSeconds(value: number | string): string | null {
+  const timeoutNum = Number(value);
+  if (!Number.isInteger(timeoutNum) || timeoutNum < 1 || timeoutNum > 120) {
+    return "Invalid HTTP request timeout: request timeout must be between 1 and 120 seconds.";
+  }
+  return null;
+}
+
+// Shared media request timeout bounds check for the full-save and the media
+// modal-save paths so an out-of-range value fails on the client instead of
+// returning a server 400 from load validation. Mirrors the
+// Config+Validation media.timeout_seconds bound (5-120).
+function validateMediaTimeoutSeconds(value: number | string): string | null {
+  const timeoutNum = Number(value);
+  if (!Number.isInteger(timeoutNum) || timeoutNum < 5 || timeoutNum > 120) {
+    return "Invalid media timeout: request timeout must be between 5 and 120 seconds.";
   }
   return null;
 }
@@ -846,17 +895,6 @@ export default function SettingsManager() {
   // pending tick instead of firing setState on an unmounted pane or closing a
   // fresh edit.
   const filesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Declarative Security Policy (policy.toml)
-  const [policyData, setPolicyData] = useState<any>(null);
-  const [policyRawToml, setPolicyRawToml] = useState<string>("");
-  const [policyPath, setPolicyPath] = useState<string>("");
-  const [policyLoadedFromDisk, setPolicyLoadedFromDisk] = useState<boolean>(false);
-  const [policyViolations, setPolicyViolations] = useState<string[]>([]);
-  const [policyEditMode, setPolicyEditMode] = useState<"visual" | "raw">("visual");
-  const [policyLoading, setPolicyLoading] = useState<boolean>(false);
-  const [policySaving, setPolicySaving] = useState<boolean>(false);
-  const [policySaveSuccess, setPolicySaveSuccess] = useState<boolean>(false);
-  const [policyError, setPolicyError] = useState<string | null>(null);
   // Form-local reset confirmations: resetting only rewrites the in-progress
   // form and never persists until Save, so the modal must state counts and
   // the until-Save nature explicitly.
@@ -1011,6 +1049,9 @@ export default function SettingsManager() {
   const [radarrApiKeyEnv, setRadarrApiKeyEnv] = useState("RADARR_API_KEY");
   const [radarrDefaultQuality, setRadarrDefaultQuality] = useState("");
   const [radarrDefaultRoot, setRadarrDefaultRoot] = useState("");
+  const [mediaTimeoutSeconds, setMediaTimeoutSeconds] = useState<number | string>(
+    DEFAULT_MEDIA_TIMEOUT_SECONDS
+  );
 
   // Single probe list for every Keychain-backed name so the status map drives
   // all badges: email password envs, provider api_key_envs, and the Sonarr /
@@ -1098,6 +1139,12 @@ export default function SettingsManager() {
   // Homelab allowed origins for browser & web tools (multiline text, one host/domain per line)
   const [browserAllowedOriginsText, setBrowserAllowedOriginsText] = useState<string>(
     DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT
+  );
+  const [browserTimeoutSeconds, setBrowserTimeoutSeconds] = useState<number | string>(
+    DEFAULT_BROWSER_TIMEOUT_SECONDS
+  );
+  const [browserFetchTimeoutSeconds, setBrowserFetchTimeoutSeconds] = useState<number | string>(
+    DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS
   );
   const [browserSaveLoading, setBrowserSaveLoading] = useState(false);
   const [browserModalError, setBrowserModalError] = useState<string | null>(null);
@@ -1197,10 +1244,23 @@ export default function SettingsManager() {
   const [goalsMaxActiveGoals, setGoalsMaxActiveGoals] = useState<number | string>(
     DEFAULT_GOALS_MAX_ACTIVE_GOALS
   );
-  // Proactive Muse suggestions ([ideas]): opt-in enable toggle. Off by default
-  // so a fresh install never spends background review calls; the per-cycle cap
-  // and review timeout stay file-owned planning bounds.
+  const [goalsMaxStepsPerGoal, setGoalsMaxStepsPerGoal] = useState<number | string>(
+    DEFAULT_GOALS_MAX_STEPS_PER_GOAL
+  );
+  const [goalsPlanTimeoutSeconds, setGoalsPlanTimeoutSeconds] = useState<number | string>(
+    DEFAULT_GOALS_PLAN_TIMEOUT_SECONDS
+  );
+  const [goalsMaxTriggersPerGoal, setGoalsMaxTriggersPerGoal] = useState<number | string>(
+    DEFAULT_GOALS_MAX_TRIGGERS_PER_GOAL
+  );
+  // Proactive Muse suggestions ([ideas]): opt-in enable toggle and generation bounds.
   const [ideasEnabled, setIdeasEnabled] = useState<boolean>(DEFAULT_IDEAS_ENABLED);
+  const [ideasMaxPerCycle, setIdeasMaxPerCycle] = useState<number | string>(
+    DEFAULT_IDEAS_MAX_PER_CYCLE
+  );
+  const [ideasTimeoutSeconds, setIdeasTimeoutSeconds] = useState<number | string>(
+    DEFAULT_IDEAS_TIMEOUT_SECONDS
+  );
   // Background interruption policy ([proactive]): surfacing mode plus the
   // guarded judge budget. Off never interrupts while the approvals inbox and
   // run history keep recording in every mode.
@@ -1791,6 +1851,11 @@ export default function SettingsManager() {
   // without [media] leave the form defaults untouched.
   const populateMediaSettings = useCallback(
     (media: MediaConfigData | undefined | null) => {
+      if (media?.timeout_seconds !== undefined || media?.timeoutSeconds !== undefined) {
+        setMediaTimeoutSeconds(
+          media.timeout_seconds ?? media.timeoutSeconds ?? DEFAULT_MEDIA_TIMEOUT_SECONDS
+        );
+      }
       if (media?.sonarr) {
         setSonarrEnabled(media.sonarr.enabled ?? true);
         setSonarrUrl(media.sonarr.url ?? "");
@@ -1843,7 +1908,9 @@ export default function SettingsManager() {
         settings?.media?.radarr?.api_key_env?.trim() ||
         settings?.media?.radarr?.apiKeyEnv?.trim() ||
         "";
+      const timeoutSec = typeof mediaTimeoutSeconds === "string" ? parseInt(mediaTimeoutSeconds, 10) : mediaTimeoutSeconds;
       return {
+        timeout_seconds: isNaN(timeoutSec) || timeoutSec <= 0 ? DEFAULT_MEDIA_TIMEOUT_SECONDS : timeoutSec,
         sonarr: {
           enabled: sonarrEnabled,
           url: sonarrUrl.trim(),
@@ -1863,6 +1930,7 @@ export default function SettingsManager() {
       };
     },
     [
+      mediaTimeoutSeconds,
       sonarrEnabled,
       sonarrUrl,
       sonarrApiKeyEnv,
@@ -2100,11 +2168,25 @@ export default function SettingsManager() {
       if (typeof goals.enabled === "boolean") {
         setGoalsEnabled(goals.enabled);
       }
-      if (typeof goals.step_interval_minutes === "number") {
-        setGoalsStepIntervalMinutes(goals.step_interval_minutes);
+      const stepInterval = goals.step_interval_minutes ?? goals.stepIntervalMinutes;
+      if (typeof stepInterval === "number") {
+        setGoalsStepIntervalMinutes(stepInterval);
       }
-      if (typeof goals.max_active_goals === "number") {
-        setGoalsMaxActiveGoals(goals.max_active_goals);
+      const maxActive = goals.max_active_goals ?? goals.maxActiveGoals;
+      if (typeof maxActive === "number") {
+        setGoalsMaxActiveGoals(maxActive);
+      }
+      const maxSteps = goals.max_steps_per_goal ?? goals.maxStepsPerGoal;
+      if (typeof maxSteps === "number") {
+        setGoalsMaxStepsPerGoal(maxSteps);
+      }
+      const planTimeout = goals.plan_timeout_seconds ?? goals.planTimeoutSeconds;
+      if (typeof planTimeout === "number") {
+        setGoalsPlanTimeoutSeconds(planTimeout);
+      }
+      const maxTriggers = goals.max_triggers_per_goal ?? goals.maxTriggersPerGoal;
+      if (typeof maxTriggers === "number") {
+        setGoalsMaxTriggersPerGoal(maxTriggers);
       }
     },
     []
@@ -2119,15 +2201,26 @@ export default function SettingsManager() {
       if (typeof ideas.enabled === "boolean") {
         setIdeasEnabled(ideas.enabled);
       }
+      const maxCycle = ideas.max_per_cycle ?? ideas.maxPerCycle;
+      if (typeof maxCycle === "number") {
+        setIdeasMaxPerCycle(maxCycle);
+      }
+      const timeout = ideas.timeout_seconds ?? ideas.timeoutSeconds;
+      if (typeof timeout === "number") {
+        setIdeasTimeoutSeconds(timeout);
+      }
     },
     []
   );
 
-  // Builds the [ideas] delta from the enable toggle so the full-settings save
-  // shares one shape; the planning bounds stay file-owned.
+  // Builds the [ideas] delta from the enable toggle and bounds.
   const buildIdeasPayload = useCallback((): IdeasSettingsUpdate => {
-    return { enabled: ideasEnabled };
-  }, [ideasEnabled]);
+    return {
+      enabled: ideasEnabled,
+      max_per_cycle: Number(ideasMaxPerCycle),
+      timeout_seconds: Number(ideasTimeoutSeconds),
+    };
+  }, [ideasEnabled, ideasMaxPerCycle, ideasTimeoutSeconds]);
 
   // Builds the [goals] delta from the pursuit form fields so the
   // full-settings save shares one shape with future modal saves. Sends the
@@ -2142,14 +2235,24 @@ export default function SettingsManager() {
         enabled: goalsEnabled,
         step_interval_minutes: Number(goalsStepIntervalMinutes),
         max_active_goals: Number(goalsMaxActiveGoals),
+        max_steps_per_goal: Number(goalsMaxStepsPerGoal),
+        plan_timeout_seconds: Number(goalsPlanTimeoutSeconds),
+        max_triggers_per_goal: Number(goalsMaxTriggersPerGoal),
       };
     },
-    [goalsEnabled, goalsStepIntervalMinutes, goalsMaxActiveGoals]
+    [
+      goalsEnabled,
+      goalsStepIntervalMinutes,
+      goalsMaxActiveGoals,
+      goalsMaxStepsPerGoal,
+      goalsPlanTimeoutSeconds,
+      goalsMaxTriggersPerGoal,
+    ]
   );
 
   // Shared goals validation for the full-save path so it rejects an
   // out-of-range cadence or cap before any network write with one message.
-  // Mirrors GoalsConfig bounds (5-20160, 1-50).
+  // Mirrors GoalsConfig bounds.
   const validateGoalsFields = useCallback((): string | null => {
     const intervalNum = Number(goalsStepIntervalMinutes);
     if (!Number.isInteger(intervalNum) || intervalNum < GOALS_STEP_INTERVAL_MIN_MINUTES || intervalNum > GOALS_STEP_INTERVAL_MAX_MINUTES) {
@@ -2159,8 +2262,40 @@ export default function SettingsManager() {
     if (!Number.isInteger(capNum) || capNum < GOALS_MAX_ACTIVE_MIN || capNum > GOALS_MAX_ACTIVE_MAX) {
       return `Invalid goals cap: max active goals must be between ${GOALS_MAX_ACTIVE_MIN} and ${GOALS_MAX_ACTIVE_MAX}.`;
     }
+    const stepsNum = Number(goalsMaxStepsPerGoal);
+    if (!Number.isInteger(stepsNum) || stepsNum < 1 || stepsNum > 24) {
+      return "Invalid goals plan length: max steps per goal must be between 1 and 24.";
+    }
+    const planTimeoutNum = Number(goalsPlanTimeoutSeconds);
+    if (!Number.isInteger(planTimeoutNum) || planTimeoutNum < 1) {
+      return "Invalid goals planning timeout: plan timeout must be at least 1 second.";
+    }
+    const triggersNum = Number(goalsMaxTriggersPerGoal);
+    if (!Number.isInteger(triggersNum) || triggersNum < 0 || triggersNum > 32) {
+      return "Invalid goals triggers budget: max triggers per goal must be between 0 and 32.";
+    }
     return null;
-  }, [goalsStepIntervalMinutes, goalsMaxActiveGoals]);
+  }, [
+    goalsStepIntervalMinutes,
+    goalsMaxActiveGoals,
+    goalsMaxStepsPerGoal,
+    goalsPlanTimeoutSeconds,
+    goalsMaxTriggersPerGoal,
+  ]);
+
+  // Shared ideas validation for the full-save path.
+  // Mirrors IdeasConfig bounds (1-10 per cycle, 1-120 seconds).
+  const validateIdeasFields = useCallback((): string | null => {
+    const maxCycleNum = Number(ideasMaxPerCycle);
+    if (!Number.isInteger(maxCycleNum) || maxCycleNum < 1 || maxCycleNum > 10) {
+      return "Invalid ideas per cycle: must be between 1 and 10.";
+    }
+    const timeoutNum = Number(ideasTimeoutSeconds);
+    if (!Number.isInteger(timeoutNum) || timeoutNum < 1 || timeoutNum > 120) {
+      return "Invalid ideas timeout: review timeout must be between 1 and 120 seconds.";
+    }
+    return null;
+  }, [ideasMaxPerCycle, ideasTimeoutSeconds]);
 
   // Copies one settings fetch into the proactivity fields, tolerating an
   // absent [proactive] section from older engines by keeping the form
@@ -2341,6 +2476,12 @@ export default function SettingsManager() {
     setSearchMaxResults(
       data.browserMaxResults ?? data.searchMaxResults ?? DEFAULT_SEARCH_MAX_RESULTS
     );
+    if (data.browserTimeoutSeconds !== undefined) {
+      setBrowserTimeoutSeconds(data.browserTimeoutSeconds);
+    }
+    if (data.browserFetchTimeoutSeconds !== undefined) {
+      setBrowserFetchTimeoutSeconds(data.browserFetchTimeoutSeconds);
+    }
     setBrowserAllowedOriginsText(formatAllowedOriginsText(data.browserAllowedOrigins));
     setPluginsDir(data.pluginsDir ?? "~/.runeweaver/plugins");
     setPluginsMarketplaceIndexURL(
@@ -2504,88 +2645,6 @@ export default function SettingsManager() {
       void refreshBootBind();
     }
   }, [activeTab, refreshBootBind]);
-
-  // Policy routes sit behind the same owner gate as every other settings
-  // route, so the three policy calls carry the shared auth convention
-  // (bearer when configured, cookie otherwise) instead of a bare fetch that
-  // would 401 in token mode (headless/tests).
-  const fetchPolicy = useCallback(async () => {
-    setPolicyLoading(true);
-    setPolicyError(null);
-    try {
-      const res = await fetch("/settings/policy", {
-        headers: authHeaders(),
-        credentials: "same-origin",
-      });
-      if (!res.ok) {
-        throw new Error(`Failed to load policy: ${res.statusText}`);
-      }
-      const data = await res.json();
-      setPolicyData(data.policy);
-      setPolicyRawToml(data.raw_toml || "");
-      setPolicyPath(data.path || "");
-      setPolicyLoadedFromDisk(!!data.loaded_from_disk);
-      setPolicyViolations(data.violations || []);
-    } catch (err: any) {
-      setPolicyError(err.message || "Failed to load security policy.");
-    } finally {
-      setPolicyLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (activeTab === "security") {
-      void fetchPolicy();
-    }
-  }, [activeTab, fetchPolicy]);
-
-  const handleSavePolicy = async () => {
-    setPolicySaving(true);
-    setPolicyError(null);
-    setPolicySaveSuccess(false);
-    try {
-      const res = await fetch("/settings/policy", {
-        method: "PUT",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        credentials: "same-origin",
-        body: JSON.stringify({ raw_toml: policyRawToml }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.reason || "Failed to save policy.");
-      }
-      setPolicyData(data.policy);
-      setPolicyRawToml(data.raw_toml || "");
-      setPolicyLoadedFromDisk(true);
-      setPolicyViolations(data.violations || []);
-      setPolicySaveSuccess(true);
-      setTimeout(() => setPolicySaveSuccess(false), 3000);
-    } catch (err: any) {
-      setPolicyError(err.message || "Failed to save security policy.");
-    } finally {
-      setPolicySaving(false);
-    }
-  };
-
-  const handleVerifyPolicy = async () => {
-    setPolicyError(null);
-    try {
-      const res = await fetch("/settings/policy/verify", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        credentials: "same-origin",
-        body: JSON.stringify({ raw_toml: policyRawToml }),
-      });
-      const data = await res.json();
-      setPolicyViolations(data.violations || []);
-      if (data.valid) {
-        setPolicySaveSuccess(true);
-        setTimeout(() => setPolicySaveSuccess(false), 2000);
-      }
-    } catch (err: any) {
-      setPolicyError(err.message || "Verification failed.");
-    }
-  };
 
   // Clears the sticky restart flag once the saved file converges with the
   // re-anchored boot: the health poll moves live to the new boot after an
@@ -2882,6 +2941,12 @@ export default function SettingsManager() {
       setSaving(false);
       return;
     }
+    const ideasValidationError = validateIdeasFields();
+    if (ideasValidationError) {
+      setError(ideasValidationError);
+      setSaving(false);
+      return;
+    }
     const proactiveValidationError = validateProactiveFields();
     if (proactiveValidationError) {
       setError(proactiveValidationError);
@@ -2972,6 +3037,28 @@ export default function SettingsManager() {
       maxResultsNum > 50
     ) {
       setError("Invalid search max results: max results must be between 1 and 50.");
+      setSaving(false);
+      return;
+    }
+    // Browser automation, HTTP request, and media request timeouts share their
+    // bounds helpers so the full-save rejects the same shapes their modal saves
+    // do before any network write. Mirrors browser 5-300, fetch 1-120, and
+    // media 5-120.
+    const browserTimeoutError = validateBrowserTimeoutSeconds(browserTimeoutSeconds);
+    if (browserTimeoutError) {
+      setError(browserTimeoutError);
+      setSaving(false);
+      return;
+    }
+    const browserFetchTimeoutError = validateBrowserFetchTimeoutSeconds(browserFetchTimeoutSeconds);
+    if (browserFetchTimeoutError) {
+      setError(browserFetchTimeoutError);
+      setSaving(false);
+      return;
+    }
+    const mediaTimeoutError = validateMediaTimeoutSeconds(mediaTimeoutSeconds);
+    if (mediaTimeoutError) {
+      setError(mediaTimeoutError);
       setSaving(false);
       return;
     }
@@ -3122,6 +3209,8 @@ export default function SettingsManager() {
         // persist the [browser] values the tools dial.
         browserSearxngURL: trimmedSearxngURL,
         browserSearchTimeoutSeconds: timeoutNum,
+        browserTimeoutSeconds: Number(browserTimeoutSeconds) || DEFAULT_BROWSER_TIMEOUT_SECONDS,
+        browserFetchTimeoutSeconds: Number(browserFetchTimeoutSeconds) || DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS,
         browserMaxResults: maxResultsNum,
         browserAllowedOrigins: parseAllowedOriginsText(browserAllowedOriginsText),
         searchSearxngURL: trimmedSearxngURL,
@@ -3267,6 +3356,11 @@ export default function SettingsManager() {
   );
 
   const handleSaveMediaConfig = async () => {
+    const mediaTimeoutError = validateMediaTimeoutSeconds(mediaTimeoutSeconds);
+    if (mediaTimeoutError) {
+      setMediaModalError(mediaTimeoutError);
+      return;
+    }
     setMediaSaveLoading(true);
     setMediaModalError(null);
     try {
@@ -3293,15 +3387,35 @@ export default function SettingsManager() {
   };
 
   const handleSaveBrowserConfig = async () => {
+    const browserTimeoutError = validateBrowserTimeoutSeconds(browserTimeoutSeconds);
+    if (browserTimeoutError) {
+      setBrowserModalError(browserTimeoutError);
+      return;
+    }
+    const browserFetchTimeoutError = validateBrowserFetchTimeoutSeconds(browserFetchTimeoutSeconds);
+    if (browserFetchTimeoutError) {
+      setBrowserModalError(browserFetchTimeoutError);
+      return;
+    }
     setBrowserSaveLoading(true);
     setBrowserModalError(null);
     try {
+      const bTimeout = Number(browserTimeoutSeconds);
+      const fTimeout = Number(browserFetchTimeoutSeconds);
       const updated = await updateSettings({
         browserAllowedOrigins: parseAllowedOriginsText(browserAllowedOriginsText),
+        browserTimeoutSeconds: isNaN(bTimeout) || bTimeout <= 0 ? DEFAULT_BROWSER_TIMEOUT_SECONDS : bTimeout,
+        browserFetchTimeoutSeconds: isNaN(fTimeout) || fTimeout <= 0 ? DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS : fTimeout,
       });
-      // Refresh only the browser field so unsaved edits in other tabs survive.
+      // Refresh only the browser fields so unsaved edits in other tabs survive.
       setBrowserAllowedOriginsText(formatAllowedOriginsText(updated.browserAllowedOrigins));
-      pushSuccessToast("Browser & web settings saved!");
+      if (updated.browserTimeoutSeconds !== undefined) {
+        setBrowserTimeoutSeconds(updated.browserTimeoutSeconds);
+      }
+      if (updated.browserFetchTimeoutSeconds !== undefined) {
+        setBrowserFetchTimeoutSeconds(updated.browserFetchTimeoutSeconds);
+      }
+      pushSuccessToast("Web, browser & API settings saved!");
       if (browserSaveTimerRef.current !== null) {
         clearTimeout(browserSaveTimerRef.current);
         browserSaveTimerRef.current = null;
@@ -3908,6 +4022,17 @@ export default function SettingsManager() {
           <button
             type="button"
             role="tab"
+            aria-selected={activeTab === "policy"}
+            className={`settings-tab-btn ${activeTab === "policy" ? "active" : ""}`}
+            onClick={() => selectSettingsTab("policy")}
+          >
+            <ApprovalsIcon size={16} />
+            <span>Policy</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
             aria-selected={activeTab === "memory"}
             className={`settings-tab-btn ${activeTab === "memory" ? "active" : ""}`}
             onClick={() => selectSettingsTab("memory")}
@@ -3987,9 +4112,13 @@ export default function SettingsManager() {
               save-button) while still patching only the [index] section, so it
               renders outside the shared settings form and its own controls
               never submit the unrelated config values. Status cards, charts,
-              and run controls live on the Memory → Index Status tab instead. */}
+              and run controls live on the Memory → Index Status tab instead.
+              The policy pane follows the same precedent: it owns its structured
+              policy save outside the shared config form so policy writes apply
+              live with no restart and never share the config save path. */}
           {activeTab === "indexing" ? <IndexPolicyPanel /> : null}
-          {activeTab !== "indexing" ? (
+          {activeTab === "policy" ? <PolicyPane /> : null}
+          {activeTab !== "indexing" && activeTab !== "policy" ? (
           <form onSubmit={handleSave} className="settings-form">
         {/* TAB 1: LLM Providers */}
         {activeTab === "providers" && (
@@ -4549,6 +4678,90 @@ export default function SettingsManager() {
             </div>
             <div className="form-row" style={{ marginTop: "1rem" }}>
               <div className="form-group flex-1">
+                <label htmlFor="goals-max-steps">Max Steps Per Goal</label>
+                <input
+                  id="goals-max-steps"
+                  type="number"
+                  className="input-field"
+                  min={1}
+                  max={24}
+                  step={1}
+                  value={goalsMaxStepsPerGoal}
+                  onChange={(e) => setGoalsMaxStepsPerGoal(e.target.value)}
+                />
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  Maximum plan steps generated per goal. Range: 1–24. Default is {DEFAULT_GOALS_MAX_STEPS_PER_GOAL}.
+                </p>
+              </div>
+              <div className="form-group flex-1">
+                <label htmlFor="goals-plan-timeout">Planning Timeout (seconds)</label>
+                <input
+                  id="goals-plan-timeout"
+                  type="number"
+                  className="input-field"
+                  min={1}
+                  max={600}
+                  step={1}
+                  value={goalsPlanTimeoutSeconds}
+                  onChange={(e) => setGoalsPlanTimeoutSeconds(e.target.value)}
+                />
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  Timeout in seconds for model goal decomposition planning. Default is {DEFAULT_GOALS_PLAN_TIMEOUT_SECONDS}s.
+                </p>
+              </div>
+              <div className="form-group flex-1">
+                <label htmlFor="goals-max-triggers">Max Triggers Per Goal</label>
+                <input
+                  id="goals-max-triggers"
+                  type="number"
+                  className="input-field"
+                  min={0}
+                  max={32}
+                  step={1}
+                  value={goalsMaxTriggersPerGoal}
+                  onChange={(e) => setGoalsMaxTriggersPerGoal(e.target.value)}
+                />
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  Event wake-up triggers allowed per goal. Range: 0–32. Default is {DEFAULT_GOALS_MAX_TRIGGERS_PER_GOAL}.
+                </p>
+              </div>
+            </div>
+            <div className="form-row" style={{ marginTop: "1rem" }}>
+              <div className="form-group flex-1">
+                <label htmlFor="ideas-max-per-cycle">Max Ideas Per Cycle</label>
+                <input
+                  id="ideas-max-per-cycle"
+                  type="number"
+                  className="input-field"
+                  min={1}
+                  max={10}
+                  step={1}
+                  value={ideasMaxPerCycle}
+                  onChange={(e) => setIdeasMaxPerCycle(e.target.value)}
+                />
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  Maximum proactive suggestions generated per cycle. Range: 1–10. Default is {DEFAULT_IDEAS_MAX_PER_CYCLE}.
+                </p>
+              </div>
+              <div className="form-group flex-1">
+                <label htmlFor="ideas-timeout-seconds">Idea Review Timeout (seconds)</label>
+                <input
+                  id="ideas-timeout-seconds"
+                  type="number"
+                  className="input-field"
+                  min={1}
+                  max={120}
+                  step={1}
+                  value={ideasTimeoutSeconds}
+                  onChange={(e) => setIdeasTimeoutSeconds(e.target.value)}
+                />
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  Timeout in seconds for proactive ideas generation review. Range: 1–120. Default is {DEFAULT_IDEAS_TIMEOUT_SECONDS}s.
+                </p>
+              </div>
+            </div>
+            <div className="form-row" style={{ marginTop: "1rem" }}>
+              <div className="form-group flex-1">
                 <label htmlFor="proactive-mode">Proactivity Mode</label>
                 <select
                   id="proactive-mode"
@@ -4924,7 +5137,7 @@ export default function SettingsManager() {
                       onClick={() => setSelectedToolCategory(cat.id)}
                     >
                       <Icon size={13} />
-                      <span>{cat.name.split(" ")[0]}</span>
+                      <span>{cat.name.replace(/,/g, "").split(" ")[0]}</span>
                       <span className="tools-category-pill-count">{catToolCount}</span>
                     </button>
                   );
@@ -5433,227 +5646,6 @@ export default function SettingsManager() {
                   {rotateError}
                 </div>
               ) : null}
-            </div>
-
-            {/* Declarative Security Policy (policy.toml) */}
-            <div className="settings-section card" data-testid="security-policy-section">
-              <div className="settings-section-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px" }}>
-                <div className="settings-section-title-group" style={{ maxWidth: "600px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <KeyIcon size={18} style={{ color: "var(--accent-color, #6366f1)" }} />
-                    <h3 style={{ margin: 0 }}>Declarative Security Policy (<code>policy.toml</code>)</h3>
-                  </div>
-                  <p className="settings-section-hint" style={{ marginTop: "4px" }}>
-                    OpenShell-grade declarative boundary enforcement. Outbound network egress, target-bound credentials, and formal mathematical safety invariants.
-                    {policyPath ? <span className="muted text-sm" style={{ display: "block", marginTop: "2px" }}>Location: <code>{policyPath}</code> ({policyLoadedFromDisk ? "Customized" : "Factory Defaults"})</span> : null}
-                  </p>
-                </div>
-                <div className="row" style={{ gap: "8px", alignItems: "center" }}>
-                  <div className="segmented-control" style={{ display: "inline-flex", borderRadius: "6px", overflow: "hidden", border: "1px solid var(--border-color, #2d3748)" }}>
-                    <button
-                      type="button"
-                      className={`btn-sm ${policyEditMode === "visual" ? "primary" : "ghost"}`}
-                      style={{ padding: "4px 10px", fontSize: "0.8rem", borderRadius: 0 }}
-                      onClick={() => setPolicyEditMode("visual")}
-                    >
-                      Visual Overview
-                    </button>
-                    <button
-                      type="button"
-                      className={`btn-sm ${policyEditMode === "raw" ? "primary" : "ghost"}`}
-                      style={{ padding: "4px 10px", fontSize: "0.8rem", borderRadius: 0 }}
-                      onClick={() => setPolicyEditMode("raw")}
-                    >
-                      Raw TOML Editor
-                    </button>
-                  </div>
-                  <button
-                    type="button"
-                    className="ghost icon-text-btn btn-sm"
-                    onClick={handleVerifyPolicy}
-                    disabled={policyLoading || policySaving}
-                    title="Run formal invariant verifier on policy"
-                  >
-                    <CheckIcon size={14} />
-                    <span>Verify</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="primary icon-text-btn btn-sm"
-                    onClick={handleSavePolicy}
-                    disabled={policyLoading || policySaving}
-                  >
-                    <RefreshIcon size={14} className={policySaving ? "spin" : ""} />
-                    <span>{policySaving ? "Saving…" : "Save Policy"}</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Invariant Verification Status Banner */}
-              <div style={{ marginTop: "12px", marginBottom: "14px" }}>
-                {policyViolations.length === 0 ? (
-                  <div style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "8px",
-                    padding: "8px 12px",
-                    borderRadius: "6px",
-                    backgroundColor: "rgba(16, 185, 129, 0.1)",
-                    border: "1px solid rgba(16, 185, 129, 0.25)",
-                    color: "var(--success-color, #10b981)",
-                    fontSize: "0.85rem",
-                  }}>
-                    <CheckIcon size={16} />
-                    <span><strong>All 4 Formal Security Invariants Verified:</strong> Path Containment Safety, Credential Binding Confinement, Rule Shadow Prevention, and Critical Tool Lock hold.</span>
-                  </div>
-                ) : (
-                  <div style={{
-                    padding: "10px 14px",
-                    borderRadius: "6px",
-                    backgroundColor: "rgba(239, 68, 68, 0.1)",
-                    border: "1px solid rgba(239, 68, 68, 0.3)",
-                    color: "var(--danger-color, #ef4444)",
-                    fontSize: "0.85rem",
-                  }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: "bold", marginBottom: "4px" }}>
-                      <AlertTriangleIcon size={16} />
-                      <span>{policyViolations.length} Invariant Violation(s) Detected (Policy will fall back to safe default):</span>
-                    </div>
-                    <ul style={{ margin: "4px 0 0 20px", padding: 0 }}>
-                      {policyViolations.map((v, i) => (
-                        <li key={i} style={{ marginBottom: "2px" }}>{v}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-
-              {policySaveSuccess ? (
-                <div style={{ padding: "8px 12px", borderRadius: "6px", backgroundColor: "rgba(16, 185, 129, 0.15)", color: "#10b981", fontSize: "0.85rem", marginBottom: "12px" }}>
-                  ✓ Security policy saved successfully. Invariants re-verified.
-                </div>
-              ) : null}
-
-              {policyError ? (
-                <div className="error-banner" style={{ marginBottom: "12px" }}>
-                  {policyError}
-                </div>
-              ) : null}
-
-              {policyEditMode === "visual" ? (
-                <div className="policy-visual-layout" style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-                  {/* Network Egress Subsection */}
-                  <div style={{ padding: "12px", borderRadius: "6px", backgroundColor: "var(--bg-card-nested, rgba(255,255,255,0.03))", border: "1px solid var(--border-color, #2d3748)" }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
-                      <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
-                        <GlobeIcon size={15} />
-                        <span>Network Egress Boundaries</span>
-                      </h4>
-                      <span className="badge" style={{ fontSize: "0.75rem", padding: "2px 8px", borderRadius: "4px", backgroundColor: policyData?.network?.mode === "allowlist_only" ? "rgba(99, 102, 241, 0.2)" : "rgba(245, 158, 11, 0.2)", color: policyData?.network?.mode === "allowlist_only" ? "#818cf8" : "#fbbf24" }}>
-                        Mode: {policyData?.network?.mode || "allowlist_only"}
-                      </span>
-                    </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", fontSize: "0.82rem" }}>
-                      <div>
-                        <div style={{ fontWeight: 600, marginBottom: "4px", color: "var(--text-muted, #94a3b8)" }}>Allowed Domains ({policyData?.network?.allowed_domains?.length || 0})</div>
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
-                          {(policyData?.network?.allowed_domains || []).map((d: string) => (
-                            <span key={d} style={{ padding: "2px 6px", borderRadius: "4px", backgroundColor: "rgba(99, 102, 241, 0.15)", border: "1px solid rgba(99, 102, 241, 0.3)", fontFamily: "monospace" }}>{d}</span>
-                          ))}
-                          {(!policyData?.network?.allowed_domains || policyData.network.allowed_domains.length === 0) ? <span className="muted">None configured</span> : null}
-                        </div>
-                      </div>
-                      <div>
-                        <div style={{ fontWeight: 600, marginBottom: "4px", color: "var(--text-muted, #94a3b8)" }}>Blocked Domains ({policyData?.network?.blocked_domains?.length || 0})</div>
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
-                          {(policyData?.network?.blocked_domains || []).map((d: string) => (
-                            <span key={d} style={{ padding: "2px 6px", borderRadius: "4px", backgroundColor: "rgba(239, 68, 68, 0.15)", border: "1px solid rgba(239, 68, 68, 0.3)", color: "#f87171", fontFamily: "monospace" }}>{d}</span>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Target-Bound Credentials Subsection */}
-                  <div style={{ padding: "12px", borderRadius: "6px", backgroundColor: "var(--bg-card-nested, rgba(255,255,255,0.03))", border: "1px solid var(--border-color, #2d3748)" }}>
-                    <div style={{ marginBottom: "8px" }}>
-                      <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "6px" }}>
-                        <KeyIcon size={15} />
-                        <span>Target-Bound Credentials</span>
-                      </h4>
-                      <p className="settings-section-hint" style={{ margin: "2px 0 0 0" }}>
-                        Credentials bound to authorized endpoints. When the model invokes a tool with <code>rwsecret:&lt;key&gt;</code>, the egress supervisor verifies destination host, HTTP method, and path before Keychain access.
-                      </p>
-                    </div>
-
-                    {policyData?.credentials && Object.keys(policyData.credentials).length > 0 ? (
-                      <div style={{ overflowX: "auto" }}>
-                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem", textAlign: "left" }}>
-                          <thead>
-                            <tr style={{ borderBottom: "1px solid var(--border-color, #2d3748)", color: "var(--text-muted, #94a3b8)" }}>
-                              <th style={{ padding: "6px 8px" }}>Secret Key</th>
-                              <th style={{ padding: "6px 8px" }}>Allowed Destination Hosts</th>
-                              <th style={{ padding: "6px 8px" }}>Allowed Methods</th>
-                              <th style={{ padding: "6px 8px" }}>Path Prefixes</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {Object.entries(policyData.credentials).map(([k, v]: [string, any]) => (
-                              <tr key={k} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                                <td style={{ padding: "6px 8px", fontFamily: "monospace", fontWeight: 600 }}><code>{k}</code></td>
-                                <td style={{ padding: "6px 8px" }}>
-                                  {(v.allowed_hosts || []).map((h: string) => (
-                                    <span key={h} style={{ display: "inline-block", padding: "1px 5px", margin: "1px", borderRadius: "3px", backgroundColor: "rgba(255,255,255,0.06)", fontFamily: "monospace" }}>{h}</span>
-                                  ))}
-                                  {(!v.allowed_hosts || v.allowed_hosts.length === 0) ? <span className="danger text-sm">None (Denied)</span> : null}
-                                </td>
-                                <td style={{ padding: "6px 8px" }}>
-                                  {(v.allowed_methods && v.allowed_methods.length > 0) ? v.allowed_methods.join(", ") : <span className="muted">Any</span>}
-                                </td>
-                                <td style={{ padding: "6px 8px" }}>
-                                  {(v.allowed_path_prefixes && v.allowed_path_prefixes.length > 0) ? v.allowed_path_prefixes.join(", ") : <span className="muted">Any</span>}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    ) : (
-                      <p className="muted text-sm" style={{ margin: "8px 0 0 0" }}>
-                        No credential bindings declared. Add <code>[credentials.&lt;KEY&gt;]</code> in the Raw TOML Editor to authorize secrets for specific hosts.
-                      </p>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                /* Raw TOML Editor */
-                <div className="form-group" style={{ marginTop: "4px" }}>
-                  <label htmlFor="policy-raw-toml-textarea" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
-                    <span>Edit <code>policy.toml</code> directly:</span>
-                    <span className="muted text-sm">Validates against 4 formal invariants on save</span>
-                  </label>
-                  <textarea
-                    id="policy-raw-toml-textarea"
-                    className="input-field"
-                    style={{
-                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                      fontSize: "0.84rem",
-                      lineHeight: "1.45",
-                      minHeight: "260px",
-                      whiteSpace: "pre",
-                      backgroundColor: "var(--bg-editor, #0f172a)",
-                      color: "#f8fafc",
-                    }}
-                    value={policyRawToml}
-                    onChange={(e) => setPolicyRawToml(e.target.value)}
-                    placeholder="# Enter TOML policy content..."
-                    rows={14}
-                  />
-                  <span className="form-group-hint">
-                    Syntax errors or invariant violations prevent committing and keep the existing safe policy active.
-                  </span>
-                </div>
-              )}
             </div>
           </>
         )}
@@ -7002,20 +6994,22 @@ export default function SettingsManager() {
         </Modal>
       ) : null}
 
-      {/* Browser and Web tools configuration modal (browser.navigate, browser.act, web.fetch).
-          Configures homelab allowlist patterns and displays auto-allowed media servers. */}
+      {/* Browser, Web, and API tools configuration modal (browser.navigate, browser.act, web.fetch, web.search, api.request).
+          Configures automation and request timeouts plus the homelab origins SSRF exemption; public-domain egress rules stay on the Policy tab. */}
       {configuringToolName === "browser.navigate" ||
       configuringToolName === "browser.act" ||
-      configuringToolName === "web.fetch" ? (
+      configuringToolName === "web.fetch" ||
+      configuringToolName === "web.search" ||
+      configuringToolName === "api.request" ? (
         <Modal
-          label="Configure Browser & Web Automation"
+          label="Configure Web, Browser & API Automation"
           onClose={() => {
             if (!browserSaveLoading) setConfiguringToolName(null);
           }}
           containerClassName="modal-container"
         >
           <div className="modal-header">
-            <h3>Configure Browser & Web Automation</h3>
+            <h3>Configure Web, Browser & API Automation</h3>
             <button
               type="button"
               className="icon-button"
@@ -7037,15 +7031,123 @@ export default function SettingsManager() {
             )}
 
             <p className="muted text-sm" style={{ marginBottom: "16px" }}>
-              Configure allowed homelab hosts and domain patterns for <code>browser.navigate</code>, <code>browser.act</code>, and <code>web.fetch</code>.
-              Requests to private RFC 1918 IPs and internal networks are blocked by default to prevent SSRF, but allowed origins and auto-allowed services can be safely accessed.
+              Configure timeouts and execution limits for browser automation (<code>browser.navigate</code>, <code>browser.act</code>), web fetch &amp; search (<code>web.fetch</code>, <code>web.search</code>), and external API requests (<code>api.request</code>).
             </p>
+
+            {/* Timeouts Section */}
+            <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
+              <h4 style={{ margin: "0 0 12px 0", fontSize: "0.88rem" }}>Request &amp; Automation Timeouts</h4>
+              <div className="form-group" style={{ marginBottom: "12px" }}>
+                <label htmlFor="browser-timeout-seconds" style={{ fontSize: "0.82rem" }}>
+                  Browser Automation Timeout (seconds)
+                </label>
+                <input
+                  id="browser-timeout-seconds"
+                  type="number"
+                  min={5}
+                  max={300}
+                  className="input-field"
+                  value={browserTimeoutSeconds}
+                  onChange={(e) => setBrowserTimeoutSeconds(e.target.value)}
+                />
+                <span className="form-group-hint" style={{ marginTop: "4px", display: "block" }}>
+                  Timeout in seconds for Playwright actions (navigation, clicking, waiting for selectors). Default is {DEFAULT_BROWSER_TIMEOUT_SECONDS}s.
+                </span>
+              </div>
+
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label htmlFor="browser-fetch-timeout-seconds" style={{ fontSize: "0.82rem" }}>
+                  HTTP Request Timeout (seconds)
+                </label>
+                <input
+                  id="browser-fetch-timeout-seconds"
+                  type="number"
+                  min={1}
+                  max={120}
+                  className="input-field"
+                  value={browserFetchTimeoutSeconds}
+                  onChange={(e) => setBrowserFetchTimeoutSeconds(e.target.value)}
+                />
+                <span className="form-group-hint" style={{ marginTop: "4px", display: "block" }}>
+                  Timeout in seconds for direct HTTP requests made by <code>web.fetch</code> and <code>api.request</code>. Default is {DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS}s.
+                </span>
+              </div>
+            </div>
+
+            {/* Homelab origin allowlist: BrowserConfig.allowedOrigins feeds the
+                SSRF exemption for loopback and private-range hosts, so this
+                editor is the only dashboard surface that can authorize a LAN
+                origin. The declarative policy gate covers public egress and
+                never widens the SSRF set, so the Policy tab cannot substitute
+                for it. */}
+            <div
+              style={{
+                padding: "14px",
+                borderRadius: "8px",
+                border: "1px solid var(--border-color, #2d3748)",
+                marginBottom: "16px",
+                backgroundColor: "var(--bg-secondary, #141822)",
+              }}
+            >
+              <h4 style={{ margin: "0 0 6px 0", fontSize: "0.88rem" }}>Homelab Allowed Origins</h4>
+              <p className="muted text-sm" style={{ margin: "0 0 10px 0" }}>
+                Origins listed here are exempt from SSRF blocking for browser, web, and API calls.
+              </p>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label htmlFor="browser-allowed-origins-textarea" style={{ fontSize: "0.82rem" }}>
+                  Allowed Origins (one per line)
+                </label>
+                <textarea
+                  id="browser-allowed-origins-textarea"
+                  className="input-field allowed-origins-textarea"
+                  value={browserAllowedOriginsText}
+                  onChange={(e) => setBrowserAllowedOriginsText(e.target.value)}
+                  placeholder={"http://192.168.1.50:11434\nhttp://homeassistant.local:8123"}
+                  rows={4}
+                />
+                <span className="form-group-hint" style={{ marginTop: "4px", display: "block" }}>
+                  One host, domain, or URL per line. Blank lines are ignored. Entries exempt
+                  loopback and private-range hosts from SSRF blocking, which the policy
+                  allowlist cannot do.
+                </span>
+              </div>
+            </div>
+
+            {/* Security Policy pointer: public-domain egress allow/deny rules
+                live on the Policy tab, while private-LAN dialing stays with
+                the Homelab Allowed Origins editor above because the SSRF
+                guard reads that allowlist, not the policy file. */}
+            <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px" }}>
+                <div>
+                  <h4 style={{ margin: "0 0 6px 0", fontSize: "0.88rem" }}>Security &amp; Network Policy</h4>
+                  <p className="muted text-sm" style={{ margin: 0 }}>
+                    Public outbound domain allow and deny rules are centrally enforced via{" "}
+                    <code>policy.toml</code> under the Policy tab. Private-LAN and loopback
+                    origins must be authorized in Homelab Allowed Origins above: the SSRF guard
+                    reads that list, so the policy allowlist alone cannot cover them. Configured
+                    services (Sonarr, Radarr, SearXNG, and Email servers) are automatically trusted.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="ghost"
+                  style={{ whiteSpace: "nowrap", fontSize: "0.8rem", padding: "6px 10px" }}
+                  onClick={() => {
+                    setActiveTab("policy");
+                    setConfiguringToolName(null);
+                  }}
+                >
+                  Manage Security Policy &rarr;
+                </button>
+              </div>
+            </div>
 
             {/* Auto-Allowed Services Card */}
             <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
               <h4 style={{ margin: "0 0 6px 0", fontSize: "0.88rem" }}>Auto-Allowed Services</h4>
               <p className="muted text-sm" style={{ margin: "0 0 10px 0" }}>
-                Configured media automation servers and SearXNG are automatically trusted and exempt from SSRF blocking without needing to be re-entered.
+                Configured media automation servers, SearXNG, and configured email host servers are automatically trusted by the security policy.
               </p>
               <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.85rem", padding: "6px 10px", borderRadius: "6px", backgroundColor: "var(--bg-tertiary, #1a202c)" }}>
@@ -7079,30 +7181,6 @@ export default function SettingsManager() {
                   )}
                 </div>
               </div>
-            </div>
-
-            {/* Allowed Origins Multiline Textarea */}
-            <div className="form-group" style={{ marginBottom: "10px" }}>
-              <label htmlFor="browser-allowed-origins-textarea" style={{ fontSize: "0.85rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span>
-                  Allowed Hosts & Domains{" "}
-                  <span className="muted text-sm">
-                    ({parseAllowedOriginsText(browserAllowedOriginsText).length}{" "}
-                    {parseAllowedOriginsText(browserAllowedOriginsText).length === 1 ? "host" : "hosts"})
-                  </span>
-                </span>
-              </label>
-              <textarea
-                id="browser-allowed-origins-textarea"
-                className="input-field allowed-origins-textarea"
-                value={browserAllowedOriginsText}
-                onChange={(e) => setBrowserAllowedOriginsText(e.target.value)}
-                placeholder={"*.homelab.local\n192.168.1.*\nhomeassistant.local\n10.0.0.5:8123"}
-              />
-              <span className="form-group-hint" style={{ marginTop: "4px", display: "block" }}>
-                One host, domain pattern, or IP pattern per line. Supports exact hostnames (e.g. <code>nas.local</code>),
-                exact origins with ports (e.g. <code>192.168.1.50:8080</code>), or wildcards (e.g. <code>*.homelab.local</code> or <code>192.168.1.*</code>). Blank lines are ignored.
-              </span>
             </div>
           </div>
           <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
@@ -7347,6 +7425,27 @@ export default function SettingsManager() {
                     placeholder="e.g. /data/media/movies"
                   />
                 </div>
+              </div>
+            </div>
+
+            {/* Media Request Timeout Card */}
+            <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginTop: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label htmlFor="media-timeout-seconds" style={{ fontSize: "0.82rem" }}>
+                  Request Timeout (seconds)
+                </label>
+                <input
+                  id="media-timeout-seconds"
+                  type="number"
+                  min={5}
+                  max={120}
+                  className="input-field"
+                  value={mediaTimeoutSeconds}
+                  onChange={(e) => setMediaTimeoutSeconds(e.target.value)}
+                />
+                <span className="form-group-hint" style={{ marginTop: "4px", display: "block" }}>
+                  Timeout in seconds for API calls to Sonarr and Radarr. Default is {DEFAULT_MEDIA_TIMEOUT_SECONDS}s.
+                </span>
               </div>
             </div>
           </div>
