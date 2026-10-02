@@ -24,6 +24,17 @@ private func makeIndexPath() -> (path: String, base: URL) {
     return (base.appendingPathComponent("docindex.db").path, base)
 }
 
+/// Names the isolated sidecar targets a store reset must take so the test
+/// never deletes the operator's real mail checkpoint or Messages watermark.
+/// - Parameter base: Test-owned scratch directory.
+/// - Returns: Mail checkpoint and Messages watermark paths under `base`.
+private func makeIndexResetSidecars(base: URL) -> (mailCheckpointPath: String, messagesStatePath: String) {
+    (
+        mailCheckpointPath: base.appendingPathComponent("mail-index-checkpoint.json").path,
+        messagesStatePath: base.appendingPathComponent("messages-state.json").path
+    )
+}
+
 /// Builds a document with sane defaults for tests.
 private func makeDocument(
     source: IndexSource = .files,
@@ -699,7 +710,10 @@ struct DocIndexStoreTests {
             chunks: [IndexedChunk(documentID: document.id, ordinal: 0, text: "resettable body")]
         )
 
-        try await store.reset()
+        // Sidecar targets are required and name this test's scratch files, so
+        // the reset never clears the operator's live state.
+        let sidecars = makeIndexResetSidecars(base: base)
+        try await store.reset(mailCheckpointPath: sidecars.mailCheckpointPath, messagesStatePath: sidecars.messagesStatePath)
 
         let stats = try await store.stats()
         #expect(stats.documents == 0)
@@ -1374,7 +1388,9 @@ struct DocIndexStoreTests {
         try FileManager.default.removeItem(atPath: path)
         try? FileManager.default.removeItem(atPath: path + "-wal")
         try? FileManager.default.removeItem(atPath: path + "-shm")
-        try await store.reset()
+        // The required sidecar targets stay inside the scratch directory.
+        let sidecars = makeIndexResetSidecars(base: base)
+        try await store.reset(mailCheckpointPath: sidecars.mailCheckpointPath, messagesStatePath: sidecars.messagesStatePath)
 
         // Opening recreates an empty store instead of throwing a missing-table error.
         let empty = try await store.stats()

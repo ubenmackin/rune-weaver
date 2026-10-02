@@ -159,6 +159,17 @@ public final class ServerContext: Sendable {
         liveIndexBox.withLock { $0.store }
     }
 
+    /// Persisted Messages watermark the index reset route clears.
+    ///
+    /// Owned by the context so a test-wired context can point a reset at a
+    /// scratch file instead of the operator's live watermark; production
+    /// contexts seed the real default.
+    public let indexMessagesStatePath: String
+    /// Persisted mail checkpoint the index reset route clears. Mirrors
+    /// `indexMessagesStatePath` so a test-wired reset can never delete the
+    /// operator's live checkpoint either.
+    public let indexMailCheckpointPath: String
+
     /// Owner bearer verifier, or nil for the no-auth loopback posture.
     public let auth: ServerAuth?
     /// Shared Playwright gateway reused across browser live-reloads so a settings PUT
@@ -240,6 +251,8 @@ public final class ServerContext: Sendable {
         browserConfig: BrowserConfig = BrowserConfig(),
         indexCoordinator: IndexCoordinator? = nil,
         indexStore: DocIndexStore? = nil,
+        indexMessagesStatePath: String = MessagesIndexer.defaultStatePath,
+        indexMailCheckpointPath: String = MailIndexCheckpointStore.defaultPath,
         servingLLM: (any LLMProvider)? = nil,
         auth: ServerAuth? = nil,
         browserGateway: (any BrowserPlaywrightGateway)? = nil,
@@ -358,6 +371,8 @@ public final class ServerContext: Sendable {
         self.browserConfig = browserConfig
         self.servingLLM = servingLLM
         self.liveIndexBox = OSAllocatedUnfairLock(initialState: LiveIndexPair(store: indexStore, coordinator: indexCoordinator))
+        self.indexMessagesStatePath = indexMessagesStatePath
+        self.indexMailCheckpointPath = indexMailCheckpointPath
         self.auth = auth
         self.browserGateway = browserGateway
         self.searchTransport = searchTransport

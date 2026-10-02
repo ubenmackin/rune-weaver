@@ -5,7 +5,9 @@
 // resolved effort block, the last watermark, per-source enablement,
 // recent failures, and live run state; run executes one on-demand pass; cancel
 // asks an in-flight pass to stop at its next safe point; prune removes
-// documents older than a cutoff; reset clears the store; and reclaim runs
+// documents older than a cutoff; reset clears the store plus its mail
+// checkpoint and Messages watermark through context-owned paths, so tests
+// inject scratch targets while production keeps the real defaults; and reclaim runs
 // `VACUUM` reporting before and after byte figures. Live progress is
 // poll-snapshot primary: the status probe carries the additive `live` snapshot
 // derived from the coordinator's `liveTotals` (null when idle) that the menu
@@ -165,6 +167,10 @@ private func registerIndexPruneRoute(_ app: Application) {
 }
 
 /// Registers the reset route behind `POST /index/reset`.
+///
+/// The document store owns both sidecar resets through the context-owned
+/// paths, so a test-wired context can never delete the operator's live mail
+/// checkpoint or Messages watermark.
 /// - Parameter app: Application receiving the route.
 private func registerIndexResetRoute(_ app: Application) {
     let index = app.grouped(PathComponent.constant(ServerPaths.index))
@@ -174,18 +180,16 @@ private func registerIndexResetRoute(_ app: Application) {
         guard let store = context.indexStore else {
             throw Abort(.serviceUnavailable, reason: "Indexing is not configured.")
         }
-        try await store.reset()
+        try await store.reset(
+            mailCheckpointPath: context.indexMailCheckpointPath,
+            messagesStatePath: context.indexMessagesStatePath
+        )
         if let coordinator = context.indexCoordinator {
             do {
                 try await coordinator.reset()
             } catch {
                 RuneWeaverLog.server.warning("ServerIndexRoutes: failed to reset index coordinator: \(error.localizedDescription)")
             }
-        }
-        do {
-            try MailIndexCheckpointStore.reset()
-        } catch {
-            RuneWeaverLog.server.warning("ServerIndexRoutes: failed to reset mail checkpoints: \(error.localizedDescription)")
         }
         return IndexResetResponse(reset: true)
     }

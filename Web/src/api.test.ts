@@ -20,6 +20,7 @@ import {
   deleteFact,
   deleteGoal,
   deleteJob,
+  deleteSecret,
   formatAllowedOriginsText,
   formatGoalNextAdvance,
   formatRunDuration,
@@ -59,6 +60,7 @@ import {
   searchMemory,
   setAuthToken,
   storeFact,
+  storeSecret,
   subscribeAuthState,
   textContainsPlaceholderForCall,
   toolCancel,
@@ -774,6 +776,46 @@ describe("dashboard api client", () => {
     expect(ids.has("call_10")).toBe(true);
     expect(ids.has("call_missing")).toBe(false);
     expect(placeholderCallIDsInText("Prose [call_9] only").size).toBe(0);
+  });
+
+  it("storeSecret resolves on 204 and posts key plus secret", async () => {
+    // A stored secret is write-only: the client resolves on the bodyless 204
+    // and never parses a JSON record, so the key plus value must ride the
+    // request body exactly once.
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      storeSecret("EMAIL_PRIMARY_PASSWORD", "hunter2"),
+    ).resolves.toBeUndefined();
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(path).toBe("/settings/secrets");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({
+      key: "EMAIL_PRIMARY_PASSWORD",
+      secret: "hunter2",
+    });
+  });
+
+  it("deleteSecret resolves on 204 and sends DELETE", async () => {
+    // Deletes share the bodyless-success contract, so the removal route must
+    // not be expected to carry a JSON record back.
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(deleteSecret("EMAIL_PRIMARY_PASSWORD")).resolves.toBeUndefined();
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(path).toBe("/settings/secrets/EMAIL_PRIMARY_PASSWORD");
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("storeSecret still rejects a bare empty 200 as invalid JSON", async () => {
+    // Only 204 counts as a bodyless success: an empty 200 fails closed so a
+    // fetch-helper refactor cannot silently tolerate a missing secret
+    // response and resurrect the invalid-JSON settings banner.
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      storeSecret("EMAIL_PRIMARY_PASSWORD", "hunter2"),
+    ).rejects.toThrow("Invalid JSON response: /settings/secrets");
   });
 });
 
