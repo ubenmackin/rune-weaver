@@ -4606,30 +4606,6 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
                 </span>
               </button>
             ) : null}
-            {reconnecting && !reconnectDismissed ? (
-              <span
-                className="connection-status-pill"
-                data-testid="chat-reconnecting"
-              >
-                <span role="status" aria-label="Connection to server lost">
-                  Live updates paused — reconnecting to server… Chat still sends; streaming will resume.
-                </span>
-                <button
-                  type="button"
-                  data-testid="chat-reconnect-retry"
-                  onClick={handleRetryConnection}
-                >
-                  Retry now
-                </button>
-                <button
-                  type="button"
-                  data-testid="chat-reconnect-dismiss"
-                  onClick={() => setReconnectDismissed(true)}
-                >
-                  Dismiss
-                </button>
-              </span>
-            ) : null}
             {sessionPendingCount > 0 ? (
               <span
                 className="pending-approval-badge"
@@ -4662,6 +4638,40 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
             </button>
           </div>
         </div>
+
+        {/* Reconnect notice lives outside the header as a fixed centered toast
+            so an outage never shifts or wraps the title row. It stays mounted
+            for the whole outage and leaves with recovery or an explicit
+            retry/dismiss; dismiss only snoozes the current outage because the
+            close handler re-arms the notice on the next drop. */}
+        {reconnecting && !reconnectDismissed ? (
+          <div
+            className="connection-toast"
+            data-testid="chat-reconnecting"
+            role="alert"
+            aria-live="assertive"
+          >
+            <span className="connection-toast-message">
+              Live updates paused — reconnecting to server… Chat still sends; streaming will resume.
+            </span>
+            <div className="connection-toast-actions">
+              <button
+                type="button"
+                data-testid="chat-reconnect-retry"
+                onClick={handleRetryConnection}
+              >
+                Retry now
+              </button>
+              <button
+                type="button"
+                data-testid="chat-reconnect-dismiss"
+                onClick={() => setReconnectDismissed(true)}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         {/* Message Stream */}
         <div className="message-list" aria-live="polite" ref={messageListRef} onScroll={handleMessageListScroll}>

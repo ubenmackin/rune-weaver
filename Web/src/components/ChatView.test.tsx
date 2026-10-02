@@ -2580,8 +2580,9 @@ describe("Chat reconnecting banner", () => {
   });
 
   it("shows the reconnecting banner when the shared socket closes", async () => {
-    // The header pill is the only signal that live updates paused while drafts
-    // stay usable, so a dropped socket must surface it without locking input.
+    // The centered toast is the only signal that live updates paused while
+    // drafts stay usable, so a dropped socket must surface it without locking
+    // input or shifting the header layout.
     const { capture, instances, CountingSocket } = makeCountingSocket();
     vi.stubGlobal("WebSocket", CountingSocket);
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
@@ -2598,14 +2599,35 @@ describe("Chat reconnecting banner", () => {
     await waitFor(() => {
       expect(screen.getByTestId("chat-reconnecting")).toBeInTheDocument();
     });
+    const toast = screen.getByTestId("chat-reconnecting");
+    expect(toast).toHaveClass("connection-toast");
+    expect(toast).toHaveAttribute("role", "alert");
+    expect(toast).toHaveAttribute("aria-live", "assertive");
+    expect(
+      within(toast).getByText(
+        "Live updates paused — reconnecting to server… Chat still sends; streaming will resume.",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByTestId("chat-reconnect-retry")).toBeInTheDocument();
     expect(screen.getByTestId("chat-reconnect-dismiss")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Retry now" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
     expect(screen.getByLabelText("Chat input")).not.toBeDisabled();
+    // The header keeps its compact title row while the outage is surfaced as
+    // a fixed overlay, so no inline pill may remain inside the title.
+    expect(
+      document.querySelector(".chat-panel-title .connection-status-pill"),
+    ).toBeNull();
+    expect(
+      document.querySelector(".chat-panel-header [data-testid='chat-reconnecting']"),
+    ).toBeNull();
   });
 
   it("retry forces an immediate redial and clears the banner on open", async () => {
     // A visible retry must bypass the idle backoff so the view rejoins live
-    // without waiting out the scheduled timer, and recovery clears the pill
+    // without waiting out the scheduled timer, and recovery clears the toast
     // on the socket open instead of leaving it stuck.
     const user = userEvent.setup();
     const { capture, instances, CountingSocket } = makeCountingSocket();
@@ -2622,6 +2644,9 @@ describe("Chat reconnecting banner", () => {
     await waitFor(() => {
       expect(screen.getByTestId("chat-reconnecting")).toBeInTheDocument();
     });
+    expect(screen.getByTestId("chat-reconnecting")).toHaveClass(
+      "connection-toast",
+    );
 
     const dialedBeforeRetry = instances.length;
     await user.click(screen.getByTestId("chat-reconnect-retry"));
@@ -2635,7 +2660,7 @@ describe("Chat reconnecting banner", () => {
   });
 
   it("dismiss hides the banner until the next close", async () => {
-    // Dismiss is a per-outage snooze: it hides the pill for the current drop
+    // Dismiss is a per-outage snooze: it hides the toast for the current drop
     // while the next close resets it, so a fresh outage never stays silent.
     const user = userEvent.setup();
     const { capture, instances, CountingSocket } = makeCountingSocket();
@@ -2649,9 +2674,12 @@ describe("Chat reconnecting banner", () => {
     await act(async () => {
       instances[0].close();
     });
-    // Wait for the pill to mount before dismissing so the click never races
+    // Wait for the toast to mount before dismissing so the click never races
     // the close notification.
     await screen.findByTestId("chat-reconnecting");
+    expect(screen.getByTestId("chat-reconnecting")).toHaveClass(
+      "connection-toast",
+    );
     expect(screen.getByTestId("chat-reconnect-dismiss")).toBeInTheDocument();
 
     await user.click(screen.getByTestId("chat-reconnect-dismiss"));
@@ -2659,12 +2687,54 @@ describe("Chat reconnecting banner", () => {
       expect(screen.queryByTestId("chat-reconnecting")).not.toBeInTheDocument();
     });
 
-    // A fresh drop resets the snooze, so the pill returns for the next outage.
+    // A fresh drop resets the snooze, so the toast returns for the next outage.
     await act(async () => {
       instances[0].close();
     });
     await screen.findByTestId("chat-reconnecting");
     expect(screen.getByTestId("chat-reconnecting")).toBeInTheDocument();
+    expect(screen.getByTestId("chat-reconnecting")).toHaveClass(
+      "connection-toast",
+    );
+  });
+
+  it("renders the reconnect notice outside the header as a centered toast", async () => {
+    // The title row must keep its compact shape during an outage, so the
+    // notice mounts as a fixed overlay sibling before the message list with
+    // no inline pill left behind in the header.
+    const { capture, instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+
+    await act(async () => {
+      instances[0].close();
+    });
+    await screen.findByTestId("chat-reconnecting");
+
+    const toast = screen.getByTestId("chat-reconnecting");
+    expect(toast.tagName.toLowerCase()).toBe("div");
+    expect(toast).toHaveClass("connection-toast");
+    expect(
+      within(toast).getByText(
+        "Live updates paused — reconnecting to server… Chat still sends; streaming will resume.",
+      ),
+    ).toBeInTheDocument();
+    expect(document.querySelector(".connection-status-pill")).toBeNull();
+    const header = document.querySelector(".chat-panel-header");
+    expect(header).not.toBeNull();
+    expect(
+      within(header as HTMLElement).queryByTestId("chat-reconnecting"),
+    ).toBeNull();
+    const messageList = document.querySelector(".message-list");
+    expect(messageList).not.toBeNull();
+    expect(
+      toast.compareDocumentPosition(messageList as Node) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });
 

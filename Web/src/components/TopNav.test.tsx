@@ -664,6 +664,78 @@ describe("TopNav Work group menu", () => {
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("pushes the rolled-up total down to each unread Work child", async () => {
+    // Collapsed and expanded readings stay auditable together: the trigger
+    // keeps the rolled-up total while the open menu attributes the same
+    // unread share to its owning child, so the driver of the count is
+    // visible without opening another surface.
+    const user = userEvent.setup();
+    renderGroupNav({ runsBadge: 3 });
+    const trigger = screen.getByRole("button", { name: "Work, 3 unread" });
+    expect(trigger.querySelector(".nav-badge")?.textContent).toBe("3");
+    await user.click(trigger);
+    const runsItem = screen.getByRole("menuitem", {
+      name: "Runs, 3 unread",
+    });
+    expect(
+      runsItem.querySelector(".nav-dropdown-item-badge")?.textContent,
+    ).toBe("3");
+    expect(
+      runsItem
+        .querySelector(".nav-dropdown-item-badge")
+        ?.getAttribute("aria-hidden"),
+    ).toBe("true");
+    // Children without an unread share stay pill-free so only actionable
+    // rows draw the eye.
+    expect(
+      screen
+        .getByRole("menuitem", { name: "Goals" })
+        .querySelector(".nav-dropdown-item-badge"),
+    ).toBeNull();
+    expect(
+      screen
+        .getByRole("menuitem", { name: "Schedules" })
+        .querySelector(".nav-dropdown-item-badge"),
+    ).toBeNull();
+  });
+
+  it("matches each Work child pill to its own unread share", async () => {
+    // Split totals stay attributable: each child pill renders its own count
+    // while the trigger keeps the summed total for the collapsed reading.
+    const user = userEvent.setup();
+    renderGroupNav({ goalsBadge: 2, runsBadge: 1 });
+    const trigger = screen.getByRole("button", { name: "Work, 3 unread" });
+    expect(trigger.querySelector(".nav-badge")?.textContent).toBe("3");
+    await user.click(trigger);
+    expect(
+      screen
+        .getByRole("menuitem", { name: "Goals, 2 unread" })
+        .querySelector(".nav-dropdown-item-badge")?.textContent,
+    ).toBe("2");
+    expect(
+      screen
+        .getByRole("menuitem", { name: "Runs, 1 unread" })
+        .querySelector(".nav-dropdown-item-badge")?.textContent,
+    ).toBe("1");
+    expect(
+      screen
+        .getByRole("menuitem", { name: "Schedules" })
+        .querySelector(".nav-dropdown-item-badge"),
+    ).toBeNull();
+  });
+
+  it("renders no child pills when Work has no unread", async () => {
+    // Zero stays quiet: the open rows mint no pill until work arrives, so the
+    // menu reads as plain navigation at rest.
+    const user = userEvent.setup();
+    renderGroupNav();
+    await user.click(screen.getByRole("button", { name: "Work" }));
+    expect(
+      screen.getByRole("menu", { name: "Work sections" }),
+    ).toBeInTheDocument();
+    expect(document.querySelector(".nav-dropdown-item-badge")).toBeNull();
+  });
+
   it("closes the menu when a click lands outside the group", async () => {
     const user = userEvent.setup();
     renderGroupNav();
