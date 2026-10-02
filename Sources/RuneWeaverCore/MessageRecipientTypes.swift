@@ -155,16 +155,28 @@ public enum MessageRecipientNameNormalizer: Sendable {
     ///
     /// Lowercasing plus alphanumeric-only filtering maps every spelling of the
     /// same phone number (`+1 (555) 123-4567`, `+15551234567`) and every case
-    /// variant of the same email onto one key. The country code stays part of
-    /// the key because dropping it could merge distinct numbers; deciding when
-    /// two keys are the same person stays with the caller. Punctuation-only
-    /// input has no identity at all, so the result is nil rather than an empty key.
+    /// variant of the same email onto one key. An 11-digit all-numeric key with
+    /// a leading `1` then folds to its last 10 digits, because chat history
+    /// stores E.164 (`+19163907495`) while Contacts commonly stores the national
+    /// form (`(916) 390-7495`); without that fold the two spellings never join,
+    /// which silently drops history enrichment and display-name lookup for the
+    /// national-form side. The fold applies only to that narrow NANP shape, so
+    /// other digit strings and all email keys keep today's identity.
+    /// Punctuation-only input has no identity at all, so the result is nil
+    /// rather than an empty key.
     /// - Parameter raw: Raw phone number, email address, or handle.
     /// - Returns: Lowercased alphanumeric key, or nil when nothing remains.
     public static func handleKey(_ raw: String) -> String? {
         let scalars = raw.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
         guard !scalars.isEmpty else { return nil }
-        return String(scalars.map { Character($0) })
+        let key = String(scalars.map { Character($0) })
+        // Chat history arrives in E.164 while Contacts often keeps the national
+        // spelling; folding the single leading NANP `1` lets those two rows join
+        // for enrichment and display-name lookup instead of silently missing.
+        if key.count == 11, key.hasPrefix("1"), key.unicodeScalars.allSatisfy({ ("0" ... "9").contains($0) }) {
+            return String(key.suffix(10))
+        }
+        return key
     }
 }
 

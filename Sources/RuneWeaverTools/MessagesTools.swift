@@ -296,6 +296,21 @@ public struct MessagesResolveRecipientArgs: Sendable, Equatable, Decodable {
     }
 }
 
+/// Copy-pasteable handoff for `messages.send`, derived from a unique resolution.
+///
+/// `recipient` carries the selected candidate's handle verbatim so the send
+/// call dials exactly the resolved identity, while `resolvedFrom` preserves
+/// the trimmed name the handle was resolved from for audit and alias learning.
+public struct MessagesResolveSendHint: Sendable, Equatable, Codable {
+    public let recipient: String
+    public let resolvedFrom: String
+
+    public init(recipient: String, resolvedFrom: String) {
+        self.recipient = recipient
+        self.resolvedFrom = resolvedFrom
+    }
+}
+
 /// Resolved recipient candidates for one query.
 public struct MessagesResolveRecipientEnvelope: Sendable, Equatable, Codable {
     /// Query the resolution answered, echoed for correlation.
@@ -308,19 +323,24 @@ public struct MessagesResolveRecipientEnvelope: Sendable, Equatable, Codable {
     public let candidates: [MessageRecipientCandidate]
     /// Owner-facing guidance for an empty result; nil when any candidate exists.
     public let note: String?
+    /// Copy-pasteable send handoff; non-nil if and only if `resolved` is non-nil.
+    /// Absent in older payloads, which still decode with this as nil.
+    public let sendWith: MessagesResolveSendHint?
 
     public init(
         query: String,
         ambiguous: Bool,
         resolved: MessageRecipientCandidate? = nil,
         candidates: [MessageRecipientCandidate],
-        note: String? = nil
+        note: String? = nil,
+        sendWith: MessagesResolveSendHint? = nil
     ) {
         self.query = query
         self.ambiguous = ambiguous
         self.resolved = resolved
         self.candidates = candidates
         self.note = note
+        self.sendWith = sendWith
     }
 }
 
@@ -641,8 +661,9 @@ public struct MessagesSendTool: Tool, Sendable {
             + "Requires operator approval. Use when the user explicitly instructs to send or reply to a message."
 
     public let inputSchema = JSONSchema(
-        rawValue: #"{"type":"object","properties":{"recipient":{"type":"string","description":"Recipient phone number or email handle. "#
-            + #"Call messages.resolveRecipient first when you only have a name; never pass a display name."},"#
+        rawValue: #"{"type":"object","properties":{"recipient":{"type":"string","description":"Recipient phone number or email handle. It MUST be a handle "#
+            + #"from messages.resolveRecipient (copy its sendWith.recipient verbatim, with sendWith.resolvedFrom as "#
+            + #"resolvedFrom); passing a display name always fails."},"#
             + #""text":{"type":"string","description":"Message text to send"},"#
             + #""resolvedFrom":{"type":"string","description":"Optional original display name when recipient "#
             + #"was resolved from a name; remembered for future lookups."}},"#
@@ -935,6 +956,7 @@ public struct MessagesResolveRecipientTool: Tool, Sendable {
     public let description =
         "Resolves a contact name, nickname, or partial name to candidate phone numbers or email addresses using Contacts and recent conversations. "
             + "Read-only. Use before messages.send when you only have a name, and to disambiguate multiple matches."
+            + " The envelope includes sendWith, a copy-pasteable recipient for messages.send."
 
     public let inputSchema = JSONSchema(
         rawValue: #"{"type":"object","properties":{"name":{"type":"string","description":"Contact name, nickname, "#
@@ -979,12 +1001,19 @@ public struct MessagesResolveRecipientTool: Tool, Sendable {
         // Resolution never fails and an empty candidate list is a value, so the
         // envelope always reports success; only argument shape can fail a call.
         let resolution = await resolver.resolve(name: query, limit: args.limit)
+        // The handoff exists exactly when a single identity won: the send call
+        // must copy a resolved handle verbatim rather than retype a display
+        // name, so ambiguous and empty results carry no handoff to copy.
+        let sendWith = resolution.selected.map {
+            MessagesResolveSendHint(recipient: $0.handle, resolvedFrom: query)
+        }
         let envelope = MessagesResolveRecipientEnvelope(
             query: resolution.query,
             ambiguous: resolution.isAmbiguous,
             resolved: resolution.selected,
             candidates: resolution.candidates,
-            note: resolution.candidates.isEmpty ? Self.noMatchNote(for: query) : nil
+            note: resolution.candidates.isEmpty ? Self.noMatchNote(for: query) : nil,
+            sendWith: sendWith
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
