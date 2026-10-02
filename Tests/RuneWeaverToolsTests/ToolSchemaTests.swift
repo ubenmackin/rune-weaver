@@ -87,7 +87,7 @@ struct ToolSchemaTests {
     }
 
     @Test
-    func `Builtin schemas advertise required alias groups`() async throws {
+    func `Builtin schemas advertise canonical property groups`() async throws {
         let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
         let policyStore = await ToolsTestSupport.makeTestPolicyStore()
@@ -98,41 +98,33 @@ struct ToolSchemaTests {
             let raw = tool.inputSchema.rawValue
             switch tool.name {
             case "web.search":
-                for key in ["query", "q", "limit", "count"] {
+                for key in ["query", "limit"] {
                     #expect(properties[key] != nil, "web.search missing property \(key)")
                 }
+                #expect(properties["q"] == nil)
                 #expect(raw.contains(#""required":["query"]"#), "web.search must require query")
-                #expect(raw.contains(#""required":["q"]"#), "web.search must accept q alias")
             case "web.fetch":
-                for key in ["url", "uri", "link"] {
-                    #expect(properties[key] != nil, "web.fetch missing property \(key)")
-                }
+                #expect(properties["url"] != nil, "web.fetch missing property url")
+                #expect(properties["uri"] == nil)
                 #expect(raw.contains(#""required":["url"]"#))
-                #expect(raw.contains(#""required":["uri"]"#))
-                #expect(raw.contains(#""required":["link"]"#))
             case "browser.navigate":
-                for key in ["url", "page", "pageUrl", "page_url", "includeScreenshot", "screenshot", "include_screenshot"] {
+                for key in ["url", "includeScreenshot", "headed"] {
                     #expect(properties[key] != nil, "browser.navigate missing property \(key)")
                 }
+                #expect(properties["page"] == nil)
                 #expect(raw.contains(#""required":["url"]"#))
-                #expect(raw.contains(#""required":["page"]"#))
-                #expect(raw.contains(#""required":["pageUrl"]"#))
-                #expect(raw.contains(#""required":["page_url"]"#))
             case "browser.act":
-                for key in ["action", "type", "kind", "ref", "target", "selector", "element", "elementRef", "text", "value", "input", "key", "url", "page", "pageUrl", "page_url"] {
+                for key in ["action", "ref", "url", "text"] {
                     #expect(properties[key] != nil, "browser.act missing property \(key)")
                 }
-                #expect(raw.contains("allOf"), "browser.act must group action, ref, and url requirements")
-                #expect(raw.contains(#""required":["action"]"#))
-                #expect(raw.contains(#""required":["ref"]"#))
-                #expect(raw.contains(#""required":["url"]"#))
+                #expect(properties["type"] == nil)
+                #expect(raw.contains(#""required":["action","ref","url"]"#))
             case "api.request":
-                for key in ["method", "verb", "url", "uri", "link", "headers", "header", "body", "payload", "data"] {
+                for key in ["method", "url", "headers", "body"] {
                     #expect(properties[key] != nil, "api.request missing property \(key)")
                 }
-                #expect(raw.contains("allOf"), "api.request must group method and url requirements")
-                #expect(raw.contains(#""required":["method"]"#))
-                #expect(raw.contains(#""required":["url"]"#))
+                #expect(properties["verb"] == nil)
+                #expect(raw.contains(#""required":["method","url"]"#))
             case "files.read":
                 for key in ["path", "offset", "limit", "encoding"] {
                     #expect(properties[key] != nil, "files.read missing property \(key)")
@@ -157,67 +149,71 @@ struct ToolSchemaTests {
                     #expect(properties[key] != nil, "files.write missing property \(key)")
                 }
                 #expect(raw.contains(#""required":["path","content"]"#))
-            case "remember_fact", "memories.store":
+            case "memories.store":
                 for key in ["text", "category"] {
                     #expect(properties[key] != nil, "\(tool.name) missing property \(key)")
                 }
                 #expect(raw.contains(#""required":["text"]"#))
-            case "recall_memories", "memories.recall":
-                for key in ["query", "limit"] {
+            case "memories.recall":
+                for key in ["query", "limit", "since", "until"] {
                     #expect(properties[key] != nil, "\(tool.name) missing property \(key)")
                 }
                 #expect(raw.contains(#""required":["query"]"#))
             case "email.search":
-                for key in ["account", "query", "limit", "mailbox", "folder"] {
+                for key in ["account", "query", "limit", "mailbox"] {
                     #expect(properties[key] != nil, "email.search missing property \(key)")
                 }
+                #expect(properties["folder"] == nil)
                 #expect(raw.contains(#""required":["account","query"]"#))
             case "email.read":
-                for key in ["account", "id", "messageId", "message_id", "uid", "mailbox", "folder"] {
+                for key in ["account", "id", "mailbox"] {
                     #expect(properties[key] != nil, "email.read missing property \(key)")
                 }
-                #expect(raw.contains(#""required":["account"]"#))
-                #expect(raw.contains(#""required":["id"]"#))
-                #expect(raw.contains(#""required":["messageId"]"#))
+                #expect(properties["messageId"] == nil)
+                #expect(raw.contains(#""required":["account","id"]"#))
             case "email.attachment":
-                for key in ["account", "id", "messageId", "message_id", "uid", "index", "attachmentIndex", "attachment_index", "mailbox", "preview", "subpath", "saveToPath"] {
+                for key in ["account", "id", "index", "mailbox", "preview", "subpath", "saveToPath"] {
                     #expect(properties[key] != nil, "email.attachment missing property \(key)")
                 }
-                #expect(raw.contains(#""required":["account"]"#))
-                #expect(raw.contains(#""required":["id"]"#))
-                #expect(raw.contains(#""required":["index"]"#))
+                #expect(properties["messageId"] == nil)
+                #expect(properties["attachmentIndex"] == nil)
+                #expect(raw.contains(#""required":["account","id","index"]"#))
             case "email.send":
-                for key in ["account", "to", "cc", "bcc", "subject", "bodyText", "body", "bodyHtml", "attachmentPaths", "replyToId", "mailbox"] {
+                for key in ["account", "to", "cc", "bcc", "subject", "bodyText", "bodyHtml", "attachmentPaths", "replyToId", "mailbox"] {
                     #expect(properties[key] != nil, "email.send missing property \(key)")
                 }
+                #expect(properties["body"] == nil)
+                #expect(properties["folder"] == nil)
                 #expect(raw.contains(#""required":["account","to","subject"]"#))
             case "email.listMailboxes":
                 #expect(properties["account"] != nil, "email.listMailboxes must describe account")
                 #expect(raw.contains(#""required":["account"]"#))
             case "email.move":
-                for key in ["account", "id", "messageId", "destination", "toMailbox", "markAsRead", "mark_as_read"] {
+                for key in ["account", "id", "destination", "markAsRead"] {
                     #expect(properties[key] != nil, "email.move missing property \(key)")
                 }
-                #expect(raw.contains(#""required":["account"]"#))
-                #expect(raw.contains(#""required":["id"]"#))
-                #expect(raw.contains(#""required":["destination"]"#))
+                #expect(properties["messageId"] == nil)
+                #expect(raw.contains(#""required": ["account", "id", "destination"]"#) || raw.contains(#""required":["account","id","destination"]"#))
             case "messages.search":
                 for key in ["query", "recipient", "limit"] {
                     #expect(properties[key] != nil, "messages.search missing property \(key)")
                 }
             case "messages.read":
-                for key in ["chatId", "chat_id", "recipient", "limit"] {
+                for key in ["chatId", "recipient", "limit"] {
                     #expect(properties[key] != nil, "messages.read missing property \(key)")
                 }
+                #expect(properties["chat_id"] == nil)
             case "messages.send":
-                for key in ["recipient", "to", "text", "message"] {
+                for key in ["recipient", "text"] {
                     #expect(properties[key] != nil, "messages.send missing property \(key)")
                 }
+                #expect(properties["to"] == nil)
                 #expect(raw.contains(#""required":["recipient","text"]"#))
             case "messages.resolveRecipient":
-                for key in ["name", "query", "limit"] {
+                for key in ["name", "limit"] {
                     #expect(properties[key] != nil, "messages.resolveRecipient missing property \(key)")
                 }
+                #expect(properties["query"] == nil)
                 #expect(raw.contains(#""required":["name"]"#))
             default:
                 Issue.record("Unexpected builtin tool \(tool.name)")
@@ -311,7 +307,7 @@ struct ToolSchemaTests {
     }
 
     @Test
-    func `Email attachment schema keeps identifier and index aliases`() async throws {
+    func `Email attachment schema defines canonical properties`() async throws {
         let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
         let bus = ToolBus()
@@ -327,9 +323,11 @@ struct ToolSchemaTests {
         }
         let parsed = try encodeToolParameters(ToolDefinition(attachment))
         let properties = try #require(parsed["properties"] as? [String: Any])
-        for key in ["account", "id", "messageId", "message_id", "uid", "index", "attachmentIndex", "attachment_index"] {
+        for key in ["account", "id", "index", "mailbox", "preview", "subpath", "saveToPath"] {
             #expect(properties[key] != nil, "Missing property \(key)")
         }
+        #expect(properties["messageId"] == nil)
+        #expect(properties["attachmentIndex"] == nil)
         #expect(parsed["additionalProperties"] as? Bool == false)
     }
 
@@ -349,9 +347,7 @@ struct ToolSchemaTests {
         #expect(partitioned.skipped.isEmpty, "Unexpected messages skips: \(partitioned.skipped)")
         #expect(partitioned.valid.count == MessagesTools.toolNames.count)
         // Strict backends reject non-object roots, so each messages schema must
-        // decode to a strict object; per-tool property checks pin the alias
-        // groups callers rely on, with send keeping both canonical keys required
-        // so recipient and text aliases cannot drift out of the contract.
+        // decode to a strict object; per-tool property checks pin canonical keys.
         for tool in tools {
             let parsed = try encodeToolParameters(ToolDefinition(tool))
             #expect(parsed["type"] as? String == "object", "Tool \(tool.name) must declare type object")
@@ -363,18 +359,21 @@ struct ToolSchemaTests {
                     #expect(properties[key] != nil, "messages.search missing property \(key)")
                 }
             case "messages.read":
-                for key in ["chatId", "chat_id", "recipient", "limit"] {
+                for key in ["chatId", "recipient", "limit"] {
                     #expect(properties[key] != nil, "messages.read missing property \(key)")
                 }
+                #expect(properties["chat_id"] == nil)
             case "messages.send":
-                for key in ["recipient", "to", "text", "message"] {
+                for key in ["recipient", "text"] {
                     #expect(properties[key] != nil, "messages.send missing property \(key)")
                 }
+                #expect(properties["to"] == nil)
                 #expect(tool.inputSchema.rawValue.contains(#""required":["recipient","text"]"#))
             case "messages.resolveRecipient":
-                for key in ["name", "query", "limit"] {
+                for key in ["name", "limit"] {
                     #expect(properties[key] != nil, "messages.resolveRecipient missing property \(key)")
                 }
+                #expect(properties["query"] == nil)
                 #expect(tool.inputSchema.rawValue.contains(#""required":["name"]"#))
             default:
                 Issue.record("Unexpected messages tool \(tool.name)")

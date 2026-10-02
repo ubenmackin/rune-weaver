@@ -4,8 +4,9 @@
 // over the self-hosted SearXNG JSON endpoint (`GET <searxng_url>/search` with
 // `format=json`), capped by the smaller of the caller limit and `[browser]`
 // `max_results` so the model cannot fan out unbounded context. The envelope
-// carries titles, URLs, and snippets tolerating SearXNG key drift (`q`/`count`
-// aliases, `content` vs `snippet`, `url` vs `link`).
+// carries titles, URLs, and snippets tolerating SearXNG key drift (`content`
+// vs `snippet`, `url` vs `link`); strict wire arguments stay canonical
+// (`query`/`limit`) so retired spellings fail closed.
 //
 // `SearXNGEnsurer` keeps the local engine warm for both serve boot and first
 // search. Concurrent callers for one normalized base URL collapse onto a single
@@ -676,21 +677,18 @@ public struct WebSearchArgs: Sendable, Equatable, Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case query
-        // Single-letter wire alias keeps a descriptive case name.
-        case queryShort = "q"
         case limit
-        case count
     }
 
-    /// Decodes arguments, accepting `q`/`count` aliases for model drift.
+    /// Decodes canonical search arguments.
+    /// Strict wire carries only `query`/`limit` so retired `q`/`count` spellings
+    /// fail closed under additionalProperties false and wire plus decoder agree.
     /// - Parameter decoder: Decoder for the arguments document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let query = try container.decodeIfPresent(String.self, forKey: .query)
-            ?? container.decodeIfPresent(String.self, forKey: .queryShort)
             ?? ""
         let rawLimit = try container.decodeIfPresent(Int.self, forKey: .limit)
-            ?? container.decodeIfPresent(Int.self, forKey: .count)
             ?? Self.defaultLimit
         self.init(query: query, limit: rawLimit)
     }
@@ -797,15 +795,29 @@ public struct WebSearchTool: Tool, Sendable {
             + "Use when the user asks for current, external, or factual information beyond memory. "
             + "Returns bounded titles, URLs, and snippets."
     /// Function-calling contract for `query` and optional `limit`.
-    /// Every decoder alias (`q`, `count`) is advertised so a compliant
-    /// validator accepts exactly what the decoder handles.
+    /// Schema advertises only canonical keys; retired spellings stay out of the
+    /// schema as removed aliases so strict validators and the decoder agree.
     public let inputSchema =
         JSONSchema(
-            rawValue: #"{"type":"object","properties":{"query":{"type":"string","description":"Free-text search query"},"#
-                + #""q":{"type":"string","description":"Alias for query"},"limit":{"type":"integer","description":"Maximum results "#
-                + #"(1-50, default 10, capped by browser.max_results)","minimum":1,"maximum":50},"count":{"type":"integer","#
-                + #""description":"Alias for limit (1-50)","minimum":1,"maximum":50}},"anyOf":[{"required":["query"]},"#
-                + #"{"required":["q"]}],"additionalProperties":false}"#
+            rawValue: """
+            {
+              "type": "object",
+              "properties": {
+                "query": {
+                  "type": "string",
+                  "description": "Free-text search query"
+                },
+                "limit": {
+                  "type": "integer",
+                  "description": "Maximum results (1-50, default 10, capped by browser.max_results)",
+                  "minimum": 1,
+                  "maximum": 50
+                }
+              },
+              "required":["query"],
+              "additionalProperties": false
+            }
+            """
         )
     /// Always allowed: search never changes engine or remote state.
     public let permissionLevel = PermissionLevel.readOnly

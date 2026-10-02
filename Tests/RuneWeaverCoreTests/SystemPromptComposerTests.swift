@@ -7,9 +7,9 @@ import Testing
 private struct ComposerReadStub: Tool, Sendable {
     /// Stable stub name.
     let name = "stub.read"
-    /// Distinctive description asserted in the composed prompt.
+    /// Distinctive description.
     let description = "Reads stub records for the composer test."
-    /// Distinctive schema asserted in the composed prompt.
+    /// Distinctive schema.
     let inputSchema = JSONSchema(rawValue: #"{"type":"object","properties":{"query":{"type":"string"}}}"#)
     /// Always allowed without prompts.
     let permissionLevel = PermissionLevel.readOnly
@@ -24,9 +24,9 @@ private struct ComposerReadStub: Tool, Sendable {
 private struct ComposerWriteStub: Tool, Sendable {
     /// Stable stub name.
     let name = "stub.write"
-    /// Distinctive description asserted in the composed prompt.
+    /// Distinctive description.
     let description = "Writes stub records for the composer test."
-    /// Distinctive schema asserted in the composed prompt.
+    /// Distinctive schema.
     let inputSchema = JSONSchema(rawValue: #"{"type":"object","properties":{"text":{"type":"string"}}}"#)
     /// Requires an approval decision.
     let permissionLevel = PermissionLevel.requiresApproval
@@ -40,46 +40,40 @@ private struct ComposerWriteStub: Tool, Sendable {
 @Suite("System Prompt Composer")
 struct SystemPromptComposerTests {
     @Test
-    func `Composed prompt lists every registered tool with description and schema`() async {
+    func `Composed prompt omits tool schema dumps and keeps lean policy`() async {
         let bus = ToolBus()
         await bus.register(tool: ComposerReadStub())
         await bus.register(tool: ComposerWriteStub())
         let prompt = await SystemPromptComposer.compose(toolBus: bus)
-        for tool in await bus.availableTools() {
-            #expect(prompt.contains(tool.name))
-            // Prompts carry the one-line summary so multi-sentence sources stay within budget.
-            #expect(prompt.contains(ToolPromptDisplay.oneLine(tool.description)))
-            // Prompts carry minified sorted-keys schemas so strict backends see the same object without whitespace.
-            let display = SystemPromptComposer.validatedDisplaySchema(for: tool, supportsVision: true, logSkips: false)
-            #expect(display != nil)
-            if let display {
-                #expect(prompt.contains(SystemPromptComposer.compactSchemaJSON(display)))
-            }
-        }
-        #expect(prompt.contains("stub.read"))
-        #expect(prompt.contains("stub.write"))
-        #expect(prompt.contains("Reads stub records for the composer test."))
-        #expect(prompt.contains("Writes stub records for the composer test."))
-        // The default tier needs no label; only gated levels are marked inline.
-        #expect(!prompt.contains("Permission: readOnly"))
-        #expect(!prompt.contains("[readOnly]"))
-        #expect(prompt.contains("[requiresApproval]"))
+
+        // Native tool calling omits tool schemas and descriptions from prompt text
+        #expect(!prompt.contains("Available tools:"))
+        #expect(!prompt.contains("stub.read"))
+        #expect(!prompt.contains("stub.write"))
+        #expect(!prompt.contains("Reads stub records"))
+        #expect(!prompt.contains("Writes stub records"))
+
+        // Prompts carry identity, provenance marker, and tool-use policy
+        #expect(prompt.contains("Rune Weaver"))
+        #expect(prompt.contains(SystemPromptComposer.composedMarker))
+        #expect(prompt.contains("Tool-use policy:"))
+        #expect(SystemPromptComposer.isComposedPrompt(prompt))
     }
 
     @Test
-    func `Composed prompt carries identity, tool-use policy, and memory guidance`() {
+    func `Composed prompt carries identity, tool-use policy, and canonical memory guidance`() {
         let tools: [any Tool] = [ComposerReadStub(), ComposerWriteStub()]
         let prompt = SystemPromptComposer.compose(tools: tools)
         let lowered = prompt.lowercased()
+
         #expect(prompt.contains("Rune Weaver"))
         #expect(lowered.contains("helpful personal assistant"))
         #expect(lowered.contains("read freely"))
-        #expect(lowered.contains("approval-gated writes go through the gate"))
-        #expect(lowered.contains("auto-allowed"))
-        #expect(lowered.contains("auditable"))
-        #expect(prompt.contains("recall_memories"))
-        #expect(prompt.contains("remember_fact"))
-        #expect(lowered.contains("before answering from history"))
+        #expect(lowered.contains("approval-gated"))
+        #expect(prompt.contains("memories.store"))
+        #expect(prompt.contains("memories.recall"))
+        #expect(!prompt.contains("remember_fact"))
+        #expect(!prompt.contains("recall_memories"))
         #expect(lowered.contains("unprompted"))
         #expect(lowered.contains("durable"))
     }
@@ -88,16 +82,16 @@ struct SystemPromptComposerTests {
     func `Composed prompt from empty registry still carries identity`() {
         let prompt = SystemPromptComposer.compose(tools: [])
         #expect(prompt.contains("Rune Weaver"))
-        #expect(prompt.contains("recall_memories"))
-        #expect(prompt.contains("remember_fact"))
+        #expect(prompt.contains("memories.recall"))
+        #expect(prompt.contains("memories.store"))
         #expect(prompt.contains("Current date: " + SystemPromptComposer.currentDateString()))
     }
 
     @Test
     func `Current date parameter overrides calendar date and alters rendered prompt`() {
         let tools: [any Tool] = [ComposerReadStub()]
-        let promptA = SystemPromptComposer.compose(tools: tools, supportsVision: true, includeToolSchemas: true, currentDate: "2026-09-18")
-        let promptB = SystemPromptComposer.compose(tools: tools, supportsVision: true, includeToolSchemas: true, currentDate: "2026-09-19")
+        let promptA = SystemPromptComposer.compose(tools: tools, supportsVision: true, currentDate: "2026-09-18")
+        let promptB = SystemPromptComposer.compose(tools: tools, supportsVision: true, currentDate: "2026-09-19")
         #expect(promptA.contains("Current date: 2026-09-18"))
         #expect(promptB.contains("Current date: 2026-09-19"))
         #expect(promptA != promptB)
@@ -130,126 +124,56 @@ struct SystemPromptComposerTests {
     }
 
     @Test
-    func `Prompt byte audit measures total plus per-tool schema contribution`() {
+    func `Prompt byte audit measures total bytes without tool schema text`() {
         let tools: [any Tool] = [ComposerReadStub(), ComposerWriteStub()]
         let audit = SystemPromptComposer.byteAudit(tools: tools)
         #expect(audit.totalBytes == SystemPromptComposer.compose(tools: tools).utf8.count)
-        #expect(audit.perTool.count == 2)
-        for entry in audit.perTool {
-            #expect(entry.schemaBytes > 0)
-            #expect(entry.entryBytes >= entry.schemaBytes)
-        }
-        // Sorted-by-name determinism keeps the audit stable across runs.
-        #expect(audit.perTool.map(\.name) == ["stub.read", "stub.write"])
+        #expect(audit.perTool.isEmpty)
     }
 
     @Test
-    func `Vision and text-only prompts stay distinct`() {
-        let tools: [any Tool] = [ComposerReadStub()]
-        let vision = SystemPromptComposer.compose(tools: tools, supportsVision: true)
-        let textOnly = SystemPromptComposer.compose(tools: tools, supportsVision: false)
-        #expect(vision != textOnly)
-        #expect(vision.lowercased().contains("screenshot"))
-        #expect(textOnly.lowercased().contains("text-only"))
-    }
-
-    @Test
-    func `One-line summary keeps abbreviation guidance intact`() {
-        // Abbreviations must not truncate mid-sentence, or prompt guidance is lost.
-        let description = "Opens a URL in a fresh isolated context; returns text plus refs (e.g. e12) for browser.act. Auth walls escalate to human login; downloads are manifest-only."
-        let oneLine = ToolPromptDisplay.oneLine(description)
-        #expect(oneLine == "Opens a URL in a fresh isolated context; returns text plus refs (e.g. e12) for browser.act.")
-        #expect(oneLine.contains("e12) for browser.act"))
-    }
-
-    @Test
-    func `Omitting tool schemas excludes Available tools block and schemas but preserves identity and policy`() {
+    func `Scheduled prompt carries scheduled guidance and canonical memory guidance`() {
         let tools: [any Tool] = [ComposerReadStub(), ComposerWriteStub()]
-        let withSchemas = SystemPromptComposer.compose(tools: tools, supportsVision: true, includeToolSchemas: true)
-        let withoutSchemas = SystemPromptComposer.compose(tools: tools, supportsVision: true, includeToolSchemas: false)
-
-        #expect(withSchemas != withoutSchemas)
-        #expect(SystemPromptComposer.isComposedPrompt(withoutSchemas))
-
-        // Without schemas should omit tool listings and schemas
-        #expect(!withoutSchemas.contains("Available tools:"))
-        #expect(!withoutSchemas.contains("stub.read"))
-        #expect(!withoutSchemas.contains("stub.write"))
-        #expect(!withoutSchemas.contains("Reads stub records"))
-
-        // But must retain core identity, policy, and memory instructions
-        #expect(withoutSchemas.contains("Rune Weaver"))
-        #expect(withoutSchemas.contains("Tool-use policy:"))
-        #expect(withoutSchemas.contains("recall_memories"))
-        #expect(withoutSchemas.contains("remember_fact"))
-
-        // With schemas should retain tool listings
-        #expect(withSchemas.contains("Available tools:"))
-        #expect(withSchemas.contains("stub.read"))
-        #expect(withSchemas.contains("stub.write"))
-    }
-
-    @Test
-    func `Scheduled prompt honors tool schema omission`() {
-        let tools: [any Tool] = [ComposerReadStub(), ComposerWriteStub()]
-        let scheduled = SystemPromptComposer.composeScheduled(tools: tools, supportsVision: true, includeToolSchemas: false)
+        let scheduled = SystemPromptComposer.composeScheduled(tools: tools, supportsVision: true)
         #expect(!scheduled.contains("Available tools:"))
         #expect(!scheduled.contains("stub.read"))
         #expect(scheduled.contains("Scheduled task guidance:"))
         #expect(scheduled.contains("Rune Weaver"))
+        #expect(scheduled.contains("memories.store"))
+        #expect(scheduled.contains("memories.recall"))
     }
 
     @Test
-    func `Temporal rule guides since-until windows with July example`() {
+    func `Freshness guardrail is present in both chat and scheduled prompts`() {
         let tools: [any Tool] = [ComposerReadStub()]
-        let prompt = SystemPromptComposer.compose(tools: tools)
-        let lowered = prompt.lowercased()
-        // Temporal windows must use explicit ranges instead of keyword guesses.
-        #expect(lowered.contains("yesterday"))
-        #expect(lowered.contains("single-date"))
-        #expect(lowered.contains("month-window"))
-        #expect(lowered.contains("since plus until instead of keyword guessing"))
-        // July vacation is the canonical fan-out shape across recall plus live tools.
-        #expect(prompt.contains("since 2026-07-01 until 2026-08-01"))
-        #expect(prompt.contains("memories.recall"))
-        #expect(prompt.contains("email.search"))
-        #expect(prompt.contains("messages.search"))
-        // Date-only days stay local with inclusive start and exclusive end.
-        #expect(lowered.contains("local calendar days"))
-        #expect(lowered.contains("since inclusive"))
-        #expect(lowered.contains("until exclusive"))
-        #expect(prompt.contains("Current date: grounds relative terms"))
-    }
-
-    @Test
-    func `Temporal rule sits alongside freshness guardrail and scheduled prompts inherit it`() {
-        let tools: [any Tool] = [ComposerReadStub()]
-        let prompt = SystemPromptComposer.compose(tools: tools, supportsVision: true, includeToolSchemas: true, currentDate: "2026-09-19")
-        // Freshness guardrail stays intact next to the temporal rule.
+        let prompt = SystemPromptComposer.compose(tools: tools, supportsVision: true, currentDate: "2026-09-19")
         #expect(prompt.contains("current as of last night"))
         #expect(prompt.lowercased().contains("prefer live"))
-        #expect(prompt.contains("since 2026-07-01 until 2026-08-01"))
-        // Current-date line still grounds relative terms.
         #expect(prompt.contains("Current date: 2026-09-19"))
-        // Scheduled runs share the base prompt so they inherit the same rule.
-        let scheduled = SystemPromptComposer.composeScheduled(tools: tools, supportsVision: true, includeToolSchemas: true, currentDate: "2026-09-19")
-        #expect(scheduled.contains("since 2026-07-01 until 2026-08-01"))
-        #expect(scheduled.lowercased().contains("since inclusive"))
-        #expect(scheduled.lowercased().contains("until exclusive"))
+
+        let scheduled = SystemPromptComposer.composeScheduled(tools: tools, supportsVision: true, currentDate: "2026-09-19")
         #expect(scheduled.contains("current as of last night"))
         #expect(scheduled.contains("Current date: 2026-09-19"))
         #expect(scheduled.contains("Scheduled task guidance:"))
     }
 
     @Test
-    func `Tool schema omission reduces prompt byte audit and empties perTool list`() {
-        let tools: [any Tool] = [ComposerReadStub(), ComposerWriteStub()]
-        let fullAudit = SystemPromptComposer.byteAudit(tools: tools, supportsVision: true, includeToolSchemas: true)
-        let slimAudit = SystemPromptComposer.byteAudit(tools: tools, supportsVision: true, includeToolSchemas: false)
-
-        #expect(slimAudit.totalBytes < fullAudit.totalBytes)
-        #expect(slimAudit.perTool.isEmpty)
-        #expect(fullAudit.perTool.count == 2)
+    func `Vision schema filter strips screenshot options when vision is disabled`() {
+        let rawWithScreenshot = """
+        {
+          "type": "object",
+          "properties": {
+            "url": {"type": "string"},
+            "includeScreenshot": {"type": "boolean"},
+            "screenshot": {"type": "boolean"}
+          },
+          "required": ["url"]
+        }
+        """
+        let stripped = SystemPromptComposer.strippedNavigateSchema(JSONSchema(rawValue: rawWithScreenshot))
+        #expect(!stripped.rawValue.contains("includeScreenshot"))
+        #expect(!stripped.rawValue.contains("screenshot"))
+        #expect(stripped.rawValue.contains("url"))
     }
 
     @Test

@@ -280,8 +280,7 @@ struct ChatCommand: AsyncParsableCommand {
         let effectiveSystemPrompt = await SystemPromptComposer.resolve(
             flag: systemPrompt,
             toolBus: toolBus,
-            supportsVision: active.modelInfo.supportsVision,
-            includeToolSchemas: !active.modelInfo.supportsTools
+            supportsVision: active.modelInfo.supportsVision
         )
         let context = ChatTurnContext(
             conversations: conversations,

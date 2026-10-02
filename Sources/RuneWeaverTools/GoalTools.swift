@@ -41,7 +41,9 @@ public struct GoalCreateArgs: Sendable, Equatable, Decodable {
         case triggers
     }
 
-    /// Decodes create args, accepting every documented cadence alias.
+    /// Decodes create args; `step_interval_minutes` and `cadence` are compatibility-only aliases kept out
+    /// of the strict schema, which advertises `stepIntervalMinutes` only, so the wire stays fail-closed
+    /// while older callers still decode.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         title = try container.decode(String.self, forKey: .title)
@@ -99,7 +101,9 @@ public struct GoalTriggerArgs: Sendable, Equatable, Decodable {
         case cooldown
     }
 
-    /// Decodes trigger args, accepting the documented aliases.
+    /// Decodes trigger args; `event_kind`/`kind` and `cooldown_minutes`/`cooldown` are compatibility-only
+    /// aliases kept out of the strict schema, which advertises `eventKind` and `cooldownMinutes` only,
+    /// so the wire stays fail-closed while older callers still decode.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if let direct = try container.decodeIfPresent(String.self, forKey: .eventKind) {
@@ -170,7 +174,8 @@ public struct GoalStatusArgs: Sendable, Equatable, Decodable {
         case limit
     }
 
-    /// Decodes status args, accepting every documented goal-id alias.
+    /// Decodes status args; `goalId`/`goal_id`/`id` are compatibility-only aliases kept out of the strict
+    /// schema, which advertises `goalID` only, so the wire stays fail-closed while older callers still decode.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let resolvedGoalID: String? =
@@ -240,7 +245,9 @@ public struct GoalProgressArgs: Sendable, Equatable, Decodable {
         case reason
     }
 
-    /// Decodes progress args, accepting every documented alias without pinning one spelling.
+    /// Decodes progress args; goal, step, status, and note aliases are compatibility-only and kept out of
+    /// the strict schema, which advertises `goalID`/`stepOrdinal`/`status`/`note` only, so the wire stays
+    /// fail-closed while older callers still decode.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if let direct = try container.decodeIfPresent(String.self, forKey: .goalID) {
@@ -574,18 +581,12 @@ public struct GoalCreateTool: Tool, Sendable {
             + #""statement":{"type":"string","description":"Fuller intent shown to the owner and model"},"#
             + #""stepIntervalMinutes":{"type":"integer","#
             + #""description":"Cadence hint in minutes between advancements (default daily, 5-20160)","minimum":5,"maximum":20160},"#
-            + #""step_interval_minutes":{"type":"integer","description":"Alias for stepIntervalMinutes","minimum":5,"maximum":20160},"#
-            + #""cadence":{"type":"integer","description":"Alias for stepIntervalMinutes","minimum":5,"maximum":20160},"#
             + #""triggers":{"type":"array","description":"Optional event wake-ups that pull the goal forward when a matching event arrives","#
             + #""maxItems":32,"items":{"type":"object","properties":{"#
             + #""eventKind":{"type":"string","description":"Event kind to watch, for example step_done, completed, needs_input, tool, or episode"},"#
-            + #""event_kind":{"type":"string","description":"Alias for eventKind"},"#
-            + #""kind":{"type":"string","description":"Alias for eventKind"},"#
             + #""pattern":{"type":"string","description":"Optional substring the event message must contain"},"#
-            + #""cooldownMinutes":{"type":"integer","description":"Debounce window in minutes (default 60)","minimum":1},"#
-            + #""cooldown_minutes":{"type":"integer","description":"Alias for cooldownMinutes","minimum":1},"#
-            + #""cooldown":{"type":"integer","description":"Alias for cooldownMinutes","minimum":1}},"#
-            + #""additionalProperties":false}}},"#
+            + #""cooldownMinutes":{"type":"integer","description":"Debounce window in minutes (default 60)","minimum":1}},"#
+            + #""required":["eventKind"],"additionalProperties":false}}},"#
             + #""required":["title","statement"],"additionalProperties":false}"#
     )
     /// Creation changes durable state, so every call parks for approval.
@@ -694,16 +695,11 @@ public struct GoalStatusTool: Tool, Sendable {
     public let inputSchema = JSONSchema(
         rawValue: #"{"type":"object","properties":{"#
             + #""goalID":{"type":"string","description":"Goal identifier for one goal"},"#
-            + #""goalId":{"type":"string","description":"Alias for goalID"},"#
-            + #""goal_id":{"type":"string","description":"Alias for goalID"},"#
-            + #""id":{"type":"string","description":"Alias for goalID"},"#
             + #""all":{"type":"boolean","description":"When true, list goals up to limit"},"#
             + #""limit":{"type":"integer","#
             + #""description":"Maximum goals when all is true (1-50, default 10); recent events per goal capped separately at 10","#
             + #""minimum":1,"maximum":50}},"#
-            + #""allOf":[{"anyOf":[{"required":["goalID"]},{"required":["goalId"]},"#
-            + #"{"required":["goal_id"]},{"required":["id"]},{"required":["all"]}]} ],"#
-            + #""additionalProperties":false}"#
+            + #""required":[],"additionalProperties":false}"#
     )
     /// Pure reads never park.
     public let permissionLevel = PermissionLevel.readOnly
@@ -804,26 +800,14 @@ public struct GoalProgressTool: Tool, Sendable {
     public let inputSchema = JSONSchema(
         rawValue: #"{"type":"object","properties":{"#
             + #""goalID":{"type":"string","description":"Goal identifier; omit to use the session linked goal or the single active goal"},"#
-            + #""goalId":{"type":"string","description":"Alias for goalID"},"#
-            + #""goal_id":{"type":"string","description":"Alias for goalID"},"#
-            + #""id":{"type":"string","description":"Alias for goalID"},"#
             + #""stepOrdinal":{"type":"integer","description":"Zero-based step position within the plan"},"#
-            + #""step_ordinal":{"type":"integer","description":"Alias for stepOrdinal"},"#
-            + #""ordinal":{"type":"integer","description":"Alias for stepOrdinal"},"#
-            + #""step":{"type":"integer","description":"Alias for stepOrdinal"},"#
             + #""status":{"type":"string","description":"New step state: done, blocked, in_progress, or skipped"},"#
-            + #""state":{"type":"string","description":"Alias for status"},"#
-            + #""note":{"type":"string","description":"Annotation; a blocked note may park the goal awaiting owner input"},"#
-            + #""notes":{"type":"string","description":"Alias for note"},"#
-            + #""message":{"type":"string","description":"Alias for note"},"#
-            + #""reason":{"type":"string","description":"Alias for note"}},"#
-            + #""allOf":[{"anyOf":[{"required":["stepOrdinal"]},{"required":["step_ordinal"]},{"required":["ordinal"]},{"required":["step"]}]},"#
-            + #"{"anyOf":[{"required":["status"]},{"required":["state"]}]} ],"#
-            + #""additionalProperties":false}"#
+            + #""note":{"type":"string","description":"Annotation; a blocked note may park the goal awaiting owner input"}},"#
+            + #""required":["stepOrdinal","status"],"additionalProperties":false}"#
     )
     /// Step moves mutate durable pursuit state, so every call parks for approval.
     ///
-    /// This deliberately differs from the `remember_fact` bargain (trusted per the owner
+    /// This deliberately differs from the `memories.store` bargain (trusted per the owner
     /// memory-write ruling): a remembered fact appends one semantic note, while
     /// `goal.progress` moves step lifecycle state and can park the whole goal into
     /// `needs_input` via the engine, changing what the scheduler advances next. That is a

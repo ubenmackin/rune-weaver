@@ -41,28 +41,21 @@ public struct BrowserNavigateArgs: Sendable, Equatable, Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case url
-        case page
-        case pageUrl
-        case pageURL = "page_url"
         case includeScreenshot
-        case screenshot
-        case includeScreenshotSnake = "include_screenshot"
         case headed
         case interactive
     }
 
-    /// Decodes arguments, accepting every documented URL alias plus screenshot aliases.
+    /// Decodes canonical navigate arguments.
+    /// Strict wire carries only `url`/`includeScreenshot`/`headed`; `interactive`
+    /// stays as intentional compatibility for headed and is kept out of the schema
+    /// so retired page and screenshot spellings fail closed while old prompts
+    /// still park correctly.
     /// - Parameter decoder: Decoder for the arguments document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if let direct = try container.decodeIfPresent(String.self, forKey: .url), !direct.isEmpty {
             url = direct
-        } else if let page = try container.decodeIfPresent(String.self, forKey: .page), !page.isEmpty {
-            url = page
-        } else if let camel = try container.decodeIfPresent(String.self, forKey: .pageUrl), !camel.isEmpty {
-            url = camel
-        } else if let snake = try container.decodeIfPresent(String.self, forKey: .pageURL), !snake.isEmpty {
-            url = snake
         } else {
             throw DecodingError.keyNotFound(
                 CodingKeys.url,
@@ -76,9 +69,7 @@ public struct BrowserNavigateArgs: Sendable, Equatable, Decodable {
         // a surprise vision payload on a text-only model; mirrors `BrowserScreenshotPolicy`
         // parsing.
         let primaryFlag: Bool? = (try? container.decodeIfPresent(Bool.self, forKey: .includeScreenshot)) ?? nil
-        let screenshotFlag: Bool? = (try? container.decodeIfPresent(Bool.self, forKey: .screenshot)) ?? nil
-        let snakeFlag: Bool? = (try? container.decodeIfPresent(Bool.self, forKey: .includeScreenshotSnake)) ?? nil
-        includeScreenshot = primaryFlag ?? screenshotFlag ?? snakeFlag ?? false
+        includeScreenshot = primaryFlag ?? false
 
         let headedFlag: Bool? = (try? container.decodeIfPresent(Bool.self, forKey: .headed)) ?? nil
         let interactiveFlag: Bool? = (try? container.decodeIfPresent(Bool.self, forKey: .interactive)) ?? nil
@@ -112,32 +103,21 @@ public struct BrowserActArgs: Sendable, Equatable, Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case action
-        case type
-        case kind
         case ref
-        case target
-        case selector
-        case element
-        case elementRef
         case text
-        case value
-        case input
         case key
         case url
-        case page
-        case pageUrl
-        case pageURL = "page_url"
     }
 
-    /// Decodes arguments, accepting every documented alias plus integer refs.
+    /// Decodes canonical act arguments.
+    /// Strict wire carries only `action`/`ref`/`text`/`key`/`url`; `key` stays as
+    /// intentional compatibility for press text and integer refs coerce to snapshot
+    /// shape, both kept out of the strict schema beyond the string `ref` so wire
+    /// plus decoder agree on retired spellings.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if let direct = try container.decodeIfPresent(String.self, forKey: .action), !direct.isEmpty {
             action = direct
-        } else if let type = try container.decodeIfPresent(String.self, forKey: .type), !type.isEmpty {
-            action = type
-        } else if let kind = try container.decodeIfPresent(String.self, forKey: .kind), !kind.isEmpty {
-            action = kind
         } else {
             throw DecodingError.keyNotFound(
                 CodingKeys.action,
@@ -149,17 +129,9 @@ public struct BrowserActArgs: Sendable, Equatable, Decodable {
         }
         ref = try Self.decodeRef(from: container)
         text = try container.decodeIfPresent(String.self, forKey: .text)
-            ?? container.decodeIfPresent(String.self, forKey: .value)
-            ?? container.decodeIfPresent(String.self, forKey: .input)
             ?? container.decodeIfPresent(String.self, forKey: .key)
         if let direct = try container.decodeIfPresent(String.self, forKey: .url), !direct.isEmpty {
             url = direct
-        } else if let page = try container.decodeIfPresent(String.self, forKey: .page), !page.isEmpty {
-            url = page
-        } else if let camel = try container.decodeIfPresent(String.self, forKey: .pageUrl), !camel.isEmpty {
-            url = camel
-        } else if let snake = try container.decodeIfPresent(String.self, forKey: .pageURL), !snake.isEmpty {
-            url = snake
         } else {
             throw DecodingError.keyNotFound(
                 CodingKeys.url,
@@ -171,25 +143,21 @@ public struct BrowserActArgs: Sendable, Equatable, Decodable {
         }
     }
 
-    /// Decodes the element ref from string or integer aliases.
+    /// Decodes the element ref from string or integer input.
     private static func decodeRef(from container: KeyedDecodingContainer<CodingKeys>) throws -> String {
-        // Each alias probes strings with `try?` so an integer-shaped value
+        // String input probes with `try?` so an integer-shaped value
         // (for example `{"ref": 12}`) does not throw a type mismatch before
         // the integer pass maps it to snapshot shape (`"e12"`). Bare numeric
         // strings normalize through the shared validator so `"12"` behaves
-        // like `12` under the `ref: [string, integer]` schema.
-        for key in [CodingKeys.ref, .target, .selector, .element, .elementRef] {
-            if let direct = try? container.decodeIfPresent(String.self, forKey: key),
-               !direct.isEmpty
-            {
-                let trimmed = direct.trimmingCharacters(in: .whitespacesAndNewlines)
-                return BrowserValidation.normalizedRef(trimmed.isEmpty ? direct : trimmed)
-            }
+        // like `12` under the string-only `ref` schema with decoder coercion.
+        if let direct = try? container.decodeIfPresent(String.self, forKey: .ref),
+           !direct.isEmpty
+        {
+            let trimmed = direct.trimmingCharacters(in: .whitespacesAndNewlines)
+            return BrowserValidation.normalizedRef(trimmed.isEmpty ? direct : trimmed)
         }
-        for key in [CodingKeys.ref, .target, .selector, .element, .elementRef] {
-            if let number = try? container.decodeIfPresent(Int.self, forKey: key) {
-                return "e\(number)"
-            }
+        if let number = try? container.decodeIfPresent(Int.self, forKey: .ref) {
+            return "e\(number)"
         }
         throw DecodingError.keyNotFound(
             CodingKeys.ref,
@@ -468,27 +436,35 @@ public struct BrowserNavigateTool: Tool, Sendable {
         "Opens a URL in a persistent context (default headless); returns text plus refs (e.g. e12) for browser.act. "
             + "Auth walls escalate to human login via headed=true; downloads are manifest-only. "
             + "Navigation is SSRF-guarded: approval-free browsing must not dial loopback, link-local, metadata, or private ranges."
-    /// Function-calling contract for `url` (plus accepted aliases), the screenshot opt-in, and headed mode.
-    /// Every decoder alias is advertised so a compliant validator accepts
-    /// exactly what the decoder handles.
+    /// Function-calling contract for `url`, the screenshot opt-in, and headed mode.
+    /// Schema advertises only canonical keys; decoder tolerance for retired
+    /// spellings stays out of the schema as intentional compatibility so strict
+    /// validators and the decoder agree on what is advertised.
     public let inputSchema =
         JSONSchema(
-            rawValue: #"{"type":"object","properties":{"url":{"type":"string","description":"http(s) page URL "#
-                + #"to open"},"page":{"type":"string","description":"Alias for url"}, "#
-                + #""pageUrl":{"type":"string","description":"Alias for url"}, "#
-                + #""page_url":{"type":"string","description":"Alias for url"}, "#
-                + #""includeScreenshot":{"type":"boolean","description":"Capture "#
-                + #"a downscaled JPEG screenshot for vision models "#
-                + #"(default false; vision models only)","default":false}, "#
-                + #""screenshot":{"type":"boolean","description":"Alias for includeScreenshot", "#
-                + #""default":false},"include_screenshot":{"type":"boolean", "#
-                + #""description":"Alias for includeScreenshot"},"#
-                + #""headed":{"type":"boolean","description":"Launch a visible browser window for "#
-                + #"human login or CAPTCHA resolution (default false; use when authRequired was detected)", "#
-                + #""default":false},"interactive":{"type":"boolean","description":"Alias for headed"}}, "#
-                + #""anyOf":[{"required":["url"]}, {"required":["page"]}, "#
-                + #"{"required":["pageUrl"]}, {"required":["page_url"]}],"#
-                + #""additionalProperties":false}"#
+            rawValue: """
+            {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "description": "http(s) page URL to open"
+                },
+                "includeScreenshot": {
+                  "type": "boolean",
+                  "description": "Capture a downscaled JPEG screenshot for vision models (default false; vision models only)",
+                  "default": false
+                },
+                "headed": {
+                  "type": "boolean",
+                  "description": "Launch a visible browser window for human login or CAPTCHA resolution (default false)",
+                  "default": false
+                }
+              },
+              "required":["url"],
+              "additionalProperties": false
+            }
+            """
         )
     /// Always allowed: navigation distills without changing web state.
     public let permissionLevel = PermissionLevel.readOnly
@@ -715,38 +691,37 @@ public struct BrowserActTool: Tool, Sendable {
             + "fill/select need text, approval-gated, manifest-only downloads. "
             + "Act URLs are SSRF-guarded like navigation: loopback, link-local, metadata, and private ranges stay denied."
     /// Function-calling contract for `action`, `ref`, optional `text`, and `url`.
-    /// Every decoder alias is advertised so a compliant validator accepts
-    /// exactly what the decoder handles.
+    /// Schema advertises only canonical keys; decoder tolerance for retired
+    /// spellings and integer refs stays out of the schema as intentional
+    /// compatibility so strict validators and the decoder agree on what is advertised.
     public let inputSchema =
         JSONSchema(
-            rawValue: #"{"type":"object","properties":{"action":{"type":"string", "#
-                + #""description":"Single action: click, fill, select, press, or scroll"}, "#
-                + #""type":{"type":"string","description":"Alias for action"}, "#
-                + #""kind":{"type":"string","description":"Alias for action"}, "#
-                + #""ref":{"type":["string","integer"],"description":"Snapshot element ref "#
-                + #"from browser.navigate (e.g. e12 or 12)"}, "#
-                + #""target":{"type":["string","integer"],"description":"Alias for ref"}, "#
-                + #""selector":{"type":["string","integer"],"description":"Alias for ref"}, "#
-                + #""element":{"type":["string","integer"],"description":"Alias for ref"}, "#
-                + #""elementRef":{"type":["string","integer"],"description":"Alias for ref"}, "#
-                + #""text":{"type":"string","description":"Value for fill/select "#
-                + #"or key for press (e.g. Enter)"}, "#
-                + #""value":{"type":"string","description":"Alias for text"}, "#
-                + #""input":{"type":"string","description":"Alias for text"}, "#
-                + #""key":{"type":"string","description":"Alias for text (press key)"}, "#
-                + #""url":{"type":"string","description":"Snapshot page URL the ref "#
-                + #"came from"}, "#
-                + #""page":{"type":"string","description":"Alias for url"}, "#
-                + #""pageUrl":{"type":"string","description":"Alias for url"}, "#
-                + #""page_url":{"type":"string","description":"Alias for url"}}, "#
-                + #""allOf":[{"anyOf":[{"required":["action"]}, "#
-                + #"{"required":["type"]}, {"required":["kind"]}]}, "#
-                + #"{"anyOf":[{"required":["ref"]}, {"required":["target"]}, "#
-                + #"{"required":["selector"]}, {"required":["element"]}, "#
-                + #"{"required":["elementRef"]}]}, "#
-                + #"{"anyOf":[{"required":["url"]}, {"required":["page"]}, "#
-                + #"{"required":["pageUrl"]}, {"required":["page_url"]}]}],"#
-                + #""additionalProperties":false}"#
+            rawValue: """
+            {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": ["click", "fill", "select", "press", "scroll"],
+                  "description": "Single action: click, fill, select, press, or scroll"
+                },
+                "ref": {
+                  "type": "string",
+                  "description": "Snapshot element ref from browser.navigate (e.g. e12; integer 12 coerces via decoder)"
+                },
+                "text": {
+                  "type": "string",
+                  "description": "Value for fill/select or key for press (e.g. Enter)"
+                },
+                "url": {
+                  "type": "string",
+                  "description": "Snapshot page URL the ref came from"
+                }
+              },
+              "required":["action","ref","url"],
+              "additionalProperties": false
+            }
+            """
         )
     /// Gated: acting changes web state and always prompts without a trust grant.
     public let permissionLevel = PermissionLevel.requiresApproval

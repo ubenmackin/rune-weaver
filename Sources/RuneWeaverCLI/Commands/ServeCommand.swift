@@ -253,17 +253,23 @@ extension ServeCommand {
         return gate
     }
 
+    private struct GoalStack {
+        let store: GoalStore
+        let engine: GoalEngine
+        let recipientAliasStore: RecipientAliasStore
+    }
+
     private func makeGoalStack(
         memoryConfig: MemoryConfig,
         goalsConfig: GoalsConfig,
         selected: any LLMProvider
-    ) -> (store: GoalStore, engine: GoalEngine, recipientAliasStore: RecipientAliasStore) {
+    ) -> GoalStack {
         let goalStore = GoalStore(dbPath: memoryConfig.episodesDBPath)
         let goalEngine = GoalEngine(store: goalStore, llm: selected, config: goalsConfig)
         // The learned-alias store shares the same episodes file so a served
         // resolved-name send teaches later resolutions without another datastore.
         let recipientAliasStore = RecipientAliasStore(dbPath: memoryConfig.episodesDBPath)
-        return (goalStore, goalEngine, recipientAliasStore)
+        return GoalStack(store: goalStore, engine: goalEngine, recipientAliasStore: recipientAliasStore)
     }
 
     private func makePreviewBus(
@@ -323,8 +329,7 @@ extension ServeCommand {
         let livePrompt = await SystemPromptComposer.resolve(
             flag: systemPrompt,
             toolBus: context.toolBus,
-            supportsVision: selected.modelInfo.supportsVision,
-            includeToolSchemas: !selected.modelInfo.supportsTools
+            supportsVision: selected.modelInfo.supportsVision
         )
         if livePrompt != effectiveSystemPrompt {
             print(TerminalStyle.dim("Served prompt differs from live registry; continuing with startup snapshot."))
@@ -386,7 +391,7 @@ extension ServeCommand {
         // posture on a missing file and leaves corruption to fail the first
         // tool build closed below.
         let policyStore = await PolicyStore.makeLoaded(injected: nil)
-        let (goalStore, goalEngine, recipientAliasStore) = makeGoalStack(
+        let goalStack = makeGoalStack(
             memoryConfig: loaded.config.memory,
             goalsConfig: loaded.config.goals,
             selected: selected
@@ -394,9 +399,9 @@ extension ServeCommand {
         let deps = ToolBootstrapDependencies(
             memoryEngine: memoryEngine,
             embedder: embedder,
-            goalStore: goalStore,
-            goalEngine: goalEngine,
-            recipientAliasStore: recipientAliasStore,
+            goalStore: goalStack.store,
+            goalEngine: goalStack.engine,
+            recipientAliasStore: goalStack.recipientAliasStore,
             conversations: conversations
         )
         // One seed shared by the prompt preview and the served registry so both
@@ -529,8 +534,7 @@ extension ServeCommand {
         return await SystemPromptComposer.resolve(
             flag: systemPrompt,
             toolBus: previewBus,
-            supportsVision: selected.modelInfo.supportsVision,
-            includeToolSchemas: !selected.modelInfo.supportsTools
+            supportsVision: selected.modelInfo.supportsVision
         )
     }
 

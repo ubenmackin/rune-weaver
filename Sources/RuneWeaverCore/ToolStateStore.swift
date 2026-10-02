@@ -7,7 +7,7 @@ import Foundation
 
 /// Durable enable/disable snapshot for one tool.
 public struct ToolState: Sendable, Codable, Equatable {
-    /// Registered tool name (e.g. `"email.search"`, `"remember_fact"`).
+    /// Registered tool name (e.g. `"email.search"`, `"memories.store"`).
     public let toolName: String
     /// Whether the tool should be enabled on the live bus.
     public var enabled: Bool

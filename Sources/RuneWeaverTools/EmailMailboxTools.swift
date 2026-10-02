@@ -96,30 +96,41 @@ public struct EmailMoveTool: Tool, Sendable {
             + "The destination must already exist: unknown names fail with the available folders and nothing is created. "
             + "Pass markAsRead true to set Seen on the moved message; "
             + "passing the same folder as source and destination marks the message read without moving it."
-    /// Function-calling contract for `account`, `id` (plus accepted aliases), source, destination, and `markAsRead`.
+    /// Function-calling contract for `account`, `id`, source `mailbox`, `destination`, and `markAsRead`.
+    /// Schema advertises only canonical keys; decoder tolerance for retired
+    /// spellings stays out of the schema as intentional compatibility so strict
+    /// validators and the decoder agree on what is advertised.
     public let inputSchema =
         JSONSchema(
-            rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
-                + #"from [email.accounts] (e.g. volcrypt, icloud)"},"id":{"type":"string","description":"IMAP message id "#
-                + #"from email.search"},"messageId":{"type":"string","description":"Alias "#
-                + #"for id"},"message_id":{"type":"string","description":"Alias for id"},"uid":{"type":"string","description":"Alias "#
-                + #"for id"},"mailbox":{"type":"string","description":"Source mailbox from the email.search hit "#
-                + #"(e.g. INBOX); omitted means INBOX"},"folder":{"type":"string","description":"Alias for "#
-                + #"mailbox"},"source":{"type":"string","description":"Alias for mailbox"},"fromMailbox":{"type":"string","description":"Alias "#
-                + #"for mailbox"},"from_mailbox":{"type":"string","description":"Alias "#
-                + #"for mailbox"},"destination":{"type":"string","description":"Destination "#
-                + #"mailbox (must already exist; unknown names fail without creating folders)"},"toMailbox":{"type":"string","description":"Alias "#
-                + #"for destination"},"destinationMailbox":{"type":"string","description":"Alias "#
-                + #"for destination"},"destination_mailbox":{"type":"string","description":"Alias "#
-                + #"for destination"},"to_mailbox":{"type":"string","description":"Alias "#
-                + #"for destination"},"markAsRead":{"type":"boolean","description":"When true, "#
-                + #"set Seen on the moved message (default false)"},"mark_as_read":{"type":"boolean","description":"Alias "#
-                + #"for markAsRead"}}"#
-                + #","required":["account"],"allOf":[{"anyOf":[{"required":["id"]},"#
-                + #"{"required":["messageId"]},{"required":["message_id"]},{"required":["uid"]}]},"#
-                + #"{"anyOf":[{"required":["destination"]},{"required":["toMailbox"]},"#
-                + #"{"required":["destinationMailbox"]},{"required":["destination_mailbox"]},"#
-                + #"{"required":["to_mailbox"]}]} ],"additionalProperties":false}"#
+            rawValue: """
+            {
+              "type": "object",
+              "properties": {
+                "account": {
+                  "type": "string",
+                  "description": "Account nickname from [email.accounts] (e.g. volcrypt, icloud)"
+                },
+                "id": {
+                  "type": "string",
+                  "description": "IMAP message id from email.search"
+                },
+                "mailbox": {
+                  "type": "string",
+                  "description": "Source mailbox from the email.search hit (e.g. INBOX); omitted means INBOX"
+                },
+                "destination": {
+                  "type": "string",
+                  "description": "Destination mailbox (must already exist; unknown names fail without creating folders)"
+                },
+                "markAsRead": {
+                  "type": "boolean",
+                  "description": "When true, set Seen on the moved message (default false)"
+                }
+              },
+              "required": ["account", "id", "destination"],
+              "additionalProperties": false
+            }
+            """
         )
     /// Gated: moving relocates mail and always prompts without a trust grant.
     public let permissionLevel = PermissionLevel.requiresApproval

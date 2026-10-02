@@ -36,7 +36,6 @@ public struct BashArgs: Codable, Sendable, Equatable {
         case command
         case cwd
         case timeoutSeconds
-        case requestNetwork
         case requestNetworkSnake = "request_network"
     }
 
@@ -48,9 +47,12 @@ public struct BashArgs: Codable, Sendable, Equatable {
         self.commandArgs = BashCommandArgs(command: command)
         self.cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
         self.timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
-        let camelNet = try container.decodeIfPresent(Bool.self, forKey: .requestNetwork)
+        // Strict wire carries only snake `request_network`; the provider
+        // rejects the camel spelling via additionalProperties false while the
+        // decoder ignores unknown keys and defaults fail-closed to `false`,
+        // so a camel `true` never enables network.
         let snakeNet = try container.decodeIfPresent(Bool.self, forKey: .requestNetworkSnake)
-        self.requestNetwork = camelNet ?? snakeNet ?? false
+        self.requestNetwork = snakeNet ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -167,7 +169,8 @@ public struct BashTool: Tool {
           "description": "Optional flag to request network access in Seatbelt sandbox (gates on operator approval)."
         }
       },
-      "required": ["command"]
+      "required": ["command"],
+      "additionalProperties": false
     }
     """)
 

@@ -101,7 +101,15 @@ private func registerIndexStatusRoute(_ app: Application) {
             }
         }
         let lastRun = latestIndexRun(from: latestEntry)
-        return makeIndexStatusResponse(config: config, stats: fastStats, running: running, lastErrors: lastErrors, lastRun: lastRun, live: live, storage: storage)
+        return makeIndexStatusResponse(
+            config: config,
+            stats: fastStats,
+            running: running,
+            lastErrors: lastErrors,
+            lastRun: lastRun,
+            live: live,
+            storage: storage
+        )
     }
 }
 

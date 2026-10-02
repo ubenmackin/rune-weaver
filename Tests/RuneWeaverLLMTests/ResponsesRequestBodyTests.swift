@@ -124,7 +124,7 @@ struct ResponsesRequestBodyTests {
         let callID = "call_01a09249e1177af390085e651e9bd8c6"
         let args = #"{"limit":5,"query":"email address"}"#
         let placeholder = ToolInput.placeholderContent(for: [
-            ToolInput(toolName: "recall_memories", argumentsJSON: args, callID: callID)
+            ToolInput(toolName: "memories.recall", argumentsJSON: args, callID: callID)
         ])
         let messages = [
             Message(role: .user, content: "What is my email address?"),
@@ -134,7 +134,7 @@ struct ResponsesRequestBodyTests {
         ]
         let tools = [
             ToolDefinition(
-                name: "recall_memories",
+                name: "memories.recall",
                 description: "Recall memories",
                 parameters: JSONSchema(rawValue: #"{"type":"object"}"#)
             )
@@ -146,7 +146,7 @@ struct ResponsesRequestBodyTests {
         let callItem = input[1]
         #expect((callItem["type"] as? String) == "function_call")
         #expect((callItem["call_id"] as? String) == callID)
-        #expect((callItem["name"] as? String) == "recall_memories")
+        #expect((callItem["name"] as? String) == "memories.recall")
         #expect((callItem["arguments"] as? String) == args)
 
         let outputItem = input[2]

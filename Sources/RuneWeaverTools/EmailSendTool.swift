@@ -69,7 +69,8 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
         case body
     }
 
-    /// Decodes arguments, accepting the `folder` alias for `mailbox` and `body` for `bodyText`.
+    /// Decodes arguments; `folder` and `body` are compatibility-only aliases kept out of strict schema,
+    /// which advertises bodyText/mailbox only, so wire stays fail-closed while older callers still decode.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         account = try container.decode(String.self, forKey: .account)
@@ -439,6 +440,9 @@ public struct EmailSendTool: Tool, Sendable {
             + "attachments must be workspace-guarded absolute paths, and replyToId threads a reply. "
             + "Returns the sender, recipients, subject, body size, and Sent status."
     /// Function-calling contract for the send envelope plus threading and attachments.
+    /// Schema advertises only canonical keys; decoder tolerance for retired
+    /// spellings stays out of the schema as intentional compatibility so strict
+    /// validators and the decoder agree on what is advertised.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
@@ -448,8 +452,7 @@ public struct EmailSendTool: Tool, Sendable {
                 + #""minItems":0,"maxItems":20},"bcc":{"type":"array","description":"Optional BCC recipients (counted in the 20 total)", "#
                 + #""items":{"type":"string"},"minItems":0,"maxItems":20},"subject":{"type":"string","description":"Subject header "#
                 + #"(1-998 chars, no CR or LF)","maxLength":998},"bodyText":{"type":"string","description":"Email body formatted in standard "#
-                + #"Markdown or plain text. Automatically rendered to styled HTML with a plain-text fallback. You can also pass 'body'."},"#
-                + #""body":{"type":"string","description":"Alias for bodyText."},"#
+                + #"Markdown or plain text. Automatically rendered to styled HTML with a plain-text fallback."},"#
                 + #""bodyHtml":{"type":"string","description":"Optional raw HTML body override. "#
                 + #"If omitted, styled HTML is automatically generated from bodyText."},"#
                 + #""attachmentPaths":{"type":"array","description":"Optional workspace-guarded "#
@@ -607,7 +610,7 @@ extension EmailSendTool {
             throw EmailIMAPError.bridgeFailed(
                 "Invalid email.send arguments: expected {\"account\": \"<name>\", "
                     + "\"to\": [\"<email>\"], \"subject\": \"<text>\", "
-                    + "\"bodyText\": \"<text>\" (or \"body\": \"<text>\") and/or \"bodyHtml\": \"<html>\"}."
+                    + "\"bodyText\": \"<text>\" and/or \"bodyHtml\": \"<html>\"}."
             )
         }
     }
@@ -633,7 +636,7 @@ extension EmailSendTool {
         }
         let rawHtml = try EmailSendValidation.validateOptionalBody(args.bodyHtml, field: "bodyHtml")
         guard rawText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false || rawHtml != nil else {
-            throw EmailIMAPError.bridgeFailed("Invalid body: provide 'bodyText' (or 'body') and/or 'bodyHtml'.")
+            throw EmailIMAPError.bridgeFailed("Invalid body: provide 'bodyText' and/or 'bodyHtml'.")
         }
         // Markdown or plain text in bodyText is standard: when rawHtml is omitted,
         // styled HTML is automatically generated via Ink with a plain-text fallback.
@@ -650,7 +653,7 @@ extension EmailSendTool {
             try EmailSendValidation.validateBody(derived, field: "bodyText")
             effectiveText = derived
         } else {
-            throw EmailIMAPError.bridgeFailed("Invalid body: provide 'bodyText' (or 'body') and/or 'bodyHtml'.")
+            throw EmailIMAPError.bridgeFailed("Invalid body: provide 'bodyText' and/or 'bodyHtml'.")
         }
         let hasCustomHtml = rawHtml != nil
         let effectiveHtml: String? = if let rawHtml {

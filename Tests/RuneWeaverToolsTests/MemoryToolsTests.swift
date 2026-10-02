@@ -127,20 +127,6 @@ struct MemoryToolsTests {
         )
         #expect(recalled.isError == false)
         #expect(recalled.content.contains("lighthouse keeper"))
-
-        // Execute via legacy aliases
-        let storedViaAlias = await bus.execute(
-            toolCall: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"Foghorn sounds at 4 AM"}"#),
-            context: ToolContext(conversationID: UUID())
-        )
-        #expect(storedViaAlias.isError == false)
-        #expect(capture.captured().count == 2)
-        let recalledViaAlias = await bus.execute(
-            toolCall: ToolInput(toolName: "recall_memories", argumentsJSON: #"{"query":"Foghorn","limit":5}"#),
-            context: ToolContext(conversationID: UUID())
-        )
-        #expect(recalledViaAlias.isError == false)
-        #expect(recalledViaAlias.content.contains("Foghorn"))
     }
 
     @Test
@@ -173,7 +159,7 @@ struct MemoryToolsTests {
         let capture = ToolsTestSupport.AuditCapture()
         let tool = RememberFactTool(engine: engine, audit: { capture.record($0) })
         let output = try await tool.execute(
-            input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses"}"#),
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses"}"#),
             context: ToolContext(conversationID: UUID(), dryRun: true)
         )
         #expect(output.isError == false)
@@ -191,29 +177,29 @@ struct MemoryToolsTests {
         let capture = ToolsTestSupport.AuditCapture()
         let remember = RememberFactTool(engine: engine, audit: { capture.record($0) })
         let badShape = try await remember.execute(
-            input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"category":"preference"}"#),
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"category":"preference"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(badShape.isError == true)
         let emptyText = try await remember.execute(
-            input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"   "}"#),
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"   "}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(emptyText.isError == true)
         let punctuationOnly = try await remember.execute(
-            input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"...!!!"}"#),
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"...!!!"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(punctuationOnly.isError == true)
         #expect(capture.captured().isEmpty)
         let recall = RecallMemoriesTool(engine: engine)
         let badRecall = try await recall.execute(
-            input: ToolInput(toolName: "recall_memories", argumentsJSON: "not-json"),
+            input: ToolInput(toolName: "memories.recall", argumentsJSON: "not-json"),
             context: ToolContext(conversationID: UUID())
         )
         #expect(badRecall.isError == true)
         let emptyQuery = try await recall.execute(
-            input: ToolInput(toolName: "recall_memories", argumentsJSON: #"{"query":"  "}"#),
+            input: ToolInput(toolName: "memories.recall", argumentsJSON: #"{"query":"  "}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(emptyQuery.isError == true)

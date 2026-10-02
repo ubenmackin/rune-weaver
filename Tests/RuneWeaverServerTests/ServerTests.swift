@@ -1021,11 +1021,11 @@ struct ToolStateStoreTests {
         await writer.setEnabled(toolName: "stub.read", enabled: false)
         // The store stays name-agnostic on purpose: memory tools toggle
         // through the same rows as every other registered tool.
-        await writer.setEnabled(toolName: "remember_fact", enabled: false)
+        await writer.setEnabled(toolName: "memories.store", enabled: false)
         await writer.setEnabled(toolName: "stub.write", enabled: true)
         let first = await writer.loadAll()
         #expect(first["stub.read"] == false)
-        #expect(first["remember_fact"] == false)
+        #expect(first["memories.store"] == false)
         #expect(first["stub.write"] == true)
         #expect(await writer.isEnabled(toolName: "stub.read") == false)
         #expect(await writer.isEnabled(toolName: "never.toggled") == nil)
@@ -1036,14 +1036,14 @@ struct ToolStateStoreTests {
         let second = await reloaded.loadAll()
         #expect(second == first)
         #expect(await reloaded.isEnabled(toolName: "stub.read") == false)
-        #expect(await reloaded.isEnabled(toolName: "remember_fact") == false)
+        #expect(await reloaded.isEnabled(toolName: "memories.store") == false)
         #expect(await reloaded.isEnabled(toolName: "stub.write") == true)
 
         // Overwrites win and survive a third reload.
         await reloaded.setEnabled(toolName: "stub.read", enabled: true)
         let reread = ToolStateStore(dbPath: dbPath)
         #expect(await reread.isEnabled(toolName: "stub.read") == true)
-        #expect(await reread.isEnabled(toolName: "remember_fact") == false)
+        #expect(await reread.isEnabled(toolName: "memories.store") == false)
     }
 
     @Test

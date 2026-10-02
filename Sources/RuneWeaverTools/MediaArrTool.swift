@@ -24,10 +24,9 @@ public struct MediaArrTool: Tool, Sendable {
             + "For approval-free reads prefer 'media.arr.read'."
 
     /// Function-calling contract for the combined tool.
-    /// Every decoder alias (`app`/`target`, `command`, `title`/`term`,
-    /// `tvdbId`/`tmdbId`, `quality_profile`, `root_folder`) is advertised so a
-    /// strict `additionalProperties:false` validator accepts exactly what
-    /// `MediaArrArgs` decodes.
+    /// Advertises only the canonical keys (`service`/`action`/`query`/`id`/`qualityProfile`/`rootFolder`);
+    /// decoder aliases stay compatibility-only and are never advertised so a
+    /// strict `additionalProperties:false` validator accepts exactly the canonical shape.
     public let inputSchema = JSONSchema(
         rawValue: """
         {
@@ -38,71 +37,29 @@ public struct MediaArrTool: Tool, Sendable {
               "enum": ["sonarr", "radarr"],
               "description": "Target service: 'sonarr' for TV shows or 'radarr' for movies"
             },
-            "app": {
-              "type": "string",
-              "enum": ["sonarr", "radarr"],
-              "description": "Alias for service"
-            },
-            "target": {
-              "type": "string",
-              "enum": ["sonarr", "radarr"],
-              "description": "Alias for service"
-            },
             "action": {
               "type": "string",
               "enum": ["search", "add", "status", "queue"],
               "description": "Action: 'search' to find titles, 'add' to library, 'queue' to view downloads, or 'status' to check health"
             },
-            "command": {
-              "type": "string",
-              "enum": ["search", "add", "status", "queue"],
-              "description": "Alias for action"
-            },
             "query": {
               "type": "string",
               "description": "Title or keyword for search or add (e.g. 'Shogun', 'Fallout', 'Gladiator II')"
-            },
-            "title": {
-              "type": "string",
-              "description": "Alias for query"
-            },
-            "term": {
-              "type": "string",
-              "description": "Alias for query"
             },
             "id": {
               "type": "integer",
               "description": "Optional TVDB ID (for Sonarr) or TMDB ID (for Radarr) when adding a specific title"
             },
-            "tvdbId": {
-              "type": "integer",
-              "description": "Alias for id (Sonarr TVDB ID)"
-            },
-            "tmdbId": {
-              "type": "integer",
-              "description": "Alias for id (Radarr TMDB ID)"
-            },
             "qualityProfile": {
               "type": "string",
               "description": "Optional quality profile name override (e.g. 'HD-1080p', 'Ultra-HD')"
             },
-            "quality_profile": {
-              "type": "string",
-              "description": "Alias for qualityProfile"
-            },
             "rootFolder": {
               "type": "string",
               "description": "Optional root folder path override"
-            },
-            "root_folder": {
-              "type": "string",
-              "description": "Alias for rootFolder"
             }
           },
-          "allOf": [
-            {"anyOf": [{"required": ["service"]}, {"required": ["app"]}, {"required": ["target"]}]},
-            {"anyOf": [{"required": ["action"]}, {"required": ["command"]}]}
-          ],
+          "required": ["service", "action"],
           "additionalProperties": false
         }
         """
@@ -159,9 +116,9 @@ public struct MediaArrReadTool: Tool, Sendable {
             + "Approval-free; adding titles requires 'media.arr'."
 
     /// Function-calling contract for reads.
-    /// Mirrors the combined schema's aliases so the same model drift works on
-    /// both surfaces; `add` is absent here so strict validators route mutations
-    /// to the gated tool.
+    /// Advertises only the canonical read keys (`service`/`action`/`query`);
+    /// decoder tolerance mirrors the combined tool compatibility-only and is never advertised.
+    /// `add` is absent here so strict validators route mutations to the gated tool.
     public let inputSchema = JSONSchema(
         rawValue: """
         {
@@ -172,71 +129,17 @@ public struct MediaArrReadTool: Tool, Sendable {
               "enum": ["sonarr", "radarr"],
               "description": "Target service: 'sonarr' for TV shows or 'radarr' for movies"
             },
-            "app": {
-              "type": "string",
-              "enum": ["sonarr", "radarr"],
-              "description": "Alias for service"
-            },
-            "target": {
-              "type": "string",
-              "enum": ["sonarr", "radarr"],
-              "description": "Alias for service"
-            },
             "action": {
               "type": "string",
               "enum": ["search", "status", "queue"],
               "description": "Read action: 'search' to find titles, 'queue' to view downloads, or 'status' to check health"
             },
-            "command": {
-              "type": "string",
-              "enum": ["search", "status", "queue"],
-              "description": "Alias for action"
-            },
             "query": {
               "type": "string",
               "description": "Title or keyword for search (e.g. 'Shogun', 'Fallout')"
-            },
-            "title": {
-              "type": "string",
-              "description": "Alias for query"
-            },
-            "term": {
-              "type": "string",
-              "description": "Alias for query"
-            },
-            "id": {
-              "type": "integer",
-              "description": "Optional TVDB ID (for Sonarr) or TMDB ID (for Radarr)"
-            },
-            "tvdbId": {
-              "type": "integer",
-              "description": "Alias for id (Sonarr TVDB ID)"
-            },
-            "tmdbId": {
-              "type": "integer",
-              "description": "Alias for id (Radarr TMDB ID)"
-            },
-            "qualityProfile": {
-              "type": "string",
-              "description": "Ignored for reads; kept so shared call shapes validate"
-            },
-            "quality_profile": {
-              "type": "string",
-              "description": "Alias for qualityProfile"
-            },
-            "rootFolder": {
-              "type": "string",
-              "description": "Ignored for reads; kept so shared call shapes validate"
-            },
-            "root_folder": {
-              "type": "string",
-              "description": "Alias for rootFolder"
             }
           },
-          "allOf": [
-            {"anyOf": [{"required": ["service"]}, {"required": ["app"]}, {"required": ["target"]}]},
-            {"anyOf": [{"required": ["action"]}, {"required": ["command"]}]}
-          ],
+          "required": ["service", "action"],
           "additionalProperties": false
         }
         """

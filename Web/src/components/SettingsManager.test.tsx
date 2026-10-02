@@ -336,7 +336,7 @@ describe("SettingsManager", () => {
 
     const mockTools = [
       {
-        name: "remember_fact",
+        name: "memories.store",
         description: "Store persistent fact",
         permissionLevel: "readOnly",
         inputSchema: "{}",
@@ -443,7 +443,7 @@ describe("SettingsManager", () => {
     };
     const mockTools = [
       {
-        name: "remember_fact",
+        name: "memories.store",
         description: "Store persistent fact",
         permissionLevel: "readOnly",
         inputSchema: "{}",
@@ -1518,7 +1518,7 @@ describe("SettingsManager", () => {
     ];
     const mockTools = [
       {
-        name: "remember_fact",
+        name: "memories.store",
         description: "Store persistent fact",
         permissionLevel: "readOnly",
         inputSchema: "{}",
@@ -1605,7 +1605,7 @@ describe("SettingsManager", () => {
     };
     const mockTools = [
       {
-        name: "remember_fact",
+        name: "memories.store",
         description: "Store persistent fact",
         permissionLevel: "readOnly",
         inputSchema: "{}",

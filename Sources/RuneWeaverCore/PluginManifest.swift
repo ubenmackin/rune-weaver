@@ -229,7 +229,7 @@ public struct PluginManifest: Sendable, Codable, Equatable {
 
             // Protected built-in tool namespaces
             let reservedPrefixes = ["memory.", "memories.", "messages.", "email.", "config.", "scheduler.", "approvals.", "system."]
-            if toolName == "remember_fact" || toolName == "recall_memories" || toolName == "memories.store" || toolName == "memories.recall" || reservedPrefixes
+            if toolName == "memories.store" || toolName == "memories.recall" || reservedPrefixes
                 .contains(where: { toolName.hasPrefix($0) })
             {
                 throw PluginManifestError.reservedToolName(tool: toolName, reason: "Reserved for core system engine.")
