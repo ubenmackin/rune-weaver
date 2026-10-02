@@ -457,9 +457,16 @@ extension Orchestrator {
     }
 
     /// Parks the turn when tool iterations exceed the allowed limit and an approval queue is present.
+    ///
+    /// A caller that already persisted the continuation call's placeholder (the
+    /// boundary-refusal path) passes the identical prebuilt call so the park
+    /// files it against that placeholder instead of minting a second identifier.
+    /// The narration-persisted flag travels through so the filing path never
+    /// repeats a note the caller already wrote.
     func parkForContinuation(
         toolRounds: Int,
         context: ParkTurnContext,
+        continuationCall: ToolInput? = nil,
         request: TurnLoopRequest,
         pendingEpisodic: inout [(content: String, role: Message.Role)]
     ) async throws -> TurnLoopOutcome {
@@ -469,7 +476,7 @@ extension Orchestrator {
         // The refused attempt bumped the counter without executing, so the honest
         // completed count is one behind the refused round.
         let completedRounds = max(0, toolRounds - 1)
-        let continueCall = ToolInput(
+        let continueCall = continuationCall ?? ToolInput(
             toolName: "engine.continue",
             argumentsJSON: "{\"rounds\":\(completedRounds)}"
         )
@@ -483,7 +490,8 @@ extension Orchestrator {
                 toolActions: context.toolActions,
                 billedTokens: context.billedTokens,
                 toolRounds: completedRounds,
-                contextTokens: context.contextTokens
+                contextTokens: context.contextTokens,
+                narrationAlreadyPersisted: context.narrationAlreadyPersisted
             ),
             request: request,
             pendingEpisodic: &pendingEpisodic

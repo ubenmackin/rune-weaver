@@ -820,6 +820,48 @@ describe("ApprovalsInbox", () => {
     expect(widenCalls[0]).toContain(`/approvals/grants/${grantId}/widen`);
   });
 
+  it("withholds the widen control for per-recipient messages.send grants", async () => {
+    const grantId = "33333333-3333-3333-3333-333333333333";
+    const now = Math.floor(Date.now() / 1000);
+    const future = now + 3600;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
+          return jsonResponse({
+            grants: [
+              {
+                id: grantId,
+                toolName: "messages.send",
+                target: "+15551234567",
+                grantedAt: now,
+                expiresAt: future,
+                duration: "oneHour",
+                useCount: 0,
+                lastUsedAt: null,
+              },
+            ],
+            count: 1,
+          });
+        }
+        return jsonResponse({ approvals: [], count: 0 });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(
+        screen.getByText("messages sends to +15551234567 are approved"),
+      ).toBeInTheDocument();
+    });
+    // Send trust is per-recipient and has no tool-wide scope, so the card never
+    // offers an action the server would honestly refuse; revoke stays available
+    // so the live grant remains manageable.
+    expect(
+      screen.queryByRole("button", { name: "Widen to all targets" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeInTheDocument();
+  });
+
   it("locks every widen button while one widen is in flight", async () => {
     const user = userEvent.setup();
     const firstId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";

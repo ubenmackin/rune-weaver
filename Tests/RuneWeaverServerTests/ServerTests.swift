@@ -1243,14 +1243,19 @@ struct TrustGrantsRouteTests {
         return .noContent
     }
 
-    /// Mirrors the POST /approvals/grants/:id/widen handler mapping so the 404
-    /// contract stays pinned to the widen result.
+    /// Mirrors the POST /approvals/grants/:id/widen handler mapping so the
+    /// tri-state contract stays pinned: a promoted grant is 204, an unknown or
+    /// expired id is 404, and a live grant whose tool has no tool-wide scope is
+    /// the honest conflict rather than "Unknown grant".
     private func widenGrantStatus(id: UUID, gate: PermissionGate) async throws -> HTTPStatus {
-        let widened = await gate.widenGrant(id: id)
-        guard widened else {
+        switch await gate.widenGrant(id: id) {
+        case .widened:
+            return .noContent
+        case .notFound:
             throw Abort(.notFound, reason: "Unknown grant \(id.uuidString)")
+        case let .notWidenable(reason):
+            throw Abort(.conflict, reason: reason)
         }
-        return .noContent
     }
 
     @Test
@@ -1537,6 +1542,57 @@ struct TrustGrantsRouteTests {
             Issue.record("Expected notFound for unknown grant")
         } catch let abort as Abort {
             #expect(abort.status == .notFound)
+        }
+    }
+
+    @Test
+    func `Widen live messages.send grant returns honest conflict, not unknown`() async {
+        let gate = PermissionGate()
+        let descriptor = ActionDescriptor(toolName: "messages.send", target: "+15551234567")
+        await gate.grantTrust(for: descriptor, duration: .forever)
+
+        guard let id = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor })?.id else {
+            Issue.record("Expected the canonical send grant")
+            return
+        }
+
+        // A live send grant is per-recipient by design: the route must name the
+        // refusal (409) instead of reporting the listed id as unknown (404),
+        // and the grant must survive unchanged so it stays revocable.
+        do {
+            _ = try await widenGrantStatus(id: id, gate: gate)
+            Issue.record("Expected conflict for a live messages.send grant")
+        } catch let abort as Abort {
+            #expect(abort.status == .conflict)
+            #expect(abort.reason == "messages.send grants are per-recipient and cannot be widened")
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        #expect(await gate.activeGrants().map(\.actionDescriptor) == [descriptor])
+    }
+
+    @Test
+    func `Widen expired messages.send grant stays notFound`() async {
+        let now = Date()
+        let expired = TrustGrant(
+            id: UUID(),
+            actionDescriptor: ActionDescriptor(toolName: "messages.send", target: "+15551234567"),
+            grantedAt: now.addingTimeInterval(-7200),
+            expiresAt: now.addingTimeInterval(-60),
+            duration: .fiveMinutes
+        )
+        // Bootstrap prunes the lapsed row, so a send grant that no longer
+        // exists reads as notFound rather than as the live-grant refusal; the
+        // gate's guard order is what keeps those outcomes distinct.
+        let store = InMemoryTrustStore(grants: [expired])
+        let gate = await PermissionGate.load(store: store)
+        do {
+            _ = try await widenGrantStatus(id: expired.id, gate: gate)
+            Issue.record("Expected notFound for an expired messages.send grant")
+        } catch let abort as Abort {
+            #expect(abort.status == .notFound)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
         }
     }
 

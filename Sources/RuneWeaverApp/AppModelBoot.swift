@@ -181,6 +181,9 @@ extension AppModel {
         )
         let goalStore = GoalStore(dbPath: config.memory.episodesDBPath)
         let goalEngine = GoalEngine(store: goalStore, llm: selectedProvider, config: config.goals)
+        // The send tool learns confirmed name-to-handle mappings here, in the
+        // same shared episodes database as goals and run history.
+        let recipientAliasStore = RecipientAliasStore(dbPath: config.memory.episodesDBPath)
         // One policy store per process, loaded before the registry builds, so
         // the served egress supervisor and the settings policy routes share
         // one instance and an HTTP policy write applies without a restart.
@@ -196,7 +199,8 @@ extension AppModel {
                 goalEngine: goalEngine,
                 goalStore: goalStore,
                 goalConversations: conversations,
-                policyStore: policyStore
+                policyStore: policyStore,
+                recipientAliasStore: recipientAliasStore
             )
         } catch {
             // Fail-closed boot: a policy that cannot be verified means no

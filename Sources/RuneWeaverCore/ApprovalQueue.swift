@@ -331,6 +331,20 @@ public actor ApprovalQueue {
             let descriptor = effectiveWiden
                 ? ActionDescriptor(toolName: request.toolName, target: "")
                 : ActionDescriptor.descriptor(for: request.input, toolName: request.toolName)
+            // A durable `messages.send` grant must key on the canonical handle
+            // the owner is authorizing, so approving a request whose recipient
+            // is a display name can never mint trust, and there is no tool-wide
+            // send scope for a widen decision to promote. Admission refuses
+            // name-shaped sends before filing on the orchestrator path; this
+            // guard keeps the invariant for every other filing path (headless
+            // bus handlers, direct enqueue), and the gate refuses invalid send
+            // descriptors defensively beneath it. The approved call still fails
+            // closed at execution when the arguments are malformed.
+            if request.toolName == "messages.send",
+               effectiveWiden || ActionDescriptor.messagesRecipientHandle(from: request.input) == nil
+            {
+                return true
+            }
             await permissionGate?.grantTrust(for: descriptor, duration: effectiveDuration)
         }
         return true

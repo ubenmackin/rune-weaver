@@ -117,6 +117,8 @@ cat << PLIST_EOF > "${CONTENTS_DIR}/Info.plist"
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSContactsUsageDescription</key>
+    <string>Rune Weaver uses your contacts to resolve recipient names to phone numbers or email addresses when you ask it to send a message.</string>
     <key>NSUserNotificationAlertStyle</key>
     <string>banner</string>
     <key>NSAppTransportSecurity</key>

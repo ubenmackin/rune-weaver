@@ -4,7 +4,9 @@
 // grant/revoke broadcast (usage via poll/manual refresh): listing pruned active
 // grants newest-first, revoking by identifier, and widening an existing grant to
 // all targets by identifier, with a hub broadcast notifying every connected
-// client after durable changes that alter the grants list.
+// client after durable changes that alter the grants list. Widen keeps an
+// unknown identifier (404) distinct from a live grant whose tool has no
+// tool-wide scope (409), so a listed grant is never refused as "unknown".
 
 import Foundation
 import RuneWeaverCore
@@ -79,11 +81,18 @@ func registerTrustGrantsRoutes(_ app: Application) {
             throw Abort(.badRequest, reason: "id must be a UUID")
         }
         let context = req.application.runeWeaver
-        let widened = await context.permissionGate.widenGrant(id: id)
-        guard widened else {
+        switch await context.permissionGate.widenGrant(id: id) {
+        case .widened:
+            await context.hub.broadcastTrustGrantsChanged()
+            return .noContent
+        case .notFound:
+            // An identifier that names no live grant stays 404 so a stale
+            // dashboard row reads as gone rather than as a server refusal.
             throw Abort(.notFound, reason: "Unknown grant \(raw)")
+        case let .notWidenable(reason):
+            // The grant is live and listed, so "Unknown grant" would be
+            // factually wrong; the refusal itself is the honest answer.
+            throw Abort(.conflict, reason: reason)
         }
-        await context.hub.broadcastTrustGrantsChanged()
-        return .noContent
     }
 }

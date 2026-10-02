@@ -124,12 +124,12 @@ public struct MessagesContactNameResolver: MessagesContactResolving {
                         CNContactFormatter.string(from: contact, style: .fullName)
                     ) else { return }
                     for phone in contact.phoneNumbers {
-                        if let key = Self.normalizedHandle(phone.value.stringValue) {
+                        if let key = MessageRecipientNameNormalizer.handleKey(phone.value.stringValue) {
                             names[key] = display
                         }
                     }
                     for email in contact.emailAddresses {
-                        if let key = Self.normalizedHandle(email.value as String) {
+                        if let key = MessageRecipientNameNormalizer.handleKey(email.value as String) {
                             names[key] = display
                         }
                     }
@@ -143,15 +143,6 @@ public struct MessagesContactNameResolver: MessagesContactResolving {
         #else
             return [:]
         #endif
-    }
-
-    /// Normalizes a phone number or email handle for case- and punctuation-insensitive matching.
-    /// - Parameter raw: Raw handle from `handle.id` or a contact field.
-    /// - Returns: Lowercased alphanumeric key, or nil when nothing remains.
-    static func normalizedHandle(_ raw: String) -> String? {
-        let scalars = raw.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
-        guard !scalars.isEmpty else { return nil }
-        return String(scalars.map { Character($0) })
     }
 }
 
@@ -914,7 +905,7 @@ extension MessagesIndexer {
     /// - Returns: Friendly name, or nil when the handle is unknown.
     public static func friendlyName(for handle: String?, names: [String: String]) -> String? {
         guard let handle = NormalizedText.value(handle),
-              let key = MessagesContactNameResolver.normalizedHandle(handle)
+              let key = MessageRecipientNameNormalizer.handleKey(handle)
         else { return nil }
         return names[key]
     }
