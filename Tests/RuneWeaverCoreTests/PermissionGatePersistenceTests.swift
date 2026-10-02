@@ -418,7 +418,7 @@ struct PermissionGatePersistenceTests {
 
         // Widening promotes target to empty while preserving ID and useCount
         let widened = await gate.widenGrant(id: grant.id)
-        #expect(widened == true)
+        #expect(widened == .widened)
 
         let active = await gate.activeGrants()
         #expect(active.count == 1)
@@ -432,11 +432,43 @@ struct PermissionGatePersistenceTests {
         let bobDescriptor = ActionDescriptor(toolName: "email.send", target: "bob@example.com")
         #expect(await gate.isTrusted(bobDescriptor) == true)
 
-        // Repeat widen on already empty target returns true (idempotent)
-        #expect(await gate.widenGrant(id: grant.id) == true)
+        // Repeat widen on already empty target reports success (idempotent)
+        #expect(await gate.widenGrant(id: grant.id) == .widened)
 
-        // Widening non-existent ID returns false
-        #expect(await gate.widenGrant(id: UUID()) == false)
+        // Widening a non-existent ID reports notFound, never notWidenable
+        #expect(await gate.widenGrant(id: UUID()) == .notFound)
+    }
+
+    @Test
+    func `widenGrant distinguishes notFound from notWidenable`() async {
+        let gate = PermissionGate()
+        let widenable = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        let send = ActionDescriptor(toolName: "messages.send", target: "+15551234567")
+        await gate.grantTrust(for: widenable, duration: .oneHour)
+        await gate.grantTrust(for: send, duration: .oneHour)
+
+        let staged = await gate.activeGrants()
+        guard let widenableID = staged.first(where: { $0.actionDescriptor == widenable })?.id,
+              let sendID = staged.first(where: { $0.actionDescriptor == send })?.id
+        else {
+            Issue.record("Expected both grants before widening")
+            return
+        }
+
+        // The three outcomes must stay distinct: a missing id is notFound, a
+        // live send grant is notWidenable with the honest reason, and a regular
+        // targeted grant promotes. Collapsing the middle case into notFound is
+        // what made the route report a listed grant as unknown.
+        #expect(await gate.widenGrant(id: UUID()) == .notFound)
+        #expect(
+            await gate.widenGrant(id: sendID)
+                == .notWidenable(reason: GrantWidenOutcome.messagesSendRefusal)
+        )
+        #expect(await gate.widenGrant(id: widenableID) == .widened)
+
+        let active = await gate.activeGrants()
+        #expect(active.contains { $0.actionDescriptor == send })
+        #expect(active.contains { $0.actionDescriptor == ActionDescriptor(toolName: "email.send") })
     }
 
     @Test
@@ -467,8 +499,8 @@ struct PermissionGatePersistenceTests {
         // second grant, so the second widen must find its slot again by
         // identity. Reusing the stale index would overwrite the unrelated grant
         // that follows instead of the intended one.
-        #expect(await gate.widenGrant(id: firstID) == true)
-        #expect(await gate.widenGrant(id: secondID) == true)
+        #expect(await gate.widenGrant(id: firstID) == .widened)
+        #expect(await gate.widenGrant(id: secondID) == .widened)
 
         let active = await gate.activeGrants()
         let emailGrants = active.filter { $0.actionDescriptor.toolName == "email.send" }
@@ -501,11 +533,11 @@ struct PermissionGatePersistenceTests {
             return
         }
 
-        #expect(await gate.widenGrant(id: firstID) == true)
+        #expect(await gate.widenGrant(id: firstID) == .widened)
         // The target now sits last, and the dedupe removes the widened grant
         // ahead of it; resolving by identity keeps the write in range rather
         // than trapping on the stale slot.
-        #expect(await gate.widenGrant(id: secondID) == true)
+        #expect(await gate.widenGrant(id: secondID) == .widened)
 
         let active = await gate.activeGrants()
         #expect(active.count == 1)
@@ -538,7 +570,7 @@ struct PermissionGatePersistenceTests {
         // Promoting the narrow grant must collapse the overlapping tool-wide
         // row rather than leave two rows covering the same tool, while keeping
         // the narrow grant's identity and usage counters.
-        #expect(await gate.widenGrant(id: narrowID) == true)
+        #expect(await gate.widenGrant(id: narrowID) == .widened)
 
         let active = await gate.activeGrants()
         #expect(active.count == 1)
@@ -568,7 +600,7 @@ struct PermissionGatePersistenceTests {
             return
         }
 
-        #expect(await gate.widenGrant(id: narrowID) == true)
+        #expect(await gate.widenGrant(id: narrowID) == .widened)
 
         let active = await gate.activeGrants()
         #expect(active.count == 1)
@@ -602,7 +634,7 @@ struct PermissionGatePersistenceTests {
         let store = InMemoryTrustStore(grants: [narrow, toolWide])
         let gate = await PermissionGate.load(store: store)
 
-        #expect(await gate.widenGrant(id: narrow.id) == true)
+        #expect(await gate.widenGrant(id: narrow.id) == .widened)
 
         let active = await gate.activeGrants()
         #expect(active.count == 1)
@@ -634,7 +666,7 @@ struct PermissionGatePersistenceTests {
         let store = InMemoryTrustStore(grants: [narrow, toolWide])
         let gate = await PermissionGate.load(store: store)
 
-        #expect(await gate.widenGrant(id: narrow.id) == true)
+        #expect(await gate.widenGrant(id: narrow.id) == .widened)
 
         let active = await gate.activeGrants()
         #expect(active.count == 1)

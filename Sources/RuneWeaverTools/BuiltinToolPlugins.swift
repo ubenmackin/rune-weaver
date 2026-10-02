@@ -145,6 +145,8 @@ public enum BuiltinToolPlugins {
     ///   serving process hands to `files.write` so a live write that
     ///   supersedes a staged review reaches connected dashboards; nil keeps
     ///   direct-core writers silent.
+    /// - Parameter recipientAliasStore: Durable alias store the send tool
+    ///   learns from after a resolved-name send; nil keeps alias learning off.
     /// - Throws: `PolicyInvariantError` when no verified policy is available.
     public static func makeAllTools(
         emailConfig: EmailConfig? = nil,
@@ -174,6 +176,7 @@ public enum BuiltinToolPlugins {
         goalsConfig: GoalsConfig = GoalsConfig(),
         messagesGateway: (any MessagesGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
+        recipientAliasStore: (any MessageAliasStoring)? = nil,
         stagedFilesStore: StagedFilesStore? = nil,
         supersededReviewNotifier: (@Sendable (String) async -> Void)? = nil,
         fanOutEngine: FanOutEngine? = nil,
@@ -203,7 +206,11 @@ public enum BuiltinToolPlugins {
                 securityConfig: securityConfig
             )
         }
-        tools += MessagesTools.makeTools(chatDatabasePath: chatDatabasePath, gateway: messagesGateway)
+        tools += MessagesTools.makeTools(
+            chatDatabasePath: chatDatabasePath,
+            gateway: messagesGateway,
+            recipientAliasStore: recipientAliasStore
+        )
         tools += FilesTools.makeTools(
             filesConfig: filesConfig ?? FilesConfig(),
             stagedFilesStore: stagedFilesStore,
@@ -268,6 +275,8 @@ public enum BuiltinToolPlugins {
     /// Convenience overload building all tools from a unified `RuneWeaverConfig`.
     /// - Parameter policyStore: Shared security policy store; nil builds and
     ///   loads the factory default.
+    /// - Parameter recipientAliasStore: Durable alias store the send tool
+    ///   learns from after a resolved-name send; nil keeps alias learning off.
     /// - Throws: `PolicyInvariantError` when no verified policy is available.
     public static func makeAllTools(
         config: RuneWeaverConfig,
@@ -286,7 +295,8 @@ public enum BuiltinToolPlugins {
         goalConversations: ConversationManager? = nil,
         fanOutEngine: FanOutEngine? = nil,
         policyStore: PolicyStore? = nil,
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor? = nil,
+        recipientAliasStore: (any MessageAliasStoring)? = nil
     ) async throws -> [any Tool] {
         let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
         return try await makeAllTools(
@@ -313,6 +323,7 @@ public enum BuiltinToolPlugins {
             goalStore: goalStore,
             goalConversations: goalConversations,
             goalsConfig: config.goals,
+            recipientAliasStore: recipientAliasStore,
             fanOutEngine: fanOutEngine,
             policyStore: policyStore,
             egressSupervisor: egressSupervisor
@@ -335,6 +346,8 @@ public enum BuiltinToolPlugins {
     /// - Parameter policyStore: Shared security policy store; nil builds and
     ///   loads the factory default before any tool registers, so a boot can
     ///   never leave an unsupervised `api.request` on the bus.
+    /// - Parameter recipientAliasStore: Durable alias store the send tool
+    ///   learns from after a resolved-name send; nil keeps alias learning off.
     /// - Throws: `PolicyInvariantError` when no verified policy is available.
     public static func registerAll(
         on bus: ToolBus,
@@ -365,6 +378,7 @@ public enum BuiltinToolPlugins {
         goalsConfig: GoalsConfig = GoalsConfig(),
         messagesGateway: (any MessagesGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
+        recipientAliasStore: (any MessageAliasStoring)? = nil,
         stagedFilesStore: StagedFilesStore? = nil,
         supersededReviewNotifier: (@Sendable (String) async -> Void)? = nil,
         fanOutEngine: FanOutEngine? = nil,
@@ -400,6 +414,7 @@ public enum BuiltinToolPlugins {
             goalsConfig: goalsConfig,
             messagesGateway: messagesGateway,
             chatDatabasePath: chatDatabasePath,
+            recipientAliasStore: recipientAliasStore,
             stagedFilesStore: stagedFilesStore,
             supersededReviewNotifier: supersededReviewNotifier,
             fanOutEngine: fanOutEngine,

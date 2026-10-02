@@ -108,7 +108,50 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
         {
             return ActionDescriptor(toolName: toolName, target: combined)
         }
+        if toolName == "messages.send" {
+            // `messages.send` never falls through to the generic target path.
+            // Generic extraction accepts arrays and comma-split strings and
+            // skips a non-string `recipient` for a handle-shaped `to`, so a
+            // malformed call could derive a canonical handle and mint a durable
+            // per-handle grant for a send that can never execute. The strict
+            // derivation yields nil for those shapes, and the empty target it
+            // maps to is a descriptor `isGrantable` already refuses for sends.
+            return ActionDescriptor(toolName: toolName, target: messagesRecipientHandle(from: toolCall) ?? "")
+        }
         return ActionDescriptor(toolName: toolName, target: ActionDescriptor.target(from: toolCall))
+    }
+
+    /// Canonical handle for a `messages.send` recipient, or nil when the call
+    /// carries no usable canonical handle.
+    ///
+    /// A durable send grant must key on the exact handle the owner authorized,
+    /// so the target derives through the shared classification owner instead of
+    /// the generic lowercased-text extraction that would store a display name.
+    /// Handle spellings canonicalize (`+1 (555) 123-4567` and `+15551234567`
+    /// agree on one target), while names and malformed recipients return nil so
+    /// callers can refuse them before any approval or grant is derived.
+    ///
+    /// The scan is strict about a present key: once `recipient` exists it
+    /// decides the target, so a non-string value (`["+15551234567"]`, `123`,
+    /// `true`, `{}`) or a blank/name-shaped string is malformed and returns nil
+    /// rather than falling through to the `to` alias. Only a missing (or null)
+    /// `recipient` lets `to` supply the handle, matching the tool decoder that
+    /// reads a null recipient as absent. Falling through on a present
+    /// non-string is exactly how an array or numeric recipient paired with a
+    /// handle-shaped `to` could mint a durable grant for a send that can never
+    /// execute.
+    /// - Parameter toolCall: Raw `messages.send` invocation.
+    /// - Returns: Canonical handle, or nil when absent or not a handle.
+    static func messagesRecipientHandle(from toolCall: ToolInput) -> String? {
+        guard let object = parsedArgumentsObject(from: toolCall.argumentsJSON) else { return nil }
+        for key in ["recipient", "to"] {
+            guard let raw = object[key], !(raw is NSNull) else { continue }
+            guard let text = raw as? String else { return nil }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return MessageRecipientClassification.canonicalHandle(trimmed)
+        }
+        return nil
     }
 
     /// Extracts a target string from raw tool arguments.
@@ -432,6 +475,29 @@ public struct TrustGrant: Sendable, Codable, Equatable {
     }
 }
 
+/// Outcome of promoting a persisted grant to its tool-wide scope.
+///
+/// Widening can fail for two reasons callers must keep distinct: the
+/// identifier may name no live grant, or the grant may be live but belong to a
+/// tool with no tool-wide scope. Collapsing both into "not widened" makes a
+/// visible, live grant read as unknown.
+public enum GrantWidenOutcome: Sendable, Equatable {
+    /// The grant was found and now covers every target for its tool. An
+    /// already tool-wide grant reports success without changing.
+    case widened
+    /// No live grant carries the identifier: unknown, expired, or pruned.
+    case notFound
+    /// A live grant exists but its tool has no tool-wide scope, so promoting
+    /// it would invent trust the owner never approved. Carries the
+    /// caller-facing explanation.
+    case notWidenable(reason: String)
+
+    /// Caller-facing reason a live `messages.send` grant cannot be widened.
+    /// Send trust is keyed to the canonical recipient the owner approved, so
+    /// there is no tool-wide scope to promote it to.
+    public static let messagesSendRefusal = "messages.send grants are per-recipient and cannot be widened"
+}
+
 /// Estimated risk level of an action requesting approval.
 public enum ImpactSeverity: String, Sendable, Codable, Equatable, CaseIterable {
     /// Read-only inspection, search, or status query with no side effects.
@@ -566,6 +632,34 @@ public enum PermissionDecision: Sendable, Equatable {
     case denied(String)
 }
 
+/// Pre-admission verdict for a tool call carrying a target-shaped argument.
+///
+/// Tools whose arguments encode an externally-addressed target can refuse a
+/// call before the permission gate parks it, so an invalid target never reaches
+/// the approvals inbox and a durable trust grant can never be keyed on it.
+/// Execution still re-validates and fails closed; this verdict only decides
+/// whether the call may enter the approval pipeline.
+public enum ToolAdmissionVerdict: Sendable, Equatable {
+    /// The call may proceed to permission evaluation and approval filing.
+    case proceed
+    /// The call is refused before admission; the reason is the caller-facing message.
+    case refuse(reason: String)
+}
+
+/// Optional pre-admission validation seam for target-shaped tool calls.
+///
+/// The orchestrator consults the verdict before `PermissionGate.checkPermission`
+/// and before `ApprovalQueue.fileRequest`. A refusal is answered to the model as
+/// an immediate failure result, so an invalid target is actionable before the
+/// owner is asked to approve anything. Tools that do not conform keep their
+/// existing admission path byte-identically.
+public protocol ToolAdmissionValidating: Sendable {
+    /// Validates one call before permission evaluation and approval filing.
+    /// - Parameter input: Raw invocation about to be admitted.
+    /// - Returns: `.proceed` to keep the existing admission path, or `.refuse` with the caller-facing reason.
+    func admissionVerdict(for input: ToolInput) async -> ToolAdmissionVerdict
+}
+
 /// Trust boundary between the agent and the real world.
 public actor PermissionGate {
     /// Live grants, mirrored to the store best-effort.
@@ -628,6 +722,12 @@ public actor PermissionGate {
             grants = []
         }
         grants.removeAll { $0.isExpired(at: now) }
+        // Rows written before the per-recipient send invariant may key on an
+        // empty or display-name target. Matching fails closed for them either
+        // way, but an invalid descriptor stays an invalid descriptor: dropping
+        // it at load keeps the grants list honest instead of showing send trust
+        // that can never cover a real call.
+        grants.removeAll { !Self.isGrantable($0.actionDescriptor) }
     }
 
     /// Starts a periodic background reaper that checks and cleans up expired grants.
@@ -775,6 +875,14 @@ public actor PermissionGate {
     /// Records trust for an action.
     public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration) async {
         guard duration != .thisTime else { return }
+        // Every durable mint path funnels through here — the CLI approval
+        // handler, `ApprovalQueue.decide`, and the bus passthrough — so the
+        // per-recipient send invariant is enforced at one boundary: a
+        // `messages.send` target that is empty (malformed call) or not the
+        // canonical handle (display name) is an invalid descriptor and stores
+        // nothing. Handle-shaped sends mint their canonical handle exactly as
+        // before, and every other tool keeps its tool-wide semantics.
+        guard Self.isGrantable(descriptor) else { return }
         pruneExpired()
         let now = Date()
         let expiresAt = duration.timeInterval.map { now.addingTimeInterval($0) }
@@ -853,14 +961,26 @@ public actor PermissionGate {
     /// When a longer-lived tool-wide grant for the same tool already exists, that
     /// grant is kept instead so widening never shortens trust.
     /// - Parameter id: Stable grant identifier.
-    /// - Returns: True when a valid grant was found and widened.
-    public func widenGrant(id: UUID) async -> Bool {
+    /// - Returns: `.widened` when a live grant was found and now covers every
+    ///   target (an already tool-wide grant is idempotent success),
+    ///   `.notFound` when the identifier matches no live grant, and
+    ///   `.notWidenable` when the grant is live but its tool has no tool-wide
+    ///   scope.
+    public func widenGrant(id: UUID) async -> GrantWidenOutcome {
         pruneExpired()
         guard let current = grants.first(where: { $0.id == id && $0.isValid() }) else {
-            return false
+            return .notFound
+        }
+        // A send grant is per-recipient by design: an empty target is an
+        // invalid descriptor there, never a tool-wide scope, so send trust is
+        // never promoted past the canonical handle the owner approved. The
+        // distinct outcome keeps the live grant from reading as unknown on the
+        // widen route.
+        guard current.actionDescriptor.toolName != "messages.send" else {
+            return .notWidenable(reason: GrantWidenOutcome.messagesSendRefusal)
         }
         guard !current.actionDescriptor.target.isEmpty else {
-            return true
+            return .widened
         }
         let widenedDescriptor = ActionDescriptor(toolName: current.actionDescriptor.toolName, target: "")
         // A pre-existing tool-wide grant may outlive the narrow grant the user
@@ -877,7 +997,7 @@ public actor PermissionGate {
         {
             grants.removeAll { $0.id == id }
             await persist()
-            return true
+            return .widened
         }
         // Dedupe can remove a tool-wide grant positioned before the target,
         // shifting the target's slot; a pre-removal index would then land on an
@@ -902,7 +1022,7 @@ public actor PermissionGate {
             grants.append(widened)
         }
         await persist()
-        return true
+        return .widened
     }
 
     /// Explicitly refuses an action with a reason.
@@ -957,19 +1077,44 @@ public actor PermissionGate {
         return candidate > incumbent
     }
 
+    /// Whether a descriptor may key a durable grant.
+    ///
+    /// A `messages.send` grant must store the exact canonical handle the owner
+    /// authorized. An empty target is the generic tool-wide scope, but for a
+    /// send it is the signature of a malformed call (missing, blank, or
+    /// non-string recipient), and a display-name target is the signature of a
+    /// name-shaped call; neither may persist send trust, so both are invalid
+    /// descriptors rather than a tool-wide scope. Every other tool keeps its
+    /// existing tool-wide semantics.
+    /// - Parameter descriptor: Candidate grant key.
+    /// - Returns: True when the descriptor may be stored.
+    private static func isGrantable(_ descriptor: ActionDescriptor) -> Bool {
+        guard descriptor.toolName == "messages.send" else { return true }
+        guard !descriptor.target.isEmpty else { return false }
+        return MessageRecipientClassification.canonicalHandle(descriptor.target) == descriptor.target
+    }
+
     /// Index of the live grant covering the descriptor, if any. An exact
     /// tool-plus-target grant wins, with a tool-wide empty-target grant as
     /// the fallback. Shared by allow checks and usage accounting so both
     /// attribute to the same grant.
     private func coveringGrantIndex(for descriptor: ActionDescriptor, at date: Date) -> Int? {
-        if let exact = grants.firstIndex(where: {
-            $0.isValid(at: date)
-                && $0.actionDescriptor.toolName == descriptor.toolName
-                && $0.actionDescriptor.target == descriptor.target
-        }) {
+        // A `messages.send` scope is always an exact canonical handle. An empty
+        // target is the widen scope every other tool supports but, for a send,
+        // the signature of a malformed call (or a legacy tool-wide row), so it
+        // never matches — not even exactly — and never falls back to a stored
+        // empty-target grant. Handle-shaped sends keep the exact-match path.
+        let isMessagesSend = descriptor.toolName == "messages.send"
+        if !(isMessagesSend && descriptor.target.isEmpty),
+           let exact = grants.firstIndex(where: {
+               $0.isValid(at: date)
+                   && $0.actionDescriptor.toolName == descriptor.toolName
+                   && $0.actionDescriptor.target == descriptor.target
+           })
+        {
             return exact
         }
-        guard !descriptor.target.isEmpty else { return nil }
+        guard !descriptor.target.isEmpty, !isMessagesSend else { return nil }
         return grants.firstIndex(where: {
             $0.isValid(at: date)
                 && $0.actionDescriptor.toolName == descriptor.toolName

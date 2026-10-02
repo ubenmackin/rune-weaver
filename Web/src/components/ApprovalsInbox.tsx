@@ -59,6 +59,15 @@ function grantScopeLine(grant: TrustGrant): string {
   return `${tool} to ${target} are approved`;
 }
 
+// Send trust is keyed to the recipient the owner approved and has no tool-wide
+// scope, so the widen route honestly refuses `messages.send` grants. Withhold
+// the control instead of offering an action the server cannot perform, while
+// every other targeted grant stays widenable.
+function isWidenableGrant(grant: TrustGrant): boolean {
+  const target = (grant.target ?? "").trim();
+  return target.length > 0 && grant.toolName !== "messages.send";
+}
+
 function grantExpiryDate(grant: TrustGrant): Date | null {
   return parseTrustGrantExpiry(grant.expiresAt);
 }
@@ -617,8 +626,9 @@ export default function ApprovalsInbox() {
                     {/* Whole-list widen lock: every widen disables while one is
                         in flight so overlapping requests cannot corrupt the
                         shared in-flight id; only the active row shows the
-                        spinner, mirroring the revoke staging lock. */}
-                    {(grant.target ?? "").trim().length > 0 ? (
+                        spinner, mirroring the revoke staging lock. Send grants
+                        are per-recipient and withhold the control entirely. */}
+                    {isWidenableGrant(grant) ? (
                       <button
                         type="button"
                         className="secondary"

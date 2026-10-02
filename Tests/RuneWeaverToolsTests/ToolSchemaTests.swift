@@ -214,6 +214,11 @@ struct ToolSchemaTests {
                     #expect(properties[key] != nil, "messages.send missing property \(key)")
                 }
                 #expect(raw.contains(#""required":["recipient","text"]"#))
+            case "messages.resolveRecipient":
+                for key in ["name", "query", "limit"] {
+                    #expect(properties[key] != nil, "messages.resolveRecipient missing property \(key)")
+                }
+                #expect(raw.contains(#""required":["name"]"#))
             default:
                 Issue.record("Unexpected builtin tool \(tool.name)")
             }
@@ -366,6 +371,11 @@ struct ToolSchemaTests {
                     #expect(properties[key] != nil, "messages.send missing property \(key)")
                 }
                 #expect(tool.inputSchema.rawValue.contains(#""required":["recipient","text"]"#))
+            case "messages.resolveRecipient":
+                for key in ["name", "query", "limit"] {
+                    #expect(properties[key] != nil, "messages.resolveRecipient missing property \(key)")
+                }
+                #expect(tool.inputSchema.rawValue.contains(#""required":["name"]"#))
             default:
                 Issue.record("Unexpected messages tool \(tool.name)")
             }

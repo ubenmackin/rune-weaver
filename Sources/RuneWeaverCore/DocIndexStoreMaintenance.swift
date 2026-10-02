@@ -23,6 +23,37 @@ import os
 
     /// Lock guarding the injectable size probe so test overrides stay race-free.
     private let docIndexDbstatProbeLock = OSAllocatedUnfairLock(initialState: DocIndexDbstatProbe?.none)
+
+    /// Raw grouped chunk/text aggregates from the single chunk/text pass.
+    ///
+    /// `bySource` holds every non-NULL source key from the grouped query,
+    /// including unknown or empty strings that never enter the filtered
+    /// breakdown; the orphan fields hold the NULL-source row for chunks
+    /// whose parent document row is missing. Snapshot totals sum both, so
+    /// manual SQL or a future source value cannot silently undercount.
+    private struct GroupedChunkAggregates {
+        /// Chunk counts and text bytes keyed by observed source string.
+        var bySource: [String: (count: Int, bytes: Int64)]
+        /// Chunks on the NULL-source row without a parent document row.
+        var orphanChunks: Int
+        /// Text bytes on the NULL-source row without a parent document row.
+        var orphanBytes: Int64
+    }
+
+    /// Per-source breakdown plus exact snapshot totals from the same pass.
+    ///
+    /// `bySource` carries only known sources holding at least one document,
+    /// in canonical order, while the totals cover the raw grouped mapping
+    /// plus the orphan row so unknown-source rows still count toward the
+    /// snapshot without a second table scan.
+    private struct SourceAggregateResult {
+        /// Per-source aggregates in canonical `IndexSource` order.
+        var bySource: [IndexSourceStats]
+        /// Exact chunk total including unknown sources and orphan chunks.
+        var totalChunks: Int
+        /// Exact text-byte total including unknown sources and orphan bytes.
+        var totalBytes: Int64
+    }
 #endif
 
 /// Lock guarding per-database aggregate-pass counters so parallel status polls stay race-free.
@@ -622,7 +653,7 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
         /// per-source breakdown attributes only known sources.
         /// - Parameter handle: Open database handle.
         /// - Returns: Per-source aggregates in canonical order with exact chunk and byte totals.
-        private static func sourceAggregates(handle: OpaquePointer?) throws -> (bySource: [IndexSourceStats], totalChunks: Int, totalBytes: Int64) {
+        private static func sourceAggregates(handle: OpaquePointer?) throws -> SourceAggregateResult {
             let documentCounts = try groupedCounts(
                 handle: handle,
                 sql: "SELECT source, COUNT(*) FROM indexed_documents GROUP BY source;"
@@ -649,7 +680,7 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             // enter the filtered breakdown still count toward the snapshot.
             let totalChunks = chunkAggregates.bySource.values.reduce(0) { $0 + $1.count } + chunkAggregates.orphanChunks
             let totalBytes = chunkAggregates.bySource.values.reduce(Int64(0)) { $0 + $1.bytes } + chunkAggregates.orphanBytes
-            return (bySource: aggregates, totalChunks: totalChunks, totalBytes: totalBytes)
+            return SourceAggregateResult(bySource: aggregates, totalChunks: totalChunks, totalBytes: totalBytes)
         }
 
         /// Reads the single grouped chunk/text pass into per-source counts and byte sums plus orphan totals.
@@ -668,7 +699,7 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
         private static func groupedChunkAggregates(
             handle: OpaquePointer?,
             sql: String
-        ) throws -> (bySource: [String: (count: Int, bytes: Int64)], orphanChunks: Int, orphanBytes: Int64) {
+        ) throws -> GroupedChunkAggregates {
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 throw DocIndexError.persistenceFailed("Could not prepare grouped count")
@@ -689,7 +720,7 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
                 }
                 values[key] = (count: count, bytes: bytes)
             }
-            return (bySource: values, orphanChunks: orphanChunks, orphanBytes: orphanBytes)
+            return GroupedChunkAggregates(bySource: values, orphanChunks: orphanChunks, orphanBytes: orphanBytes)
         }
 
         /// Reads the vector chunk count and embedding byte total in one pass.

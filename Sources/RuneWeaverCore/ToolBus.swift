@@ -573,11 +573,27 @@ public actor ToolBus {
 
     /// Resolves gated approval through the attached handler.
     ///
-    /// Dry-run previews never file: they fall through to the tool's preview
-    /// envelope instead of parking and waiting on the inbox.
+    /// Pre-admission validation runs first for tools that declare it, so an
+    /// invalid target is answered with the tool's actionable refusal instead of
+    /// reaching the prompt. Dry-run previews never file: they fall through to
+    /// the tool's preview envelope instead of parking and waiting on the inbox.
     private func resolveApproval(tool: any Tool, call: ToolInput, context: ToolContext) async -> ToolResult? {
         if context.dryRun {
             return nil
+        }
+        // Pre-admission validation is the admission seam for target-shaped
+        // tools: the orchestrator consults it before parking, while a direct bus
+        // execution (the CLI REPL, the live-approval backstop) reaches the
+        // prompt without that partition, so the same verdict is consulted here.
+        // A refusal is answered as an immediate failure, so an invalid target
+        // never prompts the owner and no approval row is filed. Tools without
+        // the seam keep their existing approval path byte-identically, and the
+        // dry-run early return above still lets previews compose their own
+        // result.
+        if let validator = tool as? any ToolAdmissionValidating,
+           case let .refuse(reason) = await validator.admissionVerdict(for: call)
+        {
+            return .failure(toolCallID: call.callID, content: reason)
         }
         guard let approvalHandler else {
             return .failure(

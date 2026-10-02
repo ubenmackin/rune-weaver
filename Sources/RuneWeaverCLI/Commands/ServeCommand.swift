@@ -213,6 +213,7 @@ extension ServeCommand {
         let embedder: (any EmbeddingsBackend)?
         let goalStore: GoalStore
         let goalEngine: GoalEngine
+        let recipientAliasStore: RecipientAliasStore
         let conversations: ConversationManager
     }
 
@@ -256,10 +257,13 @@ extension ServeCommand {
         memoryConfig: MemoryConfig,
         goalsConfig: GoalsConfig,
         selected: any LLMProvider
-    ) -> (store: GoalStore, engine: GoalEngine) {
+    ) -> (store: GoalStore, engine: GoalEngine, recipientAliasStore: RecipientAliasStore) {
         let goalStore = GoalStore(dbPath: memoryConfig.episodesDBPath)
         let goalEngine = GoalEngine(store: goalStore, llm: selected, config: goalsConfig)
-        return (goalStore, goalEngine)
+        // The learned-alias store shares the same episodes file so a served
+        // resolved-name send teaches later resolutions without another datastore.
+        let recipientAliasStore = RecipientAliasStore(dbPath: memoryConfig.episodesDBPath)
+        return (goalStore, goalEngine, recipientAliasStore)
     }
 
     private func makePreviewBus(
@@ -290,7 +294,8 @@ extension ServeCommand {
             goalStore: deps.goalStore,
             goalConversations: deps.conversations,
             goalLLM: selected,
-            policyStore: seed.policyStore
+            policyStore: seed.policyStore,
+            recipientAliasStore: deps.recipientAliasStore
         )
     }
 
@@ -381,7 +386,7 @@ extension ServeCommand {
         // posture on a missing file and leaves corruption to fail the first
         // tool build closed below.
         let policyStore = await PolicyStore.makeLoaded(injected: nil)
-        let (goalStore, goalEngine) = makeGoalStack(
+        let (goalStore, goalEngine, recipientAliasStore) = makeGoalStack(
             memoryConfig: loaded.config.memory,
             goalsConfig: loaded.config.goals,
             selected: selected
@@ -391,6 +396,7 @@ extension ServeCommand {
             embedder: embedder,
             goalStore: goalStore,
             goalEngine: goalEngine,
+            recipientAliasStore: recipientAliasStore,
             conversations: conversations
         )
         // One seed shared by the prompt preview and the served registry so both
@@ -501,7 +507,8 @@ extension ServeCommand {
             goalStore: deps.goalStore,
             goalConversations: deps.conversations,
             goalsConfig: loaded.config.goals,
-            policyStore: seed.policyStore
+            policyStore: seed.policyStore,
+            recipientAliasStore: deps.recipientAliasStore
         )
     }
 

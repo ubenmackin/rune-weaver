@@ -96,21 +96,29 @@ struct MessagesToolsTests {
     @Test
     func `Messages tools metadata and permission levels`() {
         let stub = StubMessagesGateway()
-        let tools = MessagesTools.makeTools(gateway: stub)
-        #expect(tools.count == 3)
-        #expect(MessagesTools.toolNames == ["messages.search", "messages.read", "messages.send"])
+        let tools = MessagesTools.makeTools(gateway: stub, resolver: StubMessagesRecipientResolver())
+        #expect(tools.count == 4)
+        #expect(MessagesTools.toolNames == ["messages.search", "messages.read", "messages.send", "messages.resolveRecipient"])
 
         let search = tools.first { $0.name == "messages.search" }
         #expect(search != nil)
         #expect(search?.permissionLevel == .readOnly)
+        #expect(search?.contentTrustLevel == .untrustedExternal)
 
         let read = tools.first { $0.name == "messages.read" }
         #expect(read != nil)
         #expect(read?.permissionLevel == .readOnly)
+        #expect(read?.contentTrustLevel == .untrustedExternal)
 
         let send = tools.first { $0.name == "messages.send" }
         #expect(send != nil)
         #expect(send?.permissionLevel == .requiresApproval)
+        #expect(send?.contentTrustLevel == .untrustedExternal)
+
+        let resolve = tools.first { $0.name == "messages.resolveRecipient" }
+        #expect(resolve != nil)
+        #expect(resolve?.permissionLevel == .readOnly)
+        #expect(resolve?.contentTrustLevel == .untrustedExternal)
     }
 
     @Test
@@ -275,7 +283,7 @@ struct MessagesToolsTests {
         await MessagesTools.register(on: bus, gateway: stub)
 
         let names = await bus.toolNames()
-        #expect(Set(names).isSuperset(of: Set(["messages.search", "messages.read", "messages.send"])))
+        #expect(Set(names).isSuperset(of: Set(["messages.search", "messages.read", "messages.send", "messages.resolveRecipient"])))
 
         let searched = await bus.execute(
             toolCall: ToolInput(toolName: "messages.search", argumentsJSON: #"{"query":"Flight"}"#),

@@ -444,6 +444,24 @@ public actor Orchestrator {
     }
 }
 
+/// One structured call refused before admission, with its actionable reason.
+private struct RefusedAdmission {
+    /// The refused invocation.
+    let call: ToolInput
+    /// Caller-facing refusal content surfaced to the model as a failure result.
+    let reason: String
+}
+
+/// Admission buckets for one round of resolved structured calls.
+private struct StructuredCallPartition {
+    /// Calls admitted to run immediately.
+    var allowed: [ToolInput] = []
+    /// Calls parked for approval.
+    var needsPark: [ToolInput] = []
+    /// Calls refused before admission with their actionable reasons.
+    var refused: [RefusedAdmission] = []
+}
+
 // MARK: - Tool loop execution
 
 extension Orchestrator {
@@ -675,41 +693,82 @@ extension Orchestrator {
         )
     }
 
-    /// Splits resolved structured calls into immediately runnable versus needs-park.
+    /// Splits resolved structured calls into immediately runnable, needs-park,
+    /// and refused-before-admission buckets.
     /// Every enabled tool with a resolvable definition is evaluated through the
     /// permission gate: a call whose verdict is requiresApproval parks when the turn
     /// is live (inbox present, not a dry run), whether approval is demanded by the
     /// tool level or by an unlisted egress host reported for a read-only network
-    /// tool. Everything else stays allowed-now so unknown, disabled, denied,
-    /// covering-grant, and preview paths keep their existing ToolBus behavior.
+    /// tool. A tool declaring pre-admission validation is consulted before the
+    /// gate, so an invalid target (a name-shaped `messages.send`) is refused with
+    /// actionable candidates and never reaches the approvals inbox or a durable
+    /// trust grant. Everything else stays allowed-now so unknown, disabled,
+    /// denied, covering-grant, and preview paths keep their existing ToolBus
+    /// behavior.
     /// Fail-closed: a missing gate or inbox never parks.
     private func partitionStructuredCalls(
         _ calls: [ToolInput],
         isDryRun: Bool,
         sessionID: UUID?
-    ) async -> (allowed: [ToolInput], needsPark: [ToolInput]) {
+    ) async -> StructuredCallPartition {
         guard !isDryRun, approvalQueue != nil, let gate = permissionGate else {
-            return (calls, [])
+            return StructuredCallPartition(allowed: calls)
         }
-        var allowed: [ToolInput] = []
-        var needsPark: [ToolInput] = []
+        var partition = StructuredCallPartition()
         for call in calls {
             guard let tool = await toolBus.tool(named: call.toolName) else {
-                allowed.append(call)
+                partition.allowed.append(call)
                 continue
             }
             guard await toolBus.isToolEnabled(named: call.toolName) else {
-                allowed.append(call)
+                partition.allowed.append(call)
+                continue
+            }
+            // Pre-admission validation runs before the gate verdict so an invalid
+            // target is answered directly instead of parking: no approval row is
+            // filed and no durable grant can be keyed on it.
+            if let validator = tool as? any ToolAdmissionValidating,
+               case let .refuse(reason) = await validator.admissionVerdict(for: call)
+            {
+                partition.refused.append(RefusedAdmission(call: call, reason: reason))
                 continue
             }
             let verdict = await gate.checkPermission(toolCall: call, tool: tool, sessionID: sessionID)
             if case .requiresApproval = verdict {
-                needsPark.append(call)
+                partition.needsPark.append(call)
             } else {
-                allowed.append(call)
+                partition.allowed.append(call)
             }
         }
-        return (allowed, needsPark)
+        return partition
+    }
+
+    /// Splits narrated gated calls into admitted and pre-admission-refused buckets.
+    ///
+    /// Narrated calls never pass through `partitionStructuredCalls`, so a tool
+    /// declaring pre-admission validation is consulted here as well; a refusal
+    /// is answered to the model with the same immediate failure result as a
+    /// structured refusal and is never filed for approval. Tools without the
+    /// seam stay admitted byte-identically.
+    /// - Parameter calls: Narrated gated calls resolved for this round.
+    /// - Returns: Admitted calls plus refused calls with their actionable reasons.
+    private func preflightNarratedGatedCalls(_ calls: [ToolInput]) async -> (admitted: [ToolInput], refused: [RefusedAdmission]) {
+        var admitted: [ToolInput] = []
+        var refused: [RefusedAdmission] = []
+        for call in calls {
+            guard let tool = await toolBus.tool(named: call.toolName),
+                  let validator = tool as? any ToolAdmissionValidating
+            else {
+                admitted.append(call)
+                continue
+            }
+            if case let .refuse(reason) = await validator.admissionVerdict(for: call) {
+                refused.append(RefusedAdmission(call: call, reason: reason))
+            } else {
+                admitted.append(call)
+            }
+        }
+        return (admitted, refused)
     }
 
     /// Builds a park context from the current loop state.
@@ -766,16 +825,65 @@ extension Orchestrator {
     }
 
     /// Parks the turn if tool iterations exceed the allowed limit.
+    ///
+    /// A boundary round can also refuse calls before admission. Those refusals
+    /// must not be lost to the park: the round note and its refusal results are
+    /// persisted and folded into the park context before returning, so history,
+    /// the response actions, and the resumed model all see the actionable
+    /// candidates instead of retrying a call the tool already rejected. The
+    /// continuation call is built here so its placeholder rides the same single
+    /// round note, mirroring a non-boundary refusals round.
     private func checkLimitAndPark(
         toolRounds: Int,
         parkContext: ParkTurnContext,
+        refusedCalls: [RefusedAdmission],
         request: TurnLoopRequest,
         pendingEpisodic: inout [(content: String, role: Message.Role)]
     ) async throws -> TurnLoopOutcome? {
         guard OrchestratorToolLoop.isLimitExceeded(rounds: toolRounds, max: maxToolIterations) else { return nil }
+        guard !refusedCalls.isEmpty else {
+            return try await parkForContinuation(
+                toolRounds: toolRounds,
+                context: parkContext,
+                request: request,
+                pendingEpisodic: &pendingEpisodic
+            )
+        }
+        // The refused attempt bumped the counter without executing, so the honest
+        // completed count is one behind the refused round.
+        let completedRounds = max(0, toolRounds - 1)
+        let continueCall = ToolInput(
+            toolName: "engine.continue",
+            argumentsJSON: "{\"rounds\":\(completedRounds)}"
+        )
+        // Narration plus every recorded placeholder lands in one assistant note;
+        // narrated refusals already carry their placeholder line in the text and
+        // are not duplicated, while structured refusals and the continuation call
+        // get theirs appended, so each result below has a preceding placeholder.
+        let refusalNote = assistantNoteMessage(
+            text: parkContext.narratedText,
+            calls: refusedCalls.map(\.call) + [continueCall]
+        )
+        await conversations.append(refusalNote, to: request.sessionID)
+        let refusedActions = try await recordRefusedAdmissions(
+            refusedCalls,
+            roundIndex: toolRounds - 1,
+            request: request,
+            pendingEpisodic: &pendingEpisodic
+        )
+        let refusalsContext = ParkTurnContext(
+            gated: parkContext.gated,
+            narratedText: parkContext.narratedText,
+            toolActions: parkContext.toolActions + refusedActions,
+            billedTokens: parkContext.billedTokens,
+            toolRounds: parkContext.toolRounds,
+            contextTokens: parkContext.contextTokens,
+            narrationAlreadyPersisted: true
+        )
         return try await parkForContinuation(
             toolRounds: toolRounds,
-            context: parkContext,
+            context: refusalsContext,
+            continuationCall: continueCall,
             request: request,
             pendingEpisodic: &pendingEpisodic
         )
@@ -876,8 +984,19 @@ extension Orchestrator {
             // Dry runs never park: structured needs-park is already empty via
             // the partition, and narrated siblings are dropped here so a dry
             // run with narration cannot file through the combined batch.
-            let combinedGated = request.isDryRun ? [] : partition.needsPark + narratedGated
-            if partition.allowed.isEmpty {
+            // Narrated gated calls never pass through the structured partition,
+            // so their pre-admission validation runs here too; a refused call is
+            // answered with the same immediate failure result and is never filed.
+            var admittedNarrated = narratedGated
+            var refusedNarrated: [RefusedAdmission] = []
+            if !request.isDryRun {
+                let narratedPreflight = await preflightNarratedGatedCalls(narratedGated)
+                admittedNarrated = narratedPreflight.admitted
+                refusedNarrated = narratedPreflight.refused
+            }
+            let refusedCalls = partition.refused + refusedNarrated
+            let combinedGated = request.isDryRun ? [] : partition.needsPark + admittedNarrated
+            if partition.allowed.isEmpty, refusedCalls.isEmpty {
                 // Gated-only round skips execution and parks immediately; an empty
                 // combined batch falls through to the break below like today.
                 if !combinedGated.isEmpty {
@@ -895,7 +1014,11 @@ extension Orchestrator {
                 gated: combinedGated, text: finalText, actions: toolActions, toolRounds: toolRounds, tokens: tokens
             )
             if let outcome = try await checkLimitAndPark(
-                toolRounds: toolRounds, parkContext: parkContext, request: request, pendingEpisodic: &pendingEpisodic
+                toolRounds: toolRounds,
+                parkContext: parkContext,
+                refusedCalls: refusedCalls,
+                request: request,
+                pendingEpisodic: &pendingEpisodic
             ) {
                 return outcome
             }
@@ -903,7 +1026,17 @@ extension Orchestrator {
                 calls: partition.allowed, finalText: finalText, toolRounds: toolRounds, request: request, pendingEpisodic: &pendingEpisodic,
                 noteCalls: calls
             )
+            // Refusals are answered after the assistant note is persisted so the
+            // failure results follow their call placeholders in history, exactly
+            // like a bus execution.
+            let refused = try await recordRefusedAdmissions(
+                refusedCalls,
+                roundIndex: toolRounds - 1,
+                request: request,
+                pendingEpisodic: &pendingEpisodic
+            )
             toolActions.append(contentsOf: executed)
+            toolActions.append(contentsOf: refused)
             // The executed call already wrote this turn's narration note, so the
             // sibling gated calls must park without persisting it a second time.
             let updatedContext = makeParkContext(
@@ -1068,6 +1201,71 @@ extension Orchestrator {
             }
             throw error
         }
+    }
+
+    /// Records pre-admission refusals as immediate failure results.
+    ///
+    /// A refused call never enters the approvals inbox and never executes, so
+    /// the loop answers it directly: the model receives the actionable reason
+    /// as a normal tool result and can retry with a valid target. Events mirror
+    /// a bus execution (started then completed failure) so live clients render
+    /// the call like any other terminal tool failure, and the result rides the
+    /// producing tool's declared trust level so candidate-bearing refusals stay
+    /// labeled data in model context.
+    /// - Parameters:
+    ///   - refusals: Calls refused by their tool's pre-admission verdict.
+    ///   - roundIndex: Zero-based LLM round that produced the calls.
+    ///   - request: Owning turn request carrying the event sink and session.
+    ///   - pendingEpisodic: Buffered episodic records receiving the refusal mirror.
+    /// - Returns: Recorded refusal actions in call order.
+    private func recordRefusedAdmissions(
+        _ refusals: [RefusedAdmission],
+        roundIndex: Int,
+        request: TurnLoopRequest,
+        pendingEpisodic: inout [(content: String, role: Message.Role)]
+    ) async throws -> [ToolAction] {
+        var actions: [ToolAction] = []
+        for refusal in refusals {
+            try Task.checkCancellation()
+            let call = refusal.call
+            await request.onEvent?(.toolStarted(
+                toolName: call.toolName,
+                callID: call.callID,
+                argumentsJSON: call.argumentsJSON,
+                roundIndex: roundIndex
+            ))
+            let result = ToolResult(toolCallID: call.callID, content: refusal.reason, isError: true)
+            actions.append(ToolAction(
+                toolName: call.toolName,
+                callID: call.callID,
+                argumentsJSON: call.argumentsJSON,
+                result: result,
+                roundIndex: roundIndex
+            ))
+            await request.onEvent?(.toolCompleted(
+                toolName: call.toolName,
+                callID: call.callID,
+                result: result,
+                roundIndex: roundIndex
+            ))
+            let tool = await OrchestratorToolLoop.appendLabeledResult(
+                on: toolBus,
+                to: conversations,
+                toolName: call.toolName,
+                result: result,
+                sessionID: request.sessionID,
+                labelingEnabled: securityConfig.untrustedLabeling
+            )
+            if let record = OrchestratorToolLoop.episodicToolRecord(
+                toolName: call.toolName,
+                result: result,
+                for: tool,
+                labelingEnabled: securityConfig.untrustedLabeling
+            ) {
+                pendingEpisodic.append((record, .tool))
+            }
+        }
+        return actions
     }
 }
 

@@ -220,6 +220,8 @@ enum CLIShared {
     /// supervisor-less `api.request`.
     /// - Parameter policyStore: Shared security policy store; nil builds and
     ///   loads the factory default.
+    /// - Parameter recipientAliasStore: Durable alias store the send tool
+    ///   learns from after a resolved-name send; nil keeps alias learning off.
     /// - Returns: Tools in registration order.
     /// - Throws: `ExitCode(1)` after printing the policy rejection reason.
     static func pluginTools(
@@ -241,7 +243,8 @@ enum CLIShared {
         goalConversations: ConversationManager? = nil,
         goalsConfig: GoalsConfig = GoalsConfig(),
         fanOutEngine: FanOutEngine? = nil,
-        policyStore: PolicyStore? = nil
+        policyStore: PolicyStore? = nil,
+        recipientAliasStore: (any MessageAliasStoring)? = nil
     ) async throws -> [any Tool] {
         let browser = browserConfig ?? BrowserConfig()
         let baseOrigins = llmServerURLs
@@ -265,6 +268,7 @@ enum CLIShared {
                 goalStore: goalStore,
                 goalConversations: goalConversations,
                 goalsConfig: goalsConfig,
+                recipientAliasStore: recipientAliasStore,
                 fanOutEngine: fanOutEngine,
                 policyStore: policyStore
             )
@@ -295,6 +299,9 @@ enum CLIShared {
     /// - Parameter policyStore: Shared security policy store; nil builds and
     ///   loads the factory default. Callers that also boot a service pass
     ///   their instance so one store backs both.
+    /// - Parameter recipientAliasStore: Durable alias store the send tool
+    ///   learns from; nil auto-builds one from the resolved episodes path so
+    ///   chat remembers confirmed name sends without a second wiring step.
     /// - Throws: `ExitCode(1)` after printing when the security policy cannot
     ///   be verified.
     static func makeToolBus(
@@ -321,7 +328,8 @@ enum CLIShared {
         goalConversations: ConversationManager? = nil,
         goalLLM: (any LLMProvider)? = nil,
         fanOutEngine: FanOutEngine? = nil,
-        policyStore: PolicyStore? = nil
+        policyStore: PolicyStore? = nil,
+        recipientAliasStore: (any MessageAliasStoring)? = nil
     ) async throws -> ToolBus {
         let bus = ToolBus(
             approvalHandler: approvalHandler,
@@ -330,15 +338,20 @@ enum CLIShared {
         // Resolve the goal stack: explicit collaborators win, otherwise a supplied
         // policy plus LLM builds the store from the episodes path and the engine
         // over it, so disabled installs still register fail-closed tools.
+        let rawPath = episodesDBPath ?? MemoryConfig.defaultEpisodesDBPath
         var effectiveStore = goalStore
         if effectiveStore == nil, goalsConfig != nil {
-            let rawPath = episodesDBPath ?? MemoryConfig.defaultEpisodesDBPath
             effectiveStore = GoalStore(dbPath: rawPath)
         }
         var effectiveEngine = goalEngine
-        if effectiveEngine == nil, let store = effectiveStore, let goalsConfig, let llm = goalLLM {
-            effectiveEngine = GoalEngine(store: store, llm: llm, config: goalsConfig)
+        if effectiveEngine == nil, let goalsConfig, let goalLLM, let store = effectiveStore {
+            effectiveEngine = GoalEngine(store: store, llm: goalLLM, config: goalsConfig)
         }
+        // The learned-alias store needs no engine, so it auto-builds from the
+        // same resolved path whenever the caller supplied none: CLI chat records
+        // confirmed name sends without a second wiring step, and construction is
+        // path-only, so callers that never send pay no I/O.
+        let effectiveAliasStore = recipientAliasStore ?? RecipientAliasStore(dbPath: rawPath)
         let shipsDisabled = BuiltinToolPlugins.shipsDisabledToolNames
         for tool in try await pluginTools(
             emailConfig: emailConfig,
@@ -359,7 +372,8 @@ enum CLIShared {
             goalConversations: goalConversations,
             goalsConfig: goalsConfig ?? GoalsConfig(),
             fanOutEngine: fanOutEngine,
-            policyStore: policyStore
+            policyStore: policyStore,
+            recipientAliasStore: effectiveAliasStore
         ) {
             await bus.register(tool: tool, isEnabled: !shipsDisabled.contains(tool.name))
         }
