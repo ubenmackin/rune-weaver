@@ -1,9 +1,8 @@
-// Rune Weaver App Tests — Menu bar desktop tool-state refresh regression tests.
+// Rune Weaver App Tests — Menu bar desktop activity refresh regression tests.
 //
-// Pins the single-gate invariant: the Desktop Control menu section is
-// driven by the live tool-state toggles, so enabling a desktop tool must
-// surface within one refresh tick. Otherwise the active indicator and
-// Emergency Stop stay hidden while a `desktop.action` batch dispatches.
+// Pins the active-only invariant: the Desktop Control menu section appears
+// only while a batch runs, so armed-but-idle tool toggles stay hidden while
+// the active indicator and Emergency Stop surface mid-dispatch.
 
 import Foundation
 @testable import RuneWeaverApp
@@ -74,33 +73,38 @@ private func makeFixtureContext() throws -> (ServerContext, URL) {
 @MainActor
 struct AppModelDesktopGateRefreshTests {
     @Test
-    func `runtime desktop tool-state flip surfaces within one refresh tick`() async throws {
+    func `desktop section follows live batch activity within one refresh tick`() async throws {
         let (context, base) = try makeFixtureContext()
         defer { try? FileManager.default.removeItem(at: base) }
 
         let model = AppModel()
         model.serverContext = context
-        // A stock install boots with both desktop tools disabled, so the
-        // Desktop Control section starts hidden.
-        #expect(model.isDesktopEnabled == false)
+        // A fresh model starts idle, so the Desktop Control section hides.
+        #expect(model.isDesktopActive == false)
 
-        // One poll tick (the refresh loop's body) against disabled tools keeps
-        // the section hidden.
+        // One poll tick while the shared monitor is idle keeps the section
+        // hidden.
         await model.refreshState()
-        #expect(model.isDesktopEnabled == false)
+        #expect(model.isDesktopActive == false)
 
-        // Enabling a desktop tool through the tool-state toggle must surface
-        // the menu section so the active indicator and Emergency Stop are
-        // reachable mid-dispatch.
+        // Enabling a desktop tool alone must not surface the section;
+        // armed-but-idle stays hidden until a batch actually dispatches.
         await context.toolBus.register(tool: DesktopTools.makeTools()[0], isEnabled: true)
         await model.refreshState()
-        #expect(model.isDesktopEnabled == true)
+        #expect(model.isDesktopActive == false)
 
-        // Disabling both tools again hides the section on the next tick, so
-        // the menu never advertises Desktop Control while nothing can run.
-        await context.toolBus.disableTool(named: DesktopTools.screenshotToolName)
-        await context.toolBus.disableTool(named: DesktopTools.actionToolName)
+        // A running batch surfaces the section so the active indicator and
+        // Emergency Stop are reachable mid-dispatch.
+        await DesktopControlMonitor.shared.beginBatch()
         await model.refreshState()
-        #expect(model.isDesktopEnabled == false)
+        #expect(model.isDesktopActive == true)
+
+        // Settling the batch hides the section on the next tick, so the menu
+        // never advertises Desktop Control while nothing is running.
+        await DesktopControlMonitor.shared.endBatch()
+        await model.refreshState()
+        #expect(model.isDesktopActive == false)
+        // Balance any stray batch so the shared monitor stays idle for peers.
+        await DesktopControlMonitor.shared.endBatch()
     }
 }

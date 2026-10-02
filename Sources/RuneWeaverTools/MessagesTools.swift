@@ -808,9 +808,12 @@ private enum MessagesRecipientRouting {
     ///
     /// The wording names the two repairs the owner can actually perform, so the
     /// model asks for an exact handle instead of retrying the same name.
+    /// "Enable for Contacts" names the Contacts row's Enable button in the
+    /// Permissions window (the literal button label is the generic Enable),
+    /// so the guidance points at the row affordance without renaming it.
     static func noMatchesNote(for name: String) -> String {
         "No contact or recent conversation matches \"" + name + "\". Pass a phone number or email, "
-            + "or grant Contacts access in System Settings -> Privacy & Security -> Contacts."
+            + "or open Rune Weaver menu -> Permissions… -> Enable for Contacts."
     }
 }
 
@@ -1236,9 +1239,12 @@ public struct MessagesSendTool: Tool, Sendable {
     }
 
     /// Guidance when no lookup surface produced a candidate.
+    ///
+    /// "Enable for Contacts" names the Contacts row's Enable button in the
+    /// Permissions window (the literal button label is the generic Enable).
     private static func noMatchMessage(for raw: String) -> String {
         "No contact or recent conversation matches \"" + raw + "\". Ask the user for the exact phone number or email, "
-            + "or grant Contacts access to Rune Weaver in System Settings -> Privacy & Security -> Contacts."
+            + "or open Rune Weaver menu -> Permissions… -> Enable for Contacts."
     }
 
     /// Whole-calendar-day age of an exchange, so "today" survives a clock that
@@ -1396,9 +1402,12 @@ public struct MessagesResolveRecipientTool: Tool, Sendable {
 
     /// Guidance for a zero-candidate result: the model must ask for an exact
     /// handle rather than guess at a name that matched nobody.
+    ///
+    /// "Enable for Contacts" names the Contacts row's Enable button in the
+    /// Permissions window (the literal button label is the generic Enable).
     private static func noMatchNote(for query: String) -> String {
         "No match for \"\(query)\". Ask the user for the exact phone number or email, "
-            + "or grant Contacts access in System Settings -> Privacy & Security -> Contacts."
+            + "or open Rune Weaver menu -> Permissions… -> Enable for Contacts."
     }
 }
 

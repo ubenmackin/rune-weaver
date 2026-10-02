@@ -123,7 +123,7 @@ struct MessagesResolveRecipientToolTests {
         #expect(envelope.ambiguous == false)
         let note = try #require(envelope.note)
         #expect(note.contains(#"No match for "Nobody"."#))
-        #expect(note.contains("Privacy & Security -> Contacts"))
+        #expect(note.contains("Rune Weaver menu -> Permissions… -> Enable for Contacts"))
     }
 
     @Test

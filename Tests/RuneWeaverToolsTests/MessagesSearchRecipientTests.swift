@@ -100,7 +100,7 @@ struct MessagesSearchRecipientTests {
     /// The exact zero-match guidance both tools must return for an unresolvable name.
     private func guidanceNote(for name: String) -> String {
         "No contact or recent conversation matches \"" + name + "\". Pass a phone number or email, "
-            + "or grant Contacts access in System Settings -> Privacy & Security -> Contacts."
+            + "or open Rune Weaver menu -> Permissions… -> Enable for Contacts."
     }
 
     /// Rebecca's two canonical handles as one unambiguous identity.

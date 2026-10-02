@@ -166,7 +166,7 @@ struct MessagesSendGuardTests {
         #expect(output.isError == true)
         #expect(
             output.content
-                == #"No contact or recent conversation matches "Rebecca". Ask the user for the exact phone number or email, or grant Contacts access to Rune Weaver in System Settings -> Privacy & Security -> Contacts."#
+                == #"No contact or recent conversation matches "Rebecca". Ask the user for the exact phone number or email, or open Rune Weaver menu -> Permissions… -> Enable for Contacts."#
         )
         #expect(gateway.sentMessages.isEmpty)
     }

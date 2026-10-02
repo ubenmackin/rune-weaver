@@ -45,11 +45,28 @@ struct AppMenuLabel: View {
             model.start()
             if model.needsOwnerToken {
                 showOnboarding = true
+            } else if model.isRunning, PermissionsOnboarding.shouldAutoOpen(needsOwnerToken: model.needsOwnerToken, hasCompleted: model.hasCompletedPermissionsOnboarding) {
+                // Owner-token onboarding outranks permissions guidance: only
+                // a provisioned launch with unseen guidance opens the window,
+                // so first run never competes with the blocking token sheet.
+                // Gated on isRunning so first launch waits for boot to resolve
+                // the token posture instead of reading the pre-boot flag.
+                model.openPermissions()
             }
+            // First launch with boot still resolving opens nothing here; the
+            // isRunning change below auto-opens once provisioning is known.
         }
         .onChange(of: model.needsOwnerToken) { _, newValue in
             if newValue {
                 showOnboarding = true
+            }
+        }
+        .onChange(of: model.isRunning) { _, running in
+            // Deferred permissions auto-open: boot has resolved, so the token
+            // posture is known and guidance opens only for a provisioned
+            // launch with unseen onboarding, never ahead of the token sheet.
+            if running, !showOnboarding, PermissionsOnboarding.shouldAutoOpen(needsOwnerToken: model.needsOwnerToken, hasCompleted: model.hasCompletedPermissionsOnboarding) {
+                model.openPermissions()
             }
         }
         // First-run onboarding sheet driven by separate presentation state
@@ -63,6 +80,12 @@ struct AppMenuLabel: View {
             if model.serverContext?.auth == nil {
                 model.needsOwnerToken = true
             }
+            // A token sheet that resolved the missing credential unblocks
+            // permissions guidance: a still-tokenless dismissal keeps the
+            // token path owning this launch instead.
+            if PermissionsOnboarding.shouldAutoOpen(needsOwnerToken: model.needsOwnerToken, hasCompleted: model.hasCompletedPermissionsOnboarding) {
+                model.openPermissions()
+            }
         }, content: {
             OwnerOnboardingView(model: model)
         })
@@ -73,56 +96,62 @@ struct AppMenuView: View {
     @Bindable var model: AppModel
 
     var body: some View {
+        // A healthy provisioned server needs no menu chrome, so the Server
+        // section stays hidden until it earns attention: a failed bind or a
+        // tokenless local-only boot. Hiding both the section and its divider
+        // keeps the steady-state menu free of a leading separator.
         // The embedded service can refuse a bind (for example an all-interfaces
         // address without an owner token), and that refusal is otherwise only
         // visible in the log. The title stays short via the model helper and
         // the detail stays a one-line summary so the menu keeps a narrow
         // width; token recovery flows through the single bottom Owner Access
         // entry plus a full restart, never a live endpoint.
-        Section("Server") {
-            Text(model.serverStatus)
-            if model.isRestarting {
-                // A restart holds the boot flag across the hop, so the menu
-                // names the in-flight state instead of offering a second
-                // concurrent Retry that would race the bind.
-                ProgressView("Restarting…")
-            }
-            if model.isServerFailed {
-                // Failed banner shows only while the flag holds; the detail is
-                // a short summary so a long bind error never widens the menu.
-                if let detail = model.serverStatusDetail {
-                    Text(detail)
+        if model.isServerFailed || model.needsOwnerToken {
+            Section("Server") {
+                Text(model.serverStatus)
+                if model.isRestarting {
+                    // A restart holds the boot flag across the hop, so the menu
+                    // names the in-flight state instead of offering a second
+                    // concurrent Retry that would race the bind.
+                    ProgressView("Restarting…")
+                }
+                if model.isServerFailed {
+                    // Failed banner shows only while the flag holds; the detail is
+                    // a short summary so a long bind error never widens the menu.
+                    if let detail = model.serverStatusDetail {
+                        Text(detail)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                    }
+                    // Single token path lives at the bottom Owner Access entry;
+                    // this hint points there so no duplicate button widens the menu.
+                    Text("Add a token in Owner Access below, then Retry.")
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                    // A bad hostname has no native editor, so recovery is a config
+                    // file edit followed by a full restart via Retry.
+                    Text("To fix the hostname, edit config.toml [server] hostname, then Retry.")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
                         .truncationMode(.tail)
+                    // Full restart adopts a new token or hostname; never
+                    // live-reloads, and never navigates while the server is down.
+                    Button(model.isRestarting ? "Restarting…" : "Retry Server") {
+                        model.restartServerToAdoptToken()
+                    }
+                    .disabled(model.isRestarting)
+                } else if model.needsOwnerToken {
+                    // Healthy loopback boot without a token stays local-only; the
+                    // bottom Owner Access entry remains the sole token action.
+                    Text("Local only — add a token in Owner Access to enable LAN binds.")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
-                // Single token path lives at the bottom Owner Access entry;
-                // this hint points there so no duplicate button widens the menu.
-                Text("Add a token in Owner Access below, then Retry.")
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                // A bad hostname has no native editor, so recovery is a config
-                // file edit followed by a full restart via Retry.
-                Text("To fix the hostname, edit config.toml [server] hostname, then Retry.")
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-                    .truncationMode(.tail)
-                // Full restart adopts a new token or hostname; never
-                // live-reloads, and never navigates while the server is down.
-                Button(model.isRestarting ? "Restarting…" : "Retry Server") {
-                    model.restartServerToAdoptToken()
-                }
-                .disabled(model.isRestarting)
-            } else if model.needsOwnerToken {
-                // Healthy loopback boot without a token stays local-only; the
-                // bottom Owner Access entry remains the sole token action.
-                Text("Local only — add a token in Owner Access to enable LAN binds.")
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
             }
-        }
 
-        Divider()
+            Divider()
+        }
 
         Button("Open Web Dashboard") {
             model.openDashboard()
@@ -208,7 +237,10 @@ struct AppMenuView: View {
             }
         }
 
-        if model.isDesktopEnabled {
+        // Armed-but-idle desktop control stays out of the menu; the section
+        // appears only while a batch runs, so Emergency Stop is reachable
+        // exactly when it can act and the steady-state menu stays short.
+        if model.isDesktopActive {
             Divider()
 
             Section("Desktop Control") {
@@ -236,6 +268,10 @@ struct AppMenuView: View {
         // Rotate without Terminal live in the Settings scene.
         Button("Owner Access...") {
             model.openOwnerAccess()
+        }
+
+        Button("Permissions…") {
+            model.openPermissions()
         }
 
         Divider()

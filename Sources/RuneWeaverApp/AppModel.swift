@@ -48,12 +48,11 @@ public final class AppModel {
     public var activeChats: [ActiveChatInfo] = []
     public var nextScheduleText: String = "No jobs scheduled"
     public var lastRunSummaryText: String = "None yet"
-    /// Whether either desktop tool is enabled via its tool-state toggle (the
-    /// menu-bar Desktop Control section shows then). Seeded at boot and
-    /// re-read from the live context on every refresh tick, so a toggle
-    /// flipped at runtime surfaces.
-    public var isDesktopEnabled: Bool = false
     /// Whether a desktop action batch is currently executing.
+    ///
+    /// The sole selector for the Desktop Control menu section: armed-but-idle
+    /// tool toggles stay out of the menu, so the section appears only while a
+    /// batch runs and Emergency Stop is reachable exactly when it can act.
     public var isDesktopActive: Bool = false
     /// Set to true to signal an emergency abort of the current desktop batch.
     public var desktopEmergencyStop: Bool = false
@@ -84,6 +83,14 @@ public final class AppModel {
     /// first-run onboarding sheet. Loopback stays bootable for local use; the
     /// flag only records that LAN binds stay refused until a token is minted.
     public var needsOwnerToken: Bool = false
+    /// Durable completion flag for the Permissions window. Seeded from the
+    /// store at construction so a relaunch never reopens guidance the owner
+    /// already dismissed, while the menu entry can still open the window.
+    public private(set) var hasCompletedPermissionsOnboarding: Bool = false
+    /// Backing store for the Permissions completion flag. Injected so tests
+    /// can isolate first-run state in a fresh defaults suite without touching
+    /// the owner's real flag.
+    private let permissionsOnboardingStore: PermissionsOnboardingStore
     /// Freshly minted owner token shown exactly once. Held in memory only and
     /// cleared on acknowledgement; never logged and never written outside the
     /// Keychain/file persistence owned by the auth store. The setter stays
@@ -127,10 +134,14 @@ public final class AppModel {
     /// fields. Nil before a successful bind.
     private var boundEndpoint: ServerEndpointConfig?
 
-    public init() {
+    public init(permissionsOnboardingStore: PermissionsOnboardingStore = PermissionsOnboardingStore()) {
         // Construction stays side-effect free: the notification center is
         // configured when boot starts, so building the model (including in
         // refresh-path tests) never touches UNUserNotificationCenter.
+        // The completion flag snapshots the durable store so first-run
+        // guidance survives relaunches through UserDefaults, not memory.
+        self.permissionsOnboardingStore = permissionsOnboardingStore
+        self.hasCompletedPermissionsOnboarding = permissionsOnboardingStore.isCompleted
         setupNotificationCallbacks()
     }
 
@@ -481,12 +492,9 @@ extension AppModel {
             await registerBootTools(context: context, plugins: pipeline.plugins)
 
             self.serverContext = context
-            // Seed the menu section from the live tool-state toggles;
-            // `refreshState` re-reads the live context each tick so a runtime
-            // flip also surfaces.
-            let screenshotLive = await context.toolBus.isToolEnabled(named: DesktopTools.screenshotToolName)
-            let actionLive = await context.toolBus.isToolEnabled(named: DesktopTools.actionToolName)
-            self.isDesktopEnabled = screenshotLive || actionLive
+            // The Desktop Control menu section gates on live batch activity
+            // (isDesktopActive mirrored from the shared monitor on each tick),
+            // not on tool-state toggles, so boot seeds no enabled flag here.
 
             try await launchBootServer(context: context, serverConfig: bindConfig)
             // A loopback boot without a token stays live for local use, but
@@ -523,12 +531,6 @@ extension AppModel {
 
     public func refreshState() async {
         guard let context = serverContext else { return }
-        // Re-read the live tool-state toggles every tick so a dashboard or
-        // tool-route flip surfaces the Desktop Control section (active
-        // indicator plus Emergency Stop) without waiting for a restart.
-        let screenshotLive = await context.toolBus.isToolEnabled(named: DesktopTools.screenshotToolName)
-        let actionLive = await context.toolBus.isToolEnabled(named: DesktopTools.actionToolName)
-        self.isDesktopEnabled = screenshotLive || actionLive
         let pending = await context.approvals.list()
         let runs = await context.runs.list(limit: 1)
         let runningIDs = await context.activeTurns.runningSessionIDs()
@@ -864,6 +866,19 @@ public extension AppModel {
 
     func openOwnerAccess() {
         OwnerAccessWindowController.shared.show(model: self)
+    }
+
+    /// Marks Permissions onboarding complete and persists it, so the window
+    /// opens exactly once per install while the menu entry stays available.
+    func markPermissionsOnboardingCompleted() {
+        hasCompletedPermissionsOnboarding = true
+        permissionsOnboardingStore.markCompleted()
+    }
+
+    /// Opens the Permissions checklist window on demand from the menu or the
+    /// first-run gate, always with a fresh live view model from the controller.
+    func openPermissions() {
+        PermissionsWindowController.shared.show(model: self)
     }
 
     func quit() {
