@@ -34,6 +34,7 @@ import {
   describeIndexRun,
   formatIndexCount,
   formatToolProgressElapsedMs,
+  getAuthToken,
   getIndexStatus,
   getSettings,
   indexRunTriggerLabel,
@@ -293,7 +294,9 @@ export function floorPositive(value: unknown): number {
 // `du`; the text/vector/FTS/free rows explain where those bytes live, and the
 // content total stays as a secondary detail. Every field degrades to zero so
 // a drifted payload never renders NaN, and older engines without the file
-// sizes fall back to the content total instead of failing.
+// sizes fall back to the content total instead of failing. `hasStorage`
+// tracks slow arrival explicitly so an honest empty index hides sizing once
+// slow lands instead of gating solely on non-zero breakdown.
 export interface IndexStorageBreakdown {
   onDisk: number;
   dbFile: number;
@@ -305,6 +308,7 @@ export interface IndexStorageBreakdown {
   content: number;
   hasOnDisk: boolean;
   hasBreakdown: boolean;
+  hasStorage: boolean;
 }
 
 // Sanitized on-disk total: the database file plus the write-ahead log when
@@ -327,9 +331,10 @@ export function resolveIndexOnDiskBytes(
 
 // Full breakdown for the size card: on-disk primary plus the four storage
 // rows and the content secondary. `hasOnDisk` reports whether the file sizes
-// were present; `hasBreakdown` reports whether any storage row was present,
+// were present; `hasBreakdown` reports whether any storage row was non-zero,
 // so the card omits the breakdown row for older engines instead of rendering
-// a row of zeros.
+// a row of zeros. `hasStorage` reports whether the slow phase landed, so the
+// sizing copy shows only until slow fields land even for an honest empty index.
 export function resolveIndexStorageBreakdown(
   status: Pick<
     IndexStatusResponse,
@@ -341,6 +346,7 @@ export function resolveIndexStorageBreakdown(
     | "ftsBytes"
     | "freeBytes"
   > | null | undefined,
+  hasStorage = false,
 ): IndexStorageBreakdown {
   const content = floorPositive(status?.bytes);
   const dbFile = floorPositive(
@@ -374,7 +380,65 @@ export function resolveIndexStorageBreakdown(
     content,
     hasOnDisk,
     hasBreakdown,
+    hasStorage,
   };
+}
+
+// Slow storage snapshot for GET /index/storage. Fast status carries counts
+// immediately while these byte totals arrive separately, so every key stays
+// optional and byte-compatible with older engines that omit the route.
+export interface IndexStorageResponse {
+  bytes?: number | null;
+  textBytes?: number | null;
+  vectorBytes?: number | null;
+  ftsBytes?: number | null;
+  freeBytes?: number | null;
+  dbFileBytes?: number | null;
+  walBytes?: number | null;
+  contentBytes?: number | null;
+  bySource?: IndexSourceCounts[] | null;
+}
+
+/// Reads the slow storage breakdown from GET /index/storage.
+/// Ownership: second phase of loadStatus only; never called from render or broadcast handlers directly.
+/// Edge cases: non-OK answers throw ApiError so the caller keeps phase-1 state; malformed or non-record JSON degrades to an empty object so the merge stays a no-op; network failure propagates as ApiError.
+export async function getIndexStorage(): Promise<IndexStorageResponse> {
+  let response: Response;
+  try {
+    const token = getAuthToken();
+    response = await fetch("/index/storage", {
+      credentials: "same-origin",
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    });
+  } catch (error) {
+    throw new ApiError(
+      error instanceof Error ? error.message : "Network request failed",
+      0,
+    );
+  }
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`.trim();
+    try {
+      const text = await response.text();
+      if (text) detail = text.slice(0, 500);
+    } catch {
+      // Keep the status fallback when the body is unreadable.
+    }
+    throw new ApiError(detail || "Request failed: /index/storage", response.status);
+  }
+  try {
+    const data: unknown = await response.json();
+    // Non-record payloads degrade to empty so a drifted body never clears fast counts.
+    if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+    return data as IndexStorageResponse;
+  } catch (error) {
+    throw new ApiError(
+      error instanceof ApiError ? error.message : "Invalid JSON response: /index/storage",
+      response.status,
+    );
+  }
 }
 
 // Effort preset ids in display order: the three scaling presets plus the
@@ -965,12 +1029,17 @@ export interface IndexingPanelProps {
 // Module-scoped last-good status shared across mounts in this tab lifetime.
 // Written only by loadStatus on success and read only by the state initializer,
 // so a tab switch paints instantly and a failing refresh keeps the last panel.
-let cachedIndexStatus: IndexStatusResponse | null = null;
+// The slow content total rides alongside so phase 2 owns slow byte totals.
+let cachedIndexStatus: (IndexStatusResponse & IndexStorageResponse) | null = null;
+// Module-scoped slow arrival flag mirroring the cached status. Set on the
+// successful storage merge and cleared with the cache, so a remount paints
+// the honest sizing state without waiting for a fresh slow fetch.
+let cachedHasStorage = false;
 
 /// Clears the module-scoped cached index status.
 /// Ownership: test isolation only, never called from production paths.
 /// Edge cases: safe when the cache is already null; the next mount cold-boots to the skeleton.
-export function clearCachedIndexStatusForTesting(): void { cachedIndexStatus = null; }
+export function clearCachedIndexStatusForTesting(): void { cachedIndexStatus = null; cachedHasStorage = false; }
 
 /// Renders the index status dashboard with instant hydration from the module cache.
 /// Ownership: initial paint reads the cache via the state initializer; refreshes revalidate via loadStatus without resetting to null.
@@ -978,7 +1047,11 @@ export function clearCachedIndexStatusForTesting(): void { cachedIndexStatus = n
 export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps) {
   // Initial paint owns the cache read so a prior successful load renders
   // synchronously before the background revalidation resolves.
-  const [status, setStatus] = useState<IndexStatusResponse | null>(() => cachedIndexStatus);
+  const [status, setStatus] = useState<(IndexStatusResponse & IndexStorageResponse) | null>(() => cachedIndexStatus);
+  // Slow arrival flag for the sizing gate. False until the storage merge
+  // lands so `Sizing storage…` shows only while slow is pending, even for an
+  // honest empty index whose breakdown stays all zeros.
+  const [hasStorage, setHasStorage] = useState(() => cachedHasStorage);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // One in-flight slot names the action so Run, Prune, Reset, and Reclaim stay
@@ -1053,6 +1126,11 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // generation, and a timer only clears when no newer growth arrived first
   // (broadcast plus poll can land within one 1200ms window).
   const flashGenerationRef = useRef({ size: 0, documents: 0, chunks: 0 });
+  // Generation counter for two-phase loads so overlapping polls keep only the
+  // newest storage merge. Phase 1 paints fast unconditionally while phase 2
+  // checks this before merging, so a slow storage answer never overwrites a
+  // newer fast snapshot.
+  const loadGenerationRef = useRef(0);
   useEffect(() => {
     const pending = flashTimersRef.current;
     return () => {
@@ -1106,8 +1184,10 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // Honest on-disk storage: the database file plus the write-ahead log as the
   // primary figure, the text/vector/FTS/free rows as the breakdown, and the
   // content total as the secondary detail. Older engines without the file
-  // sizes fall back to the content total with no breakdown row.
-  const storage = resolveIndexStorageBreakdown(status);
+  // sizes fall back to the content total with no breakdown row. The explicit
+  // arrival flag keeps sizing honest for an empty index whose breakdown stays
+  // all zeros after slow lands.
+  const storage = resolveIndexStorageBreakdown(status, hasStorage);
   // Retired documents from the last run, accepting both wire spellings.
   // Null when the engine predates retirement tracking so the strip omits it
   // instead of rendering a zero.
@@ -1143,22 +1223,67 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // transient notice so both figures survive the post-reclaim status reload.
   const reclaimSummary = formatIndexReclaimResult(reclaimResult);
 
-  /// Reloads index status and commits the last-good snapshot to the module cache.
-  /// Ownership: sole writer of the cache alongside the state update.
-  /// Edge cases: success caches before setting state; failure leaves the cache untouched and surfaces the error slot.
+  /// Reloads index status in two phases and commits the last-good snapshot to the module cache.
+  /// Ownership: sole owner of fetch plus cache commit; phase 1 owns fast counts, phase 2 owns slow byte totals.
+  /// Edge cases: fast success caches and paints before slow resolves; slow merge keeps fast counts and never clears them while in flight; slow failure leaves phase-1 state plus the error slot untouched and never nulls status; overlapping polls keep only the newest merge via the generation counter.
   const loadStatus = useCallback(async () => {
+    const generation = loadGenerationRef.current + 1;
+    loadGenerationRef.current = generation;
     setError(null);
+    let fast: IndexStatusResponse | null = null;
     try {
       const response = await getIndexStatus();
+      fast = response;
       cachedIndexStatus = response;
+      // Fast resets the slow arrival gate so sizing shows until the fresh
+      // storage merge lands for this generation.
+      cachedHasStorage = false;
       setStatus(response);
-      return response;
+      setHasStorage(false);
     } catch (failure) {
+      // Only the newest poll owns the error slot so a stale rejection never
+      // clears a newer panel that already painted.
+      if (loadGenerationRef.current !== generation) return null;
       setError(
         failure instanceof ApiError ? failure.message : "Failed to load index status",
       );
       return null;
     }
+    // Phase 2 fires without awaiting paint so the cold mount paints counts,
+    // pills, and the last-run strip immediately. The generation guard keeps
+    // only the newest storage answer when polls overlap.
+    void (async () => {
+      try {
+        const s = await getIndexStorage();
+        if (loadGenerationRef.current !== generation) return;
+        setStatus((prev) => {
+          if (prev == null) return prev;
+          const merged: IndexStatusResponse & IndexStorageResponse = {
+            ...prev,
+            bytes: s.bytes ?? prev.bytes,
+            textBytes: s.textBytes ?? prev.textBytes,
+            vectorBytes: s.vectorBytes ?? prev.vectorBytes,
+            ftsBytes: s.ftsBytes ?? prev.ftsBytes,
+            freeBytes: s.freeBytes ?? prev.freeBytes,
+            dbFileBytes: s.dbFileBytes ?? prev.dbFileBytes,
+            walBytes: s.walBytes ?? prev.walBytes,
+            contentBytes: s.contentBytes ?? prev.contentBytes,
+            bySource: s.bySource != null && s.bySource.length > 0 ? s.bySource : prev.bySource,
+          };
+          // Recommit the module cache so a tab switch paints merged sizes instantly.
+          cachedIndexStatus = merged;
+          return merged;
+        });
+        // Slow arrival flips the sizing gate so an honest empty index hides
+        // the sizing copy once slow lands instead of gating on non-zero.
+        cachedHasStorage = true;
+        setHasStorage(true);
+      } catch {
+        // Storage failure leaves phase-1 state plus the existing error slot
+        // untouched and never nulls status.
+      }
+    })();
+    return fast;
   }, []);
 
   useEffect(() => {
@@ -1795,7 +1920,23 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                   data-testid="index-stat-size-value"
                   style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
                 >
-                  {formatIndexBytes(storage.onDisk)}
+                  <span data-testid="index-stat-size-figure">
+                    {formatIndexBytes(storage.onDisk)}
+                  </span>
+                  {/* Explicit sizing state while slow storage is pending:
+                      inline copy beside the figure with no spinner so the card
+                      never shifts layout when exact sizes fill in. Gated on
+                      slow arrival so an honest empty index hides it once slow
+                      lands instead of gating on non-zero breakdown. */}
+                  {storage.hasStorage ? null : (
+                    <span
+                      className="muted text-xs"
+                      data-testid="index-size-sizing"
+                      style={{ marginLeft: 8, fontWeight: 400, fontSize: 12 }}
+                    >
+                      Sizing storage…
+                    </span>
+                  )}
                 </div>
                 {/* Breakdown row for the on-disk figure: text, vectors, FTS,
                     and free space. Omitted for older engines without the

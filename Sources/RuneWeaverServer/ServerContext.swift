@@ -1041,7 +1041,12 @@ private func resolvePluginStack(
 /// Wires live approval prompts and restores persisted tool toggles on a built context.
 /// Keeps `make` within the body-length gate by owning the boot tail that must run
 /// after construction: orphaned detonation reclamation, bus approval handler
-/// install, then stored-toggle restore so restarts honor operator intent.
+/// install, stored-toggle restore so restarts honor operator intent, then one
+/// best-effort index snapshot warm so the first dashboard storage poll hits cache.
+/// Ownership: this is the sole warm site shared by every boot path, so callers
+/// stay duplication-free. Edge cases: the warm never blocks boot and never
+/// throws; a nil store (index disabled) is a no-op, and a missing database
+/// reports an empty breakdown cheaply through the already-covered status path.
 private func finalizeServerContext(
     _ context: ServerContext,
     sandboxConfig: SandboxConfig,
@@ -1058,6 +1063,15 @@ private func finalizeServerContext(
     // restore operator intent; tools registered after `make` (builtin
     // plugins in the serve path) re-apply via `restoreToolStates`.
     await context.restoreToolStates()
+    // Warm fills the 60s TTL snapshot so the first dashboard poll finds slow fields cached.
+    let store = context.indexStore
+    Task.detached(priority: .utility) {
+        do {
+            _ = try await store?.storageBreakdown()
+        } catch {
+            RuneWeaverLog.server.debug("ServerContext: index storage warm skipped: \(error.localizedDescription)")
+        }
+    }
 }
 
 /// Storage key for the shared ``ServerContext``.
