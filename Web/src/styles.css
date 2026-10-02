@@ -396,6 +396,20 @@ a {
   background: rgba(255, 255, 255, 0.04);
 }
 
+/* Child unread pill inside the open Work menu. It docks right inside the
+ * existing flex `.nav-dropdown-item` row and matches the trigger `.nav-badge`
+ * palette so the rolled-up total stays visually auditable per child. */
+.nav-dropdown-item-badge {
+  background: var(--accent-purple);
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 .profile-menu-footer {
   padding: 6px 12px 4px;
   font-size: 11px;
@@ -3443,6 +3457,72 @@ button:disabled {
   cursor: pointer;
   padding: 0 0 0 4px;
   font-size: 13px;
+}
+
+/* Centered persistent reconnect toast: a fixed overlay at the top-center so a
+   socket outage stays visible without shifting or wrapping the chat header.
+   The toast persists for the whole outage and leaves only on socket recovery
+   or an explicit retry/dismiss, keeping the conversation usable underneath. */
+.connection-toast {
+  position: fixed;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 10px 14px;
+  background: rgba(20,20,30,0.82);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(245,158,11,0.45);
+  border-radius: 12px;
+  color: #fde68a;
+  font-size: 13px;
+  box-shadow: 0 12px 30px rgba(0,0,0,0.5);
+  animation: toast-slide-down 0.25s ease-out;
+}
+
+.connection-toast-message {
+  flex: 1 1 auto;
+}
+
+.connection-toast-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.connection-toast-actions button {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.15);
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.connection-toast-actions button:hover {
+  background: rgba(255,255,255,0.14);
+}
+
+.connection-toast-actions button:focus-visible {
+  outline: 2px solid #f59e0b;
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .connection-toast {
+    top: 56px;
+    max-width: calc(100vw - 16px);
+    flex-wrap: wrap;
+    justify-content: center;
+    text-align: center;
+  }
 }
 
 /* ==========================================================================

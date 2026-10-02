@@ -568,6 +568,13 @@ export default function TopNav({
                   {group.children.map((child) => {
                     const ChildIcon = child.icon;
                     const childActive = currentTab === child.id;
+                    // Each open-menu row names its own unread share so the
+                    // rolled-up trigger total stays auditable without opening
+                    // another surface; the pill renders the capped display
+                    // string while the accessible name keeps the honest count.
+                    const childCount = normalizeBadgeCount(badgeByTab[child.id] ?? 0);
+                    const childDisplay = formatBadgeCount(childCount);
+                    const childAccessibleLabel = childCount > 0 ? `${child.label}, ${childCount} unread` : child.label;
                     return (
                       <button
                         key={child.id}
@@ -577,9 +584,15 @@ export default function TopNav({
                           childActive ? "active" : ""
                         }`}
                         onClick={() => handleChildSelect(child.id)}
+                        aria-label={childAccessibleLabel}
                       >
                         <ChildIcon size={16} />
                         <span>{child.label}</span>
+                        {childDisplay ? (
+                          <span className="nav-dropdown-item-badge" aria-hidden="true">
+                            {childDisplay}
+                          </span>
+                        ) : null}
                       </button>
                     );
                   })}
