@@ -475,6 +475,82 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             try computeStatusSnapshot(dbPath: dbPath, dbstatProbe: dbstatProbe).makeStats()
         }
 
+        /// Reads fast index counts without measuring content bytes.
+        ///
+        /// Owned by `SQLiteDocIndexStore`: opens once and runs only count
+        /// aggregates plus the watermark, so a cold status poll returns true
+        /// document, chunk, vector, per-source, and extraction counts well
+        /// under the dashboard budget. Per-source byte totals stay zero to
+        /// signal pending slow storage rather than an estimate; text, vector,
+        /// and full-text legs stay nil, free and content bytes stay zero, and
+        /// file sizes ride `onDiskBytes` so the probe reports what the
+        /// filesystem holds. Never touches the aggregate-pass counter, never
+        /// touches `dbstat`, and never measures `LENGTH`, so slow-pass proofs
+        /// observe exactly one pass per cold storage poll and zero for fast
+        /// polls. An empty store reports the epoch watermark.
+        /// - Parameter dbPath: SQLite file path. `~` is expanded.
+        /// - Returns: An index statistics snapshot with true counts, true file sizes, and pending slow size fields.
+        static func fastStats(dbPath: String) throws -> IndexStats {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            let documents = try scalarInt(handle: handle, sql: "SELECT COUNT(*) FROM indexed_documents;")
+            let chunks = try scalarInt(handle: handle, sql: "SELECT COUNT(*) FROM indexed_chunks;")
+            let vectorChunks = try scalarInt(handle: handle, sql: "SELECT COUNT(*) FROM indexed_chunks WHERE is_vector = 1;")
+            let indexAsOf = try scalarMaxIndexedAt(handle: handle)
+            let documentCounts = try groupedCounts(
+                handle: handle,
+                sql: "SELECT source, COUNT(*) FROM indexed_documents GROUP BY source;"
+            )
+            // Inner join keeps only chunks with a live parent row; totals stay
+            // exact via the full-table COUNT above while per-source rows cover
+            // joined sources in canonical order with pending zero bytes.
+            let chunkCounts = try groupedCounts(
+                handle: handle,
+                sql: "SELECT d.source, COUNT(c.id) FROM indexed_chunks c JOIN indexed_documents d ON d.id = c.document_id GROUP BY d.source;"
+            )
+            let extractCounts = try groupedCounts(
+                handle: handle,
+                sql: "SELECT extract_status, COUNT(*) FROM indexed_documents GROUP BY extract_status;"
+            )
+            var bySource: [IndexSourceStats] = []
+            for source in IndexSource.allCases {
+                guard let sourceDocuments = documentCounts[source.rawValue] else { continue }
+                let sourceChunks = chunkCounts[source.rawValue] ?? 0
+                bySource.append(IndexSourceStats(
+                    source: source,
+                    documents: sourceDocuments,
+                    chunks: sourceChunks,
+                    bytes: 0
+                ))
+            }
+            var byExtractStatus: [IndexExtractStatusStats] = []
+            for status in ExtractStatus.allCases {
+                guard let statusDocuments = extractCounts[status.rawValue] else { continue }
+                byExtractStatus.append(IndexExtractStatusStats(status: status, documents: statusDocuments))
+            }
+            let dbFileBytes = onDiskBytes(at: expanded)
+            let walBytes = onDiskBytes(at: expanded + "-wal")
+            let keywordChunks = max(chunks - vectorChunks, 0)
+            return IndexStats(
+                documents: documents,
+                chunks: chunks,
+                vectorChunks: vectorChunks,
+                keywordChunks: keywordChunks,
+                bytes: 0,
+                indexAsOf: indexAsOf,
+                bySource: bySource,
+                byExtractStatus: byExtractStatus,
+                dbFileBytes: dbFileBytes,
+                walBytes: walBytes,
+                textBytes: nil,
+                vectorBytes: nil,
+                ftsBytes: nil,
+                freeBytes: 0,
+                contentBytes: 0
+            )
+        }
+
         /// Reads the on-disk and logical size breakdown.
         ///
         /// File sizes ride the shared `resolvedDbFileBytes` helper (filesystem

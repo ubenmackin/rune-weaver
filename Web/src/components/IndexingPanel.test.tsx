@@ -133,11 +133,16 @@ function appearsBefore(a: Element, b: Element): boolean {
   return (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
 }
 
+/// Stubs fetch for index status, storage, run, and settings routes.
+/// Ownership: test-only fetch double; every test starts from statusPayload plus empty storage.
+/// Edge cases: storage defaults to an empty no-op merge so fast paint stays honest; storageError forces a slow-phase rejection without touching phase-1 state.
 function stubFetch(
   overrides: {
     status?: unknown;
     settings?: unknown;
     reclaim?: unknown;
+    storage?: unknown;
+    storageError?: boolean;
     capture?: (url: string) => Response | null;
   } = {},
 ) {
@@ -161,6 +166,13 @@ function stubFetch(
     }
     if (url === "/index/status") {
       return jsonResponse(overrides.status ?? statusPayload);
+    }
+    if (url === "/index/storage") {
+      // Slow phase defaults to an empty no-op merge so existing fast-only
+      // fixtures keep their honest sizing state without clearing counts.
+      if (overrides.storageError) throw new Error("storage boom");
+      if (overrides.storage !== undefined) return jsonResponse(overrides.storage);
+      return jsonResponse({});
     }
     if (url === "/index/run") {
       return jsonResponse({
@@ -4088,5 +4100,267 @@ describe("IndexingPanel instant hydration", () => {
     expect(screen.getByTestId("index-last-run")).toBeInTheDocument();
     expect(screen.queryByTestId("index-status-skeleton")).toBeNull();
     expect(screen.queryByText("Loading index status…")).toBeNull();
+  });
+});
+
+/// Two-phase status suite for the fast/slow split.
+/// Ownership: phase 1 paints from GET /index/status; phase 2 merges GET /index/storage.
+/// Edge cases: gated storage keeps sizing honest; slow merge never clears fast counts; slow failure never nulls status.
+describe("IndexingPanel two-phase storage", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    clearCachedIndexStatusForTesting();
+  });
+
+  /// Fast paint owns counts, pills, and strip before slow storage resolves.
+  /// Ownership: phase 1 paints from status while storage stays gated.
+  /// Edge cases: gated storage keeps hasBreakdown false so the sizing copy shows with no breakdown flash.
+  it("paints fast counts with sizing state before storage resolves", async () => {
+    const fastStatus = {
+      ...statusPayload,
+      bytes: 2048,
+      bySource: [
+        { kind: "files", documents: 30, chunks: 70, bytes: 0 },
+        { kind: "mail", documents: 12, chunks: 30, bytes: 0 },
+      ],
+    };
+    let resolveStorage!: (value: Response) => void;
+    const gated = new Promise<Response>((resolve) => {
+      resolveStorage = resolve;
+    });
+    const fetchMock = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === "/index/status") return jsonResponse(fastStatus);
+      if (url === "/index/storage") return gated;
+      return jsonResponse({ engineName: "Test Engine", index: indexConfig });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
+    });
+    // Counts, pills, and last-run strip paint immediately from the fast phase.
+    expect(screen.getByText("42")).toBeInTheDocument();
+    expect(screen.getByText("100")).toBeInTheDocument();
+    expect(screen.getByText("Files · Off")).toBeInTheDocument();
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("Last run ok");
+    // Honest sizing state with no breakdown yet and no skeleton flash.
+    expect(screen.getByTestId("index-size-sizing")).toHaveTextContent("Sizing storage…");
+    expect(screen.queryByTestId("index-size-breakdown")).toBeNull();
+    expect(screen.queryByTestId("index-status-skeleton")).toBeNull();
+    // Per-source rows render counts immediately with pending byte detail.
+    expect(screen.getByText("30 docs · 70 chunks · 0 B")).toBeInTheDocument();
+
+    resolveStorage(jsonResponse({}));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([url]) => String(url) === "/index/storage"),
+      ).toBe(true);
+    });
+  });
+
+  /// Storage merge owns filling exact sizes without clearing fast counts.
+  /// Ownership: phase 2 merges storage over phase-1 state via the functional updater.
+  /// Edge cases: merge recommits the module cache; sizing copy clears once the breakdown arrives.
+  it("merges storage sizes without clearing fast counts", async () => {
+    const fastStatus = {
+      ...statusPayload,
+      bytes: 2048,
+      bySource: [
+        { kind: "files", documents: 30, chunks: 70, bytes: 0 },
+        { kind: "mail", documents: 12, chunks: 30, bytes: 0 },
+      ],
+    };
+    const slowStorage = {
+      bytes: 2048,
+      textBytes: 1024,
+      vectorBytes: 1024,
+      ftsBytes: 512,
+      freeBytes: 512,
+      dbFileBytes: 2048,
+      walBytes: 1024,
+      contentBytes: 2048,
+      bySource: [
+        { kind: "files", documents: 30, chunks: 70, bytes: 1500 },
+        { kind: "mail", documents: 12, chunks: 30, bytes: 548 },
+      ],
+    };
+    const { fetchMock } = stubFetch({ status: fastStatus, storage: slowStorage });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
+    });
+    // Slow merge fills the size card without a flash or layout shift.
+    await waitFor(() => {
+      expect(screen.getByTestId("index-size-breakdown")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-stat-size-value")).toHaveTextContent("3 KB");
+    expect(screen.getByTestId("index-size-text")).toHaveTextContent("1 KB");
+    expect(screen.getByTestId("index-size-vectors")).toHaveTextContent("1 KB");
+    expect(screen.getByTestId("index-size-files")).toHaveTextContent("DB");
+    // Sizing copy clears once exact sizes arrive.
+    expect(screen.queryByTestId("index-size-sizing")).toBeNull();
+    // Fast counts never clear while slow was in flight.
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
+    expect(screen.getByText("100")).toBeInTheDocument();
+    expect(screen.getByText("Files · Off")).toBeInTheDocument();
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("Last run ok");
+    // Source byte detail fills in alongside the preserved counts.
+    expect(screen.getByText("30 docs · 70 chunks · 1.5 KB")).toBeInTheDocument();
+  });
+
+  /// Storage failure owns surviving the fast panel untouched.
+  /// Ownership: phase-2 rejection leaves phase-1 state plus the error slot untouched.
+  /// Edge cases: never nulls status to the skeleton; no storage error surfaces in the error slot.
+  it("survives storage failure without clearing the fast panel", async () => {
+    const fastStatus = {
+      ...statusPayload,
+      bytes: 2048,
+      bySource: [
+        { kind: "files", documents: 30, chunks: 70, bytes: 0 },
+        { kind: "mail", documents: 12, chunks: 30, bytes: 0 },
+      ],
+    };
+    const { fetchMock } = stubFetch({ status: fastStatus, storageError: true });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
+    });
+    // Let the slow rejection settle without touching the fast panel.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
+    expect(screen.getByText("100")).toBeInTheDocument();
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("Last run ok");
+    expect(screen.getByText("Files · Off")).toBeInTheDocument();
+    expect(screen.queryByTestId("index-status-skeleton")).toBeNull();
+    // Storage failure never surfaces in the error slot and never nulls status.
+    expect(screen.queryByText("storage boom")).toBeNull();
+    expect(screen.getByTestId("index-size-sizing")).toBeInTheDocument();
+    expect(screen.queryByTestId("index-size-breakdown")).toBeNull();
+  });
+
+  /// Slow arrival owns the sizing gate separately from non-zero breakdown.
+  /// Ownership: resolveIndexStorageBreakdown carries the explicit arrival flag.
+  /// Edge cases: honest empty stays breakdown-free but arrival-true so sizing hides.
+  it("tracks slow arrival separately from non-zero breakdown", () => {
+    const landedEmpty = resolveIndexStorageBreakdown({ bytes: 0 }, true);
+    expect(landedEmpty.hasStorage).toBe(true);
+    expect(landedEmpty.hasBreakdown).toBe(false);
+    // Pending keeps sizing honest until the storage merge lands.
+    const pending = resolveIndexStorageBreakdown({ bytes: 0 }, false);
+    expect(pending.hasStorage).toBe(false);
+    expect(pending.hasBreakdown).toBe(false);
+    // Non-zero breakdown still reports rows once slow lands.
+    const landedFull = resolveIndexStorageBreakdown(
+      {
+        bytes: 2048,
+        dbFileBytes: 2048,
+        walBytes: 1024,
+        textBytes: 1024,
+        vectorBytes: 1024,
+        ftsBytes: 512,
+        freeBytes: 512,
+      },
+      true,
+    );
+    expect(landedFull.hasStorage).toBe(true);
+    expect(landedFull.hasBreakdown).toBe(true);
+  });
+
+  /// Honest empty owns hiding sizing once slow lands with all zeros.
+  /// Ownership: phase 2 arrival flips the sizing gate, not the breakdown values.
+  /// Edge cases: breakdown stays omitted for the empty store while sizing clears.
+  it("hides sizing for an honest empty index once slow lands", async () => {
+    const fastStatus = {
+      ...statusPayload,
+      documents: 0,
+      chunks: 0,
+      vectorChunks: 0,
+      keywordChunks: 0,
+      bytes: 0,
+      bySource: [],
+      byExtractStatus: [],
+      lastRun: null,
+    };
+    const slowStorage = {
+      bytes: 0,
+      textBytes: 0,
+      vectorBytes: 0,
+      ftsBytes: 0,
+      freeBytes: 0,
+      dbFileBytes: 0,
+      walBytes: 0,
+      contentBytes: 0,
+      bySource: [],
+    };
+    const { fetchMock } = stubFetch({ status: fastStatus, storage: slowStorage });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-size-value")).toBeInTheDocument();
+    });
+    // Slow zeros land: sizing clears even though no breakdown row appears.
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([url]) => String(url) === "/index/storage"),
+      ).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("index-size-sizing")).toBeNull();
+    });
+    expect(screen.queryByTestId("index-size-breakdown")).toBeNull();
+  });
+
+  /// Empty storage owns preserving phase-1 source rows.
+  /// Ownership: phase 2 keeps fast counts when storage rows are absent or empty.
+  /// Edge cases: zeroed `bySource: []` never clears true fast counts; slow byte
+  /// totals still merge including the slow content total.
+  it("preserves phase-1 source rows when storage returns an empty payload", async () => {
+    const fastStatus = {
+      ...statusPayload,
+      bytes: 2048,
+      bySource: [
+        { kind: "files", documents: 30, chunks: 70, bytes: 0 },
+        { kind: "mail", documents: 12, chunks: 30, bytes: 0 },
+      ],
+    };
+    const slowStorage = {
+      bytes: 2048,
+      textBytes: 1024,
+      vectorBytes: 1024,
+      ftsBytes: 512,
+      freeBytes: 512,
+      dbFileBytes: 2048,
+      walBytes: 1024,
+      contentBytes: 2048,
+      bySource: [],
+    };
+    const { fetchMock } = stubFetch({ status: fastStatus, storage: slowStorage });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-size-breakdown")).toBeInTheDocument();
+    });
+    // Sizing clears once slow lands with the slow content total intact.
+    expect(screen.queryByTestId("index-size-sizing")).toBeNull();
+    // Fast counts survive the zeroed storage rows instead of clearing.
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
+    expect(screen.getByText("30 docs · 70 chunks · 0 B")).toBeInTheDocument();
+    expect(screen.getByTestId("index-bar-files")).toBeInTheDocument();
   });
 });

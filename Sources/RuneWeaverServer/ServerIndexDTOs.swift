@@ -43,7 +43,9 @@ public struct IndexSourceCounts: Content, Equatable {
     public let documents: Int
     /// Number of stored chunks belonging to this source.
     public let chunks: Int
-    /// Total chunk text bytes belonging to this source.
+    /// Total chunk text bytes belonging to this source. Zero is the explicit
+    /// pending sentinel from the fast pass, not an estimate; the true slow
+    /// total is filled by `GET /index/storage`.
     public let bytes: Int64
 
     /// Creates a per-source content row.
@@ -51,7 +53,7 @@ public struct IndexSourceCounts: Content, Equatable {
     ///   - kind: Source kind token.
     ///   - documents: Indexed document count.
     ///   - chunks: Stored chunk count.
-    ///   - bytes: Total chunk text bytes.
+    ///   - bytes: Total chunk text bytes; zero is the fast-pass pending sentinel filled by `GET /index/storage`.
     public init(kind: String, documents: Int = 0, chunks: Int = 0, bytes: Int64 = 0) {
         self.kind = kind
         self.documents = documents
@@ -499,6 +501,112 @@ public struct IndexStatusResponse: Content, Equatable {
     }
 }
 
+/// Storage breakdown for `GET /index/storage`.
+///
+/// Owned by the index routes: carries byte-exact totals plus per-source
+/// document, chunk, and byte rows from the slow aggregate pass, so the
+/// dashboard merges slow sizes over the fast status snapshot. Every size is
+/// non-optional with a zero default so a missing store reports an honest
+/// zeroed payload rather than failing, and decoding stays tolerant via
+/// `decodeIfPresent` so older dashboards keep decoding.
+public struct IndexStorageResponse: Content, Equatable {
+    /// Total chunk text bytes held by the index.
+    public let bytes: Int64
+    /// Total chunk text bytes held by the index.
+    public let textBytes: Int64
+    /// Total embedding BLOB bytes held by vector chunks.
+    public let vectorBytes: Int64
+    /// Full-text index bytes, zero when the size probe is unavailable.
+    public let ftsBytes: Int64
+    /// Unused freelist bytes reclaimable by `POST /index/reclaim`.
+    public let freeBytes: Int64
+    /// Main SQLite file size in bytes, read from the filesystem.
+    public let dbFileBytes: Int64
+    /// Write-ahead log size in bytes, zero when checkpointed.
+    public let walBytes: Int64
+    /// Logical content bytes (`textBytes` plus `vectorBytes`).
+    public let contentBytes: Int64
+    /// Per-source document/chunk/byte aggregates, one row per origin corpus.
+    public let bySource: [IndexSourceCounts]
+
+    /// Creates a storage breakdown snapshot.
+    /// - Parameters:
+    ///   - bytes: Total chunk text bytes.
+    ///   - textBytes: Chunk text bytes.
+    ///   - vectorBytes: Embedding bytes.
+    ///   - ftsBytes: Full-text index bytes.
+    ///   - freeBytes: Freelist bytes.
+    ///   - dbFileBytes: Main file size.
+    ///   - walBytes: Write-ahead log size.
+    ///   - contentBytes: Logical content bytes.
+    ///   - bySource: Per-source content aggregates.
+    public init(
+        bytes: Int64 = 0,
+        textBytes: Int64 = 0,
+        vectorBytes: Int64 = 0,
+        ftsBytes: Int64 = 0,
+        freeBytes: Int64 = 0,
+        dbFileBytes: Int64 = 0,
+        walBytes: Int64 = 0,
+        contentBytes: Int64 = 0,
+        bySource: [IndexSourceCounts] = []
+    ) {
+        self.bytes = bytes
+        self.textBytes = textBytes
+        self.vectorBytes = vectorBytes
+        self.ftsBytes = ftsBytes
+        self.freeBytes = freeBytes
+        self.dbFileBytes = dbFileBytes
+        self.walBytes = walBytes
+        self.contentBytes = contentBytes
+        self.bySource = bySource
+    }
+
+    /// Coding keys for the version-tolerant storage contract.
+    private enum CodingKeys: String, CodingKey {
+        case bytes
+        case textBytes
+        case vectorBytes
+        case ftsBytes
+        case freeBytes
+        case dbFileBytes
+        case walBytes
+        case contentBytes
+        case bySource
+    }
+
+    /// Decodes a storage snapshot, defaulting absent sizes and sources so
+    /// payloads built against an older engine still decode.
+    /// - Parameter decoder: Decoder carrying the snapshot.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        bytes = try container.decodeIfPresent(Int64.self, forKey: .bytes) ?? 0
+        textBytes = try container.decodeIfPresent(Int64.self, forKey: .textBytes) ?? 0
+        vectorBytes = try container.decodeIfPresent(Int64.self, forKey: .vectorBytes) ?? 0
+        ftsBytes = try container.decodeIfPresent(Int64.self, forKey: .ftsBytes) ?? 0
+        freeBytes = try container.decodeIfPresent(Int64.self, forKey: .freeBytes) ?? 0
+        dbFileBytes = try container.decodeIfPresent(Int64.self, forKey: .dbFileBytes) ?? 0
+        walBytes = try container.decodeIfPresent(Int64.self, forKey: .walBytes) ?? 0
+        contentBytes = try container.decodeIfPresent(Int64.self, forKey: .contentBytes) ?? 0
+        bySource = try container.decodeIfPresent([IndexSourceCounts].self, forKey: .bySource) ?? []
+    }
+
+    /// Encodes a storage snapshot including every size and source row.
+    /// - Parameter encoder: Encoder receiving the snapshot.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(bytes, forKey: .bytes)
+        try container.encode(textBytes, forKey: .textBytes)
+        try container.encode(vectorBytes, forKey: .vectorBytes)
+        try container.encode(ftsBytes, forKey: .ftsBytes)
+        try container.encode(freeBytes, forKey: .freeBytes)
+        try container.encode(dbFileBytes, forKey: .dbFileBytes)
+        try container.encode(walBytes, forKey: .walBytes)
+        try container.encode(contentBytes, forKey: .contentBytes)
+        try container.encode(bySource, forKey: .bySource)
+    }
+}
+
 /// Builds the `/index/status` shape from engine policy, aggregate stats, live
 /// run state, and recent failures.
 ///
@@ -507,20 +615,22 @@ public struct IndexStatusResponse: Content, Equatable {
 /// store or coordinator report an honest empty/stopped snapshot instead of
 /// failing. The `live` snapshot is additive: existing callers omit it and
 /// report an idle strip, while the route passes the coordinator's live totals
-/// through when a run is in flight. Sizes ride the optional `storage`
-/// breakdown so file probes stay with the route while the shape stays pure;
-/// a nil breakdown reports zeros matching the zeroed counts. Effort resolves
+/// through when a run is in flight. Fast stats flow through the existing
+/// `stats` parameter with true counts, watermark, and file sizes while slow
+/// size legs stay nil or zero; sizes prefer the optional `storage` breakdown
+/// when warm and fall back to `stats` file sizes when cold, so a cold poll
+/// reports pending zeros for slow legs instead of failing. Effort resolves
 /// from the stored preset on this machine so the dashboard renders workers
 /// without a second fetch.
 ///
 /// - Parameters:
 ///   - config: Active index policy driving enablement and effort.
-///   - stats: Aggregate store stats, or nil when no store is wired.
+///   - stats: Fast or slow aggregate stats, or nil when no store is wired.
 ///   - running: Whether a run is in flight.
 ///   - lastErrors: Recent run failures, newest first.
 ///   - lastRun: Latest run outcome, or nil when no run has been recorded.
 ///   - live: Live in-flight snapshot, or nil when idle.
-///   - storage: On-disk and logical size breakdown, or nil for zeros.
+///   - storage: Cached slow breakdown when fresh, or nil for pending slow legs.
 /// - Returns: The status snapshot.
 func makeIndexStatusResponse(
     config: IndexConfig,
@@ -542,7 +652,9 @@ func makeIndexStatusResponse(
     let byExtractStatus = (stats?.byExtractStatus ?? []).map { row in
         IndexExtractStatusCounts(status: row.status.rawValue, documents: row.documents)
     }
-    let breakdown = storage ?? IndexStorageBreakdown()
+    // Slow legs prefer the cached breakdown when warm; cold polls fall back
+    // to fast file sizes for the on-disk pair and pending zeros for the rest,
+    // so fast counts stay visible while slow bytes merge in later.
     let activeProcessors = max(1, ProcessInfo.processInfo.activeProcessorCount)
     let effort = IndexEffortStatus(
         preset: config.effort,
@@ -556,14 +668,14 @@ func makeIndexStatusResponse(
         chunks: stats?.chunks ?? 0,
         vectorChunks: stats?.vectorChunks ?? 0,
         keywordChunks: stats?.keywordChunks ?? 0,
-        bytes: stats?.bytes ?? 0,
-        dbFileBytes: breakdown.dbFileBytes,
-        walBytes: breakdown.walBytes,
-        textBytes: breakdown.textBytes,
-        vectorBytes: breakdown.vectorBytes,
-        ftsBytes: breakdown.ftsBytes,
-        freeBytes: breakdown.freeBytes,
-        contentBytes: breakdown.contentBytes,
+        bytes: storage?.textBytes ?? stats?.bytes ?? 0,
+        dbFileBytes: storage?.dbFileBytes ?? stats?.dbFileBytes ?? 0,
+        walBytes: storage?.walBytes ?? stats?.walBytes ?? 0,
+        textBytes: storage?.textBytes ?? stats?.textBytes ?? 0,
+        vectorBytes: storage?.vectorBytes ?? stats?.vectorBytes ?? 0,
+        ftsBytes: storage?.ftsBytes ?? stats?.ftsBytes ?? 0,
+        freeBytes: storage?.freeBytes ?? stats?.freeBytes ?? 0,
+        contentBytes: storage?.contentBytes ?? stats?.contentBytes ?? 0,
         indexAsOf: stats?.indexAsOf,
         sources: sources,
         lastErrors: lastErrors,
@@ -1031,6 +1143,8 @@ public extension ServerPaths {
     static let indexReset = "reset"
     /// Index reclaim subpath under `/index`.
     static let indexReclaim = "reclaim"
+    /// Index storage subpath under `/index`.
+    static let indexStorage = "storage"
 }
 
 // MARK: - Index Settings Merge

@@ -326,6 +326,37 @@ public actor DocIndexStore {
         return snapshot.makeStats()
     }
 
+    /// Reads fast index counts without measuring content bytes.
+    ///
+    /// Owned by `DocIndexStore`: runs the static fast aggregate on the
+    /// interactive lane with zero cache interaction, so a cold status poll
+    /// returns true counts and the watermark without touching the slow-pass
+    /// counter, `dbstat`, or `LENGTH`. Never reads or writes `cachedStatus`,
+    /// so repeated fast polls issue only cheap COUNT work and never extend or
+    /// invalidate the slow snapshot TTL.
+    /// - Returns: An index statistics snapshot with true counts, true file sizes, and pending slow size fields.
+    public func fastStats() async throws -> IndexStats {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run(lane: .interactive) {
+            try DocIndexStoreIO.fastStats(dbPath: dbPath)
+        }
+    }
+
+    /// Returns the cached storage breakdown when the slow snapshot is still fresh.
+    ///
+    /// Owned by `DocIndexStore`: inspects `cachedStatus` against
+    /// `statsCacheTTLSeconds` with zero SQLite work, so a warm status poll
+    /// can attach true sizes opportunistically while a cold poll degrades to
+    /// nil and leaves slow size fields pending. A TTL miss returns nil rather
+    /// than recomputing, so callers never trigger a slow pass from this path.
+    /// - Returns: The cached storage breakdown, or nil when cold or expired.
+    public func cachedStorageIfFresh() async -> IndexStorageBreakdown? {
+        if let cached = cachedStatus, clock().timeIntervalSince(cached.at) < Self.statsCacheTTLSeconds {
+            return cached.snapshot.makeBreakdown()
+        }
+        return nil
+    }
+
     /// Deletes documents indexed before a cutoff, then reclaims file space.
     /// - Parameter cutoff: Documents with an earlier `indexedAt` are removed.
     /// - Returns: Number of documents removed.
@@ -584,6 +615,22 @@ enum DocIndexStoreIO {
     static func stats(dbPath: String) throws -> IndexStats {
         #if canImport(SQLite3)
             return try SQLiteDocIndexStore.stats(dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Reads fast index counts without measuring content bytes.
+    ///
+    /// Owned by `DocIndexStoreIO`: thin passthrough to the static fast
+    /// aggregate, so the actor stays off blocking SQLite work while tests can
+    /// still prove zero `LENGTH`/`dbstat` work at the static layer. Never
+    /// touches the slow snapshot counter.
+    /// - Parameter dbPath: SQLite file path.
+    /// - Returns: An index statistics snapshot with true counts and pending slow size fields.
+    static func fastStats(dbPath: String) throws -> IndexStats {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.fastStats(dbPath: dbPath)
         #else
             throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
         #endif

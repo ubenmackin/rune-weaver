@@ -29,6 +29,7 @@ import Vapor
 /// - Parameter app: Application receiving the routes.
 func registerIndexRoutes(_ app: Application) {
     registerIndexStatusRoute(app)
+    registerIndexStorageRoute(app)
     registerIndexRunRoute(app)
     registerIndexCancelRoute(app)
     registerIndexPruneRoute(app)
@@ -36,7 +37,14 @@ func registerIndexRoutes(_ app: Application) {
     registerIndexReclaimRoute(app)
 }
 
-/// Registers the status probe behind `GET /index/status`.
+/// Registers the fast status probe behind `GET /index/status`.
+///
+/// Owned by the index routes: serves true counts, watermark, running, sources,
+/// last run, live, and effort from the cheap fast aggregate in well under the
+/// dashboard budget, attaching cached slow sizes opportunistically when the
+/// TTL snapshot is still fresh. A cold poll reports pending zeros for slow
+/// legs while keeping fast counts visible; a missing store reports zeroed
+/// counts and a stopped run instead of failing.
 /// - Parameter app: Application receiving the route.
 private func registerIndexStatusRoute(_ app: Application) {
     let index = app.grouped(PathComponent.constant(ServerPaths.index))
@@ -47,7 +55,7 @@ private func registerIndexStatusRoute(_ app: Application) {
         // A missing store or coordinator is a real absent component, not an
         // error: the probe reports zeroed counts and a stopped run so a stock
         // install still renders an honest empty state.
-        async let statsTask = context.indexStore?.stats()
+        async let fastStatsTask = context.indexStore?.fastStats()
         async let runningTask = context.indexCoordinator?.isRunning ?? false
         // Live snapshot rides the coordinator's cached counters, so polling
         // never touches run state or the document store; nil when idle.
@@ -57,13 +65,17 @@ private func registerIndexStatusRoute(_ app: Application) {
         // shared fetch feeds both the latest strip and the failure list so
         // they agree on the same snapshot.
         async let kindRunsTask = context.runs.list(limit: 50, kind: ServerIndexRunReporter.kind)
+        // Opportunistic slow sizes: zero I/O TTL hit when warm, nil when cold,
+        // so the fast poll never triggers a slow aggregate pass.
+        async let cachedStorageTask = context.indexStore?.cachedStorageIfFresh()
 
-        let stats = try await statsTask
-        // On-disk and logical sizes ride the store breakdown so the dashboard
-        // renders true file bytes instead of a logical estimate; a missing
-        // store reports zeros matching the zeroed counts above rather than
-        // failing the probe.
-        let storage = try await context.indexStore?.storageBreakdown()
+        // Fast counts never touch the slow-pass counter, `dbstat`, or `LENGTH`.
+        let fastStats = try await fastStatsTask
+        // Flatten the double optional from chaining an optional store over an
+        // optional cached breakdown: nil store and cold cache both degrade to
+        // nil storage, which renders as pending slow legs.
+        let cachedDouble: IndexStorageBreakdown?? = await cachedStorageTask
+        let storage: IndexStorageBreakdown? = cachedDouble ?? nil
         let running = await runningTask
         let live = await liveTask
         let kindRuns = await kindRunsTask
@@ -89,7 +101,56 @@ private func registerIndexStatusRoute(_ app: Application) {
             }
         }
         let lastRun = latestIndexRun(from: latestEntry)
-        return makeIndexStatusResponse(config: config, stats: stats, running: running, lastErrors: lastErrors, lastRun: lastRun, live: live, storage: storage)
+        return makeIndexStatusResponse(config: config, stats: fastStats, running: running, lastErrors: lastErrors, lastRun: lastRun, live: live, storage: storage)
+    }
+}
+
+/// Registers the slow storage probe behind `GET /index/storage`.
+///
+/// Owned by the index routes: serves byte-exact totals plus per-source bytes
+/// from a single slow snapshot fetch, so a cold storage poll performs exactly
+/// one aggregate pass with both views projected locally. Per-source bytes ride
+/// the slow `stats().bySource` rows; a missing store reports a zeroed payload
+/// rather than failing so older dashboards keep rendering.
+/// - Parameter app: Application receiving the route.
+private func registerIndexStorageRoute(_ app: Application) {
+    let index = app.grouped(PathComponent.constant(ServerPaths.index))
+
+    index.get(PathComponent.constant(ServerPaths.indexStorage)) { req async throws -> IndexStorageResponse in
+        let context = req.application.runeWeaver
+        guard let store = context.indexStore else {
+            // No store is an honest empty state, never an error, matching the
+            // status probe's missing-store posture.
+            return IndexStorageResponse()
+        }
+        // Single slow snapshot fetch projecting both views locally: one
+        // `stats()` pass carries every size leg, so one cold poll increments
+        // the aggregate-pass counter exactly once even when a concurrent
+        // write lands between awaits.
+        let stats = try await store.stats()
+        // Per-source bytes come from the slow stats rows, which carry true
+        // logical totals rather than the fast pending zeros.
+        let bySource = stats.bySource.map { row in
+            IndexSourceCounts(kind: row.source.rawValue, documents: row.documents, chunks: row.chunks, bytes: row.bytes)
+        }
+        // Breakdown legs project from the same snapshot: `textBytes` equals
+        // `bytes` when the split is present and falls back to `bytes` when
+        // the `dbstat` probe is unavailable; `vectorBytes` falls back to the
+        // content-minus-text difference so the unavailable split still
+        // reports true embedding bytes; `ftsBytes` degrades to zero.
+        let textBytes = stats.textBytes ?? stats.bytes
+        let vectorBytes = stats.vectorBytes ?? max(stats.contentBytes - stats.bytes, 0)
+        return IndexStorageResponse(
+            bytes: stats.bytes,
+            textBytes: textBytes,
+            vectorBytes: vectorBytes,
+            ftsBytes: stats.ftsBytes ?? 0,
+            freeBytes: stats.freeBytes,
+            dbFileBytes: stats.dbFileBytes,
+            walBytes: stats.walBytes,
+            contentBytes: stats.contentBytes,
+            bySource: bySource
+        )
     }
 }
 

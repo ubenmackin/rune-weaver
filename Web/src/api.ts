@@ -2857,6 +2857,25 @@ export interface IndexStatusResponse {
   effort?: IndexEffortStatus | null;
 }
 
+// Storage breakdown for `GET /index/storage`: byte-exact totals plus per-source
+// document, chunk, and byte rows from the slow aggregate pass. Every field is
+// optional for back-compat; absent degrades to pending rather than failing so
+// older engines and older dashboards keep decoding. The dashboard merges these
+// slow keys over the fast `/index/status` state and never clears fast counts
+// while slow is in flight; fast `bySource[].bytes` stays 0 meaning pending,
+// never an estimate.
+export interface IndexStorageResponse {
+  bytes?: number | null;
+  textBytes?: number | null;
+  vectorBytes?: number | null;
+  ftsBytes?: number | null;
+  freeBytes?: number | null;
+  dbFileBytes?: number | null;
+  walBytes?: number | null;
+  contentBytes?: number | null;
+  bySource?: IndexSourceCounts[];
+}
+
 // Outcome of `POST /index/run`.
 export interface IndexRunResponse {
   sessionID: string;
@@ -3919,6 +3938,14 @@ export function updateSettings(
 // install still renders an empty state.
 export function getIndexStatus(): Promise<IndexStatusResponse> {
   return fetchJson<IndexStatusResponse>("/index/status");
+}
+
+// Reads the slow index storage breakdown: byte-exact totals plus per-source
+// bytes from the TTL-shared slow pass. A missing store reports a zeroed
+// payload rather than failing. Callers merge these slow keys over the fast
+// status state and never clear fast counts while slow is in flight.
+export function getIndexStorage(): Promise<IndexStorageResponse> {
+  return fetchJson<IndexStorageResponse>("/index/storage");
 }
 
 // Milliseconds elapsed since the last successful index watermark, or null when
