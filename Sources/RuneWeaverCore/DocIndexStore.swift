@@ -33,12 +33,13 @@ public actor DocIndexStore {
 
     /// How long a status snapshot stays reusable before the next poll recomputes it.
     ///
-    /// Content writes invalidate the cache, so a status poll after a write
-    /// recomputes on the next read; the bound keeps repeated dashboard polls
-    /// within the window free of SQLite work while keeping staleness
-    /// predictable. `markSeen` stamps are excluded because no snapshot field
+    /// The snapshot is reused for 60 seconds of idle reads, so repeated
+    /// dashboard polls within the window issue no SQLite work; any content
+    /// write invalidates the cache, so a status poll after a write
+    /// recomputes on the next read while keeping staleness predictable.
+    /// `markSeen` stamps are excluded because no snapshot field
     /// projects `last_seen_run`.
-    public static let statsCacheTTLSeconds: TimeInterval = 10
+    public static let statsCacheTTLSeconds: TimeInterval = 60
 
     /// Cached aggregate snapshot plus when it was taken, in clock time.
     private var cachedStatus: (snapshot: DocIndexStatusSnapshot, at: Date)?
@@ -68,7 +69,9 @@ public actor DocIndexStore {
     /// A hit performs no SQLite work at all, so a repeated poll inside the TTL
     /// issues zero aggregate queries; a miss performs exactly one aggregate
     /// pass through the shared snapshot helper and then projects from it.
-    /// The write generation captured before suspending guards against a
+    /// Aggregate passes run on the interactive lane so status polls never
+    /// queue behind utility-throttled indexing work. The write generation
+    /// captured before suspending guards against a
     /// concurrent invalidation: when it changed, this pass may predate the
     /// write, so it is discarded in favor of a fresh refill or a single
     /// bounded post-write retry (at most two passes per call) instead of
@@ -79,7 +82,7 @@ public actor DocIndexStore {
         }
         let dbPath = self.dbPath
         let generationBefore = statusGeneration
-        let snapshot = try await SQLiteSerialIO.run(lane: .indexing) {
+        let snapshot = try await SQLiteSerialIO.run(lane: .interactive) {
             try DocIndexStoreIO.statusSnapshot(dbPath: dbPath)
         }
         // A concurrent write invalidated while suspended, so this snapshot
@@ -93,7 +96,7 @@ public actor DocIndexStore {
                 return refilled.snapshot
             }
             let retryGenerationBefore = statusGeneration
-            let retrySnapshot = try await SQLiteSerialIO.run(lane: .indexing) {
+            let retrySnapshot = try await SQLiteSerialIO.run(lane: .interactive) {
                 try DocIndexStoreIO.statusSnapshot(dbPath: dbPath)
             }
             // Stay bounded: even when another write landed during the retry,

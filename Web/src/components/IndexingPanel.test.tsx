@@ -9,6 +9,7 @@ import IndexingPanel, {
   INDEX_EFFORT_OPTIONS,
   INDEX_LAST_ERROR_PREVIEW_CHARS,
   IndexPolicyPanel,
+  clearCachedIndexStatusForTesting,
   dedupeIndexErrors,
   describeAutoStartNotice,
   describeEffortReality,
@@ -69,6 +70,14 @@ import sharedStyles from "../styles.css?raw";
 // Plain stylesheet imports resolve to empty under the test transform, so the
 // raw text import keeps the regression pinned to the single stylesheet owner
 // while staying inside the bundler module graph with no runtime file access.
+
+/// Isolates the module-scoped index status cache between tests.
+/// Ownership: test isolation only; every test starts with a null cache so a
+/// prior successful load never leaks into the next cold-boot assertion.
+/// Edge cases: safe to clear when already null; per-test seeding re-caches explicitly.
+beforeEach(() => {
+  clearCachedIndexStatusForTesting();
+});
 
 // Complete [index] section as the engine returns it under GET /settings.
 const indexConfig = {
@@ -3909,5 +3918,175 @@ describe("IndexPolicyPanel index roots editor", () => {
     await waitFor(() => {
       expect(screen.getByText("Index roots cannot be empty.")).toBeInTheDocument();
     });
+  });
+});
+
+/// Instant hydration suite for the module-scoped status cache.
+/// Ownership: initial paint reads the cache; loadStatus commits it on success.
+/// Edge cases: cold boot shows the skeleton; cache hits paint instantly and revalidate silently.
+describe("IndexingPanel instant hydration", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    clearCachedIndexStatusForTesting();
+  });
+
+  /// Cold boot owns the skeleton placeholder when the cache is null.
+  /// Ownership: initial paint with a null cache; no fetch has resolved yet.
+  /// Edge cases: gated fetch keeps status null so the old text paragraph never renders.
+  it("renders the skeleton placeholder on true cold boot", async () => {
+    let resolveStatus!: (value: Response) => void;
+    const gated = new Promise<Response>((resolve) => {
+      resolveStatus = resolve;
+    });
+    const fetchMock = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === "/index/status") return gated;
+      return jsonResponse({ engineName: "Test Engine", index: indexConfig });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    // Skeleton shows while status stays null; the old text copy never renders.
+    expect(screen.getByTestId("index-status-skeleton")).toBeInTheDocument();
+    expect(screen.getByTestId("index-status-skeleton")).toHaveAttribute(
+      "aria-label",
+      "Loading index status",
+    );
+    expect(screen.getByTestId("index-status-skeleton")).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+    expect(screen.queryByText("Loading index status…")).toBeNull();
+    expect(screen.queryByText("42")).toBeNull();
+
+    resolveStatus(jsonResponse(statusPayload));
+    await waitFor(() => {
+      expect(screen.getByText("42")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("index-status-skeleton")).toBeNull();
+  });
+
+  /// Cache-hit instant render owns the synchronous paint from the module cache.
+  /// Ownership: first mount seeds the cache; second mount reads it in the state initializer.
+  /// Edge cases: gated second fetch stays pending so the paint proves no fetch wait.
+  it("renders cached stat cards instantly on remount without awaiting fetch", async () => {
+    const { fetchMock } = stubFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { unmount } = render(<IndexingPanel />);
+    await waitFor(() => {
+      expect(screen.getByText("42")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("Last run ok");
+    expect(screen.getByText("Files · Off")).toBeInTheDocument();
+    unmount();
+
+    // Remount with a gated fetch: the cached panel must paint before it resolves.
+    let resolveSecond!: (value: Response) => void;
+    const gated = new Promise<Response>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const secondFetch = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === "/index/status") return gated;
+      return jsonResponse({ engineName: "Test Engine", index: indexConfig });
+    });
+    vi.stubGlobal("fetch", secondFetch);
+
+    render(<IndexingPanel />);
+
+    // Instant paint without awaiting fetch: cards, pills, and strip with zero blank flash.
+    expect(screen.getByText("42")).toBeInTheDocument();
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
+    expect(screen.getByText("Files · Off")).toBeInTheDocument();
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("Last run ok");
+    expect(screen.queryByTestId("index-status-skeleton")).toBeNull();
+    expect(screen.queryByText("Loading index status…")).toBeNull();
+
+    resolveSecond(jsonResponse(statusPayload));
+    await waitFor(() => {
+      const statusCalls = secondFetch.mock.calls.filter(
+        ([url]) => String(url) === "/index/status",
+      ).length;
+      expect(statusCalls).toBeGreaterThan(0);
+    });
+  });
+
+  /// Background revalidation owns the silent update without resetting to null.
+  /// Ownership: remount paints the cached value; the pending fetch resolves with fresh counts.
+  /// Edge cases: the skeleton never mounts mid-update and the old value swaps atomically.
+  it("revalidates in the background without flashing to null", async () => {
+    const { fetchMock } = stubFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { unmount } = render(<IndexingPanel />);
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
+    });
+    unmount();
+
+    const updated = { ...statusPayload, documents: 87, chunks: 120 };
+    let resolveSecond!: (value: Response) => void;
+    const gated = new Promise<Response>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const secondFetch = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === "/index/status") return gated;
+      return jsonResponse({ engineName: "Test Engine", index: indexConfig });
+    });
+    vi.stubGlobal("fetch", secondFetch);
+
+    render(<IndexingPanel />);
+
+    // Cached value paints instantly with no skeleton while revalidation pends.
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
+    expect(screen.queryByTestId("index-status-skeleton")).toBeNull();
+
+    resolveSecond(jsonResponse(updated));
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("87");
+    });
+    // Updated silently: no skeleton flash, no old text paragraph, no null gap.
+    expect(screen.queryByTestId("index-status-skeleton")).toBeNull();
+    expect(screen.queryByText("Loading index status…")).toBeNull();
+    expect(screen.getByTestId("index-last-run")).toBeInTheDocument();
+  });
+
+  /// Failing refresh owns keeping the last good panel alongside the error slot.
+  /// Ownership: loadStatus leaves the cache untouched on failure; state keeps the cached panel.
+  /// Edge cases: cached paint precedes the rejection; the error surfaces without clearing cards.
+  it("keeps the last good panel when the background refresh fails", async () => {
+    const { fetchMock } = stubFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { unmount } = render(<IndexingPanel />);
+    await waitFor(() => {
+      expect(screen.getByText("42")).toBeInTheDocument();
+    });
+    unmount();
+
+    const failingFetch = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === "/index/status") throw new Error("boom");
+      return jsonResponse({ engineName: "Test Engine", index: indexConfig });
+    });
+    vi.stubGlobal("fetch", failingFetch);
+
+    render(<IndexingPanel />);
+
+    // Cached panel paints instantly before the failing refresh settles.
+    expect(screen.getByText("42")).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByText("boom")).toBeInTheDocument();
+    });
+    // Last good panel survives plus the error slot; no skeleton takes over.
+    expect(screen.getByText("42")).toBeInTheDocument();
+    expect(screen.getByTestId("index-last-run")).toBeInTheDocument();
+    expect(screen.queryByTestId("index-status-skeleton")).toBeNull();
+    expect(screen.queryByText("Loading index status…")).toBeNull();
   });
 });

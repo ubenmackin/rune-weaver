@@ -336,11 +336,21 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
 
         /// Computes every status aggregate in one pass over a single open handle.
         ///
-        /// Opens once, then runs each COUNT, the MAX watermark, each GROUP BY,
-        /// both `SUM(LENGTH)` queries, one grouped `dbstat` walk, and each
-        /// PRAGMA exactly once. Both public projections read from the returned
-        /// snapshot with no second pass, so one status poll never fans out into
-        /// duplicate COUNTs or double `dbstat` walks.
+        /// Opens once, then runs the document COUNT, the MAX watermark, one
+        /// grouped chunk/text query owned by `sourceAggregates(handle:)`, one
+        /// vector query owned by `vectorCountAndBytes(handle:)`, one scoped
+        /// `dbstat` walk owned by `dbstatGroupedPageBytes(handle:probe:)`,
+        /// each GROUP BY, and each PRAGMA exactly once. Both public
+        /// projections read from the returned snapshot with no second pass,
+        /// so one status poll never fans out into duplicate COUNTs or double
+        /// `dbstat` walks. Chunk and text totals sum the raw grouped mapping
+        /// plus the orphan bucket from that same grouped pass: the chunk/text
+        /// query keeps chunks whose parent document row is missing (legacy
+        /// file, pragma-off write, manual SQL) on a NULL-source row instead
+        /// of dropping them through an inner join, and rows under unknown or
+        /// empty source strings stay in the raw totals, so snapshot totals
+        /// stay exact while the per-source breakdown attributes only joined
+        /// rows for known sources.
         /// - Parameters:
         ///   - dbPath: SQLite file path. `~` is expanded.
         ///   - dbstatProbe: Per-object page-byte reader, or nil for the live table.
@@ -350,17 +360,15 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
             let documents = try scalarInt(handle: handle, sql: "SELECT COUNT(*) FROM indexed_documents;")
-            let chunks = try scalarInt(handle: handle, sql: "SELECT COUNT(*) FROM indexed_chunks;")
-            let vectorChunks = try scalarInt(
-                handle: handle,
-                sql: "SELECT COUNT(*) FROM indexed_chunks WHERE is_vector = 1;"
-            )
-            let textLogical = try scalarInt64(
-                handle: handle,
-                sql: "SELECT COALESCE(SUM(LENGTH(CAST(chunk_text AS BLOB))), 0) FROM indexed_chunks;"
-            )
             let indexAsOf = try scalarMaxIndexedAt(handle: handle)
-            let bySource = try sourceAggregates(handle: handle)
+            let sourceResult = try sourceAggregates(handle: handle)
+            let bySource = sourceResult.bySource
+            // Totals sum the raw grouped mapping plus the orphan bucket from
+            // the same grouped pass so no full-table COUNT or SUM scans the
+            // chunks table a second time yet chunks with unknown sources or
+            // without a parent row still count toward the snapshot.
+            let chunks = sourceResult.totalChunks
+            let textLogical: Int64 = sourceResult.totalBytes
             let byExtractStatus = try extractStatusAggregates(handle: handle)
             let pageCount = try scalarInt(handle: handle, sql: "PRAGMA page_count;")
             let pageSize = try scalarInt(handle: handle, sql: "PRAGMA page_size;")
@@ -373,10 +381,7 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             )
             let freeBytes = Int64(max(freelistCount, 0)) * pageSizeBytes
             let walBytes = onDiskBytes(at: expanded + "-wal")
-            let vectorLogical = try scalarInt64(
-                handle: handle,
-                sql: "SELECT COALESCE(SUM(LENGTH(embedding)), 0) FROM indexed_chunks WHERE is_vector = 1;"
-            )
+            let vector = try vectorCountAndBytes(handle: handle)
             let grouped = try? dbstatGroupedPageBytes(handle: handle, probe: dbstatProbe)
             // Logical content bytes, not page bytes: only the FTS leg is
             // attributed via the grouped `dbstat` split.
@@ -388,9 +393,9 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             let snapshot = DocIndexStatusSnapshot(
                 documents: documents,
                 chunks: chunks,
-                vectorChunks: vectorChunks,
+                vectorChunks: vector.count,
                 textBytes: textLogical,
-                vectorBytes: vectorLogical,
+                vectorBytes: vector.bytes,
                 indexAsOf: indexAsOf,
                 bySource: bySource,
                 byExtractStatus: byExtractStatus,
@@ -481,10 +486,13 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
 
         /// Reads per-object page bytes via one grouped `dbstat` query with an injectable probe.
         ///
-        /// Groups `SUM(pgsize)` by object name so the caller attributes file
-        /// pages to content and search structures without one query per table.
-        /// A nil probe result or a failed prepare reports unavailability
-        /// instead of an empty map.
+        /// Owns the scoped `dbstat` pass: an injected probe keeps its exact
+        /// current behavior (a nil mapping reports unavailability while a
+        /// mapping returns as-is), and a nil probe scopes the live table to
+        /// the chunk full-text objects through a `sqlite_schema` name filter
+        /// so content pages never enter the split. The `ftsPageBytes(from:)`
+        /// prefix filter stays on top as defense-in-depth. A nil probe result
+        /// or a failed prepare reports unavailability instead of an empty map.
         /// - Parameters:
         ///   - handle: Open database handle.
         ///   - probe: Per-object page-byte reader, or nil for the live table.
@@ -497,7 +505,13 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
                 return mapping
             }
             var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name;", -1, &statement, nil) == SQLITE_OK else {
+            guard sqlite3_prepare_v2(
+                handle,
+                "SELECT name, SUM(pgsize) FROM dbstat WHERE name IN (SELECT name FROM sqlite_schema WHERE name LIKE 'indexed_chunks_fts%') GROUP BY name;",
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK else {
                 throw DocIndexError.persistenceFailed("Could not prepare dbstat probe")
             }
             defer { sqlite3_finalize(statement) }
@@ -590,33 +604,39 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             return onDiskBytes(at: expandedPath)
         }
 
-        /// Aggregates per-source document, chunk, and byte counts.
+        /// Aggregates per-source document, chunk, and byte counts plus snapshot totals.
         ///
-        /// Document counts group the `indexed_documents` table directly while
-        /// chunk and byte counts join through `indexed_chunks`, so a document
-        /// without chunks still contributes its document row with zero chunks
-        /// and bytes. Only sources holding at least one document are returned,
-        /// in canonical `IndexSource` order.
-        private static func sourceAggregates(handle: OpaquePointer?) throws -> [IndexSourceStats] {
+        /// Owns the single grouped chunk/text pass: one three-column
+        /// source/count/bytes query returns both per-source chunk counts and
+        /// text byte sums in a single prepare/step/finalize walk, so the
+        /// chunks table is scanned once instead of once per column family.
+        /// Document counts group `indexed_documents` directly with a `?? 0`
+        /// fallback for chunk-less documents, so a document without chunks
+        /// still contributes its document row with zero chunks and bytes.
+        /// Only sources holding at least one document are returned, in
+        /// canonical `IndexSource` order. The chunk/text query runs
+        /// `FROM indexed_chunks LEFT JOIN indexed_documents`, which preserves
+        /// orphan chunks whose parent document row is missing on a NULL-source
+        /// row; snapshot totals sum the raw grouped mapping plus that orphan
+        /// row so unknown or empty source strings stay exact while the
+        /// per-source breakdown attributes only known sources.
+        /// - Parameter handle: Open database handle.
+        /// - Returns: Per-source aggregates in canonical order with exact chunk and byte totals.
+        private static func sourceAggregates(handle: OpaquePointer?) throws -> (bySource: [IndexSourceStats], totalChunks: Int, totalBytes: Int64) {
             let documentCounts = try groupedCounts(
                 handle: handle,
                 sql: "SELECT source, COUNT(*) FROM indexed_documents GROUP BY source;"
             )
-            let chunkCounts = try groupedCounts(
+            let chunkAggregates = try groupedChunkAggregates(
                 handle: handle,
-                sql: "SELECT d.source, COUNT(c.id) FROM indexed_chunks c "
-                    + "JOIN indexed_documents d ON d.id = c.document_id GROUP BY d.source;"
-            )
-            let byteSums = try groupedSums(
-                handle: handle,
-                sql: "SELECT d.source, COALESCE(SUM(LENGTH(CAST(c.chunk_text AS BLOB))), 0) "
-                    + "FROM indexed_chunks c JOIN indexed_documents d ON d.id = c.document_id GROUP BY d.source;"
+                sql: "SELECT d.source, COUNT(c.id), COALESCE(SUM(LENGTH(CAST(c.chunk_text AS BLOB))), 0) "
+                    + "FROM indexed_chunks c LEFT JOIN indexed_documents d ON d.id = c.document_id GROUP BY d.source;"
             )
             var aggregates: [IndexSourceStats] = []
             for source in IndexSource.allCases {
                 guard let documents = documentCounts[source.rawValue] else { continue }
-                let chunks = chunkCounts[source.rawValue] ?? 0
-                let bytes = byteSums[source.rawValue] ?? 0
+                let chunks = chunkAggregates.bySource[source.rawValue]?.count ?? 0
+                let bytes = chunkAggregates.bySource[source.rawValue]?.bytes ?? 0
                 aggregates.append(IndexSourceStats(
                     source: source,
                     documents: documents,
@@ -624,7 +644,81 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
                     bytes: bytes
                 ))
             }
-            return aggregates
+            // Totals cover the raw grouped mapping plus the orphan row from
+            // the same pass, so unknown or empty source strings that never
+            // enter the filtered breakdown still count toward the snapshot.
+            let totalChunks = chunkAggregates.bySource.values.reduce(0) { $0 + $1.count } + chunkAggregates.orphanChunks
+            let totalBytes = chunkAggregates.bySource.values.reduce(Int64(0)) { $0 + $1.bytes } + chunkAggregates.orphanBytes
+            return (bySource: aggregates, totalChunks: totalChunks, totalBytes: totalBytes)
+        }
+
+        /// Reads the single grouped chunk/text pass into per-source counts and byte sums plus orphan totals.
+        ///
+        /// Mirrors the `groupedValues` prepare/step/finalize shape but reads
+        /// both value columns from each row in one walk, so the three-column
+        /// source/count/bytes query executes exactly once. Rows without a
+        /// source key carry orphan chunks whose parent document row is
+        /// missing; they fold into the orphan totals rather than a per-source
+        /// bucket, so snapshot totals stay exact while the breakdown keeps
+        /// only joined sources.
+        /// - Parameters:
+        ///   - handle: Open database handle.
+        ///   - sql: Three-column grouped chunk/text query.
+        /// - Returns: Mapping from source name to chunk count and text bytes with orphan chunk and byte totals.
+        private static func groupedChunkAggregates(
+            handle: OpaquePointer?,
+            sql: String
+        ) throws -> (bySource: [String: (count: Int, bytes: Int64)], orphanChunks: Int, orphanBytes: Int64) {
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not prepare grouped count")
+            }
+            defer { sqlite3_finalize(statement) }
+            var values: [String: (count: Int, bytes: Int64)] = [:]
+            var orphanChunks = 0
+            var orphanBytes: Int64 = 0
+            while sqlite3_step(statement) == SQLITE_ROW {
+                // Both aggregates come from the same row so one walk serves
+                // the chunk-count and text-bytes families together.
+                let count = Int(sqlite3_column_int64(statement, 1))
+                let bytes = sqlite3_column_int64(statement, 2)
+                guard let key = SQLiteHelpers.columnText(statement, index: 0) else {
+                    orphanChunks += count
+                    orphanBytes += bytes
+                    continue
+                }
+                values[key] = (count: count, bytes: bytes)
+            }
+            return (bySource: values, orphanChunks: orphanChunks, orphanBytes: orphanBytes)
+        }
+
+        /// Reads the vector chunk count and embedding byte total in one pass.
+        ///
+        /// Owns the single vector aggregate: one two-column COUNT/SUM query
+        /// returns both values from its single result row, so the chunks
+        /// table is scanned once instead of once per aggregate. The
+        /// `COALESCE` keeps an empty index on the single `(0, 0)` row, so
+        /// callers never treat absence as failure.
+        /// - Parameter handle: Open database handle.
+        /// - Returns: Vector chunk count paired with logical embedding bytes.
+        private static func vectorCountAndBytes(handle: OpaquePointer?) throws -> (count: Int, bytes: Int64) {
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                handle,
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(embedding)), 0) FROM indexed_chunks WHERE is_vector = 1;",
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not prepare vector count")
+            }
+            defer { sqlite3_finalize(statement) }
+            // An aggregate without GROUP BY always yields exactly one row;
+            // a missing row degrades to zeros rather than failing the poll.
+            guard sqlite3_step(statement) == SQLITE_ROW else { return (count: 0, bytes: 0) }
+            let count = Int(sqlite3_column_int64(statement, 0))
+            let bytes = sqlite3_column_int64(statement, 1)
+            return (count: count, bytes: bytes)
         }
 
         /// Aggregates document counts grouped by extraction outcome.
@@ -668,13 +762,6 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
         private static func groupedCounts(handle: OpaquePointer?, sql: String) throws -> [String: Int] {
             try groupedValues(handle: handle, sql: sql, prepareError: "Could not prepare grouped count") {
                 Int(sqlite3_column_int64($0, 1))
-            }
-        }
-
-        /// Reads a two-column `GROUP BY` byte-sum mapping into text keys.
-        private static func groupedSums(handle: OpaquePointer?, sql: String) throws -> [String: Int64] {
-            try groupedValues(handle: handle, sql: sql, prepareError: "Could not prepare grouped sum") {
-                sqlite3_column_int64($0, 1)
             }
         }
 
@@ -765,17 +852,6 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             defer { sqlite3_finalize(statement) }
             guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
             return Int(sqlite3_column_int64(statement, 0))
-        }
-
-        /// Reads a single 64-bit aggregate.
-        private static func scalarInt64(handle: OpaquePointer?, sql: String) throws -> Int64 {
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-                throw DocIndexError.persistenceFailed("Could not prepare sum")
-            }
-            defer { sqlite3_finalize(statement) }
-            guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
-            return sqlite3_column_int64(statement, 0)
         }
 
         /// Reads the newest `indexed_at` watermark, falling back to the epoch
