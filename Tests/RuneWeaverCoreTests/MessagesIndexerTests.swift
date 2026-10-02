@@ -883,4 +883,53 @@ struct MessagesIndexerTests {
         #expect(frames.last?.scanned == 3)
         #expect(frames.last?.matched == 3)
     }
+
+    @Test
+    func `Reset watermark clears persisted state so next pass starts from beginning`() async throws {
+        let paths = makeMessagesPaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        try createMessagesFixture(at: paths.database)
+        let handle = try openMessagesFixture(at: paths.database)
+        try insertMessagesFixtureMessage(
+            into: handle,
+            rowID: 1,
+            guid: "guid-1",
+            text: "First message",
+            date: 700_000_000_000_010_000,
+            isFromMe: false
+        )
+        try joinMessagesFixtureChat(into: handle, chatID: 1, messageID: 1)
+        sqlite3_close(handle)
+
+        let store = DocIndexStore(dbPath: paths.store)
+        let indexer = MessagesIndexer(
+            chatDatabasePath: paths.database,
+            store: store,
+            statePath: paths.state
+        )
+        let first = try await indexer.indexNewMessages()
+        #expect(first.scanned == 1)
+        #expect(try await indexer.currentRowIDWatermark() == 1)
+
+        // Reset watermark via static helper
+        try MessagesIndexer.resetWatermark(statePath: paths.state)
+        #expect(try await indexer.currentRowIDWatermark() == 0)
+
+        // Re-indexing works and resets via instance method
+        _ = try await indexer.indexNewMessages()
+        #expect(try await indexer.currentRowIDWatermark() == 1)
+        try await indexer.resetWatermark()
+        #expect(try await indexer.currentRowIDWatermark() == 0)
+
+        // Resetting via DocIndexStore clears it as well; both sidecar targets
+        // stay inside the fixture directory so the test never clears the
+        // operator's real checkpoint or watermark files.
+        _ = try await indexer.indexNewMessages()
+        #expect(try await indexer.currentRowIDWatermark() == 1)
+        try await store.reset(
+            mailCheckpointPath: paths.base.appendingPathComponent("mail-index-checkpoint.json").path,
+            messagesStatePath: paths.state
+        )
+        #expect(try await indexer.currentRowIDWatermark() == 0)
+    }
 }

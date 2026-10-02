@@ -227,7 +227,9 @@ private func validateSecretKey(_ rawKey: String) throws -> String {
 private func registerSettingsSecretsRoutes(_ settings: RoutesBuilder) {
     // Keychain secret management routes.
     // Responses never cache and never carry secret bytes: store and delete
-    // return an empty 200 while status returns only an existence map.
+    // answer `204 No Content` with no body — the same bodyless-success shape
+    // every other side-effect route uses — while status returns only an
+    // existence map.
     let secretsGroup = settings.grouped(PathComponent.constant(ServerPaths.secrets))
 
     secretsGroup.post { req async throws -> Response in
@@ -245,7 +247,7 @@ private func registerSettingsSecretsRoutes(_ settings: RoutesBuilder) {
         } catch {
             throw Abort(.internalServerError, reason: "Failed to store secret in Keychain: \(error.localizedDescription)")
         }
-        let response = Response(status: .ok)
+        let response = Response(status: .noContent)
         response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store, private")
         return response
     }
@@ -282,7 +284,7 @@ private func registerSettingsSecretsRoutes(_ settings: RoutesBuilder) {
         } catch {
             throw Abort(.internalServerError, reason: "Failed to delete secret from Keychain: \(error.localizedDescription)")
         }
-        let response = Response(status: .ok)
+        let response = Response(status: .noContent)
         response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store, private")
         return response
     }

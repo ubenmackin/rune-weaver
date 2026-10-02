@@ -390,16 +390,32 @@ public actor DocIndexStore {
         }
     }
 
-    /// Clears every document, chunk, and search-index entry, plus incremental mail checkpoints.
-    public func reset() async throws {
+    /// Clears every document, chunk, and search-index entry, plus incremental mail checkpoints and messages watermarks.
+    ///
+    /// The sidecar targets are required rather than defaulted so no caller can
+    /// silently clear an operator's live checkpoint or watermark: the server
+    /// route supplies its context-owned paths, and a production context seeds
+    /// the real defaults.
+    /// - Parameters:
+    ///   - mailCheckpointPath: Persisted mail checkpoint to clear.
+    ///   - messagesStatePath: Persisted Messages watermark to clear.
+    public func reset(
+        mailCheckpointPath: String,
+        messagesStatePath: String
+    ) async throws {
         let dbPath = self.dbPath
         try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.reset(dbPath: dbPath)
         }
         do {
-            try MailIndexCheckpointStore.reset()
+            try MailIndexCheckpointStore.reset(path: mailCheckpointPath)
         } catch {
             RuneWeaverLog.stores.error("DocIndexStore: failed to reset MailIndexCheckpointStore: \(error.localizedDescription)")
+        }
+        do {
+            try MessagesIndexer.resetWatermark(statePath: messagesStatePath)
+        } catch {
+            RuneWeaverLog.stores.error("DocIndexStore: failed to reset MessagesIndexer watermark: \(error.localizedDescription)")
         }
         invalidateStatusCache()
     }

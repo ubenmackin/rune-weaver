@@ -5,12 +5,16 @@
 // without raw TOML, structured PUT validation (field gates then the two
 // formal invariants) before any file write, the shared-store visibility that
 // lets a rebuilt egress supervisor observe an accepted write with no restart,
-// and the structured candidate verify route.
+// and the structured candidate verify route. Also pins the `/settings/secrets`
+// store and delete routes to their bodyless `204 No Content` contract, the
+// only success shape the dashboard JSON client accepts.
 // Scope: route status codes, DTO shapes, and policy file/store effects;
 // invariant math and the supervisor gate internals stay with their own suites.
 // Architectural role: guards the one owner surface whose writes steer the
 // mandatory egress choke-point, so a route edit cannot persist an unverified
-// policy or claim a write that never landed.
+// policy or claim a write that never landed; the secrets acknowledgement is
+// guarded the same way — a bare `200` reads as failure to the owner even after
+// the Keychain write landed.
 
 import Foundation
 import RuneWeaverCore
@@ -1045,7 +1049,7 @@ struct SettingsRouteTests {
         let base = ServerContext.fallbackUnconfigured
         // A fresh bus keeps these rebuilt tools off the shared fallback
         // registry, so parallel route tests never observe them.
-        let context = makePolicyRouteContext(
+        let context = makeRouteContext(
             store: store,
             egressSupervisor: bootSupervisor,
             toolBus: ToolBus(permissionGate: base.permissionGate)
@@ -1122,6 +1126,165 @@ struct SettingsRouteTests {
     }
 }
 
+// MARK: - Shared Settings Route Helpers
+
+/// Builds the lean route context for the settings policy and secrets surfaces.
+///
+/// Borrows the fallback context's collaborators — each settings route group
+/// reads only its injected collaborator, so no turn machinery is involved — and
+/// injects the isolated policy store and/or secrets manager under test as the
+/// instances the app serves. Live-reload regressions may additionally inject
+/// the boot supervisor the save path must preserve and a fresh bus so their
+/// tool registrations stay off the shared fallback registry.
+/// - Parameters:
+///   - store: The one policy store this app's routes must serve; defaults to the fallback store.
+///   - egressSupervisor: Boot supervisor the context exposes for triage and gate decisions.
+///   - toolBus: Fresh registry for tests that rebuild tools; defaults to the fallback bus.
+///   - secrets: The secrets manager this app's routes must serve; nil leaves secrets unwired.
+/// - Returns: A context wired for the `/settings/policy` and `/settings/secrets` routes.
+private func makeRouteContext(
+    store: PolicyStore? = nil,
+    egressSupervisor: OutboundEgressSupervisor? = nil,
+    toolBus: ToolBus? = nil,
+    secrets: SecretsManager? = nil
+) -> ServerContext {
+    let base = ServerContext.fallbackUnconfigured
+    return ServerContext(
+        config: .default,
+        conversations: base.conversations,
+        toolBus: toolBus ?? base.toolBus,
+        orchestrator: base.orchestrator,
+        memoryEngine: base.memoryEngine,
+        permissionGate: base.permissionGate,
+        approvals: base.approvals,
+        steeringQueue: base.steeringQueue,
+        secrets: secrets,
+        policyStore: store ?? base.policyStore,
+        egressSupervisor: egressSupervisor
+    )
+}
+
+/// Runs one test body against an application serving the settings routes.
+/// - Parameters:
+///   - store: The policy store the routes must serve; defaults to the fallback store.
+///   - secrets: The secrets manager the routes must serve; nil leaves secrets unwired.
+///   - body: Test body receiving the configured app.
+/// - Returns: Whatever `body` returns.
+private func withRouteApp<T>(
+    store: PolicyStore? = nil,
+    secrets: SecretsManager? = nil,
+    _ body: (Application) async throws -> T
+) async throws -> T {
+    let app = try await Application.make(.testing)
+    do {
+        app.runeWeaver = makeRouteContext(store: store, secrets: secrets)
+        registerRuneWeaverRoutes(app)
+        let value = try await body(app)
+        try await app.asyncShutdown()
+        return value
+    } catch {
+        try? await app.asyncShutdown()
+        throw error
+    }
+}
+
+/// Sends one in-process request through the registered settings routes.
+/// - Parameters:
+///   - app: Configured application.
+///   - method: HTTP verb.
+///   - path: Request path.
+///   - body: Content JSON body for POST and PUT probes; nil sends no body.
+/// - Returns: The route response, without binding a socket.
+private func settingsRequest(
+    app: Application,
+    method: HTTPMethod,
+    path: String,
+    body: (some Content)?
+) async throws -> Response {
+    let request = Request(
+        application: app,
+        method: method,
+        url: URI(string: path),
+        on: app.eventLoopGroup.next()
+    )
+    if let body {
+        try request.content.encode(body)
+    }
+    return try await app.responder.respond(to: request).get()
+}
+
+/// Sends one in-process bodyless request through the registered settings routes.
+/// - Parameters:
+///   - app: Configured application.
+///   - method: HTTP verb.
+///   - path: Request path.
+/// - Returns: The route response, without binding a socket.
+private func settingsRequest(
+    app: Application,
+    method: HTTPMethod,
+    path: String
+) async throws -> Response {
+    let request = Request(
+        application: app,
+        method: method,
+        url: URI(string: path),
+        on: app.eventLoopGroup.next()
+    )
+    return try await app.responder.respond(to: request).get()
+}
+
+// MARK: - Settings Secrets Routes
+
+@Suite("Settings Secrets Routes")
+struct SettingsSecretsRouteTests {
+    @Test
+    func `POST /settings/secrets stores the secret and answers 204`() async throws {
+        // The dashboard accepts only a bodyless 204 as success, so the bare 200
+        // this route used to answer surfaced as `Invalid JSON response` even
+        // after the Keychain write landed. Pin the acknowledged status, the
+        // non-cacheable header every secret-bearing response must keep, and the
+        // effect the owner was waiting on.
+        let secrets = SecretsManager(inMemory: true)
+        let key = "RW_TEST_SECRET_" + UUID().uuidString.replacingOccurrences(of: "-", with: "_")
+
+        try await withRouteApp(secrets: secrets) { app in
+            let response = try await settingsRequest(
+                app: app,
+                method: .POST,
+                path: "/settings/secrets",
+                body: StoreSecretRequest(key: key, secret: "s3cret-value")
+            )
+            #expect(response.status == .noContent)
+            #expect((response.body.string ?? "").isEmpty)
+            #expect(response.headers.first(name: "Cache-Control") == "no-store, private")
+            #expect(try await secrets.retrieve(key: key) == "s3cret-value")
+        }
+    }
+
+    @Test
+    func `DELETE /settings/secrets/:key removes the secret and answers 204`() async throws {
+        // A pre-seeded value proves the route removed bytes rather than only
+        // answering a status; the unique key keeps a same-named environment
+        // variable from faking a retrieval. The acknowledgement must stay as
+        // bodyless and as non-cacheable as the store response.
+        let secrets = SecretsManager(inMemory: true)
+        let key = "RW_TEST_SECRET_" + UUID().uuidString.replacingOccurrences(of: "-", with: "_")
+        try await secrets.store(key: key, secret: "to-delete")
+
+        try await withRouteApp(secrets: secrets) { app in
+            let response = try await settingsRequest(
+                app: app,
+                method: .DELETE,
+                path: "/settings/secrets/\(key)"
+            )
+            #expect(response.status == .noContent)
+            #expect((response.body.string ?? "").isEmpty)
+            #expect(response.headers.first(name: "Cache-Control") == "no-store, private")
+            #expect(try await (secrets.retrieve(key: key) ?? "").isEmpty)
+        }
+    }
+}
+
 // MARK: - Security Policy Routes
 
 /// Minimal orchestrator stub so fan-out live-reload tests can own an engine
@@ -1161,105 +1324,6 @@ private func makePolicyRouteStore(contents: String? = nil) async throws -> (stor
     let store = PolicyStore(fileURL: fileURL)
     await store.load()
     return (store, fileURL, directory)
-}
-
-/// Builds the lean route context for the policy surface.
-///
-/// Borrows the fallback context's collaborators — the policy routes read only
-/// the shared store, so no turn machinery is involved — and injects the
-/// isolated store under test as the one instance the app serves. Live-reload
-/// regressions may additionally inject the boot supervisor the save path must
-/// preserve and a fresh bus so their tool registrations stay off the shared
-/// fallback registry.
-/// - Parameters:
-///   - store: The one policy store this app's routes must serve.
-///   - egressSupervisor: Boot supervisor the context exposes for triage and gate decisions.
-///   - toolBus: Fresh registry for tests that rebuild tools; defaults to the fallback bus.
-/// - Returns: A context wired for the `/settings/policy` routes.
-private func makePolicyRouteContext(
-    store: PolicyStore,
-    egressSupervisor: OutboundEgressSupervisor? = nil,
-    toolBus: ToolBus? = nil
-) -> ServerContext {
-    let base = ServerContext.fallbackUnconfigured
-    return ServerContext(
-        config: .default,
-        conversations: base.conversations,
-        toolBus: toolBus ?? base.toolBus,
-        orchestrator: base.orchestrator,
-        memoryEngine: base.memoryEngine,
-        permissionGate: base.permissionGate,
-        approvals: base.approvals,
-        steeringQueue: base.steeringQueue,
-        policyStore: store,
-        egressSupervisor: egressSupervisor
-    )
-}
-
-/// Runs one test body against an application serving the policy routes.
-/// - Parameters:
-///   - store: The shared store the routes must serve.
-///   - body: Test body receiving the configured app.
-/// - Returns: Whatever `body` returns.
-private func withPolicyRouteApp<T>(
-    store: PolicyStore,
-    _ body: (Application) async throws -> T
-) async throws -> T {
-    let app = try await Application.make(.testing)
-    do {
-        app.runeWeaver = makePolicyRouteContext(store: store)
-        registerRuneWeaverRoutes(app)
-        let value = try await body(app)
-        try await app.asyncShutdown()
-        return value
-    } catch {
-        try? await app.asyncShutdown()
-        throw error
-    }
-}
-
-/// Sends one in-process request through the registered policy surface.
-/// - Parameters:
-///   - app: Configured application.
-///   - method: HTTP verb.
-///   - path: Request path.
-///   - body: Content JSON body for PUT and POST probes; nil sends no body.
-/// - Returns: The route response, without binding a socket.
-private func policyRequest(
-    app: Application,
-    method: HTTPMethod,
-    path: String,
-    body: (some Content)?
-) async throws -> Response {
-    let request = Request(
-        application: app,
-        method: method,
-        url: URI(string: path),
-        on: app.eventLoopGroup.next()
-    )
-    if let body {
-        try request.content.encode(body)
-    }
-    return try await app.responder.respond(to: request).get()
-}
-
-/// Sends one in-process GET through the registered policy surface.
-/// - Parameters:
-///   - app: Configured application.
-///   - path: Request path.
-/// - Returns: The route response, without binding a socket.
-private func policyRequest(
-    app: Application,
-    method: HTTPMethod,
-    path: String
-) async throws -> Response {
-    let request = Request(
-        application: app,
-        method: method,
-        url: URI(string: path),
-        on: app.eventLoopGroup.next()
-    )
-    return try await app.responder.respond(to: request).get()
 }
 
 /// Retired raw-TOML body shape, kept so the migration signal stays pinned:
@@ -1303,8 +1367,8 @@ struct SettingsPolicyRouteTests {
         let (store, fileURL, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
-            let response = try await policyRequest(app: app, method: .GET, path: "/settings/policy")
+        try await withRouteApp(store: store) { app in
+            let response = try await settingsRequest(app: app, method: .GET, path: "/settings/policy")
             #expect(response.status == .ok)
             let payload = try response.content.decode(PolicyResponse.self)
 
@@ -1330,7 +1394,7 @@ struct SettingsPolicyRouteTests {
         let (store, fileURL, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
+        try await withRouteApp(store: store) { app in
             let before = try String(contentsOf: fileURL, encoding: .utf8)
             let beforePolicy = await store.current
 
@@ -1340,7 +1404,7 @@ struct SettingsPolicyRouteTests {
             for legacy in [
                 RetiredRawTOMLPolicyBody(raw_toml: "version = 1\n[network]\nmode = \"unrestricted\"\n")
             ] {
-                let response = try await policyRequest(
+                let response = try await settingsRequest(
                     app: app, method: .PUT, path: "/settings/policy", body: legacy
                 )
                 #expect(response.status == .badRequest)
@@ -1359,7 +1423,7 @@ struct SettingsPolicyRouteTests {
         let (store, fileURL, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
+        try await withRouteApp(store: store) { app in
             let before = try String(contentsOf: fileURL, encoding: .utf8)
             let beforePolicy = await store.current
 
@@ -1399,7 +1463,7 @@ struct SettingsPolicyRouteTests {
                 policy: structuredPolicyDTO(blocked: ["*foo"])
             )
             for candidate in [badMode, blankDomain, tomlBreaking, emptyHosts, badMethod, unrootedPrefix, badKey] + wildcardShapes + [blockedWildcard] {
-                let response = try await policyRequest(
+                let response = try await settingsRequest(
                     app: app, method: .PUT, path: "/settings/policy", body: candidate
                 )
                 #expect(response.status == .badRequest)
@@ -1417,7 +1481,7 @@ struct SettingsPolicyRouteTests {
 
             // The retired mode name keeps its fail-closed intent by mapping
             // to the surviving posture instead of refusing the save.
-            let legacyResponse = try await policyRequest(
+            let legacyResponse = try await settingsRequest(
                 app: app,
                 method: .PUT,
                 path: "/settings/policy",
@@ -1434,7 +1498,7 @@ struct SettingsPolicyRouteTests {
         let (store, fileURL, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
+        try await withRouteApp(store: store) { app in
             let before = try String(contentsOf: fileURL, encoding: .utf8)
             let beforePolicy = await store.current
 
@@ -1446,7 +1510,7 @@ struct SettingsPolicyRouteTests {
                     "LEAKED": CredentialBindingDTO(allowedHosts: ["*"], allowedMethods: [], allowedPathPrefixes: [])
                 ])
             )
-            let response = try await policyRequest(
+            let response = try await settingsRequest(
                 app: app,
                 method: .PUT,
                 path: "/settings/policy",
@@ -1469,7 +1533,7 @@ struct SettingsPolicyRouteTests {
         let (store, fileURL, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
+        try await withRouteApp(store: store) { app in
             // A public literal settles in the policy and SSRF gates without a
             // resolver hop, so the rebuilt supervisor probes hermetically.
             let destination = try #require(URL(string: "https://93.184.216.34/v1/status"))
@@ -1483,7 +1547,7 @@ struct SettingsPolicyRouteTests {
             }
 
             let candidate = UpdatePolicyRequest(policy: structuredPolicyDTO())
-            let response = try await policyRequest(
+            let response = try await settingsRequest(
                 app: app, method: .PUT, path: "/settings/policy", body: candidate
             )
             #expect(response.status == .ok)
@@ -1527,7 +1591,7 @@ struct SettingsPolicyRouteTests {
         let (store, _, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
+        try await withRouteApp(store: store) { app in
             let candidate = UpdatePolicyRequest(
                 policy: structuredPolicyDTO(
                     credentials: [
@@ -1539,12 +1603,12 @@ struct SettingsPolicyRouteTests {
                     ]
                 )
             )
-            let putResponse = try await policyRequest(
+            let putResponse = try await settingsRequest(
                 app: app, method: .PUT, path: "/settings/policy", body: candidate
             )
             #expect(putResponse.status == .ok)
 
-            let getResponse = try await policyRequest(app: app, method: .GET, path: "/settings/policy")
+            let getResponse = try await settingsRequest(app: app, method: .GET, path: "/settings/policy")
             #expect(getResponse.status == .ok)
             let payload = try getResponse.content.decode(PolicyResponse.self)
             #expect(payload.policy.network.allowedDomains == ["93.184.216.34"])
@@ -1563,9 +1627,9 @@ struct SettingsPolicyRouteTests {
         let (store, _, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
+        try await withRouteApp(store: store) { app in
             let candidate = UpdatePolicyRequest(policy: structuredPolicyDTO())
-            let putResponse = try await policyRequest(
+            let putResponse = try await settingsRequest(
                 app: app, method: .PUT, path: "/settings/policy", body: candidate
             )
             #expect(putResponse.status == .ok)
@@ -1587,14 +1651,14 @@ struct SettingsPolicyRouteTests {
         let (store, fileURL, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
+        try await withRouteApp(store: store) { app in
             let before = try String(contentsOf: fileURL, encoding: .utf8)
             let beforePolicy = await store.current
 
             let candidate = VerifyPolicyRequest(
                 policy: structuredPolicyDTO(mode: "unrestricted", allowed: [], blocked: ["169.254.169.254"])
             )
-            let response = try await policyRequest(
+            let response = try await settingsRequest(
                 app: app, method: .POST, path: "/settings/policy/verify", body: candidate
             )
             #expect(response.status == .ok)
@@ -1616,12 +1680,12 @@ struct SettingsPolicyRouteTests {
         let (store, fileURL, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
+        try await withRouteApp(store: store) { app in
             let before = try String(contentsOf: fileURL, encoding: .utf8)
 
             // A structural refusal names the gate and field so the editor can
             // repair the exact entry; the verdict stays invalid either way.
-            let structural = try await policyRequest(
+            let structural = try await settingsRequest(
                 app: app,
                 method: .POST,
                 path: "/settings/policy/verify",
@@ -1645,7 +1709,7 @@ struct SettingsPolicyRouteTests {
             // A confinement failure reports the violated formal invariant, so
             // a loopback binding the shape gate accepts still surfaces the
             // credential-confinement wording instead of a field gate.
-            let violating = try await policyRequest(
+            let violating = try await settingsRequest(
                 app: app,
                 method: .POST,
                 path: "/settings/policy/verify",
@@ -1674,9 +1738,9 @@ struct SettingsPolicyRouteTests {
         let (store, fileURL, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
+        try await withRouteApp(store: store) { app in
             let before = try String(contentsOf: fileURL, encoding: .utf8)
-            let rejected = try await policyRequest(
+            let rejected = try await settingsRequest(
                 app: app,
                 method: .POST,
                 path: "/settings/policy/verify",
@@ -1701,8 +1765,8 @@ struct SettingsPolicyRouteTests {
         #expect(FileManager.default.fileExists(atPath: fileURL.path))
         #expect(await store.loadedFromDisk == false)
 
-        try await withPolicyRouteApp(store: store) { app in
-            let response = try await policyRequest(app: app, method: .GET, path: "/settings/policy")
+        try await withRouteApp(store: store) { app in
+            let response = try await settingsRequest(app: app, method: .GET, path: "/settings/policy")
             #expect(response.status == .ok)
             let payload = try response.content.decode(PolicyResponse.self)
             #expect(payload.loadedFromDisk == false)
@@ -1725,8 +1789,8 @@ struct SettingsPolicyRouteTests {
         #expect(FileManager.default.fileExists(atPath: fileURL.path))
         #expect(await store.loadedFromDisk == false)
 
-        try await withPolicyRouteApp(store: store) { app in
-            let response = try await policyRequest(app: app, method: .GET, path: "/settings/policy")
+        try await withRouteApp(store: store) { app in
+            let response = try await settingsRequest(app: app, method: .GET, path: "/settings/policy")
             #expect(response.status == .ok)
             let payload = try response.content.decode(PolicyResponse.self)
             #expect(payload.loadedFromDisk == false)
@@ -1740,9 +1804,9 @@ struct SettingsPolicyRouteTests {
         let (store, fileURL, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
+        try await withRouteApp(store: store) { app in
             let candidate = UpdatePolicyRequest(policy: structuredPolicyDTO())
-            let response = try await policyRequest(
+            let response = try await settingsRequest(
                 app: app, method: .PUT, path: "/settings/policy", body: candidate
             )
             #expect(response.status == .ok)
@@ -1763,7 +1827,7 @@ struct SettingsPolicyRouteTests {
         let (store, fileURL, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
+        try await withRouteApp(store: store) { app in
             let before = try String(contentsOf: fileURL, encoding: .utf8)
             let beforePolicy = await store.current
 
@@ -1780,7 +1844,7 @@ struct SettingsPolicyRouteTests {
             ]
             for entry in forbidden {
                 let candidate = UpdatePolicyRequest(policy: structuredPolicyDTO(allowed: [entry]))
-                let response = try await policyRequest(
+                let response = try await settingsRequest(
                     app: app, method: .PUT, path: "/settings/policy", body: candidate
                 )
                 #expect(response.status == .badRequest)
@@ -1801,7 +1865,7 @@ struct SettingsPolicyRouteTests {
         let (store, _, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try await withPolicyRouteApp(store: store) { app in
+        try await withRouteApp(store: store) { app in
             // Unbracketed IPv6 keeps its colons on the network allowlist, and a
             // server-accepted bracketed credential host round-trips, so the
             // REST boundary and the dashboard helper agree on IPv6 shapes.
@@ -1818,7 +1882,7 @@ struct SettingsPolicyRouteTests {
                     ]
                 )
             )
-            let response = try await policyRequest(
+            let response = try await settingsRequest(
                 app: app, method: .PUT, path: "/settings/policy", body: candidate
             )
             #expect(response.status == .ok)

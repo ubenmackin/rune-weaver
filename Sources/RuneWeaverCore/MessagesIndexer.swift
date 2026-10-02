@@ -491,9 +491,18 @@ public actor MessagesIndexer {
         try readWatermark()
     }
 
+    /// Clears the persisted watermark file, resetting it so the next pass starts from the beginning.
+    /// - Parameter statePath: Persisted watermark file path; `~` is expanded.
+    public static func resetWatermark(statePath: String = defaultStatePath) throws {
+        let expanded = (statePath as NSString).expandingTildeInPath
+        let url = URL(fileURLWithPath: expanded)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try FileManager.default.removeItem(at: url)
+    }
+
     /// Clears the persisted watermark so the next pass starts from the beginning.
     public func resetWatermark() throws {
-        try writeWatermark(0)
+        try Self.resetWatermark(statePath: stateURL.path)
     }
 
     #if canImport(SQLite3)

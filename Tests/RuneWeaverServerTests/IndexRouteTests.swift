@@ -61,17 +61,34 @@ private func withIndexTestApp<T>(_ body: (Application) async throws -> T) async 
     }
 }
 
+/// Builds a unique scratch path for a reset sidecar so route tests never clear
+/// the operator's real mail checkpoint or Messages watermark files.
+/// - Parameter name: Leaf file name.
+/// - Returns: An isolated path under the system temporary directory.
+private func makeResetScratchPath(_ name: String) -> String {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("runeweaver-index-reset-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent(name)
+        .path
+}
+
 /// Builds a context around the ephemeral fallback collaborators so a test can
 /// vary only the index collaborators and verifier without booting the engine.
+/// Reset sidecar targets default to scratch paths so a route test can never
+/// delete the operator's live state.
 /// - Parameters:
 ///   - auth: Owner verifier, or nil for the ungated posture.
 ///   - coordinator: Index coordinator to expose, or nil.
 ///   - store: Document store to expose, or nil.
+///   - messagesStatePath: Persisted Messages watermark the reset route clears.
+///   - mailCheckpointPath: Persisted mail checkpoint the reset route clears.
 /// - Returns: A context wired for the `/index` routes.
 private func makeIndexTestContext(
     auth: ServerAuth? = nil,
     coordinator: IndexCoordinator? = nil,
-    store: DocIndexStore? = nil
+    store: DocIndexStore? = nil,
+    messagesStatePath: String = makeResetScratchPath("messages-state.json"),
+    mailCheckpointPath: String = makeResetScratchPath("mail-index-checkpoint.json")
 ) -> ServerContext {
     let base = ServerContext.fallbackUnconfigured
     return ServerContext(
@@ -85,6 +102,8 @@ private func makeIndexTestContext(
         steeringQueue: base.steeringQueue,
         indexCoordinator: coordinator,
         indexStore: store,
+        indexMessagesStatePath: messagesStatePath,
+        indexMailCheckpointPath: mailCheckpointPath,
         auth: auth
     )
 }
@@ -252,6 +271,40 @@ struct IndexControlRouteTests {
     }
 
     @Test
+    func `Reset endpoint clears persisted messages watermark and mail checkpoint`() async throws {
+        let (coordinator, store, directory) = try makeIndexComponents()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // Both sidecars live in this test's scratch directory and the context
+        // below is injected with their paths, so the reset proves the route
+        // honors its injected targets instead of clearing the operator's files.
+        let messagesStateURL = directory.appendingPathComponent("messages-state.json")
+        try JSONEncoder().encode(MessagesIndexState(lastRowID: 12345)).write(to: messagesStateURL, options: .atomic)
+        #expect(FileManager.default.fileExists(atPath: messagesStateURL.path))
+
+        let mailCheckpointURL = directory.appendingPathComponent("mail-index-checkpoint.json")
+        let checkpoints = MailIndexCheckpointStore(path: mailCheckpointURL.path)
+        try await checkpoints.recordBackfillFloor(account: "test", mailbox: "INBOX", floor: 42)
+        #expect(FileManager.default.fileExists(atPath: mailCheckpointURL.path))
+
+        try await withIndexTestApp { app in
+            app.runeWeaver = makeIndexTestContext(
+                coordinator: coordinator,
+                store: store,
+                messagesStatePath: messagesStateURL.path,
+                mailCheckpointPath: mailCheckpointURL.path
+            )
+            registerIndexRoutes(app)
+
+            let reset = try await indexRequest(app: app, method: .POST, path: "/index/reset")
+            #expect(reset.status == .ok)
+            #expect(try reset.content.decode(IndexResetResponse.self).reset == true)
+            #expect(!FileManager.default.fileExists(atPath: messagesStateURL.path))
+            #expect(!FileManager.default.fileExists(atPath: mailCheckpointURL.path))
+        }
+    }
+
+    @Test
     func `Prune requires an explicit cutoff instead of defaulting to now`() async throws {
         let (coordinator, store, directory) = try makeIndexComponents()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -297,6 +350,16 @@ struct IndexControlRouteTests {
                 #expect(response.status == .serviceUnavailable, "\(path) must fail closed without a coordinator")
             }
         }
+    }
+
+    @Test
+    func `Unconfigured context keeps the real reset targets`() {
+        // Only test-wired contexts point the reset sidecars at scratch files;
+        // the shared fallback context (like a production boot) keeps the real
+        // defaults so a live reset still clears the operator's own state.
+        let context = ServerContext.fallbackUnconfigured
+        #expect(context.indexMessagesStatePath == MessagesIndexer.defaultStatePath)
+        #expect(context.indexMailCheckpointPath == MailIndexCheckpointStore.defaultPath)
     }
 
     @Test
