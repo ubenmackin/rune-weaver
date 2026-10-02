@@ -299,9 +299,22 @@ public enum PluginSecurity {
         let standardTarget = normalizedPath(targetURL)
         let homeDir = normalizedPath(FileManager.default.homeDirectoryForCurrentUser)
         let defaultPlugins = (homeDir as NSString).appendingPathComponent(".runeweaver/plugins")
+        // The memory tree is the engine's private state — episodic sessions and
+        // approvals, the trust-grant ledger, and the plaintext profile plus
+        // semantic vectors — so a tool must be refused outright rather than
+        // earning write access through the ordinary approval path.
+        let defaultMemory = (homeDir as NSString).appendingPathComponent(".runeweaver/memory")
         let defaultConfig = (homeDir as NSString).appendingPathComponent(".runeweaver/config.toml")
+        // The egress policy file is the credential/network control plane, and
+        // the bearer token authorizes non-loopback access, so a tool must no
+        // more replace them than the engine config beside them.
+        let defaultPolicy = (homeDir as NSString).appendingPathComponent(".runeweaver/policy.toml")
+        let defaultTokenFile = (homeDir as NSString).appendingPathComponent(".runeweaver/auth_token")
 
-        if isInside(standardTarget, defaultPlugins) || standardTarget == defaultConfig {
+        if isInside(standardTarget, defaultPlugins) || isInside(standardTarget, defaultMemory)
+            || standardTarget == defaultConfig
+            || standardTarget == defaultPolicy || standardTarget == defaultTokenFile
+        {
             return true
         }
 

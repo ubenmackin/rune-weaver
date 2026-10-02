@@ -23,7 +23,7 @@ public struct MediaArrClient: Sendable {
     /// Redirect budget shared with the web/API manual chains so LAN hosts cannot bounce the key forever.
     static let maxRedirects = HTTPRedirectFollower.maxRedirects
     /// Explicit per-request timeout so a hung LAN host stalls one turn, not the run.
-    static let timeoutSeconds: Double = 15
+    static let defaultTimeoutSeconds: Double = 15
     /// Per-response decode budget shared with `web.fetch`; over-cap payloads fail closed before parsing.
     static let maxResponseBytes = WebFetchTool.maxFetchBytes
     /// Error-body preview cap so a large payload never inflates a thrown message.
@@ -33,13 +33,17 @@ public struct MediaArrClient: Sendable {
     private let transport: any MediaArrTransport
     private let secrets: SecretsManager
 
+    private var requestTimeoutSeconds: Double {
+        Double(mediaConfig.timeoutSeconds)
+    }
+
     public init(
         mediaConfig: MediaConfig,
         transport: (any MediaArrTransport)? = nil,
         secrets: SecretsManager? = nil
     ) {
         self.mediaConfig = mediaConfig
-        self.transport = transport ?? URLSessionMediaArrTransport()
+        self.transport = transport ?? URLSessionMediaArrTransport(timeoutSeconds: Double(mediaConfig.timeoutSeconds))
         self.secrets = secrets ?? SecretsManager()
     }
 
@@ -142,7 +146,7 @@ extension MediaArrClient {
 
     private func makeRequest(url: URL, method: String = "GET", apiKey: String, body: Data? = nil) -> URLRequest {
         // Explicit timeout keeps a hung LAN host from stalling the turn on the shared default.
-        var req = URLRequest(url: url, timeoutInterval: Self.timeoutSeconds)
+        var req = URLRequest(url: url, timeoutInterval: requestTimeoutSeconds)
         req.httpMethod = method
         req.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -163,7 +167,7 @@ extension MediaArrClient {
         var current = request
         if current.timeoutInterval < 1 {
             var bounded = current
-            bounded.timeoutInterval = Self.timeoutSeconds
+            bounded.timeoutInterval = requestTimeoutSeconds
             current = bounded
         }
         // Fail closed on the initial hop before any dial: a safe config cannot
@@ -229,7 +233,7 @@ extension MediaArrClient {
             // Only 307/308 preserve method and body; every other redirect becomes
             // a plain GET without a body, mirroring the constrained API chain.
             let preservesMethod = response.statusCode == 307 || response.statusCode == 308
-            var nextRequest = URLRequest(url: next, timeoutInterval: Self.timeoutSeconds)
+            var nextRequest = URLRequest(url: next, timeoutInterval: requestTimeoutSeconds)
             nextRequest.httpMethod = preservesMethod ? (current.httpMethod ?? "GET") : "GET"
             let currentHost = currentURL.host.map { ApiSSRFGuard.normalizedHost($0) }
             let nextHost = next.host.map { ApiSSRFGuard.normalizedHost($0) }

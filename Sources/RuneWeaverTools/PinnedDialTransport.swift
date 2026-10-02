@@ -545,14 +545,11 @@ private struct PinnedDialFailure: Error, Sendable {
 
 /// Carries one `NWConnection` across an attempt's `@Sendable` callbacks.
 ///
-/// Network.framework connections are thread-safe and deliver every callback
-/// (state, send completion, receive) on the queue passed to `start(queue:)`,
-/// so sharing one reference among an attempt's callbacks is sound. The box
-/// keeps that one reference explicitly unchecked rather than depending on the
-/// SDK's Network.framework `Sendable` annotations, which have moved across
-/// toolchains, and the attempt never hands a raw connection to a `@Sendable`
-/// closure.
-private final class PinnedConnectionBox: @unchecked Sendable {
+/// Network.framework connections natively conform to `Sendable` and deliver
+/// every callback on the queue passed to `start(queue:)`, so sharing one
+/// immutable reference among an attempt's callbacks is sound and statically
+/// checked under Swift 6 language mode.
+private final class PinnedConnectionBox: Sendable {
     /// The wrapped connection for one attempt.
     let connection: NWConnection
 

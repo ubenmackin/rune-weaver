@@ -49,8 +49,8 @@ public extension ApprovalQueue {
     ///
     /// Single-host triage limit: this returns the first host only while
     /// enforcement screens every host in the batch, so a multi-host batch
-    /// badges its first unlisted host and re-parks for the next on retry
-    /// instead of approving the whole batch on one badge.
+    /// badges its first host and cannot approve the whole batch on one badge;
+    /// unifying multi-host badging remains a tracked follow-up.
     static func extractEgressHost(toolName: String, argumentsJSON: String) -> String? {
         extractAllEgressHosts(toolName: toolName, argumentsJSON: argumentsJSON).first
     }

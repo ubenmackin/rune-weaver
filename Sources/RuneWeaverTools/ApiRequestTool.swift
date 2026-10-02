@@ -358,19 +358,27 @@ public struct ApiRequestTool: Tool, Sendable {
     /// no second copy of that configuration.
     private let egressSupervisor: OutboundEgressSupervisor
 
+    public let timeoutSeconds: Double
+
     /// Creates an API request tool.
     /// - Parameters:
     ///   - transport: HTTP transport; the live pinned dialer when nil.
+    ///   - browserConfig: Optional browser config supplying fetchTimeoutSeconds.
+    ///   - timeoutSeconds: Optional explicit timeout override in seconds.
     ///   - egressSupervisor: Live egress supervisor; required at every
     ///     production construction site.
     public init(
         transport: (any ApiRequestTransport)? = nil,
+        browserConfig: BrowserConfig? = nil,
+        timeoutSeconds: Double? = nil,
         egressSupervisor: OutboundEgressSupervisor
     ) {
+        let resolvedTimeout = timeoutSeconds ?? Double(browserConfig?.fetchTimeoutSeconds ?? Int(Self.timeoutSeconds))
+        self.timeoutSeconds = resolvedTimeout
         if let transport {
             self.transport = transport
         } else {
-            self.transport = PinnedApiRequestTransport(timeoutSeconds: Self.timeoutSeconds)
+            self.transport = PinnedApiRequestTransport(timeoutSeconds: resolvedTimeout)
         }
         self.egressSupervisor = egressSupervisor
     }
@@ -549,7 +557,7 @@ public struct ApiRequestTool: Tool, Sendable {
                 method: hop.method,
                 headers: hop.headers,
                 body: hop.body,
-                timeoutSeconds: Self.timeoutSeconds,
+                timeoutSeconds: self.timeoutSeconds,
                 userAgent: Self.userAgent
             )
             let (data, response) = try await transport.data(for: request, pin: hop.dialPin)
@@ -1018,11 +1026,15 @@ public enum ApiRequestTools {
     ///   tool shares the one policy-backed choke-point for this process.
     public static func makeTools(
         supervisor: OutboundEgressSupervisor,
-        transport: (any ApiRequestTransport)? = nil
+        transport: (any ApiRequestTransport)? = nil,
+        browserConfig: BrowserConfig? = nil,
+        timeoutSeconds: Double? = nil
     ) -> [any Tool] {
         [
             ApiRequestTool(
                 transport: transport,
+                browserConfig: browserConfig,
+                timeoutSeconds: timeoutSeconds,
                 egressSupervisor: supervisor
             )
         ]
@@ -1034,11 +1046,15 @@ public enum ApiRequestTools {
     public static func register(
         on bus: ToolBus,
         supervisor: OutboundEgressSupervisor,
-        transport: (any ApiRequestTransport)? = nil
+        transport: (any ApiRequestTransport)? = nil,
+        browserConfig: BrowserConfig? = nil,
+        timeoutSeconds: Double? = nil
     ) async {
         for tool in makeTools(
             supervisor: supervisor,
-            transport: transport
+            transport: transport,
+            browserConfig: browserConfig,
+            timeoutSeconds: timeoutSeconds
         ) {
             await bus.register(tool: tool)
         }

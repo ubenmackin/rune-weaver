@@ -64,12 +64,20 @@ struct PluginSecurityTests {
     }
 
     @Test
-    func `Write guardrails block agent writes to plugins directory and config`() {
+    func `Write guardrails block agent writes to plugins, memory, config, and policy`() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
+        // The memory tree joins the plugin pen and the control files: it holds
+        // episodic sessions, approvals, the trust-grant ledger, and the
+        // plaintext profile, so no tool may rewrite it through any path.
         let protectedPaths = [
             "\(home)/.runeweaver/plugins/my-plugin/main.py",
             "\(home)/.runeweaver/plugins/malicious.json",
-            "\(home)/.runeweaver/config.toml"
+            "\(home)/.runeweaver/memory/episodes.db",
+            "\(home)/.runeweaver/memory/episodes.db.profile.json",
+            "\(home)/.runeweaver/memory/vectors/chunk.json",
+            "\(home)/.runeweaver/config.toml",
+            "\(home)/.runeweaver/policy.toml",
+            "\(home)/.runeweaver/auth_token"
         ]
 
         for path in protectedPaths {
@@ -106,16 +114,24 @@ struct PluginSecurityTests {
             }
         }
 
-        let protectedCall = ToolInput(
-            toolName: "file.write",
-            argumentsJSON: "{\"path\":\"\(home)/.runeweaver/plugins/evil.py\",\"content\":\"evil\"}"
-        )
+        // The egress policy file and the memory tree are protected alongside
+        // the plugins directory and config, so a files.write targeting them is
+        // denied by the protected-path check before any approval or trust path
+        // is consulted.
+        let protectedArguments = [
+            "{\"path\":\"\(home)/.runeweaver/plugins/evil.py\",\"content\":\"evil\"}",
+            "{\"path\":\"\(home)/.runeweaver/memory/episodes.db\",\"content\":\"evil\"}",
+            "{\"path\":\"\(home)/.runeweaver/policy.toml\",\"content\":\"[network]\"}"
+        ]
 
-        let decision = await gate.checkPermission(toolCall: protectedCall, tool: DummyTool())
-        guard case let .denied(reason) = decision else {
-            Issue.record("Expected denied decision, got \(decision)")
-            return
+        for arguments in protectedArguments {
+            let protectedCall = ToolInput(toolName: "file.write", argumentsJSON: arguments)
+            let decision = await gate.checkPermission(toolCall: protectedCall, tool: DummyTool())
+            guard case let .denied(reason) = decision else {
+                Issue.record("Expected denied decision, got \(decision)")
+                return
+            }
+            #expect(reason.contains("protected Rune Weaver engine files"))
         }
-        #expect(reason.contains("protected Rune Weaver engine files"))
     }
 }

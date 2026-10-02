@@ -886,10 +886,19 @@ extension RuneWeaverConfig {
         if let allowed = try browser.strictStringArray("allowed_origins", field: "browser.allowed_origins") {
             config.browser.allowedOrigins = allowed
         }
+        if let timeout = try browser.strictInt("timeout_seconds", field: "browser.timeout_seconds") {
+            config.browser.timeoutSeconds = timeout
+        }
+        if let fetchTimeout = try browser.strictInt("fetch_timeout_seconds", field: "browser.fetch_timeout_seconds") {
+            config.browser.fetchTimeoutSeconds = fetchTimeout
+        }
     }
 
     private static func decodeMedia(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let media = root.tables["media"] else { return }
+        if let timeout = try media.strictInt("timeout_seconds", field: "media.timeout_seconds") {
+            config.media.timeoutSeconds = timeout
+        }
         if let sonarr = media.tables["sonarr"] {
             try decodeArrSection(sonarr, fieldPrefix: "media.sonarr", into: &config.media.sonarr)
         }

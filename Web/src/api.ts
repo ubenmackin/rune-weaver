@@ -2168,6 +2168,8 @@ export type RadarrConfigData = ArrServiceConfigData;
 export interface MediaConfigData {
   sonarr: SonarrConfigData;
   radarr: RadarrConfigData;
+  timeout_seconds?: number;
+  timeoutSeconds?: number;
 }
 
 // Local background indexer policy mirroring the engine `IndexConfig`
@@ -2270,9 +2272,15 @@ export interface DesktopSettingsUpdate {
 export interface GoalsConfigData {
   enabled: boolean;
   step_interval_minutes: number;
+  stepIntervalMinutes?: number;
   max_active_goals: number;
-  max_steps_per_goal: number;
-  plan_timeout_seconds: number;
+  maxActiveGoals?: number;
+  max_steps_per_goal?: number;
+  maxStepsPerGoal?: number;
+  plan_timeout_seconds?: number;
+  planTimeoutSeconds?: number;
+  max_triggers_per_goal?: number;
+  maxTriggersPerGoal?: number;
 }
 
 // Partial goals patch for `PUT /settings`, mirroring the engine
@@ -2286,6 +2294,12 @@ export interface GoalsSettingsUpdate {
   stepIntervalMinutes?: number;
   max_active_goals?: number;
   maxActiveGoals?: number;
+  max_steps_per_goal?: number;
+  maxStepsPerGoal?: number;
+  plan_timeout_seconds?: number;
+  planTimeoutSeconds?: number;
+  max_triggers_per_goal?: number;
+  maxTriggersPerGoal?: number;
 }
 
 // Interruption policy for background scheduler and goal turns, mirroring the
@@ -2313,13 +2327,18 @@ export interface ProactiveSettingsUpdate {
 export interface IdeasConfigData {
   enabled: boolean;
   max_per_cycle: number;
+  maxPerCycle?: number;
   timeout_seconds: number;
+  timeoutSeconds?: number;
 }
 
 // Partial ideas patch for `PUT /settings`, mirroring the engine `IdeasUpdate`.
-// Only the enable toggle is dashboard-owned; the planning bounds stay file-owned.
 export interface IdeasSettingsUpdate {
   enabled?: boolean;
+  max_per_cycle?: number;
+  maxPerCycle?: number;
+  timeout_seconds?: number;
+  timeoutSeconds?: number;
 }
 
 // Manual mirror of the IdeasConfig default so a fresh form matches the boundary
@@ -3317,6 +3336,8 @@ export interface SettingsResponse {
   browserSearchTimeoutSeconds?: number;
   browserMaxResults?: number;
   browserAllowedOrigins?: string[];
+  browserTimeoutSeconds?: number;
+  browserFetchTimeoutSeconds?: number;
   searchSearxngURL?: string;
   searchTimeoutSeconds?: number;
   searchMaxResults?: number;
@@ -3393,6 +3414,8 @@ export interface UpdateSettingsInput {
   browserSearchTimeoutSeconds?: number;
   browserMaxResults?: number;
   browserAllowedOrigins?: string[];
+  browserTimeoutSeconds?: number;
+  browserFetchTimeoutSeconds?: number;
   searchSearxngURL?: string;
   searchTimeoutSeconds?: number;
   searchMaxResults?: number;
@@ -3793,7 +3816,12 @@ export const DEFAULT_FILES_DENY_PATTERNS: string[] = [
   "*keychain*",
   ".ssh/*",
   ".aws/*",
+  ".runeweaver/memory/*",
   ".runeweaver/memory/vectors/*",
+  ".runeweaver/browser_profiles/*",
+  ".runeweaver/policy.toml",
+  ".runeweaver/auth_token",
+  ".runeweaver/searxng/*",
   ".git-credentials",
   ".gitcookies",
   ".rclone.conf",
@@ -3863,6 +3891,14 @@ export const DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES = 3;
 export const DEFAULT_SEARCH_SEARXNG_URL = "http://127.0.0.1:8888";
 export const DEFAULT_SEARCH_TIMEOUT_SECONDS = 10;
 export const DEFAULT_SEARCH_MAX_RESULTS = 10;
+export const DEFAULT_BROWSER_TIMEOUT_SECONDS = 30;
+export const DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS = 15;
+export const DEFAULT_MEDIA_TIMEOUT_SECONDS = 15;
+export const DEFAULT_GOALS_MAX_STEPS_PER_GOAL = 12;
+export const DEFAULT_GOALS_PLAN_TIMEOUT_SECONDS = 60;
+export const DEFAULT_GOALS_MAX_TRIGGERS_PER_GOAL = 8;
+export const DEFAULT_IDEAS_MAX_PER_CYCLE = 3;
+export const DEFAULT_IDEAS_TIMEOUT_SECONDS = 20;
 
 export function getSettings(): Promise<SettingsResponse> {
   return fetchJson<SettingsResponse>("/settings");

@@ -12,17 +12,31 @@ import Vapor
 ///
 /// Every field stays optional so a request carrying only the enable flag leaves
 /// the rest of the stored suggestion policy untouched instead of resetting it.
-/// The dashboard-owned subset is the enable toggle: the per-cycle cap and
-/// review timeout stay file-owned planning bounds, matching the goals patch so
-/// the settings surface cannot widen execution cost.
+/// The dashboard owns the full suggestion surface — the enable toggle, the
+/// per-cycle cap, and the review timeout — matching the goals patch so both
+/// policies are tuned from settings with range checks single-sourced in the
+/// config validation layer.
 public struct IdeasUpdate: Content, Sendable, Equatable {
     /// Whether proactive idea generation runs at all. Nil preserves the stored value.
     public var enabled: Bool?
+    /// Maximum ideas persisted per generation cycle. Nil preserves the stored value.
+    public var maxPerCycle: Int?
+    /// Seconds the review waits on the model before returning no ideas. Nil preserves the stored value.
+    public var timeoutSeconds: Int?
 
     /// Creates a partial ideas patch.
-    /// - Parameter enabled: Whether suggestion generation runs.
-    public init(enabled: Bool? = nil) {
+    /// - Parameters:
+    ///   - enabled: Whether suggestion generation runs.
+    ///   - maxPerCycle: Maximum ideas per generation cycle.
+    ///   - timeoutSeconds: Review timeout in seconds.
+    public init(
+        enabled: Bool? = nil,
+        maxPerCycle: Int? = nil,
+        timeoutSeconds: Int? = nil
+    ) {
         self.enabled = enabled
+        self.maxPerCycle = maxPerCycle
+        self.timeoutSeconds = timeoutSeconds
     }
 
     /// Populates a patch from a full snapshot so programmatic callers holding a
@@ -30,6 +44,34 @@ public struct IdeasUpdate: Content, Sendable, Equatable {
     /// - Parameter config: Complete suggestion policy.
     public init(_ config: IdeasConfig) {
         self.enabled = config.enabled
+        self.maxPerCycle = config.maxPerCycle
+        self.timeoutSeconds = config.timeoutSeconds
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case maxPerCycle = "max_per_cycle"
+        case maxPerCycleCamel = "maxPerCycle"
+        case timeoutSeconds = "timeout_seconds"
+        case timeoutSecondsCamel = "timeoutSeconds"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+        let snakeMax = try container.decodeIfPresent(Int.self, forKey: .maxPerCycle)
+        let camelMax = try container.decodeIfPresent(Int.self, forKey: .maxPerCycleCamel)
+        maxPerCycle = snakeMax ?? camelMax
+        let snakeTimeout = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
+        let camelTimeout = try container.decodeIfPresent(Int.self, forKey: .timeoutSecondsCamel)
+        timeoutSeconds = snakeTimeout ?? camelTimeout
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(enabled, forKey: .enabled)
+        try container.encodeIfPresent(maxPerCycle, forKey: .maxPerCycle)
+        try container.encodeIfPresent(timeoutSeconds, forKey: .timeoutSeconds)
     }
 }
 
@@ -44,6 +86,12 @@ extension UpdateSettingsRequest {
         guard let update = self.ideas else { return }
         if let enabled = update.enabled {
             ideas.enabled = enabled
+        }
+        if let maxPerCycle = update.maxPerCycle {
+            ideas.maxPerCycle = maxPerCycle
+        }
+        if let timeoutSeconds = update.timeoutSeconds {
+            ideas.timeoutSeconds = timeoutSeconds
         }
     }
 }

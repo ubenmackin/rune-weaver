@@ -159,7 +159,11 @@ max_concurrent_machines = 3
 # (escalating or failing per require_approval_on_deny below), otherwise a path
 # inside any allow root is allowed, otherwise it denies as outside-roots.
 # Denied paths are skipped everywhere including the document index.
-deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key", "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/vectors/*", ".git-credentials", ".gitcookies", ".rclone.conf", ".npmrc", ".pypirc", ".Xauthority", ".emulator_console_auth_token", ".gnupg/*", ".kube/*", ".docker/*", ".config/gcloud/*", ".chia_keys/*", "*_history", ".zsh_sessions/*"]
+# Engine-owned protected paths (the whole memory tree, browser profiles, the
+# policy control file, the auth token file, and the SearXNG settings) stay
+# denied even when this list is narrowed: operators can extend the guard,
+# never drop it.
+deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key", "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/*", ".runeweaver/memory/vectors/*", ".runeweaver/browser_profiles/*", ".runeweaver/policy.toml", ".runeweaver/auth_token", ".runeweaver/searxng/*", ".git-credentials", ".gitcookies", ".rclone.conf", ".npmrc", ".pypirc", ".Xauthority", ".emulator_console_auth_token", ".gnupg/*", ".kube/*", ".docker/*", ".config/gcloud/*", ".chia_keys/*", "*_history", ".zsh_sessions/*"]
 # Allowed roots for live file access (`~` expands to home); outside-root paths
 # escalate to approval. Order is display-only and never changes the decision.
 # Allow roots bound live access only and do not affect index coverage:
@@ -252,6 +256,10 @@ searxng_url = "http://127.0.0.1:8888"
 search_timeout_seconds = 10
 # Maximum results per web.search call (1-50, bounding context fan-out).
 max_results = 10
+# Per-action timeout in seconds for Playwright browser automation (5-300).
+timeout_seconds = 30
+# Per-request HTTP timeout in seconds for web.fetch and api.request (1-120).
+fetch_timeout_seconds = 15
 
 [desktop]
 # Native macOS perception and gated automation. Both tools always register
@@ -378,6 +386,10 @@ auto_rescan = true
 # Defaults are enabled = true with no URL (matching RuneWeaverConfig defaults):
 # enabled with no URL stays unconfigured — the tool reports guidance and never
 # dials — so set url to activate against a running instance.
+
+[media]
+# HTTP request timeout in seconds for media automation calls (5-120).
+timeout_seconds = 15
 
 [media.sonarr]
 enabled = true

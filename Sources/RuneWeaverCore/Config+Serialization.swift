@@ -231,6 +231,8 @@ extension RuneWeaverConfig {
             "search_timeout_seconds = \(browser.searchTimeoutSeconds)",
             "max_results = \(browser.maxResults)",
             "allowed_origins = \(Self.tomlStringArray(browser.allowedOrigins))",
+            "timeout_seconds = \(browser.timeoutSeconds)",
+            "fetch_timeout_seconds = \(browser.fetchTimeoutSeconds)",
             ""
         ]
     }
@@ -318,6 +320,11 @@ extension RuneWeaverConfig {
 
     private func renderMediaTOML() -> [String] {
         var lines: [String] = []
+        if media.timeoutSeconds != MediaConfig.defaultTimeoutSeconds {
+            lines.append("[media]")
+            lines.append("timeout_seconds = \(media.timeoutSeconds)")
+            lines.append("")
+        }
         lines += renderArrSection(name: "sonarr", config: media.sonarr, defaultAPIKeyEnv: ArrInstanceConfig.defaultSonarrAPIKeyEnv)
         lines += renderArrSection(name: "radarr", config: media.radarr, defaultAPIKeyEnv: ArrInstanceConfig.defaultRadarrAPIKeyEnv)
         return lines

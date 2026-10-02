@@ -676,15 +676,17 @@ extension Orchestrator {
     }
 
     /// Splits resolved structured calls into immediately runnable versus needs-park.
-    /// Needs-park holds only calls whose tool lookup succeeds, whose level is
-    /// requiresApproval, whose gate verdict is requiresApproval, and whose turn is
-    /// live (inbox present, not a dry run). Everything else stays allowed-now so
-    /// unknown, disabled, denied, readOnly, trusted, covering-grant, and preview
-    /// paths keep their existing ToolBus behavior. Fail-closed: a missing gate or
-    /// inbox never parks.
+    /// Every enabled tool with a resolvable definition is evaluated through the
+    /// permission gate: a call whose verdict is requiresApproval parks when the turn
+    /// is live (inbox present, not a dry run), whether approval is demanded by the
+    /// tool level or by an unlisted egress host reported for a read-only network
+    /// tool. Everything else stays allowed-now so unknown, disabled, denied,
+    /// covering-grant, and preview paths keep their existing ToolBus behavior.
+    /// Fail-closed: a missing gate or inbox never parks.
     private func partitionStructuredCalls(
         _ calls: [ToolInput],
-        isDryRun: Bool
+        isDryRun: Bool,
+        sessionID: UUID?
     ) async -> (allowed: [ToolInput], needsPark: [ToolInput]) {
         guard !isDryRun, approvalQueue != nil, let gate = permissionGate else {
             return (calls, [])
@@ -700,11 +702,7 @@ extension Orchestrator {
                 allowed.append(call)
                 continue
             }
-            guard tool.permissionLevel == .requiresApproval else {
-                allowed.append(call)
-                continue
-            }
-            let verdict = await gate.checkPermission(toolCall: call, tool: tool)
+            let verdict = await gate.checkPermission(toolCall: call, tool: tool, sessionID: sessionID)
             if case .requiresApproval = verdict {
                 needsPark.append(call)
             } else {
@@ -870,7 +868,11 @@ extension Orchestrator {
             // handler, while every other call keeps its existing execute path.
             // The combined batch files structured needs-park plus narrated siblings
             // under one identifier so mixed rounds park once.
-            let partition = await partitionStructuredCalls(calls, isDryRun: request.isDryRun)
+            let partition = await partitionStructuredCalls(
+                calls,
+                isDryRun: request.isDryRun,
+                sessionID: request.sessionID
+            )
             // Dry runs never park: structured needs-park is already empty via
             // the partition, and narrated siblings are dropped here so a dry
             // run with narration cannot file through the combined batch.

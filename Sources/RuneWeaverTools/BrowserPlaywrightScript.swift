@@ -11,10 +11,16 @@
 // metadata, and private ranges without its own exemption plumbing. The program is split into two ordered segments that
 // concatenate atomically (`head` then `tail`); keep them adjacent and edit
 // them together so the deny set, capture budget, and envelope shape update as
-// one. The capture budget and viewport interpolate `BrowserScreenshotPolicy`
-// so a Swift budget change updates the helper without a second literal to
-// drift, and deny behavior stays pinned by the shared web-safety fixture
-// (`Tests/RuneWeaverToolsTests/WebToolsTests.swift` allowlist suite).
+// one. The capture budget and viewport interpolate `BrowserScreenshotPolicy`,
+// and the headed human-login wait interpolates `SubprocessPlaywrightGateway.headedWaitSeconds`
+// (the kill budget minus cleanup headroom), so a Swift budget change updates the helper without a
+// second literal to drift; the headed kill budget itself covers the navigation budget plus the wait
+// cap plus headroom so `finally: context.close()` runs before the kill; deny behavior
+// stays pinned by the shared web-safety fixture
+// (`Tests/RuneWeaverToolsTests/WebToolsTests.swift` allowlist suite). The
+// configured browser timeout arrives as `timeoutMs`, bounding the initial
+// navigation and every per-action wait so the Swift setting governs in-page
+// waits instead of a hardcoded literal.
 
 import Foundation
 import RuneWeaverCore
@@ -24,7 +30,7 @@ import RuneWeaverCore
 enum BrowserPlaywrightScriptHead: Sendable {
     /// Head source text, ending at the close of `_ssrf_deny_reason`.
     static let part = #"""
-    import sys, json
+    import sys, json, os, time
 
     def fail(message):
         sys.stdout.write(json.dumps({"ok": False, "error": message}))
@@ -299,6 +305,18 @@ enum BrowserPlaywrightScriptTail: Sendable {
         except Exception:
             return b""
 
+    def _request_timeout_ms(req, default_ms):
+        # The Swift gateway plumbs the configured `browser.timeout_seconds` as
+        # `timeoutMs` so navigation and per-action waits honor the operator's
+        # setting instead of this helper's legacy literals; missing,
+        # non-numeric, or non-positive values keep the historical default for
+        # callers that reach the bridge directly.
+        try:
+            value = int(req.get("timeoutMs"))
+        except Exception:
+            return default_ms
+        return value if value > 0 else default_ms
+
     def main():
         try:
             req = json.loads(sys.stdin.read() or "{}")
@@ -337,41 +355,79 @@ enum BrowserPlaywrightScriptTail: Sendable {
             if not ref or len(ref) < 2 or not ref.startswith("e") or not ref[1:].isdigit() or int(ref[1:]) < 1:
                 fail("Invalid ref '%s'" % ref)
                 return
+        timeout_ms = _request_timeout_ms(req, 30000)
+        action_timeout_ms = _request_timeout_ms(req, 10000)
         try:
+            profile_dir = os.path.expanduser("~/.runeweaver/browser_profiles/default")
+            os.makedirs(profile_dir, exist_ok=True)
+            is_headed = bool(req.get("headed") or req.get("interactive")) if op == "navigate" else False
             with sync_playwright() as pw:
-                browser = pw.chromium.launch(headless=True)
                 try:
                     # Fixed 1280x800 viewport at unit scale keeps opt-in captures
                     # at the 1280px longest edge without device-scale inflation;
                     # PIL downscale plus quality stepping in `capture_screenshot`
                     # enforces the 500KB bound before Swift's fail-closed check.
-                    if want_screenshot:
-                        vw = \#(BrowserScreenshotPolicy.captureViewportWidth)
-                        vh = \#(BrowserScreenshotPolicy.captureViewportHeight)
-                        context = browser.new_context(
-                            accept_downloads=False,
-                            viewport={"width": vw, "height": vh},
-                            device_scale_factor=1)
-                    else:
-                        context = browser.new_context(accept_downloads=False)
-                    page = context.new_page()
-                    goto_response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    vw = \#(BrowserScreenshotPolicy.captureViewportWidth)
+                    vh = \#(BrowserScreenshotPolicy.captureViewportHeight)
+                    context = pw.chromium.launch_persistent_context(
+                        user_data_dir=profile_dir,
+                        headless=not is_headed,
+                        accept_downloads=False,
+                        viewport={"width": vw, "height": vh} if want_screenshot else None,
+                        device_scale_factor=1 if want_screenshot else None)
+                    page = context.pages[0] if context.pages else context.new_page()
+                    goto_response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
                     landed = page.url or url
                     landed_reason = _ssrf_deny_reason(landed)
                     if landed_reason:
                         fail(landed_reason)
                         return
+                    if op == "navigate" and is_headed:
+                        # Wait loop for human login / 2FA / CAPTCHA resolution
+                        if is_auth_wall(page) or any(k in (page.url or "").lower() for k in ("login", "signin", "sign-in", "auth")):
+                            start_wait = time.time()
+                            # Stays below the subprocess kill budget so the timeout path still reaches `finally: context.close()`.
+                            max_wait = \#(SubprocessPlaywrightGateway.headedWaitSeconds)
+                            while time.time() - start_wait < max_wait:
+                                active = context.pages[-1] if context.pages else page
+                                if not context.pages or (active and active.is_closed()):
+                                    break
+                                cur_url = (active.url or "").lower()
+                                auth_terms = ("login", "signin", "sign-in", "auth")
+                                if not any(k in cur_url for k in auth_terms) and not is_auth_wall(active):
+                                    try:
+                                        active.wait_for_load_state("domcontentloaded", timeout=3000)
+                                    except Exception:
+                                        pass
+                                    page = active
+                                    break
+                                try:
+                                    page.wait_for_timeout(500)
+                                except Exception:
+                                    break
                     if op == "navigate":
-                        refs = collect_refs(page)
-                        chain = redirect_chain_for(goto_response, url, page.url or url)
-                        shot = capture_screenshot(page) if want_screenshot else ""
+                        active_page = context.pages[-1] if context.pages and not context.pages[-1].is_closed() else (page if not page.is_closed() else None)
+                        target_page = active_page or page
+                        final_url = ""
+                        try:
+                            final_url = target_page.url or url
+                        except Exception:
+                            final_url = url
+                        final_title = ""
+                        try:
+                            final_title = target_page.title() or ""
+                        except Exception:
+                            final_title = ""
+                        refs = collect_refs(target_page) if not target_page.is_closed() else []
+                        chain = redirect_chain_for(goto_response, url, final_url)
+                        shot = capture_screenshot(target_page) if want_screenshot and not target_page.is_closed() else ""
                         sys.stdout.write(json.dumps({
                             "ok": True,
-                            "url": page.url or url,
-                            "title": page.title() or "",
-                            "text": page_text(page),
+                            "url": final_url,
+                            "title": final_title,
+                            "text": page_text(target_page) if not target_page.is_closed() else "",
                             "refs": refs,
-                            "authRequired": is_auth_wall(page),
+                            "authRequired": is_auth_wall(target_page) if not target_page.is_closed() else False,
                             "downloads": [],
                             "redirectChain": chain,
                             "redirectCount": max(0, len(chain) - 1),
@@ -390,15 +446,15 @@ enum BrowserPlaywrightScriptTail: Sendable {
                         return
                     el = els[wanted]
                     if action == "click":
-                        el.click(timeout=10000)
+                        el.click(timeout=action_timeout_ms)
                     elif action == "fill":
-                        el.fill(text or "", timeout=10000)
+                        el.fill(text or "", timeout=action_timeout_ms)
                     elif action == "select":
-                        el.select_option(label=text or "", timeout=10000)
+                        el.select_option(label=text or "", timeout=action_timeout_ms)
                     elif action == "press":
-                        el.press(text or "Enter", timeout=10000)
+                        el.press(text or "Enter", timeout=action_timeout_ms)
                     elif action == "scroll":
-                        el.scroll_into_view_if_needed(timeout=10000)
+                        el.scroll_into_view_if_needed(timeout=action_timeout_ms)
                     try:
                         page.wait_for_load_state("domcontentloaded", timeout=5000)
                     except Exception:
@@ -422,7 +478,7 @@ enum BrowserPlaywrightScriptTail: Sendable {
                     sys.stdout.flush()
                 finally:
                     try:
-                        browser.close()
+                        context.close()
                     except Exception:
                         pass
         except Exception as exc:
