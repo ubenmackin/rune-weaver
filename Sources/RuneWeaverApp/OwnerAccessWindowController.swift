@@ -5,7 +5,8 @@
 // while keeping the raw secret visible exactly once through the hosted section.
 // Scope: One retained NSWindow hosting the SwiftUI OwnerTokenSettingsSection,
 // shared through the singleton and re-rooted on every show so model state
-// stays fresh; frame persistence plus centering fallback live here.
+// stays fresh; frame persistence plus centering fallback plus activation ride
+// the shared single-instance helper.
 // Architectural role: Keeps AppKit window lifecycle (creation, autosave,
 // delegate retention for fast re-opening) separate from the SwiftUI settings
 // content, so the menu model stays the sole owner of token state and the raw
@@ -28,9 +29,7 @@ public final class OwnerAccessWindowController: NSObject {
     /// Displays the native Owner Access window hosting OwnerTokenSettingsSection.
     public func show(model: AppModel) {
         let win = getOrCreateWindow(model: model)
-        win.orderFrontRegardless()
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate()
+        SingleInstanceHostedWindow.show(win)
     }
 
     private func getOrCreateWindow(model: AppModel) -> NSWindow {
@@ -40,19 +39,14 @@ public final class OwnerAccessWindowController: NSObject {
             return existing
         }
 
-        let styleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
-        let initialRect = NSRect(x: 0, y: 0, width: 540, height: 460)
-        let accessWindow = NSWindow(contentRect: initialRect, styleMask: styleMask, backing: .buffered, defer: false)
-        accessWindow.title = "Owner Access"
-        accessWindow.minSize = NSSize(width: 480, height: 380)
-        accessWindow.setFrameAutosaveName("RuneWeaverOwnerAccessWindow")
-        accessWindow.isReleasedWhenClosed = false
+        let accessWindow = SingleInstanceHostedWindow.makeWindow(
+            title: "Owner Access",
+            autosaveName: "RuneWeaverOwnerAccessWindow",
+            initialRect: NSRect(x: 0, y: 0, width: 540, height: 460),
+            minSize: NSSize(width: 480, height: 380),
+            contentView: NSHostingView(rootView: OwnerTokenSettingsSection(model: model).padding(20))
+        )
         accessWindow.delegate = self
-        accessWindow.contentView = NSHostingView(rootView: OwnerTokenSettingsSection(model: model).padding(20))
-
-        if !accessWindow.setFrameUsingName("RuneWeaverOwnerAccessWindow") {
-            accessWindow.center()
-        }
 
         self.window = accessWindow
         return accessWindow

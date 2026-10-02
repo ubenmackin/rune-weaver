@@ -121,6 +121,8 @@ cat << PLIST_EOF > "${CONTENTS_DIR}/Info.plist"
     <string>Rune Weaver uses your contacts to resolve recipient names to phone numbers or email addresses when you ask it to send a message.</string>
     <key>NSUserNotificationAlertStyle</key>
     <string>banner</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Rune Weaver sends messages through Messages when you ask it to.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>
