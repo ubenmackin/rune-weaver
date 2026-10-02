@@ -268,4 +268,101 @@ struct MessagesResolveRecipientToolTests {
         #expect(envelope.resolved?.handle == "+15551234567")
         #expect(envelope.resolved?.source == .alias)
     }
+
+    @Test
+    func `Unique resolution carries a copy-pasteable sendWith handoff`() async throws {
+        let selected = candidate(
+            displayName: "Rebecca Mackin",
+            handle: "rebecca@example.com",
+            service: "iMessage",
+            contactID: "contact-1"
+        )
+        let resolver = StubMessagesRecipientResolver(resolutionsByName: [
+            "Rebecca": MessageRecipientResolution(query: "Rebecca", candidates: [selected], selected: selected)
+        ])
+        // Padded input proves resolvedFrom is the trimmed query, not the raw spelling.
+        let output = try await run(#"{"name":"  Rebecca  "}"#, through: resolver)
+
+        #expect(output.isError == false)
+        let envelope = try JSONDecoder().decode(MessagesResolveRecipientEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.resolved?.handle == "rebecca@example.com")
+        let sendWith = try #require(envelope.sendWith)
+        #expect(sendWith.recipient == "rebecca@example.com")
+        #expect(sendWith.resolvedFrom == "Rebecca")
+    }
+
+    @Test
+    func `Ambiguous resolution carries no sendWith handoff`() async throws {
+        let first = candidate(displayName: "Rebecca A", handle: "rebecca.a@example.com", contactID: "contact-a")
+        let second = candidate(displayName: "Rebecca B", handle: "rebecca.b@example.com", contactID: "contact-b")
+        let resolver = StubMessagesRecipientResolver(resolutionsByName: [
+            "Rebecca": MessageRecipientResolution(
+                query: "Rebecca",
+                candidates: [first, second],
+                selected: nil,
+                isAmbiguous: true
+            )
+        ])
+        let output = try await run(#"{"name":"Rebecca"}"#, through: resolver)
+
+        #expect(output.isError == false)
+        let envelope = try JSONDecoder().decode(MessagesResolveRecipientEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.resolved == nil)
+        #expect(envelope.ambiguous == true)
+        // No single winner means nothing safe to copy into messages.send.
+        #expect(envelope.sendWith == nil)
+    }
+
+    @Test
+    func `Zero-match resolution carries no sendWith handoff`() async throws {
+        let resolver = StubMessagesRecipientResolver()
+        let output = try await run(#"{"name":"Nobody"}"#, through: resolver)
+
+        #expect(output.isError == false)
+        let envelope = try JSONDecoder().decode(MessagesResolveRecipientEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.resolved == nil)
+        #expect(envelope.candidates.isEmpty)
+        // An empty result must not invent a handle for the send call to copy.
+        #expect(envelope.sendWith == nil)
+    }
+
+    @Test
+    func `SendWith preserves the selected handle verbatim`() async throws {
+        let selected = candidate(
+            displayName: "Rebecca Mackin",
+            handle: "+15551234567",
+            service: "iMessage",
+            source: .handle
+        )
+        let resolver = StubMessagesRecipientResolver(resolutionsByName: [
+            "Rebecca Mackin": MessageRecipientResolution(
+                query: "Rebecca Mackin",
+                candidates: [selected],
+                selected: selected
+            )
+        ])
+        let output = try await run(#"{"name":"  Rebecca Mackin  "}"#, through: resolver)
+
+        #expect(output.isError == false)
+        let envelope = try JSONDecoder().decode(MessagesResolveRecipientEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.resolved?.handle == "+15551234567")
+        let sendWith = try #require(envelope.sendWith)
+        // The handoff copies the stored handle exactly; normalization lives in
+        // the send path, never in the value the model pastes.
+        #expect(sendWith.recipient == "+15551234567")
+        #expect(sendWith.resolvedFrom == "Rebecca Mackin")
+    }
+
+    @Test
+    func `Envelope without sendWith still decodes for older payloads`() throws {
+        // Payloads written before the handoff existed omit the key entirely;
+        // decoding must stay total so cached envelopes keep working.
+        let legacyJSON = """
+        {"ambiguous":false,"candidates":[{"handle":"rebecca@example.com","source":"contact"}],"query":"Rebecca","resolved":{"handle":"rebecca@example.com","source":"contact"}}
+        """
+        let envelope = try JSONDecoder().decode(MessagesResolveRecipientEnvelope.self, from: Data(legacyJSON.utf8))
+        #expect(envelope.query == "Rebecca")
+        #expect(envelope.resolved?.handle == "rebecca@example.com")
+        #expect(envelope.sendWith == nil)
+    }
 }

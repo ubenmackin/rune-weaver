@@ -1,10 +1,46 @@
 // Rune Weaver App — macOS Menu Bar Agent Application.
 
+import AppKit
 import RuneWeaverCore
+import RuneWeaverTools
 import SwiftUI
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak static var shared: AppDelegate?
+    weak var model: AppModel?
+    private var isTerminating = false
+
+    override init() {
+        super.init()
+        Self.shared = self
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if let model {
+            if isTerminating || model.isTerminated {
+                return .terminateNow
+            }
+            isTerminating = true
+            Task { @MainActor in
+                await model.stopForQuit()
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
+        Task {
+            await SearXNGEnsurer.bestEffortStop()
+            await MainActor.run {
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
+    }
+}
 
 @main
 struct RuneWeaverApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
 
     var body: some Scene {
@@ -42,6 +78,7 @@ struct AppMenuLabel: View {
             }
         }
         .onAppear {
+            AppDelegate.shared?.model = model
             model.start()
             if model.needsOwnerToken {
                 showOnboarding = true

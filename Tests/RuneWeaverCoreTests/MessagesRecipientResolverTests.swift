@@ -366,7 +366,9 @@ struct MessagesRecipientResolverTests {
 
     @Test
     func `A handle input returns a single passthrough candidate`() async {
-        let contacts = StubContactSearching(names: ["15551234567": "Alice"])
+        // The stub key is the folded national form, since the typed E.164
+        // handle now canonicalizes to the same key Contacts stores.
+        let contacts = StubContactSearching(names: ["5551234567": "Alice"])
         let resolution = await resolver(contacts: contacts).resolve(name: "+1 (555) 123-4567", limit: 5)
         #expect(resolution.candidates.count == 1)
         #expect(resolution.selected == resolution.candidates.first)
@@ -456,6 +458,29 @@ struct MessagesRecipientResolverTests {
     }
 
     @Test
+    func `Cross-format phone history enriches the national contact handle`() async throws {
+        // Contacts keeps the national spelling while chat history stores E.164;
+        // the shared key fold must still join them, or the phone side loses its
+        // recency bonus and a stale email wrongly wins.
+        let recent = Date().addingTimeInterval(-2 * Self.day)
+        let stale = Date().addingTimeInterval(-10 * Self.day)
+        let contacts = StubContactSearching(records: [
+            contact(id: "c-1", name: "Rebecca Mackin", handles: ["(916) 390-7495", "rebecca@example.com"])
+        ])
+        let history = StubHistorySourcing(stats: [
+            stat(handle: "+19163907495", service: "iMessage", at: recent),
+            stat(handle: "rebecca@example.com", service: "SMS", at: stale)
+        ])
+        let resolution = await resolver(contacts: contacts, history: history).resolve(name: "Rebecca Mackin", limit: 5)
+        #expect(resolution.candidates.map(\.handle) == ["(916) 390-7495", "rebecca@example.com"])
+        let selected = try #require(resolution.selected)
+        #expect(selected.handle == "(916) 390-7495")
+        #expect(selected.service == "iMessage")
+        #expect(selected.lastMessageAt == recent)
+        #expect(resolution.isAmbiguous == false)
+    }
+
+    @Test
     func `Recency bonuses order recent over stale over undated handles`() async {
         let recent = Date().addingTimeInterval(-3 * Self.day)
         let stale = Date().addingTimeInterval(-10 * Self.day)
@@ -499,7 +524,7 @@ struct MessagesRecipientResolverTests {
         let merged = try #require(resolution.candidates.first)
         #expect(merged.source == .alias)
         #expect(merged.displayName == "Rebecca Mackin")
-        #expect(MessageRecipientNameNormalizer.handleKey(merged.handle) == "15551234567")
+        #expect(MessageRecipientNameNormalizer.handleKey(merged.handle) == "5551234567")
         #expect(resolution.selected?.source == .alias)
         #expect(resolution.isAmbiguous == false)
     }

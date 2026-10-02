@@ -53,7 +53,7 @@
 // failure names Hub reachability, run failure names the exit plus tail, watch
 // crash or missing names the exit plus logs) while per-stage detail (stage,
 // exit, capped tail, timeout) moves to server warn logs plus collapsed
-// diagnostics. The container stays running after quit by design.
+// diagnostics. The container is auto-stopped when Rune Weaver.app quits.
 
 import Foundation
 import RuneWeaverCore
@@ -64,6 +64,15 @@ public protocol SearXNGEnsuring: Sendable {
     /// - Parameter browser: `[browser]` policy carrying the base URL.
     /// - Throws: Guidance error when the engine stays unreachable.
     func ensure(browser: BrowserConfig) async throws
+
+    /// Best-effort stop of the managed container when quitting or requested.
+    func stop() async
+}
+
+public extension SearXNGEnsuring {
+    func stop() async {
+        await SearXNGEnsurer.bestEffortStop()
+    }
 }
 
 /// Single-flight lifecycle for the local SearXNG engine.
@@ -329,6 +338,11 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
             }
             throw error
         }
+    }
+
+    /// Best-effort stop conforming to SearXNGEnsuring.
+    public func stop() async {
+        await Self.bestEffortStop()
     }
 
     /// Non-throwing ensure for HTTP lifecycle routes sharing the single-flight path.

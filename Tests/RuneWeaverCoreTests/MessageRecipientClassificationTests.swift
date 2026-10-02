@@ -122,12 +122,45 @@ struct MessageRecipientClassificationTests {
     func `Handle keys collapse phone spellings and email case`() {
         let punctuationPhone = MessageRecipientNameNormalizer.handleKey("+1 (555) 123-4567")
         let digitsPhone = MessageRecipientNameNormalizer.handleKey("+15551234567")
-        #expect(punctuationPhone == "15551234567")
+        // Both spellings carry the NANP country code, so they fold to the
+        // national form shared with Contacts instead of the raw E.164 digits.
+        #expect(punctuationPhone == "5551234567")
         #expect(punctuationPhone == digitsPhone)
         #expect(MessageRecipientNameNormalizer.handleKey("1.555.123.4567") == digitsPhone)
         let foldedEmail = MessageRecipientNameNormalizer.handleKey("Rebecca@ICloud.com")
         #expect(foldedEmail == "rebeccaicloudcom")
         #expect(foldedEmail == MessageRecipientNameNormalizer.handleKey("rebecca@icloud.com"))
+    }
+
+    @Test
+    func `Handle keys fold the NANP country code across spellings`() {
+        // E.164 history rows and national-form Contacts rows must meet on one
+        // key, or enrichment silently misses the national side.
+        let expected = "9163907495"
+        #expect(MessageRecipientNameNormalizer.handleKey("+1 (916) 390-7495") == expected)
+        #expect(MessageRecipientNameNormalizer.handleKey("(916) 390-7495") == expected)
+        #expect(MessageRecipientNameNormalizer.handleKey("+19163907495") == expected)
+        #expect(MessageRecipientNameNormalizer.handleKey("19163907495") == expected)
+        // The national spelling already matches, so folding is idempotent.
+        #expect(MessageRecipientNameNormalizer.handleKey("9163907495") == expected)
+        #expect(MessageRecipientNameNormalizer.handleKey("916-390-7495") == expected)
+    }
+
+    @Test
+    func `Handle keys leave non-NANP and email shapes unchanged`() {
+        // Ten digits never carried a country code to fold.
+        #expect(MessageRecipientNameNormalizer.handleKey("9163907495") == "9163907495")
+        // Eleven digits without the NANP leading `1` stay distinct numbers.
+        #expect(MessageRecipientNameNormalizer.handleKey("29163907495") == "29163907495")
+        #expect(MessageRecipientNameNormalizer.handleKey("+2 (916) 390-7495") == "29163907495")
+        // Longer digit strings are not NANP national numbers either.
+        #expect(MessageRecipientNameNormalizer.handleKey("191639074951") == "191639074951")
+        #expect(MessageRecipientNameNormalizer.handleKey("123456789012345") == "123456789012345")
+        // Emails fold case only, even when they carry digits.
+        #expect(MessageRecipientNameNormalizer.handleKey("Rebecca@ICloud.com") == "rebeccaicloudcom")
+        #expect(MessageRecipientNameNormalizer.handleKey("rebecca19163907495@example.com") == "rebecca19163907495examplecom")
+        // Letters anywhere disqualify the fold, so mixed handles keep today's key.
+        #expect(MessageRecipientNameNormalizer.handleKey("1a9163907495") == "1a9163907495")
     }
 
     @Test

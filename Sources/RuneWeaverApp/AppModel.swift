@@ -133,8 +133,17 @@ public final class AppModel {
     /// `[server]`-supplied host or port instead of the published override
     /// fields. Nil before a successful bind.
     private var boundEndpoint: ServerEndpointConfig?
+    private let searchEnsurer: any SearXNGEnsuring
+    private let onTerminate: @MainActor @Sendable () -> Void
+    /// Tracks completed shutdown so repeat quit requests or delegate callbacks
+    /// never run double-stop or race process termination.
+    private(set) var isTerminated = false
 
-    public init(permissionsOnboardingStore: PermissionsOnboardingStore = PermissionsOnboardingStore()) {
+    public init(
+        permissionsOnboardingStore: PermissionsOnboardingStore = PermissionsOnboardingStore(),
+        searchEnsurer: any SearXNGEnsuring = SearXNGEnsurer.shared,
+        onTerminate: @escaping @MainActor @Sendable () -> Void = { NSApplication.shared.terminate(nil) }
+    ) {
         // Construction stays side-effect free: the notification center is
         // configured when boot starts, so building the model (including in
         // refresh-path tests) never touches UNUserNotificationCenter.
@@ -142,6 +151,8 @@ public final class AppModel {
         // guidance survives relaunches through UserDefaults, not memory.
         self.permissionsOnboardingStore = permissionsOnboardingStore
         self.hasCompletedPermissionsOnboarding = permissionsOnboardingStore.isCompleted
+        self.searchEnsurer = searchEnsurer
+        self.onTerminate = onTerminate
         setupNotificationCallbacks()
     }
 
@@ -322,21 +333,28 @@ extension AppModel {
     private func startSearchWarmup(browserConfig: BrowserConfig) {
         searchWarmupTask?.cancel()
         let captured = browserConfig
-        searchWarmupTask = Self.makeSearchWarmupTask(browserConfig: captured)
+        let ensurer = searchEnsurer
+        searchWarmupTask = Self.makeSearchWarmupTask(browserConfig: captured, ensurer: ensurer)
     }
 
     /// Creates the warmup flight off MainActor isolation.
     /// Nonisolated so the minutes-budget ensure never blocks the menu bar while
     /// still inheriting task-locals and priority (unlike a detached task);
     /// the caller retains the handle for quit cancel.
-    private nonisolated static func makeSearchWarmupTask(browserConfig: BrowserConfig) -> Task<Void, Never> {
+    private nonisolated static func makeSearchWarmupTask(
+        browserConfig: BrowserConfig,
+        ensurer: any SearXNGEnsuring
+    ) -> Task<Void, Never> {
         Task(priority: .background) {
-            await Self.runSearchWarmup(browserConfig: browserConfig)
+            await Self.runSearchWarmup(browserConfig: browserConfig, ensurer: ensurer)
         }
     }
 
     /// Background search engine warmup execution running off @MainActor.
-    private nonisolated static func runSearchWarmup(browserConfig: BrowserConfig) async {
+    private nonisolated static func runSearchWarmup(
+        browserConfig: BrowserConfig,
+        ensurer: any SearXNGEnsuring
+    ) async {
         let searxngURL = browserConfig.searxngURL
         // Structured group ties the stage ticker to the ensure flight so parent
         // cancel or scope exit always reaps the watcher; no unstructured
@@ -361,7 +379,7 @@ extension AppModel {
                 }
             }
             do {
-                try await SearXNGEnsurer.shared.ensure(browser: browserConfig)
+                try await ensurer.ensure(browser: browserConfig)
                 RuneWeaverLog.server.info("SearXNG ready at \(browserConfig.searxngURL).")
             } catch is CancellationError {
                 // Best-effort warmup swallows cancel so quit stays silent.
@@ -881,11 +899,14 @@ public extension AppModel {
         PermissionsWindowController.shared.show(model: self)
     }
 
-    func quit() {
+    /// Shuts down background polling, server runner, and the auto-started search engine container.
+    /// Idempotent so multiple quit notifications or tests never double-stop.
+    func stopForQuit() async {
+        guard !isTerminated else { return }
+        isTerminated = true
         pollingTask?.cancel()
         pollingTask = nil
-        // Cancel the detached search flight up front so quit never leaves
-        // the container start plus watch running after the menu bar exits.
+        // Cancel the detached search flight up front so quit reaps any in-flight ensure.
         searchWarmupTask?.cancel()
         searchWarmupTask = nil
         let context = serverContext
@@ -893,10 +914,19 @@ public extension AppModel {
         let task = serverTask
         serverTask = nil
         let runner = serverRunner
-        Task(priority: .userInitiated) {
-            await runner.shutdown(context: context, app: app)
-            task?.cancel()
-            NSApplication.shared.terminate(nil)
+        let ensurer = searchEnsurer
+
+        async let stopServer: Void = runner.shutdown(context: context, app: app)
+        async let stopSearch: Void = ensurer.stop()
+        _ = await (stopServer, stopSearch)
+        task?.cancel()
+    }
+
+    func quit() {
+        Task(priority: .userInitiated) { @MainActor [weak self] in
+            guard let self else { return }
+            await self.stopForQuit()
+            self.onTerminate()
         }
     }
 
