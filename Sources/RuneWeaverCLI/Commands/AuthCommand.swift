@@ -76,7 +76,10 @@ struct AuthTokenGenerateCommand: AsyncParsableCommand {
         // Generation routes through the actor's rotation path so the CSPRNG,
         // the Keychain write, and the atomic 0600 file write stay single-sourced
         // rather than forked in the CLI. An empty seed is honest here: this
-        // verifier is never served, it only mints and persists.
+        // verifier is never served, it only mints and persists. Supplying the
+        // durable session store lets that rotation clear any stale session file,
+        // so device logins minted under the previous credential cannot outlive
+        // the token they were exchanged for.
         let store = ServerAuthTokenStore(authConfig: authConfig)
         if existing != nil {
             // The refusal is decided against the authoritative store; the same
@@ -91,7 +94,7 @@ struct AuthTokenGenerateCommand: AsyncParsableCommand {
             )
             throw ExitCode(1)
         }
-        let auth = ServerAuth(initialToken: "", store: store)
+        let auth = ServerAuth(initialToken: "", store: store, sessionStore: ServerAuthSessionStore())
         let token = try await auth.rotate()
         printMintedToken(token, action: "Generated")
         await printPersistenceNote(authConfig, token: token)

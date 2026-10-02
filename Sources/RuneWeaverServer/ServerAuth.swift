@@ -3,8 +3,9 @@
 // Rune Weaver is a personal, single-owner harness: exactly one bearer token
 // guards the HTTP surface once it leaves loopback. This file owns the credential
 // model — constant-time verification, the rotating token store, the brute-force
-// bucket, and the Vapor middleware that gates every non-public route — so route
-// files only declare paths while the trust boundary stays in one place.
+// bucket, the digest-keyed sliding browser sessions with their restricted-file
+// persistence, and the Vapor middleware that gates every non-public route — so
+// route files only declare paths while the trust boundary stays in one place.
 //
 // The public surface is tiny and carries no engine data: the static dashboard
 // bundle plus a liveness shape that leaks no version, model, or search detail.
@@ -42,6 +43,12 @@ public enum ServerAuthError: Error, LocalizedError, Sendable, Equatable {
     /// Rotation was refused because a live environment override outranks every
     /// persistence target and would shadow the replacement on the next boot.
     case environmentOverrideActive(name: String)
+    /// The configured auth-session file is readable by group or other accounts,
+    /// or its permission mode could not be verified.
+    case insecureSessionsFile(path: String)
+    /// The persisted auth-session file could not be decoded or carries an
+    /// unsupported schema version.
+    case sessionStoreUnreadable(path: String)
 
     public var errorDescription: String? {
         switch self {
@@ -56,6 +63,10 @@ public enum ServerAuthError: Error, LocalizedError, Sendable, Equatable {
         case let .environmentOverrideActive(name):
             "Cannot rotate the owner token while environment override \(name) is set; "
                 + "update or unset it so the replacement can take effect."
+        case let .insecureSessionsFile(path):
+            "Refusing to read auth session file \(path): permissions must be 0600."
+        case let .sessionStoreUnreadable(path):
+            "Failed to read auth session file \(path): it is corrupt or uses an unsupported version."
         }
     }
 }
@@ -201,7 +212,7 @@ public struct ServerAuthTokenStore: Sendable {
         }
         if let tokenFileURL {
             do {
-                try Self.writeRestrictedFile(token, to: tokenFileURL)
+                try Self.writeRestrictedFile(Data(token.utf8), to: tokenFileURL)
                 persisted = true
             } catch {
                 failures.append("file: \(error.localizedDescription)")
@@ -260,15 +271,50 @@ public struct ServerAuthTokenStore: Sendable {
         return (trimmed?.isEmpty ?? true) ? nil : trimmed
     }
 
-    /// Reads the token file, refusing one that other local accounts could read
-    /// or whose mode cannot be verified.
+    /// Reads bytes from a restricted file, refusing one that other local
+    /// accounts could read or whose mode cannot be verified.
     ///
-    /// A loose mode is a fail-closed error rather than a warning: trusting a
-    /// credential another account can read would silently weaken the owner-only
-    /// trust boundary the token exists to enforce. The same holds when the
+    /// A loose mode is a fail-closed error rather than a warning: trusting
+    /// bytes another account can read would silently weaken the owner-only
+    /// trust boundary the file exists to enforce. The same holds when the
     /// permission attribute is unavailable — an unverifiable mode is
     /// indistinguishable from a loose one, so the read never proceeds on a
-    /// failed stat or a failed `NSNumber` cast.
+    /// failed stat or a failed `NSNumber` cast. Callers name the error for
+    /// their own artifact, so the token and session stores share one
+    /// permission policy while still reporting which file was refused.
+    /// - Parameters:
+    ///   - fileURL: Restricted file to read.
+    ///   - insecureFileError: Error constructor naming the refused path.
+    ///   - fileManager: Filesystem accessor, injectable so the unreadable-attribute
+    ///     path can be exercised without loosening a real file.
+    /// - Returns: The file's bytes, or nil when the file is absent or unreadable.
+    /// - Throws: The `insecureFileError` for a loose file or one whose
+    ///   permission mode could not be verified.
+    static func readRestrictedData(
+        _ fileURL: URL,
+        insecureFileError: (String) -> ServerAuthError = ServerAuthError.insecureTokenFile,
+        fileManager: FileManager = .default
+    ) throws -> Data? {
+        guard fileManager.fileExists(atPath: fileURL.path) else { return nil }
+        guard let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
+              let permissions = attributes[.posixPermissions] as? NSNumber
+        else {
+            // Fail closed: without a verified mode there is no way to prove the
+            // bytes are owner-only, so they must not be read at all.
+            throw insecureFileError(fileURL.path)
+        }
+        if permissions.intValue & 0o077 != 0 {
+            throw insecureFileError(fileURL.path)
+        }
+        return try? Data(contentsOf: fileURL)
+    }
+
+    /// Reads a restricted token file and normalizes its text value.
+    ///
+    /// Environment values can arrive padded, so the file branch trims through
+    /// the same normalization as every other source; a blank result is treated
+    /// as absent. Permission refusal is delegated to ``readRestrictedData(_:insecureFileError:fileManager:)``
+    /// so the token and session stores cannot drift on the mode policy.
     /// - Parameters:
     ///   - fileURL: Restricted token file.
     ///   - fileManager: Filesystem accessor, injectable so the unreadable-attribute
@@ -277,27 +323,18 @@ public struct ServerAuthTokenStore: Sendable {
     /// - Throws: ``ServerAuthError/insecureTokenFile(path:)`` for a loose file or
     ///   one whose permission mode could not be read.
     static func readRestrictedFile(_ fileURL: URL, fileManager: FileManager = .default) throws -> String? {
-        guard fileManager.fileExists(atPath: fileURL.path) else { return nil }
-        guard let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
-              let permissions = attributes[.posixPermissions] as? NSNumber
+        guard let data = try readRestrictedData(fileURL, fileManager: fileManager),
+              let value = String(data: data, encoding: .utf8)
         else {
-            // Fail closed: without a verified mode there is no way to prove the
-            // credential is owner-only, so it must not be read at all.
-            throw ServerAuthError.insecureTokenFile(path: fileURL.path)
-        }
-        if permissions.intValue & 0o077 != 0 {
-            throw ServerAuthError.insecureTokenFile(path: fileURL.path)
-        }
-        guard let data = try? Data(contentsOf: fileURL), let value = String(data: data, encoding: .utf8) else {
             return nil
         }
         return Self.normalizedToken(value)
     }
 
-    /// Writes the token to a `0600` file inside a `0700` directory using a
-    /// same-directory temp plus an atomic replace, so a crash never leaves a
+    /// Writes restricted bytes to a `0600` file inside a `0700` directory using
+    /// a same-directory temp plus an atomic replace, so a crash never leaves a
     /// half-written credential and no window exposes it under a looser mode.
-    private static func writeRestrictedFile(_ token: String, to fileURL: URL) throws {
+    static func writeRestrictedFile(_ data: Data, to fileURL: URL) throws {
         let fileManager = FileManager.default
         let directory = fileURL.deletingLastPathComponent()
         try fileManager.createDirectory(
@@ -306,13 +343,13 @@ public struct ServerAuthTokenStore: Sendable {
             attributes: [.posixPermissions: 0o700]
         )
         // Re-assert the directory mode: a directory created by an older build or
-        // a restore could be wider, and the token must never sit in one.
+        // a restore could be wider, and restricted bytes must never sit in one.
         try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
 
         let tempURL = directory.appendingPathComponent(".\(fileURL.lastPathComponent).\(UUID().uuidString).tmp")
         guard fileManager.createFile(
             atPath: tempURL.path,
-            contents: Data(token.utf8),
+            contents: data,
             attributes: [.posixPermissions: 0o600]
         ) else {
             throw ServerAuthError.tokenStorageFailed(reason: "could not create temporary token file")
@@ -337,6 +374,47 @@ public struct ServerAuthTokenStore: Sendable {
             guard let cValue = getenv(cKey) else { return nil }
             return String(validatingCString: cValue)
         }
+    }
+}
+
+/// How a presented credential authenticated, captured atomically with the
+/// verification itself.
+///
+/// The owner token and browser sessions are both bearer credentials, but they
+/// differ in the follow-up they permit: only a browser session may have its
+/// cookie re-issued, and both are bound to the generation that was live when
+/// they were checked. Returning this shape from one actor hop keeps the
+/// classification and the generation consistent under a concurrent
+/// ``ServerAuth/rotate()`` instead of letting a separate lookup observe a
+/// rotation in between.
+public struct ServerAuthVerifiedPresentation: Equatable, Sendable {
+    /// Credential class that matched.
+    public enum Kind: Sendable, Equatable {
+        /// The live owner bearer token.
+        case ownerToken
+        /// An active browser session minted under the live generation.
+        case browserSession
+    }
+
+    /// Token generation the credential verified under.
+    public let generation: Int
+    /// Which credential class matched.
+    public let kind: Kind
+    /// Whether the browser session cookie is due to be re-issued.
+    ///
+    /// Always false for ``Kind/ownerToken``: the owner token never rides a
+    /// cookie, so an owner verification must not attach one.
+    public let shouldRefreshSessionCookie: Bool
+
+    /// Creates a verified presentation.
+    /// - Parameters:
+    ///   - generation: Token generation the credential verified under.
+    ///   - kind: Which credential class matched.
+    ///   - shouldRefreshSessionCookie: Whether the cookie is due for renewal.
+    public init(generation: Int, kind: Kind, shouldRefreshSessionCookie: Bool) {
+        self.generation = generation
+        self.kind = kind
+        self.shouldRefreshSessionCookie = shouldRefreshSessionCookie
     }
 }
 
@@ -373,6 +451,23 @@ public actor ServerAuth {
     public static let failureWindow: TimeInterval = 60
     /// Cooldown advertised through `Retry-After` once the bucket trips.
     public static let retryAfterSeconds = 30
+    /// Idle window after which a session with no requests is dead.
+    ///
+    /// The window slides with every authenticated request and has no absolute
+    /// cap: daily activity keeps a session alive indefinitely, and only a
+    /// rotation forcibly revokes one. The browser cookie advertises the same
+    /// lifetime as its `Max-Age`.
+    public static let sessionIdleTimeoutSeconds: TimeInterval = 86400
+    /// Minimum interval between re-issuing one browser's session cookie.
+    ///
+    /// Renewal is throttled so an active dashboard is not sent a fresh
+    /// `Set-Cookie` on every request while its idle window still slides.
+    public static let sessionCookieRenewalIntervalSeconds: TimeInterval = 300
+    /// Minimum interval between touch-class session persists.
+    ///
+    /// Structural changes always write immediately; touch updates coalesce to
+    /// this interval so request-rate activity does not become disk IO.
+    static let sessionPersistenceCoalesceSeconds: TimeInterval = 60
     /// Upper bound on tracked identities so random clients cannot grow memory without bound.
     private static let maxTrackedIdentities = 1024
 
@@ -389,21 +484,32 @@ public actor ServerAuth {
     private let store: ServerAuthTokenStore
     /// Per-identity failure state.
     private var failures: [String: FailureBucket] = [:]
-    /// Ephemeral browser sessions, mapping session token -> session entry.
+    /// Ephemeral browser sessions keyed by SHA-256 hex digest of the session token.
     private var sessions: [String: SessionEntry] = [:]
     /// Upper bound on active browser sessions to prevent unbounded memory growth.
     private static let maxActiveSessions = 100
+    /// Durable session sink, or nil for an in-memory-only verifier that never touches disk.
+    private let sessionStore: ServerAuthSessionStore?
+    /// Injectable clock so sliding expiry, cookie renewal, and coalescing are deterministic.
+    private let now: @Sendable () -> Date
+    /// Whether in-memory session state differs from what the persisted file holds.
+    private var sessionsDirty = false
+    /// Last persistence attempt, throttling touch-class writes to the coalesce interval.
+    private var lastPersistedAt: Date?
 
-    /// One active browser session: the token generation it was minted under plus
-    /// when it was created.
+    /// One active browser session, keyed by the digest of its token.
     ///
-    /// The generation binds the session to the live owner token so a rotation
+    /// The digest key means the table itself never carries a credential. The
+    /// generation binds the session to the live owner token so a rotation
     /// revokes sessions minted under the retired credential instead of letting
-    /// them survive past it; `createdAt` orders entries oldest-first so the
-    /// 100-session cap evicts the stalest sessions first.
+    /// them survive past it; `lastSeenAt` drives the sliding idle window and the
+    /// least-recently-seen eviction order, and `cookieRefreshedAt` throttles
+    /// renewal so an active browser is not re-issued its cookie on every request.
     private struct SessionEntry: Sendable {
         let generation: Int
         let createdAt: Date
+        var lastSeenAt: Date
+        var cookieRefreshedAt: Date
     }
 
     /// Accumulated failures for one identity.
@@ -417,21 +523,78 @@ public actor ServerAuth {
     }
 
     /// Creates a verifier with a known token.
-    /// Prefer ``resolve(authConfig:service:)`` at boot so the token is loaded
+    /// Prefer ``resolve(authConfig:service:inMemory:)`` at boot so the token is loaded
     /// from the configured sources instead of hard-coded.
+    ///
+    /// When a session store is supplied, unexpired persisted sessions minted
+    /// under the persisted generation are restored so a restart preserves device
+    /// logins. A refused or undecodable document logs a credential-free warning
+    /// and starts empty rather than trusting it; drops found at load only set the
+    /// dirty flag, so a boot that merely shed stale entries waits for the next
+    /// touch or structural change before rewriting the file.
     /// - Parameters:
     ///   - initialToken: Non-empty live token.
     ///   - store: Persistence seam used by rotations.
-    public init(initialToken: String, store: ServerAuthTokenStore) {
+    ///   - sessionStore: Durable session sink, or nil to keep sessions in memory only.
+    ///   - now: Clock used for expiry, renewal, and persistence scheduling.
+    public init(
+        initialToken: String,
+        store: ServerAuthTokenStore,
+        sessionStore: ServerAuthSessionStore? = nil,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
         self.token = initialToken
         self.store = store
+        self.sessionStore = sessionStore
+        self.now = now
+        guard let sessionStore else { return }
+        do {
+            guard let persisted = try sessionStore.load() else { return }
+            let current = now()
+            var restored: [String: SessionEntry] = [:]
+            restored.reserveCapacity(persisted.sessions.count)
+            var dropped = false
+            for persistedSession in persisted.sessions {
+                let entry = SessionEntry(
+                    generation: persistedSession.generation,
+                    createdAt: persistedSession.createdAt,
+                    lastSeenAt: persistedSession.lastSeenAt,
+                    cookieRefreshedAt: persistedSession.cookieRefreshedAt
+                )
+                guard persistedSession.generation == persisted.generation,
+                      !Self.isExpired(entry, at: current)
+                else {
+                    dropped = true
+                    continue
+                }
+                // A hand-edited file can repeat a digest; a later entry replaces
+                // the earlier one instead of trapping in a unique-keys initializer.
+                if restored.updateValue(entry, forKey: persistedSession.digest) != nil {
+                    dropped = true
+                }
+            }
+            if Self.evictOverflowSessions(&restored) {
+                dropped = true
+            }
+            self.generation = persisted.generation
+            self.sessions = restored
+            if dropped {
+                self.sessionsDirty = true
+            }
+        } catch {
+            RuneWeaverLog.server.warning(
+                "Failed to load persisted owner auth sessions; starting empty: \(error.localizedDescription)"
+            )
+        }
     }
 
     /// Resolves a boot token from the configured sources.
     /// - Parameters:
     ///   - authConfig: Declared token sources.
     ///   - service: Keychain service namespace.
-    ///   - inMemory: When true, secrets are kept in-memory and never touch the system Keychain.
+    ///   - inMemory: When true, secrets are kept in-memory and never touch the system
+    ///     Keychain, and the durable session store is disabled so no session file is
+    ///     read or written.
     /// - Returns: A verifier, or nil when no source resolves (loopback-no-auth).
     /// - Throws: ``ServerAuthError`` on unreadable storage so boot fails closed.
     public static func resolve(
@@ -447,47 +610,71 @@ public actor ServerAuth {
         guard !trimmed.isEmpty else {
             return nil
         }
-        return ServerAuth(initialToken: trimmed, store: store)
+        return ServerAuth(
+            initialToken: trimmed,
+            store: store,
+            sessionStore: inMemory ? nil : ServerAuthSessionStore()
+        )
     }
 
     /// Mints a fresh ephemeral session token for browser dashboard access.
     ///
-    /// The token is bound to the current generation so a later ``rotate()``
-    /// revokes it with every other live session, and entries carry their
-    /// creation time so the 100-session cap evicts oldest-first instead of
-    /// growing without bound. Called from the login (`POST /auth/session`) and
-    /// rotation (`POST /auth/rotate`) routes after the owner credential verifies.
+    /// Only the SHA-256 digest of the token is stored, so neither the session
+    /// table nor the persisted document can leak a credential. The entry is
+    /// bound to the current generation so a later ``rotate()`` revokes it with
+    /// every other live session, and the table is trimmed to the cap by evicting
+    /// the least-recently-seen session. A structural change persists
+    /// immediately, so a crash cannot strand a browser holding a cookie the
+    /// server has already forgotten. Called from the login (`POST /auth/session`)
+    /// and rotation (`POST /auth/rotate`) routes after the owner credential verifies.
     /// - Returns: The newly minted 256-bit session token.
     /// - Throws: ``ServerAuthError/tokenGenerationFailed`` when the system
     ///   CSPRNG cannot produce random bytes; no weaker fallback is minted.
     public func createSession() throws -> String {
-        if sessions.count >= Self.maxActiveSessions {
-            let sorted = sessions.sorted { $0.value.createdAt < $1.value.createdAt }
-            for (key, _) in sorted.prefix(sessions.count - Self.maxActiveSessions + 1) {
-                sessions.removeValue(forKey: key)
-            }
-        }
+        pruneExpiredSessions()
         let sessionToken = try Self.generateToken()
-        sessions[sessionToken] = SessionEntry(generation: generation, createdAt: Date())
+        let current = now()
+        sessions[Self.sessionDigestHex(sessionToken)] = SessionEntry(
+            generation: generation,
+            createdAt: current,
+            lastSeenAt: current,
+            cookieRefreshedAt: current
+        )
+        // Insert-then-evict keeps "at most the cap" as a post-condition even
+        // when the table was already full before the mint.
+        Self.evictOverflowSessions(&sessions)
+        markDirty(structural: true)
         return sessionToken
     }
 
     /// Revokes an ephemeral browser session on logout.
+    ///
+    /// The removal is structural, so the persisted set is rewritten immediately:
+    /// a restart must not resurrect a session the owner just logged out.
     public func revokeSession(_ sessionID: String) {
-        sessions.removeValue(forKey: sessionID)
+        sessions.removeValue(forKey: Self.sessionDigestHex(sessionID))
+        markDirty(structural: true)
     }
 
     /// Flushes all active browser sessions (e.g. during token rotation).
+    ///
+    /// The empty set is persisted immediately, so the clear survives a restart
+    /// instead of letting disk resurrect sessions the rotation retired.
     public func revokeAllSessions() {
         sessions.removeAll(keepingCapacity: false)
+        markDirty(structural: true)
     }
 
     /// Whether an ephemeral session identifier is currently active.
+    ///
+    /// Applies the same generation and idle-window checks as ``verify(_:)``, so
+    /// an expired or rotated session never reads as active.
     public func hasActiveSession(_ sessionID: String) -> Bool {
-        sessions[sessionID] != nil
+        guard let entry = sessions[Self.sessionDigestHex(sessionID)] else { return false }
+        return entry.generation == generation && !Self.isExpired(entry, at: now())
     }
 
-    /// Verifies a presented token and captures the generation it verified under,
+    /// Verifies a presented credential and captures how it authenticated,
     /// atomically.
     ///
     /// ``rotate()`` swaps the live token and advances `generation` in the same
@@ -495,34 +682,58 @@ public actor ServerAuth {
     /// ``verify(_:)`` can observe a rotation that landed between the two hops: a
     /// request authenticated with the retired token would then be stamped with
     /// the new generation and survive both the hub watermark and the per-frame
-    /// check. Returning the generation from the same hop as the constant-time
+    /// check. Returning the presentation from the same hop as the constant-time
     /// comparison closes that window — the value always belongs to whichever
-    /// token actually matched. The call suspends no further once it begins, so it
-    /// cannot interleave with a rotation.
-    /// - Parameter presented: Credential from the header or upgrade query.
-    /// - Returns: The generation the live token was verified under, or nil when
-    ///   the presented value is empty or does not match.
-    public func verifyAndCaptureGeneration(_ presented: String) -> Int? {
+    /// credential actually matched. The call suspends no further once it begins,
+    /// so it cannot interleave with a rotation.
+    ///
+    /// Browser sessions also slide here: a touch updates `lastSeenAt`, and once
+    /// the renewal throttle has elapsed the presentation asks the caller to
+    /// re-issue the cookie. An entry that is expired or was minted under a
+    /// retired generation is dropped on sight, since presenting it proves the
+    /// browser still holds a credential the server has already retired.
+    /// - Parameter presented: Credential from the header, cookie, or upgrade query.
+    /// - Returns: How the credential authenticated, or nil when it did not.
+    public func verifyAndCaptureGeneration(_ presented: String) -> ServerAuthVerifiedPresentation? {
         guard !presented.isEmpty else { return nil }
-        if let session = sessions[presented] {
-            if session.generation == self.generation {
-                return session.generation
-            } else {
-                sessions.removeValue(forKey: presented)
+        let digest = Self.sessionDigestHex(presented)
+        if let entry = sessions[digest] {
+            let current = now()
+            guard entry.generation == self.generation, !Self.isExpired(entry, at: current) else {
+                sessions.removeValue(forKey: digest)
+                markDirty(structural: true)
                 return nil
             }
+            var refreshed = entry
+            refreshed.lastSeenAt = current
+            var shouldRefreshCookie = false
+            if current.timeIntervalSince(entry.cookieRefreshedAt) >= Self.sessionCookieRenewalIntervalSeconds {
+                refreshed.cookieRefreshedAt = current
+                shouldRefreshCookie = true
+            }
+            sessions[digest] = refreshed
+            markDirty(structural: false)
+            return ServerAuthVerifiedPresentation(
+                generation: entry.generation,
+                kind: .browserSession,
+                shouldRefreshSessionCookie: shouldRefreshCookie
+            )
         }
         guard Self.constantTimeEquals(presented, token) else { return nil }
-        return generation
+        return ServerAuthVerifiedPresentation(
+            generation: generation,
+            kind: .ownerToken,
+            shouldRefreshSessionCookie: false
+        )
     }
 
-    /// Verifies a presented token in constant time.
+    /// Verifies a presented credential in constant time.
     ///
-    /// Reuses the atomic compare-and-capture so the constant-time comparison
-    /// semantics live in exactly one place and a future change cannot weaken one
-    /// path while the other still guards the surface.
-    /// - Parameter presented: Credential from the header or upgrade query.
-    /// - Returns: True only for the live token.
+    /// Reuses the atomic compare-and-capture so the comparison semantics live in
+    /// exactly one place and a future change cannot weaken one path while the
+    /// other still guards the surface.
+    /// - Parameter presented: Credential from the header, cookie, or upgrade query.
+    /// - Returns: True for the live owner token or an active browser session.
     public func verify(_ presented: String) -> Bool {
         verifyAndCaptureGeneration(presented) != nil
     }
@@ -567,6 +778,10 @@ public actor ServerAuth {
     /// rotation it cannot replace would be reported as successful and then
     /// silently undone on the next boot; that case is refused up front rather
     /// than minting a credential that cannot hold.
+    ///
+    /// Every live session is cleared through ``revokeAllSessions()``, whose
+    /// structural write persists the empty set alongside the advanced
+    /// generation, so a restart cannot resurrect a session this rotation retired.
     /// - Returns: The new token, returned to the caller exactly once.
     /// - Throws: ``ServerAuthError/environmentOverrideActive(name:)`` when an
     ///   environment override would shadow the replacement, or
@@ -696,6 +911,137 @@ public actor ServerAuth {
         let digest = SHA256.hash(data: Data(token.utf8))
         return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
     }
+
+    /// Full digest that keys one session token in memory and on disk.
+    ///
+    /// The digest is the session's durable identity: persisting or logging it
+    /// reveals nothing usable, while a presented token can still be looked up
+    /// without keeping raw credentials outside process memory.
+    /// - Parameter token: Raw session token.
+    /// - Returns: 64 lowercase hex characters.
+    private static func sessionDigestHex(_ token: String) -> String {
+        let digest = SHA256.hash(data: Data(token.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Whether a session has been idle past the sliding window.
+    ///
+    /// Static because the actor's synchronous initializer is nonisolated and
+    /// must prune persisted entries before the actor is usable; keeping the one
+    /// predicate here means load, touch, and lookup cannot drift on what
+    /// "expired" means.
+    /// - Parameters:
+    ///   - entry: Session entry to test.
+    ///   - current: Clock value shared by the calling operation.
+    /// - Returns: True when the idle window has fully lapsed.
+    private static func isExpired(_ entry: SessionEntry, at current: Date) -> Bool {
+        current.timeIntervalSince(entry.lastSeenAt) > sessionIdleTimeoutSeconds
+    }
+
+    /// Drops expired sessions from memory without a structural write.
+    ///
+    /// Expiry is implicit in the clock advancing, so it must not force disk IO
+    /// on its own; the dirty flag still records that memory has diverged from
+    /// disk, and the next touch or structural change persists the pruned set.
+    private func pruneExpiredSessions() {
+        let current = now()
+        let expiredDigests = sessions
+            .filter { Self.isExpired($0.value, at: current) }
+            .map(\.key)
+        guard !expiredDigests.isEmpty else { return }
+        for digest in expiredDigests {
+            sessions.removeValue(forKey: digest)
+        }
+        sessionsDirty = true
+    }
+
+    /// Evicts least-recently-seen sessions until the table is back within the cap.
+    ///
+    /// Ordering by `lastSeenAt` makes an idle session lose to an active one;
+    /// ties fall back to the older creation time and then the digest, so
+    /// eviction stays deterministic even when two sessions were touched in the
+    /// same instant.
+    /// - Parameter sessions: Session table to trim in place.
+    /// - Returns: True when at least one entry was evicted.
+    @discardableResult
+    private static func evictOverflowSessions(_ sessions: inout [String: SessionEntry]) -> Bool {
+        var evicted = false
+        while sessions.count > maxActiveSessions {
+            guard let victim = sessions.min(by: { lhs, rhs in
+                if lhs.value.lastSeenAt != rhs.value.lastSeenAt {
+                    return lhs.value.lastSeenAt < rhs.value.lastSeenAt
+                }
+                if lhs.value.createdAt != rhs.value.createdAt {
+                    return lhs.value.createdAt < rhs.value.createdAt
+                }
+                return lhs.key < rhs.key
+            }) else {
+                break
+            }
+            sessions.removeValue(forKey: victim.key)
+            evicted = true
+        }
+        return evicted
+    }
+
+    /// Marks session state dirty and persists it when the change class allows.
+    ///
+    /// Structural changes (mint, revoke, rotation) write immediately so they
+    /// survive a crash; touch updates coalesce to the interval so a busy browser
+    /// cannot turn every request into disk IO. A recorded attempt throttles
+    /// retries after a failed write to the same interval instead of hammering a
+    /// failing disk, and a verifier that has not attempted a write yet has no
+    /// throttle to honor.
+    /// - Parameter structural: Whether a session was added or removed.
+    private func markDirty(structural: Bool) {
+        sessionsDirty = true
+        let current = now()
+        let touchPersistDue = lastPersistedAt.map {
+            current.timeIntervalSince($0) >= Self.sessionPersistenceCoalesceSeconds
+        } ?? true
+        if structural || touchPersistDue {
+            persistNow(at: current)
+        }
+    }
+
+    /// Writes the current session table and records the attempt either way.
+    ///
+    /// A missing store clears the dirty flag without IO, matching the contract
+    /// that an in-memory-only verifier never touches disk. A failed write logs a
+    /// credential-free warning and leaves the dirty flag set so the next
+    /// coalesce interval retries; the attempt is recorded for both outcomes so a
+    /// failing filesystem is not retried on every request.
+    /// - Parameter current: Clock value shared with the change that triggered the write.
+    private func persistNow(at current: Date) {
+        defer { lastPersistedAt = current }
+        guard let sessionStore else {
+            sessionsDirty = false
+            return
+        }
+        var entries: [PersistedAuthSession] = []
+        entries.reserveCapacity(sessions.count)
+        for (digest, entry) in sessions {
+            entries.append(
+                PersistedAuthSession(
+                    digest: digest,
+                    generation: entry.generation,
+                    createdAt: entry.createdAt,
+                    lastSeenAt: entry.lastSeenAt,
+                    cookieRefreshedAt: entry.cookieRefreshedAt
+                )
+            )
+        }
+        entries.sort { $0.digest < $1.digest }
+        let state = PersistedAuthSessions(generation: generation, sessions: entries)
+        do {
+            try sessionStore.save(state)
+            sessionsDirty = false
+        } catch {
+            RuneWeaverLog.server.warning(
+                "Failed to persist owner auth sessions; retrying after the coalesce interval: \(error.localizedDescription)"
+            )
+        }
+    }
 }
 
 /// Request classification shared by the middleware and the WebSocket upgrade guard.
@@ -760,11 +1106,28 @@ public enum ServerAuthRequest {
     }
 
     /// Generates an HttpOnly session cookie value for the owner token.
-    public static func makeSessionCookie(token: String, isSecure: Bool = false) -> HTTPCookies.Value {
+    ///
+    /// The cookie advertises the same sliding idle lifetime the server enforces,
+    /// so a browser drops the credential at roughly the moment the session would
+    /// die server-side instead of holding a cookie for a session that is already
+    /// gone. `Max-Age` (rather than `Expires`) is used so a refreshed cookie
+    /// fully replaces the browser's previous deadline, and the parameter lets a
+    /// caller mint a deliberately different lifetime without forking the
+    /// attribute list.
+    /// - Parameters:
+    ///   - token: Session token to store in the cookie.
+    ///   - isSecure: Whether the cookie is HTTPS-only.
+    ///   - maxAge: Lifetime in seconds, defaulting to the sliding idle window.
+    /// - Returns: Session cookie ready to attach to a response.
+    public static func makeSessionCookie(
+        token: String,
+        isSecure: Bool = false,
+        maxAge: Int = Int(ServerAuth.sessionIdleTimeoutSeconds)
+    ) -> HTTPCookies.Value {
         HTTPCookies.Value(
             string: token,
             expires: nil,
-            maxAge: nil,
+            maxAge: maxAge,
             domain: nil,
             path: "/",
             isSecure: isSecure,
@@ -1037,16 +1400,32 @@ public struct ServerAuthMiddleware: AsyncMiddleware {
         // would let a rotation land in between and stamp a retired-token upgrade
         // with the new generation, which would then pass the hub watermark and
         // the per-frame check instead of being refused.
-        if let presented, let verifiedGeneration = await auth.verifyAndCaptureGeneration(presented) {
+        if let presented, let presentation = await auth.verifyAndCaptureGeneration(presented) {
             await auth.clearFailures(for: identity)
             request.runeWeaverAuthenticated = true
-            request.runeWeaverTokenGeneration = verifiedGeneration
+            request.runeWeaverTokenGeneration = presentation.generation
             if isUpgrade {
                 // Validate once, then erase the credential before the handshake
                 // crosses into route handling so no downstream log captures it.
                 ServerAuthRequest.stripPresentedToken(from: request)
             }
-            return try await next.respond(to: request)
+            let response = try await next.respond(to: request)
+            // Only a browser session has a cookie to slide, and only once the
+            // renewal throttle has elapsed; the owner bearer never rides a
+            // cookie and an upgrade cannot act on a `Set-Cookie`. A cookie the
+            // handler already issued (logout's expiry or rotation's fresh
+            // session) is authoritative, so renewal must not clobber it.
+            if presentation.kind == .browserSession,
+               presentation.shouldRefreshSessionCookie,
+               !isUpgrade,
+               response.cookies[ServerAuthRequest.sessionCookieName] == nil
+            {
+                response.cookies[ServerAuthRequest.sessionCookieName] = ServerAuthRequest.makeSessionCookie(
+                    token: presented,
+                    isSecure: ServerAuthRequest.isRequestSecure(request)
+                )
+            }
+            return response
         }
 
         if request.method == .GET || request.method == .HEAD {

@@ -19,9 +19,12 @@ public final class SettingsWindowController: NSObject {
     }
 
     /// Displays the native settings window, loading the standalone settings URL.
-    /// If an ephemeral session token is provided, injects the `rw_session` cookie
-    /// into the WebKit cookie store prior to navigation so the settings view is
-    /// pre-authenticated without prompting for the owner bearer token.
+    /// When a session token is provided, injects the `rw_session` cookie into
+    /// the WebKit cookie store prior to navigation so the settings view is
+    /// pre-authenticated without prompting for the owner bearer token. The
+    /// cookie carries the same sliding idle lifetime the server enforces, so the
+    /// native window and the browser dashboard cannot drift on when a session
+    /// goes dead or on the deadline the browser should honor.
     public func show(url: URL, sessionToken: String? = nil) async {
         self.allowedBaseURL = url
         let win = getOrCreateWindow()
@@ -32,7 +35,8 @@ public final class SettingsWindowController: NSObject {
                 .path: "/",
                 .name: ServerAuthRequest.sessionCookieName,
                 .value: sessionToken,
-                .secure: url.scheme == "https" ? "TRUE" : "FALSE"
+                .secure: url.scheme == "https" ? "TRUE" : "FALSE",
+                .expires: Date().addingTimeInterval(ServerAuth.sessionIdleTimeoutSeconds)
             ]
             if let cookie = HTTPCookie(properties: cookieProps) {
                 await webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie)
