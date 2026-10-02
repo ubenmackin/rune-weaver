@@ -45,7 +45,12 @@ struct AppMenuLabel: View {
             model.start()
             if model.needsOwnerToken {
                 showOnboarding = true
-            } else if model.isRunning, PermissionsOnboarding.shouldAutoOpen(needsOwnerToken: model.needsOwnerToken, hasCompleted: model.hasCompletedPermissionsOnboarding) {
+            } else if model.isRunning,
+                      PermissionsOnboarding.shouldAutoOpen(
+                          needsOwnerToken: model.needsOwnerToken,
+                          hasCompleted: model.hasCompletedPermissionsOnboarding
+                      )
+            {
                 // Owner-token onboarding outranks permissions guidance: only
                 // a provisioned launch with unseen guidance opens the window,
                 // so first run never competes with the blocking token sheet.
@@ -65,7 +70,12 @@ struct AppMenuLabel: View {
             // Deferred permissions auto-open: boot has resolved, so the token
             // posture is known and guidance opens only for a provisioned
             // launch with unseen onboarding, never ahead of the token sheet.
-            if running, !showOnboarding, PermissionsOnboarding.shouldAutoOpen(needsOwnerToken: model.needsOwnerToken, hasCompleted: model.hasCompletedPermissionsOnboarding) {
+            if running, !showOnboarding,
+               PermissionsOnboarding.shouldAutoOpen(
+                   needsOwnerToken: model.needsOwnerToken,
+                   hasCompleted: model.hasCompletedPermissionsOnboarding
+               )
+            {
                 model.openPermissions()
             }
         }

@@ -56,7 +56,7 @@ struct ChatInterruptTests {
         let interrupt = ChatInterruptState()
         let snapshot = ["user: summarize inbox"]
         var working = snapshot
-        let requested = ["email.search", "email.read", "recall_memories"]
+        let requested = ["email.search", "email.read", "memories.recall"]
         var executed: [String] = []
         var outcome: ChatTurnOutcome = .completed
         for (index, tool) in requested.enumerated() {

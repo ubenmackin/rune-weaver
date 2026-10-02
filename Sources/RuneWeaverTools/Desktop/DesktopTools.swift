@@ -31,7 +31,7 @@ public struct DesktopScreenshotTool: Tool, Sendable {
             + #""description":"Name of a running application to capture its frontmost window instead of the full display."},"#
             + #""include_windows_list":{"type":"boolean","#
             + #""description":"Include a list of all visible windows in the output.","default":false}"#
-            + #"},"additionalProperties":false}"#
+            + #"},"required":[],"additionalProperties":false}"#
     )
     public let permissionLevel = PermissionLevel.readOnly
 

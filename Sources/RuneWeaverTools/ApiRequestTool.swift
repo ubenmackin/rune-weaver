@@ -1,7 +1,7 @@
 // Rune Weaver Tools — Constrained API request tool with bounded I/O.
 //
 // The tool is the narrow, approval-gated replacement for shell curl: a closed
-// GET/POST/PUT/DELETE surface with an allowlisted header subset, a 64KB body
+// GET/POST/PUT/PATCH/DELETE surface with an allowlisted header subset, a 64KB body
 // cap, and a 256KB truncated response budget. File pulls stay manifest-only so
 // no remote bytes reach the host filesystem, and dry runs preview the redacted
 // shape without dialing.
@@ -39,6 +39,8 @@ public enum ApiMethod: String, Sendable, Codable, CaseIterable {
     case POST
     /// Replace with an optional body.
     case PUT
+    /// Partial update with an optional body.
+    case PATCH
     /// Remove, typically without a body.
     case DELETE
 
@@ -53,7 +55,7 @@ public enum ApiMethod: String, Sendable, Codable, CaseIterable {
 
 /// Arguments for the `api.request` tool.
 public struct ApiRequestArgs: Sendable, Equatable, Decodable {
-    /// HTTP method (GET, POST, PUT, or DELETE in any casing).
+    /// HTTP method (GET, POST, PUT, PATCH, DELETE in any casing).
     public let method: String
     /// Absolute http(s) URL to request.
     public let url: String
@@ -72,48 +74,33 @@ public struct ApiRequestArgs: Sendable, Equatable, Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case method
-        case verb
         case url
-        case uri
-        case link
         case headers
-        case header
         case body
-        case payload
-        case data
     }
 
-    /// Decodes arguments, accepting `verb` for `method`, `uri`/`link` for
-    /// `url`, `header` for `headers`, and `payload`/`data` for `body` so model
-    /// drift keeps working without widening the approved surface.
+    /// Decodes canonical request arguments.
+    /// Strict wire carries only `method`/`url`/`headers`/`body` so retired
+    /// spellings fail closed under additionalProperties false and wire plus
+    /// decoder agree.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if let direct = try container.decodeIfPresent(String.self, forKey: .method), !direct.isEmpty {
             method = direct
-        } else if let verb = try container.decodeIfPresent(String.self, forKey: .verb), !verb.isEmpty {
-            method = verb
         } else {
             method = ""
         }
         if let direct = try container.decodeIfPresent(String.self, forKey: .url), !direct.isEmpty {
             url = direct
-        } else if let uri = try container.decodeIfPresent(String.self, forKey: .uri), !uri.isEmpty {
-            url = uri
-        } else if let link = try container.decodeIfPresent(String.self, forKey: .link), !link.isEmpty {
-            url = link
         } else {
             url = ""
         }
         if let direct = try container.decodeIfPresent([String: String].self, forKey: .headers) {
             headers = direct
-        } else if let single = try container.decodeIfPresent([String: String].self, forKey: .header) {
-            headers = single
         } else {
             headers = nil
         }
         body = try container.decodeIfPresent(String.self, forKey: .body)
-            ?? container.decodeIfPresent(String.self, forKey: .payload)
-            ?? container.decodeIfPresent(String.self, forKey: .data)
     }
 
     /// Trimmed method verb.
@@ -295,7 +282,7 @@ public struct ApiRequestTool: Tool, Sendable {
     public let name = "api.request"
     /// When the LLM should use this tool.
     public let description =
-        "Performs one constrained HTTP API request (GET, POST, PUT, or DELETE) for smoke checks and simple downloads. "
+        "Performs one constrained HTTP API request (GET, POST, PUT, PATCH, DELETE) for smoke checks and simple downloads. "
             + "Use for API health checks or small JSON fetches instead of shell curl. "
             + "Requires approval with method plus URL plus body preview; "
             + "SSRF targets (private RFC 1918, 169.254.0.0/16, loopback except searxng_url and LLM endpoints, "
@@ -307,22 +294,39 @@ public struct ApiRequestTool: Tool, Sendable {
             + "Body is capped at 64KB and responses at 256KB truncated. "
             + "File pulls return a manifest only and never write to the host."
     /// Function-calling contract for method, URL, headers, and body.
-    /// Every decoder alias (`verb`, `uri`/`link`, `header`, `payload`/`data`)
-    /// is advertised so a compliant validator accepts what the decoder handles.
+    /// Schema advertises only canonical keys; retired spellings stay out of the
+    /// schema as removed aliases so strict validators and the decoder agree.
     public let inputSchema =
         JSONSchema(
-            rawValue: #"{"type":"object","properties":{"method":{"type":"string","enum":["GET","POST","PUT","DELETE"],"#
-                + #""description":"HTTP method"},"verb":{"type":"string","description":"Alias for method"},"#
-                + #""url":{"type":"string","description":"Absolute http(s) URL to request"},"uri":{"type":"string","#
-                + #""description":"Alias for url"},"link":{"type":"string","description":"Alias for url"},"#
-                + #""headers":{"type":"object","description":"Optional headers (Accept, Content-Type, "#
-                + #"Authorization only; values may use rwsecret:<KEY> references)","#
-                + #""additionalProperties":{"type":"string"}},"header":{"type":"object","description":"Alias for headers","#
-                + #""additionalProperties":{"type":"string"}},"body":{"type":"string","description":"Optional request body (64KB cap)"},"#
-                + #""payload":{"type":"string","description":"Alias for body"},"data":{"type":"string","description":"Alias for body"}},"#
-                + #""allOf":[{"anyOf":[{"required":["method"]}, {"required":["verb"]}]}, "#
-                + #"{"anyOf":[{"required":["url"]}, {"required":["uri"]}, {"required":["link"]}]}],"#
-                + #""additionalProperties":false}"#
+            rawValue: """
+            {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+                  "description": "HTTP method"
+                },
+                "url": {
+                  "type": "string",
+                  "description": "Absolute http(s) URL to request"
+                },
+                "headers": {
+                  "type": "object",
+                  "description": "Optional headers (Accept, Content-Type, Authorization only; values may use rwsecret:<KEY> references)",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "body": {
+                  "type": "string",
+                  "description": "Optional request body (64KB cap)"
+                }
+              },
+              "required":["method","url"],
+              "additionalProperties": false
+            }
+            """
         )
     /// Always gated: even GET parks so the SSRF guard and caps stay human-visible.
     public let permissionLevel = PermissionLevel.requiresApproval
@@ -390,13 +394,13 @@ public struct ApiRequestTool: Tool, Sendable {
             args = try JSONDecoder().decode(ApiRequestArgs.self, from: Data(input.argumentsJSON.utf8))
         } catch {
             return .failure(
-                "Invalid api.request arguments: expected {\"method\": \"GET|POST|PUT|DELETE\", \"url\": \"<http(s)://...>\"}.",
+                "Invalid api.request arguments: expected {\"method\": \"GET|POST|PUT|PATCH|DELETE\", \"url\": \"<http(s)://...>\"}.",
                 callID: input.callID
             )
         }
         guard let method = ApiMethod.normalized(args.trimmedMethod) else {
             return .failure(
-                "Invalid api.request method '\(args.trimmedMethod)': must be one of GET, POST, PUT, DELETE.",
+                "Invalid api.request method '\(args.trimmedMethod)': must be one of GET, POST, PUT, PATCH, DELETE.",
                 callID: input.callID
             )
         }

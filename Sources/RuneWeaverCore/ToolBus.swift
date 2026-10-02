@@ -283,6 +283,12 @@ public actor ToolBus {
     }
 
     /// Registers an alias name pointing to a primary registered tool name.
+    /// Generic alias mechanism with zero legacy registrations: no boot path
+    /// registers `remember_fact`/`recall_memories` or any other legacy alias,
+    /// and reintroducing one requires explicit review because canonical memory
+    /// names are the sole wire identity. Resolution stays shared across
+    /// `execute`, `tool(named:)`, `isToolEnabled`, `enableTool`, and
+    /// `disableTool` so an alias never diverges from its target's enablement.
     /// - Parameters:
     ///   - aliasName: Alias name that callers might invoke (e.g. legacy tool names).
     ///   - targetToolName: Primary registered tool name.

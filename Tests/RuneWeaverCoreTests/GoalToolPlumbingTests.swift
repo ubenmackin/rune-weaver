@@ -137,11 +137,14 @@ struct GoalToolPlumbingTests {
         #expect(create.inputSchema.rawValue.contains(#""required":["title","statement"]"#))
         let progress = try #require(byName["goal.progress"])
         #expect(progress.inputSchema.rawValue.contains("stepOrdinal"))
-        #expect(progress.inputSchema.rawValue.contains("step_ordinal"))
-        #expect(progress.inputSchema.rawValue.contains("allOf"))
+        #expect(progress.inputSchema.rawValue.contains("status"))
+        #expect(!progress.inputSchema.rawValue.contains("step_ordinal"))
+        #expect(!progress.inputSchema.rawValue.contains("allOf"))
         let status = try #require(byName["goal.status"])
         #expect(status.inputSchema.rawValue.contains("goalID"))
-        #expect(status.inputSchema.rawValue.contains("goal_id"))
+        #expect(status.inputSchema.rawValue.contains("all"))
+        #expect(!status.inputSchema.rawValue.contains("goal_id"))
+        #expect(!status.inputSchema.rawValue.contains("allOf"))
     }
 
     @Test

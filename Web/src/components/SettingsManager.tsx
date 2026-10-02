@@ -286,8 +286,6 @@ const KNOWN_BUILTIN_TOOL_CATEGORIES: Record<string, string> = {
   "files.write": "files",
   "memories.store": "memories",
   "memories.recall": "memories",
-  remember_fact: "memories",
-  recall_memories: "memories",
   "goal.create": "goal",
   "goal.status": "goal",
   "goal.progress": "goal",
@@ -299,6 +297,8 @@ const KNOWN_BUILTIN_TOOL_CATEGORIES: Record<string, string> = {
 
 // Routes a builtin tool name by prefix. Callers must gate on provenance
 // first; this helper alone cannot tell bash.exec apart from bash.evil.
+// Browser, web, and api prefixes share one section so any future api.* tool
+// lands with the same Browser, Web & API editor without a second pill.
 function resolveBuiltinCategoryByName(toolName: string): string {
   if (toolName.startsWith("desktop.")) return "desktop";
   if (toolName.startsWith("messages.")) return "messages";
@@ -306,7 +306,7 @@ function resolveBuiltinCategoryByName(toolName: string): string {
   if (toolName.startsWith("browser.") || toolName.startsWith("web.") || toolName.startsWith("api.")) return "browser-web";
   if (toolName === "bash.exec" || toolName.startsWith("bash.")) return "bash";
   if (toolName.startsWith("files.")) return "files";
-  if (toolName.startsWith("memories.") || toolName === "remember_fact" || toolName === "recall_memories") return "memories";
+  if (toolName.startsWith("memories.")) return "memories";
   if (toolName.startsWith("goal.")) return "goal";
   if (toolName.startsWith("fanout.")) return "fanout";
   if (toolName.startsWith("media.")) return "media";

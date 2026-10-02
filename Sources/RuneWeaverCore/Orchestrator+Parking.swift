@@ -301,11 +301,10 @@ extension Orchestrator {
         let tools = await VisionSchemaFilter.sortedByName(toolBus.availableTools(), name: { $0.name })
         let source = await conversations.session(id: parked.sessionID)?.source
         let supportsVision = llm.modelInfo.supportsVision
-        let includeToolSchemas = !llm.modelInfo.supportsTools
         if Orchestrator.isBackgroundSource(source) {
-            return SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
+            return SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision)
         }
-        return SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
+        return SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision)
     }
 
     /// Pending actions for siblings still awaiting inbox decisions.

@@ -163,17 +163,15 @@ public struct WebFetchArgs: Sendable, Equatable, Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case url
-        case uri
-        case link
     }
 
-    /// Decodes arguments, accepting `uri`/`link` aliases for model drift.
+    /// Decodes canonical fetch arguments.
+    /// Strict wire carries only `url` so retired `uri`/`link` spellings fail
+    /// closed under additionalProperties false and wire plus decoder agree.
     /// - Parameter decoder: Decoder for the arguments document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let url = try container.decodeIfPresent(String.self, forKey: .url)
-            ?? container.decodeIfPresent(String.self, forKey: .uri)
-            ?? container.decodeIfPresent(String.self, forKey: .link)
             ?? ""
         self.url = url
     }
@@ -282,13 +280,23 @@ public struct WebFetchTool: Tool, Sendable {
             + "Use when the user asks to open, quote, or summarize a URL. "
             + "Follows up to 5 redirects with a 1 MB cap; login walls return auth_required with a browser.navigate hint."
     /// Function-calling contract for `url`.
-    /// Decoder aliases (`uri`, `link`) are advertised so a compliant
-    /// validator accepts what the decoder handles.
+    /// Schema advertises only the canonical key; retired spellings stay out of
+    /// the schema as removed aliases so strict validators and the decoder agree.
     public let inputSchema =
         JSONSchema(
-            rawValue: #"{"type":"object","properties":{"url":{"type":"string","description":"Absolute http(s) URL to fetch"},"#
-                + #""uri":{"type":"string","description":"Alias for url"},"link":{"type":"string","description":"Alias for url"}}"#
-                + #","anyOf":[{"required":["url"]}, {"required":["uri"]}, {"required":["link"]}],"additionalProperties":false}"#
+            rawValue: """
+            {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "description": "Absolute http(s) URL to fetch"
+                }
+              },
+              "required":["url"],
+              "additionalProperties": false
+            }
+            """
         )
     /// Always allowed at the gate level; unsafe URLs fail with guidance instead.
     public let permissionLevel = PermissionLevel.readOnly

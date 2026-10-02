@@ -16,7 +16,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for component details and MVP phases, [CO
 | Episodic turn persistence | 2 Memory | done-verified | Every chat turn is mirrored to the SQLite episodes store and reloads on restart. |
 | Remember capture via remember-that and slash-remember | 2 Memory | done-verified | `remember that <fact>` and `/remember <fact>` store profile and keyword facts without requiring embeddings. |
 | Memory search and facts recall | 2 Memory | done-verified | `memory search` and `memory facts` return stored turns and facts by keyword overlap. |
-| LLM memory tools — remember_fact plus recall_memories | 2 Memory | done-verified | `remember_fact`/`recall_memories` tool definitions sent every turn; both trusted auto-allowed and audit-logged per the owner memory-write ruling. |
+| LLM memory tools — memories.store plus memories.recall | 2 Memory | done-verified | `memories.store`/`memories.recall` tool definitions sent every turn; both trusted auto-allowed and audit-logged per the owner memory-write ruling. |
 | Automatic recall injection | 2 Memory | done-verified | Bounded keyword recall with nil embeddings injects top hits as source-labeled token-bounded system context; threshold-gated, skipped when nothing scores. |
 | Semantic vector embeddings backend | 2 Memory | done-verified | Facts carry local embeddings and `memory search` ranks by vector similarity. |
 | Email read — self-hosted IMAP search/read (read-only) | 3 Email | done-verified | `email.search`/`email.read` list, read, and summarize self-hosted IMAP from chat; read-only via `BODY.PEEK`/`readonly=True`, verified TLS, injection-hardened, attachments listed with download deferred. |

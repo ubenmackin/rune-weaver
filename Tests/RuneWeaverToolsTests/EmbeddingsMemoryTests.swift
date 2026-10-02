@@ -63,12 +63,12 @@ struct EmbeddingsMemoryTests {
         // fallback policy.
         let remember = RememberFactTool(engine: engine, audit: { _ in }, embedder: stub)
         let first = try await remember.execute(
-            input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"\#(dogFact)"}"#),
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"\#(dogFact)"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(first.isError == false)
         let second = try await remember.execute(
-            input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"\#(physicsFact)"}"#),
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"\#(physicsFact)"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(second.isError == false)
@@ -89,7 +89,7 @@ struct EmbeddingsMemoryTests {
         // first despite the zero-overlap query.
         let recall = RecallMemoriesTool(engine: engine, embedder: stub)
         let output = try await recall.execute(
-            input: ToolInput(toolName: "recall_memories", argumentsJSON: #"{"query":"\#(paraphrase)","limit":5}"#),
+            input: ToolInput(toolName: "memories.recall", argumentsJSON: #"{"query":"\#(paraphrase)","limit":5}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(output.isError == false)
@@ -107,7 +107,7 @@ struct EmbeddingsMemoryTests {
         let remember = RememberFactTool(engine: engine, audit: { _ in }, embedder: failing)
         let factText = "The lighthouse keeper collects brass compasses"
         let stored = try await remember.execute(
-            input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"\#(factText)"}"#),
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"\#(factText)"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(stored.isError == false)
@@ -124,7 +124,7 @@ struct EmbeddingsMemoryTests {
         // fact even though no vector was ever produced.
         let recall = RecallMemoriesTool(engine: engine, embedder: failing)
         let output = try await recall.execute(
-            input: ToolInput(toolName: "recall_memories", argumentsJSON: #"{"query":"lighthouse compasses","limit":5}"#),
+            input: ToolInput(toolName: "memories.recall", argumentsJSON: #"{"query":"lighthouse compasses","limit":5}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(output.isError == false)

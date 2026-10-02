@@ -138,7 +138,7 @@ struct SmokeHarnessTests {
             defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
             #expect(systemPrompt.contains("Rune Weaver"))
             #expect(systemPrompt.contains("email.search"))
-            #expect(systemPrompt.contains("recall_memories"))
+            #expect(systemPrompt.contains("memories.recall"))
             let provider = SmokeScriptedProvider(turns: [
                 SmokeTurn(textDeltas: ["Hello, ", "I am ready to help."], totalTokens: 42)
             ])
@@ -248,7 +248,7 @@ struct SmokeHarnessTests {
             )
             defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
             let rememberCall = ToolInput(
-                toolName: "remember_fact",
+                toolName: "memories.store",
                 argumentsJSON: #"{"text":"My dog Biscuit loves brass compasses","category":"preference"}"#,
                 callID: "call_smoke_remember_01"
             )
@@ -273,7 +273,7 @@ struct SmokeHarnessTests {
             ))
             #expect(saved.text == "Saved your preference.")
             #expect(saved.toolActions.count == 1)
-            #expect(saved.toolActions.first?.toolName == "remember_fact")
+            #expect(saved.toolActions.first?.toolName == "memories.store")
             #expect(saved.toolActions.first?.result?.isError == false)
             #expect(saved.totalTokens == 22)
             let profile = await engine.getUserProfile()
@@ -281,7 +281,7 @@ struct SmokeHarnessTests {
             #expect(audit.captured().count == 1)
             #expect(audit.captured().first?.text.contains("Biscuit") == true)
             let recallCall = ToolInput(
-                toolName: "recall_memories",
+                toolName: "memories.recall",
                 argumentsJSON: #"{"query":"Biscuit dog","limit":5}"#,
                 callID: "call_smoke_recall_01"
             )
@@ -307,7 +307,7 @@ struct SmokeHarnessTests {
             ))
             #expect(recalled.text.contains("Biscuit"))
             #expect(recalled.toolActions.count == 1)
-            #expect(recalled.toolActions.first?.toolName == "recall_memories")
+            #expect(recalled.toolActions.first?.toolName == "memories.recall")
             #expect(recalled.toolActions.first?.result?.isError == false)
             #expect(recalled.toolActions.first?.result?.content.contains("Biscuit") == true)
             #expect(recalled.toolActions.first?.result?.content.contains("brass compasses") == true)
@@ -406,23 +406,25 @@ struct SmokeHarnessTests {
         let attachment = try #require(await bus.tool(named: "email.attachment"))
         let parsed = try encodeToolParameters(ToolDefinition(attachment))
         let properties = try #require(parsed["properties"] as? [String: Any])
-        for key in ["account", "id", "messageId", "message_id", "uid", "index", "attachmentIndex", "attachment_index"] {
+        for key in ["account", "id", "index", "mailbox", "preview", "subpath", "saveToPath"] {
             #expect(properties[key] != nil, "Missing property \(key)")
         }
         #expect(parsed["additionalProperties"] as? Bool == false)
         let prompt = systemPrompt
-        for name in ["email.search", "email.read", "email.attachment", "remember_fact", "recall_memories"] {
-            #expect(prompt.contains(name))
-        }
-        // Full prompt composition covers the same sixteen so drift surfaces here too.
+        #expect(prompt.contains("Rune Weaver"))
+        #expect(prompt.contains("memories.store"))
+        #expect(prompt.contains("memories.recall"))
+        #expect(!prompt.contains("Available tools:"))
+        // Full prompt composition verifies lean prompt consistency.
         let fullBus = ToolBus()
         for tool in fullTools {
             await fullBus.register(tool: tool)
         }
         let fullPrompt = await SystemPromptComposer.compose(toolBus: fullBus)
-        for name in expected {
-            #expect(fullPrompt.contains(name), "System prompt missing \(name)")
-        }
+        #expect(fullPrompt.contains("Rune Weaver"))
+        #expect(fullPrompt.contains("memories.store"))
+        #expect(fullPrompt.contains("memories.recall"))
+        #expect(!fullPrompt.contains("Available tools:"))
     }
 
     @Test

@@ -427,9 +427,6 @@ public enum BuiltinToolPlugins {
             // registration).
             await bus.register(tool: tool, isEnabled: !shipsDisabled.contains(tool.name))
         }
-        if memoryEngine != nil {
-            await MemoryTools.registerMemoryAliases(on: bus)
-        }
     }
 
     /// Resolves the one policy store and builds the mandatory egress supervisor.

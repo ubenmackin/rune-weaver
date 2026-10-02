@@ -3,9 +3,9 @@
 import Foundation
 import RuneWeaverCore
 
-/// Audit event recorded for every `remember_fact` write.
+/// Audit event recorded for every `memories.store` write.
 public struct MemoryAuditEvent: Sendable, Codable, Equatable {
-    /// Name of the tool that performed the write (`remember_fact`).
+    /// Name of the tool that performed the write (`memories.store`).
     public let toolName: String
     /// Stored fact text (trimmed).
     public let text: String
@@ -36,7 +36,7 @@ public struct MemoryAuditEvent: Sendable, Codable, Equatable {
     }
 }
 
-/// Audit sink invoked for every `remember_fact` write.
+/// Audit sink invoked for every `memories.store` write.
 public typealias MemoryAuditHandler = @Sendable (MemoryAuditEvent) -> Void
 
 /// Local JSONL audit log for memory writes.
@@ -86,7 +86,7 @@ public enum FileMemoryAuditLog {
     }
 }
 
-/// Arguments for the `remember_fact` tool.
+/// Arguments for the `memories.store` tool.
 public struct RememberFactArgs: Sendable, Equatable, Decodable {
     /// Fact text to store.
     public let text: String
@@ -106,7 +106,8 @@ public struct RememberFactArgs: Sendable, Equatable, Decodable {
         case category
     }
 
-    /// Decodes arguments, accepting every documented text alias.
+    /// Decodes arguments; `fact` and `content` are compatibility-only aliases kept out of the strict schema,
+    /// which advertises `text` only, so the wire stays fail-closed while older callers still decode.
     /// - Parameter decoder: Decoder for the arguments document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -141,7 +142,7 @@ public struct RememberFactArgs: Sendable, Equatable, Decodable {
     }
 }
 
-/// Arguments for the `recall_memories` tool.
+/// Arguments for the `memories.recall` tool.
 public struct RecallMemoriesArgs: Sendable, Equatable, Decodable {
     /// Free-text query matched against episodic and profile memory.
     public let query: String
@@ -196,7 +197,7 @@ public struct RecallMemoriesArgs: Sendable, Equatable, Decodable {
     }
 }
 
-/// Envelope wrapping `remember_fact` tool output.
+/// Envelope wrapping `memories.store` tool output.
 public struct RememberFactEnvelope: Sendable, Equatable, Codable {
     /// Stored fact text (trimmed).
     public let text: String
@@ -216,7 +217,7 @@ public struct RememberFactEnvelope: Sendable, Equatable, Codable {
     }
 }
 
-/// One `recall_memories` hit: content plus its tier and score.
+/// One `memories.recall` hit: content plus its tier and score.
 public struct MemoryHit: Sendable, Equatable, Codable {
     /// Human-readable content.
     public let content: String
@@ -246,7 +247,7 @@ public struct MemoryHit: Sendable, Equatable, Codable {
     }
 }
 
-/// Envelope wrapping `recall_memories` tool output.
+/// Envelope wrapping `memories.recall` tool output.
 public struct RecallMemoriesEnvelope: Sendable, Equatable, Codable {
     /// Query that was run.
     public let query: String
@@ -282,12 +283,10 @@ public enum MemoryToolEncoding {
     }
 }
 
-/// `memories.store` (alias `remember_fact`) tool: persists one fact to long-lived memory.
+/// `memories.store` tool: persists one fact to long-lived memory.
 public struct RememberFactTool: Tool, Sendable {
     /// Primary tool name referenced by the LLM and memory.
     public static let primaryName = "memories.store"
-    /// Legacy alias name.
-    public static let legacyName = "remember_fact"
 
     /// Stable tool name referenced by the LLM and memory.
     public let name: String
@@ -376,12 +375,10 @@ public struct RememberFactTool: Tool, Sendable {
     }
 }
 
-/// `memories.recall` (alias `recall_memories`) tool: searches episodic, semantic, profile, and indexed document memory.
+/// `memories.recall` tool: searches episodic, semantic, profile, and indexed document memory.
 public struct RecallMemoriesTool: Tool, Sendable {
     /// Primary tool name referenced by the LLM and memory.
     public static let primaryName = "memories.recall"
-    /// Legacy alias name.
-    public static let legacyName = "recall_memories"
 
     /// Stable tool name referenced by the LLM and memory.
     public let name: String
@@ -487,15 +484,5 @@ public enum MemoryTools {
         for tool in makeTools(engine: engine, audit: audit, embedder: embedder) {
             await bus.register(tool: tool)
         }
-        await registerMemoryAliases(on: bus)
-    }
-
-    /// Registers the legacy memory aliases on a bus whose memory tools were
-    /// built through `makeTools`/`makeAllTools` instead of `register`.
-    /// Single-sources the alias pair so boot paths cannot drift.
-    /// - Parameter bus: Bus receiving the `remember_fact` and `recall_memories` aliases.
-    public static func registerMemoryAliases(on bus: ToolBus) async {
-        await bus.registerAlias(from: RememberFactTool.legacyName, to: RememberFactTool.primaryName)
-        await bus.registerAlias(from: RecallMemoriesTool.legacyName, to: RecallMemoriesTool.primaryName)
     }
 }

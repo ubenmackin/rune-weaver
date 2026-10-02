@@ -334,4 +334,85 @@ struct ToolBusTests {
         #expect(allNames.contains("email.search"))
         #expect(allNames.contains("web.search"))
     }
+
+    @Test
+    func `Alias resolves identically across bus paths and unregister drops stale aliases`() async {
+        let bus = ToolBus()
+        await bus.register(tool: ReadOnlyStubTool())
+        // Generic alias plumbing: the alias is only a second name for the
+        // target, so every lookup and mutation must land on the same entry.
+        // Otherwise an alias could execute while reporting disabled, or stay
+        // enabled while its target is off.
+        await bus.registerAlias(from: "stub.legacy", to: "stub.read")
+
+        // Lookup shares resolution: alias and canonical name return the same tool.
+        #expect(await bus.tool(named: "stub.legacy")?.name == "stub.read")
+        #expect(await bus.tool(named: "stub.read")?.name == "stub.read")
+
+        // Enablement shares resolution: both spellings report one state.
+        #expect(await bus.isToolEnabled(named: "stub.legacy") == true)
+        #expect(await bus.isToolEnabled(named: "stub.read") == true)
+
+        // Disabling through the alias flips the shared target state, so the
+        // canonical spelling observes the same gate.
+        await bus.disableTool(named: "stub.legacy")
+        #expect(await bus.isToolEnabled(named: "stub.read") == false)
+        #expect(await bus.isToolEnabled(named: "stub.legacy") == false)
+
+        // A disabled target stays disabled through the alias execution path.
+        let disabled = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.legacy", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(disabled.isError == true)
+
+        // Enabling through the canonical name restores the alias view, proving
+        // the toggle is one entry rather than two diverging flags.
+        await bus.enableTool(named: "stub.read")
+        #expect(await bus.isToolEnabled(named: "stub.legacy") == true)
+
+        // Execution shares resolution: the alias call runs the target tool.
+        let result = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.legacy", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(result.isError == false)
+        #expect(result.content == "stub-ok")
+
+        // Unregister must drop stale aliases so a removed tool cannot be
+        // reached through a leftover name after its definition is gone.
+        await bus.unregister(toolNamed: "stub.read")
+        #expect(await bus.tool(named: "stub.legacy") == nil)
+        #expect(await bus.isToolEnabled(named: "stub.legacy") == false)
+        let afterRemove = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.legacy", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(afterRemove.isError == true)
+    }
+
+    @Test
+    func `Boot registers no legacy memory aliases`() async throws {
+        let policyStore = await ToolsTestSupport.makeTestPolicyStore()
+        let tools = try await BuiltinToolPlugins.makeAllTools(
+            emailConfig: EmailConfig(),
+            filesConfig: FilesConfig(),
+            browserConfig: BrowserConfig(),
+            policyStore: policyStore
+        )
+        // Canonical memory names are the sole wire identity: a fresh build
+        // must never advertise the retired spellings as tools.
+        let names = Set(tools.map(\.name))
+        #expect(!names.contains("remember_fact"))
+        #expect(!names.contains("recall_memories"))
+
+        // A bus built from the boot set resolves neither retired name, with or
+        // without an explicit alias, so no boot path smuggles one in.
+        let bus = ToolBus()
+        for tool in tools {
+            await bus.register(tool: tool)
+        }
+        #expect(await bus.tool(named: "remember_fact") == nil)
+        #expect(await bus.tool(named: "recall_memories") == nil)
+    }
 }
