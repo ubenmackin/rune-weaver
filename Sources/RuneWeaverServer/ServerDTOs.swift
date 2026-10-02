@@ -1272,11 +1272,12 @@ public struct ToolCancelResponse: Content, Equatable {
 ///
 /// Every field stays optional so a request carrying only one key leaves the
 /// rest of the stored pursuit policy untouched instead of resetting it.
-/// Covers the dashboard-owned subset of the full `GoalsConfig` snapshot
-/// (enablement, cadence, active cap); the planning bounds stay file-owned so
-/// the settings surface cannot widen execution context. A caller holding a
-/// complete policy builds the patch through `init(_:)` and reuses the merge
-/// path without hand-mapping fields.
+/// Covers the dashboard-owned `GoalsConfig` surface in full — enablement,
+/// cadence, active cap, plan step/timeout bounds, and the per-goal trigger
+/// cap — so the settings form decides how far planning and trigger fan-out
+/// may widen, with range checks single-sourced in the config validation layer.
+/// A caller holding a complete policy builds the patch through `init(_:)` and
+/// reuses the merge path without hand-mapping fields.
 public struct GoalsUpdate: Content, Sendable, Equatable {
     /// Whether goal creation and advancement run at all. Nil preserves the stored value.
     public var enabled: Bool?
@@ -1284,6 +1285,10 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
     public var stepIntervalMinutes: Int?
     /// Maximum goals in the active state at once. Nil preserves the stored value.
     public var maxActiveGoals: Int?
+    /// Maximum steps in one decomposed plan. Nil preserves the stored value.
+    public var maxStepsPerGoal: Int?
+    /// Seconds the planner waits on the model before falling back. Nil preserves the stored value.
+    public var planTimeoutSeconds: Int?
     /// Maximum event triggers armed on one goal. Nil preserves the stored value.
     public var maxTriggersPerGoal: Int?
 
@@ -1292,16 +1297,22 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
     ///   - enabled: Whether goal pursuit runs.
     ///   - stepIntervalMinutes: Cadence hint in minutes.
     ///   - maxActiveGoals: Active-goal cap.
+    ///   - maxStepsPerGoal: Plan step cap.
+    ///   - planTimeoutSeconds: Planning model timeout.
     ///   - maxTriggersPerGoal: Per-goal event-trigger cap.
     public init(
         enabled: Bool? = nil,
         stepIntervalMinutes: Int? = nil,
         maxActiveGoals: Int? = nil,
+        maxStepsPerGoal: Int? = nil,
+        planTimeoutSeconds: Int? = nil,
         maxTriggersPerGoal: Int? = nil
     ) {
         self.enabled = enabled
         self.stepIntervalMinutes = stepIntervalMinutes
         self.maxActiveGoals = maxActiveGoals
+        self.maxStepsPerGoal = maxStepsPerGoal
+        self.planTimeoutSeconds = planTimeoutSeconds
         self.maxTriggersPerGoal = maxTriggersPerGoal
     }
 
@@ -1312,6 +1323,8 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
         self.enabled = config.enabled
         self.stepIntervalMinutes = config.stepIntervalMinutes
         self.maxActiveGoals = config.maxActiveGoals
+        self.maxStepsPerGoal = config.maxStepsPerGoal
+        self.planTimeoutSeconds = config.planTimeoutSeconds
         self.maxTriggersPerGoal = config.maxTriggersPerGoal
     }
 
@@ -1321,6 +1334,10 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
         case stepIntervalMinutesCamel = "stepIntervalMinutes"
         case maxActiveGoals = "max_active_goals"
         case maxActiveGoalsCamel = "maxActiveGoals"
+        case maxStepsPerGoal = "max_steps_per_goal"
+        case maxStepsPerGoalCamel = "maxStepsPerGoal"
+        case planTimeoutSeconds = "plan_timeout_seconds"
+        case planTimeoutSecondsCamel = "planTimeoutSeconds"
         case maxTriggersPerGoal = "max_triggers_per_goal"
         case maxTriggersPerGoalCamel = "maxTriggersPerGoal"
     }
@@ -1341,6 +1358,12 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
         let snakeCap = try container.decodeIfPresent(Int.self, forKey: .maxActiveGoals)
         let camelCap = try container.decodeIfPresent(Int.self, forKey: .maxActiveGoalsCamel)
         maxActiveGoals = snakeCap ?? camelCap
+        let snakeSteps = try container.decodeIfPresent(Int.self, forKey: .maxStepsPerGoal)
+        let camelSteps = try container.decodeIfPresent(Int.self, forKey: .maxStepsPerGoalCamel)
+        maxStepsPerGoal = snakeSteps ?? camelSteps
+        let snakeTimeout = try container.decodeIfPresent(Int.self, forKey: .planTimeoutSeconds)
+        let camelTimeout = try container.decodeIfPresent(Int.self, forKey: .planTimeoutSecondsCamel)
+        planTimeoutSeconds = snakeTimeout ?? camelTimeout
         let snakeTriggerCap = try container.decodeIfPresent(Int.self, forKey: .maxTriggersPerGoal)
         let camelTriggerCap = try container.decodeIfPresent(Int.self, forKey: .maxTriggersPerGoalCamel)
         maxTriggersPerGoal = snakeTriggerCap ?? camelTriggerCap
@@ -1356,6 +1379,8 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
         try container.encodeIfPresent(enabled, forKey: .enabled)
         try container.encodeIfPresent(stepIntervalMinutes, forKey: .stepIntervalMinutes)
         try container.encodeIfPresent(maxActiveGoals, forKey: .maxActiveGoals)
+        try container.encodeIfPresent(maxStepsPerGoal, forKey: .maxStepsPerGoal)
+        try container.encodeIfPresent(planTimeoutSeconds, forKey: .planTimeoutSeconds)
         try container.encodeIfPresent(maxTriggersPerGoal, forKey: .maxTriggersPerGoal)
     }
 }
@@ -1459,6 +1484,12 @@ extension UpdateSettingsRequest {
         }
         if let maxActiveGoals = update.maxActiveGoals {
             goals.maxActiveGoals = maxActiveGoals
+        }
+        if let maxStepsPerGoal = update.maxStepsPerGoal {
+            goals.maxStepsPerGoal = maxStepsPerGoal
+        }
+        if let planTimeoutSeconds = update.planTimeoutSeconds {
+            goals.planTimeoutSeconds = planTimeoutSeconds
         }
         if let maxTriggersPerGoal = update.maxTriggersPerGoal {
             goals.maxTriggersPerGoal = maxTriggersPerGoal

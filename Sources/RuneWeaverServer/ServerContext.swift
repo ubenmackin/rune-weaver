@@ -488,6 +488,7 @@ extension ServerContext {
         let engineConfig: EngineConfig
         let memoryEngine: MemoryEngine
         let approvals: ApprovalQueue
+        let permissionGate: PermissionGate
         let embedder: (any EmbeddingsBackend)?
         let securityConfig: SecurityConfig
         /// Recall budgets bounding automatic recall fan-out. Carries the
@@ -644,6 +645,7 @@ extension ServerContext {
             compactionThresholdPercent: args.engineConfig.compactionThresholdPercent,
             steeringQueue: steeringQueue,
             securityConfig: args.securityConfig,
+            permissionGate: args.permissionGate,
             recallBudgets: args.recallBudgets
         )
         // The serving provider doubles as the guarded judge so file mode plus
@@ -665,6 +667,50 @@ extension ServerContext {
             judgeLLM: args.llm
         )
         return RuntimeEngines(orchestrator: orchestrator, schedulerWorker: schedulerWorker, steeringQueue: steeringQueue)
+    }
+
+    /// Derives the configured-service egress candidates for the boot supervisor.
+    ///
+    /// Exposed internally so the live-reload regression can pin that boot and
+    /// settings saves consume the same derivation; the settings path reads the
+    /// same `RuneWeaverConfig.serviceEgressCandidates` accessor, so a service
+    /// source added to one path can never drift from the other.
+    /// - Parameters:
+    ///   - browser: Browser policy carrying the SearXNG base URL.
+    ///   - media: Optional media policy carrying Sonarr/Radarr URLs.
+    ///   - email: Optional mail policy carrying IMAP and SMTP hosts.
+    /// - Returns: URLs or hosts to seed into the declarative allowlist.
+    static func configuredServiceEgressCandidates(
+        browser: BrowserConfig,
+        media: MediaConfig?,
+        email: EmailConfig?
+    ) -> [String] {
+        RuneWeaverConfig.serviceEgressCandidates(browser: browser, media: media, email: email)
+    }
+
+    private static func setupEgressAndPolicy(
+        policyStore: PolicyStore,
+        toolConfigs: ToolConfigs,
+        secrets: SecretsManager?,
+        permissionGate: PermissionGate
+    ) async throws -> OutboundEgressSupervisor {
+        let serviceCandidates = Self.configuredServiceEgressCandidates(
+            browser: toolConfigs.browser,
+            media: toolConfigs.media,
+            email: toolConfigs.email
+        )
+        await policyStore.ensureServiceDomainsAllowed(urlsOrHosts: serviceCandidates)
+
+        let egressSupervisor = try await OutboundEgressSupervisor.make(
+            policyStore: policyStore,
+            secrets: secrets,
+            browserConfig: toolConfigs.browser,
+            mediaConfig: toolConfigs.media,
+            emailConfig: toolConfigs.email,
+            llmServerURLs: toolConfigs.llmServerURLs
+        )
+        await permissionGate.setEgressEvaluator(egressSupervisor)
+        return egressSupervisor
     }
 
     /// Builds a context wired for live approval prompts over WebSocket.
@@ -764,6 +810,7 @@ extension ServerContext {
             conversations: conversations, bus: services.bus, llm: llm,
             systemPrompt: systemPrompt, engineConfig: engineConfig,
             memoryEngine: memoryEngine, approvals: services.approvals,
+            permissionGate: permissionGate,
             embedder: embedder, securityConfig: securityConfig,
             recallBudgets: recallBudgets.clamped(),
             durable: services.durable, notifier: notifier,
@@ -785,13 +832,11 @@ extension ServerContext {
             config: fanOutConfig,
             reviewer: llm
         )
-        let egressSupervisor = try await OutboundEgressSupervisor.make(
+        let egressSupervisor = try await setupEgressAndPolicy(
             policyStore: resolvedPolicyStore,
+            toolConfigs: toolConfigs,
             secrets: secrets,
-            browserConfig: browserConfig,
-            mediaConfig: mediaConfig,
-            emailConfig: emailConfig,
-            llmServerURLs: llmServerURLs
+            permissionGate: permissionGate
         )
         try await registerBuiltinTools(BuiltinToolArgs(
             bus: services.bus, configs: toolConfigs, transports: transports,
@@ -849,8 +894,15 @@ extension ServerContext {
             }
         }
         let steering = SteeringQueue()
-        let orch = Orchestrator(conversations: conv, toolBus: bus, llm: FallbackDummyLLM(), steeringQueue: steering)
         let appq = ApprovalQueue(permissionGate: gate)
+        let orch = Orchestrator(
+            conversations: conv,
+            toolBus: bus,
+            llm: FallbackDummyLLM(),
+            approvalQueue: appq,
+            steeringQueue: steering,
+            permissionGate: gate
+        )
         return ServerContext(
             conversations: conv,
             toolBus: bus,
@@ -904,10 +956,7 @@ private func installLiveApprovalHandler(
         if let onApprovalRequested {
             await onApprovalRequested(request)
         }
-        let decision = await handlerApprovals.waitForDecision(
-            id: request.id,
-            timeoutSeconds: ApprovalQueue.defaultDecisionTimeoutSeconds
-        )
+        let decision = await handlerApprovals.waitForDecision(id: request.id)
         return decision.approved
     }
 }

@@ -419,8 +419,13 @@ private func registerMemoryRoutes(_ app: Application) {
 /// Applies network egress decision side effects to the supervisor and policy store.
 ///
 /// Fail-closed: returns false when the grant cannot be honored (missing host,
-/// session-less `allowSession`, missing supervisor, or a rejected policy
-/// write), and the caller must deny the tool call instead of approving it.
+/// wildcard-shaped host, session-less `allowSession`, missing supervisor, or a
+/// rejected policy write), and the caller must deny the tool call instead of
+/// approving it.
+/// Allow tiers accept exact canonical hosts only: a wildcard pattern (`*.com`)
+/// is matched as covering every destination it names, so one approval click
+/// could otherwise persist unbounded egress and defeat deny-by-default.
+/// Wildcard entries stay addable solely through the explicit policy editor.
 /// The context holds the supervisor as optional only for fallback and test
 /// doubles; production `ServerContext.make` always injects a verified
 /// supervisor or throws at boot, so a nil supervisor here means a
@@ -438,6 +443,15 @@ func applyEgressDecision(
         argumentsJSON: pending?.input.argumentsJSON ?? ""
     )
     guard let host = resolvedHost, !host.isEmpty else { return false }
+    // The host can be model-filled, so a star shape is an attacker-controlled
+    // pattern rather than a legitimate target. Deny tiers stay untouched:
+    // blocking a wildcard only tightens the posture, while allowing one does
+    // the opposite. Fail closed so the pattern is never approved and never
+    // written to policy.toml.
+    let isAllowTier = tier == .allowOnce || tier == .allowSession || tier == .alwaysAllow
+    if isAllowTier, AllowedOriginPattern.classifyWildcard(host.lowercased()) != .none {
+        return false
+    }
     switch tier {
     case .allowOnce:
         guard let supervisor = context.egressSupervisor else { return false }

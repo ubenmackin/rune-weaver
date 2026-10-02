@@ -396,7 +396,7 @@ public actor ToolBus {
         switch tool.permissionLevel {
         case .readOnly, .trusted:
             if let gate = permissionGate {
-                switch await gate.checkPermission(toolCall: effectiveCall, tool: tool) {
+                switch await gate.checkPermission(toolCall: effectiveCall, tool: tool, sessionID: context.sessionID) {
                 case .allowed:
                     break
                 case let .denied(reason):
@@ -406,9 +406,10 @@ public actor ToolBus {
                         errorKind: .executionError
                     )
                 case .requiresApproval:
-                    // Defense in depth: the gate never returns this verdict for these levels today,
-                    // but a future gate change must not silently bypass approval, so honor it
-                    // through the same handler path as gated writes.
+                    // Defense in depth: pre-admission partitioning normally parks these before
+                    // execution, but an egress evaluator (or a future gate change) can return
+                    // this verdict for read-only and trusted levels too, so honor it through
+                    // the same handler path as gated writes instead of executing unsupervised.
                     if let denial = await resolveApproval(tool: tool, call: effectiveCall, context: context) {
                         return denial
                     }
@@ -420,7 +421,7 @@ public actor ToolBus {
             // through the tool's dryRun path instead of filing; only the side
             // effect is skipped via the flag the tool already receives.
             if let gate = permissionGate {
-                switch await gate.checkPermission(toolCall: effectiveCall, tool: tool) {
+                switch await gate.checkPermission(toolCall: effectiveCall, tool: tool, sessionID: context.sessionID) {
                 case .allowed:
                     // Attribute this run to the covering grant so later review
                     // can see which trust is actually exercised. Persistence

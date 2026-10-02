@@ -408,10 +408,12 @@ struct ConfigIndexTests {
     func `Files deny defaults include credential and history patterns`() {
         let patterns = FilesConfig.defaultDenyPatterns
         // Long-standing entries stay denied so the widened list never trades
-        // an old boundary for a new one.
+        // an old boundary for a new one; the memory tree is pinned whole so
+        // the episodic database and plaintext profile cannot regress to
+        // vector-only coverage.
         for expected in [
             ".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key",
-            "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/vectors/*"
+            "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/*", ".runeweaver/memory/vectors/*"
         ] {
             #expect(patterns.contains(expected), "Expected default deny list to keep \(expected)")
         }
@@ -422,6 +424,12 @@ struct ConfigIndexTests {
             ".Xauthority", ".emulator_console_auth_token", ".gnupg/*", ".kube/*",
             ".docker/*", ".config/gcloud/*", ".chia_keys/*", "*_history", ".zsh_sessions/*"
         ] {
+            #expect(patterns.contains(expected), "Expected default deny list to include \(expected)")
+        }
+        // Engine-written secrets stay denied even though the engine owns the
+        // files: the owner bearer token and the per-install SearXNG settings
+        // carry live credentials that must never reach model context.
+        for expected in [".runeweaver/auth_token", ".runeweaver/searxng/*"] {
             #expect(patterns.contains(expected), "Expected default deny list to include \(expected)")
         }
     }

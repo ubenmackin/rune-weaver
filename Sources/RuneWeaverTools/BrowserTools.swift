@@ -2,10 +2,13 @@
 //
 // `browser.navigate` (read-only open returning distilled text plus snapshot
 // refs) and `browser.act` (approval-gated single validated action against one
-// ref plus its snapshot URL) share one subprocess gateway but never share
-// state: each call opens a fresh isolated context with no persistent profile,
-// no stored credentials, and no cross-task storage, then closes it before
-// returning. The unified act surface validates one verb (click, fill, select,
+// ref plus its snapshot URL) share one subprocess gateway and one persistent
+// Chromium profile, so login sessions survive across calls while refs never
+// cross pages; every call closes its context before returning, and helper
+// spawns serialize process-wide on Chromium's one-process-per-profile lock.
+// The configured `browser.timeout_seconds` rides the request document so
+// navigation and per-action waits honor it, not just the subprocess kill.
+// The unified act surface validates one verb (click, fill, select,
 // press, scroll) plus integer-or-string ref aliases against the snapshot URL,
 // parking every call with target plus URL. Every URL-bearing verb vets
 // through the canonical SSRF guard with the configured search, media, and
@@ -26,11 +29,14 @@ public struct BrowserNavigateArgs: Sendable, Equatable, Decodable {
     public let url: String
     /// Whether to capture an opt-in screenshot for vision models.
     public let includeScreenshot: Bool
+    /// Whether to open a headed (visible) browser session for human login or CAPTCHAs.
+    public let headed: Bool
 
     /// Memberwise initializer.
-    public init(url: String, includeScreenshot: Bool = false) {
+    public init(url: String, includeScreenshot: Bool = false, headed: Bool = false) {
         self.url = url
         self.includeScreenshot = includeScreenshot
+        self.headed = headed
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -41,6 +47,8 @@ public struct BrowserNavigateArgs: Sendable, Equatable, Decodable {
         case includeScreenshot
         case screenshot
         case includeScreenshotSnake = "include_screenshot"
+        case headed
+        case interactive
     }
 
     /// Decodes arguments, accepting every documented URL alias plus screenshot aliases.
@@ -71,6 +79,10 @@ public struct BrowserNavigateArgs: Sendable, Equatable, Decodable {
         let screenshotFlag: Bool? = (try? container.decodeIfPresent(Bool.self, forKey: .screenshot)) ?? nil
         let snakeFlag: Bool? = (try? container.decodeIfPresent(Bool.self, forKey: .includeScreenshotSnake)) ?? nil
         includeScreenshot = primaryFlag ?? screenshotFlag ?? snakeFlag ?? false
+
+        let headedFlag: Bool? = (try? container.decodeIfPresent(Bool.self, forKey: .headed)) ?? nil
+        let interactiveFlag: Bool? = (try? container.decodeIfPresent(Bool.self, forKey: .interactive)) ?? nil
+        headed = headedFlag ?? interactiveFlag ?? false
     }
 
     /// Trimmed page URL.
@@ -453,10 +465,10 @@ public struct BrowserNavigateTool: Tool, Sendable {
     /// When the LLM should use this tool.
     /// Kept to two lines so the composed prompt stays within budget across the full registry.
     public let description =
-        "Opens a URL in a fresh isolated context; returns text plus refs (e.g. e12) for browser.act. "
-            + "Auth walls escalate to human login; downloads are manifest-only. "
+        "Opens a URL in a persistent context (default headless); returns text plus refs (e.g. e12) for browser.act. "
+            + "Auth walls escalate to human login via headed=true; downloads are manifest-only. "
             + "Navigation is SSRF-guarded: approval-free browsing must not dial loopback, link-local, metadata, or private ranges."
-    /// Function-calling contract for `url` (plus accepted aliases) and the screenshot opt-in.
+    /// Function-calling contract for `url` (plus accepted aliases), the screenshot opt-in, and headed mode.
     /// Every decoder alias is advertised so a compliant validator accepts
     /// exactly what the decoder handles.
     public let inputSchema =
@@ -470,7 +482,10 @@ public struct BrowserNavigateTool: Tool, Sendable {
                 + #"(default false; vision models only)","default":false}, "#
                 + #""screenshot":{"type":"boolean","description":"Alias for includeScreenshot", "#
                 + #""default":false},"include_screenshot":{"type":"boolean", "#
-                + #""description":"Alias for includeScreenshot"}}, "#
+                + #""description":"Alias for includeScreenshot"},"#
+                + #""headed":{"type":"boolean","description":"Launch a visible browser window for "#
+                + #"human login or CAPTCHA resolution (default false; use when authRequired was detected)", "#
+                + #""default":false},"interactive":{"type":"boolean","description":"Alias for headed"}}, "#
                 + #""anyOf":[{"required":["url"]}, {"required":["page"]}, "#
                 + #"{"required":["pageUrl"]}, {"required":["page_url"]}],"#
                 + #""additionalProperties":false}"#
@@ -596,6 +611,7 @@ public struct BrowserNavigateTool: Tool, Sendable {
             let snapshot = try await gateway.navigate(
                 url: args.trimmedURL,
                 includeScreenshot: includeScreenshot,
+                headed: args.headed,
                 dryRun: context.dryRun,
                 sessionID: context.sessionID
             )
@@ -633,7 +649,7 @@ public struct BrowserNavigateTool: Tool, Sendable {
         var notes: [String] = []
         if snapshot.authRequired {
             notes.append(
-                "Page requires authentication (auth_required). Escalate to a human login via browser.navigate; "
+                "Page requires authentication (auth_required). Escalate to human login by re-navigating with headed=true; "
                     + "never re-fetch with credentials or invent credentials."
             )
         }

@@ -152,17 +152,32 @@ public struct MediaConfig: Sendable, Codable, Equatable {
     public var sonarr: SonarrConfig
     /// Radarr configuration.
     public var radarr: RadarrConfig
+    /// HTTP request timeout in seconds for media automation calls.
+    public var timeoutSeconds: Int
+
+    /// Default request timeout for media calls.
+    public static let defaultTimeoutSeconds = 15
 
     public init(
         sonarr: SonarrConfig = .defaultSonarr,
-        radarr: RadarrConfig = .defaultRadarr
+        radarr: RadarrConfig = .defaultRadarr,
+        timeoutSeconds: Int = defaultTimeoutSeconds
     ) {
         self.sonarr = sonarr
         self.radarr = radarr
+        self.timeoutSeconds = timeoutSeconds
     }
 
     private enum CodingKeys: String, CodingKey {
         case sonarr
         case radarr
+        case timeoutSeconds = "timeout_seconds"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sonarr = try container.decodeIfPresent(SonarrConfig.self, forKey: .sonarr) ?? .defaultSonarr
+        radarr = try container.decodeIfPresent(RadarrConfig.self, forKey: .radarr) ?? .defaultRadarr
+        timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds) ?? Self.defaultTimeoutSeconds
     }
 }

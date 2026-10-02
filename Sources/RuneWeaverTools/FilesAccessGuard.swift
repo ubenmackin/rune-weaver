@@ -11,7 +11,10 @@
 // is case-insensitive across three candidate views — filename, home-relative
 // path plus its suffixes (so `.ssh/*` guards nested depths), and absolute path
 // — with a trailing-`/*` also guarding its bare directory, and `~` shapes
-// resolving against the effective home rather than the process home.
+// resolving against the effective home rather than the process home. A
+// reserved `.rune_`/`.rune_backup_` review sibling also contributes its
+// derived live file's candidate views, so a staging or rollback name cannot
+// reach bytes the live path refuses.
 
 import Foundation
 import RuneWeaverCore
@@ -52,6 +55,31 @@ public enum FilesAccessGuard: Sendable {
             self.resolvedPath = resolvedPath
         }
     }
+
+    /// Engine-owned deny patterns enforced on every evaluation regardless of
+    /// the configured `[files] deny_patterns` list.
+    ///
+    /// An explicit operator list replaces the editable defaults by design, so
+    /// without this union a hand-edited or dashboard-saved config could
+    /// silently drop the engine's own private state from the guard. Persistent
+    /// browser-profile bytes (cookies, session tokens), the engine's whole
+    /// memory tree (episodic sessions and approvals, the trust-grant ledger,
+    /// the plaintext profile, and semantic vectors), the egress policy control
+    /// file, and the engine's own credentials (the owner bearer-token file and
+    /// per-install SearXNG settings) must never be readable or writable by
+    /// file tools or enter LLM context, so operators may extend the guard but
+    /// never drop these protected patterns.
+    /// Deny matching also folds in the `.rune_`/`.rune_backup_` review siblings
+    /// of each live target, so the derived review names inherit the same
+    /// protection.
+    static let alwaysDenyPatterns: [String] = [
+        ".runeweaver/memory/*",
+        ".runeweaver/memory/vectors/*",
+        ".runeweaver/browser_profiles/*",
+        ".runeweaver/policy.toml",
+        ".runeweaver/auth_token",
+        ".runeweaver/searxng/*"
+    ]
 
     /// Evaluates a raw path string against the `[files]` policy.
     public static func evaluate(path: String, homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) -> Decision {
@@ -239,26 +267,21 @@ public enum FilesAccessGuard: Sendable {
 
     /// Returns the deny-pattern reason for a canonical URL, if any.
     private static func denyReason(for canonical: URL, home: URL, filesConfig: FilesConfig) -> String? {
-        // Candidate views, lowercased once: the filename catches bare shapes (`*.pem`), the
-        // relative path and its suffixes catch directory shapes at any depth (`.ssh/*`), and the
-        // absolute path catches rooted absolute patterns.
-        var candidates: Set<String> = [canonical.lastPathComponent.lowercased(), canonical.path.lowercased()]
-        if isInside(canonical.path, root: home.path), canonical.path != home.path {
-            let prefix = home.path.hasSuffix("/") ? home.path : home.path + "/"
-            if canonical.path.hasPrefix(prefix) {
-                let relative = String(canonical.path.dropFirst(prefix.count)).lowercased()
-                if !relative.isEmpty {
-                    candidates.insert(relative)
-                    let segments = relative.split(separator: "/").map(String.init)
-                    if segments.count > 1 {
-                        for start in 1 ..< segments.count {
-                            candidates.insert(segments[start...].joined(separator: "/"))
-                        }
-                    }
-                }
-            }
+        // Candidate views, lowercased once: the filename catches bare shapes
+        // (`*.pem`), the relative path and its suffixes catch directory shapes
+        // at any depth (`.ssh/*`), and the absolute path catches rooted
+        // absolute patterns. A reserved review sibling also contributes the
+        // candidates of the live file it derives from, so a `.rune_`/
+        // `.rune_backup_` name cannot reach bytes its live path refuses.
+        var candidates = denyCandidateViews(for: canonical, home: home)
+        if let liveName = liveSiblingName(for: canonical.lastPathComponent) {
+            let liveURL = canonical.deletingLastPathComponent().appendingPathComponent(liveName)
+            candidates.formUnion(denyCandidateViews(for: liveURL, home: home))
         }
-        for rawPattern in filesConfig.denyPatterns {
+        // Engine-owned protected patterns are unioned ahead of the configured
+        // list so no operator list can silently drop them (configured patterns
+        // stay fully additive).
+        for rawPattern in alwaysDenyPatterns + filesConfig.denyPatterns {
             let trimmed = rawPattern.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 continue
@@ -283,13 +306,16 @@ public enum FilesAccessGuard: Sendable {
                 for candidate in candidates where FilesGlobMatching.matches(pattern: variant, relativePath: candidate) {
                     return "Path matches deny pattern '\(trimmed)'; reading requires explicit approval."
                 }
-                // A trailing `/*` also guards its bare directory (the glob
-                // itself only matches children), mirroring the old
-                // containment rule for roots like the vector store.
+                // A trailing `/*` also guards its bare directory and all descendants
+                // at any depth, mirroring the containment rule for roots like
+                // the vector store and browser profiles.
                 if variant.hasSuffix("/*") {
                     let base = String(variant.dropLast(2))
-                    if candidates.contains(base) {
-                        return "Path matches deny pattern '\(trimmed)'; reading requires explicit approval."
+                    let prefix = base + "/"
+                    for candidate in candidates {
+                        if candidate == base || candidate.hasPrefix(prefix) {
+                            return "Path matches deny pattern '\(trimmed)'; reading requires explicit approval."
+                        }
                     }
                 }
             }
@@ -342,5 +368,60 @@ public enum FilesAccessGuard: Sendable {
         }
         let prefix = root.hasSuffix("/") ? root : root + "/"
         return target.hasPrefix(prefix)
+    }
+}
+
+/// Deny-matching candidate derivation kept out of the guard's primary body.
+private extension FilesAccessGuard {
+    /// Candidate views a canonical URL contributes to deny matching: the
+    /// filename, the home-relative path plus its trailing suffixes, and the
+    /// absolute path — all lowercased for the case-insensitive macOS view.
+    /// - Parameters:
+    ///   - canonical: Canonical URL to view.
+    ///   - home: Canonical home boundary.
+    /// - Returns: Lowercased candidate views.
+    static func denyCandidateViews(for canonical: URL, home: URL) -> Set<String> {
+        var candidates: Set<String> = [canonical.lastPathComponent.lowercased(), canonical.path.lowercased()]
+        guard isInside(canonical.path, root: home.path), canonical.path != home.path else {
+            return candidates
+        }
+        let prefix = home.path.hasSuffix("/") ? home.path : home.path + "/"
+        guard canonical.path.hasPrefix(prefix) else {
+            return candidates
+        }
+        let relative = String(canonical.path.dropFirst(prefix.count)).lowercased()
+        guard !relative.isEmpty else {
+            return candidates
+        }
+        candidates.insert(relative)
+        let segments = relative.split(separator: "/").map(String.init)
+        if segments.count > 1 {
+            for start in 1 ..< segments.count {
+                candidates.insert(segments[start...].joined(separator: "/"))
+            }
+        }
+        return candidates
+    }
+
+    /// Live filename a reserved review sibling derives from, or nil when the
+    /// filename is not a `.rune_`/`.rune_backup_` artifact.
+    ///
+    /// Prefix matching folds case because the default APFS volume does: a
+    /// differently-cased spelling names the same artifact on disk. The
+    /// rollback prefix is tested first because it contains the staging prefix.
+    /// - Parameter filename: Final path component to test.
+    /// - Returns: The live filename, or nil when the name is not a sibling.
+    static func liveSiblingName(for filename: String) -> String? {
+        let lowered = filename.lowercased()
+        let prefix: String
+        if lowered.hasPrefix(ReviewArtifacts.backupPrefix) {
+            prefix = ReviewArtifacts.backupPrefix
+        } else if lowered.hasPrefix(ReviewArtifacts.stagingPrefix) {
+            prefix = ReviewArtifacts.stagingPrefix
+        } else {
+            return nil
+        }
+        let liveName = String(filename.dropFirst(prefix.count))
+        return liveName.isEmpty ? nil : liveName
     }
 }

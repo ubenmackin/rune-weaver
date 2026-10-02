@@ -717,6 +717,38 @@ struct PermissionGatePersistenceTests {
         let otherDescriptor = ActionDescriptor(toolName: "api.request", target: "https://other.com/api")
         #expect(await gate.isTrusted(otherDescriptor) == false)
     }
+
+    @Test
+    func `Tool-wide files write grant never covers the protected policy control file`() async {
+        struct PolicyWriteProbeTool: Tool, Sendable {
+            let name = "files.write"
+            let description = "Write file."
+            let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
+            let permissionLevel = PermissionLevel.requiresApproval
+            func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+                .success("probe-ok", callID: input.callID)
+            }
+        }
+
+        // A tool-wide grant covers every target for its tool, but protected
+        // engine state is checked before trust is consulted, so even an
+        // approved or widened files.write cannot replace the egress policy.
+        let gate = PermissionGate()
+        await gate.grantTrust(for: ActionDescriptor(toolName: "files.write"), duration: .forever)
+        #expect(await gate.isTrusted(ActionDescriptor(toolName: "files.write")) == true)
+
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let call = ToolInput(
+            toolName: "files.write",
+            argumentsJSON: "{\"path\":\"\(home)/.runeweaver/policy.toml\",\"content\":\"[network]\"}"
+        )
+        let decision = await gate.checkPermission(toolCall: call, tool: PolicyWriteProbeTool())
+        guard case let .denied(reason) = decision else {
+            Issue.record("Expected denied decision, got \(decision)")
+            return
+        }
+        #expect(reason.contains("protected Rune Weaver engine files"))
+    }
 }
 
 /// Smoke-test contract for the permission gate consulting shell rules before parking.

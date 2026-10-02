@@ -149,21 +149,33 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
 
     /// Additional allowed homelab domains, hostnames, or IP patterns for browser/web navigation.
     public var allowedOrigins: [String]
+    /// Per-action/navigation timeout in seconds for Playwright browser automation.
+    public var timeoutSeconds: Int
+    /// Per-request HTTP timeout in seconds for web.fetch and api.request.
+    public var fetchTimeoutSeconds: Int
 
     /// Default allowed origins for fresh installs.
     public static let defaultAllowedOrigins: [String] = []
+    /// Default Playwright browser automation action timeout in seconds.
+    public static let defaultTimeoutSeconds = 30
+    /// Default HTTP request timeout in seconds for web.fetch and api.request.
+    public static let defaultFetchTimeoutSeconds = 15
 
     /// Creates a browser config.
     public init(
         searxngURL: String = defaultSearxngURL,
         searchTimeoutSeconds: Int = defaultSearchTimeoutSeconds,
         maxResults: Int = defaultMaxResults,
-        allowedOrigins: [String] = defaultAllowedOrigins
+        allowedOrigins: [String] = defaultAllowedOrigins,
+        timeoutSeconds: Int = defaultTimeoutSeconds,
+        fetchTimeoutSeconds: Int = defaultFetchTimeoutSeconds
     ) {
         self.searxngURL = searxngURL
         self.searchTimeoutSeconds = searchTimeoutSeconds
         self.maxResults = maxResults
         self.allowedOrigins = allowedOrigins
+        self.timeoutSeconds = timeoutSeconds
+        self.fetchTimeoutSeconds = fetchTimeoutSeconds
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -171,6 +183,8 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
         case searchTimeoutSeconds = "search_timeout_seconds"
         case maxResults = "max_results"
         case allowedOrigins = "allowed_origins"
+        case timeoutSeconds = "timeout_seconds"
+        case fetchTimeoutSeconds = "fetch_timeout_seconds"
     }
 
     public init(from decoder: Decoder) throws {
@@ -179,6 +193,8 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
         searchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .searchTimeoutSeconds) ?? Self.defaultSearchTimeoutSeconds
         maxResults = try container.decodeIfPresent(Int.self, forKey: .maxResults) ?? Self.defaultMaxResults
         allowedOrigins = try container.decodeIfPresent([String].self, forKey: .allowedOrigins) ?? Self.defaultAllowedOrigins
+        timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds) ?? Self.defaultTimeoutSeconds
+        fetchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .fetchTimeoutSeconds) ?? Self.defaultFetchTimeoutSeconds
     }
 }
 
@@ -499,5 +515,48 @@ extension ProactiveConfig: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(mode, forKey: .mode)
         try container.encode(judgeTimeoutSeconds, forKey: .judgeTimeoutSeconds)
+    }
+}
+
+// MARK: - Configured-service egress candidates
+
+public extension RuneWeaverConfig {
+    /// Derives the configured-service egress candidates for policy auto-population.
+    ///
+    /// Single owner of the SearXNG/Sonarr/Radarr/mail-host derivation so the
+    /// boot supervisor wiring and the settings save path pre-authorize exactly
+    /// the same origins: a service source added for one path can no longer
+    /// drift from the other.
+    /// - Parameters:
+    ///   - browser: Browser policy carrying the SearXNG base URL.
+    ///   - media: Optional media policy; absent contributes no Arr URLs.
+    ///   - email: Optional mail policy; absent contributes no account hosts.
+    /// - Returns: URLs or hostnames to merge into the declarative allowlist.
+    static func serviceEgressCandidates(
+        browser: BrowserConfig,
+        media: MediaConfig? = nil,
+        email: EmailConfig? = nil
+    ) -> [String] {
+        var candidates: [String] = [browser.searxngURL]
+        if let sonarr = media?.sonarr.url {
+            candidates.append(sonarr)
+        }
+        if let radarr = media?.radarr.url {
+            candidates.append(radarr)
+        }
+        if let accounts = email?.accounts {
+            for account in accounts {
+                candidates.append(account.host)
+                if let smtp = account.smtpHost {
+                    candidates.append(smtp)
+                }
+            }
+        }
+        return candidates
+    }
+
+    /// Convenience over the merged engine config.
+    var serviceEgressCandidates: [String] {
+        Self.serviceEgressCandidates(browser: browser, media: media, email: email)
     }
 }

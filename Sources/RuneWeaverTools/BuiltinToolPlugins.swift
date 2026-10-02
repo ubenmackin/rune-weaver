@@ -120,7 +120,8 @@ public enum BuiltinToolPlugins {
             )
             + ApiRequestTools.makeTools(
                 supervisor: supervisor,
-                transport: apiTransport
+                transport: apiTransport,
+                browserConfig: browserConfig
             )
     }
 

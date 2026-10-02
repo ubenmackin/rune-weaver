@@ -37,8 +37,9 @@ func buildToolInfo(
 
     // The server owns which tools expose settings so the dashboard never
     // keeps a name allowlist: media tools share the Sonarr/Radarr patch,
-    // browser/web tools configure allowed homelab origins, desktop tools
-    // configure capture dimensions, quality, and the control blocklist,
+    // browser/web/API tools configure timeouts plus the allowed homelab
+    // origins SSRF exemption, desktop tools configure capture dimensions,
+    // quality, and the control blocklist,
     // fanout.run configures the worker cap, timeout, and tool-subset widening,
     // and bash.exec exposes its shell policy alongside desktop, media, and
     // browser/web. files.write exposes its write review mode; Files & Access
@@ -50,6 +51,7 @@ func buildToolInfo(
         || tool.name == "browser.navigate"
         || tool.name == "browser.act"
         || tool.name == "web.fetch"
+        || tool.name == "api.request"
         || tool.name == "desktop.screenshot"
         || tool.name == "desktop.action"
         || tool.name == "bash.exec"

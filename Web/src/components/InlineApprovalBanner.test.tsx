@@ -376,7 +376,13 @@ describe("InlineApprovalBanner network egress approval", () => {
     expect(screen.getByRole("menuitem", { name: "Always Allow" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Deny Always" })).toBeInTheDocument();
 
-    // Pick Always Allow
+    // Each pick closes the menu, so the remaining tiers reopen the chevron.
+    // Session picks must keep the thisTime duration while carrying their tier.
+    await user.click(screen.getByRole("menuitem", { name: "Allow During Session" }));
+    expect(onDecide).toHaveBeenCalledWith("app-egress-1", true, "thisTime", false, "allowSession");
+
+    // Reopen and pick Always Allow
+    await user.click(chevronBtn);
     await user.click(screen.getByRole("menuitem", { name: "Always Allow" }));
     expect(onDecide).toHaveBeenCalledWith("app-egress-1", true, "forever", false, "alwaysAllow");
 

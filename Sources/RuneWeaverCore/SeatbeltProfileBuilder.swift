@@ -50,8 +50,11 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         "~/.config/gcloud",
         "~/.netrc",
         "~/.runeweaver/memory",
+        "~/.runeweaver/browser_profiles",
         "~/.runeweaver/config.toml",
-        "~/.runeweaver/policy.toml"
+        "~/.runeweaver/policy.toml",
+        "~/.runeweaver/auth_token",
+        "~/.runeweaver/searxng"
     ]
 
     /// Filename-level denies applied anywhere in the tree via SBPL regex.
@@ -66,7 +69,13 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         #"/\.ssh/"#,
         #"/\.aws/"#,
         #"/\.gnupg/"#,
-        #"/\.runeweaver/memory/"#
+        #"/\.runeweaver/memory/"#,
+        #"/\.runeweaver/browser_profiles/"#,
+        // The bearer-token deny is filename-level so a `token_file` relocated
+        // outside the default path still refuses; the SearXNG tree covers the
+        // per-install Flask secret generated beside the app's config.
+        #"/[^/]*auth_token$"#,
+        #"/\.runeweaver/searxng/"#
     ]
 
     /// Creates a Seatbelt profile builder.

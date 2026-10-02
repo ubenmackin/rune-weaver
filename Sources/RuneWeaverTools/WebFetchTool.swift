@@ -332,7 +332,7 @@ public struct WebFetchTool: Tool, Sendable {
         if let transport {
             self.transport = transport
         } else {
-            self.transport = URLSessionWebFetchTransport(timeoutSeconds: Double(browserConfig.searchTimeoutSeconds))
+            self.transport = URLSessionWebFetchTransport(timeoutSeconds: Double(browserConfig.fetchTimeoutSeconds))
         }
     }
 
@@ -564,7 +564,7 @@ extension WebFetchTool {
     private func makeFetchRequest(url: URL) -> URLRequest {
         var request = URLRequest(
             url: url,
-            timeoutInterval: Double(max(browserConfig.searchTimeoutSeconds, 1))
+            timeoutInterval: Double(max(browserConfig.fetchTimeoutSeconds, 1))
         )
         request.httpMethod = "GET"
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")

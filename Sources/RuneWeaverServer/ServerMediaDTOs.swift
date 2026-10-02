@@ -68,13 +68,16 @@ public typealias RadarrSettingsUpdate = ArrSettingsUpdate
 public struct MediaSettingsUpdate: Content, Equatable {
     public var sonarr: SonarrSettingsUpdate?
     public var radarr: RadarrSettingsUpdate?
+    public var timeoutSeconds: Int?
 
     public init(
         sonarr: SonarrSettingsUpdate? = nil,
-        radarr: RadarrSettingsUpdate? = nil
+        radarr: RadarrSettingsUpdate? = nil,
+        timeoutSeconds: Int? = nil
     ) {
         self.sonarr = sonarr
         self.radarr = radarr
+        self.timeoutSeconds = timeoutSeconds
     }
 
     /// Builds a patch from a full snapshot so callers holding a complete
@@ -82,6 +85,30 @@ public struct MediaSettingsUpdate: Content, Equatable {
     public init(_ config: MediaConfig) {
         self.sonarr = SonarrSettingsUpdate(config.sonarr)
         self.radarr = RadarrSettingsUpdate(config.radarr)
+        self.timeoutSeconds = config.timeoutSeconds
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sonarr
+        case radarr
+        case timeoutSeconds = "timeout_seconds"
+        case timeoutSecondsCamel = "timeoutSeconds"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sonarr = try container.decodeIfPresent(SonarrSettingsUpdate.self, forKey: .sonarr)
+        radarr = try container.decodeIfPresent(RadarrSettingsUpdate.self, forKey: .radarr)
+        let snakeTimeout = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
+        let camelTimeout = try container.decodeIfPresent(Int.self, forKey: .timeoutSecondsCamel)
+        timeoutSeconds = snakeTimeout ?? camelTimeout
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(sonarr, forKey: .sonarr)
+        try container.encodeIfPresent(radarr, forKey: .radarr)
+        try container.encodeIfPresent(timeoutSeconds, forKey: .timeoutSeconds)
     }
 }
 
@@ -104,6 +131,9 @@ extension UpdateSettingsRequest {
     /// the media-specific logic lives beside its DTOs.
     func applyMedia(to media: inout MediaConfig) {
         guard let update = self.media else { return }
+        if let timeoutSeconds = update.timeoutSeconds {
+            media.timeoutSeconds = timeoutSeconds
+        }
         if let sonarr = update.sonarr {
             applyArr(sonarr, to: &media.sonarr)
         }

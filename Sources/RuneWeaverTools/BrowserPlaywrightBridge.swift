@@ -1,13 +1,19 @@
-// Rune Weaver Tools — Isolated Playwright bridge for browser automation.
+// Rune Weaver Tools — Playwright bridge for browser automation.
 //
 // `browser.navigate` (read-only open returning distilled text plus snapshot
 // refs) and `browser.act` (approval-gated single validated action against one
-// ref plus its snapshot URL) share one subprocess gateway but never share
-// state: each call opens a fresh isolated context with no persistent profile,
-// no stored credentials, and no cross-task storage, then closes it before
-// returning. Act re-navigates to the snapshot URL and re-resolves the ref, so
-// no handle or cookie outlives the call and refs never cross pages. Downloads
-// stay manifest-only and never reach the host.
+// ref plus its snapshot URL) share one subprocess gateway and one persistent
+// Chromium profile (`~/.runeweaver/browser_profiles/default`), so login
+// sessions survive across calls while refs never cross pages: act re-navigates
+// to the snapshot URL and re-resolves the ref, and every call closes its
+// context before returning. Chromium's profile admits one live process at a
+// time, so helper spawns serialize on a process-wide queue. Downloads stay
+// manifest-only and never reach the host.
+//
+// The configured `browser.timeout_seconds` rides the request document as
+// `timeoutMs`, so navigation and per-action waits honor it rather than the
+// helper's legacy literals; headless runs use it directly as the kill budget, while headed runs add the
+// wait cap plus cleanup headroom so the navigation plus the login wait both fit before the kill.
 //
 // The helper source lives single-source in `BrowserPlaywrightScript.swift`
 // (ordered segments concatenating atomically) alongside the subprocess I/O
@@ -319,10 +325,10 @@ public enum BrowserValidation: Sendable {
 
         func validateURLAsync(_ url: String) async throws -> String {
             let trimmed = try BrowserValidation.validatedURLLiteral(url)
-            if let refusal = await denyReasonAsync(for: trimmed) {
-                throw BrowserError.invalidURL("Invalid URL: \(refusal)")
-            }
             if let supervisor = egressSupervisor, let parsed = URL(string: trimmed) {
+                // Supervisor first: its network gate precedes the SSRF stage,
+                // so a policy-denied destination causes no DNS side effect;
+                // the canonical guard below re-vets resolved addresses.
                 let verdict = await supervisor.validate(url: parsed, sessionID: sessionID)
                 switch verdict {
                 case .allowed:
@@ -332,6 +338,9 @@ public enum BrowserValidation: Sendable {
                 case let .unlistedDomain(host, reason):
                     throw BrowserError.invalidURL("Egress blocked for unlisted host '\(host)': \(reason)")
                 }
+            }
+            if let refusal = await denyReasonAsync(for: trimmed) {
+                throw BrowserError.invalidURL("Invalid URL: \(refusal)")
             }
             return trimmed
         }
@@ -403,9 +412,10 @@ public enum BrowserValidation: Sendable {
     }
 
     /// Async URL validation against the configured exemption set.
-    /// Literal checks run inline while hostnames needing the resolver hop to
-    /// the bounded pool, so a wedged resolver fails closed without stalling
-    /// shared tasks; unverified hosts deny rather than dial.
+    /// A supervised call enters the egress supervisor first, so policy
+    /// denial precedes any resolver hop; the canonical guard then re-vets
+    /// addresses against this call's exemptions, since the supervisor's
+    /// SSRF stage judges its own. Unverified hosts deny rather than dial.
     public static func validateURLAsync(
         _ url: String,
         browserConfig: BrowserConfig,
@@ -449,8 +459,9 @@ public enum BrowserValidation: Sendable {
     }
 
     /// Async re-validation for one bridge-reported URL.
-    /// DNS vetting hops to the bounded pool so redirect re-checks cannot stall
-    /// shared tasks; an unverified hop fails closed like the entry check.
+    /// Supervised hops take the same supervisor-first order as the entry
+    /// check; DNS vetting hops to the bounded pool so redirect re-checks
+    /// cannot stall shared tasks, and an unverified hop fails closed.
     public static func validateEgressURLAsync(
         _ url: String,
         browserConfig: BrowserConfig,
@@ -712,6 +723,15 @@ public protocol BrowserPlaywrightGateway: Sendable {
         sessionID: UUID?
     ) async throws -> BrowserSnapshot
 
+    /// Session-aware navigate threading the egress session grant and optional headed mode.
+    func navigate(
+        url: String,
+        includeScreenshot: Bool,
+        headed: Bool,
+        dryRun: Bool,
+        sessionID: UUID?
+    ) async throws -> BrowserSnapshot
+
     /// Session-aware act threading the egress session grant.
     /// Declared as a requirement so the live gateway's grant-aware
     /// implementation dispatches dynamically; stubs inherit the session-less
@@ -753,6 +773,18 @@ public extension BrowserPlaywrightGateway {
         try await navigate(url: url, includeScreenshot: includeScreenshot, dryRun: dryRun)
     }
 
+    /// Default headed navigate delegating to the headless overload for stubs without headed handling.
+    func navigate(
+        url: String,
+        includeScreenshot: Bool,
+        headed: Bool,
+        dryRun: Bool,
+        sessionID: UUID?
+    ) async throws -> BrowserSnapshot {
+        _ = headed
+        return try await navigate(url: url, includeScreenshot: includeScreenshot, dryRun: dryRun, sessionID: sessionID)
+    }
+
     /// Default session-aware act for stubs without grant handling.
     /// Delegates to the session-less path so existing doubles keep
     /// compiling; the live gateway overrides with grant-aware validation.
@@ -774,6 +806,20 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     /// venv ensurer never drift on the override name.
     public static var pythonEnvVar: String {
         BrowserConfig.pythonBinEnvVar
+    }
+
+    /// Maximum timeout in seconds when running headed for human login or CAPTCHA resolution.
+    public static let headedProcessTimeoutSeconds: TimeInterval = 180.0
+    /// Seconds reserved after the headed wait loop so `finally: context.close()` releases the profile lock before the kill.
+    public static let headedCleanupHeadroomSeconds: TimeInterval = 15.0
+    /// In-page headed wait cap, strictly below the kill budget so the timeout path still reaches cleanup.
+    public static var headedWaitSeconds: TimeInterval {
+        headedProcessTimeoutSeconds - headedCleanupHeadroomSeconds
+    }
+
+    /// Headed kill budget covering the configured navigation budget plus the wait cap plus cleanup headroom.
+    public static func headedEffectiveTimeout(for timeoutSeconds: TimeInterval) -> TimeInterval {
+        timeoutSeconds + headedWaitSeconds + headedCleanupHeadroomSeconds
     }
 
     /// Explicit Python executable path, if any.
@@ -812,16 +858,17 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     /// gaining a default search origin the caller never configured.
     public init(
         pythonExecutable: String? = nil,
-        timeoutSeconds: TimeInterval = ContainerMachineManager.defaultProcessTimeoutSeconds,
+        timeoutSeconds: TimeInterval? = nil,
         maxOutputBytes: Int = ContainerMachineManager.maxProcessOutputBytes,
         allowlistedOrigins: Set<String> = [],
         egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
+        let bConfig = BrowserConfig(searxngURL: "")
         self.init(
             pythonExecutable: pythonExecutable,
-            timeoutSeconds: timeoutSeconds,
+            timeoutSeconds: timeoutSeconds ?? TimeInterval(bConfig.timeoutSeconds),
             maxOutputBytes: maxOutputBytes,
-            browserConfig: BrowserConfig(searxngURL: ""),
+            browserConfig: bConfig,
             mediaConfig: nil,
             llmServerURLs: [],
             allowlistedOrigins: allowlistedOrigins,
@@ -835,7 +882,7 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     /// way so a public start cannot bounce into sensitive ranges.
     public init(
         pythonExecutable: String? = nil,
-        timeoutSeconds: TimeInterval = ContainerMachineManager.defaultProcessTimeoutSeconds,
+        timeoutSeconds: TimeInterval? = nil,
         maxOutputBytes: Int = ContainerMachineManager.maxProcessOutputBytes,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
@@ -844,7 +891,7 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
         self.pythonExecutable = Self.resolvePythonBin(explicit: pythonExecutable)
-        self.timeoutSeconds = timeoutSeconds
+        self.timeoutSeconds = timeoutSeconds ?? TimeInterval(browserConfig.timeoutSeconds)
         self.maxOutputBytes = maxOutputBytes
         self.allowlistedOrigins = allowlistedOrigins
         self.browserConfig = browserConfig
@@ -855,7 +902,7 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
 
     /// Navigates in a fresh isolated context and returns a bounded snapshot.
     public func navigate(url: String, includeScreenshot: Bool = false) async throws -> BrowserSnapshot {
-        try await navigate(url: url, includeScreenshot: includeScreenshot, dryRun: false)
+        try await navigate(url: url, includeScreenshot: includeScreenshot, headed: false, dryRun: false)
     }
 
     /// Navigates resolving the interpreter from the fast path only when dry-running.
@@ -870,6 +917,23 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         dryRun: Bool,
         sessionID: UUID? = nil
     ) async throws -> BrowserSnapshot {
+        try await navigate(
+            url: url,
+            includeScreenshot: includeScreenshot,
+            headed: false,
+            dryRun: dryRun,
+            sessionID: sessionID
+        )
+    }
+
+    /// Navigates with optional headed mode and extended timeout for human auth.
+    public func navigate(
+        url: String,
+        includeScreenshot: Bool,
+        headed: Bool,
+        dryRun: Bool,
+        sessionID: UUID? = nil
+    ) async throws -> BrowserSnapshot {
         let validated = try await BrowserValidation.validateURLAsync(
             url,
             browserConfig: browserConfig,
@@ -879,11 +943,14 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
             egressSupervisor: egressSupervisor,
             sessionID: sessionID
         )
-        var payload: [String: Any] = ["op": "navigate", "url": validated]
-        if includeScreenshot {
-            payload["includeScreenshot"] = true
-        }
-        let data = try await run(payload: payload, dryRun: dryRun)
+        let payload = BrowserSubprocessIO.navigatePayload(
+            url: validated,
+            includeScreenshot: includeScreenshot,
+            headed: headed,
+            timeoutSeconds: timeoutSeconds
+        )
+        let effectiveTimeout: TimeInterval = headed ? Self.headedEffectiveTimeout(for: timeoutSeconds) : timeoutSeconds
+        let data = try await run(payload: payload, timeoutOverride: effectiveTimeout, dryRun: dryRun)
         let snapshot = try BrowserBridgeParsing.parseSnapshotPayload(data, fallbackURL: validated)
         // The helper surfaces its redirect chain, so every reported hop
         // re-enters the allowlist plus the canonical guard before the
@@ -1011,15 +1078,13 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         )
         let validatedRef = try BrowserValidation.validateRef(ref)
         let validatedText = try BrowserValidation.validateActText(action: action, text: text)
-        var payload: [String: Any] = [
-            "op": "act",
-            "url": validatedURL,
-            "action": action.rawValue,
-            "ref": validatedRef
-        ]
-        if let validatedText {
-            payload["text"] = validatedText
-        }
+        let payload = BrowserSubprocessIO.actPayload(
+            url: validatedURL,
+            action: action.rawValue,
+            ref: validatedRef,
+            text: validatedText,
+            timeoutSeconds: timeoutSeconds
+        )
         let data = try await run(payload: payload, dryRun: false)
         let result = try BrowserBridgeParsing.parseActPayload(data, action: action, ref: validatedRef, fallbackURL: validatedURL)
         // Post-action navigation can land elsewhere (click-through or
@@ -1053,13 +1118,14 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     }
 
     /// Runs the helper once with the given request document.
-    func run(payload: [String: Any], dryRun: Bool = false) async throws -> Data {
+    func run(payload: [String: Any], timeoutOverride: TimeInterval? = nil, dryRun: Bool = false) async throws -> Data {
         let body: Data
         do {
             body = try JSONSerialization.data(withJSONObject: payload)
         } catch {
             throw BrowserError.bridgeFailed("Could not encode browser request: \(error.localizedDescription)")
         }
+        let effectiveTimeout = timeoutOverride ?? timeoutSeconds
         // First navigate or act provisions the managed venv inline so Homebrew
         // system pythons never hit externally-managed-environment: the ensurer
         // collapses concurrent callers onto one flight and publishes staged
@@ -1075,7 +1141,7 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
                 scriptSource: BrowserPlaywrightScript.source,
                 payload: body,
                 pythonExecutable: effectivePython,
-                timeoutSeconds: timeoutSeconds,
+                timeoutSeconds: effectiveTimeout,
                 maxOutputBytes: maxOutputBytes
             )
         }
@@ -1093,7 +1159,7 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
             scriptSource: BrowserPlaywrightScript.source,
             payload: body,
             pythonExecutable: effectivePython,
-            timeoutSeconds: timeoutSeconds,
+            timeoutSeconds: effectiveTimeout,
             maxOutputBytes: maxOutputBytes
         )
     }
@@ -1127,6 +1193,82 @@ public struct StubBrowserGateway: BrowserPlaywrightGateway, Sendable {
 
 /// Runs blocking Playwright subprocess I/O off the async executor.
 enum BrowserSubprocessIO {
+    /// Process-wide serial queue for helper spawns.
+    /// Chromium's persistent profile admits one live process per user-data
+    /// directory, so two helpers launched together would collide on the
+    /// profile's SingletonLock and fail a legitimate call. Serializing the
+    /// whole blocking run — not just validation — keeps concurrent
+    /// navigate/act calls safe; queued callers hold no thread until their
+    /// turn, and a task-scoped process box still terminates a live run on
+    /// cancellation.
+    private static let bridgeRunQueue = DispatchQueue(label: "com.runeweaver.browser.playwright-bridge", qos: .utility)
+
+    /// Runs one blocking bridge operation on the serial profile queue.
+    /// Interior seam so the non-overlap contract stays testable without
+    /// spawning Playwright, and so every bridge run — live or dry-run —
+    /// shares the one queue the profile lock requires.
+    static func runSerialized<T: Sendable>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            bridgeRunQueue.async {
+                do {
+                    try continuation.resume(returning: operation())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Milliseconds the helper should allow for one navigation or action wait.
+    /// Single-sourced from the configured `browser.timeout_seconds` so the
+    /// in-page budgets and the subprocess kill budget cannot drift apart.
+    static func timeoutMilliseconds(for seconds: TimeInterval) -> Int {
+        max(1, Int((seconds * 1000).rounded()))
+    }
+
+    /// Builds the navigate request document sent to the helper.
+    /// `timeoutMs` carries the configured budget so `page.goto` honors it
+    /// instead of the helper's legacy 30s literal; every navigate key stays
+    /// assembled in one place.
+    static func navigatePayload(
+        url: String,
+        includeScreenshot: Bool,
+        headed: Bool,
+        timeoutSeconds: TimeInterval
+    ) -> [String: Any] {
+        var payload: [String: Any] = ["op": "navigate", "url": url, "timeoutMs": timeoutMilliseconds(for: timeoutSeconds)]
+        if includeScreenshot {
+            payload["includeScreenshot"] = true
+        }
+        if headed {
+            payload["headed"] = true
+        }
+        return payload
+    }
+
+    /// Builds the act request document sent to the helper.
+    /// `timeoutMs` carries the same configured budget so per-action waits
+    /// honor it instead of the helper's legacy 10s literal.
+    static func actPayload(
+        url: String,
+        action: String,
+        ref: String,
+        text: String?,
+        timeoutSeconds: TimeInterval
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "op": "act",
+            "url": url,
+            "action": action,
+            "ref": ref,
+            "timeoutMs": timeoutMilliseconds(for: timeoutSeconds)
+        ]
+        if let text {
+            payload["text"] = text
+        }
+        return payload
+    }
+
     /// Runs blocking bridge subprocess I/O off the async executor.
     static func runBridgeIO(
         scriptSource: String,
@@ -1138,34 +1280,29 @@ enum BrowserSubprocessIO {
         try Task.checkCancellation()
         // Shared box lets cancellation terminate the live helper instead of
         // leaking it: the blocking wait publishes the child before waiting
-        // so a cancel racing the spawn still finds and kills it.
+        // so a cancel racing the spawn still finds and kills it. The latch
+        // also covers a cancel landing while this run waits its turn in the
+        // serial queue, so a doomed helper never grabs the profile lock.
         let box = BoundedProcessRunner.ProcessBox()
+        let cancelled = OSAllocatedUnfairLock(initialState: false)
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                DispatchQueue.global(qos: .utility).async {
-                    do {
-                        // Cancellation after this check still terminates via
-                        // the box handler below instead of hanging the budget.
-                        if Task.isCancelled {
-                            continuation.resume(throwing: CancellationError())
-                            return
-                        }
-                        try continuation.resume(returning: runBridgeBlocking(
-                            scriptSource: scriptSource,
-                            payload: payload,
-                            pythonExecutable: pythonExecutable,
-                            timeoutSeconds: timeoutSeconds,
-                            maxOutputBytes: maxOutputBytes,
-                            processBox: box
-                        ))
-                    } catch is CancellationError {
-                        continuation.resume(throwing: CancellationError())
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
+            try await runSerialized {
+                // A cancel landing after this check still terminates via the
+                // box handler below instead of hanging the budget.
+                if cancelled.withLock({ $0 }) {
+                    throw CancellationError()
                 }
+                return try runBridgeBlocking(
+                    scriptSource: scriptSource,
+                    payload: payload,
+                    pythonExecutable: pythonExecutable,
+                    timeoutSeconds: timeoutSeconds,
+                    maxOutputBytes: maxOutputBytes,
+                    processBox: box
+                )
             }
         } onCancel: {
+            cancelled.withLock { $0 = true }
             box.terminateIfRunning()
         }
     }

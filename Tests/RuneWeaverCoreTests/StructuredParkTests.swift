@@ -95,6 +95,15 @@ private func makeStructuredGatedTool(name: String, output: String) -> Structured
     StructuredParkTool(name: name, output: output, permissionLevel: .requiresApproval)
 }
 
+/// Stub evaluator mapping specific hosts to test statuses.
+private struct StubEgressEvaluator: EgressPolicyEvaluator, Sendable {
+    let statuses: [String: HostStatus]
+
+    func evaluateHostStatus(for host: String, sessionID _: UUID?) async -> HostStatus {
+        statuses[host] ?? .allowed
+    }
+}
+
 @Suite("Structured Park Admission")
 struct StructuredParkTests {
     @Test
@@ -372,5 +381,88 @@ struct StructuredParkTests {
         #expect(await orchestrator.isSessionParked(sessionID) == false)
         #expect(await queue.count() == 1)
         #expect(response.toolActions.first?.result?.isError == true)
+    }
+}
+
+// MARK: - Egress Admission Tests
+
+extension StructuredParkTests {
+    @Test
+    func `Unlisted egress host parks read-only tool with egress host badge`() async throws {
+        let conversations = ConversationManager()
+        let evaluator = StubEgressEvaluator(statuses: ["prismix.dev": .unlisted("Unlisted domain")])
+        let gate = PermissionGate(egressEvaluator: evaluator)
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeStructuredReadTool(name: "web.fetch", output: "article-html"))
+        let unlistedCall = ToolInput(
+            toolName: "web.fetch",
+            argumentsJSON: #"{"url":"https://prismix.dev/news/f2f2b6598ef6"}"#,
+            callID: "call_egress_unlisted"
+        )
+        let synthesis = "Here is the news."
+        let llm = StructuredParkLLM(rounds: [
+            StructuredParkRound("", [unlistedCall]),
+            StructuredParkRound(synthesis)
+        ])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue,
+            permissionGate: gate
+        )
+        let sessionID = UUID()
+        let parked = try await orchestrator.process(input: UserInput(text: "Fetch prismix", sessionID: sessionID))
+        #expect(parked.isParked == true)
+        #expect(await queue.count() == 1)
+        let pending = await queue.list().first
+        #expect(pending?.toolName == "web.fetch")
+        #expect(pending?.egressHost == "prismix.dev")
+        #expect(pending?.sessionID == sessionID)
+        guard let approvalID = pending?.id else {
+            Issue.record("Expected pending approval request")
+            return
+        }
+        #expect(await queue.decide(id: approvalID, approved: true) == true)
+        let resumed = try await orchestrator.resumeNarratedApproval(id: approvalID, approved: true)
+        #expect(resumed?.sessionID == sessionID)
+        #expect(resumed?.isParked == false)
+        #expect(resumed?.toolActions.first?.toolName == "web.fetch")
+        #expect(resumed?.toolActions.first?.result?.content.contains("article-html") == true)
+    }
+
+    @Test
+    func `Allowed egress host does not park read-only tool`() async throws {
+        let conversations = ConversationManager()
+        let evaluator = StubEgressEvaluator(statuses: ["example.com": .allowed])
+        let gate = PermissionGate(egressEvaluator: evaluator)
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeStructuredReadTool(name: "web.fetch", output: "example-html"))
+        let allowedCall = ToolInput(
+            toolName: "web.fetch",
+            argumentsJSON: #"{"url":"https://example.com/index.html"}"#,
+            callID: "call_egress_allowed"
+        )
+        let llm = StructuredParkLLM(rounds: [
+            StructuredParkRound("", [allowedCall]),
+            StructuredParkRound("Fetched example.")
+        ])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue,
+            permissionGate: gate
+        )
+        let sessionID = UUID()
+        let response = try await orchestrator.process(input: UserInput(text: "Fetch example", sessionID: sessionID))
+        #expect(response.isParked == false)
+        #expect(await queue.count() == 0)
+        #expect(response.toolActions.count == 1)
+        #expect(response.toolActions.first?.result?.content.contains("example-html") == true)
     }
 }

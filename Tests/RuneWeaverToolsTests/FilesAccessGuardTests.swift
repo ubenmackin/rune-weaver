@@ -5,7 +5,11 @@
 // patterns refuse representative paths through the shared guard, an ordinary
 // Markdown document still passes, a denied credential refuses a `files.read`
 // without leaking bytes, and an index walk over the same policy skips the
-// credential without handing its bytes to the extractor.
+// credential without handing its bytes to the extractor. The engine-owned
+// always-deny patterns (the memory tree, browser profiles, the egress policy
+// control file, the owner bearer token, and the per-install SearXNG settings,
+// plus their review siblings) keep holding when a config replaces the editable
+// deny list, so operator drift can never expose protected state.
 
 import Foundation
 import os
@@ -103,6 +107,7 @@ struct FilesAccessGuardTests {
             ".docker/config.json",
             ".config/gcloud/credentials.db",
             ".chia_keys/mnemonic.txt",
+            ".runeweaver/browser_profiles/default/Cookies",
             ".zsh_history",
             ".bash_history",
             ".zsh_sessions/session-file"
@@ -242,5 +247,180 @@ struct FilesAccessGuardTests {
         #expect(liveDeniedOutside.allowed == false)
         let indexDeniedOutside = adapter.evaluate(path: deniedOutside, homeDirectoryURL: home)
         #expect(indexDeniedOutside.allowed == false)
+    }
+
+    @Test
+    func `Always-deny patterns survive a config that replaces the deny list`() throws {
+        let (base, home) = try GuardTestSupport.makeBaseAndHome()
+        defer { GuardTestSupport.cleanup(base) }
+        // A `[files] deny_patterns` list replaces the editable defaults, so an
+        // emptied list must still refuse the engine's own private state:
+        // browser-profile cookies/session tokens and memory vectors can never
+        // become readable through configuration drift.
+        let emptied = FilesConfig(denyPatterns: [], allowRoots: [home.path])
+        let protectedPaths = [
+            ".runeweaver/browser_profiles/default/Cookies",
+            ".runeweaver/browser_profiles/default/Local State",
+            ".runeweaver/memory/vectors/chunk.json"
+        ]
+        for relative in protectedPaths {
+            let decision = FilesAccessGuard.evaluate(
+                path: home.appendingPathComponent(relative).path,
+                homeDirectoryURL: home,
+                filesConfig: emptied
+            )
+            #expect(decision.allowed == false, "Expected always-deny for \(relative)")
+            #expect(decision.requiresApproval == true, "Expected approval hint for \(relative)")
+            #expect((decision.reason ?? "").contains("deny pattern"), "Expected reason for \(relative)")
+        }
+
+        // The background index adapter routes through the same guard, so the
+        // union also keeps protected state out of index chunks.
+        let indexAdapter = FilesIndexPolicyGuard(filesConfig: emptied)
+        let indexedProfile = indexAdapter.evaluate(
+            path: home.appendingPathComponent(".runeweaver/browser_profiles/default/Cookies").path,
+            homeDirectoryURL: home
+        )
+        #expect(indexedProfile.allowed == false)
+
+        // Operator patterns stay additive beside the engine-owned set: a
+        // narrowed list still denies its own shapes while a path covered by
+        // neither list still reads.
+        let narrowed = FilesConfig(
+            denyPatterns: ["*.operator-secret"],
+            allowRoots: [home.path]
+        )
+        let operatorDenied = FilesAccessGuard.evaluate(
+            path: home.appendingPathComponent("notes.operator-secret").path,
+            homeDirectoryURL: home,
+            filesConfig: narrowed
+        )
+        #expect(operatorDenied.allowed == false)
+        let benign = FilesAccessGuard.evaluate(
+            path: home.appendingPathComponent("notes.md").path,
+            homeDirectoryURL: home,
+            filesConfig: narrowed
+        )
+        #expect(benign.allowed == true)
+    }
+
+    @Test
+    func `Memory tree stays denied when the operator list is emptied`() throws {
+        let (base, home) = try GuardTestSupport.makeBaseAndHome()
+        defer { GuardTestSupport.cleanup(base) }
+        // The memory tree holds the episodic sessions and approval rows, the
+        // trust-grant ledger, and the plaintext profile JSON beside the vector
+        // store, so an emptied operator list must still refuse all of it:
+        // `files.read` can otherwise return profile facts without approval and
+        // `files.write` can target the control-plane database. The reserved
+        // review namespace inherits the same protection through the live-path
+        // derivation, so a `.rune_` staging or `.rune_backup_` rollback name
+        // cannot reach bytes the live path refuses.
+        let emptied = FilesConfig(denyPatterns: [], allowRoots: [home.path])
+        let protectedPaths = [
+            ".runeweaver/memory/episodes.db",
+            ".runeweaver/memory/episodes.db.profile.json",
+            ".runeweaver/memory/.rune_episodes.db",
+            ".runeweaver/memory/.rune_backup_episodes.db"
+        ]
+        for relative in protectedPaths {
+            let decision = FilesAccessGuard.evaluate(
+                path: home.appendingPathComponent(relative).path,
+                homeDirectoryURL: home,
+                filesConfig: emptied
+            )
+            #expect(decision.allowed == false, "Expected always-deny for \(relative)")
+            #expect(decision.requiresApproval == true, "Expected approval hint for \(relative)")
+            #expect((decision.reason ?? "").contains("deny pattern"), "Expected reason for \(relative)")
+        }
+
+        // The background index adapter routes through the same guard, so the
+        // profile cannot ride index chunks to the model under a narrowed list.
+        let indexAdapter = FilesIndexPolicyGuard(filesConfig: emptied)
+        let indexedProfile = indexAdapter.evaluate(
+            path: home.appendingPathComponent(".runeweaver/memory/episodes.db.profile.json").path,
+            homeDirectoryURL: home
+        )
+        #expect(indexedProfile.allowed == false)
+
+        // A sibling name that merely resembles the tree stays readable, so the
+        // widened pattern does not swallow an ordinary `memory` directory.
+        let nearMiss = FilesAccessGuard.evaluate(
+            path: home.appendingPathComponent("memory-notes/episodes.db").path,
+            homeDirectoryURL: home,
+            filesConfig: emptied
+        )
+        #expect(nearMiss.allowed == true)
+    }
+
+    @Test
+    func `Policy control file and its review siblings deny with an empty deny list`() throws {
+        let (base, home) = try GuardTestSupport.makeBaseAndHome()
+        defer { GuardTestSupport.cleanup(base) }
+        // The egress policy file is the credential and network control plane,
+        // so an emptied operator list must still refuse it; its reserved
+        // staging and rollback siblings name the same live file, so a direct
+        // write to those names must refuse too or the protection could be
+        // bypassed through the review namespace.
+        let emptied = FilesConfig(denyPatterns: [], allowRoots: [home.path])
+        let protectedPaths = [
+            ".runeweaver/policy.toml",
+            ".runeweaver/.rune_policy.toml",
+            ".runeweaver/.rune_backup_policy.toml"
+        ]
+        for relative in protectedPaths {
+            let decision = FilesAccessGuard.evaluate(
+                path: home.appendingPathComponent(relative).path,
+                homeDirectoryURL: home,
+                filesConfig: emptied
+            )
+            #expect(decision.allowed == false, "Expected always-deny for \(relative)")
+            #expect(decision.requiresApproval == true, "Expected approval hint for \(relative)")
+            #expect((decision.reason ?? "").contains("deny pattern"), "Expected reason for \(relative)")
+        }
+    }
+
+    @Test
+    func `Engine secret files and their review siblings deny with an empty deny list`() throws {
+        let (base, home) = try GuardTestSupport.makeBaseAndHome()
+        defer { GuardTestSupport.cleanup(base) }
+        // The owner bearer token and the SearXNG settings minted beside the
+        // engine's state are live credentials the engine writes for itself, so
+        // an emptied operator list must still refuse them. The reserved
+        // staging and rollback siblings name the same live token file, so a
+        // direct read of those names must refuse too or the protection could
+        // be bypassed through the review namespace.
+        let emptied = FilesConfig(denyPatterns: [], allowRoots: [home.path])
+        let protectedPaths = [
+            ".runeweaver/auth_token",
+            ".runeweaver/.rune_auth_token",
+            ".runeweaver/.rune_backup_auth_token",
+            ".runeweaver/searxng/settings.yml"
+        ]
+        for relative in protectedPaths {
+            let decision = FilesAccessGuard.evaluate(
+                path: home.appendingPathComponent(relative).path,
+                homeDirectoryURL: home,
+                filesConfig: emptied
+            )
+            #expect(decision.allowed == false, "Expected always-deny for \(relative)")
+            #expect(decision.requiresApproval == true, "Expected approval hint for \(relative)")
+            #expect((decision.reason ?? "").contains("deny pattern"), "Expected reason for \(relative)")
+        }
+    }
+
+    @Test
+    func `Always-deny patterns stay pinned inside the shipped defaults`() {
+        // The union and the editable defaults are separate surfaces; keeping
+        // the engine-owned set a subset of the defaults means a config copied
+        // from the shipped example (and its web mirror) can never drift below
+        // the guard's floor without a test failing here.
+        #expect(FilesAccessGuard.alwaysDenyPatterns.isEmpty == false)
+        for pattern in FilesAccessGuard.alwaysDenyPatterns {
+            #expect(
+                FilesConfig.defaultDenyPatterns.contains(pattern),
+                "Missing shipped default for \(pattern)"
+            )
+        }
     }
 }

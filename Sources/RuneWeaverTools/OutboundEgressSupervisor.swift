@@ -584,3 +584,45 @@ public actor OutboundEgressSupervisor {
         }
     }
 }
+
+// MARK: - EgressPolicyEvaluator Conformance
+
+extension OutboundEgressSupervisor: EgressPolicyEvaluator {
+    /// Checks whether a one-shot grant exists for this host and session without consuming it.
+    private func isOneShotAllowed(host: String, sessionID: UUID?) -> Bool {
+        if let sessionID, let scoped = oneShotAllowedDomains[sessionID], scoped.contains(host) {
+            return true
+        }
+        if let open = oneShotAllowedDomains[nil], open.contains(host) {
+            return true
+        }
+        return false
+    }
+
+    /// Evaluates host status against policy.toml, one-shot grants, and session allowlists
+    /// without consuming one-shot grants or requiring full HTTP URLs.
+    public func evaluateHostStatus(for host: String, sessionID: UUID?) async -> HostStatus {
+        let policy: SecurityPolicy
+        do {
+            policy = try await policyStore.snapshot()
+        } catch {
+            return .explicitlyBlocked(error.localizedDescription)
+        }
+        let canonicalHost = SensitiveAddressNormalization.normalizedHost(host)
+        switch policy.network.hostStatus(for: host) {
+        case let .explicitlyBlocked(reason):
+            return .explicitlyBlocked(reason)
+        case .allowed:
+            return .allowed
+        case let .unlisted(reason):
+            evictStaleSessionGrants()
+            if isOneShotAllowed(host: canonicalHost, sessionID: sessionID) {
+                return .allowed
+            }
+            if let sessionID, sessionAllowedDomains[sessionID]?.domains.contains(canonicalHost) == true {
+                return .allowed
+            }
+            return .unlisted(reason)
+        }
+    }
+}

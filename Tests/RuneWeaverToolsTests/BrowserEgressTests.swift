@@ -11,6 +11,7 @@
 // resolved-list verdict instead, keeping parallel suites from publishing and
 // clearing canned proof under each other mid-chain.
 
+import Dispatch
 import Foundation
 import os
 @testable import RuneWeaverCore
@@ -33,6 +34,24 @@ private enum BrowserEgressSupport {
 
         var called: Bool {
             box.withLock { $0 }
+        }
+    }
+
+    /// Records hostnames that reached the SSRF resolver, in call order.
+    /// Guarded so the log stays Sendable and safe to read after the
+    /// task-scoped DNS binding clears.
+    final class ResolverLog: Sendable {
+        private let hosts = OSAllocatedUnfairLock<[String]>(initialState: [])
+
+        /// Records one resolver request.
+        /// - Parameter host: Hostname the guard asked the resolver about.
+        func record(_ host: String) {
+            hosts.withLock { $0.append(host) }
+        }
+
+        /// Hostnames the resolver was asked about, in call order.
+        var recorded: [String] {
+            hosts.withLock { $0 }
         }
     }
 
@@ -130,6 +149,51 @@ private enum BrowserEgressSupport {
                 BrowserRedirectStep(url: publicLandedURL)
             ]
         )
+    }
+
+    /// Builds a verified policy store over a throwaway file path.
+    ///
+    /// `update` commits through the same invariant gate a successful load
+    /// uses, so the supervisor factory sees a verified snapshot without the
+    /// test serializing TOML or touching the operator's real `policy.toml`.
+    static func policyStore(_ policy: SecurityPolicy) async -> PolicyStore {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rw-browser-policy-\(UUID().uuidString).toml")
+        let store = PolicyStore(fileURL: url)
+        await store.update(policy)
+        return store
+    }
+}
+
+/// Runs `body` with the debug DNS resolver bound to `resolver` for this test's
+/// task and its children.
+///
+/// The process-global `ApiSSRFGuard.testDNSResolver` is shared by every suite,
+/// so an ordering assertion binds the task-scoped override instead: only this
+/// test's resolver traffic is observed, and concurrent suites keep their own
+/// canned proof.
+private func withTaskScopedDNS(
+    _ resolver: @escaping @Sendable (String) -> [String],
+    _ body: () async throws -> Void
+) async throws {
+    try await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
+        try await body()
+    }
+}
+
+/// Blocks until `semaphore` signals without parking the cooperative pool.
+///
+/// Swift 6 marks `DispatchSemaphore.wait` unavailable from asynchronous
+/// contexts, so the wait hops to a plain thread and resumes a continuation.
+/// The serialization regression parks one run inside the profile queue with
+/// this before releasing a second caller, so overlap can only come from a
+/// missing serial gate.
+private func waitForSignal(_ semaphore: DispatchSemaphore) async {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            semaphore.wait()
+            continuation.resume()
+        }
     }
 }
 
@@ -484,6 +548,68 @@ struct BrowserEgressTests {
     }
 
     @Test
+    func `Policy-denied host never reaches the resolver`() async throws {
+        // A destination denied by policy.toml must refuse before the SSRF
+        // stage resolves any hostname: the supervised path enters the network
+        // policy gate first, so a denied host causes no DNS side effect.
+        let resolverLog = BrowserEgressSupport.ResolverLog()
+        try await withTaskScopedDNS({ host in
+            resolverLog.record(host)
+            return ["93.184.216.34"]
+        }) {
+            let store = await BrowserEgressSupport.policyStore(
+                SecurityPolicy(
+                    network: NetworkEgressPolicy(
+                        mode: .allowlistOnly,
+                        allowedDomains: ["allowed.example.com"],
+                        blockedDomains: ["blocked.example.com"]
+                    )
+                )
+            )
+            let supervisor = try await OutboundEgressSupervisor.make(policyStore: store)
+            do {
+                _ = try await BrowserValidation.validateURLAsync(
+                    "https://blocked.example.com/page",
+                    browserConfig: BrowserEgressSupport.publicSearchConfig(),
+                    egressSupervisor: supervisor
+                )
+                Issue.record("Expected the policy-denied host to be refused")
+            } catch let error as BrowserError {
+                #expect(error.localizedDescription.contains("Egress blocked"))
+            } catch {
+                Issue.record("Expected BrowserError, got \(error)")
+            }
+            #expect(resolverLog.recorded.isEmpty)
+        }
+    }
+
+    @Test
+    func `Supervised destinations still vet resolved addresses`() async throws {
+        // A policy-allowed host still needs resolved-address vetting on the
+        // supervised path: the supervisor's SSRF stage judges its own
+        // exemption set, so the canonical guard must re-vet the surviving
+        // destination and refuse a loopback resolution.
+        let store = await BrowserEgressSupport.policyStore(
+            SecurityPolicy(network: NetworkEgressPolicy(mode: .unrestricted))
+        )
+        let supervisor = try await OutboundEgressSupervisor.make(policyStore: store)
+        try await withTaskScopedDNS({ _ in ["127.0.0.1"] }) {
+            do {
+                _ = try await BrowserValidation.validateURLAsync(
+                    "https://loopback.example.com/page",
+                    browserConfig: BrowserEgressSupport.publicSearchConfig(),
+                    egressSupervisor: supervisor
+                )
+                Issue.record("Expected the loopback resolution to be refused")
+            } catch let error as BrowserError {
+                #expect(error.localizedDescription.contains("SSRF denied"))
+            } catch {
+                Issue.record("Expected BrowserError, got \(error)")
+            }
+        }
+    }
+
+    @Test
     func `Tool descriptions disclose the SSRF guard`() {
         let navigate = BrowserNavigateTool(browserConfig: BrowserEgressSupport.publicSearchConfig())
         #expect(navigate.description.contains("SSRF-guarded"))
@@ -500,5 +626,130 @@ struct BrowserEgressTests {
         // the entry URL, the navigate landing, and the post-action landing.
         #expect(BrowserPlaywrightScript.source.contains("_ssrf_deny_reason"))
         #expect(BrowserPlaywrightScript.source.contains("landed_after"))
+    }
+
+    @Test
+    func `BrowserNavigateArgs decodes headed and interactive flags`() throws {
+        // Defaults to false when omitted.
+        let defaultData = try JSONDecoder().decode(
+            BrowserNavigateArgs.self,
+            from: Data(#"{"url":"https://example.com"}"#.utf8)
+        )
+        #expect(defaultData.headed == false)
+
+        // Decodes explicit headed flag.
+        let headedData = try JSONDecoder().decode(
+            BrowserNavigateArgs.self,
+            from: Data(#"{"url":"https://example.com","headed":true}"#.utf8)
+        )
+        #expect(headedData.headed == true)
+
+        // Decodes interactive alias.
+        let interactiveData = try JSONDecoder().decode(
+            BrowserNavigateArgs.self,
+            from: Data(#"{"url":"https://example.com","interactive":true}"#.utf8)
+        )
+        #expect(interactiveData.headed == true)
+
+        // Decodes false explicitly.
+        let falseData = try JSONDecoder().decode(
+            BrowserNavigateArgs.self,
+            from: Data(#"{"url":"https://example.com","headed":false}"#.utf8)
+        )
+        #expect(falseData.headed == false)
+    }
+
+    @Test
+    func `Embedded helper uses persistent context and headed support`() {
+        #expect(BrowserPlaywrightScript.source.contains("launch_persistent_context"))
+        #expect(BrowserPlaywrightScript.source.contains("browser_profiles"))
+        #expect(BrowserPlaywrightScript.source.contains("is_headed"))
+        #expect(SubprocessPlaywrightGateway.headedProcessTimeoutSeconds == 180.0)
+        // The headed wait cap stays strictly below the kill budget so the timeout path still reaches
+        // `finally: context.close()`; the kill budget covers the navigation budget plus the wait cap
+        // plus headroom so a slow `goto` is never killed mid-navigation before cleanup.
+        let headedKill = SubprocessPlaywrightGateway.headedProcessTimeoutSeconds
+        let headedWait = SubprocessPlaywrightGateway.headedWaitSeconds
+        let headroom = SubprocessPlaywrightGateway.headedCleanupHeadroomSeconds
+        #expect(headedWait < headedKill)
+        #expect(headedWait == headedKill - headroom)
+        let waitBudget = "max_wait = \(headedWait)"
+        #expect(BrowserPlaywrightScript.source.contains(waitBudget))
+        #expect(!BrowserPlaywrightScript.source.contains("max_wait = \(headedKill)"))
+        #expect(SubprocessPlaywrightGateway.headedEffectiveTimeout(for: 30) > 30 + headedWait)
+        // The `finally` close releases Chromium's SingletonLock, so the next
+        // serialized run can reopen the persistent profile; losing this line
+        // would leave the profile locked after an early return or failure.
+        #expect(BrowserPlaywrightScript.source.contains("finally:"))
+        #expect(BrowserPlaywrightScript.source.contains("context.close()"))
+    }
+
+    @Test
+    func `Configured timeout reaches navigation and action payloads`() {
+        // `browser.timeout_seconds` must govern in-page timeouts, not only the
+        // subprocess kill budget, or the Settings copy lies to the operator.
+        let navigate = BrowserSubprocessIO.navigatePayload(
+            url: BrowserEgressSupport.publicStartURL,
+            includeScreenshot: false,
+            headed: false,
+            timeoutSeconds: 120
+        )
+        #expect(navigate["op"] as? String == "navigate")
+        #expect(navigate["timeoutMs"] as? Int == 120_000)
+        let headed = BrowserSubprocessIO.navigatePayload(
+            url: BrowserEgressSupport.publicStartURL,
+            includeScreenshot: true,
+            headed: true,
+            timeoutSeconds: 45
+        )
+        #expect(headed["includeScreenshot"] as? Bool == true)
+        #expect(headed["headed"] as? Bool == true)
+        #expect(headed["timeoutMs"] as? Int == 45000)
+        let act = BrowserSubprocessIO.actPayload(
+            url: BrowserEgressSupport.publicPageURL,
+            action: "click",
+            ref: "e1",
+            text: nil,
+            timeoutSeconds: 90
+        )
+        #expect(act["op"] as? String == "act")
+        #expect(act["ref"] as? String == "e1")
+        #expect(act["timeoutMs"] as? Int == 90000)
+        // The helper consumes the plumbed budget and keeps its legacy literals
+        // only as the fallback for callers that reach the bridge directly.
+        #expect(BrowserPlaywrightScript.source.contains("_request_timeout_ms"))
+        #expect(BrowserPlaywrightScript.source.contains("timeout=timeout_ms"))
+        #expect(BrowserPlaywrightScript.source.contains("timeout=action_timeout_ms"))
+        #expect(!BrowserPlaywrightScript.source.contains("timeout=30000"))
+        #expect(!BrowserPlaywrightScript.source.contains("timeout=10000"))
+    }
+
+    @Test
+    func `Concurrent bridge runs serialize on the profile queue`() async throws {
+        // A persistent profile admits one Chromium process at a time, so
+        // overlapping helpers would collide on its SingletonLock and fail a
+        // legitimate call; the serial queue must keep runs from overlapping
+        // even when two callers fire together. The first run parks inside the
+        // queue before the second is even launched, so a queue-less
+        // implementation records a second `-start` before the first `-end`.
+        let events = OSAllocatedUnfairLock<[String]>(initialState: [])
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        async let first: Void = BrowserSubprocessIO.runSerialized {
+            events.withLock { $0.append("first-start") }
+            entered.signal()
+            release.wait()
+            events.withLock { $0.append("first-end") }
+        }
+        await waitForSignal(entered)
+        async let second: Void = BrowserSubprocessIO.runSerialized {
+            events.withLock { $0.append("second-start") }
+            events.withLock { $0.append("second-end") }
+        }
+        release.signal()
+        try await first
+        try await second
+        let recorded = events.withLock { $0 }
+        #expect(recorded == ["first-start", "first-end", "second-start", "second-end"])
     }
 }

@@ -607,6 +607,16 @@ extension RuneWeaverConfig {
                 message: "must be between 1 and \(BrowserConfig.maxAllowedResults)"
             )
         }
+        if browser.timeoutSeconds < 5 || browser.timeoutSeconds > 300 {
+            throw ConfigError.validationError(
+                field: "browser.timeout_seconds", message: "must be between 5 and 300"
+            )
+        }
+        if browser.fetchTimeoutSeconds < 1 || browser.fetchTimeoutSeconds > 120 {
+            throw ConfigError.validationError(
+                field: "browser.fetch_timeout_seconds", message: "must be between 1 and 120"
+            )
+        }
         for origin in browser.allowedOrigins {
             try Self.validateAllowedOrigin(origin)
         }
@@ -886,6 +896,11 @@ extension RuneWeaverConfig {
     }
 
     private func validateMediaSection() throws {
+        if media.timeoutSeconds < 5 || media.timeoutSeconds > 120 {
+            throw ConfigError.validationError(
+                field: "media.timeout_seconds", message: "must be between 5 and 120"
+            )
+        }
         if let sonarrURL = media.sonarr.url, !sonarrURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             try Self.validateHTTPURLField(sonarrURL, field: "media.sonarr.url")
         }
