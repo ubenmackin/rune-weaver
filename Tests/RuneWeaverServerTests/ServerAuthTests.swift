@@ -20,11 +20,20 @@ import Vapor
 /// Canned downstream responder used to observe whether the gate forwarded a
 /// request and whether it marked the request authenticated.
 private struct AuthProbeResponder: AsyncResponder, Sendable {
+    /// When true, the responder attaches an expired session cookie to its own
+    /// response, mirroring a logout or rotation handler so the gate's
+    /// renewal-precedence rule can be exercised.
+    var expiresSessionCookie = false
+
     func respond(to request: Request) async throws -> Response {
         var headers = HTTPHeaders()
         headers.replaceOrAdd(name: "X-Probe-Authenticated", value: request.runeWeaverAuthenticated ? "true" : "false")
         headers.replaceOrAdd(name: "X-Probe-Query", value: request.url.query ?? "")
-        return Response(status: .ok, headers: headers, body: .init(string: "probe"))
+        let response = Response(status: .ok, headers: headers, body: .init(string: "probe"))
+        if expiresSessionCookie {
+            response.cookies[ServerAuthRequest.sessionCookieName] = ServerAuthRequest.makeExpiredSessionCookie()
+        }
+        return response
     }
 }
 
@@ -276,10 +285,14 @@ struct ServerAuthTokenLifecycleTests {
         let (auth, directory, _) = try makeAuth(token: "first-token")
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        // Deterministic pre-rotation capture: the generation of the live token.
+        // Deterministic pre-rotation capture: the presentation of the live token.
         let captured = try #require(await auth.verifyAndCaptureGeneration("first-token"))
-        #expect(captured == 0)
-        #expect(await auth.verifyAndCaptureGeneration("first-token") == captured)
+        #expect(captured.generation == 0)
+        #expect(captured.kind == .ownerToken)
+        #expect(captured.shouldRefreshSessionCookie == false)
+        let repeated = try #require(await auth.verifyAndCaptureGeneration("first-token"))
+        #expect(repeated.generation == captured.generation)
+        #expect(repeated.kind == .ownerToken)
         #expect(await auth.verifyAndCaptureGeneration("stale-token") == nil)
         #expect(await auth.verifyAndCaptureGeneration("") == nil)
 
@@ -290,28 +303,29 @@ struct ServerAuthTokenLifecycleTests {
         let rotation = Task { try await auth.rotate() }
         var observed: Set<Int> = []
         for _ in 0 ..< 200 {
-            if let generation = await auth.verifyAndCaptureGeneration("first-token") {
-                observed.insert(generation)
+            if let presentation = await auth.verifyAndCaptureGeneration("first-token") {
+                observed.insert(presentation.generation)
             }
         }
         let minted = try await rotation.value
-        #expect(observed.isSubset(of: [captured]))
+        #expect(observed.isSubset(of: [captured.generation]))
 
         // Once the rotation lands, the captured generation is retired, the
         // replacement captures the advanced generation, and the hub refuses a
         // socket stamped with the retired value. That refusal is what keeps an
         // upgrade authenticated by the retired token from being registered.
-        #expect(await auth.isCurrentGeneration(captured) == false)
+        #expect(await auth.isCurrentGeneration(captured.generation) == false)
         let advanced = try #require(await auth.verifyAndCaptureGeneration(minted))
-        #expect(advanced == captured + 1)
-        #expect(await auth.isCurrentGeneration(advanced))
+        #expect(advanced.generation == captured.generation + 1)
+        #expect(advanced.kind == .ownerToken)
+        #expect(await auth.isCurrentGeneration(advanced.generation))
 
         let hub = WSHub()
         let socket = RecordingSocket()
         // A rotation raises the hub watermark to the generation live afterwards,
         // so a socket stamped with the retired value is refused at registration.
-        await hub.retire(liveGeneration: advanced)
-        let accepted = await hub.add(id: UUID(), box: socket, generation: captured)
+        await hub.retire(liveGeneration: advanced.generation)
+        let accepted = await hub.add(id: UUID(), box: socket, generation: captured.generation)
         #expect(accepted == false)
         #expect(await hub.count() == 0)
     }
@@ -1125,6 +1139,9 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             #expect(unwrappedCookie.isHTTPOnly)
             #expect(unwrappedCookie.sameSite == .strict)
             #expect(unwrappedCookie.path == "/")
+            // The login cookie advertises the sliding idle window as its
+            // Max-Age, so the browser and the server agree on the deadline.
+            #expect(unwrappedCookie.maxAge == Int(ServerAuth.sessionIdleTimeoutSeconds))
 
             // 2. Access protected route using the cookie
             let protectedReq = Request(
@@ -1201,6 +1218,10 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             #expect(unwrapped.string != "orig-token")
             #expect(await auth.hasActiveSession(unwrapped.string) == true)
             #expect(unwrapped.isHTTPOnly)
+            // A rotation mints a fresh session, and its cookie carries the same
+            // sliding lifetime as the login cookie rather than restarting the
+            // clock at zero.
+            #expect(unwrapped.maxAge == Int(ServerAuth.sessionIdleTimeoutSeconds))
         }
     }
 
@@ -1325,6 +1346,187 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             #expect(res.headers.first(name: "X-Frame-Options") == "DENY")
             #expect(res.headers.first(name: "X-Content-Type-Options") == "nosniff")
             #expect(res.headers.first(name: "Referrer-Policy") == "strict-origin-when-cross-origin")
+        }
+    }
+}
+
+/// Test-only clock for the cookie-renewal suite: a mutable instant the tests
+/// move explicitly, so renewal throttling is deterministic instead of sleeping
+/// against wall time.
+///
+/// `@unchecked Sendable` is safe because each test drives the clock from its own
+/// task and never mutates it concurrently.
+private final class TestClock: @unchecked Sendable {
+    /// Current instant handed to the verifier through its injected clock.
+    var now: Date
+
+    /// Creates a clock pinned to a whole-second instant so cookie deadlines are
+    /// exact instead of drifting with sub-second wall time.
+    init(now: Date = Date(timeIntervalSince1970: 1_700_000_000)) {
+        self.now = now
+    }
+
+    /// Moves the clock forward, as if that much wall time had passed.
+    /// - Parameter interval: Seconds to advance by.
+    func advance(_ interval: TimeInterval) {
+        now = now.addingTimeInterval(interval)
+    }
+}
+
+/// Builds a verifier over an in-memory token store, an injected clock, and no
+/// session store, so these cases exercise only the middleware's cookie-renewal
+/// decision and never touch disk.
+/// - Parameters:
+///   - clock: Deterministic clock injected into the verifier.
+///   - token: Live owner token to initialize the verifier with.
+/// - Returns: The verifier under test.
+private func makeRenewalAuth(clock: TestClock, token: String = "owner-token") -> ServerAuth {
+    let store = ServerAuthTokenStore(
+        authConfig: AuthConfig(tokenEnv: "RUNEWEAVER_AUTH_TEST_UNSET_\(UUID().uuidString)", tokenFile: nil),
+        service: "com.runeweaver.tests.\(UUID().uuidString)",
+        inMemory: true
+    )
+    return ServerAuth(initialToken: token, store: store, sessionStore: nil, now: { clock.now })
+}
+
+@Suite("Server Auth Session Cookie Renewal")
+struct ServerAuthSessionCookieRenewalTests {
+    @Test
+    func `Session cookie carries the sliding lifetime with strict attributes`() {
+        let cookie = ServerAuthRequest.makeSessionCookie(token: "t", isSecure: false)
+        #expect(cookie.string == "t")
+        #expect(cookie.maxAge == 86400)
+        #expect(cookie.maxAge == Int(ServerAuth.sessionIdleTimeoutSeconds))
+        #expect(cookie.expires == nil)
+        #expect(cookie.domain == nil)
+        #expect(cookie.path == "/")
+        #expect(cookie.isHTTPOnly)
+        #expect(cookie.sameSite == .strict)
+        #expect(cookie.isSecure == false)
+
+        // The secure flag is the caller's transport decision, so the HTTPS
+        // variant flips exactly that attribute and nothing else.
+        let secure = ServerAuthRequest.makeSessionCookie(token: "t", isSecure: true)
+        #expect(secure.isSecure == true)
+        #expect(secure.isHTTPOnly)
+        #expect(secure.sameSite == .strict)
+        #expect(secure.maxAge == 86400)
+    }
+
+    @Test
+    func `A due browser session receives a refreshed cookie with the sliding lifetime`() async throws {
+        try await withTestApp { app in
+            let clock = TestClock()
+            let auth = makeRenewalAuth(clock: clock)
+            let session = try await auth.createSession()
+            clock.advance(ServerAuth.sessionCookieRenewalIntervalSeconds + 1)
+            let middleware = ServerAuthMiddleware(auth: auth)
+
+            let request = makeRequest(app: app, path: "/settings")
+            request.cookies[ServerAuthRequest.sessionCookieName] = HTTPCookies.Value(string: session)
+            let response = try await middleware.respond(to: request, chainingTo: AuthProbeResponder())
+
+            #expect(response.status == .ok)
+            let cookie = try #require(response.cookies[ServerAuthRequest.sessionCookieName])
+            // Renewal re-issues the presented token rather than minting a
+            // replacement, so concurrent dashboard tabs keep authenticating
+            // with the one session they already hold.
+            #expect(cookie.string == session)
+            #expect(cookie.maxAge == Int(ServerAuth.sessionIdleTimeoutSeconds))
+            #expect(cookie.isHTTPOnly)
+            #expect(cookie.sameSite == .strict)
+            #expect(cookie.path == "/")
+        }
+    }
+
+    @Test
+    func `A freshly minted session is not re-issued before the renewal interval`() async throws {
+        try await withTestApp { app in
+            let clock = TestClock()
+            let auth = makeRenewalAuth(clock: clock)
+            let session = try await auth.createSession()
+            let middleware = ServerAuthMiddleware(auth: auth)
+
+            let request = makeRequest(app: app, path: "/settings")
+            request.cookies[ServerAuthRequest.sessionCookieName] = HTTPCookies.Value(string: session)
+            let response = try await middleware.respond(to: request, chainingTo: AuthProbeResponder())
+
+            #expect(response.status == .ok)
+            // The login response just set the cookie, so a request inside the
+            // throttle window must not carry a redundant Set-Cookie.
+            #expect(response.cookies[ServerAuthRequest.sessionCookieName] == nil)
+        }
+    }
+
+    @Test
+    func `A handler-issued session cookie keeps precedence over renewal`() async throws {
+        try await withTestApp { app in
+            let clock = TestClock()
+            let auth = makeRenewalAuth(clock: clock)
+            let session = try await auth.createSession()
+            clock.advance(ServerAuth.sessionCookieRenewalIntervalSeconds + 1)
+            let middleware = ServerAuthMiddleware(auth: auth)
+
+            let request = makeRequest(app: app, path: "/settings")
+            request.cookies[ServerAuthRequest.sessionCookieName] = HTTPCookies.Value(string: session)
+            let response = try await middleware.respond(
+                to: request,
+                chainingTo: AuthProbeResponder(expiresSessionCookie: true)
+            )
+
+            #expect(response.status == .ok)
+            // Logout and rotation own their cookie: an expiry (or a freshly
+            // rotated session) must not be overwritten by renewal, or logout
+            // would leave the browser authenticated.
+            let cookie = try #require(response.cookies[ServerAuthRequest.sessionCookieName])
+            #expect(cookie.maxAge == 0)
+        }
+    }
+
+    @Test
+    func `WebSocket upgrades never receive a renewal cookie`() async throws {
+        try await withTestApp { app in
+            let clock = TestClock()
+            let auth = makeRenewalAuth(clock: clock)
+            let session = try await auth.createSession()
+            clock.advance(ServerAuth.sessionCookieRenewalIntervalSeconds + 1)
+            let middleware = ServerAuthMiddleware(auth: auth)
+
+            let request = makeRequest(app: app, path: "/ws", headers: webSocketUpgradeHeaders)
+            request.cookies[ServerAuthRequest.sessionCookieName] = HTTPCookies.Value(string: session)
+            let response = try await middleware.respond(to: request, chainingTo: AuthProbeResponder())
+
+            #expect(response.status == .ok)
+            // A handshake is not a page load, so the browser cannot act on a
+            // Set-Cookie here; the session deadline rides the REST traffic the
+            // dashboard already makes.
+            #expect(response.cookies[ServerAuthRequest.sessionCookieName] == nil)
+        }
+    }
+
+    @Test
+    func `Owner bearer requests never mint a session cookie`() async throws {
+        try await withTestApp { app in
+            let clock = TestClock()
+            let auth = makeRenewalAuth(clock: clock)
+            _ = try await auth.createSession()
+            clock.advance(ServerAuth.sessionCookieRenewalIntervalSeconds + 1)
+            let middleware = ServerAuthMiddleware(auth: auth)
+
+            let response = try await middleware.respond(
+                to: makeRequest(
+                    app: app,
+                    path: "/settings",
+                    headers: ["Authorization": "Bearer owner-token"]
+                ),
+                chainingTo: AuthProbeResponder()
+            )
+
+            #expect(response.status == .ok)
+            // The owner bearer is not a browser session: there is nothing to
+            // refresh, and attaching a cookie would silently turn an API client
+            // into a logged-in browser.
+            #expect(response.cookies[ServerAuthRequest.sessionCookieName] == nil)
         }
     }
 }

@@ -137,7 +137,7 @@ The core engine is shifting from a CLI-only tool to a local service that other U
 - **Fan-out cancellation (shipped)**: `POST /runs/:id/cancel` cancels one running worker or a whole swarm by run-log row id; affected subtasks and rows settle to `cancelled` and the Runs tab refetches. No new transport.
 - **Static dashboard bundle**: Served by the engine itself with chat, grouped nav (Chat, Approvals, Work → Goals/Schedules/Runs, Memory), approvals inbox, run history, and index status surfaces.
 - **Same trust boundary**: Every service-triggered write still flows through the permission gate. The service adds transport; it does not bypass approvals.
-- **Single-owner bearer auth & ephemeral browser sessions (shipped)**: Exactly one owner token guards the engine HTTP surface. Browser clients exchange it via `POST /auth/session` for an ephemeral `HttpOnly`, `SameSite=Strict` cookie. Rotation invalidates live sessions.
+- **Single-owner bearer auth & sliding durable sessions (shipped)**: Exactly one owner token guards the engine HTTP surface. Browser clients exchange it via `POST /auth/session` for an `rw_session` cookie — `HttpOnly`, `SameSite=Strict`, `Max-Age` 24h — whose lifetime slides with activity: any authenticated REST request refreshes both the cookie and the server-side `lastSeenAt` (refresh throttled to once per 5 minutes), and a session dies only after 24h with zero requests (no absolute cap). Session state is keyed by SHA-256 digest of the session token and persisted digest-only in `~/.runeweaver/auth-sessions.json` (0600, atomic writes; raw session tokens are never persisted or logged), so an engine restart preserves device logins. Rotation invalidates live sessions and clears the persisted set; an unreadable, loose-mode, corrupt, or unknown-version store fails closed to no sessions (login required).
 - **Fail-closed binding (shipped)**: Loopback always serves. Non-loopback requires a resolved token or boot is refused.
 - **Service auto-fire plus per-process single-flight**: Service auto-fires scheduler and goal triggers, sharing one lock per firing class with manual runs; the CLI foreground loop is a second runner — run one at a time.
 
@@ -333,7 +333,7 @@ Apple Mail native, HomeKit/Home Assistant control, Discord, GitHub, Calendar (co
 6. **Defense in depth for external content**: declaration-driven untrusted labeling, deterministic credential filtering, single-sourced SSRF egress, and surrogate credential references.
 7. **Declarative deny-by-default egress over network plus credentials only**: `~/.runeweaver/policy.toml` owns `[network]` plus `[credentials.*]` only and is verified by two formal invariants at the storage boundary — **credential confinement** plus **rule-shadow prevention** — then enforced at a single mandatory choke-point (`OutboundEgressSupervisor`) for `api.request`, `web.fetch`, `browser.navigate`/`browser.act`, `bash.exec`, and `desktop.action`; unverifiable policy fails closed at boot, and supervisor denial is evaluated before Keychain or DNS side effects.
 
-Sandbox paths under `~/.runeweaver/` for config, `policy.toml`, `index.db`, `memory/episodes.db`, `memory/vectors/`, logs, plugins, voice models. The policy file itself is additionally denied to sandboxed subprocesses via the Seatbelt profile.
+Sandbox paths under `~/.runeweaver/` for config, `policy.toml`, `auth-sessions.json` (digest-only session state for sliding browser sessions), `index.db`, `memory/episodes.db`, `memory/vectors/`, logs, plugins, voice models. The policy file itself is additionally denied to sandboxed subprocesses via the Seatbelt profile.
 
 ---
 
@@ -413,7 +413,7 @@ Every section is additive with defaults on absent keys, so existing `config.toml
 
 1. **Swift over Python for core**.
 2. **Actor model for concurrency**.
-3. **WebSocket for client-server & ephemeral sessions**.
+3. **WebSocket for client-server & sliding durable sessions**.
 4. **JSON vector store with pluggable embeddings**.
 5. **Playwright over Selenium**.
 6. **Graduated trust over binary permissions**.
@@ -459,6 +459,7 @@ Every section is additive with defaults on absent keys, so existing `config.toml
 
 - Apple Silicon required for MLX; Intel via llama.cpp/cloud only.
 - Single-owner, fail-closed binding and host enforcement, auth-before-exposure, ATS local-networking only.
+- Owner sessions: sliding 24h idle window (`rw_session` `Max-Age` 86400, refreshed at most once per 5 minutes of activity, no absolute cap); `maxActiveSessions` 100 with least-recently-seen eviction; session state keyed by SHA-256 digest and persisted digest-only in `~/.runeweaver/auth-sessions.json` (0600, atomic); rotation clears all sessions; unreadable, loose, corrupt, or unknown-version stores fail closed to no sessions.
 - Local-first; opt-in indexing; opt-in desktop with OS permissions; Messages send always gated.
 - Default-ON hardening; no live secrets in context; fail-closed transport.
 - Declarative egress policy: network plus credentials only with deny-by-default allowlist posture; `mode` is `allowlist_only` | `unrestricted` (`deny_by_default` parses as `allowlist_only` on load); credentials bound to `allowed_hosts`/`allowed_methods`/`allowed_path_prefixes` under credential confinement plus rule-shadow prevention; legacy `[filesystem]` plus `[tools.*]` ignored on load and never persisted; unverifiable `policy.toml` fails closed (CLI exits nonzero, serve refuses boot) — never permissive defaults.

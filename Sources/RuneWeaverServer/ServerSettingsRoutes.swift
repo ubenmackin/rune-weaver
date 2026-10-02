@@ -954,29 +954,38 @@ private func validatedPolicyMode(_ rawValue: String) throws -> EgressMode {
 ///     `serialization`).
 /// - Returns: Trimmed entry ready to store.
 /// - Throws: `Abort(.badRequest)` naming the gate and field.
-private func validateHostEntry(_ raw: String, field: String, gate: String) throws -> String {
-    let isBinding = gate == "binding"
-    let shortField: String
+/// Context and error-formatting helper for host entry validation.
+private struct HostValidationContext {
+    let gate: String
+    let field: String
+    let isBinding: Bool
     let bindingKey: String
-    if isBinding {
-        if field.hasPrefix("credentials."), field.hasSuffix(".allowed_hosts") {
-            let start = field.index(field.startIndex, offsetBy: "credentials.".count)
-            let end = field.index(field.endIndex, offsetBy: -".allowed_hosts".count)
-            bindingKey = String(field[start ..< end])
+    let shortField: String
+
+    init(field: String, gate: String) {
+        self.gate = gate
+        self.field = field
+        self.isBinding = gate == "binding"
+        if isBinding {
+            if field.hasPrefix("credentials."), field.hasSuffix(".allowed_hosts") {
+                let start = field.index(field.startIndex, offsetBy: "credentials.".count)
+                let end = field.index(field.endIndex, offsetBy: -".allowed_hosts".count)
+                self.bindingKey = String(field[start ..< end])
+            } else {
+                self.bindingKey = field
+            }
+            self.shortField = "allowed_hosts"
         } else {
-            bindingKey = field
-        }
-        shortField = "allowed_hosts"
-    } else {
-        bindingKey = ""
-        if field.hasPrefix("network.") {
-            shortField = String(field.dropFirst("network.".count))
-        } else {
-            shortField = field
+            self.bindingKey = ""
+            if field.hasPrefix("network.") {
+                self.shortField = String(field.dropFirst("network.".count))
+            } else {
+                self.shortField = field
+            }
         }
     }
-    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    func shapeReason(_ detail: String) -> String {
+
+    func shapeReason(trimmed: String, detail: String) -> String {
         if isBinding {
             return "Invalid credentials '\(bindingKey)' field 'allowed_hosts' value '\(trimmed)': "
                 + detail + "Gate: \(gate), field: \(field)."
@@ -984,93 +993,120 @@ private func validateHostEntry(_ raw: String, field: String, gate: String) throw
         return "Invalid network field '\(shortField)' value '\(trimmed)': "
             + detail + "Gate: \(gate), field: \(field)."
     }
-    guard !trimmed.isEmpty else {
+
+    func blankAbort() -> Abort {
         if isBinding {
-            throw Abort(
+            return Abort(
                 .badRequest,
                 reason: "Invalid credentials '\(bindingKey)' field 'allowed_hosts': "
                     + "must not contain blank entries. "
                     + "Gate: \(gate), field: \(field)."
             )
         }
-        throw Abort(
+        return Abort(
             .badRequest,
             reason: "Invalid network field '\(shortField)': must not contain blank entries. "
                 + "Gate: \(gate), field: \(field)."
         )
     }
-    guard !PolicyStore.containsTOMLBreakingScalar(trimmed) else {
+
+    func tomlBreakingAbort(trimmed: String) -> Abort {
         if isBinding {
-            throw Abort(
+            return Abort(
                 .badRequest,
                 reason: "Invalid credentials '\(bindingKey)' field 'allowed_hosts' value '\(trimmed)': "
                     + "carries TOML-breaking characters. "
                     + "Gate: serialization, field: \(field)."
             )
         }
-        throw Abort(
+        return Abort(
             .badRequest,
             reason: "Invalid network field '\(shortField)' value '\(trimmed)': "
                 + "carries TOML-breaking characters. "
                 + "Gate: serialization, field: \(field)."
         )
     }
-    // Bracketed literals wrap an IPv6 address only: one outer pair with a
-    // colon-bearing inner and no port suffix. The inner strips for the
-    // confinement check downstream, so sensitive bracketed targets still
-    // refuse through the shared verifier rather than this shape gate.
-    if isBinding, trimmed.contains("[") || trimmed.contains("]") {
-        guard trimmed.hasPrefix("["),
-              trimmed.hasSuffix("]"),
-              trimmed.filter({ $0 == "[" }).count == 1,
-              trimmed.filter({ $0 == "]" }).count == 1
-        else {
-            throw Abort(.badRequest, reason: shapeReason("must be an exact host or a single leading '*.example.com' edge. "))
-        }
-        let inner = String(trimmed.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !inner.isEmpty,
-              inner.contains(":"),
-              !inner.contains("["),
-              !inner.contains("]"),
-              !inner.contains("*"),
-              !inner.contains(" ")
-        else {
-            throw Abort(.badRequest, reason: shapeReason("must be an exact host or a single leading '*.example.com' edge. "))
-        }
-        return trimmed
+}
+
+/// Validates bracketed IPv6 literals for credential bindings.
+private func validateBracketedIPv6Host(_ trimmed: String, context: HostValidationContext) throws {
+    guard trimmed.hasPrefix("["),
+          trimmed.hasSuffix("]"),
+          trimmed.filter({ $0 == "[" }).count == 1,
+          trimmed.filter({ $0 == "]" }).count == 1
+    else {
+        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "must be an exact host or a single leading '*.example.com' edge. "))
     }
-    let lowered = trimmed.lowercased()
+    let inner = String(trimmed.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !inner.isEmpty,
+          inner.contains(":"),
+          !inner.contains("["),
+          !inner.contains("]"),
+          !inner.contains("*"),
+          !inner.contains(" ")
+    else {
+        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "must be an exact host or a single leading '*.example.com' edge. "))
+    }
+}
+
+/// Enforces the wildcard domain constraint (single leading `*.example.com`).
+private func validateWildcardHost(_ lowered: String, trimmed: String, context: HostValidationContext) throws {
+    switch AllowedOriginPattern.classifyWildcard(lowered) {
+    case .leading:
+        break
+    case .none, .trailing, .invalidShape, .invalidSuffix, .invalidStem:
+        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "only a single leading '*.example.com' edge authorizes. "))
+    }
+    let bare = String(lowered.dropFirst(2))
+    guard lowered.hasPrefix("*."), !bare.isEmpty,
+          !bare.hasPrefix("."), !bare.hasSuffix(".")
+    else {
+        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "only a single leading '*.example.com' edge authorizes. "))
+    }
+    if lowered.contains(":") {
+        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "only a single leading '*.example.com' edge authorizes. "))
+    }
+}
+
+/// Validates unbracketed host strings against forbidden characters, port colons, and wildcard shapes.
+private func validateUnbracketedHostShape(_ lowered: String, trimmed: String, context: HostValidationContext) throws {
     if lowered.contains(" ") || lowered.contains("\t")
         || lowered.contains(",") || lowered.contains("?")
         || lowered.contains("[") || lowered.contains("]")
         || lowered.contains("/") || lowered.contains("\\")
         || lowered.contains("@") || lowered.contains("#")
     {
-        throw Abort(.badRequest, reason: shapeReason("must be an exact host or a single leading '*.example.com' edge. "))
+        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "must be an exact host or a single leading '*.example.com' edge. "))
     }
     // A canonical URL host never carries a port, and every valid IPv6
     // literal has at least two colons, so exactly one colon can only be a
     // port suffix that the matcher could never equal.
     if lowered.filter({ $0 == ":" }).count == 1 {
-        throw Abort(.badRequest, reason: shapeReason("must be a host without a port. "))
+        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "must be a host without a port. "))
     }
     if lowered.contains("*") {
-        switch AllowedOriginPattern.classifyWildcard(lowered) {
-        case .leading:
-            break
-        case .none, .trailing, .invalidShape, .invalidSuffix, .invalidStem:
-            throw Abort(.badRequest, reason: shapeReason("only a single leading '*.example.com' edge authorizes. "))
-        }
-        let bare = String(lowered.dropFirst(2))
-        guard lowered.hasPrefix("*."), !bare.isEmpty,
-              !bare.hasPrefix("."), !bare.hasSuffix(".")
-        else {
-            throw Abort(.badRequest, reason: shapeReason("only a single leading '*.example.com' edge authorizes. "))
-        }
-        if lowered.contains(":") {
-            throw Abort(.badRequest, reason: shapeReason("only a single leading '*.example.com' edge authorizes. "))
-        }
+        try validateWildcardHost(lowered, trimmed: trimmed, context: context)
     }
+}
+
+private func validateHostEntry(_ raw: String, field: String, gate: String) throws -> String {
+    let context = HostValidationContext(field: field, gate: gate)
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+        throw context.blankAbort()
+    }
+    guard !PolicyStore.containsTOMLBreakingScalar(trimmed) else {
+        throw context.tomlBreakingAbort(trimmed: trimmed)
+    }
+    // Bracketed literals wrap an IPv6 address only: one outer pair with a
+    // colon-bearing inner and no port suffix. The inner strips for the
+    // confinement check downstream, so sensitive bracketed targets still
+    // refuse through the shared verifier rather than this shape gate.
+    if context.isBinding, trimmed.contains("[") || trimmed.contains("]") {
+        try validateBracketedIPv6Host(trimmed, context: context)
+        return trimmed
+    }
+    try validateUnbracketedHostShape(trimmed.lowercased(), trimmed: trimmed, context: context)
     return trimmed
 }
 
