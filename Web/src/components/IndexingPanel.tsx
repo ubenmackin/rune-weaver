@@ -962,8 +962,23 @@ export interface IndexingPanelProps {
 // Status dashboard for the Memory → Index Status tab: run controls first, stat
 // cards and per-source pills second, frontend-only charts last. Policy editing
 // lives in IndexPolicyPanel so this surface owns no Save path.
+// Module-scoped last-good status shared across mounts in this tab lifetime.
+// Written only by loadStatus on success and read only by the state initializer,
+// so a tab switch paints instantly and a failing refresh keeps the last panel.
+let cachedIndexStatus: IndexStatusResponse | null = null;
+
+/// Clears the module-scoped cached index status.
+/// Ownership: test isolation only, never called from production paths.
+/// Edge cases: safe when the cache is already null; the next mount cold-boots to the skeleton.
+export function clearCachedIndexStatusForTesting(): void { cachedIndexStatus = null; }
+
+/// Renders the index status dashboard with instant hydration from the module cache.
+/// Ownership: initial paint reads the cache via the state initializer; refreshes revalidate via loadStatus without resetting to null.
+/// Edge cases: null cache cold-boots to the skeleton; a cache hit paints instantly then updates silently on fetch.
 export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps) {
-  const [status, setStatus] = useState<IndexStatusResponse | null>(null);
+  // Initial paint owns the cache read so a prior successful load renders
+  // synchronously before the background revalidation resolves.
+  const [status, setStatus] = useState<IndexStatusResponse | null>(() => cachedIndexStatus);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // One in-flight slot names the action so Run, Prune, Reset, and Reclaim stay
@@ -1128,10 +1143,14 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // transient notice so both figures survive the post-reclaim status reload.
   const reclaimSummary = formatIndexReclaimResult(reclaimResult);
 
+  /// Reloads index status and commits the last-good snapshot to the module cache.
+  /// Ownership: sole writer of the cache alongside the state update.
+  /// Edge cases: success caches before setting state; failure leaves the cache untouched and surfaces the error slot.
   const loadStatus = useCallback(async () => {
     setError(null);
     try {
       const response = await getIndexStatus();
+      cachedIndexStatus = response;
       setStatus(response);
       return response;
     } catch (failure) {
@@ -1888,7 +1907,52 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
             ) : null}
           </>
         ) : (
-          <p className="muted text-sm">Loading index status…</p>
+          <div className="index-status-skeleton" data-testid="index-status-skeleton" role="status" aria-busy="true" aria-label="Loading index status">
+            {/* Cold-boot skeleton: same card and pill geometry as the loaded panel
+                so the first paint reserves space without the old text paragraph. */}
+            <div
+              className="index-stat-cards"
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                gap: 12,
+                marginTop: 12,
+              }}
+            >
+              <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
+                <div className="muted text-xs">Size on disk</div>
+                <div className="index-stat-value muted text-sm">Loading…</div>
+              </div>
+              <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
+                <div className="muted text-xs">Documents</div>
+                <div className="index-stat-value muted text-sm">Loading…</div>
+              </div>
+              <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
+                <div className="muted text-xs">Chunks</div>
+                <div className="index-stat-value muted text-sm">Loading…</div>
+              </div>
+              <div
+                className="card index-stat-card index-watermark-card"
+                style={{
+                  padding: 12,
+                  marginBottom: 0,
+                  borderWidth: 2,
+                  borderStyle: "solid",
+                }}
+              >
+                <div className="muted text-xs">Last indexed</div>
+                <div className="index-stat-value muted text-sm">Loading…</div>
+              </div>
+            </div>
+            <div
+              className="index-source-pills"
+              style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}
+            >
+              <span className="status-pill skipped">Loading…</span>
+              <span className="status-pill skipped">Loading…</span>
+              <span className="status-pill skipped">Loading…</span>
+            </div>
+          </div>
         )}
       </div>
 
