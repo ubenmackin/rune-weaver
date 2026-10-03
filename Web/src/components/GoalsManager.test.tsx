@@ -117,7 +117,26 @@ describe("GoalsManager", () => {
     expect(screen.getByText("2 goals")).toBeInTheDocument();
   });
 
-  it("disables create submit while the title is blank", async () => {
+  it("renders friendly cadence, work-session, and done-looks-like copy", async () => {
+    installSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ goals: [goal({ stepIntervalMinutes: 1440 })], count: 1 }),
+      ),
+    );
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("field guide")).toBeInTheDocument();
+    });
+    // The card translates the raw interval into everyday language so the
+    // cadence reads as a habit rather than a timer value.
+    expect(screen.getByText(/Daily/)).toBeInTheDocument();
+    expect(screen.getByText(/next work session/i)).toBeInTheDocument();
+    expect(screen.getByText("Done looks like:")).toBeInTheDocument();
+  });
+
+  it("disables create submit until the title and what-done-looks-like are filled", async () => {
     installSocket();
     vi.stubGlobal(
       "fetch",
@@ -131,8 +150,80 @@ describe("GoalsManager", () => {
     await user.click(screen.getByRole("button", { name: "New Goal" }));
     const submit = screen.getByRole("button", { name: /create goal/i });
     expect(submit).toBeDisabled();
-    await user.type(screen.getByLabelText("Goal Title"), "field guide");
+    // The title control must carry the shared text styling and sit inside its
+    // layout wrapper so the label stays on its own line above a full-width
+    // control.
+    const titleInput = screen.getByLabelText("What do you want to get done?");
+    expect(titleInput).toHaveAttribute("type", "text");
+    expect(titleInput.closest(".form-group")).not.toBeNull();
+    await user.type(titleInput, "field guide");
+    // A title alone still leaves the submit gated until done is described.
+    expect(submit).toBeDisabled();
+    await user.type(
+      screen.getByLabelText("What does done look like?"),
+      "The guide is done",
+    );
     expect(submit).toBeEnabled();
+  });
+
+  it("creates a goal with trimmed title, statement, and cadence", async () => {
+    installSocket();
+    const posts: Array<{ path: string; body: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/goals" && !init?.method) {
+          return jsonResponse({ goals: [], count: 0 });
+        }
+        if (input === "/ideas" && !init?.method) {
+          return jsonResponse({ ideas: [], count: 0 });
+        }
+        if (input === "/goals" && init?.method === "POST") {
+          posts.push({ path: input, body: String(init.body ?? "") });
+          const parsed = JSON.parse(String(init.body ?? "{}"));
+          return jsonResponse({
+            goal: goal({
+              title: parsed.title,
+              statement: parsed.statement,
+              stepIntervalMinutes: parsed.stepIntervalMinutes,
+            }),
+            steps: [],
+            events: [],
+          });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const user = userEvent.setup();
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("No goals yet")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "New Goal" }));
+    // Surrounding whitespace is owner sloppiness, not intent, so the request
+    // carries the trimmed values the engine stores.
+    await user.type(
+      screen.getByLabelText("What do you want to get done?"),
+      "  field guide  ",
+    );
+    await user.type(
+      screen.getByLabelText("What does done look like?"),
+      "  The guide is done  ",
+    );
+    await user.selectOptions(
+      screen.getByLabelText("How often should I work on it?"),
+      "240",
+    );
+    await user.click(screen.getByRole("button", { name: /create goal/i }));
+    await waitFor(() => {
+      expect(posts).toHaveLength(1);
+    });
+    expect(posts[0].path).toBe("/goals");
+    expect(JSON.parse(posts[0].body)).toMatchObject({
+      title: "field guide",
+      statement: "The guide is done",
+      stepIntervalMinutes: 240,
+    });
   });
 
   it("shows honest already-running copy when advance answers 409", async () => {
@@ -154,10 +245,10 @@ describe("GoalsManager", () => {
     await waitFor(() => {
       expect(screen.getByText("field guide")).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Advance now" }));
+    await user.click(screen.getByRole("button", { name: "Work on it now" }));
     await waitFor(() => {
       expect(
-        screen.getByText(/is already running — wait for the current advancement/i),
+        screen.getByText(/is already running — wait for the current run/i),
       ).toBeInTheDocument();
     });
   });
@@ -459,5 +550,159 @@ describe("GoalsManager", () => {
     await waitFor(() => {
       expect(screen.queryByText("Try a shorter loop")).not.toBeInTheDocument();
     });
+  });
+
+  it("teaches goals at first contact with examples and a schedules footnote", async () => {
+    installSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ goals: [], count: 0 })),
+    );
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("No goals yet")).toBeInTheDocument();
+    });
+    // The explainer stays visible while the enabled UI answers, so the shared
+    // stub doubles for GET /settings without an extra branch.
+    expect(screen.getByText("Publish the field guide")).toBeInTheDocument();
+    expect(
+      screen.getByText("Dig into 5 papers on a topic"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Get ready for the conference talk"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Need the same task repeated on a schedule instead? Use Schedules.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("prefills the create form from an example card without creating", async () => {
+    installSocket();
+    const posts: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (init?.method === "POST") posts.push(input);
+        return jsonResponse({ goals: [], count: 0 });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("No goals yet")).toBeInTheDocument();
+    });
+    await user.click(
+      screen.getByRole("button", { name: /Publish the field guide/ }),
+    );
+    // The modal opens with the example's title, statement, and cadence while
+    // no POST leaves the client, so the card is a prefill rather than a
+    // shortcut create.
+    expect(
+      screen.getByLabelText("What do you want to get done?"),
+    ).toHaveValue("Publish the field guide");
+    expect(screen.getByLabelText("What does done look like?")).toHaveValue(
+      "The guide is written, reviewed, and shared with the team.",
+    );
+    expect(screen.getByLabelText("How often should I work on it?")).toHaveValue(
+      "10080",
+    );
+    expect(posts).toHaveLength(0);
+  });
+
+  it("gates creation when settings turn goals off", async () => {
+    installSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({ goals: { enabled: false } });
+        }
+        if (input === "/goals" && !init?.method) {
+          return jsonResponse({ goals: [], count: 0 });
+        }
+        if (input === "/ideas" && !init?.method) {
+          return jsonResponse({ ideas: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<GoalsManager />);
+    await waitFor(() => {
+      expect(screen.getByText("Goals are turned off")).toBeInTheDocument();
+    });
+    // Disabled mode offers the settings note instead of examples, and the
+    // header create stays visibly gated.
+    expect(screen.getByRole("button", { name: "New Goal" })).toBeDisabled();
+    // The disable reason is visible header text beside the controls, not a
+    // hover-only tooltip on the disabled button.
+    expect(
+      screen.getByText("Goals are turned off in Settings"),
+    ).toBeInTheDocument();
+    // The body names the real enablement control verbatim — the Enable goal
+    // pursuit checkbox under Goals & Proactivity — so the empty state points
+    // at Settings, never at the Autonomous Goals tool-toggles category card.
+    expect(
+      screen.getByText(
+        "Goals are turned off in Settings. Turn on Enable goal pursuit under Goals & Proactivity to have the agent plan and work on longer projects.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Publish the field guide"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps creation available when the settings read fails", async () => {
+    installSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          throw new Error("settings unreachable");
+        }
+        if (input === "/goals" && !init?.method) {
+          return jsonResponse({ goals: [], count: 0 });
+        }
+        if (input === "/ideas" && !init?.method) {
+          return jsonResponse({ ideas: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<GoalsManager />);
+    // A transient settings failure must not gate creation: the enabled
+    // explainer stays up and the engine still fails closed on submit.
+    await waitFor(() => {
+      expect(screen.getByText("No goals yet")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Publish the field guide")).toBeInTheDocument();
+  });
+
+  it("asks the shell to open settings from the disabled empty state", async () => {
+    installSocket();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({ goals: { enabled: false } });
+        }
+        if (input === "/goals" && !init?.method) {
+          return jsonResponse({ goals: [], count: 0 });
+        }
+        if (input === "/ideas" && !init?.method) {
+          return jsonResponse({ ideas: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const onOpenSettings = vi.fn();
+    const user = userEvent.setup();
+    render(<GoalsManager onOpenSettings={onOpenSettings} />);
+    await waitFor(() => {
+      expect(screen.getByText("Goals are turned off")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Open Settings" }));
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
   });
 });

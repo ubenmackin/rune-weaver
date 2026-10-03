@@ -145,10 +145,10 @@ describe("GoalDrawer", () => {
     const user = userEvent.setup();
     render(<GoalDrawer goalId={GOAL_ID} onClose={vi.fn()} />);
     await screen.findByText("field guide");
-    await user.click(screen.getByRole("button", { name: "Advance now" }));
+    await user.click(screen.getByRole("button", { name: "Work on it now" }));
     await waitFor(() => {
       expect(
-        screen.getByText(/is already running — wait for the current advancement/i),
+        screen.getByText(/is already running — wait for the current run/i),
       ).toBeInTheDocument();
     });
   });

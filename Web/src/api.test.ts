@@ -30,6 +30,7 @@ import {
   getHealth,
   getJob,
   getRun,
+  goalCadenceLabel,
   goalProgressPercent,
   goalStatusLabel,
   goalStatusTone,
@@ -1367,6 +1368,13 @@ describe("goal client and helpers", () => {
     expect(goalStatusTone("abandoned")).toBe("error");
     expect(goalStatusTone("paused")).toBe("skipped");
     expect(goalStatusTone("mystery")).toBe("skipped");
+  });
+
+  it("labels goal cadences with the create-form words and a plain fallback", () => {
+    expect(goalCadenceLabel(1440)).toBe("Daily");
+    expect(goalCadenceLabel(10080)).toBe("Weekly");
+    expect(goalCadenceLabel(720)).toBe("Every 12 hours");
+    expect(goalCadenceLabel(90)).toBe("every 90m");
   });
 
   it("formats run durations on one shared scale", () => {

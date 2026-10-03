@@ -255,7 +255,7 @@ export default function GoalDrawer({
               <h4>Linked runs</h4>
               {runs.length === 0 ? (
                 <p className="muted text-xs">
-                  No runs recorded for this goal yet. Use Advance now to fire one.
+                  No runs recorded for this goal yet. Use Work on it now to start one.
                 </p>
               ) : (
                 <div className="embedded-runs-list">
@@ -314,10 +314,10 @@ export default function GoalDrawer({
             if (goal) void advance(goal);
           }}
           disabled={advancing || isTerminal || !goal}
-          title="Fire one advancement now"
-          aria-label="Advance now"
+          title="Work on it now"
+          aria-label="Work on it now"
         >
-          {advancing ? "Advancing…" : "Advance now"}
+          {advancing ? "Working…" : "Work on it now"}
         </button>
         {onSelectTab ? (
           <button
