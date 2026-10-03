@@ -2701,6 +2701,32 @@ button.primary:hover:not(:disabled) {
   opacity: 0.9;
 }
 
+/* Secondary action carries the same button affordance as Revoke so the
+ * Widen control reads as a button rather than plain text; the blue outline
+ * pairs with the red danger variant without minting a new shape. Disabled
+ * intentionally inherits the global button:disabled dimming above. */
+button.secondary {
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  background: rgba(59, 130, 246, 0.15);
+  color: #bfdbfe;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+button.secondary:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.28);
+  border-color: #60a5fa;
+  color: #fff;
+}
+
+button.secondary:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
 button.ghost {
   padding: 7px 12px;
   border-radius: 8px;
@@ -3961,6 +3987,28 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* Active grant duration/expiry line stays legible at narrow widths: the flex
+ * row with wrapping gap keeps the duration label and expiry text from
+ * concatenating, while the separator stays decorative for assistive tech. */
+.approval-grant-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Duration label holds its own box so the flex gap — not whitespace — owns
+ * the separation from the expiry text at 320px and 1280px widths. */
+.approval-grant-duration {
+  flex-shrink: 0;
+}
+
+/* Decorative middot between duration and expiry; hidden from assistive tech
+ * in markup so it never enters the accessible name. */
+.approval-grant-meta-sep {
+  opacity: 0.6;
 }
 
 /* ==========================================================================

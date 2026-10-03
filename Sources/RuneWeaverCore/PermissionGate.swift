@@ -498,6 +498,30 @@ public enum GrantWidenOutcome: Sendable, Equatable {
     public static let messagesSendRefusal = "messages.send grants are per-recipient and cannot be widened"
 }
 
+/// Outcome of changing a persisted grant's duration tier in place.
+///
+/// Re-arming can fail for two reasons callers must keep distinct: the
+/// identifier may name no live grant, or the requested tier may not be a
+/// durable tier. Collapsing both into a single failure makes an expired grant
+/// read as a bad tier, or a one-shot request read as unknown.
+public enum GrantRearmOutcome: Sendable, Equatable {
+    /// The grant was found and now carries the new duration with expiry
+    /// recomputed from now. Identity and usage counters are unchanged.
+    case rearmed
+    /// No live grant carries the identifier: unknown, expired, or pruned.
+    case notFound
+    /// The requested tier cannot back a durable grant. Only the four durable
+    /// tiers may re-arm; a one-shot approval has no lifetime to recompute.
+    /// Carries the caller-facing explanation.
+    case invalidDuration(reason: String)
+
+    /// Caller-facing reason a `thisTime` approval cannot re-arm a grant.
+    /// One-shot approvals store no row, so there is no lifetime to extend;
+    /// re-arming accepts only the durable tiers.
+    public static let thisTimeRefusal =
+        "thisTime is one-shot and cannot re-arm a grant; choose fiveMinutes, oneHour, oneDay, or forever"
+}
+
 /// Estimated risk level of an action requesting approval.
 public enum ImpactSeverity: String, Sendable, Codable, Equatable, CaseIterable {
     /// Read-only inspection, search, or status query with no side effects.
@@ -1023,6 +1047,55 @@ public actor PermissionGate {
         }
         await persist()
         return .widened
+    }
+
+    /// Re-arms an existing active grant to a new duration tier.
+    /// The single owner of duration changes: expiry is always recomputed from
+    /// confirmation time, so a shorter tier shortens trust and a longer tier
+    /// extends it from now rather than from the original grant date. Identity
+    /// (id, tool plus target), creation time, and usage counters survive so the
+    /// dashboard keeps proving liveness across the change and no second row is
+    /// ever minted.
+    /// - Parameters:
+    ///   - id: Stable grant identifier.
+    ///   - duration: Replacement tier; only the durable tiers are accepted.
+    /// - Returns: `.rearmed` when the live grant now carries the new tier,
+    ///   `.notFound` when the identifier matches no live grant (unknown,
+    ///   expired, or pruned), and `.invalidDuration` when the tier cannot back
+    ///   a durable grant.
+    public func rearmGrant(id: UUID, duration: TrustDuration) async -> GrantRearmOutcome {
+        pruneExpired()
+        guard let current = grants.first(where: { $0.id == id && $0.isValid() }) else {
+            return .notFound
+        }
+        // One-shot approvals store no row, so there is no lifetime to extend.
+        // Allowlist the durable tiers so any future tier defaults to refusal
+        // instead of silently minting an unexpected lifetime.
+        guard duration == .fiveMinutes || duration == .oneHour || duration == .oneDay || duration == .forever else {
+            return .invalidDuration(reason: GrantRearmOutcome.thisTimeRefusal)
+        }
+        // Recompute from confirmation time: a nil interval is the forever tier
+        // and clears expiry, while a dated tier expires that far from now.
+        let expiresAt = duration.timeInterval.map { Date().addingTimeInterval($0) }
+        let rearmed = TrustGrant(
+            id: current.id,
+            actionDescriptor: current.actionDescriptor,
+            grantedAt: current.grantedAt,
+            expiresAt: expiresAt,
+            duration: duration,
+            useCount: current.useCount,
+            lastUsedAt: current.lastUsedAt
+        )
+        if let index = grants.firstIndex(where: { $0.id == id }) {
+            grants[index] = rearmed
+        } else {
+            // The lookup above found the grant, so it should still be present;
+            // append only as a last resort so a re-armed grant is never dropped
+            // if in-memory state ever drifts.
+            grants.append(rearmed)
+        }
+        await persist()
+        return .rearmed
     }
 
     /// Explicitly refuses an action with a reason.

@@ -8,6 +8,7 @@ import {
   authenticateWithToken,
   cancelChat,
   canonicalRestartHost,
+  changeDurationGrant,
   clearAuthToken,
   concurrentTurnsBusyMessage,
   createJob,
@@ -501,6 +502,76 @@ describe("dashboard api client", () => {
     expect(lapsed).toBeInstanceOf(ApiError);
     expect((lapsed as ApiError).status).toBe(404);
     expect((lapsed as ApiError).message).toContain("Unknown grant lapsed-id");
+  });
+
+  it("re-arms a grant with PATCH path, method, and duration body", async () => {
+    // The re-arm keeps identity and counters server-side, so the client only
+    // sends the replacement tier; the route stays the grant resource with a
+    // PATCH verb rather than a sub-action path.
+    const seen: Array<{ path: string; method?: string; body?: string }> = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      seen.push({
+        path: input,
+        method: init?.method,
+        body: init?.body ? String(init.body) : undefined,
+      });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await changeDurationGrant(
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "oneHour",
+    );
+    expect(seen[0].path).toBe(
+      "/approvals/grants/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    );
+    expect(seen[0].method).toBe("PATCH");
+    expect(JSON.parse(seen[0].body ?? "")).toEqual({ duration: "oneHour" });
+    // Identifiers travel encoded so reserved characters never split the route.
+    await changeDurationGrant("a/b c", "forever");
+    expect(seen[1].path).toBe("/approvals/grants/a%2Fb%20c");
+    expect(seen[1].method).toBe("PATCH");
+    expect(JSON.parse(seen[1].body ?? "")).toEqual({ duration: "forever" });
+    // Every durable tier round-trips through the same body shape so the modal
+    // can offer all four without per-tier branching.
+    await changeDurationGrant(
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "oneDay",
+    );
+    expect(JSON.parse(seen[2].body ?? "")).toEqual({ duration: "oneDay" });
+  });
+
+  it("surfaces re-arm failures as ApiError", async () => {
+    // A lapsed grant reports 404 with the engine reason so the duration modal
+    // can explain the row is gone instead of retrying blindly.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ reason: "Unknown grant abc" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    const missing = await changeDurationGrant("abc", "oneHour").catch(
+      (error: unknown) => error,
+    );
+    expect(missing).toBeInstanceOf(ApiError);
+    expect((missing as ApiError).status).toBe(404);
+    expect((missing as ApiError).message).toContain("Unknown grant abc");
+    // Transport failures surface with status 0 so callers can distinguish
+    // an unreachable engine from a rejected duration tier.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("boom");
+      }),
+    );
+    const offline = await changeDurationGrant("abc", "oneHour").catch(
+      (error: unknown) => error,
+    );
+    expect(offline).toBeInstanceOf(ApiError);
+    expect((offline as ApiError).status).toBe(0);
   });
 
   it("throws ApiError with status on failure", async () => {

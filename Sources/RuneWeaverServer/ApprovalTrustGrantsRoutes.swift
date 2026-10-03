@@ -2,11 +2,15 @@
 //
 // Owns the trust-grants HTTP surface plus the lightweight change signal for
 // grant/revoke broadcast (usage via poll/manual refresh): listing pruned active
-// grants newest-first, revoking by identifier, and widening an existing grant to
-// all targets by identifier, with a hub broadcast notifying every connected
-// client after durable changes that alter the grants list. Widen keeps an
-// unknown identifier (404) distinct from a live grant whose tool has no
-// tool-wide scope (409), so a listed grant is never refused as "unknown".
+// grants newest-first, revoking by identifier, re-arming an existing grant to
+// a new duration tier, and widening an existing grant to all targets by
+// identifier, with a hub broadcast notifying every connected client after
+// durable changes that alter the grants list. Widen keeps an unknown
+// identifier (404) distinct from a live grant whose tool has no tool-wide
+// scope (409), so a listed grant is never refused as "unknown". Re-arm keeps
+// an unknown identifier (404) distinct from a live grant carrying a
+// non-durable tier (400), so a stale row reads as gone while a one-shot
+// duration reads as a caller error.
 
 import Foundation
 import RuneWeaverCore
@@ -33,8 +37,8 @@ public extension WSHub {
     }
 }
 
-/// Registers the durable trust-grants list, revoke, and widen-to-all-targets
-/// routes.
+/// Registers the durable trust-grants list, revoke, duration re-arm, and
+/// widen-to-all-targets routes.
 /// - Parameter app: Application receiving the routes.
 func registerTrustGrantsRoutes(_ app: Application) {
     app.get(
@@ -93,6 +97,36 @@ func registerTrustGrantsRoutes(_ app: Application) {
             // The grant is live and listed, so "Unknown grant" would be
             // factually wrong; the refusal itself is the honest answer.
             throw Abort(.conflict, reason: reason)
+        }
+    }
+
+    app.patch(
+        PathComponent.constant(ServerPaths.approvals),
+        PathComponent.constant(ServerPaths.grants),
+        PathComponent.parameter("id")
+    ) { req async throws -> HTTPStatus in
+        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+            throw Abort(.badRequest, reason: "id must be a UUID")
+        }
+        // A malformed duration string fails decoding before the gate runs, so
+        // unknown tiers stay a caller 400 with file plus memory unchanged.
+        let body = try req.content.decode(RearmGrantRequest.self)
+        let context = req.application.runeWeaver
+        switch await context.permissionGate.rearmGrant(id: id, duration: body.duration) {
+        case .rearmed:
+            // Re-arming rewrites expiry in place without minting a second row,
+            // so dashboards must refetch the list to see the new duration.
+            await context.hub.broadcastTrustGrantsChanged()
+            return .noContent
+        case .notFound:
+            // An identifier that names no live grant stays 404 so a stale or
+            // lapsed row reads as gone rather than as a duration refusal.
+            throw Abort(.notFound, reason: "Unknown grant \(raw)")
+        case let .invalidDuration(reason):
+            // The grant is live and listed, so "Unknown grant" would be
+            // factually wrong; the tier refusal itself is the honest answer
+            // and leaves file plus memory unchanged.
+            throw Abort(.badRequest, reason: reason)
         }
     }
 }

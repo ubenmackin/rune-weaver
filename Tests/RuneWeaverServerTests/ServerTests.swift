@@ -1258,6 +1258,21 @@ struct TrustGrantsRouteTests {
         }
     }
 
+    /// Mirrors the PATCH /approvals/grants/:id handler mapping so the
+    /// tri-state contract stays pinned: a re-armed grant is 204, an unknown or
+    /// expired id is 404, and a live grant carrying a non-durable tier is the
+    /// honest 400 rather than "Unknown grant".
+    private func rearmGrantStatus(id: UUID, duration: TrustDuration, gate: PermissionGate) async throws -> HTTPStatus {
+        switch await gate.rearmGrant(id: id, duration: duration) {
+        case .rearmed:
+            return .noContent
+        case .notFound:
+            throw Abort(.notFound, reason: "Unknown grant \(id.uuidString)")
+        case let .invalidDuration(reason):
+            throw Abort(.badRequest, reason: reason)
+        }
+    }
+
     @Test
     func `Grants list returns oneHour and forever with correct fields`() async {
         let gate = PermissionGate()
@@ -1614,6 +1629,89 @@ struct TrustGrantsRouteTests {
         #expect(response.grants.first?.toolName == "api.request")
         #expect(response.grants.first?.target.isEmpty == true)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "api.request", target: "https://other.com/items")) == true)
+    }
+
+    @Test
+    func `Rearm preserves counters, identity, and creation time while recomputing expiry`() async throws {
+        let gate = PermissionGate()
+        let descriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        await gate.grantTrust(for: descriptor, duration: .oneHour)
+        await gate.recordUse(for: descriptor)
+        await gate.recordUse(for: descriptor)
+        guard let before = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor }) else {
+            Issue.record("Expected active grant before re-arm")
+            return
+        }
+        let beforeGrantedAt = before.grantedAt
+        let beforeLastUsed = before.lastUsedAt
+
+        // A successful PATCH maps to an empty 204 with no second row; expiry
+        // is recomputed from confirmation time while identity and liveness
+        // counters survive the tier change.
+        #expect(try await rearmGrantStatus(id: before.id, duration: .oneDay, gate: gate).code == 204)
+        let active = await gate.activeGrants()
+        #expect(active.count == 1)
+        guard let rearmed = active.first(where: { $0.id == before.id }) else {
+            Issue.record("Expected the same grant row after re-arm")
+            return
+        }
+        #expect(rearmed.actionDescriptor == descriptor)
+        #expect(rearmed.grantedAt == beforeGrantedAt)
+        #expect(rearmed.useCount == 2)
+        #expect(rearmed.lastUsedAt == beforeLastUsed)
+        #expect(rearmed.duration == .oneDay)
+        #expect(rearmed.expiresAt != nil)
+    }
+
+    @Test
+    func `Rearm expired grant stays notFound`() async {
+        let now = Date()
+        let expired = TrustGrant(
+            id: UUID(),
+            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "lapsed@example.com"),
+            grantedAt: now.addingTimeInterval(-7200),
+            expiresAt: now.addingTimeInterval(-60),
+            duration: .fiveMinutes
+        )
+        // Bootstrap prunes the lapsed row, so the stranded identifier never
+        // matches; the PATCH contract stays 404 for clock-skewed retries.
+        let store = InMemoryTrustStore(grants: [expired])
+        let gate = await PermissionGate.load(store: store)
+        #expect(await gate.activeGrants().isEmpty == true)
+        do {
+            _ = try await rearmGrantStatus(id: expired.id, duration: .oneHour, gate: gate)
+            Issue.record("Expected notFound for an expired grant")
+        } catch let abort as Abort {
+            #expect(abort.status == .notFound)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test
+    func `Rearm with thisTime stays badRequest with the one-shot refusal`() async {
+        let gate = PermissionGate()
+        let descriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        await gate.grantTrust(for: descriptor, duration: .oneHour)
+        guard let id = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor })?.id else {
+            Issue.record("Expected active grant before re-arm")
+            return
+        }
+
+        // The grant is live and listed, so "Unknown grant" would be factually
+        // wrong; the tier refusal itself is the honest answer and leaves the
+        // stored row unchanged.
+        do {
+            _ = try await rearmGrantStatus(id: id, duration: .thisTime, gate: gate)
+            Issue.record("Expected badRequest for a one-shot re-arm")
+        } catch let abort as Abort {
+            #expect(abort.status == .badRequest)
+            #expect(abort.reason == GrantRearmOutcome.thisTimeRefusal)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+        #expect(await gate.activeGrants().count == 1)
+        #expect(await gate.activeGrants().first?.duration == .oneHour)
     }
 }
 

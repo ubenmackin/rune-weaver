@@ -1406,6 +1406,20 @@ export function revokeTrustGrant(id: string): Promise<void> {
   });
 }
 
+// Re-arms an active grant with a new expiry tier in place. The engine keeps the
+// grant identity and usage counters and recomputes expiry from confirmation
+// time, so the client only sends the new duration and refreshes grants on
+// trust_grants_changed; a 404 surfaces as ApiError when the grant already lapsed.
+export function changeDurationGrant(
+  id: string,
+  duration: TrustDuration,
+): Promise<void> {
+  return fetchJson<void>(`/approvals/grants/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ duration }),
+  });
+}
+
 export function searchMemory(
   query: string,
   limit = 10,
