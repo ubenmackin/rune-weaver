@@ -523,17 +523,12 @@ extension ApiSSRFGuard {
         if Task.isCancelled {
             return .refused(unverifiedDenial(for: host))
         }
-        #if DEBUG
-            // Hermetic suites publish canned proof here so stubbed hosts never
-            // touch the network or consume a bounded-pool slot; the hook is
-            // debug-only so release keeps no stub surface and always vets via
-            // the system resolver fail-closed. A task-scoped binding wins over
-            // the process-global holder, so a lookup-counting suite stays
-            // isolated from concurrent suites that publish globally.
-            if let stub = activeTestDNSResolver {
-                return vettedIPListVetting(host: host, addresses: stub(host), origins: origins, url: url)
-            }
-        #endif
+        // Every address proof flows through the shared resolver — hermetic
+        // suites observe their canned proof there while production proves via
+        // the bounded pool there — so the dial path and the local-access
+        // classifier cannot observe different answers for the same host.
+        // Saturation, timeout, cancellation, and empty answers all vet as
+        // fail closed below, never as permission to dial.
         let addresses = await resolveAddressesAsync(host: host)
         return vettedIPListVetting(host: host, addresses: addresses, origins: origins, url: url)
     }
@@ -546,9 +541,9 @@ extension ApiSSRFGuard {
     /// so a wedged lookup keeps its slot until return while the waiter fails
     /// closed and never stalls the cooperative pool. Saturation drops without
     /// queueing, a queued lookup that lost the race to timeout or cancellation
-    /// skips the resolver, and DEBUG stubs answer inline exactly like
-    /// `dnsVettingAsync` so hermetic suites never touch the network or consume
-    /// a pool slot. Saturation, timeout, cancellation, and an empty or failed
+    /// skips the resolver, and DEBUG stubs answer through the same fail-closed
+    /// timeout without consuming a pool slot so hermetic suites never touch
+    /// the network. Saturation, timeout, cancellation, and an empty or failed
     /// resolution all return no addresses, and callers must treat that absence
     /// as fail closed. The addresses are vetted by the caller and never
     /// authorize a dial on their own: any dial path goes through
@@ -839,7 +834,14 @@ extension ApiSSRFGuard {
             return .unresolved(reason: unverifiedDenial(for: cleaned))
         }
         if addresses.contains(where: { isNeverExemptAddress($0) }) {
-            return .neverDialable(reason: "SSRF denied: hostname '\(cleaned)' resolves to blocked address")
+            // The refusal reuses the guard's resolved-range wording so the
+            // save-time verdict and the dial-time refusal stay identical by
+            // construction; the helper must refuse while a never-exempt
+            // address is present, and the fallback keeps the same fail-closed
+            // refusal if that ever changes.
+            let reason = vettedIPListDenial(host: cleaned, addresses: addresses)
+                ?? "SSRF denied: hostname '\(cleaned)' resolves to blocked address"
+            return .neverDialable(reason: reason)
         }
         if addresses.contains(where: { isExemptableSensitiveAddress($0) }) {
             return .localNetwork

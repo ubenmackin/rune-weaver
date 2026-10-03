@@ -122,7 +122,7 @@ export function formatDomainLines(domains: string[]): string {
 // Separators, userinfo, fragments, and port suffixes also refuse: a
 // canonicalized URL host never carries them, so such an entry could only
 // persist and then never authorize.
-// NOTE(Finding 10 - Architectural Parity):
+// Host-shape gate parity:
 // This client-side validator intentionally mirrors the server-side host shape gate in
 // Sources/RuneWeaverServer/ServerSettingsRoutes.swift (`validateHostEntry` / `validateUnbracketedHostShape`).
 // Client validation provides immediate interactive feedback in the UI before network submission,

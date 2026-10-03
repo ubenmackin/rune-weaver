@@ -48,10 +48,46 @@ private struct DefaultGoalLLM: LLMProvider, Sendable {
 }
 
 /// Single-flight lock serializing policy read-classify-write passes.
+/// An actor alone still interleaves when the operation awaits: a second caller
+/// can enter while the first is suspended on classification or file I/O, so the
+/// flag carries ownership across those awaits and the queue preserves arrival
+/// order. Waiting is intentionally non-cancellable so a cancelled waiter can
+/// never steal the handoff and strand the queue; the generation check remains
+/// the correctness backstop, so a slow holder only delays the next writer.
 public actor PolicyWriteLock {
+    /// True while one writer owns the read-classify-write window.
+    private var isLocked = false
+    /// Suspended writers in arrival order; the head owns the next handoff.
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
     public init() {}
+
     public func withLock<T: Sendable>(_ operation: () async throws -> T) async throws -> T {
-        try await operation()
+        await acquire()
+        do {
+            let value = try await operation()
+            release()
+            return value
+        } catch {
+            release()
+            throw error
+        }
+    }
+
+    private func acquire() async {
+        if !isLocked {
+            isLocked = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    private func release() {
+        if waiters.isEmpty {
+            isLocked = false
+        } else {
+            waiters.removeFirst().resume()
+        }
     }
 }
 
