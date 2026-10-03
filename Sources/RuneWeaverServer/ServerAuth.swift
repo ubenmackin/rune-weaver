@@ -442,11 +442,14 @@ public struct ServerAuthRotateResponse: Content, Sendable {
 /// that established WebSockets track, so a socket that upgraded under the
 /// retired token is dropped instead of continuing to stream. Failed attempts
 /// accumulate in per-client buckets that trip a temporary `Retry-After`; the
-/// loopback owner is never throttled, so a remote guesser can never lock the
-/// owner out.
+/// loopback owner uses a higher typo-tolerant bound (`maxLoopbackFailures`)
+/// so local mistypes rarely throttle, while brute force stays bounded behind
+/// the same cooldown and window as remote peers.
 public actor ServerAuth {
     /// Failed attempts from one non-loopback identity before throttling.
     public static let maxFailures = 5
+    /// Failed attempts from a loopback identity before throttling (higher ceiling to prevent owner lockout while bounding brute-force).
+    public static let maxLoopbackFailures = 25
     /// Window over which failures accumulate before the bucket resets.
     public static let failureWindow: TimeInterval = 60
     /// Cooldown advertised through `Retry-After` once the bucket trips.
@@ -808,25 +811,28 @@ public actor ServerAuth {
     /// Records one failed attempt and reports the current throttle interval.
     ///
     /// An already-blocked identity returns the remaining cooldown without
-    /// incrementing, so repeated guesses cannot extend their own lockout. A
-    /// loopback identity is never throttled: the owner shares the machine and
-    /// must never be locked out by their own mistyped token.
+    /// incrementing, so repeated guesses cannot extend their own lockout.
+    /// Loopback uses a higher typo-tolerant bound (`maxLoopbackFailures` 25)
+    /// than remote (`maxFailures` 5) because the owner shares the machine and
+    /// mistypes locally, but it is still bounded: reaching the bound trips a
+    /// `retryAfterSeconds` cooldown inside the `failureWindow`, and buckets
+    /// prune under `maxTrackedIdentities`.
     /// - Parameters:
     ///   - identity: Client address used to scope the bucket.
-    ///   - isLoopback: Whether the identity is exempt from throttling.
+    ///   - isLoopback: Whether the identity uses the loopback bound.
     /// - Returns: `Retry-After` seconds when throttled, otherwise nil.
     public func recordFailure(for identity: String, isLoopback: Bool) -> Int? {
-        guard !isLoopback else { return nil }
+        let maxLimit = isLoopback ? Self.maxLoopbackFailures : Self.maxFailures
         let now = Date()
         var bucket = failures[identity] ?? FailureBucket(count: 0, windowStart: now, blockedUntil: nil)
-        if let blockedUntil = bucket.blockedUntil, blockedUntil > now {
-            return Self.secondsRoundedUp(blockedUntil.timeIntervalSince(now))
+        if let remaining = blockedRemaining(for: identity, now: now) {
+            return remaining
         }
         if now.timeIntervalSince(bucket.windowStart) > Self.failureWindow {
             bucket = FailureBucket(count: 0, windowStart: now, blockedUntil: nil)
         }
         bucket.count += 1
-        if bucket.count >= Self.maxFailures {
+        if bucket.count >= maxLimit {
             bucket.blockedUntil = now.addingTimeInterval(TimeInterval(Self.retryAfterSeconds))
             failures[identity] = bucket
             pruneFailures(now: now)
@@ -846,6 +852,46 @@ public actor ServerAuth {
         failures.removeValue(forKey: identity)
     }
 
+    /// Records one failed attempt against both the derived client bucket and the direct-peer bucket.
+    ///
+    /// `X-Forwarded-For` is caller-controlled even behind a loopback proxy, so
+    /// throttling the derived identity alone lets a local peer rotate the header
+    /// for a fresh bucket per guess and bypass both bounds. Recording the
+    /// non-spoofable peer alongside preserves per-client attribution (a stable
+    /// client still trips its own `maxFailures` bound) while the shared peer
+    /// bucket trips at `maxLoopbackFailures` no matter how the header rotates.
+    /// When either bucket is already blocked, the remaining cooldown is answered
+    /// without incrementing either, so blocked guesses cannot extend the lockout.
+    /// - Parameters:
+    ///   - identity: Derived client bucket from `ServerAuthRequest.clientIdentity`.
+    ///   - isLoopback: Whether the derived identity uses the loopback bound.
+    ///   - peerIdentity: Direct socket peer bucket from `ServerAuthRequest.directPeerIdentity`.
+    ///   - peerIsLoopback: Whether the peer identity uses the loopback bound.
+    /// - Returns: `Retry-After` seconds when either bucket is throttled, otherwise nil.
+    public func recordFailure(for identity: String, isLoopback: Bool, peerIdentity: String, peerIsLoopback: Bool) -> Int? {
+        if identity == peerIdentity {
+            return recordFailure(for: identity, isLoopback: isLoopback)
+        }
+        let now = Date()
+        if let remaining = blockedRemaining(for: peerIdentity, now: now) ?? blockedRemaining(for: identity, now: now) {
+            return remaining
+        }
+        return recordFailure(for: peerIdentity, isLoopback: peerIsLoopback) ?? recordFailure(for: identity, isLoopback: isLoopback)
+    }
+
+    /// Remaining cooldown for an already-tripped bucket, without incrementing it.
+    ///
+    /// Shared so the single- and dual-bucket paths answer a blocked identity
+    /// identically instead of forking the blocked check.
+    /// - Parameters:
+    ///   - identity: Bucket to inspect.
+    ///   - now: Clock value shared with the calling record.
+    /// - Returns: Whole seconds until the bucket lifts, or nil when unblocked.
+    private func blockedRemaining(for identity: String, now: Date) -> Int? {
+        guard let blockedUntil = failures[identity]?.blockedUntil, blockedUntil > now else { return nil }
+        return Self.secondsRoundedUp(blockedUntil.timeIntervalSince(now))
+    }
+
     /// Drops aged-out buckets once the table grows, then evicts oldest windows
     /// so random identifiers cannot grow memory without bound.
     private func pruneFailures(now: Date) {
@@ -856,8 +902,7 @@ public actor ServerAuth {
                 failures.removeValue(forKey: id)
             }
         }
-        while failures.count > Self.maxTrackedIdentities {
-            guard let oldest = failures.min(by: { $0.value.windowStart < $1.value.windowStart })?.key else { break }
+        while failures.count > Self.maxTrackedIdentities, let oldest = failures.min(by: { $0.value.windowStart < $1.value.windowStart })?.key {
             failures.removeValue(forKey: oldest)
         }
     }
@@ -1044,6 +1089,36 @@ public actor ServerAuth {
     }
 }
 
+/// Throttle scope for one request, pairing the derived client bucket with the direct-peer bucket.
+///
+/// A single value keeps the middleware and login gates from drifting: the derived
+/// identity preserves per-client attribution behind a trusted proxy, while the
+/// peer identity bounds header rotation to the loopback ceiling when a caller
+/// cycles `X-Forwarded-For` to escape the per-client bucket.
+public struct ServerAuthThrottleIdentities: Sendable, Equatable {
+    /// Derived client bucket from `ServerAuthRequest/clientIdentity(for:)`.
+    public let identity: String
+    /// Whether the derived identity uses the loopback bound.
+    public let isLoopback: Bool
+    /// Direct socket peer bucket from `ServerAuthRequest/directPeerIdentity(for:)`.
+    public let peerIdentity: String
+    /// Whether the direct peer uses the loopback bound.
+    public let peerIsLoopback: Bool
+
+    /// Creates a throttle scope.
+    /// - Parameters:
+    ///   - identity: Derived client bucket.
+    ///   - isLoopback: Whether the derived identity uses the loopback bound.
+    ///   - peerIdentity: Direct socket peer bucket.
+    ///   - peerIsLoopback: Whether the direct peer uses the loopback bound.
+    public init(identity: String, isLoopback: Bool, peerIdentity: String, peerIsLoopback: Bool) {
+        self.identity = identity
+        self.isLoopback = isLoopback
+        self.peerIdentity = peerIdentity
+        self.peerIsLoopback = peerIsLoopback
+    }
+}
+
 /// Request classification shared by the middleware and the WebSocket upgrade guard.
 ///
 /// Keeping the credential-extraction rules in one place means the header path,
@@ -1151,38 +1226,118 @@ public enum ServerAuthRequest {
     }
 
     /// Determines whether the inbound request was made over HTTPS directly or through a TLS-terminating reverse proxy.
+    ///
+    /// A direct `https` URL is secure on its own. `X-Forwarded-Proto` is honored
+    /// only when the direct socket peer is loopback, meaning a trusted local
+    /// proxy asserted it; a remote peer can forge the header, so it never
+    /// confers security, and an absent peer fails closed as insecure. Test-built
+    /// requests carry no peer, so the header is honored there only under an
+    /// explicit `.testing` environment check, never by treating absence as
+    /// trust — keeping HSTS and `Secure` cookies off spoofed transports.
     public static func isRequestSecure(_ request: Request) -> Bool {
         if request.url.scheme?.lowercased() == "https" {
             return true
         }
-        if let forwardedProto = request.headers.first(name: "X-Forwarded-Proto") {
-            let primary = forwardedProto.split(separator: ",").first?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if primary == "https" {
-                return true
-            }
+        // The header is only as trustworthy as the peer that sent it: a remote
+        // peer can forge it, so only a direct loopback proxy may assert TLS.
+        guard let peerIP = request.remoteAddress?.ipAddress else {
+            // No peer to authenticate — fail closed. In-memory test requests
+            // have no socket, so honor the header only when explicitly running
+            // under `.testing`, never by treating absence as trust.
+            guard request.application.environment == .testing else { return false }
+            return forwardedProtoIsHttps(request)
         }
-        return false
+        guard isLoopbackAddress(peerIP) else {
+            return false
+        }
+        return forwardedProtoIsHttps(request)
+    }
+
+    /// Whether the `X-Forwarded-Proto` header asserts HTTPS.
+    ///
+    /// Only the first entry matters because a trusted local proxy prepends the
+    /// client-facing protocol; later entries are downstream hops, not the edge.
+    /// - Parameter request: Inbound request.
+    /// - Returns: True when the primary protocol is `https`.
+    private static func forwardedProtoIsHttps(_ request: Request) -> Bool {
+        guard let forwardedProto = request.headers.first(name: "X-Forwarded-Proto") else {
+            return false
+        }
+        let primary = forwardedProto.split(separator: ",").first?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return primary == "https"
+    }
+
+    /// Whether a socket peer address is loopback.
+    ///
+    /// Single-sourced so the TLS trust gate and the throttle classifier agree
+    /// on which peers count as local instead of drifting on forked literals.
+    /// - Parameter peerIP: Direct peer address, never `unknown`.
+    /// - Returns: True for the loopback literals.
+    private static func isLoopbackAddress(_ peerIP: String) -> Bool {
+        peerIP == "127.0.0.1" || peerIP == "::1" || peerIP.lowercased() == "localhost"
     }
 
     /// Stable client identity for failure buckets.
     ///
-    /// The raw socket address is used rather than forwarding headers, which a
-    /// caller can spoof to evade throttling. `unknown` means there is no
-    /// throttleable peer (in-process or test requests).
+    /// The first `X-Forwarded-For` entry is honored only from a direct loopback
+    /// peer so proxied clients attribute to their own bucket, but that value is
+    /// caller-controlled and rotates freely — so callers must always throttle
+    /// the non-spoofable ``directPeerIdentity(for:)`` alongside this identity
+    /// (see ``throttleIdentities(for:)``) instead of bucketing on this alone.
+    /// `unknown` means there is no throttleable peer (in-process or test requests).
     /// - Parameter request: Inbound request.
     /// - Returns: Address string used to scope the failure bucket.
     public static func clientIdentity(for request: Request) -> String {
+        let peerIP = request.remoteAddress?.ipAddress
+        if let peerIP, isLoopbackAddress(peerIP) {
+            if let forwardedFor = request.headers.first(name: "X-Forwarded-For") {
+                if let clientIP = forwardedFor.split(separator: ",").first?.trimmingCharacters(in: .whitespacesAndNewlines), !clientIP.isEmpty {
+                    return clientIP
+                }
+            }
+            return peerIP
+        }
+        return peerIP ?? "unknown"
+    }
+
+    /// Direct socket peer address, never derived from forwarding headers.
+    ///
+    /// Forwarding headers rotate under caller control, so this non-spoofable
+    /// peer is the anchor that keeps per-client attribution from becoming a
+    /// throttle bypass: the peer bucket aggregates every identity one loopback
+    /// proxy asserts.
+    /// - Parameter request: Inbound request.
+    /// - Returns: Peer address, or `unknown` when there is no socket peer.
+    public static func directPeerIdentity(for request: Request) -> String {
         request.remoteAddress?.ipAddress ?? "unknown"
     }
 
-    /// Whether an identity is loopback (or absent) and therefore never throttled.
-    /// - Parameter identity: Identity from ``clientIdentity(for:)``.
-    /// - Returns: True when the owner's own machine is making the request.
+    /// Throttle scope for one request: the derived client bucket plus the direct-peer bucket.
+    ///
+    /// Bundling both keeps the two middleware paths from drifting: the derived
+    /// identity preserves per-client attribution behind a trusted proxy, while
+    /// the peer identity bounds header rotation to the loopback ceiling.
+    /// - Parameter request: Inbound request.
+    /// - Returns: Derived identity and peer identity with their loopback bounds.
+    public static func throttleIdentities(for request: Request) -> ServerAuthThrottleIdentities {
+        let identity = clientIdentity(for: request)
+        let peerIdentity = directPeerIdentity(for: request)
+        return ServerAuthThrottleIdentities(
+            identity: identity,
+            isLoopback: isLoopback(identity),
+            peerIdentity: peerIdentity,
+            peerIsLoopback: isLoopback(peerIdentity)
+        )
+    }
+
+    /// Whether an identity is loopback and therefore uses the loopback bound.
+    ///
+    /// `unknown` (no socket peer, such as in-process or test requests) uses the
+    /// loopback bound like a local peer rather than the stricter remote bound.
+    /// - Parameter identity: Identity from ``clientIdentity(for:)`` or ``directPeerIdentity(for:)``.
+    /// - Returns: True for loopback addresses or `unknown`.
     public static func isLoopback(_ identity: String) -> Bool {
-        identity == "unknown"
-            || identity == "127.0.0.1"
-            || identity == "::1"
-            || identity.lowercased() == "localhost"
+        identity == "unknown" || isLoopbackAddress(identity)
     }
 
     /// Whether a path serves public dashboard bytes.
@@ -1386,8 +1541,11 @@ public struct ServerAuthMiddleware: AsyncMiddleware {
     }
 
     public func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
-        let identity = ServerAuthRequest.clientIdentity(for: request)
-        let isLoopback = ServerAuthRequest.isLoopback(identity)
+        // Throttle on both the derived client and the direct peer: the header
+        // value rotates freely even from loopback, so the peer bucket is what
+        // bounds a rotating guesser to the loopback ceiling.
+        let throttle = ServerAuthRequest.throttleIdentities(for: request)
+        let identity = throttle.identity
         let path = request.url.path
         // A WebSocket handshake is the only surface where the query fallback is
         // safe, so it is consulted only for a genuine upgrade on the WebSocket
@@ -1402,6 +1560,7 @@ public struct ServerAuthMiddleware: AsyncMiddleware {
         // the per-frame check instead of being refused.
         if let presented, let presentation = await auth.verifyAndCaptureGeneration(presented) {
             await auth.clearFailures(for: identity)
+            await auth.clearFailures(for: throttle.peerIdentity)
             request.runeWeaverAuthenticated = true
             request.runeWeaverTokenGeneration = presentation.generation
             if isUpgrade {
@@ -1454,7 +1613,12 @@ public struct ServerAuthMiddleware: AsyncMiddleware {
         RuneWeaverLog.server.warning(
             "Owner auth rejected \(request.method) \(path) from \(identity)."
         )
-        if let retryAfter = await auth.recordFailure(for: identity, isLoopback: isLoopback) {
+        if let retryAfter = await auth.recordFailure(
+            for: identity,
+            isLoopback: throttle.isLoopback,
+            peerIdentity: throttle.peerIdentity,
+            peerIsLoopback: throttle.peerIsLoopback
+        ) {
             return Self.throttledResponse(retryAfter: retryAfter)
         }
         return Self.unauthorizedResponse()
@@ -1509,331 +1673,5 @@ private extension Data {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
-    }
-}
-
-/// Vapor middleware validating inbound HTTP Host headers to protect against DNS rebinding.
-public struct HostValidationMiddleware: AsyncMiddleware, Sendable {
-    /// Permitted hosts (lowercased, without port).
-    public let allowedHosts: Set<String>
-    /// Whether missing Host headers should be permitted in testing environments.
-    public let allowMissingHostInTesting: Bool
-    /// Whether private-LAN Host values are accepted beside the explicit allowlist.
-    ///
-    /// True only for an all-interfaces bind (`0.0.0.0`, `::`, or `[::]`) with owner auth
-    /// configured, so a loopback-only bind never widens to LAN ranges and an
-    /// unauthenticated all-interfaces bind stays fail-closed on the explicit set.
-    private let allowsLANRanges: Bool
-
-    /// Creates host validation middleware allowing standard loopback hosts plus the server's configured hostname.
-    /// - Parameters:
-    ///   - hostname: Configured bind hostname.
-    ///   - allowMissingHostInTesting: When true, requests in `.testing` without a Host header are allowed.
-    public init(hostname: String, allowMissingHostInTesting: Bool = true) {
-        self.init(hostname: hostname, allowedHosts: [], authConfigured: false, allowMissingHostInTesting: allowMissingHostInTesting)
-    }
-
-    /// Creates host validation middleware bound to the runtime bind policy plus explicit hosts.
-    ///
-    /// The bind policy and the Host gate share one decision: an all-interfaces
-    /// bind with auth opens the LAN family (loopback, the literal bind, RFC 1918
-    /// plus link-local IPv4, IPv6 ULA plus link-local, `.local` names, and the
-    /// explicit entries), while any other bind stays strict on loopback plus the
-    /// literal plus the explicit entries with no automatic LAN ranges.
-    /// - Parameters:
-    ///   - hostname: Configured bind hostname.
-    ///   - allowedHosts: Explicit `allowed_hosts` entries, matched exact-only after lowercasing plus port stripping.
-    ///   - authConfigured: Whether a resolvable owner token guards this bind.
-    ///   - allowMissingHostInTesting: When true, requests in `.testing` without a Host header are allowed.
-    public init(
-        hostname: String,
-        allowedHosts explicitHosts: [String],
-        authConfigured: Bool,
-        allowMissingHostInTesting: Bool = true
-    ) {
-        var hosts: Set = ["127.0.0.1", "localhost", "::1", "[::1]"]
-        let trimmed = hostname.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        // Trailing FQDN dots never gate: validators reject them fail-closed,
-        // so a trailing-dot hostname (including a bare `.`) inserts nothing
-        // here and fails closed like any other trailing-dot host instead of
-        // riding the gate under a stripped spelling that never matches exactly.
-        // Enforce the DNS name bound on the bind hostname so an over-long value
-        // never widens the gate; file-load and ServeCommand already reject it,
-        // while a hand-built context stays fail-closed here.
-        if !trimmed.isEmpty, trimmed != ".", !trimmed.hasSuffix("."), trimmed.count <= ServerEndpointConfig.maxAllowedHostLength {
-            hosts.insert(trimmed)
-            // Clients send IPv6 literals bracketed or bare, so both spellings are
-            // stored to keep the comparison exact without canonicalizing inbound Hosts.
-            if trimmed.contains(":") {
-                if trimmed.hasPrefix("["), trimmed.hasSuffix("]"), trimmed.count >= 2 {
-                    let bare = String(trimmed.dropFirst().dropLast())
-                    if !bare.isEmpty {
-                        hosts.insert(bare)
-                    }
-                } else if !trimmed.hasPrefix("[") {
-                    hosts.insert("[\(trimmed)]")
-                }
-            }
-        }
-        // Single-sourced through `dedupeNormalizedBootHosts` because the
-        // explicit entries are already-bounded stored values: the raw count
-        // was capped at write time by file-load and the settings PUT (which
-        // keep `dedupeNormalizedHosts` for raw input), so re-applying the
-        // raw-count prefix here would truncate an already-expanded store —
-        // 11 IPv6 entries persist as 22 (bracketed plus bare) and must gate
-        // as 22 instead of being cut back to 20. Widening shapes and
-        // trailing-dot entries drop fail-closed through the shared
-        // `RuneWeaverConfig.validateAllowedHosts` check inside the dedupe
-        // instead of allowlisting a carved fragment, and IPv6 counterparts
-        // ride along.
-        for entry in ServerEndpointConfig.dedupeNormalizedBootHosts(explicitHosts) {
-            hosts.insert(entry)
-        }
-        self.allowedHosts = hosts
-        self.allowMissingHostInTesting = allowMissingHostInTesting
-        self.allowsLANRanges = Self.isAllInterfacesBind(trimmed) && authConfigured
-    }
-
-    /// Whether a bind hostname listens on every interface.
-    ///
-    /// Only the IPv4 and IPv6 unspecified addresses widen the Host gate; a LAN
-    /// IP bind (for example `192.168.1.20`) stays strict on its literal plus the
-    /// explicit entries so one device does not implicitly authorize the whole subnet.
-    /// - Parameter hostname: Trimmed, lowercased bind hostname.
-    /// - Returns: True for `0.0.0.0`, `::`, or `[::]`.
-    public static func isAllInterfacesBind(_ hostname: String) -> Bool {
-        let trimmed = hostname.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return trimmed == "0.0.0.0" || trimmed == "::" || trimmed == "[::]"
-    }
-
-    /// Whether a normalized Host is reachable on an authenticated all-interfaces bind.
-    ///
-    /// Covers only the LAN family the owner implicitly trusts by binding
-    /// all-interfaces with auth: private IPv4, ULA plus link-local IPv6, and
-    /// `.local` names. Public IPs and DNS names still fail closed to the
-    /// explicit allowlist so a rebinding host cannot ride the LAN opening.
-    /// - Parameter host: Lowercased, port-stripped Host from ``extractHost(from:)``.
-    /// - Returns: True for a LAN-family host.
-    public static func isLANAllowedHost(_ host: String) -> Bool {
-        guard !host.isEmpty else { return false }
-        if isPrivateIPv4LANHost(host) {
-            return true
-        }
-        if isPrivateIPv6LANHost(host) {
-            return true
-        }
-        return isLocalMDNSHost(host)
-    }
-
-    /// Whether a normalized Host is private IPv4 (RFC 1918) or link-local.
-    ///
-    /// Decimal dotted quads only: hex, octal, or short forms never open the LAN
-    /// path and stay on the explicit allowlist instead, so obfuscated spellings
-    /// cannot slip past the range check. The LAN family is exactly `10/8`,
-    /// `172.16/12`, `192.168/16`, and `169.254/16`, composed from the
-    /// sensitive-range table's per-family predicates so a widening of that
-    /// table (shared address space, TEST-NET, benchmarking, multicast,
-    /// reserved) can never silently widen this gate; loopback and the
-    /// unspecified block stay off the LAN path because they belong on the
-    /// explicit allowlist.
-    /// - Parameter host: Lowercased, port-stripped Host.
-    /// - Returns: True for `10/8`, `172.16/12`, `192.168/16`, or `169.254/16`.
-    public static func isPrivateIPv4LANHost(_ host: String) -> Bool {
-        guard let octets = parseIPv4Octets(host), octets.count == 4 else { return false }
-        guard octets[0] != 0, octets[0] != 127 else { return false }
-        // Built from the strict octets above rather than re-parsing, so the
-        // value tested here is exactly the spelling the shape gate approved.
-        let value = (UInt32(octets[0]) << 24) | (UInt32(octets[1]) << 16)
-            | (UInt32(octets[2]) << 8) | UInt32(octets[3])
-        // Deliberately narrower than the sensitive-egress table: composing the
-        // two per-family predicates keeps the masks single-sourced without
-        // inheriting shared/reserved blocks as LAN hosts.
-        return ApiSSRFGuard.isPrivateIPv4Value(value) || ApiSSRFGuard.isLinkLocalIPv4Value(value)
-    }
-
-    /// Parses a decimal dotted quad without resolver-accepted obfuscation.
-    /// - Parameter host: Candidate Host value.
-    /// - Returns: Four octets, or nil when the shape is not a plain dotted quad.
-    public static func parseIPv4Octets(_ host: String) -> [Int]? {
-        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 4 else { return nil }
-        var octets: [Int] = []
-        octets.reserveCapacity(4)
-        for part in parts {
-            // ASCII digits only: `Character.isNumber` accepts Unicode digits
-            // that `Int` would reject inconsistently, so require 0-9 here.
-            guard !part.isEmpty, part.allSatisfy({ $0 >= "0" && $0 <= "9" }) else { return nil }
-            // A leading zero would be ambiguous with octal on some resolvers, so
-            // multi-digit zero-prefixed parts stay off the LAN path and fail
-            // closed to the explicit allowlist.
-            if part.count > 1, part.hasPrefix("0") {
-                return nil
-            }
-            guard let value = Int(part), (0 ... 255).contains(value) else { return nil }
-            octets.append(value)
-        }
-        return octets
-    }
-
-    /// Whether a normalized Host is IPv6 ULA (`fc00::/7`) or link-local (`fe80::/10`).
-    ///
-    /// Bracketed and bare spellings both qualify because ``extractHost(from:)``
-    /// preserves the caller's brackets; the zone suffix (`%eth0`) is ignored for
-    /// the range decision since it names an interface, not an address change.
-    /// - Parameter host: Lowercased, port-stripped Host.
-    /// - Returns: True for ULA or link-local literals.
-    public static func isPrivateIPv6LANHost(_ host: String) -> Bool {
-        var candidate = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if candidate.hasPrefix("["), candidate.hasSuffix("]"), candidate.count >= 2 {
-            candidate = String(candidate.dropFirst().dropLast())
-        }
-        if let percent = candidate.firstIndex(of: "%") {
-            candidate = String(candidate[..<percent])
-        }
-        guard candidate.contains(":"), !candidate.contains(".") else { return false }
-        guard let groups = ipv6Hextets(candidate) else { return false }
-        // fc00::/7 (Unique Local Address): top seven bits 1111110.
-        if (groups[0] & 0xFE00) == 0xFC00 {
-            return true
-        }
-        // fe80::/10 (Link-Local): top ten bits 1111111010.
-        if (groups[0] & 0xFFC0) == 0xFE80 {
-            return true
-        }
-        return false
-    }
-
-    /// Parses IPv6 text into eight hextets for the ULA plus link-local masks.
-    ///
-    /// Single-sourced through `ApiSSRFGuard.ipv6Hextets` so the Host gate and
-    /// the SSRF guard parse literals identically instead of drifting on a
-    /// forked copy; dotted forms stay DNS names here because an embedded IPv4
-    /// tail belongs to the IPv4 range check, not this literal path.
-    /// - Parameter host: Unbracketed, zoneless, lowercased literal.
-    /// - Returns: Eight hextets, or nil when the text is not a plain IPv6 literal.
-    public static func ipv6Hextets(_ host: String) -> [UInt16]? {
-        ApiSSRFGuard.ipv6Hextets(host)
-    }
-
-    /// Whether a normalized Host is a lowercase `.local` mDNS name.
-    ///
-    /// The input is already lowercased by ``extractHost(from:)``, so the suffix
-    /// check itself enforces lowercase; a trailing FQDN dot fails closed to
-    /// the explicit allowlist like any other punctuation. Each
-    /// dot-separated label must be non-empty, at most 63 characters, and must
-    /// not start or end with a dash so shapes like `...local` or `-.local`
-    /// never open the LAN path.
-    /// - Parameter host: Lowercased, port-stripped Host.
-    /// - Returns: True for names ending in `.local`.
-    public static func isLocalMDNSHost(_ host: String) -> Bool {
-        guard !host.isEmpty else { return false }
-        // A trailing FQDN dot never opens the LAN path: validators reject
-        // trailing-dot hosts fail-closed, so `studio.local.` stays closed
-        // here instead of riding the gate under a stripped spelling.
-        let candidate = host
-        guard candidate.hasSuffix(".local") else { return false }
-        guard candidate.count > ".local".count else { return false }
-        guard candidate.count <= 253 else { return false }
-        guard !candidate.contains(":"), !candidate.contains("/") else { return false }
-        guard !candidate.contains("?"), !candidate.contains("#"), !candidate.contains("@") else { return false }
-        guard !candidate.contains(" "), !candidate.contains("\t") else { return false }
-        guard !candidate.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else { return false }
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-._")
-        guard candidate.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return false }
-        let labels = candidate.split(separator: ".", omittingEmptySubsequences: false)
-        guard labels.count >= 2, labels.last == "local" else { return false }
-        for label in labels {
-            guard !label.isEmpty, label.count <= 63 else { return false }
-            guard !label.hasPrefix("-"), !label.hasSuffix("-") else { return false }
-        }
-        return true
-    }
-
-    /// Whether a normalized Host passes this middleware's gate.
-    /// - Parameter host: Lowercased, port-stripped Host from ``extractHost(from:)``.
-    /// - Returns: True for the explicit allowlist, or for the LAN family when the bind opened it.
-    public func isAllowedHost(_ host: String) -> Bool {
-        if allowedHosts.contains(host) {
-            return true
-        }
-        guard allowsLANRanges else { return false }
-        return Self.isLANAllowedHost(host)
-    }
-
-    /// Normalizes and extracts the host component from a raw Host header value.
-    /// Single-sourced through `ServerEndpointConfig.normalizeHost` in Core so
-    /// the gate, the settings PUT, and file-load validation compare under
-    /// identical semantics.
-    public static func extractHost(from hostHeader: String) -> String {
-        ServerEndpointConfig.normalizeHost(hostHeader)
-    }
-
-    public func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
-        guard let hostHeader = request.headers.first(name: .host) else {
-            if allowMissingHostInTesting, request.application.environment == .testing {
-                return try await next.respond(to: request)
-            }
-            // Route the missing-host branch through the shared security headers
-            // so it carries the same nosniff/DENY/referrer policy plus
-            // proxy-aware HSTS as every other response.
-            let response = Response(
-                status: .badRequest,
-                headers: HTTPHeaders([
-                    ("Content-Type", "application/json; charset=utf-8"),
-                    ("Cache-Control", "no-store")
-                ]),
-                body: .init(string: #"{"error":"missing host header"}"#)
-            )
-            GlobalSecurityHeadersMiddleware.apply(to: response, for: request)
-            return response
-        }
-
-        let host = Self.extractHost(from: hostHeader)
-        guard isAllowedHost(host) else {
-            RuneWeaverLog.server.warning("HostValidationMiddleware rejected invalid Host header: \(hostHeader)")
-            // Route the 403 branch through the shared security headers so a
-            // rebinding rejection cannot be fingerprinted by missing headers
-            // and still carries proxy-aware HSTS when served behind TLS.
-            let response = Response(
-                status: .forbidden,
-                headers: HTTPHeaders([
-                    ("Content-Type", "application/json; charset=utf-8"),
-                    ("Cache-Control", "no-store")
-                ]),
-                body: .init(string: #"{"error":"invalid host header"}"#)
-            )
-            GlobalSecurityHeadersMiddleware.apply(to: response, for: request)
-            return response
-        }
-
-        return try await next.respond(to: request)
-    }
-}
-
-/// Middleware injecting defense-in-depth HTTP security headers into all responses.
-public struct GlobalSecurityHeadersMiddleware: AsyncMiddleware, Sendable {
-    public init() {}
-
-    /// Applies the shared security headers to a response.
-    ///
-    /// Single-sourced so the Host gate's early rejections carry the same
-    /// nosniff/DENY/referrer policy plus proxy-aware HSTS as the middleware
-    /// path instead of drifting on a duplicated header list.
-    /// - Parameters:
-    ///   - response: Response receiving the headers.
-    ///   - request: Inbound request deciding proxy-aware HSTS.
-    public static func apply(to response: Response, for request: Request) {
-        response.headers.replaceOrAdd(name: "X-Content-Type-Options", value: "nosniff")
-        response.headers.replaceOrAdd(name: "X-Frame-Options", value: "DENY")
-        response.headers.replaceOrAdd(name: "Referrer-Policy", value: "strict-origin-when-cross-origin")
-        if ServerAuthRequest.isRequestSecure(request) {
-            response.headers.replaceOrAdd(name: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains")
-        }
-    }
-
-    public func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
-        let response = try await next.respond(to: request)
-        Self.apply(to: response, for: request)
-        return response
     }
 }

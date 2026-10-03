@@ -249,19 +249,40 @@ func isAllowedWebSocketOrigin(_ origin: String, request: Request) -> Bool {
     if originHost.isEmpty || originHost == "." || originHost.hasSuffix(".") {
         return false
     }
-    // Loopback hosts are always permitted:
-    if originHost == "127.0.0.1" || originHost == "localhost" || originHost == "::1" {
-        return true
+
+    let originScheme = originURL.scheme?.lowercased()
+    let isSecureOrigin = originScheme == "https" || originScheme == "wss"
+    let originPort = originURL.port ?? (isSecureOrigin ? 443 : 80)
+
+    let serverPort = request.application.runeWeaver.config.port
+    let hostHeader = request.headers.first(name: .host)
+    let hostPort: Int? = if let hostHeader {
+        extractWebSocketPort(from: hostHeader)
+    } else {
+        nil
     }
+
+    // Loopback hosts: origin port must match the server's configured port or Host header port
+    if originHost == "127.0.0.1" || originHost == "localhost" || originHost == "::1" {
+        if originPort == serverPort || (hostPort != nil && originPort == hostPort) {
+            return true
+        }
+        return false
+    }
+
     // Configured server hostname under the same normalization:
     let serverHost = canonicalWebSocketHost(request.application.runeWeaver.config.hostname)
     if !serverHost.isEmpty, serverHost != ".", !serverHost.hasSuffix("."), originHost == serverHost {
-        return true
+        if originPort == serverPort || (hostPort != nil && originPort == hostPort) {
+            return true
+        }
+        return false
     }
+
     // Reverse-proxy parity: the request Host already passed
     // HostValidationMiddleware, so an Origin matching that validated Host is
     // the same site served under a proxy name rather than a cross-site page.
-    if let hostHeader = request.headers.first(name: .host) {
+    if let hostHeader {
         let rawRequestHost = HostValidationMiddleware.extractHost(from: hostHeader)
         if rawRequestHost.isEmpty || rawRequestHost == "." || rawRequestHost.hasSuffix(".") {
             return false
@@ -271,10 +292,37 @@ func isAllowedWebSocketOrigin(_ origin: String, request: Request) -> Bool {
             return false
         }
         if requestHost == originHost {
-            return true
+            if let hostPort {
+                if originPort == hostPort {
+                    return true
+                }
+            } else {
+                if originPort == 80 || originPort == 443 || originPort == serverPort {
+                    return true
+                }
+            }
         }
     }
     return false
+}
+
+/// Extracts an explicit port number from a Host header if present.
+private func extractWebSocketPort(from hostHeader: String) -> Int? {
+    let trimmed = hostHeader.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.hasPrefix("[") {
+        if let closingBracketIndex = trimmed.firstIndex(of: "]") {
+            let after = trimmed[trimmed.index(after: closingBracketIndex)...]
+            if after.hasPrefix(":") {
+                return Int(after.dropFirst())
+            }
+        }
+        return nil
+    }
+    if let colonIndex = trimmed.firstIndex(of: ":"), colonIndex == trimmed.lastIndex(of: ":") {
+        let portPart = trimmed[trimmed.index(after: colonIndex)...]
+        return Int(portPart)
+    }
+    return nil
 }
 
 /// Canonicalizes one host for WebSocket Origin comparison.

@@ -345,9 +345,14 @@ public struct BashTool: Tool {
         let effectiveWorkingDir = workingDirURL ?? FileManager.default.homeDirectoryForCurrentUser
 
         if isSandboxAvailable {
+            let allowedWrites: [String] = if let workingDirURL {
+                SeatbeltProfileBuilder.defaultSystemWritePaths + [workingDirURL.path]
+            } else {
+                SeatbeltProfileBuilder.defaultSystemWritePaths
+            }
             let profileBuilder = SeatbeltProfileBuilder(
                 allowedReadPaths: SeatbeltProfileBuilder.defaultSystemReadPaths + [effectiveWorkingDir.path],
-                allowedWritePaths: SeatbeltProfileBuilder.defaultSystemWritePaths + [effectiveWorkingDir.path],
+                allowedWritePaths: allowedWrites,
                 deniedPaths: SeatbeltProfileBuilder.defaultDeniedPaths,
                 allowNetwork: allowNetwork
             )

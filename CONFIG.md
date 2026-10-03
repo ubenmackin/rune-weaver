@@ -13,16 +13,57 @@ If the file is absent, the engine uses built-in defaults (`RuneWeaverConfig.defa
 
 Secrets (API keys, passwords, tokens) are **never** stored in this file. See [Secrets Management](#secrets-management) below.
 
+Network egress policies, domain allowlists, and loopback/SSRF exemptions are managed separately in `~/.runeweaver/policy.toml`. See [Declarative Security Policy](#declarative-security-policy) below.
+
 ## Full Option Reference
 
 ### `[engine]`
+
+Identity, logging, compaction, and execution loop controls.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `name` | string | `"Rune Weaver"` | Engine display name shown in clients. Must not be empty. |
 | `log_level` | string | `"info"` | One of `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical` (case-insensitive). |
+| `compaction_threshold_percent` | integer | `80` | Context compaction threshold in percent (`10`–`100`). Oldest turns fold into a rolling summary past this budget. |
+| `max_tool_iterations` | integer | `10` | Maximum consecutive tool execution rounds per turn before continuation approval is requested (`1`–`100`). |
+
+### `[server]`
+
+HTTP API bind endpoint and network exposure policy.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `hostname` | string | `"127.0.0.1"` | Interface the engine binds. Non-loopback addresses (`0.0.0.0` or LAN IP) require an authenticated token; unauthenticated non-loopback binds fail closed at boot. |
+| `port` | integer | `8082` | TCP port for the engine service. Default 8082 avoids MLX (8080) and llama.cpp (8081). |
+| `allowed_hosts` | array of strings | `[]` | Extra exact hostnames accepted by the Host gate (e.g. `["my-mac.tail123.ts.net"]`). Max 20 entries, max 253 characters each. No wildcards, CIDR, or schemes. |
+
+```toml
+[server]
+hostname = "127.0.0.1"
+port = 8082
+# allowed_hosts = ["mac-studio.tailscale.net"]
+```
+
+### `[auth]`
+
+Single-owner bearer token configuration. Required when exposing the engine on non-loopback addresses. The token value itself **never** lives in this file.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `token_env` | string \| unset | `"RUNEWEAVER_AUTH_TOKEN"` | Environment variable holding the bearer token. |
+| `token_file` | string \| unset | `"~/.runeweaver/auth_token"` | Path to a `0600` file holding the bearer token. |
+
+Resolution hierarchy:
+1. Environment variable named by `token_env` (Docker/headless).
+2. macOS Keychain item `(service: com.runeweaver.secrets, account: RUNEWEAVER_AUTH_TOKEN)`.
+3. Token file named by `token_file`.
+
+Generate or rotate tokens via CLI (`rune-weaver auth token generate` / `rune-weaver auth token rotate`) or the Settings page in the dashboard.
 
 ### `[llm]`
+
+Top-level provider routing.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -40,10 +81,11 @@ Each provider entry supports the same keys. Only set what that backend needs.
 | `server_url` | string \| unset | unset | Server URL (MLX / llama.cpp / vLLM / OpenAI-compatible endpoint). Must be an absolute URL when set. |
 | `api_key_env` | string \| unset | unset | Environment variable (and Keychain key) holding the API key. Resolved via `SecretsManager`; never put the key itself in TOML. |
 | `provider_type` | string \| unset | unset | Backend type for generic local entries (e.g. `"llamacpp"`). |
-| `api_style` | string | `"chat-completions"` | Request style: `"chat-completions"` (`POST /chat/completions`, default) or `"responses"` (`POST /responses`). Use `"responses"` for the `muse-spark` family; use `"chat-completions"` for `glm`, `kimi`, `deepseek`, `mimo`, `hy`, and `longcat`. Models requiring Anthropic-style messages input are unsupported. |
-| `context_length` | integer \| unset | `unset (backend default)` | Context window, per-provider override (e.g. `1000000` for 1M endpoints), must be positive. Omit to use the backend default (MLX `8192`, llama.cpp `4096`, OpenAI-compatible `128000`). |
-| `slot_count` | integer \| unset | `unset (server auto-assign)` | llama.cpp-only sticky `id_slot` pool size. Must be positive when set. Match `llama-server --parallel` to opt into prefix reuse; omit so the server auto-assigns and small servers never see an out-of-range id. Ignored by other backends. |
-| `cache_prompt` | boolean \| unset | `unset (enabled)` | llama.cpp-only prefix-cache hint sent as `cache_prompt`. Omit to keep the always-on default; set `false` to disable. Ignored by other backends. |
+| `api_style` | string | `"chat-completions"` | Request style: `"chat-completions"` (`POST /chat/completions`, default) or `"responses"` (`POST /responses`). Use `"responses"` for the `muse-spark` family. |
+| `context_length` | integer \| unset | `unset (backend default)` | Context window in tokens override (e.g. `1000000` for 1M endpoints). Omit to use the backend default (MLX `8192`, llama.cpp `4096`, OpenAI-compatible `128000`). |
+| `supports_vision` | boolean \| unset | unset | Whether the model accepts vision input (screenshots/images). Nil uses backend defaults (`true` for cloud endpoints, `false` for local servers). |
+| `slot_count` | integer \| unset | `unset (server auto-assign)` | llama.cpp-only sticky `id_slot` pool size. Must be positive when set. Match `llama-server --parallel` to opt into prefix reuse; omit so the server auto-assigns. |
+| `cache_prompt` | boolean \| unset | `unset (enabled)` | llama.cpp-only prefix-cache hint sent as `cache_prompt`. Omit to keep the always-on default; set `false` to disable. |
 
 Shipped defaults (`RuneWeaverConfig.default`):
 
@@ -52,103 +94,231 @@ Shipped defaults (`RuneWeaverConfig.default`):
 enabled = true
 model = "gemma-4-9b"
 server_url = "http://localhost:8080"
-# context_length = 8192  # optional override; omit for the backend default (MLX 8192, llama.cpp 4096, OpenAI-compatible 128000)
+# context_length = 8192
 
 [llm.providers.openrouter]
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"
 server_url = "https://openrouter.ai/api/v1"
-# context_length = 1000000  # e.g. 1000000 for 1M-context endpoints
+# context_length = 128000
 
 [llm.providers.local]
 enabled = false
 provider_type = "llamacpp"
 server_url = "http://localhost:8081"
-```
-
-`api_style` selects the OpenAI-compatible request shape per provider. It defaults to `"chat-completions"`. Set `api_style = "responses"` for the `muse-spark` family; keep `"chat-completions"` for `glm`, `kimi`, `deepseek`, `mimo`, `hy`, and `longcat`. Models that require an Anthropic-messages request shape are unsupported.
-
-```toml
-[llm.providers.openrouter]
-enabled = true
-api_key_env = "OPENROUTER_API_KEY"
-server_url = "https://openrouter.ai/api/v1"
-api_style = "responses"  # muse-spark family; omit or use "chat-completions" for glm, kimi, deepseek, mimo, hy, longcat
+# context_length = 4096
 ```
 
 ### `[memory]`
 
+Episodic memory, semantic memory vectors, and recall fan-out budgets.
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `vector_db_path` | string | `"~/.runeweaver/memory/vectors"` | JSON store path for semantic memory (LanceDB-compatible shape) holding keyword-only rows plus optional embedding vectors written through `embedding_backend`. Must not be empty. |
-| `episodes_db_path` | string | `"~/.runeweaver/memory/episodes.db"` | SQLite path for episodic memory (conversation history). Must not be empty. |
-| `embedding_model` | string | `"all-MiniLM-L6-v2"` | Retained for forward compatibility but currently unused; reserved for future small/embedding-model support. `apple` uses the fixed on-device model with no model config, `provider` reuses the active chat model via `/v1/embeddings`, and `none` stays keyword-only. Must not be empty. |
-| `embedding_backend` | string | `"apple"` | Embedding backend: `"apple"` (on-device), `"provider"` (active chat model embeddings), or `"none"` (keyword-only). Must be one of the three. |
+| `vector_db_path` | string | `"~/.runeweaver/memory/vectors"` | JSON store path for semantic memory (LanceDB-compatible shape) holding keyword-only rows plus optional embedding vectors. |
+| `episodes_db_path` | string | `"~/.runeweaver/memory/episodes.db"` | SQLite database path for episodic memory, conversation history, run logs, and scheduled jobs. |
+| `embedding_model` | string | `"all-MiniLM-L6-v2"` | Retained for forward compatibility; reserved for future model selection. |
+| `embedding_backend` | string | `"apple"` | Vector backend: `"apple"` (on-device NaturalLanguage framework), `"provider"` (chat model `/v1/embeddings`), or `"none"` (keyword-only). |
+| `recall_per_tier_limit` | integer | `5` | Maximum hits fetched per tier before merging (`1`–`50`). |
+| `recall_auto_limit` | integer | `5` | Maximum hits injected as system context per auto turn (`1`–`50`). |
+| `recall_threshold` | double | `0.1` | Minimum calibrated score for an injected recall hit (`0.0`–`1.0`). |
+| `recall_max_chars` | integer | `2000` | Maximum total characters for the injected recall block, header included (`200`–`16000`). |
+| `recall_per_hit_chars` | integer | `500` | Maximum characters kept per individual hit before ellipsis truncation (`100`–`2000`). |
+| `recall_doc_pool_multiplier` | integer | `4` | Extra vector candidates scanned per returned document page (`1`–`8`). |
+| `recall_episodic_weight` | double | `0.25` | Weight mapping episodic rank scores onto the shared recall scale (`0.0`–`1.0`). |
 
-Semantic memory selects its vector backend via `embedding_backend` (default `"apple"`). `apple` keeps vectors on-device with the fixed on-device model and no model config, `provider` reuses the active chat model for embeddings via `/v1/embeddings`, and `none` stays keyword-only with no vectors. `embedding_model` is retained but unused today. Switching chat models under `provider` may require a vector reset due to width pinning. `remember` in chat (`remember <fact>`, `remember that <fact>`, `/remember <fact>`) stores facts in structured stores — profile facts plus keyword-scored vector rows — so `memory facts` lists them in every mode.
+```toml
+[memory]
+vector_db_path = "~/.runeweaver/memory/vectors"
+episodes_db_path = "~/.runeweaver/memory/episodes.db"
+embedding_backend = "apple"
+# recall_auto_limit = 5
+# recall_threshold = 0.1
+# recall_max_chars = 2000
+```
 
 ### `[voice]`
 
+Speech-to-text and text-to-speech providers.
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `stt_provider` | string | `"whisper"` | Speech-to-text provider. Must not be empty. |
-| `whisper_model` | string | `"base"` | Whisper model size (e.g. `tiny`, `base`, `small`). Must not be empty. |
-| `tts_provider` | string | `"system"` | Text-to-speech provider (`system` = macOS `say` command). Must not be empty. |
+| `stt_provider` | string | `"whisper"` | Speech-to-text provider. |
+| `whisper_model` | string | `"base"` | Whisper model size (e.g. `tiny`, `base`, `small`). |
+| `tts_provider` | string | `"system"` | Text-to-speech provider (`"system"` uses macOS `say`). |
 
 ### `[sandbox]`
 
-Tier-3 detonation only: there is no host staging. Document writes use Seatbelt-confined temp with an atomic move on approval, and archives detonate in ephemeral microVMs with manifest-only returns.
+Ephemeral microVM archive detonation settings (Tier-3 isolation).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `container_base_image` | string | `"alpine:latest"` | OCI base image for detonation microVMs. Must not be empty. |
-| `archive_session_ttl_minutes` | integer | `10` | Crash-orphan reclamation TTL for ephemeral detonation machines. Must be 1–1440. |
-| `max_concurrent_machines` | integer | `3` | Maximum simultaneous detonation machines, enforced before spawn. Must be positive. |
+| `container_base_image` | string | `"alpine:latest"` | OCI base image for detonation microVMs using the Apple Container CLI (`container`). |
+| `archive_session_ttl_minutes` | integer | `10` | Crash-orphan reclamation TTL in minutes (`1`–`1440`). |
+| `max_concurrent_machines` | integer | `3` | Maximum simultaneous detonation microVMs enforced before spawn. |
 
-Archive detonation always uses the Apple Container CLI (`container`); there is no `container_runtime` key. Older files carrying the key load with the hardcoded default.
+### `[files]`
 
-Legacy staging keys (`staging_path`, `retention_days`, `max_total_bytes`, `cleanup_interval_seconds`) in older files are ignored with no crash and no migration; manually clean old dev-only staging directories.
+Sensitive-path guard and review postures for the `files.*` suite. Changes apply live without restart.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `deny_patterns` | array of strings | `[...]` | Glob-like patterns denied by the file access guard (e.g. `[".env*", ".ssh/*", "config.toml", ".runeweaver/policy.toml"]`). Core engine paths are permanently protected. |
+| `allow_roots` | array of strings | `["~"]` | Allowed root directories for live file access (`~` expands to home). Outside-root paths escalate to approval. |
+| `require_approval_on_deny` | bool | `true` | Whether deny hits escalate to the approvals inbox (`true`) or fail closed (`false`). |
+| `write_mode` | string | `"model"` | Forced write posture for `files.write`: `"model"` (agent chooses per call; omitted defaults to staged review), `"staged"` (forces every write into Staged Changes), `"live"` (writes immediately with `.rune_backup_` rollback copy). |
+
+```toml
+[files]
+deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key", "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/*", ".runeweaver/policy.toml", ".runeweaver/auth_token"]
+allow_roots = ["~"]
+require_approval_on_deny = true
+write_mode = "model"
+```
+
+### `[index]`
+
+Local background indexer for files, mail, and Apple Messages. Off by default so fresh installs remain quiet until opted in.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Master toggle for the local background indexer. |
+| `files` | bool | `true` | Index local document files when indexer is enabled. |
+| `mail` | bool | `false` | Index configured `[[email.accounts]]` mailboxes over read-only IMAP `BODY.PEEK`. |
+| `messages` | bool | `false` | Index Apple Messages from `~/Library/Messages/chat.db` (requires Full Disk Access). |
+| `roots` | array of strings | `["~"]` | File walk root directories (`~` expands to home). |
+| `exclude` | array of strings | `[...]` | Glob patterns skipped during file walk (e.g. `.build`, `*.log`, `node_modules`, `*.tmp`, build/cache directories). |
+| `max_file_mb` | integer | `20` | Maximum file size in MB the indexer will read (`1`–`10240`). |
+| `mail_vector_window` | string | `"2y"` | How far back mail is vectorized: `"30d"`, `"6m"`, `"1y"`, `"2y"`, or `"all"`. Older mail remains keyword-searchable. |
+| `icloud_evicted` | string | `"skip"` | Policy for iCloud files whose bytes are evicted: `"skip"` (leave out) or `"download"` (pull down before indexing). |
+| `describe_images_with_llm` | bool | `false` | Use configured LLM to describe scanned PDFs and images. |
+| `nightly_budget` | integer | `0` | Maximum items processed per nightly run; `0` means unlimited (`0`–`100000`). |
+| `max_vector_chunks_per_document` | integer | `128` | Maximum chunks per document that carry vectors (`1`–`4096`). Remaining chunks stay keyword-searchable. |
+| `mailbox_deny` | array of strings | `["Trash", "Junk", "Spam", "Deleted*"]` | Mailboxes skipped without dialing. |
+| `effort` | string | `"balanced"` | CPU effort preset: `"light"` (1 worker), `"balanced"` (half cores up to 4), `"performance"` (all but one core), or `"custom"`. |
+| `workers` | integer | `0` | Explicit worker count when `effort = "custom"` (`1`–`64`). `0` derives from preset. |
+| `thermal_backoff` | bool | `true` | Back off worker threads when macOS reports thermal pressure. |
+| `pause_on_battery` | bool | `false` | Pause indexing runs while on battery power; resume on AC. |
+| `db_path` | string | `"~/.runeweaver/index.db"` | SQLite database path for the document index. |
+
+```toml
+[index]
+enabled = true
+files = true
+mail = false
+messages = false
+roots = ["~"]
+max_file_mb = 20
+effort = "balanced"
+thermal_backoff = true
+```
 
 ### `[browser]`
 
-Local web search via self-hosted SearXNG plus bounded page fetch. Search runs against the local SearXNG JSON API so queries never leave operator infrastructure; fetch follows server redirects manually with a per-hop allowlist. The Settings web page is the easiest way to edit these values.
+Local web search via self-hosted SearXNG and Playwright browser automation.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `searxng_url` | string | `"http://127.0.0.1:8888"` | Base URL of the local SearXNG service (`/search` is appended). Must be an absolute http(s) URL. |
-| `search_timeout_seconds` | integer | `10` | Per-search HTTP timeout in seconds. Must be 1–120. |
-| `max_results` | integer | `10` | Maximum results per `web.search` call, bounding context fan-out. Must be 1–50. |
+| `searxng_url` | string | `"http://127.0.0.1:8888"` | Base URL of SearXNG (`/search` is appended). Must be an absolute URL. |
+| `search_timeout_seconds` | integer | `10` | Per-search HTTP timeout in seconds (`1`–`120`). |
+| `max_results` | integer | `10` | Maximum results per `web.search` call (`1`–`50`). |
+| `timeout_seconds` | integer | `30` | Per-action timeout in seconds for Playwright browser automation (`5`–`300`). |
+| `fetch_timeout_seconds` | integer | `15` | Per-request HTTP timeout in seconds for `web.fetch` and `api.request` (`1`–`120`). |
+
+> [!NOTE]
+> Domain allowlists and homelab network exemptions previously in `browser.allowed_origins` have been consolidated into `~/.runeweaver/policy.toml` under `[network].local_exemptions`.
 
 ```toml
 [browser]
 searxng_url = "http://127.0.0.1:8888"
 search_timeout_seconds = 10
 max_results = 10
+timeout_seconds = 30
+fetch_timeout_seconds = 15
 ```
 
-The engine ensures SearXNG on `serve` boot and on first `web.search`: it probes the base URL, otherwise starts an existing `runeweaver-searxng` container or runs one from tracked `searxng/searxng:latest` (`:latest` by design so fresh runs follow upstream without a version bump; pin via `SEARXNG_IMAGE=searxng/searxng:<tag>` when reproducibility matters; keep in sync with `SearXNGEnsurer.containerImage` and `scripts/searxng-up.sh`) with the per-install override `~/.runeweaver/searxng/settings.yml` carrying a random Flask secret (directory `0700`, file `0600`, enforced on every ensure with fail-closed logging; the bundled `Config/searxng/settings.yml` placeholder is a template only and is never mounted) plus a loopback-only publish (`127.0.0.1:<port>:8080`, host port derived from `searxng_url`: explicit port wins, else the scheme default — 80 for http, 443 for https — matching the probe; 8888 is the default configured URL's port) (following the runtime, daemon, start, pull, run, watch cascade — existence-aware heal with `rm`-first before fresh runs plus 165s readiness watch ticking on 500 ms sleeps where reachable wins, terminal states fail fast with the logs tail, and the backstop reports the last state plus logs — single-flight in-process with container-name idempotency across serve-plus-CLI races), fails closed with guidance when still down, and leaves the container running after quit by design. To rotate the secret, delete the override file and re-ensure (or re-run `scripts/searxng-up.sh`), then recreate the container. Start it manually with `scripts/searxng-up.sh` when the engine cannot. `rune-weaver status` reports `reachable` or `unreachable` for the configured URL.
+### `[desktop]`
 
-`web.search` is `readOnly` against SearXNG JSON (titles, URLs, snippets, bounded by the smaller of `limit` and `max_results`). `web.fetch` is `readOnly` with a five-hop redirect chain validated by the shared allowlist on every hop, a 1 MB byte cap, `finalUrl` always populated, and a typed envelope (`ok`, `auth_required` with a `browser.navigate` hint, `unsupported`).
-
-`browser.navigate` (`readOnly`) opens a page in a fresh isolated Playwright context (no persistent profile, no cross-task storage) and returns distilled text plus snapshot refs in its envelope (`url`, `title`, `text`, `refs`, `truncated`, `authRequired`, manifest-only `downloads`). `browser.act` (`requiresApproval`) performs one validated action (click, fill, select, press, scroll) against a snapshot ref plus its URL, parking every call with target plus URL. `api.request` (`requiresApproval`) is the constrained GET/POST/PUT/DELETE path with an allowlisted header subset, 64KB body and 256KB response caps, and `ok` / `download` (manifest-only) / `preview` envelopes. Screenshots are an opt-in `includeScreenshot` on `browser.navigate` (default false), advertised only to vision-capable models and stripped from text-only history.
-
-Search health shows in the same three places: `rune-weaver status` prints `reachable` or `unreachable`, the dashboard Profile menu shows a SearXNG row with Start and Stop, and the Settings Web pane shows the same controls plus health text.
-
-### `[email]` — `[[email.accounts]]`
-
-Repeat the `[[email.accounts]]` table once per account. Passwords live in the Keychain, never in TOML.
+Perception and automation capture knobs for `desktop.screenshot` and `desktop.action`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `name` | string | (required) | Account nickname (e.g. `"icloud"`). Must not be empty. |
-| `type` | string | `"imap"` | Account type (e.g. `"imap"`). |
-| `host` | string | (required) | IMAP hostname (e.g. `"imap.mail.me.com"`). Must not be empty. |
-| `port` | integer | `993` | IMAP port. Must be 1–65535. |
-| `username` | string | (required) | Login username. Must not be empty. |
+| `max_image_dimension` | integer | `1280` | Longest edge of downscaled screenshots in pixels (`256`–`3840`). Bounds token cost. |
+| `jpeg_quality` | double | `0.75` | JPEG compression quality for downscaled screenshots (`0.1`–`1.0`). |
+| `blocked_apps` | array of strings | `[...]` | Application names where `desktop.action` refuses to dispatch input (Terminal, Keychain Access, System Settings, 1Password, Bitwarden, etc.). |
+
+> [!IMPORTANT]
+> The `[desktop]` section carries only capture knobs. Desktop tools ship disabled and are enabled exclusively via the persisted tool toggle in Settings → Tools or the tool-state API.
+
+```toml
+[desktop]
+max_image_dimension = 1280
+jpeg_quality = 0.75
+blocked_apps = ["Terminal", "iTerm2", "Keychain Access", "System Settings", "1Password", "Bitwarden"]
+```
+
+### `[bash]` & `[[bash.rules]]`
+
+Granular shell execution policy for `bash.exec`, confined by macOS Seatbelt (`sandbox-exec`, deny-default).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `true` | Whether the `bash.exec` tool is enabled. |
+| `default_action` | string | `"ask"` | Default action if no rule matches: `"allow"`, `"ask"`, or `"deny"`. |
+| `timeout_seconds` | integer | `30` | Default execution timeout in seconds (`1`–`3600`). |
+| `allow_network` | bool | `false` | Whether commands may access network interfaces from inside the Seatbelt sandbox. |
+
+`[[bash.rules]]`: Rules evaluate top-to-bottom with **last-match-wins** semantics. Put catch-alls first and specific overrides after.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `pattern` | string | (required) | Command prefix or glob pattern to match (e.g. `"*"`, `"git status"`, `"swift test *"`). |
+| `action` | string | (required) | Permission action: `"allow"`, `"ask"`, or `"deny"`. |
+
+```toml
+[bash]
+enabled = true
+default_action = "ask"
+timeout_seconds = 30
+allow_network = false
+
+[[bash.rules]]
+pattern = "*"
+action = "ask"
+
+[[bash.rules]]
+pattern = "git status"
+action = "allow"
+```
+
+### `[email]` — `[[email.accounts]]`
+
+Repeat `[[email.accounts]]` per account. Passwords live in the Keychain (`EMAIL_<ACCOUNT>_PASSWORD`), never in TOML.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | string | (required) | Account nickname (e.g. `"icloud"`). |
+| `type` | string | `"imap"` | Account protocol type. |
+| `host` | string | (required) | IMAP server hostname. |
+| `port` | integer | `993` | IMAP TLS port. |
+| `username` | string | (required) | Login username. |
+| `smtp_host` | string \| unset | unset | SMTP submission host override (nil derives from IMAP host). |
+| `smtp_port` | integer \| unset | unset | SMTP port override (typically `587` STARTTLS or `465` SSL). |
+| `smtp_security` | string | `"auto"` | Transport security: `"ssl"`, `"starttls"`, or `"auto"`. |
+
+```toml
+[[email.accounts]]
+name = "icloud"
+type = "imap"
+host = "imap.mail.me.com"
+port = 993
+username = "user@icloud.com"
+smtp_host = "smtp.mail.me.com"
+smtp_port = 587
+smtp_security = "auto"
+```
 
 ### `[home]` — `[[home.homekit]]` / `[[home.home_assistant]]`
-
-Both `[home.homekit]` and `[[home.homekit]]` spellings load; same for `home_assistant`.
 
 `[[home.homekit]]`:
 
@@ -161,138 +331,169 @@ Both `[home.homekit]` and `[[home.homekit]]` spellings load; same for `home_assi
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | bool | `true` | Whether Home Assistant control is enabled. |
-| `url` | string \| unset | unset | Home Assistant base URL (e.g. `http://homeassistant.local:8123`). Must be absolute when set. |
-| `token_env` | string \| unset | unset | Env var (and Keychain key) holding the long-lived access token. |
+| `url` | string \| unset | unset | Home Assistant base URL (e.g. `http://homeassistant.local:8123`). |
+| `token_env` | string \| unset | unset | Env var (and Keychain key) holding the access token. |
 
 ### `[media]` — `[media.sonarr]` / `[media.radarr]`
 
-Configuration for self-hosted home media managers (Sonarr for television series and Radarr for movies), used by the `media.arr` tool. API keys are resolved securely via `SecretsManager` (environment variables or Keychain `com.runeweaver.secrets`), never stored in plaintext.
-
-Both services default to `enabled = true` with no `url` (matching `RuneWeaverConfig` defaults and `config.toml.example`). An enabled entry with a missing or blank `url` stays unconfigured: the tool reports guidance and never dials, so set `url` to activate against a running instance.
-
-`[media.sonarr]`:
+Self-hosted media automation managers used by `media.arr` and `media.arr.read`. API keys resolve via `SecretsManager` (`SONARR_API_KEY`, `RADARR_API_KEY`).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | bool | `true` | Whether Sonarr integration is enabled. |
-| `url` | string \| unset | unset | Sonarr base URL (e.g. `http://localhost:8989`). Must be an absolute http(s) URL when set. |
-| `api_key_env` | string \| unset | unset | Env var (and Keychain key) holding the Sonarr API key. |
-| `default_quality_profile` | string \| unset | unset | Optional default quality profile name (e.g. `"HD-1080p"`). When unset, auto-detected from Sonarr. |
-| `default_root_folder` | string \| unset | unset | Optional default root folder path (e.g. `"/data/media/tv"`). When unset, auto-detected from Sonarr. |
+| `timeout_seconds` | integer | `15` | Per-request HTTP timeout in seconds for media automation calls (`5`–`120`). |
 
-`[media.radarr]`:
+`[media.sonarr]` / `[media.radarr]`:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | bool | `true` | Whether Radarr integration is enabled. |
-| `url` | string \| unset | unset | Radarr base URL (e.g. `http://localhost:7878`). Must be an absolute http(s) URL when set. |
-| `api_key_env` | string \| unset | unset | Env var (and Keychain key) holding the Radarr API key. |
-| `default_quality_profile` | string \| unset | unset | Optional default quality profile name (e.g. `"HD-1080p"`). When unset, auto-detected from Radarr. |
-| `default_root_folder` | string \| unset | unset | Optional default root folder path (e.g. `"/data/media/movies"`). When unset, auto-detected from Radarr. |
+| `enabled` | bool | `true` | Whether the integration is enabled. |
+| `url` | string \| unset | unset | Base service URL (e.g. `http://localhost:8989`). Must be set to activate. |
+| `api_key_env` | string \| unset | unset | Env var / Keychain key holding the service API key. |
+| `default_quality_profile` | string \| unset | unset | Optional default quality profile name (e.g. `"HD-1080p"`). Auto-detected when unset. |
+| `default_root_folder` | string \| unset | unset | Optional root media path (e.g. `"/data/media/tv"`). Auto-detected when unset. |
 
 ```toml
+[media]
+timeout_seconds = 15
+
 [media.sonarr]
 enabled = true
 url = "http://localhost:8989"
 api_key_env = "SONARR_API_KEY"
-default_quality_profile = "HD-1080p"
-default_root_folder = "/data/media/tv"
 
 [media.radarr]
 enabled = true
 url = "http://localhost:7878"
 api_key_env = "RADARR_API_KEY"
-default_quality_profile = "HD-1080p"
-default_root_folder = "/data/media/movies"
 ```
 
 ### `[scheduler]` — `[[scheduler.jobs]]`
 
-Repeat the `[[scheduler.jobs]]` table once per job. A job needs a `name`, a `prompt`, and at least one trigger: a cron `schedule` or a `poll_account` email-arrival rule. A job with both fires on either trigger. Disabled jobs are kept but never fire.
+Persistent cron and email-arrival scheduled jobs. Config `[[scheduler.jobs]]` entries act as bootstrap seeds on initial startup when zero jobs exist in SQLite.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `name` | string | (required) | Job name (e.g. `"morning digest"`). Must not be empty. |
-| `prompt` | string | (required) | Prompt executed when the job fires. Must not be empty. |
-| `enabled` | bool | `true` | Whether the job fires. |
-| `schedule` | string \| unset | unset | Cron expression (`minute hour day month weekday`, e.g. `"0 8 * * *"` for daily at 08:00) or `@hourly` / `@daily` / `@weekly` / `@monthly` / `@yearly`. Must parse when set. |
-| `poll_account` | string \| unset | unset | Account nickname from `[[email.accounts]]` to watch for arrivals. Must not be empty when set. |
-| `poll_query` | string \| unset | `""` | Free-text query for `email.search` (blank means most-recent). |
-| `poll_mailbox` | string \| unset | unset | Mailbox to search (omitted means every selectable mailbox). |
-| `poll_interval_seconds` | integer \| unset | `300` | Seconds between poll checks. Must be positive when set. |
-| `poll_limit` | integer \| unset | `10` | Maximum hits per poll, clamped `1...50`. |
+| `name` | string | (required) | Job name (e.g. `"morning digest"`). |
+| `prompt` | string | (required) | Prompt executed when the job fires. |
+| `enabled` | bool | `true` | Whether the job is active. |
+| `schedule` | string \| unset | unset | Cron expression (`"0 8 * * *"`) or `@hourly` / `@daily` / `@weekly`. |
+| `poll_account` | string \| unset | unset | Account name from `[[email.accounts]]` to poll for unseen arrivals. |
+| `poll_query` | string \| unset | `""` | Search query for new arrivals (empty matches latest). |
+| `poll_mailbox` | string \| unset | unset | Mailbox to search (omitted means all). |
+| `poll_interval_seconds` | integer \| unset | `300` | Seconds between poll checks. |
+| `poll_limit` | integer \| unset | `10` | Maximum hits per poll (`1`–`50`). |
 
 ### `[plugins]`
 
-Controls external rune plugin discovery and marketplace integration. Discovered and newly installed runes enter the system in a disabled state awaiting human review and approval before they can execute on the live bus.
+External rune plugin discovery and community marketplace.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `plugins_dir` | string | `"~/.runeweaver/plugins"` | Directory scanned for external rune packages. Must not be empty. |
-| `marketplace_index_url` | string | `"https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json"` | Remote marketplace catalog index URL. Must be a valid URL. |
-| `auto_rescan` | bool | `true` | Whether to automatically scan the plugins directory on engine startup. |
+| `plugins_dir` | string | `"~/.runeweaver/plugins"` | Directory scanned for external rune packages. |
+| `marketplace_index_url` | string | `"https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json"` | Remote marketplace catalog index URL. |
+| `auto_rescan` | bool | `true` | Automatically scan plugins directory on startup. |
 
-## Provider Setup Guides
+### `[goals]`
 
-### MLX (local, Apple Silicon)
+Steady pursuit of long-horizon autonomous goals. Off by default so stock installs do not consume background model turns.
 
-Requires Apple Silicon. Serve a model over an OpenAI-compatible API on port 8080 (e.g. with an MLX server), then:
-
-```toml
-[llm]
-default_provider = "mlx"
-
-[llm.providers.mlx]
-enabled = true
-model = "gemma-4-9b"
-server_url = "http://localhost:8080"
-```
-
-Verify with `rune-weaver status` — the MLX provider pings `GET <server_url>/models` and reports availability. Chat streams over `/v1/chat/completions` (SSE); embeddings use `/v1/embeddings` when the server enables them (many MLX chat servers leave embeddings disabled).
-
-### llama.cpp (local, any Mac)
-
-Run `llama-server` (default port 8081), then:
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Master toggle for autonomous goal advancement and triggers. |
+| `step_interval_minutes` | integer | `1440` | Default cadence hint stored on new goals (`5`–`20160` minutes, default 24h). |
+| `max_active_goals` | integer | `10` | Maximum goals in active state at once (`1`–`50`). |
+| `max_steps_per_goal` | integer | `12` | Maximum steps in one decomposed goal plan (`1`–`24`). |
+| `plan_timeout_seconds` | integer | `60` | Timeout in seconds for the planning model call before fallback. |
+| `max_triggers_per_goal` | integer | `8` | Maximum event triggers armed on one goal (`0`–`32`). |
 
 ```toml
-[llm]
-default_provider = "local"
-
-[llm.providers.local]
-enabled = true
-provider_type = "llamacpp"
-server_url = "http://localhost:8081"
-# slot_count = 4  # match llama-server --parallel to pin turns for prefix reuse; omit for auto-assign
-# cache_prompt = true  # omit for default enabled; set false to disable the prefix hint
+[goals]
+enabled = false
+step_interval_minutes = 1440
+max_active_goals = 10
+max_steps_per_goal = 12
+plan_timeout_seconds = 60
+max_triggers_per_goal = 8
 ```
 
-Intel Macs should use this (or vLLM/cloud) — MLX requires Apple Silicon. Leave `slot_count` unset unless the server runs with a matching `--parallel` pool, since out-of-range ids are rejected.
+### `[proactive]`
 
-### OpenRouter (cloud fallback)
+Interruption policy filtering macOS notifications and dashboard interruption frames for background turns. Run history and approvals always record regardless of mode.
 
-1. Create an API key at [openrouter.ai](https://openrouter.ai).
-2. Expose it via environment or Keychain (see below) — never paste it into TOML:
-
-```bash
-export OPENROUTER_API_KEY="sk-or-..."
-```
-
-3. Configure:
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `mode` | string | `"all"` | Surfacing mode: `"all"` (all outcomes), `"milestones"` (milestones + errors + parked turns), `"guarded"` (milestones + judge model call on routine successes), `"off"` (no interruptions). |
+| `judge_timeout_seconds` | integer | `15` | Timeout in seconds for guarded judge evaluation (`1`–`120`). |
 
 ```toml
-[llm]
-default_provider = "mlx"
-fallback_provider = "openrouter"
-
-[llm.providers.openrouter]
-enabled = true
-api_key_env = "OPENROUTER_API_KEY"
-server_url = "https://openrouter.ai/api/v1"
+[proactive]
+mode = "all"
+judge_timeout_seconds = 15
 ```
 
-The router tries `default_provider` first and falls through to `fallback_provider` on failure. Any OpenAI-compatible endpoint works the same way — point `server_url` at it and set `api_key_env`.
+### `[ideas]`
 
-Every OpenAI-compatible request sends `User-Agent: rune-weaver/<version>` (matching the CLI version). Chat sessions also send `x-opencode-session: <session-UUID>` on chat, embeddings, and `GET /models` probes so a gateway can correlate turns; local providers (MLX, llama.cpp) never send the session header.
+Proactive Wayfinder suggestions reviewing goal outcomes and memory facts to brainstorm next steps.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Whether proactive idea generation runs during nightly ticks and on goal completion. |
+| `max_per_cycle` | integer | `3` | Maximum candidate ideas persisted per generation cycle (`1`–`10`). |
+| `timeout_seconds` | integer | `20` | Review model timeout in seconds before returning empty (`1`–`120`). |
+
+```toml
+[ideas]
+enabled = false
+max_per_cycle = 3
+timeout_seconds = 20
+```
+
+### `[fanout]`
+
+Tuning for parallel worker swarms via `fanout.run`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `max_workers` | integer | `2` | Maximum concurrent workers running at once (`1`–`8`). |
+| `worker_timeout_seconds` | integer | `0` | Timeout per worker turn in seconds; `0` means unlimited (`0`–`86400`). |
+| `full_tools` | bool | `false` | When `false`, workers receive read-only tools only. When `true`, widens workers to full tool registry. |
+
+> [!IMPORTANT]
+> Enablement is gated solely by the `fanout.run` tool toggle in Settings → Tools. `[fanout]` carries swarm tuning only.
+
+```toml
+[fanout]
+max_workers = 2
+worker_timeout_seconds = 0
+full_tools = false
+```
+
+### `[security]`
+
+Harness-level content protection defaults. Both default to `true` (fail-hardened).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `untrusted_labeling` | bool | `true` | Wraps network-derived tool output in data-only delimiters so models do not mistake content for instructions. |
+| `email_credential_filter` | bool | `true` | Redacts one-time passwords, login tokens, and magic links from agent-visible mail context while leaving human mailboxes untouched. |
+
+```toml
+[security]
+untrusted_labeling = true
+email_credential_filter = true
+```
+
+---
+
+## Declarative Security Policy
+
+Network egress permissions and SSRF defenses are governed by `~/.runeweaver/policy.toml`, which operates with a **deny-by-default** stance managed via the Policy pane in dashboard Settings or `rune-weaver policy`:
+
+- **`[network]`**: Egress allowlist rules and `local_exemptions` for internal homelab domains/hosts (e.g. `homeassistant.local`, `192.168.1.50`).
+- **SSRF Guard**: Loopback and cloud metadata endpoints (`169.254.169.254`, etc.) are blocked by default. SearXNG and local LLM endpoints configured in `config.toml` receive automatic targeted exemptions.
+- **Atomic updates & FIFO locking**: `PolicyStore` ensures that policy changes are verified against invariant rules and saved atomically.
+
+---
 
 ## Secrets Management
 
@@ -305,71 +506,82 @@ Writes always go to the Keychain. Secrets are never logged, never embedded in er
 
 Config keys that reference secrets (`api_key_env`, `token_env`, email passwords) only **name** the variable — `SecretsManager.resolve(_:)` fetches the value at execution time, so the LLM prompt never contains credentials.
 
-Practical guide:
-
 ```bash
-# Option A: environment (simplest for dev/Docker)
+# Environment (dev/Docker)
 export OPENROUTER_API_KEY="sk-or-..."
 export HA_TOKEN="your-home-assistant-token"
 export SONARR_API_KEY="your-sonarr-api-key"
 export RADARR_API_KEY="your-radarr-api-key"
 
-# Option B: Keychain (best for daily use on macOS)
-# Store via the app/CLI secrets path under service "com.runeweaver.secrets",
-# keyed by the same name (e.g. OPENROUTER_API_KEY, HA_TOKEN, SONARR_API_KEY, RADARR_API_KEY, per-account IMAP passwords).
+# Keychain (recommended for macOS)
+# Stored via the app or CLI under service "com.runeweaver.secrets"
 ```
 
-Email account passwords are looked up by account — store each account's password in the Keychain rather than adding any key to TOML.
+---
 
 ## Common Configurations
 
-**Fully local (no cloud):**
+**Local-first with cloud fallback (recommended):**
 
 ```toml
+[engine]
+name = "Rune Weaver"
+log_level = "info"
+
+[server]
+hostname = "127.0.0.1"
+port = 8082
+
 [llm]
 default_provider = "mlx"
-# no fallback_provider key at all
+fallback_provider = "openrouter"
 
 [llm.providers.mlx]
 enabled = true
 model = "gemma-4-9b"
 server_url = "http://localhost:8080"
-```
-
-No data leaves the machine.
-
-**Local-first with cloud fallback (recommended):**
-
-```toml
-[llm]
-default_provider = "mlx"
-fallback_provider = "openrouter"
-```
-
-Local by default, cloud only when the local server is down.
-
-**Cloud-only (e.g. Intel Mac without a local server):**
-
-```toml
-[llm]
-default_provider = "openrouter"
 
 [llm.providers.openrouter]
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"
 server_url = "https://openrouter.ai/api/v1"
+
+[files]
+write_mode = "staged"
+
+[index]
+enabled = true
+files = true
+mail = false
+messages = false
+roots = ["~"]
 ```
 
-**Quiet logging + custom paths:**
+**Tailscale / Remote headless node:**
 
 ```toml
-[engine]
-log_level = "warning"
+[server]
+hostname = "0.0.0.0"
+port = 8082
+allowed_hosts = ["mac-studio.tailnet-xyz.ts.net"]
 
-[memory]
-vector_db_path = "~/.runeweaver/memory/vectors"
-episodes_db_path = "~/.runeweaver/memory/episodes.db"
+[auth]
+token_env = "RUNEWEAVER_AUTH_TOKEN"
+token_file = "~/.runeweaver/auth_token"
+```
 
-[sandbox]
-container_base_image = "alpine:latest"
+**Privacy-hardened local only (no cloud, no network bash):**
+
+```toml
+[llm]
+default_provider = "mlx"
+
+[bash]
+enabled = true
+default_action = "ask"
+allow_network = false
+
+[security]
+untrusted_labeling = true
+email_credential_filter = true
 ```

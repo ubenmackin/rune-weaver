@@ -12,6 +12,7 @@
 import Foundation
 import NIOCore
 import NIOWebSocket
+import os
 import RuneWeaverCore
 @testable import RuneWeaverServer
 import Testing
@@ -592,8 +593,8 @@ struct ServerAuthMiddlewareTests {
             )
             #expect(stillThrottled.status == .tooManyRequests)
 
-            // The owner shares the machine and must never be locked out by a
-            // mistyped token, so loopback failures are never bucketed.
+            // The owner shares the machine and has a higher failure threshold,
+            // so loopback failures do not trip on small counts but bound brute-force.
             let loopback = try SocketAddress(ipAddress: "127.0.0.1", port: 5001)
             for _ in 0 ..< (ServerAuth.maxFailures + 2) {
                 let response = try await middleware.respond(
@@ -602,6 +603,19 @@ struct ServerAuthMiddlewareTests {
                 )
                 #expect(response.status == .unauthorized)
             }
+
+            // Exceeding maxLoopbackFailures bounds automated guessing:
+            for _ in (ServerAuth.maxFailures + 2) ..< (ServerAuth.maxLoopbackFailures - 1) {
+                _ = try await middleware.respond(
+                    to: makeRequest(app: app, path: "/settings", remoteAddress: loopback),
+                    chainingTo: AuthProbeResponder()
+                )
+            }
+            let loopbackThrottled = try await middleware.respond(
+                to: makeRequest(app: app, path: "/settings", remoteAddress: loopback),
+                chainingTo: AuthProbeResponder()
+            )
+            #expect(loopbackThrottled.status == .tooManyRequests)
         }
     }
 
@@ -1272,6 +1286,35 @@ struct ServerAuthSessionAndSecurityHeadersTests {
 
             let req4 = Request(application: app, method: .GET, url: URI(string: "http://localhost/auth/session"), on: app.eventLoopGroup.next())
             #expect(ServerAuthRequest.isRequestSecure(req4) == false)
+
+            // Untrusted remote peer cannot spoof X-Forwarded-Proto
+            let remotePeer = try SocketAddress(ipAddress: "203.0.113.195", port: 44321)
+            let untrustedReq = Request(
+                application: app,
+                method: .GET,
+                url: URI(string: "http://example.com/auth/session"),
+                headers: HTTPHeaders([("X-Forwarded-Proto", "https")]),
+                remoteAddress: remotePeer,
+                on: app.eventLoopGroup.next()
+            )
+            #expect(ServerAuthRequest.isRequestSecure(untrustedReq) == false)
+            untrustedReq.headers.replaceOrAdd(name: "X-Forwarded-For", value: "198.51.100.42")
+            #expect(ServerAuthRequest.clientIdentity(for: untrustedReq) == "203.0.113.195")
+
+            // Trusted loopback reverse proxy honors X-Forwarded-Proto and X-Forwarded-For
+            let proxyPeer = try SocketAddress(ipAddress: "127.0.0.1", port: 54321)
+            let trustedReq = Request(
+                application: app,
+                method: .GET,
+                url: URI(string: "http://example.com/auth/session"),
+                headers: HTTPHeaders([("X-Forwarded-Proto", "https")]),
+                remoteAddress: proxyPeer,
+                on: app.eventLoopGroup.next()
+            )
+            #expect(ServerAuthRequest.isRequestSecure(trustedReq) == true)
+            #expect(ServerAuthRequest.clientIdentity(for: trustedReq) == "127.0.0.1")
+            trustedReq.headers.replaceOrAdd(name: "X-Forwarded-For", value: "198.51.100.42, 10.0.0.1")
+            #expect(ServerAuthRequest.clientIdentity(for: trustedReq) == "198.51.100.42")
         }
     }
 
@@ -1353,23 +1396,24 @@ struct ServerAuthSessionAndSecurityHeadersTests {
 /// Test-only clock for the cookie-renewal suite: a mutable instant the tests
 /// move explicitly, so renewal throttling is deterministic instead of sleeping
 /// against wall time.
-///
-/// `@unchecked Sendable` is safe because each test drives the clock from its own
-/// task and never mutates it concurrently.
-private final class TestClock: @unchecked Sendable {
+private final class TestClock: Sendable {
+    private let box: OSAllocatedUnfairLock<Date>
+
     /// Current instant handed to the verifier through its injected clock.
-    var now: Date
+    var now: Date {
+        box.withLock { $0 }
+    }
 
     /// Creates a clock pinned to a whole-second instant so cookie deadlines are
     /// exact instead of drifting with sub-second wall time.
     init(now: Date = Date(timeIntervalSince1970: 1_700_000_000)) {
-        self.now = now
+        self.box = OSAllocatedUnfairLock(initialState: now)
     }
 
     /// Moves the clock forward, as if that much wall time had passed.
     /// - Parameter interval: Seconds to advance by.
     func advance(_ interval: TimeInterval) {
-        now = now.addingTimeInterval(interval)
+        box.withLock { $0 = $0.addingTimeInterval(interval) }
     }
 }
 
@@ -1899,5 +1943,19 @@ struct SecretsManagerInMemoryTests {
             let status = SecItemCopyMatching(query as CFDictionary, &item)
             #expect(status == errSecItemNotFound, "Rotation with inMemory store must not persist to Keychain")
         #endif
+    }
+
+    @Test
+    func `GlobalSecurityHeadersMiddleware applies defensive headers including Content-Security-Policy`() async throws {
+        try await withTestApp { app in
+            let middleware = GlobalSecurityHeadersMiddleware()
+            let req = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
+            let response = try await middleware.respond(to: req, chainingTo: AuthProbeResponder())
+
+            #expect(response.headers.first(name: "X-Content-Type-Options") == "nosniff")
+            #expect(response.headers.first(name: "X-Frame-Options") == "DENY")
+            #expect(response.headers.first(name: "Referrer-Policy") == "strict-origin-when-cross-origin")
+            #expect(response.headers.first(name: "Content-Security-Policy") == "default-src 'none'; frame-ancestors 'none'; base-uri 'none';")
+        }
     }
 }
