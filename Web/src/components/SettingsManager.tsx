@@ -12,9 +12,6 @@ import {
   formatDenyPatternsText,
   parseAllowRootsText,
   parseDenyPatternsText,
-  DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT,
-  formatAllowedOriginsText,
-  parseAllowedOriginsText,
   DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES,
   DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE,
   DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
@@ -234,8 +231,8 @@ interface ToolCategoryMeta {
 }
 
 // Browser and web tools share one section because they dial the same [browser]
-// policy surface (SearXNG plus the homelab allowlist) and one Configure editor;
-// splitting them stranded web.fetch away from the allowlist UI its calls need.
+// timeout surface (SearXNG plus request timeouts) and one Configure editor;
+// splitting them stranded web.fetch away from the timeout UI its calls need.
 // The browser-web id is the sole grouping for both prefixes, so pills, search
 // filtering, and bulk toggles stay in lockstep and any future browser.* or
 // web.* tool lands here without a second pill or section.
@@ -1136,10 +1133,6 @@ export default function SettingsManager() {
   // instead of firing setState on an unmounted pane or closing a fresh edit.
   const mediaSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Homelab allowed origins for browser & web tools (multiline text, one host/domain per line)
-  const [browserAllowedOriginsText, setBrowserAllowedOriginsText] = useState<string>(
-    DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT
-  );
   const [browserTimeoutSeconds, setBrowserTimeoutSeconds] = useState<number | string>(
     DEFAULT_BROWSER_TIMEOUT_SECONDS
   );
@@ -1253,7 +1246,7 @@ export default function SettingsManager() {
   const [goalsMaxTriggersPerGoal, setGoalsMaxTriggersPerGoal] = useState<number | string>(
     DEFAULT_GOALS_MAX_TRIGGERS_PER_GOAL
   );
-  // Proactive Muse suggestions ([ideas]): opt-in enable toggle and generation bounds.
+  // Proactive Wayfinder suggestions ([ideas]): opt-in enable toggle and generation bounds.
   const [ideasEnabled, setIdeasEnabled] = useState<boolean>(DEFAULT_IDEAS_ENABLED);
   const [ideasMaxPerCycle, setIdeasMaxPerCycle] = useState<number | string>(
     DEFAULT_IDEAS_MAX_PER_CYCLE
@@ -2482,7 +2475,6 @@ export default function SettingsManager() {
     if (data.browserFetchTimeoutSeconds !== undefined) {
       setBrowserFetchTimeoutSeconds(data.browserFetchTimeoutSeconds);
     }
-    setBrowserAllowedOriginsText(formatAllowedOriginsText(data.browserAllowedOrigins));
     setPluginsDir(data.pluginsDir ?? "~/.runeweaver/plugins");
     setPluginsMarketplaceIndexURL(
       data.pluginsMarketplaceIndexURL ??
@@ -3212,7 +3204,6 @@ export default function SettingsManager() {
         browserTimeoutSeconds: Number(browserTimeoutSeconds) || DEFAULT_BROWSER_TIMEOUT_SECONDS,
         browserFetchTimeoutSeconds: Number(browserFetchTimeoutSeconds) || DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS,
         browserMaxResults: maxResultsNum,
-        browserAllowedOrigins: parseAllowedOriginsText(browserAllowedOriginsText),
         searchSearxngURL: trimmedSearxngURL,
         searchTimeoutSeconds: timeoutNum,
         searchMaxResults: maxResultsNum,
@@ -3403,12 +3394,10 @@ export default function SettingsManager() {
       const bTimeout = Number(browserTimeoutSeconds);
       const fTimeout = Number(browserFetchTimeoutSeconds);
       const updated = await updateSettings({
-        browserAllowedOrigins: parseAllowedOriginsText(browserAllowedOriginsText),
         browserTimeoutSeconds: isNaN(bTimeout) || bTimeout <= 0 ? DEFAULT_BROWSER_TIMEOUT_SECONDS : bTimeout,
         browserFetchTimeoutSeconds: isNaN(fTimeout) || fTimeout <= 0 ? DEFAULT_BROWSER_FETCH_TIMEOUT_SECONDS : fTimeout,
       });
-      // Refresh only the browser fields so unsaved edits in other tabs survive.
-      setBrowserAllowedOriginsText(formatAllowedOriginsText(updated.browserAllowedOrigins));
+      // Refresh only the timeout fields so unsaved edits in other tabs survive.
       if (updated.browserTimeoutSeconds !== undefined) {
         setBrowserTimeoutSeconds(updated.browserTimeoutSeconds);
       }
@@ -6995,7 +6984,7 @@ export default function SettingsManager() {
       ) : null}
 
       {/* Browser, Web, and API tools configuration modal (browser.navigate, browser.act, web.fetch, web.search, api.request).
-          Configures automation and request timeouts plus the homelab origins SSRF exemption; public-domain egress rules stay on the Policy tab. */}
+          Configures automation and request timeouts; domain allow/deny rules and local network access live on the Policy tab. */}
       {configuringToolName === "browser.navigate" ||
       configuringToolName === "browser.act" ||
       configuringToolName === "web.fetch" ||
@@ -7074,59 +7063,15 @@ export default function SettingsManager() {
               </div>
             </div>
 
-            {/* Homelab origin allowlist: BrowserConfig.allowedOrigins feeds the
-                SSRF exemption for loopback and private-range hosts, so this
-                editor is the only dashboard surface that can authorize a LAN
-                origin. The declarative policy gate covers public egress and
-                never widens the SSRF set, so the Policy tab cannot substitute
-                for it. */}
-            <div
-              style={{
-                padding: "14px",
-                borderRadius: "8px",
-                border: "1px solid var(--border-color, #2d3748)",
-                marginBottom: "16px",
-                backgroundColor: "var(--bg-secondary, #141822)",
-              }}
-            >
-              <h4 style={{ margin: "0 0 6px 0", fontSize: "0.88rem" }}>Homelab Allowed Origins</h4>
-              <p className="muted text-sm" style={{ margin: "0 0 10px 0" }}>
-                Origins listed here are exempt from SSRF blocking for browser, web, and API calls.
-              </p>
-              <div className="form-group" style={{ marginBottom: 0 }}>
-                <label htmlFor="browser-allowed-origins-textarea" style={{ fontSize: "0.82rem" }}>
-                  Allowed Origins (one per line)
-                </label>
-                <textarea
-                  id="browser-allowed-origins-textarea"
-                  className="input-field allowed-origins-textarea"
-                  value={browserAllowedOriginsText}
-                  onChange={(e) => setBrowserAllowedOriginsText(e.target.value)}
-                  placeholder={"http://192.168.1.50:11434\nhttp://homeassistant.local:8123"}
-                  rows={4}
-                />
-                <span className="form-group-hint" style={{ marginTop: "4px", display: "block" }}>
-                  One host, domain, or URL per line. Blank lines are ignored. Entries exempt
-                  loopback and private-range hosts from SSRF blocking, which the policy
-                  allowlist cannot do.
-                </span>
-              </div>
-            </div>
-
-            {/* Security Policy pointer: public-domain egress allow/deny rules
-                live on the Policy tab, while private-LAN dialing stays with
-                the Homelab Allowed Origins editor above because the SSRF
-                guard reads that allowlist, not the policy file. */}
+            {/* Security Policy pointer: domain allow/deny rules and local
+                network access live on the Policy tab, so this modal keeps only
+                a compact pointer to that surface. */}
             <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px" }}>
                 <div>
                   <h4 style={{ margin: "0 0 6px 0", fontSize: "0.88rem" }}>Security &amp; Network Policy</h4>
                   <p className="muted text-sm" style={{ margin: 0 }}>
-                    Public outbound domain allow and deny rules are centrally enforced via{" "}
-                    <code>policy.toml</code> under the Policy tab. Private-LAN and loopback
-                    origins must be authorized in Homelab Allowed Origins above: the SSRF guard
-                    reads that list, so the policy allowlist alone cannot cover them. Configured
-                    services (Sonarr, Radarr, SearXNG, and Email servers) are automatically trusted.
+                    Domain allow/deny rules and local network access are managed under the Policy tab.
                   </p>
                 </div>
                 <button
@@ -7147,7 +7092,7 @@ export default function SettingsManager() {
             <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
               <h4 style={{ margin: "0 0 6px 0", fontSize: "0.88rem" }}>Auto-Allowed Services</h4>
               <p className="muted text-sm" style={{ margin: "0 0 10px 0" }}>
-                Configured media automation servers, SearXNG, and configured email host servers are automatically trusted by the security policy.
+                Configured Sonarr, Radarr, and SearXNG origins are automatically exempt from SSRF blocking only. Calls still require Policy authorization or approval.
               </p>
               <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.85rem", padding: "6px 10px", borderRadius: "6px", backgroundColor: "var(--bg-tertiary, #1a202c)" }}>

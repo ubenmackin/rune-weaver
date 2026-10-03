@@ -71,7 +71,7 @@ test: test-web test-swift
 
 test-web:
 	@test -d Web/node_modules || $(MAKE) setup-web
-	cd Web && npm test
+	cd Web && VITEST_SKIP_INSTALL_CHECKS=1 npm test
 
 test-swift: version
 	swift test

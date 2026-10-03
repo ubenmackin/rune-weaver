@@ -21,7 +21,6 @@ import {
   deleteGoal,
   deleteJob,
   deleteSecret,
-  formatAllowedOriginsText,
   formatGoalNextAdvance,
   formatRunDuration,
   formatToolProgressElapsedMs,
@@ -43,7 +42,6 @@ import {
   MAX_CONCURRENT_CHAT_TURNS,
   MAX_CONCURRENT_CHAT_TURNS_HEADER,
   normalizeServerAllowedHost,
-  parseAllowedOriginsText,
   parseGoalSnapshot,
   parseGoalUpdatedFrame,
   parseMaxConcurrentChatTurns,
@@ -1075,25 +1073,6 @@ describe("owner bearer auth client", () => {
     ).toBe(false);
     expect(isAuthenticatedHealth(null)).toBe(false);
     expect(isAuthenticatedHealth(undefined)).toBe(false);
-  });
-
-  it("parses allowed origins text into trimmed array ignoring blanks", () => {
-    expect(parseAllowedOriginsText(null)).toEqual([]);
-    expect(parseAllowedOriginsText(undefined)).toEqual([]);
-    expect(parseAllowedOriginsText("")).toEqual([]);
-    expect(parseAllowedOriginsText("  \n  ")).toEqual([]);
-    expect(
-      parseAllowedOriginsText("  *.homelab.local \n\n 192.168.1.*  \n homeassistant.local ")
-    ).toEqual(["*.homelab.local", "192.168.1.*", "homeassistant.local"]);
-  });
-
-  it("formats allowed origins array into newline-separated text", () => {
-    expect(formatAllowedOriginsText(null)).toBe("");
-    expect(formatAllowedOriginsText(undefined)).toBe("");
-    expect(formatAllowedOriginsText([])).toBe("");
-    expect(
-      formatAllowedOriginsText(["*.homelab.local", "192.168.1.*"])
-    ).toBe("*.homelab.local\n192.168.1.*");
   });
 });
 

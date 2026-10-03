@@ -34,7 +34,7 @@ private struct CannedApiTransport: ApiRequestTransport, Sendable {
 @Suite("OutboundEgressSupervisor")
 struct OutboundEgressSupervisorTests {
     /// Builds a supervisor over a throwaway verified policy store and runs
-    /// `body` with the canned public DNS proof bound to this test's task.
+    /// `body` with this test's canned DNS proof bound to its task.
     ///
     /// The resolver binds through `ApiSSRFGuard.$taskTestDNSResolver` rather
     /// than the process-global holder: suites run in parallel and share that
@@ -44,14 +44,17 @@ struct OutboundEgressSupervisorTests {
     ///   - policy: Verified policy the supervisor enforces.
     ///   - secrets: Credential backing for injection tests; an empty in-memory
     ///     manager when nil.
+    ///   - dnsProof: Host-to-addresses proof this test binds; the default
+    ///     answers every host with one public address, while exemption tests
+    ///     answer their homelab host with a private or link-local address.
     ///   - body: Test body receiving the built supervisor.
     private func withTestSupervisor(
         policy: SecurityPolicy,
         secrets: SecretsManager? = nil,
+        dnsProof: @escaping @Sendable (String) -> [String] = { _ in ["93.184.216.34"] },
         _ body: (OutboundEgressSupervisor) async throws -> Void
     ) async throws {
-        let resolver: @Sendable (String) -> [String] = { _ in ["93.184.216.34"] }
-        try await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
+        try await ApiSSRFGuard.$taskTestDNSResolver.withValue(dnsProof) {
             let store = PolicyStore(fileURL: URL(fileURLWithPath: "/tmp/test-egress-\(UUID().uuidString).toml"))
             await store.update(policy)
             let supervisor = OutboundEgressSupervisor(
@@ -538,6 +541,153 @@ struct OutboundEgressSupervisorTests {
             let url = try #require(URL(string: "https://evil.com/page"))
             let result = await supervisor.validateReadOnly(url: url)
             #expect(result != nil)
+        }
+    }
+
+    // MARK: - Effective SSRF Exemptions (Policy Local Exemptions)
+
+    @Test
+    func `Private-resolving host is denied without a local exemption`() async throws {
+        let policy = SecurityPolicy(
+            network: NetworkEgressPolicy(mode: .unrestricted, blockedDomains: [])
+        )
+        try await withTestSupervisor(policy: policy, dnsProof: { _ in ["192.168.1.50"] }) { supervisor in
+            let url = try #require(URL(string: "https://nas.homelab.internal/status"))
+            let result = await supervisor.validate(url: url, method: "GET", headers: [:])
+            switch result {
+            case .allowed: Issue.record("Expected SSRF denial for a private-resolving host without an exemption")
+            case let .denied(reason), let .unlistedDomain(_, reason):
+                #expect(reason.contains("resolves to blocked address"))
+            }
+            let readOnly = await supervisor.validateReadOnly(url: url)
+            #expect(readOnly?.contains("resolves to blocked address") == true)
+        }
+    }
+
+    @Test
+    func `Private-resolving host dials under a policy local exemption`() async throws {
+        let policy = SecurityPolicy(
+            network: NetworkEgressPolicy(
+                mode: .unrestricted,
+                localExemptions: ["nas.homelab.internal"]
+            )
+        )
+        try await withTestSupervisor(policy: policy, dnsProof: { _ in ["192.168.1.50"] }) { supervisor in
+            let url = try #require(URL(string: "https://nas.homelab.internal/status"))
+            let result = await supervisor.validate(url: url, method: "GET", headers: [:])
+            switch result {
+            case let .allowed(outcome):
+                #expect(outcome.dialPin.host == "nas.homelab.internal")
+                #expect(outcome.dialPin.addresses == ["192.168.1.50"])
+                #expect(outcome.dialPin.isSecure)
+            case let .denied(reason), let .unlistedDomain(_, reason):
+                Issue.record("Expected the local exemption to allow the private-resolving host, got: \(reason)")
+            }
+            let readOnly = await supervisor.validateReadOnly(url: url)
+            #expect(readOnly == nil)
+        }
+    }
+
+    @Test
+    func `Metadata and link-local stay denied even under a policy local exemption`() async throws {
+        let policy = SecurityPolicy(
+            network: NetworkEgressPolicy(
+                mode: .unrestricted,
+                blockedDomains: [],
+                localExemptions: ["nas.homelab.internal"]
+            )
+        )
+        try await withTestSupervisor(policy: policy, dnsProof: { _ in ["169.254.10.9"] }) { supervisor in
+            let metadataURL = try #require(URL(string: "http://169.254.169.254/latest/meta-data/"))
+            let metadataResult = await supervisor.validate(url: metadataURL, method: "GET", headers: [:])
+            switch metadataResult {
+            case .allowed: Issue.record("CRITICAL: metadata literal dialed under a local exemption")
+            case let .denied(reason), let .unlistedDomain(_, reason): #expect(reason.contains("metadata"))
+            }
+            let linkLocalURL = try #require(URL(string: "http://169.254.10.9/metadata"))
+            let linkLocalResult = await supervisor.validateReadOnly(url: linkLocalURL)
+            #expect(linkLocalResult?.contains("link-local") == true)
+            // An exemption names the host, never what it resolves to: a
+            // rebinding answer in never-dialable space refuses even for the
+            // exempted name.
+            let exemptedURL = try #require(URL(string: "https://nas.homelab.internal/status"))
+            let rebinding = await supervisor.validateReadOnly(url: exemptedURL)
+            #expect(rebinding?.contains("resolves to blocked address") == true)
+        }
+    }
+
+    @Test
+    func `Policy exemption write after supervisor construction applies live`() async throws {
+        let resolver: @Sendable (String) -> [String] = { _ in ["192.168.1.50"] }
+        try await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
+            let store = PolicyStore(fileURL: URL(fileURLWithPath: "/tmp/test-egress-\(UUID().uuidString).toml"))
+            await store.update(SecurityPolicy(network: NetworkEgressPolicy(mode: .unrestricted, blockedDomains: [])))
+            let supervisor = OutboundEgressSupervisor(
+                policyStore: store,
+                secrets: SecretsManager(inMemory: true),
+                browserConfig: BrowserConfig()
+            )
+            let url = try #require(URL(string: "https://nas.homelab.internal/status"))
+            let before = await supervisor.validate(url: url, method: "GET", headers: [:])
+            switch before {
+            case .allowed: Issue.record("Expected denial before the policy carried the exemption")
+            case let .denied(reason), let .unlistedDomain(_, reason):
+                #expect(reason.contains("resolves to blocked address"))
+            }
+            // A policy write lands through the shared store with no restart;
+            // the supervisor reads the snapshot per call, so the next verdict
+            // carries the new exemption.
+            let violations = await store.update(
+                SecurityPolicy(
+                    network: NetworkEgressPolicy(
+                        mode: .unrestricted,
+                        localExemptions: ["nas.homelab.internal"]
+                    )
+                )
+            )
+            #expect(violations.isEmpty)
+            let after = await supervisor.validate(url: url, method: "GET", headers: [:])
+            switch after {
+            case let .allowed(outcome):
+                #expect(outcome.dialPin.host == "nas.homelab.internal")
+                #expect(outcome.dialPin.addresses == ["192.168.1.50"])
+            case let .denied(reason), let .unlistedDomain(_, reason):
+                Issue.record("Expected the live policy write to exempt the homelab host, got: \(reason)")
+            }
+            let readOnly = await supervisor.validateReadOnly(url: url)
+            #expect(readOnly == nil)
+        }
+    }
+
+    @Test
+    func `Retired browser allowed origins grant no dialing at the supervisor`() async throws {
+        // `browser.allowed_origins` is retired migration input: naming a
+        // private host there must not exempt it at the dial decision, even
+        // though the same browser config object rides every boot path
+        // (`BuiltinToolPlugins`, `ServerContext`, `ServeCommand`,
+        // `AppModelBoot`). Only the snapshot's `local_exemptions` (plus auto
+        // service origins) may exempt.
+        let resolver: @Sendable (String) -> [String] = { _ in ["192.168.1.50"] }
+        try await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
+            let store = PolicyStore(fileURL: URL(fileURLWithPath: "/tmp/test-egress-\(UUID().uuidString).toml"))
+            await store.update(SecurityPolicy(network: NetworkEgressPolicy(mode: .unrestricted, blockedDomains: [])))
+            let supervisor = OutboundEgressSupervisor(
+                policyStore: store,
+                secrets: SecretsManager(inMemory: true),
+                browserConfig: BrowserConfig(allowedOrigins: ["nas.homelab.internal", "192.168.1.*"])
+            )
+            let url = try #require(URL(string: "https://nas.homelab.internal/status"))
+            let result = await supervisor.validate(url: url, method: "GET", headers: [:])
+            switch result {
+            case .allowed: Issue.record("Retired browser.allowed_origins must not exempt private dialing")
+            case let .denied(reason), let .unlistedDomain(_, reason):
+                #expect(reason.contains("resolves to blocked address"))
+            }
+            let readOnly = await supervisor.validateReadOnly(url: url)
+            #expect(readOnly?.contains("resolves to blocked address") == true)
+            // The guard-level set carries the same verdict: the retired list
+            // contributes nothing, so the private literal refuses there too.
+            #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.50/status", browserConfig: BrowserConfig(allowedOrigins: ["192.168.1.*"])) != nil)
         }
     }
 

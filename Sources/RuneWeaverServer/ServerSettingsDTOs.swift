@@ -59,6 +59,11 @@ public struct SettingsResponse: Content, Equatable {
     public let browserSearxngURL: String
     public let browserSearchTimeoutSeconds: Int
     public let browserMaxResults: Int
+    /// Retired migration-display field: mirrors `config.browser.allowedOrigins`
+    /// for wire compatibility so older dashboards still decode, but it grants
+    /// nothing at runtime and `PUT /settings` ignores it. Local-network grants
+    /// flow only through `PUT /settings/policy` and
+    /// `POST /settings/policy/recheck-local/apply` into `local_exemptions`.
     public let browserAllowedOrigins: [String]
     public let browserTimeoutSeconds: Int
     public let browserFetchTimeoutSeconds: Int
@@ -80,7 +85,7 @@ public struct SettingsResponse: Content, Equatable {
     public let goals: GoalsConfig
     /// Interruption policy for background scheduler and goal turns.
     public let proactive: ProactiveConfig
-    /// Proactive Muse suggestion policy.
+    /// Proactive Wayfinder suggestion policy.
     public let ideas: IdeasConfig
     /// Parallel worker fan-out policy backing `fanout.run`.
     public let fanout: FanOutConfig
@@ -381,6 +386,10 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let browserSearxngURL: String?
     public let browserSearchTimeoutSeconds: Int?
     public let browserMaxResults: Int?
+    /// Retired wire-compat field: still decodes so older dashboards sending a
+    /// full-form `PUT /settings` keep parsing, but `apply(to:)` ignores it and
+    /// it never grants dialing. Use `PUT /settings/policy` to manage
+    /// `local_exemptions`.
     public let browserAllowedOrigins: [String]?
     public let browserTimeoutSeconds: Int?
     public let browserFetchTimeoutSeconds: Int?
@@ -702,9 +711,15 @@ extension UpdateSettingsRequest {
         if let browserFetchTimeoutSeconds {
             browser.fetchTimeoutSeconds = browserFetchTimeoutSeconds
         }
-        if let browserAllowedOrigins {
-            browser.allowedOrigins = browserAllowedOrigins
-        }
+        // `browserAllowedOrigins` is retired: decoded for wire compatibility
+        // but never written here, so `PUT /settings` cannot persist or grant
+        // a local-network exemption. The sole migration consumer is
+        // `PolicyStore.load(legacyLocalOrigins:)`; new grants flow only
+        // through `PUT /settings/policy` and
+        // `POST /settings/policy/recheck-local/apply`. The binding is
+        // intentionally read (`_ =`) so a future edit cannot silently
+        // reintroduce the write without touching this gate.
+        _ = browserAllowedOrigins
     }
 
     private func applyEmail(to email: inout EmailConfig) {
@@ -726,9 +741,9 @@ extension UpdateSettingsRequest {
     }
 
     /// Applies the `[server]` bind patch, preserving every key the request omits.
-    /// Mirrors the `browserAllowedOrigins` shape: a nil patch is a no-op, while a
-    /// present patch writes verbatim after fail-closed checks so invalid values
-    /// never persist or reach the live bind. Hostname validation is
+    /// A nil patch is a no-op, while a present patch writes verbatim after
+    /// fail-closed checks so invalid values never persist or reach the live
+    /// bind. Hostname validation is
     /// single-sourced through `RuneWeaverConfig.validateServerHostname` so the
     /// PUT and file-load paths agree with a clear 400 instead of a spurious
     /// 403 or an obscure bind failure.
@@ -851,21 +866,53 @@ public struct SecretStatusResponse: Content, Sendable, Equatable {
 /// Only `allowlist_only` and `unrestricted` persist. The retired
 /// `deny_by_default` name maps to the fail-closed posture on load and at the
 /// REST boundary so older callers keep their intent without storing ambiguity.
+/// `localExemptions` is server-owned: the pane renders it display-only and PUT
+/// ignores any client-supplied value, deriving the stored set from server-side
+/// classification instead. The wire emits camelCase `localExemptions` sorted;
+/// snake_case `local_exemptions` decodes tolerantly for older callers but is
+/// never emitted.
 public struct NetworkEgressPolicyDTO: Content, Sendable, Equatable {
     public let mode: String
     public let allowedDomains: [String]
     public let blockedDomains: [String]
+    public let localExemptions: [String]
 
-    public init(mode: String, allowedDomains: [String], blockedDomains: [String]) {
+    public init(mode: String, allowedDomains: [String], blockedDomains: [String], localExemptions: [String] = []) {
         self.mode = mode
         self.allowedDomains = allowedDomains
         self.blockedDomains = blockedDomains
+        self.localExemptions = localExemptions
     }
 
     private enum CodingKeys: String, CodingKey {
         case mode
         case allowedDomains = "allowed_domains"
         case blockedDomains = "blocked_domains"
+        case localExemptions
+        case localExemptionsSnake = "local_exemptions"
+    }
+
+    /// Decodes tolerantly so older snake_case payloads still parse: camelCase
+    /// wins when both spellings arrive so the two contracts cannot fork.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try container.decode(String.self, forKey: .mode)
+        allowedDomains = try container.decodeIfPresent([String].self, forKey: .allowedDomains) ?? []
+        blockedDomains = try container.decodeIfPresent([String].self, forKey: .blockedDomains) ?? []
+        let camel = try container.decodeIfPresent([String].self, forKey: .localExemptions)
+        let snake = try container.decodeIfPresent([String].self, forKey: .localExemptionsSnake)
+        localExemptions = camel ?? snake ?? []
+    }
+
+    /// Encodes the canonical wire shape: snake_case network lists plus
+    /// camelCase `localExemptions`. The snake spelling decodes but never
+    /// encodes so emitted payloads keep one spelling.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(mode, forKey: .mode)
+        try container.encode(allowedDomains, forKey: .allowedDomains)
+        try container.encode(blockedDomains, forKey: .blockedDomains)
+        try container.encode(localExemptions, forKey: .localExemptions)
     }
 }
 
@@ -917,6 +964,48 @@ public struct SecurityPolicyDTO: Content, Sendable, Equatable {
     }
 }
 
+/// Local-access report returned by `PUT /settings/policy` and `POST /settings/policy/recheck-local/apply`.
+///
+/// `granted` names the exemptions added by this write, `removed` names the
+/// exemptions dropped by it (derived from allowlist deletions on PUT and from
+/// re-classification on re-check apply), and `neverDialable` names added
+/// entries that persist name-only with no grant. `GET /settings/policy`
+/// sends no report.
+public struct PolicyLocalAccessReport: Content, Sendable, Equatable {
+    public let granted: [String]
+    public let removed: [String]
+    public let neverDialable: [String]
+
+    public init(granted: [String] = [], removed: [String] = [], neverDialable: [String] = []) {
+        self.granted = granted
+        self.removed = removed
+        self.neverDialable = neverDialable
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case granted
+        case removed
+        case neverDialable
+        case neverDialableSnake = "never_dialable"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        granted = try container.decodeIfPresent([String].self, forKey: .granted) ?? []
+        removed = try container.decodeIfPresent([String].self, forKey: .removed) ?? []
+        let camel = try container.decodeIfPresent([String].self, forKey: .neverDialable)
+        let snake = try container.decodeIfPresent([String].self, forKey: .neverDialableSnake)
+        neverDialable = camel ?? snake ?? []
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(granted, forKey: .granted)
+        try container.encode(removed, forKey: .removed)
+        try container.encode(neverDialable, forKey: .neverDialable)
+    }
+}
+
 /// Response returned by GET /settings/policy.
 ///
 /// Carries the structured policy plus where it came from and its live
@@ -924,22 +1013,26 @@ public struct SecurityPolicyDTO: Content, Sendable, Equatable {
 /// the structured shape and the server owns serialization, so the file and
 /// the supervisor can never disagree on quoting. Writes apply live through
 /// the shared store, so the response never advertises a restart for policy.
+/// `localAccess` carries the PUT classification report and stays nil on GET.
 public struct PolicyResponse: Content, Sendable, Equatable {
     public let policy: SecurityPolicyDTO
     public let path: String
     public let loadedFromDisk: Bool
     public let violations: [String]
+    public let localAccess: PolicyLocalAccessReport?
 
     public init(
         policy: SecurityPolicyDTO,
         path: String,
         loadedFromDisk: Bool,
-        violations: [String]
+        violations: [String],
+        localAccess: PolicyLocalAccessReport? = nil
     ) {
         self.policy = policy
         self.path = path
         self.loadedFromDisk = loadedFromDisk
         self.violations = violations
+        self.localAccess = localAccess
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -947,6 +1040,28 @@ public struct PolicyResponse: Content, Sendable, Equatable {
         case path
         case loadedFromDisk = "loaded_from_disk"
         case violations
+        case localAccess
+        case localAccessSnake = "local_access"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        policy = try container.decode(SecurityPolicyDTO.self, forKey: .policy)
+        path = try container.decode(String.self, forKey: .path)
+        loadedFromDisk = try container.decodeIfPresent(Bool.self, forKey: .loadedFromDisk) ?? false
+        violations = try container.decodeIfPresent([String].self, forKey: .violations) ?? []
+        let camel = try container.decodeIfPresent(PolicyLocalAccessReport.self, forKey: .localAccess)
+        let snake = try container.decodeIfPresent(PolicyLocalAccessReport.self, forKey: .localAccessSnake)
+        localAccess = camel ?? snake
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(policy, forKey: .policy)
+        try container.encode(path, forKey: .path)
+        try container.encode(loadedFromDisk, forKey: .loadedFromDisk)
+        try container.encode(violations, forKey: .violations)
+        try container.encodeIfPresent(localAccess, forKey: .localAccess)
     }
 }
 
@@ -1032,5 +1147,64 @@ public struct VerifyPolicyResponse: Content, Sendable, Equatable {
     public init(valid: Bool, violations: [String]) {
         self.valid = valid
         self.violations = violations
+    }
+}
+
+/// Request for POST /settings/policy/recheck-local and its apply sibling.
+///
+/// Carries the structured candidate the caller wants re-checked. Any
+/// client-supplied `localExemptions` is ignored (server-owned): the pane
+/// renders the field display-only and both endpoints derive the grant set
+/// from server-side classification instead.
+public struct RecheckLocalExemptionsRequest: Content, Sendable, Equatable {
+    public let policy: SecurityPolicyDTO
+
+    public init(policy: SecurityPolicyDTO) {
+        self.policy = policy
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case policy
+        case rawToml = "raw_toml"
+        case rawTomlCamel = "rawToml"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Fail closed on the retired shape like PUT and verify so an old
+        // editor learns the structured contract instead of sending text.
+        if container.contains(.rawToml) || container.contains(.rawTomlCamel) {
+            throw Abort(
+                .badRequest,
+                reason: "Invalid policy field 'raw_toml': raw TOML is no longer supported. "
+                    + "Send a structured 'policy' object with version, network, and credentials."
+            )
+        }
+        self.policy = try container.decode(SecurityPolicyDTO.self, forKey: .policy)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(policy, forKey: .policy)
+    }
+}
+
+/// Preview diff returned by POST /settings/policy/recheck-local.
+///
+/// `added` names grants the apply would create, `removed` names grants it
+/// would drop, `unchanged` names grants it would keep, and `unresolved`
+/// names entries that could not be proven without aborting. Every list is
+/// sorted so the pane renders a stable diff. Preview never writes.
+public struct RecheckLocalExemptionsResponse: Content, Sendable, Equatable {
+    public let added: [String]
+    public let removed: [String]
+    public let unchanged: [String]
+    public let unresolved: [String]
+
+    public init(added: [String] = [], removed: [String] = [], unchanged: [String] = [], unresolved: [String] = []) {
+        self.added = added
+        self.removed = removed
+        self.unchanged = unchanged
+        self.unresolved = unresolved
     }
 }

@@ -27,7 +27,7 @@ public enum ProactiveEventKind: String, Sendable, Codable, CaseIterable, Equatab
     case goalBlocked
     /// A scheduler or goal turn parked awaiting approval.
     case runParked
-    /// A proactive suggestion the Muse engine proposed outside any turn.
+    /// A proactive suggestion the Wayfinder engine proposed outside any turn.
     case ideaProposed
 
     /// Whether this kind breaks through under the milestones policy.

@@ -82,12 +82,23 @@ public enum WebFetchSSRFGuard: Sendable {
     public static func denyReason(
         for rawURL: String,
         browserConfig: BrowserConfig,
-        mediaConfig: MediaConfig? = nil
+        mediaConfig: MediaConfig? = nil,
+        extraAllowlistedOrigins: Set<String> = []
     ) -> String? {
         guard let trimmed = NormalizedText.value(rawURL) else {
             return "Empty URL: web.fetch needs an absolute http(s) URL."
         }
-        return ApiSSRFGuard.denyReason(for: trimmed, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: [])
+        // Effective exemptions union the config-derived auto origins with the
+        // owner-declared local grants so a policy exemption reaches the
+        // initial guard; never-exempt targets stay refused inside the guard.
+        // The retired `browser.allowed_origins` never feeds the base set.
+        let baseOrigins = ApiSSRFGuard.allowlistedOrigins(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: []
+        )
+        let effective = baseOrigins.union(extraAllowlistedOrigins)
+        return ApiSSRFGuard.denyReason(for: trimmed, allowlistedOrigins: effective)
     }
 
     /// Async refusal reason that keeps blocking DNS off the cooperative pool.
@@ -97,30 +108,39 @@ public enum WebFetchSSRFGuard: Sendable {
     public static func denyReasonAsync(
         for rawURL: String,
         browserConfig: BrowserConfig,
-        mediaConfig: MediaConfig? = nil
+        mediaConfig: MediaConfig? = nil,
+        extraAllowlistedOrigins: Set<String> = []
     ) async -> String? {
         guard let trimmed = NormalizedText.value(rawURL) else {
             return "Empty URL: web.fetch needs an absolute http(s) URL."
         }
-        return await ApiSSRFGuard.denyReasonAsync(for: trimmed, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: [])
+        let baseOrigins = ApiSSRFGuard.allowlistedOrigins(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: []
+        )
+        let effective = baseOrigins.union(extraAllowlistedOrigins)
+        return await ApiSSRFGuard.denyReasonAsync(for: trimmed, allowlistedOrigins: effective)
     }
 
     /// Whether a URL may be dialed under the fetch SSRF guard.
     public static func isAllowed(
         for rawURL: String,
         browserConfig: BrowserConfig,
-        mediaConfig: MediaConfig? = nil
+        mediaConfig: MediaConfig? = nil,
+        extraAllowlistedOrigins: Set<String> = []
     ) -> Bool {
-        denyReason(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig) == nil
+        denyReason(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig, extraAllowlistedOrigins: extraAllowlistedOrigins) == nil
     }
 
     /// Async allow check that keeps blocking DNS on the bounded pool.
     public static func isAllowedAsync(
         for rawURL: String,
         browserConfig: BrowserConfig,
-        mediaConfig: MediaConfig? = nil
+        mediaConfig: MediaConfig? = nil,
+        extraAllowlistedOrigins: Set<String> = []
     ) async -> Bool {
-        await denyReasonAsync(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig) == nil
+        await denyReasonAsync(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig, extraAllowlistedOrigins: extraAllowlistedOrigins) == nil
     }
 
     /// Normalizes a URL host for sensitive-range comparison.
@@ -326,17 +346,23 @@ public struct WebFetchTool: Tool, Sendable {
     private let transport: any WebFetchTransport
     /// Optional egress supervisor enforcing declarative security policy.
     private let egressSupervisor: OutboundEgressSupervisor?
+    /// Owner-declared local grants unioned with the config-derived origins.
+    /// Keeps the approval-free initial guard from rejecting an internal URL
+    /// the supervised hop gate would allow.
+    private let extraAllowlistedOrigins: Set<String>
 
     /// Creates a fetch tool.
     public init(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         transport: (any WebFetchTransport)? = nil,
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor? = nil,
+        extraAllowlistedOrigins: Set<String> = []
     ) {
         self.browserConfig = browserConfig
         self.mediaConfig = mediaConfig
         self.egressSupervisor = egressSupervisor
+        self.extraAllowlistedOrigins = extraAllowlistedOrigins
         if let transport {
             self.transport = transport
         } else {
@@ -369,14 +395,21 @@ public struct WebFetchTool: Tool, Sendable {
         }
         // Declarative policy enforcement runs per hop inside `fetchChain`
         // (including this initial URL as its first hop) under the live
-        // session, so no pre-check runs here: a duplicate would consume a
-        // one-shot grant the hop gate then re-parks.
+        // session, so no stateful pre-check runs here. The stateless SSRF
+        // pre-check still runs with the merged origins so an internal URL
+        // covered by a local exemption is not rejected before the supervised
+        // hop gate runs.
         // Approval-free fetch must not dial loopback, link-local, metadata, or private ranges:
         // prompt-injected content could otherwise exfiltrate the loopback-only no-auth service into
-        // tool output. Configured search, media, and allowed origins are exempt.
+        // tool output. Configured search, media, allowed, and local-exemption origins are exempt.
         // DNS blocks its thread, so the verdict hops to the bounded pool instead
         // of stalling shared tasks.
-        if let refusal = await WebFetchSSRFGuard.denyReasonAsync(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig) {
+        if let refusal = await WebFetchSSRFGuard.denyReasonAsync(
+            for: rawURL,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
+        ) {
             return unsupportedFailure(
                 originalURL: rawURL,
                 finalURL: rawURL,
@@ -439,7 +472,8 @@ extension WebFetchTool {
         if let refusal = await WebFetchSSRFGuard.denyReasonAsync(
             for: url.absoluteString,
             browserConfig: browserConfig,
-            mediaConfig: mediaConfig
+            mediaConfig: mediaConfig,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
         ) {
             return refusal
         }
@@ -771,18 +805,22 @@ public enum WebFetchTools {
     public static let toolNames = ["web.fetch"]
 
     /// Builds the fetch tool for a browser and media config.
+    /// - Parameter extraAllowlistedOrigins: Owner-declared local grants
+    ///   unioned with the config-derived origins in the initial guard.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         transport: (any WebFetchTransport)? = nil,
-        supervisor: OutboundEgressSupervisor? = nil
+        supervisor: OutboundEgressSupervisor? = nil,
+        extraAllowlistedOrigins: Set<String> = []
     ) -> [any Tool] {
         [
             WebFetchTool(
                 browserConfig: browserConfig,
                 mediaConfig: mediaConfig,
                 transport: transport,
-                egressSupervisor: supervisor
+                egressSupervisor: supervisor,
+                extraAllowlistedOrigins: extraAllowlistedOrigins
             )
         ]
     }
@@ -793,13 +831,15 @@ public enum WebFetchTools {
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         transport: (any WebFetchTransport)? = nil,
-        supervisor: OutboundEgressSupervisor? = nil
+        supervisor: OutboundEgressSupervisor? = nil,
+        extraAllowlistedOrigins: Set<String> = []
     ) async {
         for tool in makeTools(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             transport: transport,
-            supervisor: supervisor
+            supervisor: supervisor,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
         ) {
             await bus.register(tool: tool)
         }

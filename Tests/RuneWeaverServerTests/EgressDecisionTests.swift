@@ -296,6 +296,33 @@ struct EgressDecisionGuardTests {
             #expect(reason.lowercased().contains("blocked"))
         }
     }
+
+    @Test
+    func `Triage alwaysAllow never adds localExemptions`() async throws {
+        let harness = try await makeEgressDecisionHarness()
+        defer { harness.cleanUp() }
+
+        // Only PUT and re-check apply may write `localExemptions` (Shared
+        // Contract C): triage persists the allow entry alone, even for a
+        // local-network literal that classification would otherwise grant.
+        let before = try await harness.store.snapshot()
+        #expect(before.network.localExemptions.isEmpty)
+
+        let request = await enqueueEgressRequest(host: "192.168.1.10", context: harness.context)
+        let applied = await applyEgressDecision(tier: .alwaysAllow, pending: request, context: harness.context)
+        #expect(applied == true)
+
+        let policy = try await harness.store.snapshot()
+        #expect(policy.network.allowedDomains.contains("192.168.1.10"))
+        #expect(policy.network.localExemptions.isEmpty)
+
+        // The store appenders preserve the same boundary directly: an
+        // allowlist append rides through with exemptions untouched.
+        _ = try await harness.store.appendAllowedDomain("192.168.1.11")
+        let appended = try await harness.store.snapshot()
+        #expect(appended.network.allowedDomains.contains("192.168.1.11"))
+        #expect(appended.network.localExemptions.isEmpty)
+    }
 }
 
 @Suite("Egress Decision Transports")

@@ -22,6 +22,8 @@
 //      destination's effective route path.
 //   3. SSRF Guard — prevent metadata, link-local, and RFC 1918 dials; an
 //      allowed verdict returns the vetted numeric addresses as a dial pin.
+//      Exemptions are the config origins unioned with the policy's
+//      `local_exemptions`, read fresh on every call.
 //   4. Just-In-Time Wire Injection — swap surrogates for live Keychain secrets.
 //
 // Network and binding checks run before the SSRF guard resolves any hostname,
@@ -315,7 +317,8 @@ public actor OutboundEgressSupervisor {
     ///    this destination host, HTTP method, and effective route path — dot segments
     ///    resolved per RFC 3986, encoded separators and encoded dot segments refused.
     /// 3. **SSRF Guard**: Blocks metadata IPs, link-local, RFC 1918 (via ApiSSRFGuard)
-    ///    and returns the proven numeric addresses as a dial pin.
+    ///    and returns the proven numeric addresses as a dial pin. Exemptions are
+    ///    the config-derived origins unioned with the snapshot's `local_exemptions`.
     /// 4. **Wire Injection**: Swaps surrogates for live Keychain secrets.
     ///
     /// If any step fails, the method returns a `.denied` with a human-readable reason.
@@ -425,12 +428,22 @@ public actor OutboundEgressSupervisor {
         // that domain names might resolve to. The same pass returns the dial pin:
         // the numeric addresses it proved, so the caller dials the proof instead
         // of re-resolving the hostname after this check (DNS rebinding).
-        let dialPin: SSRFDialPin
-        switch await ApiSSRFGuard.vetAsync(
-            for: url.absoluteString,
+        // Effective exemptions union the config-derived auto origins
+        // (`searxng_url`, enabled media LAN URLs, LLM server URLs) with the
+        // owner-declared `local_exemptions` from this hop's snapshot, so a
+        // policy write applies live with no restart while never-exempt targets
+        // (metadata, link-local, embedded translations) stay refused. The
+        // retired `browser.allowed_origins` never feeds this set.
+        let ssrfOrigins = ApiSSRFGuard.allowlistedOrigins(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs
+        ).union(policy.network.localExemptions)
+        let dialPin: SSRFDialPin
+        switch await ApiSSRFGuard.vetAsync(
+            for: url.absoluteString,
+            allowlistedOrigins: ssrfOrigins,
+            hasLLMOrigins: !llmServerURLs.isEmpty
         ) {
         case let .refused(ssrfReason):
             return .denied(ssrfReason)
@@ -499,12 +512,18 @@ public actor OutboundEgressSupervisor {
             return reason
         }
 
-        // SSRF guard
-        return await ApiSSRFGuard.denyReasonAsync(
-            for: url.absoluteString,
+        // SSRF guard over the same effective exemptions the full gate uses, so
+        // read-only checks honor a live policy exemption identically. The
+        // retired `browser.allowed_origins` never feeds this set.
+        let ssrfOrigins = ApiSSRFGuard.allowlistedOrigins(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs
+        ).union(policy.network.localExemptions)
+        return await ApiSSRFGuard.denyReasonAsync(
+            for: url.absoluteString,
+            allowlistedOrigins: ssrfOrigins,
+            hasLLMOrigins: !llmServerURLs.isEmpty
         )
     }
 

@@ -125,12 +125,14 @@ struct PolicyShowCommand: AsyncParsableCommand {
         }
         print("")
 
-        // The aggregate verifier owns exactly the two invariants this surface
-        // reports — credential confinement and rule-shadow prevention — so a
-        // legacy filesystem or tool table can never flip the reported status.
+        // The aggregate verifier owns exactly the three invariants this surface
+        // reports — credential confinement, rule-shadow prevention, and local-exemption
+        // safety — so a legacy filesystem or tool table can never flip the reported status.
         let violations = PolicyInvariantVerifier.verify(loaded)
         if violations.isEmpty {
-            print(TerminalStyle.success("✓ All 2 formal security invariants verified (credential confinement, rule-shadow prevention)."))
+            print(TerminalStyle.success(
+                "✓ All 3 formal security invariants verified (credential confinement, rule-shadow prevention, local-exemption safety)."
+            ))
         } else {
             print(TerminalStyle.error("✗ Invariant violations detected (\(violations.count)):"))
             for violation in violations {
@@ -158,11 +160,11 @@ struct PolicyShowCommand: AsyncParsableCommand {
     }
 }
 
-/// Verifies the two owned policy invariants on demand for a policy file.
+/// Verifies the three owned policy invariants on demand for a policy file.
 struct PolicyVerifyCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "verify",
-        abstract: "Formally verify credential confinement and rule-shadow prevention."
+        abstract: "Formally verify credential confinement, rule-shadow prevention, and local-exemption safety."
     )
 
     @Option(name: .long, help: "Path to policy.toml to verify (defaults to ~/.runeweaver/policy.toml).")
@@ -181,7 +183,7 @@ struct PolicyVerifyCommand: AsyncParsableCommand {
             print(TerminalStyle.dim("File does not exist. Verifying safe factory default posture..."))
             let violations = PolicyInvariantVerifier.verify(.safeDefault)
             if violations.isEmpty {
-                print(TerminalStyle.success("✓ Safe default posture satisfies credential confinement and rule-shadow prevention."))
+                print(TerminalStyle.success("✓ Safe default posture satisfies credential confinement, rule-shadow prevention, and local-exemption safety."))
             } else {
                 print(TerminalStyle.error("✗ Invariant violations in safe default:"))
                 for violation in violations {
@@ -204,15 +206,16 @@ struct PolicyVerifyCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        // Only the two owned invariants decide the verdict: legacy filesystem
+        // Only the three owned invariants decide the verdict: legacy filesystem
         // and tool tables parse for compatibility but never fail verification,
         // so an old file with those sections still verifies when its network
         // and credential bindings are sound.
         let violations = PolicyInvariantVerifier.verify(parsed)
         if violations.isEmpty {
-            print(TerminalStyle.success("✓ PASSED: All 2 formal security invariants verified successfully."))
+            print(TerminalStyle.success("✓ PASSED: All 3 formal security invariants verified successfully."))
             print("  1. Credential Confinement: Verified")
             print("  2. Rule Shadow Prevention: Verified")
+            print("  3. Local Exemption Safety: Verified")
         } else {
             print(TerminalStyle.error("✗ FAILED: Policy violates \(violations.count) formal security invariant(s):"))
             for (idx, violation) in violations.enumerated() {

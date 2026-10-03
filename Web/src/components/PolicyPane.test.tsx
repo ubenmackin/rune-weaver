@@ -96,7 +96,7 @@ describe("PolicyPane", () => {
     // Keychain presence resolves beside the policy load, so the row badges
     // Stored instead of blocking the render on secrets.
     expect(await screen.findByText("Keychain Stored")).toBeDefined();
-    expect(screen.getByText(/All 2 Formal Security Invariants Verified/)).toBeDefined();
+    expect(screen.getByText(/All 3 Formal Security Invariants Verified/)).toBeDefined();
     expect(screen.getByTestId("policy-location").textContent).toContain("Customized");
 
     // The retired contract is gone: no raw editor and no Verify button.
@@ -545,6 +545,38 @@ describe("PolicyPane", () => {
     expect(isValidDomainLine("2001:db8::1")).toBe(true);
   });
 
+  it("maintains domain validation parity with server SettingsRouteTests (Finding 10)", () => {
+    const valid = [
+      "api.example.com",
+      "*.example.com",
+      "127.0.0.1",
+      "::1",
+      "2001:db8::1",
+      "sub.domain.co.uk",
+    ];
+    for (const host of valid) {
+      expect(isValidDomainLine(host)).toBe(true);
+    }
+
+    const rejected = [
+      "*",
+      "*.",
+      "*example.com",
+      "api.*",
+      "api.*.com",
+      "http://api.example.com",
+      "api.example.com:8080",
+      "api.example.com/path",
+      "foo@bar",
+      "foo#bar",
+      "foo bar",
+      "foo,bar",
+    ];
+    for (const host of rejected) {
+      expect(isValidDomainLine(host)).toBe(false);
+    }
+  });
+
   it("treats reordered sets as clean through the canonical snapshot", () => {
     // Domain lists and binding arrays behave as sets while credential keys
     // behave as a map, so ordering alone must not read dirty.
@@ -565,5 +597,350 @@ describe("PolicyPane", () => {
       },
     };
     expect(canonicalPolicySnapshot(base)).toBe(canonicalPolicySnapshot(reordered));
+  });
+
+  it("ignores server-owned local exemptions in the dirty comparison", () => {
+    // localExemptions is display-only: a server-derived grant must never read
+    // dirty, so the canonical snapshot excludes it.
+    const without = {
+      version: 1,
+      network: { mode: "allowlist_only", allowed_domains: ["a.example.com"], blocked_domains: [] },
+      credentials: {},
+    };
+    const withGrant = {
+      version: 1,
+      network: {
+        mode: "allowlist_only",
+        allowed_domains: ["a.example.com"],
+        blocked_domains: [],
+        localExemptions: ["airflow.int.volcrypt.com"],
+      },
+      credentials: {},
+    };
+    expect(canonicalPolicySnapshot(without)).toBe(canonicalPolicySnapshot(withGrant));
+  });
+
+  it("renders stored local exemptions read-only with hint copy", async () => {
+    const payload = {
+      ...panePolicyPayload,
+      policy: {
+        ...panePolicyPayload.policy,
+        network: {
+          ...(panePolicyPayload.policy.network as Record<string, unknown>),
+          localExemptions: ["airflow.int.volcrypt.com"],
+        },
+      },
+    };
+    stubPaneFetch(() => jsonResponse(payload));
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    const area = screen.getByTestId("policy-local-exemptions") as HTMLTextAreaElement;
+    expect(area.value).toContain("airflow.int.volcrypt.com");
+    expect(area.readOnly).toBe(true);
+    expect(screen.getByTestId("local-exemptions-count").textContent).toContain("1");
+    const hint = screen.getByTestId("local-exemptions-hint").textContent ?? "";
+    expect(hint).toContain("private addresses");
+    expect(hint).toContain("Wildcards never");
+    expect(hint).toContain("Metadata");
+    expect(hint).toContain("link-local");
+  });
+
+  it("tolerates snake_case local_exemptions on decode", async () => {
+    const payload = {
+      ...panePolicyPayload,
+      policy: {
+        version: 1,
+        network: {
+          mode: "allowlist_only",
+          allowed_domains: ["api.example.com"],
+          blocked_domains: ["metadata.google.internal"],
+          local_exemptions: ["airflow.int.volcrypt.com"],
+        },
+        credentials: panePolicyPayload.policy.credentials,
+      },
+    };
+    stubPaneFetch(() => jsonResponse(payload));
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    expect(
+      (screen.getByTestId("policy-local-exemptions") as HTMLTextAreaElement).value
+    ).toContain("airflow.int.volcrypt.com");
+  });
+
+  it("discloses local grants on save and never sends exemptions", async () => {
+    let sentPolicy: Record<string, unknown> | null = null;
+    stubPaneFetch((init) => {
+      if (init?.method === "PUT") {
+        const sent = JSON.parse(init.body as string) as { policy: Record<string, unknown> };
+        sentPolicy = sent.policy;
+        return jsonResponse({
+          ...panePolicyPayload,
+          policy: {
+            ...(panePolicyPayload.policy as Record<string, unknown>),
+            network: {
+              ...((panePolicyPayload.policy as Record<string, unknown>).network as Record<string, unknown>),
+              localExemptions: ["office-printer.local"],
+            },
+          },
+          localAccess: {
+            granted: ["office-printer.local"],
+            removed: [],
+            neverDialable: [],
+          },
+        });
+      }
+      return jsonResponse(panePolicyPayload);
+    });
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    await user.click(screen.getByTestId("policy-save"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-saved")).toBeDefined();
+    });
+    expect(screen.getByTestId("policy-saved").textContent).toContain(
+      "Local network access granted for: office-printer.local"
+    );
+    expect(
+      (screen.getByTestId("policy-local-exemptions") as HTMLTextAreaElement).value
+    ).toContain("office-printer.local");
+    // Display-only: the write never carries the server-owned field.
+    expect(sentPolicy).not.toBeNull();
+    const sentNetwork = (sentPolicy as unknown as { network: Record<string, unknown> }).network;
+    expect(sentNetwork).not.toHaveProperty("localExemptions");
+    expect(sentNetwork).not.toHaveProperty("local_exemptions");
+  });
+
+  it("warns on never-dialable hosts after save", async () => {
+    stubPaneFetch((init) => {
+      if (init?.method === "PUT") {
+        const sent = JSON.parse(init.body as string) as { policy: unknown };
+        return jsonResponse({
+          ...panePolicyPayload,
+          policy: sent.policy,
+          localAccess: {
+            granted: [],
+            removed: [],
+            neverDialable: ["169.254.169.254"],
+          },
+        });
+      }
+      return jsonResponse(panePolicyPayload);
+    });
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    await user.click(screen.getByTestId("policy-save"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-local-never-dialable")).toBeDefined();
+    });
+    expect(screen.getByTestId("policy-local-never-dialable").textContent).toContain(
+      "169.254.169.254"
+    );
+  });
+
+  it("discloses removed local access on save", async () => {
+    stubPaneFetch((init) => {
+      if (init?.method === "PUT") {
+        const sent = JSON.parse(init.body as string) as { policy: unknown };
+        return jsonResponse({
+          ...panePolicyPayload,
+          policy: sent.policy,
+          localAccess: {
+            granted: [],
+            removed: ["old-device.local"],
+            neverDialable: [],
+          },
+        });
+      }
+      return jsonResponse(panePolicyPayload);
+    });
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    await user.click(screen.getByTestId("policy-save"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-saved")).toBeDefined();
+    });
+    expect(screen.getByTestId("policy-local-removed")).toBeDefined();
+    expect(screen.getByTestId("policy-local-removed").textContent).toContain(
+      "Local network access removed for: old-device.local"
+    );
+  });
+
+  it("shows the unresolved 400 reason and keeps the draft", async () => {
+    stubPaneFetch((init) => {
+      if (init?.method === "PUT") {
+        return jsonResponse(
+          {
+            reason:
+              "Local access classification failed for: mystery.local (unresolved DNS). Nothing was saved. Gate: classification, field: network.allowed_domains.",
+          },
+          400
+        );
+      }
+      return jsonResponse(panePolicyPayload);
+    });
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    const allowed = screen.getByLabelText("Allowed domains") as HTMLTextAreaElement;
+    await user.clear(allowed);
+    await user.type(allowed, "api.example.com\nmystery.local");
+    await user.click(screen.getByTestId("policy-save"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-error")).toBeDefined();
+    });
+    expect(screen.getByTestId("policy-error").textContent).toContain("mystery.local");
+    // The 400 never persists: the draft stays for repair.
+    expect((screen.getByLabelText("Allowed domains") as HTMLTextAreaElement).value).toContain(
+      "mystery.local"
+    );
+    expect(screen.queryByTestId("policy-saved")).toBeNull();
+  });
+
+  it("previews a local re-check diff and applies it", async () => {
+    const fetchMock = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const urlStr = String(url);
+        const method = init?.method ?? "GET";
+        if (urlStr === "/settings/policy" && method !== "PUT") {
+          return jsonResponse({
+            ...panePolicyPayload,
+            policy: {
+              ...panePolicyPayload.policy,
+              network: {
+                ...(panePolicyPayload.policy.network as Record<string, unknown>),
+                localExemptions: ["office-printer.local"],
+              },
+            },
+          });
+        }
+        if (urlStr === "/settings/policy" && method === "PUT") {
+          const sent = JSON.parse(init?.body as string) as { policy: unknown };
+          return jsonResponse({ ...panePolicyPayload, policy: sent.policy });
+        }
+        if (urlStr === "/settings/policy/recheck-local" && method === "POST") {
+          const sent = JSON.parse(init?.body as string) as { policy: Record<string, unknown> };
+          const sentNetwork = (sent.policy as { network: Record<string, unknown> }).network;
+          expect(sentNetwork).not.toHaveProperty("localExemptions");
+          return jsonResponse({
+            added: ["new-printer.local"],
+            removed: [],
+            unchanged: ["office-printer.local"],
+            unresolved: [],
+          });
+        }
+        if (urlStr === "/settings/policy/recheck-local/apply" && method === "POST") {
+          return jsonResponse({
+            ...panePolicyPayload,
+            policy: {
+              ...panePolicyPayload.policy,
+              network: {
+                ...(panePolicyPayload.policy.network as Record<string, unknown>),
+                localExemptions: ["new-printer.local", "office-printer.local"],
+              },
+            },
+            localAccess: { granted: ["new-printer.local"], removed: [], neverDialable: [] },
+          });
+        }
+        if (urlStr.includes("/settings/secrets/status")) {
+          return jsonResponse({ status: { GITHUB_TOKEN: true } });
+        }
+        return jsonResponse({});
+      }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    await user.click(screen.getByTestId("policy-recheck"));
+
+    const modal = await screen.findByTestId("policy-recheck-modal");
+    expect(within(modal).getByTestId("policy-recheck-added").textContent).toContain(
+      "new-printer.local"
+    );
+    expect(within(modal).getByTestId("policy-recheck-unchanged").textContent).toContain(
+      "office-printer.local"
+    );
+    const confirm = within(modal).getByTestId(
+      "policy-recheck-confirm"
+    ) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(false);
+
+    await user.click(confirm);
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-saved")).toBeDefined();
+    });
+    expect(screen.getByTestId("policy-saved").textContent).toContain(
+      "Local network access granted for: new-printer.local"
+    );
+    expect(
+      (screen.getByTestId("policy-local-exemptions") as HTMLTextAreaElement).value
+    ).toContain("new-printer.local");
+    expect(screen.queryByTestId("policy-recheck-modal")).toBeNull();
+  });
+
+  it("disables confirm while unresolved hosts remain", async () => {
+    const fetchMock = vi.fn(
+      async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const urlStr = String(url);
+        const method = init?.method ?? "GET";
+        if (urlStr === "/settings/policy") return jsonResponse(panePolicyPayload);
+        if (urlStr === "/settings/policy/recheck-local" && method === "POST") {
+          return jsonResponse({
+            added: [],
+            removed: [],
+            unchanged: [],
+            unresolved: ["ghost.local"],
+          });
+        }
+        if (urlStr.includes("/settings/secrets/status")) {
+          return jsonResponse({ status: { GITHUB_TOKEN: true } });
+        }
+        return jsonResponse({});
+      }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    await user.click(screen.getByTestId("policy-recheck"));
+
+    const modal = await screen.findByTestId("policy-recheck-modal");
+    expect(within(modal).getByTestId("policy-recheck-unresolved").textContent).toContain(
+      "ghost.local"
+    );
+    expect(within(modal).getByTestId("policy-recheck-unresolved").textContent).toContain(
+      "Cannot apply"
+    );
+    expect(
+      (within(modal).getByTestId("policy-recheck-confirm") as HTMLButtonElement).disabled
+    ).toBe(true);
+  });
+
+  it("renders the save control inside the shared settings footer", async () => {
+    stubPaneFetch(() => jsonResponse(panePolicyPayload));
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    // The save control matches every other Settings tab: a shared
+    // settings-footer wrapping a primary-button save-button.
+    const saveButton = screen.getByTestId("policy-save");
+    expect(saveButton).toHaveClass("primary-button");
+    expect(saveButton).toHaveClass("save-button");
+    expect(saveButton.closest(".settings-footer")).not.toBeNull();
   });
 });

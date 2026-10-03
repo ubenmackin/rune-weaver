@@ -3,8 +3,9 @@
 // Purpose: canonicalize resolver-accepted IPv4 spellings, IPv6 literals, and
 // origin forms before any range decision, so obfuscated hosts cannot bypass a
 // security check. Scope: parsing plus loopback, link-local, private-range,
-// shared/CGNAT, special-purpose reserved-block, and mapped/translated/embedded
-// IPv4-tail classification only, with no DNS or dial decisions.
+// shared/CGNAT, special-purpose reserved-block, cloud-metadata host matching,
+// and mapped/translated/embedded IPv4-tail classification only, with no DNS or
+// dial decisions.
 // Architectural role: the engine's single-source classification layer — the
 // SSRF egress guard and the formal policy invariant verifier both enter
 // through these helpers, so credential-confinement and egress verdicts cannot
@@ -310,11 +311,11 @@ public enum SensitiveAddressNormalization: Sendable {
 
 /// Sensitive-range classification shared by security checks.
 ///
-/// Covers loopback, link-local, private RFC 1918, the shared address space
-/// (`100.64.0.0/10`, where cloud metadata literals such as Alibaba's
-/// `100.100.100.200` answer), special-purpose reserved IPv4 blocks,
-/// `0.0.0.0/8`, IPv6 unique-local addresses, and the IPv4-embedding
-/// translation prefixes (mapped, translated, NAT64, 6to4, and
+/// Covers cloud-metadata hostnames and literals, loopback, link-local, private
+/// RFC 1918, the shared address space (`100.64.0.0/10`, where cloud metadata
+/// literals such as Alibaba's `100.100.100.200` answer), special-purpose
+/// reserved IPv4 blocks, `0.0.0.0/8`, IPv6 unique-local addresses, and the
+/// IPv4-embedding translation prefixes (mapped, translated, NAT64, 6to4, and
 /// IPv4-compatible) so fetch, API, and policy-vault checks share one range
 /// table.
 public enum SensitiveAddressRanges: Sendable {
@@ -636,5 +637,44 @@ public enum SensitiveAddressRanges: Sendable {
         }
         guard let value = ipv4Value(cleaned) else { return false }
         return isSensitiveIPv4Value(value)
+    }
+}
+
+// MARK: - Cloud Metadata Hosts
+
+public extension SensitiveAddressRanges {
+    /// Well-known cloud metadata hostnames plus metadata address literals,
+    /// refused even over public DNS and even when an allowlisted name resolves
+    /// to them. Single-sourced here so the runtime SSRF guard and the policy
+    /// invariant verifier cannot drift on what counts as a metadata target.
+    static let blockedMetadataHosts: Set<String> = [
+        "metadata.google.internal",
+        "metadata.google",
+        "metadata.goog",
+        "instance-data.compute.internal",
+        "instance-data",
+        "metadata.azure.internal",
+        "metadata.aws.internal",
+        "metadata",
+        "169.254.169.254",
+        "100.100.100.200"
+    ]
+
+    /// Whether a host is a well-known metadata hostname or metadata literal.
+    /// Intent: exact plus dot-suffix match against the blocked set keeps
+    /// subdomains like `sub.metadata.google.internal` refused while
+    /// `foo-metadata.google-bar.example.com` passes; substring matching
+    /// would overblock the latter, and an address literal such as
+    /// `100.100.100.200` matches exactly so it is refused before any allowlist
+    /// exemption. Invariant: comparison uses the cleaned lowercased base form,
+    /// and empty hosts never match.
+    static func isMetadataHost(_ host: String) -> Bool {
+        let lowered = SensitiveAddressNormalization.cleanedHostBase(host)
+        guard !lowered.isEmpty else { return false }
+        if blockedMetadataHosts.contains(lowered) {
+            return true
+        }
+        // Dot-suffix covers subdomains of a blocked name without substring overblocking.
+        return blockedMetadataHosts.contains { lowered.hasSuffix("." + $0) }
     }
 }

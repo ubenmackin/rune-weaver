@@ -395,7 +395,7 @@ public actor FanOutEngine {
     /// nearest sane bound instead of oversubscribing the serving model.
     private var config: FanOutConfig
     /// Background reviewer over the collected worker outputs, injected from
-    /// the same serving instance the Muse uses so review quality tracks the
+    /// the same serving instance the Wayfinder uses so review quality tracks the
     /// active model posture; nil keeps the merge pass on its deterministic
     /// and fail-open fallbacks instead of spending a review call.
     private let reviewer: (any LLMProvider)?

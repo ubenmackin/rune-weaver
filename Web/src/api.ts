@@ -1981,7 +1981,7 @@ export function patchGoalStep(
   );
 }
 
-// One proactive Muse suggestion mirrored from the engine `Idea` snapshot. The
+// One proactive Wayfinder suggestion mirrored from the engine `Idea` snapshot. The
 // kind and status ride as the engine raw strings so the dashboard never invents
 // a case the store cannot round-trip; the goal link stays optional because tips
 // carry no owning goal.
@@ -2320,7 +2320,7 @@ export interface ProactiveSettingsUpdate {
   judgeTimeoutSeconds?: number;
 }
 
-// Proactive Muse suggestion policy mirroring the engine `IdeasConfig`
+// Proactive Wayfinder suggestion policy mirroring the engine `IdeasConfig`
 // (Sources/RuneWeaverCore/Config.swift). Ideas stay opt-in so a fresh install
 // never spends background review calls; the per-cycle cap and review timeout
 // stay file-owned planning bounds.
@@ -3380,7 +3380,7 @@ export interface SettingsResponse {
   // Interruption policy under [proactive]; optional for back-compat with
   // older engines that predate the section.
   proactive?: ProactiveConfigData;
-  // Proactive Muse suggestion policy under [ideas]; optional for back-compat
+  // Proactive Wayfinder suggestion policy under [ideas]; optional for back-compat
   // with older engines that predate the section.
   ideas?: IdeasConfigData;
   // Parallel worker fan-out policy under [fanout]; optional for back-compat
@@ -3463,22 +3463,6 @@ export interface UpdateSettingsInput {
   serverHostname?: string;
   serverPort?: number;
   serverAllowedHosts?: string[];
-}
-
-// Textarea mirror of the empty allowed origins defaults.
-export const DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT = "";
-
-// Parses the allowed-origins textarea into the wire shape, defaulting to an
-// empty allowlist when no text is present.
-export function parseAllowedOriginsText(text: string | undefined | null): string[] {
-  return parseLinesToList(text, []);
-}
-
-// Formats an allowed-origins array for the multiline editor.
-export function formatAllowedOriginsText(
-  origins: string[] | undefined | null
-): string {
-  return formatListToText(origins, DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT);
 }
 
 // Manual mirrors of ServerEndpointConfig ([server] bind) in

@@ -1,4 +1,4 @@
-// Rune Weaver Core — SQLite-backed durable store for proactive Muse ideas.
+// Rune Weaver Core — SQLite-backed durable store for proactive Wayfinder ideas.
 //
 // Persists the suggestions the ideas engine proposes in the shared
 // `episodes.db` file beside sessions, episodes, goals, trust grants, and run

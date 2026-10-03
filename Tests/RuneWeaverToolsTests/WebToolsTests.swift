@@ -367,6 +367,83 @@ struct WebFetchSafetyTests {
         #expect(envelope.status == "unsupported")
         #expect(!envelope.finalUrl.isEmpty)
     }
+
+    @Test
+    func `Extra origins exempt a private literal in the fetch guard`() async {
+        // Private literals need no DNS proof, so no stub is required: the
+        // literal stage alone decides with and without the extra set.
+        let privateURL = "http://192.168.1.10/status"
+        let denied = await WebFetchSSRFGuard.denyReasonAsync(
+            for: privateURL,
+            browserConfig: BrowserConfig(),
+            mediaConfig: nil,
+            extraAllowlistedOrigins: []
+        )
+        #expect(denied != nil)
+        let allowed = await WebFetchSSRFGuard.denyReasonAsync(
+            for: privateURL,
+            browserConfig: BrowserConfig(),
+            mediaConfig: nil,
+            extraAllowlistedOrigins: ["192.168.1.10"]
+        )
+        #expect(allowed == nil)
+        // Never-exempt targets stay refused even when the extra set names
+        // them, so a policy exemption cannot launder metadata or link-local.
+        let metadata = await WebFetchSSRFGuard.denyReasonAsync(
+            for: "http://169.254.169.254/latest/meta-data",
+            browserConfig: BrowserConfig(),
+            mediaConfig: nil,
+            extraAllowlistedOrigins: ["169.254.169.254"]
+        )
+        #expect(metadata != nil)
+    }
+
+    @Test
+    func `Fetch initial guard honors extra origins end to end`() async throws {
+        // Private literals settle without DNS, so the stub transport alone
+        // keeps this hermetic: without the extra set the initial guard
+        // rejects before the transport, while the merged set reaches it.
+        let privateURLString = "http://192.168.1.10/status"
+        let privateURL = try #require(URL(string: privateURLString))
+        let transport = WebTestSupport.RoutingFetchTransport { request in
+            let body = Data("<html><body><p>homelab ok</p></body></html>".utf8)
+            return (body, WebTestSupport.okResponse(for: request.url ?? privateURL))
+        }
+        let deniedTool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
+        let deniedOutput = try await deniedTool.execute(
+            input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"http://192.168.1.10/status"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(deniedOutput.isError)
+        let deniedEnvelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(deniedOutput.content.utf8))
+        #expect(deniedEnvelope.status == "unsupported")
+        let allowedTool = WebFetchTool(
+            browserConfig: BrowserConfig(),
+            transport: transport,
+            extraAllowlistedOrigins: ["192.168.1.10"]
+        )
+        let allowedOutput = try await allowedTool.execute(
+            input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"http://192.168.1.10/status"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(!allowedOutput.isError)
+        let allowedEnvelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(allowedOutput.content.utf8))
+        #expect(allowedEnvelope.status == "ok")
+        #expect((allowedEnvelope.content ?? "").contains("homelab ok"))
+        // The factory threads the same set so a built web tool set honors
+        // the exemption without callers reaching for the concrete type.
+        let built = WebTools.makeTools(
+            browserConfig: BrowserConfig(),
+            fetchTransport: transport,
+            extraAllowlistedOrigins: ["192.168.1.10"]
+        )
+        let builtFetch = try #require(built.first(where: { $0.name == "web.fetch" }))
+        let builtOutput = try await builtFetch.execute(
+            input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"http://192.168.1.10/status"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(!builtOutput.isError)
+    }
 }
 
 @Suite("Browser Config")
@@ -604,7 +681,12 @@ struct SearXNGEnsurerRuntimeTests {
     }
 
     @Test
-    func `Allowlisted origins extracts media servers and browser allowed origins`() {
+    func `Allowlisted origins extracts auto service origins and ignores retired browser allowed origins`() {
+        // `browser.allowed_origins` is retired migration input only: it must
+        // never feed the runtime exemption set, which carries the auto service
+        // origins (`searxng_url`, enabled media LAN URLs, LLM server URLs).
+        // Owner grants arrive via the snapshot's `local_exemptions`, unioned
+        // by callers.
         let browser = BrowserConfig(
             searxngURL: "http://127.0.0.1:8888",
             allowedOrigins: ["*.homelab.local", "192.168.1.*"]
@@ -624,27 +706,40 @@ struct SearXNGEnsurerRuntimeTests {
         #expect(origins.contains("sonarr.local"))
         #expect(origins.contains("10.0.0.2:7878"))
         #expect(origins.contains("10.0.0.2"))
-        #expect(origins.contains("*.homelab.local"))
-        #expect(origins.contains("192.168.1.*"))
+        #expect(!origins.contains("*.homelab.local"))
+        #expect(!origins.contains("192.168.1.*"))
+        // A private literal named only by the retired list stays denied; the
+        // same pattern unioned as an owner exemption still clears.
+        #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.120:8080/status", browserConfig: browser, mediaConfig: media) != nil)
+        #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.120:8080/status", allowlistedOrigins: origins.union(["192.168.1.*"])) == nil)
     }
 
     @Test
-    func `SSRF allowlist permits wildcard homelab hosts and IPs but denies link-local`() {
+    func `Retired browser allowed origins grant no dialing`() {
+        // The retired list must not exempt anything at dial time: the same
+        // patterns keep their matcher semantics only when carried as an
+        // explicit exemption set (the `local_exemptions` union path), never
+        // via the browser config.
         let browser = BrowserConfig(
             allowedOrigins: ["*.homelab.local", "192.168.1.*"]
         )
         let origins = ApiSSRFGuard.allowlistedOrigins(browserConfig: browser)
-        // Allowlisted names prove addresses explicitly so rebinding cannot launder
-        // a blocked target behind a permitted suffix.
+        #expect(!origins.contains("*.homelab.local"))
+        #expect(!origins.contains("192.168.1.*"))
+        // Matcher semantics preserved at the explicit-set layer: an
+        // allowlisted name proves its private resolutions while rebinding to
+        // link-local stays denied, and literal wildcards match without DNS.
+        let explicit: Set = ["*.homelab.local", "192.168.1.*"]
         #expect(ApiSSRFGuard.vettedIPListDenial(
-            host: "nas.homelab.local", addresses: ["192.168.1.10"], origins: origins
+            host: "nas.homelab.local", addresses: ["192.168.1.10"], origins: explicit
         ) == nil)
         // Rebinding an allowlisted name to link-local stays denied.
         #expect(ApiSSRFGuard.vettedIPListDenial(
-            host: "nas.homelab.local", addresses: ["169.254.169.254"], origins: origins
+            host: "nas.homelab.local", addresses: ["169.254.169.254"], origins: explicit
         ) != nil)
-        // Wildcard IP match stays literal-only without DNS.
-        #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.120:8080/status", browserConfig: browser) == nil)
+        // The retired config path grants nothing: the private literal and the
+        // off-pattern address both refuse without an owner exemption.
+        #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.120:8080/status", browserConfig: browser) != nil)
         // Different IP not matched
         #expect(ApiSSRFGuard.denyReason(for: "http://10.0.0.1/admin", browserConfig: browser) != nil)
         // Link-local is never allowed
@@ -876,6 +971,226 @@ struct SSRFEmbeddedIPv4SpellingTests {
         for address in publicAddresses {
             let denial = ApiSSRFGuard.vettedIPListDenial(host: "example.com", addresses: [address])
             #expect(denial == nil, "expected '\(address)' to stay dialable")
+        }
+    }
+}
+
+@Suite("SSRF Local Access Classification")
+struct LocalAccessClassificationTests {
+    /// Reason carried by a refusal-shaped verdict, or nil for grant verdicts.
+    private static func reason(_ verdict: LocalAccessVerdict) -> String? {
+        switch verdict {
+        case .publicDestination, .localNetwork:
+            nil
+        case let .neverDialable(reason), let .unresolved(reason):
+            reason
+        }
+    }
+
+    /// Whether the verdict refuses even under an exemption.
+    private static func isNeverDialable(_ verdict: LocalAccessVerdict) -> Bool {
+        if case .neverDialable = verdict {
+            return true
+        }
+        return false
+    }
+
+    /// Whether the verdict fails closed without a proven address.
+    private static func isUnresolved(_ verdict: LocalAccessVerdict) -> Bool {
+        if case .unresolved = verdict {
+            return true
+        }
+        return false
+    }
+
+    /// Bare-host URL shape the guard's URL APIs need, bracketing IPv6 literals.
+    private static func urlString(forHost host: String) -> String {
+        let cleaned = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return "http:///" }
+        if cleaned.contains(":"), !cleaned.hasPrefix("[") {
+            return "http://[\(cleaned)]/"
+        }
+        return "http://\(cleaned)/"
+    }
+
+    @Test
+    func `Literal matrix classifies public local and never-dialable spellings`() async {
+        let publicHosts = [
+            "93.184.216.34",
+            "8.8.8.8",
+            "2606:4700:4700::1111",
+            "64:ff9b::5db8:d822"
+        ]
+        for host in publicHosts {
+            let verdict = await ApiSSRFGuard.classifyLocalAccess(forHost: host)
+            #expect(verdict == .publicDestination, "expected a public verdict for \(host), got \(verdict)")
+        }
+        // Loopback, private, CGNAT, reserved, and unique-local stay in the
+        // exemption-eligible local bucket rather than never-dialable.
+        let localHosts = [
+            "127.0.0.1",
+            "::1",
+            "0.0.0.0",
+            "localhost",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.10",
+            "100.64.0.1",
+            "198.18.0.1",
+            "240.0.0.1",
+            "fd00::1",
+            "64:ff9b::a00:1"
+        ]
+        for host in localHosts {
+            let verdict = await ApiSSRFGuard.classifyLocalAccess(forHost: host)
+            #expect(verdict == .localNetwork, "expected a local-network verdict for \(host), got \(verdict)")
+        }
+        // Metadata, link-local, and embedded translations of either refuse
+        // before any exemption can apply.
+        let neverHosts = [
+            "metadata.google.internal",
+            "metadata",
+            "100.100.100.200",
+            "169.254.169.254",
+            "fe80::1",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b:1:a9fe:a9:fe00::",
+            "2002:a9fe:a9fe::",
+            "::a9fe:a9fe"
+        ]
+        for host in neverHosts {
+            let verdict = await ApiSSRFGuard.classifyLocalAccess(forHost: host)
+            #expect(Self.isNeverDialable(verdict), "expected a never-dialable verdict for \(host), got \(verdict)")
+            #expect(Self.reason(verdict) != nil, "expected a refusal reason for \(host)")
+        }
+    }
+
+    @Test
+    func `Hostname matrix proves answers through the task-scoped resolver`() async {
+        let answers: [String: [String]] = [
+            "airflow.int.volcrypt.com": ["10.100.5.34"],
+            "public.example.com": ["93.184.216.34", "93.184.216.35"],
+            "mixed.example.com": ["93.184.216.34", "10.0.0.5"],
+            "loopback.example.com": ["127.0.0.1"],
+            "link-local.example.com": ["169.254.169.254"],
+            "metadata-literal.example.com": ["100.100.100.200"],
+            "embedded.example.com": ["64:ff9b::a9fe:a9fe"],
+            "empty.example.com": []
+        ]
+        let resolver: @Sendable (String) -> [String] = { answers[$0] ?? [] }
+        await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
+            let airflow = await ApiSSRFGuard.classifyLocalAccess(forHost: "airflow.int.volcrypt.com")
+            #expect(airflow == .localNetwork, "expected the homelab answer to classify local, got \(airflow)")
+            let publicVerdict = await ApiSSRFGuard.classifyLocalAccess(forHost: "public.example.com")
+            #expect(publicVerdict == .publicDestination, "expected a public answer to stay public, got \(publicVerdict)")
+            // One sensitive address makes the whole name local: a host that
+            // answers both must never be stored as public-only.
+            let mixed = await ApiSSRFGuard.classifyLocalAccess(forHost: "mixed.example.com")
+            #expect(mixed == .localNetwork, "expected a mixed answer to classify local, got \(mixed)")
+            let loopback = await ApiSSRFGuard.classifyLocalAccess(forHost: "loopback.example.com")
+            #expect(loopback == .localNetwork, "expected a loopback answer to classify local, got \(loopback)")
+            for host in ["link-local.example.com", "metadata-literal.example.com", "embedded.example.com"] {
+                let verdict = await ApiSSRFGuard.classifyLocalAccess(forHost: host)
+                #expect(Self.isNeverDialable(verdict), "expected never-dialable for \(host), got \(verdict)")
+            }
+            let empty = await ApiSSRFGuard.classifyLocalAccess(forHost: "empty.example.com")
+            #expect(Self.isUnresolved(empty), "expected an empty answer to fail closed, got \(empty)")
+            let unmapped = await ApiSSRFGuard.classifyLocalAccess(forHost: "unmapped.example.com")
+            #expect(Self.isUnresolved(unmapped), "expected an unknown host to fail closed, got \(unmapped)")
+        }
+    }
+
+    @Test
+    func `Blank hosts fail closed to unresolved`() async {
+        let blank = await ApiSSRFGuard.classifyLocalAccess(forHost: "")
+        #expect(Self.isUnresolved(blank), "expected an empty host to fail closed, got \(blank)")
+        let whitespace = await ApiSSRFGuard.classifyLocalAccess(forHost: "   ")
+        #expect(Self.isUnresolved(whitespace), "expected a blank host to fail closed, got \(whitespace)")
+    }
+
+    @Test
+    func `A wedged resolver times out to unresolved`() async {
+        // Block the bounded pool well past the fail-closed budget; the
+        // classifier must answer unresolved instead of waiting for the wedged
+        // lookup.
+        let resolver: @Sendable (String) -> [String] = { _ in
+            Thread.sleep(forTimeInterval: ApiSSRFGuard.dnsResolutionTimeoutSeconds + 5)
+            return ["93.184.216.34"]
+        }
+        let verdict = await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
+            await ApiSSRFGuard.classifyLocalAccess(forHost: "wedged.example.com")
+        }
+        #expect(Self.isUnresolved(verdict), "expected the timeout to fail closed, got \(verdict)")
+    }
+
+    @Test
+    func `Verdicts agree with the unexempted guard refusal`() async {
+        let answers: [String: [String]] = [
+            "airflow.int.volcrypt.com": ["10.100.5.34"],
+            "public.example.com": ["93.184.216.34"],
+            "mixed.example.com": ["93.184.216.34", "10.0.0.5"],
+            "loopback.example.com": ["127.0.0.1"],
+            "blocked.example.com": ["169.254.169.254"],
+            "empty.example.com": []
+        ]
+        let resolver: @Sendable (String) -> [String] = { answers[$0] ?? [] }
+        let hosts = [
+            "airflow.int.volcrypt.com",
+            "public.example.com",
+            "mixed.example.com",
+            "loopback.example.com",
+            "blocked.example.com",
+            "empty.example.com",
+            "93.184.216.34",
+            "10.0.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "fe80::1",
+            "metadata.google.internal",
+            "100.100.100.200",
+            "64:ff9b::a9fe:a9fe",
+            "fd00::1",
+            "2606:4700:4700::1111",
+            ""
+        ]
+        await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
+            for host in hosts {
+                let verdict = await ApiSSRFGuard.classifyLocalAccess(forHost: host)
+                let refusal = await ApiSSRFGuard.denyReasonAsync(
+                    for: Self.urlString(forHost: host),
+                    allowlistedOrigins: []
+                )
+                if verdict == .publicDestination {
+                    #expect(refusal == nil, "expected no guard refusal for public host '\(host)'")
+                } else {
+                    #expect(refusal != nil, "expected a guard refusal for '\(host)' with verdict \(verdict)")
+                }
+            }
+        }
+    }
+
+    @Test
+    func `Refusal-shaped verdicts reuse the guard wording`() async {
+        let answers: [String: [String]] = [
+            "blocked.example.com": ["169.254.169.254"],
+            "empty.example.com": []
+        ]
+        let resolver: @Sendable (String) -> [String] = { answers[$0] ?? [] }
+        let pairs: [(host: String, url: String)] = [
+            ("metadata.google.internal", "http://metadata.google.internal/"),
+            ("100.100.100.200", "http://100.100.100.200/"),
+            ("169.254.169.254", "http://169.254.169.254/"),
+            ("fe80::1", "http://[fe80::1]/"),
+            ("64:ff9b::a9fe:a9fe", "http://[64:ff9b::a9fe:a9fe]/"),
+            ("blocked.example.com", "http://blocked.example.com/"),
+            ("empty.example.com", "http://empty.example.com/")
+        ]
+        await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
+            for pair in pairs {
+                let verdict = await ApiSSRFGuard.classifyLocalAccess(forHost: pair.host)
+                let denial = await ApiSSRFGuard.denyReasonAsync(for: pair.url, allowlistedOrigins: [])
+                #expect(Self.reason(verdict) == denial, "expected shared wording for '\(pair.host)': verdict \(verdict) vs denial \(denial ?? "nil")")
+            }
         }
     }
 }

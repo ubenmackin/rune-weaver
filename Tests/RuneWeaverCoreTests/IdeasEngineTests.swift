@@ -1,4 +1,4 @@
-// Rune Weaver Core Tests — Proactive Muse ideas engine, store, and config.
+// Rune Weaver Core Tests — Proactive Wayfinder ideas engine, store, and config.
 //
 // Exercises the ideas stack end to end against isolated temporary databases
 // with a stub language provider: forgiving JSON parsing (fenced and prefixed

@@ -17,6 +17,9 @@ interface ModalProps {
   // Full container class list (for example "modal-container
   // session-delete-modal") so size variants stay with the caller.
   containerClassName?: string;
+  // Optional test identifier for testing queries.
+  testId?: string;
+  "data-testid"?: string;
 }
 
 export default function Modal({
@@ -25,6 +28,8 @@ export default function Modal({
   onConfirm,
   children,
   containerClassName = "modal-container",
+  testId,
+  "data-testid": dataTestId,
 }: ModalProps) {
   // Focus the container on open via effect instead of autoFocus so focus
   // lands inside the dialog for keyboard users without stealing it on
@@ -72,6 +77,7 @@ export default function Modal({
         tabIndex={-1}
         className={containerClassName}
         onClick={(event: MouseEvent) => event.stopPropagation()}
+        data-testid={testId ?? dataTestId}
       >
         {children}
       </div>

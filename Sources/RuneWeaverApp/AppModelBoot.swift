@@ -187,7 +187,10 @@ extension AppModel {
         // One policy store per process, loaded before the registry builds, so
         // the served egress supervisor and the settings policy routes share
         // one instance and an HTTP policy write applies without a restart.
-        let policyStore = await PolicyStore.makeLoaded(injected: nil)
+        let policyStore = await PolicyStore.makeLoaded(
+            injected: nil,
+            legacyLocalOrigins: config.browser.allowedOrigins
+        )
         let plugins: [any Tool]
         do {
             plugins = try await BuiltinToolPlugins.makeAllTools(
