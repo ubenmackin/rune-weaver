@@ -545,7 +545,7 @@ describe("PolicyPane", () => {
     expect(isValidDomainLine("2001:db8::1")).toBe(true);
   });
 
-  it("maintains domain validation parity with server SettingsRouteTests (Finding 10)", () => {
+  it("maintains domain validation parity with server SettingsRouteTests", () => {
     const valid = [
       "api.example.com",
       "*.example.com",

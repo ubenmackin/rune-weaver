@@ -511,7 +511,7 @@ private func validateUnbracketedHostShape(_ lowered: String, trimmed: String, co
 
 /// Validates one host entry at the network and binding ingress gates.
 ///
-/// NOTE(Finding 10 - Architectural Parity):
+/// Host-shape gate parity:
 /// This server-side gate enforces authoritative host validation. A matching client-side
 /// implementation exists in Web/src/components/PolicyPane.tsx (`isValidDomainLine`) to give
 /// instant interactive UI feedback without network round-trips. Test suites in SettingsRouteTests.swift

@@ -2620,7 +2620,7 @@ struct SettingsPolicyRecheckLocalTests {
     }
 
     @Test
-    func `Domain validation parity with PolicyPane client validator (Finding 10)`() async throws {
+    func `Domain validation parity with PolicyPane client validator`() async throws {
         let (store, _, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
@@ -2677,7 +2677,7 @@ struct SettingsPolicyRecheckLocalTests {
     }
 
     @Test
-    func `PolicyStore optimistic concurrency CAS rejection (Finding 9)`() async throws {
+    func `PolicyStore optimistic concurrency CAS rejection`() async throws {
         let (store, _, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 
