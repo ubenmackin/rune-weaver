@@ -1,4 +1,4 @@
-// Rune Weaver Core — Proactive Muse engine that proposes next moves.
+// Rune Weaver Core — Proactive Wayfinder engine that proposes next moves.
 //
 // Reviews recent goal outcomes and a memory-facts summary, then spends exactly
 // one cheap model call to turn them into a small batch of suggestions. The
@@ -172,7 +172,7 @@ public actor IdeasEngine {
     /// into `goalId`, which is the link the accept route re-plans against.
     static func reviewPrompt(outcomes: [String], facts: [String], maxPerCycle: Int) -> String {
         var lines: [String] = []
-        lines.append("You are the Muse for Rune Weaver, a personal assistant harness.")
+        lines.append("You are the Wayfinder for Rune Weaver, a personal assistant harness.")
         lines.append("Propose at most \(maxPerCycle) proactive next moves the owner would likely value, based on recent goal outcomes and known facts.")
         lines.append("")
         lines.append("Recent goal outcomes:")

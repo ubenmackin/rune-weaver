@@ -7,6 +7,9 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
+declare const process: { env: Record<string, string | undefined> };
+process.env.VITEST_SKIP_INSTALL_CHECKS = "1";
+
 // Static bundle for the engine to serve. Base "./" keeps asset URLs
 // relative so the same dist works behind any loopback port with no CORS
 // and no runtime Node server.

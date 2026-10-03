@@ -5,11 +5,15 @@
 // Violations fall back to the safe factory posture — the engine never runs
 // with a broken policy.
 //
-// Two invariants are enforced over the network-plus-credentials scope:
+// Two formal invariants are enforced over the network-plus-credentials scope,
+// plus a local-exemption safety check for declarative local-network grants:
 //   1. Credential Binding Confinement — no credential targets wildcards beyond
 //      a single leading `*.` subdomain edge, metadata hosts, loopback,
 //      link-local, or private ranges.
 //   2. Rule Shadow Prevention — broad allows cannot shadow specific denies.
+//   3. Local Exemption Safety — no blank, TOML-breaking, malformed, metadata,
+//      link-local, or embedded-translation entry can become an exemption;
+//      loopback, private, CGNAT, and ULA hosts remain allowed by design.
 
 import Foundation
 
@@ -36,7 +40,7 @@ public enum PolicyInvariantVerifier: Sendable {
         "localhost" // Credentials should target real endpoints
     ]
 
-    /// Runs both invariant checks and returns violation descriptions.
+    /// Runs all invariant checks and returns violation descriptions.
     ///
     /// - Parameter policy: The security policy to verify.
     /// - Returns: Empty array when all invariants hold, or human-readable
@@ -45,6 +49,7 @@ public enum PolicyInvariantVerifier: Sendable {
         var violations: [String] = []
         violations.append(contentsOf: verifyCredentialConfinement(policy))
         violations.append(contentsOf: verifyRuleShadowing(policy))
+        violations.append(contentsOf: verifyLocalExemptions(policy))
         return violations
     }
 
@@ -187,6 +192,95 @@ public enum PolicyInvariantVerifier: Sendable {
                         )
                     }
                 }
+            }
+        }
+
+        return violations
+    }
+
+    // MARK: - Invariant 3: Local Exemption Safety
+
+    /// Guarantees every `[network].local_exemptions` entry is a well-formed,
+    /// TOML-safe grant that names no never-dialable target.
+    ///
+    /// Formally: ∀ e ∈ localExemptions, e ∉ Blank ∪ TOMLBreaking ∪
+    /// MalformedShapes, and Target(e) ∉ Metadata ∪ LinkLocal, where Target
+    /// strips a single leading `*.` or trailing `.*` edge because a wildcard
+    /// authorizes through the base or stem it names. Loopback, private RFC
+    /// 1918, shared/CGNAT, and unique-local addresses stay allowed by design:
+    /// an exemption exists precisely to reach a local service, while metadata
+    /// and link-local are never dialable through any spelling — including a
+    /// NAT64, 6to4, or IPv4-compatible literal that embeds one.
+    /// - Parameter policy: The security policy to verify.
+    /// - Returns: Empty array when every exemption is safe, or human-readable
+    ///   violation descriptions for each failing entry.
+    public static func verifyLocalExemptions(_ policy: SecurityPolicy) -> [String] {
+        var violations: [String] = []
+
+        for entry in policy.network.localExemptions {
+            let lowered = entry.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+            guard !lowered.isEmpty else {
+                violations.append(
+                    "Invariant 3 (Local Exemption Safety): local_exemptions contains a blank entry, "
+                        + "which can never match a host."
+                )
+                continue
+            }
+            guard !PolicyStore.containsTOMLBreakingScalar(entry) else {
+                violations.append(
+                    "Invariant 3 (Local Exemption Safety): local_exemptions entry '\(entry)' carries "
+                        + "a quote or control character TOML cannot round-trip."
+                )
+                continue
+            }
+            guard AllowedOriginPattern.isValidExemptionEntry(lowered) else {
+                violations.append(
+                    "Invariant 3 (Local Exemption Safety): local_exemptions entry '\(entry)' is not "
+                        + "a valid host, address literal, or single-edge wildcard."
+                )
+                continue
+            }
+
+            // A wildcard authorizes through the base or stem it names, so the
+            // never-dialable checks run on what the matcher would compare. The
+            // bare universal `*` names no concrete target to classify.
+            let target: String = switch AllowedOriginPattern.classifyWildcard(lowered) {
+            case .none:
+                lowered
+            case .leading:
+                String(lowered.dropFirst(2))
+            case .trailing:
+                String(lowered.dropLast(2))
+            case .invalidShape, .invalidSuffix, .invalidStem:
+                lowered
+            }
+
+            if SensitiveAddressRanges.isMetadataHost(target) {
+                violations.append(
+                    "Invariant 3 (Local Exemption Safety): local_exemptions entry '\(entry)' targets "
+                        + "metadata host '\(target)'."
+                )
+                continue
+            }
+            if SensitiveAddressRanges.isLinkLocalIPv4(target) || SensitiveAddressRanges.isLinkLocalIPv6(target) {
+                violations.append(
+                    "Invariant 3 (Local Exemption Safety): local_exemptions entry '\(entry)' targets "
+                        + "link-local address '\(target)'."
+                )
+                continue
+            }
+            // A decoded link-local or metadata address refuses even for an
+            // allowlisted name, exactly like its direct spelling, so a
+            // translation literal cannot smuggle a never-dialable target past
+            // the exemption gate.
+            if let embedded = SensitiveAddressRanges.embeddedIPv4Literal(target),
+               SensitiveAddressRanges.isMetadataHost(embedded) || SensitiveAddressRanges.isLinkLocalIPv4(embedded)
+            {
+                violations.append(
+                    "Invariant 3 (Local Exemption Safety): local_exemptions entry '\(entry)' embeds "
+                        + "never-dialable address '\(embedded)'."
+                )
             }
         }
 

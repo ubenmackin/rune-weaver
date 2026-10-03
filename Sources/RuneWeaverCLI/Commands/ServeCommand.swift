@@ -390,7 +390,10 @@ extension ServeCommand {
         // supervisor without a restart. Loading here seeds the factory-safe
         // posture on a missing file and leaves corruption to fail the first
         // tool build closed below.
-        let policyStore = await PolicyStore.makeLoaded(injected: nil)
+        let policyStore = await PolicyStore.makeLoaded(
+            injected: nil,
+            legacyLocalOrigins: loaded.config.browser.allowedOrigins
+        )
         let goalStack = makeGoalStack(
             memoryConfig: loaded.config.memory,
             goalsConfig: loaded.config.goals,

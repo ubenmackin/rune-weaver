@@ -10,6 +10,9 @@
 // Architectural role: single-source verdict layer backing `ApiSSRFGuard`; the
 // sync engine, the async inline stage, and the async pin-producing path share
 // this stage so literal and resolved decisions cannot diverge between callers.
+// The same layer also carries `LocalAccessVerdict`, the save-time
+// local-access classifier's result, so a host's stored access grant and its
+// dial decision cannot drift.
 
 import Foundation
 import RuneWeaverCore
@@ -56,6 +59,29 @@ public enum ApiSSRFVetting: Sendable, Equatable {
     }
 }
 
+/// Whether saving a host should grant the owner access to local-network
+/// destinations.
+///
+/// One verdict type owns the save-time decision so the stored grant and the
+/// dial-time guard cannot disagree: `.neverDialable` mirrors the guard's
+/// no-exemption refusal for metadata, link-local, and embedded-translation
+/// targets; `.localNetwork` mirrors the exemptable-sensitive ranges (loopback,
+/// private, CGNAT, reserved, and unique-local); `.publicDestination` mirrors
+/// the public-literal and public-answer allowance; and `.unresolved` mirrors
+/// the guard's fail-closed answer when no address could be proven.
+public enum LocalAccessVerdict: Sendable, Equatable {
+    /// A public destination: saving it grants no local-network reach.
+    case publicDestination
+    /// A loopback, private, CGNAT, reserved, or unique-local destination.
+    case localNetwork
+    /// Never dialable even under an exemption: metadata, link-local, or an
+    /// embedded translation of either.
+    case neverDialable(reason: String)
+    /// No address could be proven (blank host, empty answer, timeout, or
+    /// cancellation); absence of proof never grants local access.
+    case unresolved(reason: String)
+}
+
 extension ApiSSRFGuard {
     /// Async vetting against an explicit exemption set, returning the dial pin.
     /// Literal checks run inline on the calling task while DNS hops to the
@@ -71,6 +97,24 @@ extension ApiSSRFGuard {
         allowlistedOrigins: Set<String> = []
     ) async -> ApiSSRFVetting {
         await vet(for: rawURL, origins: allowlistedOrigins, hasLLMOrigins: false)
+    }
+
+    /// Async vetting against an explicit exemption set with honest wording,
+    /// returning the dial pin. Identical vetting to the default overload —
+    /// `hasLLMOrigins` tunes only the loopback denial wording so a caller that
+    /// unions LLM endpoints into its exemption set never denies with a reason
+    /// promising fewer exemptions than the gate actually honors.
+    /// - Parameters:
+    ///   - rawURL: Candidate URL.
+    ///   - allowlistedOrigins: Precomputed `host:port` exemptions that may be dialed.
+    ///   - hasLLMOrigins: Whether LLM endpoints contribute exemptions, for honest wording.
+    /// - Returns: Dialable pin, or a refusal reason.
+    public static func vetAsync(
+        for rawURL: String,
+        allowlistedOrigins: Set<String>,
+        hasLLMOrigins: Bool
+    ) async -> ApiSSRFVetting {
+        await vet(for: rawURL, origins: allowlistedOrigins, hasLLMOrigins: hasLLMOrigins)
     }
 
     /// Async vetting for a URL, returning the dial pin.

@@ -933,7 +933,7 @@ public struct EmailConfig: Sendable, Codable, Equatable {
     }
 }
 
-/// `[ideas]` — proactive Muse suggestions.
+/// `[ideas]` — proactive Wayfinder suggestions.
 ///
 /// Ideas stay opt-in so a fresh install never spends background model calls
 /// brainstorming. `maxPerCycle` caps how many candidate ideas one generation
@@ -1145,7 +1145,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var bash = BashConfig()
     /// Interruption policy for background scheduler and goal turns.
     public var proactive = ProactiveConfig()
-    /// Proactive Muse idea suggestions. Off by default.
+    /// Proactive Wayfinder idea suggestions. Off by default.
     public var ideas = IdeasConfig()
     /// Parallel worker fan-out policy. Availability flows through tool registration.
     public var fanOut = FanOutConfig()

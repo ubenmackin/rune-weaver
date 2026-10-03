@@ -1,6 +1,6 @@
 // Rune Weaver Server — Proactive idea REST surface for the engine API.
 //
-// Purpose: exposes the suggestions the Muse engine proposes over HTTP so
+// Purpose: exposes the suggestions the Wayfinder engine proposes over HTTP so
 // dashboards can review them: listing with status filtering, per-status counts
 // for the attention badge, dismissal, and acceptance. Acceptance is the single
 // write this surface performs, and it routes through the same pursuit

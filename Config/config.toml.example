@@ -433,7 +433,7 @@ max_triggers_per_goal = 8
 # judge_timeout_seconds = 15  # Seconds the guarded judge may spend (1-120).
 
 [ideas]
-# Proactive Muse suggestions. Off by default so a fresh install never spends
+# Proactive Wayfinder suggestions. Off by default so a fresh install never spends
 # background model calls brainstorming; when enabled the engine reviews recent
 # goal outcomes plus a memory-facts summary on the nightly tick and on goal
 # achievement. Suggestions ride the `proactive_message` frame for the badge.

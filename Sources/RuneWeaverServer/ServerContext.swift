@@ -47,6 +47,14 @@ private struct DefaultGoalLLM: LLMProvider, Sendable {
     }
 }
 
+/// Single-flight lock serializing policy read-classify-write passes.
+public actor PolicyWriteLock {
+    public init() {}
+    public func withLock<T: Sendable>(_ operation: () async throws -> T) async throws -> T {
+        try await operation()
+    }
+}
+
 /// Shared engine collaborators held in Vapor application storage.
 public final class ServerContext: Sendable {
     /// Loopback binding plus port.
@@ -199,6 +207,12 @@ public final class ServerContext: Sendable {
     public let policyStore: PolicyStore
     /// Mandatory outbound egress supervisor backing runtime domain triage and dynamic allows.
     public let egressSupervisor: OutboundEgressSupervisor?
+    /// Single-flight lock serializing policy read-classify-write passes.
+    public let policyWriteLock: PolicyWriteLock
+    /// Live `[media]` policy carrying LAN exemption origins.
+    public let mediaConfig: MediaConfig?
+    /// Configured LLM server URLs feeding the SSRF loopback exemption.
+    public let llmServerURLs: [String]
     /// Hermetic desktop capture bridge preserved across live-reloads so a
     /// settings PUT refreshes capture knobs without dropping test doubles.
     public let desktopCaptureBridge: (any DesktopCapturing)?
@@ -277,7 +291,10 @@ public final class ServerContext: Sendable {
         fanOut: FanOutEngine? = nil,
         fanOutConfig: FanOutConfig = FanOutConfig(),
         policyStore: PolicyStore? = nil,
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor? = nil,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        policyWriteLock: PolicyWriteLock = PolicyWriteLock()
     ) {
         self.config = config
         self.conversations = conversations
@@ -388,6 +405,9 @@ public final class ServerContext: Sendable {
         // `api.request`, so the unloaded default is never a supervisor source.
         self.policyStore = policyStore ?? PolicyStore()
         self.egressSupervisor = egressSupervisor
+        self.policyWriteLock = policyWriteLock
+        self.mediaConfig = mediaConfig
+        self.llmServerURLs = llmServerURLs
         self.desktopCaptureBridge = desktopCaptureBridge
         self.desktopControlBridge = desktopControlBridge
         self.desktopConfigBox = OSAllocatedUnfairLock(initialState: desktopConfig)
@@ -786,7 +806,10 @@ extension ServerContext {
         // an injected store is authoritative, while the factory default is
         // loaded here so the same instance feeds both the egress supervisor
         // and the settings policy routes.
-        let resolvedPolicyStore = await PolicyStore.makeLoaded(injected: policyStore)
+        let resolvedPolicyStore = await PolicyStore.makeLoaded(
+            injected: policyStore,
+            legacyLocalOrigins: browserConfig.allowedOrigins
+        )
         await permissionGate.updateBashConfig(bashConfig)
         let services = await bootstrapServices(
             permissionGate: permissionGate,
@@ -886,7 +909,9 @@ extension ServerContext {
             ideasEngine: services.ideasEngine, ideasConfig: ideasConfig,
             proactiveConfig: proactiveConfig, stagedFiles: stagedFilesStore,
             fanOut: fanOutEngine, policyStore: resolvedPolicyStore,
-            egressSupervisor: egressSupervisor
+            egressSupervisor: egressSupervisor,
+            mediaConfig: toolConfigs.media,
+            llmServerURLs: toolConfigs.llmServerURLs
         )
         await finalizeServerContext(context, sandboxConfig: sandboxConfig, onApprovalRequested: onApprovalRequested)
         return context

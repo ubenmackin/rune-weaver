@@ -86,16 +86,32 @@ public enum BuiltinToolPlugins {
         policyStore: PolicyStore? = nil,
         egressSupervisor: OutboundEgressSupervisor? = nil
     ) async throws -> [any Tool] {
-        let origins = ApiSSRFGuard.allowlistedOrigins(
+        // Resolve the one store first so the supervisor and the merged
+        // origins read the same verified snapshot; an injected store stays
+        // authoritative while nil loads the factory default with the retired
+        // browser origins migrated once.
+        let resolvedStore = await PolicyStore.makeLoaded(
+            injected: policyStore,
+            legacyLocalOrigins: browserConfig.allowedOrigins
+        )
+        let baseOrigins = ApiSSRFGuard.allowlistedOrigins(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs
         )
+        // Effective exemptions union the config-derived auto origins
+        // (`searxng_url`, enabled media LAN URLs, LLM server URLs) with the
+        // owner-declared local grants; never-exempt targets stay refused
+        // inside the guard even when present in either set. The retired
+        // `browser.allowed_origins` never feeds the base set; its sole
+        // consumer is the `legacyLocalOrigins` migration above.
+        let localExemptions: Set<String> = await (try? resolvedStore.snapshot().network.localExemptions) ?? []
+        let mergedOrigins = baseOrigins.union(localExemptions)
         let supervisor: OutboundEgressSupervisor = if let egressSupervisor {
             egressSupervisor
         } else {
             try await makeEgressSupervisor(
-                policyStore: policyStore,
+                resolvedStore: resolvedStore,
                 secrets: secrets,
                 browserConfig: browserConfig,
                 mediaConfig: mediaConfig,
@@ -108,14 +124,15 @@ public enum BuiltinToolPlugins {
             searchTransport: searchTransport,
             fetchTransport: fetchTransport,
             ensurer: ensurer,
-            supervisor: supervisor
+            supervisor: supervisor,
+            extraAllowlistedOrigins: mergedOrigins
         )
             + BrowserTools.makeTools(
                 gateway: gateway,
                 browserConfig: browserConfig,
                 mediaConfig: mediaConfig,
                 llmServerURLs: llmServerURLs,
-                allowlistedOrigins: origins,
+                allowlistedOrigins: mergedOrigins,
                 egressSupervisor: supervisor
             )
             + ApiRequestTools.makeTools(
@@ -183,11 +200,18 @@ public enum BuiltinToolPlugins {
         policyStore: PolicyStore? = nil,
         egressSupervisor: OutboundEgressSupervisor? = nil
     ) async throws -> [any Tool] {
+        // Resolve the one store first so exactly one instance backs this
+        // build; the inner web/browser build reuses it instead of loading a
+        // second default.
+        let resolvedStore = await PolicyStore.makeLoaded(
+            injected: policyStore,
+            legacyLocalOrigins: browserConfig.allowedOrigins
+        )
         let supervisor: OutboundEgressSupervisor = if let egressSupervisor {
             egressSupervisor
         } else {
             try await makeEgressSupervisor(
-                policyStore: policyStore,
+                resolvedStore: resolvedStore,
                 secrets: secrets,
                 browserConfig: browserConfig,
                 mediaConfig: mediaConfig,
@@ -246,7 +270,7 @@ public enum BuiltinToolPlugins {
             apiTransport: apiTransport,
             ensurer: ensurer,
             secrets: secrets,
-            policyStore: policyStore,
+            policyStore: resolvedStore,
             egressSupervisor: supervisor
         )
         if let mediaConfig {
@@ -429,25 +453,22 @@ public enum BuiltinToolPlugins {
         }
     }
 
-    /// Resolves the one policy store and builds the mandatory egress supervisor.
+    /// Builds the mandatory egress supervisor from the already-resolved store.
     ///
-    /// A caller-injected store is used as-is so the process keeps exactly one
-    /// instance (an HTTP policy write then reaches the supervisor without a
-    /// restart); a nil store constructs and loads the factory default, letting
-    /// a missing file seed the deny-by-default posture while corruption
-    /// surfaces as a thrown `PolicyInvariantError`. Either way the supervisor
-    /// factory re-verifies the snapshot, so no unsupervised registry is built.
+    /// Callers resolve the one store first via `PolicyStore.makeLoaded` so the
+    /// supervisor and the merged origins read the same verified snapshot and
+    /// exactly one store instance backs the build. The supervisor factory
+    /// re-verifies the snapshot, so no unsupervised registry is built.
     /// - Throws: `PolicyInvariantError` when the store holds no verified policy.
     private static func makeEgressSupervisor(
-        policyStore: PolicyStore?,
+        resolvedStore: PolicyStore,
         secrets: SecretsManager?,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig?,
         llmServerURLs: [String],
         emailConfig: EmailConfig? = nil
     ) async throws -> OutboundEgressSupervisor {
-        let resolvedStore = await PolicyStore.makeLoaded(injected: policyStore)
-        return try await OutboundEgressSupervisor.make(
+        try await OutboundEgressSupervisor.make(
             policyStore: resolvedStore,
             secrets: secrets,
             browserConfig: browserConfig,

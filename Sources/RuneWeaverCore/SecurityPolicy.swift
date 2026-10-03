@@ -71,6 +71,8 @@ public struct SecurityPolicy: Sendable, Equatable {
     /// so `"  Evil.COM  "` lands exactly as the matcher evaluates it. Blank
     /// input is a no-op returning the policy unchanged: callers that must
     /// fail closed on empty (triage handlers) validate before calling.
+    /// `localExemptions` rides through untouched, so a domain append never
+    /// widens or narrows an exemption grant.
     public func appendingAllowedDomain(_ domain: String) -> SecurityPolicy {
         guard let canonical = Self.canonicalDomainEntry(domain) else { return self }
         var updated = self
@@ -79,7 +81,8 @@ public struct SecurityPolicy: Sendable, Equatable {
         updated.network = NetworkEgressPolicy(
             mode: updated.network.mode,
             allowedDomains: allowed,
-            blockedDomains: updated.network.blockedDomains
+            blockedDomains: updated.network.blockedDomains,
+            localExemptions: updated.network.localExemptions
         )
         return updated
     }
@@ -88,6 +91,8 @@ public struct SecurityPolicy: Sendable, Equatable {
     ///
     /// Trims surrounding whitespace and stores the canonical comparison form;
     /// blank input is a no-op returning the policy unchanged.
+    /// `localExemptions` rides through untouched, so a domain append never
+    /// widens or narrows an exemption grant.
     public func appendingBlockedDomain(_ domain: String) -> SecurityPolicy {
         guard let canonical = Self.canonicalDomainEntry(domain) else { return self }
         var updated = self
@@ -96,7 +101,8 @@ public struct SecurityPolicy: Sendable, Equatable {
         updated.network = NetworkEgressPolicy(
             mode: updated.network.mode,
             allowedDomains: updated.network.allowedDomains,
-            blockedDomains: blocked
+            blockedDomains: blocked,
+            localExemptions: updated.network.localExemptions
         )
         return updated
     }
@@ -143,16 +149,23 @@ public struct NetworkEgressPolicy: Sendable, Equatable {
     /// Domains explicitly blocked regardless of mode. Evaluated before
     /// the allowlist so a blocked domain is never reachable.
     public var blockedDomains: Set<String>
+    /// Owner-declared local-network exemptions from `[network].local_exemptions`.
+    /// Entries are shape-checked plus classified before storage; comparison
+    /// always canonicalizes through `canonicalEntry(_:)`. Empty by default, so
+    /// a policy that declared no grant exempts nothing.
+    public var localExemptions: Set<String>
 
     /// Creates a network egress policy.
     public init(
         mode: EgressMode = .allowlistOnly,
         allowedDomains: Set<String> = ["127.0.0.1"],
-        blockedDomains: Set<String> = ["169.254.169.254"]
+        blockedDomains: Set<String> = ["169.254.169.254"],
+        localExemptions: Set<String> = []
     ) {
         self.mode = mode
         self.allowedDomains = allowedDomains
         self.blockedDomains = blockedDomains
+        self.localExemptions = localExemptions
     }
 
     /// Factory safe default: allowlist-only with only loopback permitted.
@@ -240,7 +253,7 @@ public struct NetworkEgressPolicy: Sendable, Equatable {
     /// same normalizer the SSRF guard trusts. A malformed entry that
     /// normalizes to nothing can only equal an empty host, so it fails closed
     /// instead of matching broadly.
-    static func canonicalEntry(_ entry: String) -> String {
+    public static func canonicalEntry(_ entry: String) -> String {
         let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("*.") else {
             return SensitiveAddressNormalization.normalizedHost(trimmed)

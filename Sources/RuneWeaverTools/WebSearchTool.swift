@@ -1029,20 +1029,24 @@ public enum WebTools {
     public static let toolNames = ["web.search", "web.fetch"]
 
     /// Builds both web tools for a browser config and optional media config.
+    /// - Parameter extraAllowlistedOrigins: Owner-declared local grants
+    ///   threaded into the fetch initial guard alongside config origins.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         searchTransport: (any WebSearchTransport)? = nil,
         fetchTransport: (any WebFetchTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil,
-        supervisor: OutboundEgressSupervisor? = nil
+        supervisor: OutboundEgressSupervisor? = nil,
+        extraAllowlistedOrigins: Set<String> = []
     ) -> [any Tool] {
         WebSearchTools.makeTools(browserConfig: browserConfig, transport: searchTransport, ensurer: ensurer)
             + WebFetchTools.makeTools(
                 browserConfig: browserConfig,
                 mediaConfig: mediaConfig,
                 transport: fetchTransport,
-                supervisor: supervisor
+                supervisor: supervisor,
+                extraAllowlistedOrigins: extraAllowlistedOrigins
             )
     }
 
@@ -1054,7 +1058,8 @@ public enum WebTools {
         searchTransport: (any WebSearchTransport)? = nil,
         fetchTransport: (any WebFetchTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil,
-        supervisor: OutboundEgressSupervisor? = nil
+        supervisor: OutboundEgressSupervisor? = nil,
+        extraAllowlistedOrigins: Set<String> = []
     ) async {
         for tool in makeTools(
             browserConfig: browserConfig,
@@ -1062,7 +1067,8 @@ public enum WebTools {
             searchTransport: searchTransport,
             fetchTransport: fetchTransport,
             ensurer: ensurer,
-            supervisor: supervisor
+            supervisor: supervisor,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
         ) {
             await bus.register(tool: tool)
         }

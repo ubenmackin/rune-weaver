@@ -225,12 +225,15 @@ extension RuneWeaverConfig {
     }
 
     private func renderBrowserTOML() -> [String] {
+        // `browser.allowed_origins` is deprecated: legacy origins migrate once
+        // into `[network].local_exemptions` in policy.toml on first load, so a
+        // resaved config never emits the key. Decoding still accepts it so an
+        // older file can seed that migration.
         [
             "[browser]",
             "searxng_url = \(Self.tomlQuoted(browser.searxngURL))",
             "search_timeout_seconds = \(browser.searchTimeoutSeconds)",
             "max_results = \(browser.maxResults)",
-            "allowed_origins = \(Self.tomlStringArray(browser.allowedOrigins))",
             "timeout_seconds = \(browser.timeoutSeconds)",
             "fetch_timeout_seconds = \(browser.fetchTimeoutSeconds)",
             ""

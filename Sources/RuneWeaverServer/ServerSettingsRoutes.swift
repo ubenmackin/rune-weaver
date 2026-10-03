@@ -420,24 +420,22 @@ func gatewayForLiveReload(
 /// rebuild path the settings save uses and pin the `api.request` supervisor
 /// identity against the triage/gate/browser instance.
 func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async throws {
-    // Provider endpoints feed the SSRF exemption set, so an LLM-endpoint change
-    // must refresh live tools immediately rather than waiting for a restart.
-    guard body.media != nil || body.browserAllowedOrigins != nil || body.browserSearxngURL != nil
+    // `browserAllowedOrigins` is retired and never triggers a reload: it is
+    // decoded for wire compatibility but ignored by `apply(to:)`, so a PUT
+    // carrying only that field leaves config and exemptions untouched.
+    guard body.media != nil || body.browserSearxngURL != nil
         || body.searchSearxngURL != nil || body.providers != nil || body.defaultProvider != nil
         || body.fallbackProvider != nil || body.browserTimeoutSeconds != nil || body.browserFetchTimeoutSeconds != nil
     else {
         return
     }
     let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
-    let browserOrigins = ApiSSRFGuard.allowlistedOrigins(
+    let browserOrigins = await mergedNetworkOrigins(
         browserConfig: config.browser,
         mediaConfig: config.media,
-        llmServerURLs: appLLMOrigins
+        llmServerURLs: appLLMOrigins,
+        store: context.policyStore
     )
-    // The rebuild goes through the same supervisor factory as boot, reading
-    // the shared policy store so an origin refresh never swaps in an
-    // unsupervised api.request; a store that lost its verified policy fails
-    // the PUT instead of degrading the live tool.
     let supervisor = try await OutboundEgressSupervisor.make(
         policyStore: context.policyStore,
         secrets: context.secrets,
@@ -445,66 +443,53 @@ func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWeaverConfi
         mediaConfig: config.media,
         llmServerURLs: appLLMOrigins
     )
-    let busGateway: (any BrowserPlaywrightGateway)? = if let existing =
-        await context.toolBus.tool(named: "browser.navigate") as? BrowserNavigateTool
-    {
-        existing.browserGateway
-    } else {
-        nil
-    }
     let effectiveSupervisor = context.egressSupervisor ?? supervisor
-    if let gatewayForReload = gatewayForLiveReload(
-        stored: context.browserGateway,
-        busGateway: busGateway,
+    await reregisterNetworkTools(
         browserConfig: config.browser,
         mediaConfig: config.media,
         llmServerURLs: appLLMOrigins,
         origins: browserOrigins,
-        egressSupervisor: effectiveSupervisor
-    ) {
-        for tool in BrowserTools.makeTools(
-            gateway: gatewayForReload,
-            browserConfig: config.browser,
-            mediaConfig: config.media,
-            llmServerURLs: appLLMOrigins,
-            allowlistedOrigins: browserOrigins,
-            egressSupervisor: effectiveSupervisor
-        ) {
-            await reregisterPreservingToggle(tool, on: context)
-        }
-    } else {
-        for tool in BrowserTools.makeTools(
-            browserConfig: config.browser,
-            mediaConfig: config.media,
-            llmServerURLs: appLLMOrigins,
-            allowlistedOrigins: browserOrigins,
-            egressSupervisor: effectiveSupervisor
-        ) {
-            await reregisterPreservingToggle(tool, on: context)
-        }
-    }
-    for tool in WebTools.makeTools(
-        browserConfig: config.browser,
-        mediaConfig: config.media,
-        searchTransport: context.searchTransport,
-        fetchTransport: context.fetchTransport,
-        ensurer: context.searchEnsurer,
-        supervisor: effectiveSupervisor
-    ) {
-        await reregisterPreservingToggle(tool, on: context)
-    }
-    // The rebuilt api.request must hold the same supervisor instance triage,
-    // the permission gate, and the browser tools use (`effectiveSupervisor`):
-    // ephemeral allowOnce/allowSession grants land on the context instance, so
-    // binding the fresh factory result would make an approved retry check a
-    // different actor and fail as unlisted after any settings save.
-    for tool in ApiRequestTools.makeTools(
         supervisor: effectiveSupervisor,
-        transport: context.apiTransport,
-        browserConfig: config.browser
-    ) {
-        await reregisterPreservingToggle(tool, on: context)
-    }
+        context: context
+    )
+}
+
+/// Rebuilds browser, web, and API tools after a committed policy write so a
+/// `local_exemptions` edit applies live with no restart.
+///
+/// Reads the live config for browser, media, and LLM origins directly from `ServerContext`,
+/// unions them with the store snapshot's `local_exemptions`, rebuilds the gateway through
+/// `gatewayForLiveReload`, and reregisters browser, web, and API tools preserving toggles.
+/// Because both the live supervisor and tool initial guards derive from the context's live
+/// configs and the shared store, supervisor SSRF checks and tool guards stay unified with
+/// zero divergence across custom `--config` files and dynamic policy writes.
+/// - Parameter context: Live server context owning the tool bus and transports.
+func refreshNetworkToolsAfterPolicySave(context: ServerContext) async {
+    let browserConfig = context.browserConfig
+    let mediaConfig = context.mediaConfig
+    let llmServerURLs = context.llmServerURLs
+    let mergedOrigins = await mergedNetworkOrigins(
+        browserConfig: browserConfig,
+        mediaConfig: mediaConfig,
+        llmServerURLs: llmServerURLs,
+        store: context.policyStore
+    )
+    let fallbackSupervisor = try? await OutboundEgressSupervisor.make(
+        policyStore: context.policyStore,
+        secrets: context.secrets,
+        browserConfig: browserConfig,
+        mediaConfig: mediaConfig,
+        llmServerURLs: llmServerURLs
+    )
+    guard let effectiveSupervisor = context.egressSupervisor ?? fallbackSupervisor else { return }
+    await reregisterNetworkTools(
+        browserConfig: browserConfig,
+        mediaConfig: mediaConfig,
+        llmServerURLs: llmServerURLs,
+        origins: mergedOrigins,
+        supervisor: effectiveSupervisor,
+        context: context
+    )
 }
 
 /// Reconciles live desktop tools with the persisted `[desktop]` policy so saved values take effect without a restart.
@@ -766,543 +751,45 @@ private func probedIndexComponents(savedConfig: RuneWeaverConfig, context: Serve
     return components
 }
 
-// MARK: - Security Policy Routes
+// MARK: - Network Tools Reload Helpers
 
-private func registerSettingsPolicyRoutes(_ settings: RoutesBuilder) {
-    let policyGroup = settings.grouped(PathComponent.constant(ServerPaths.policy))
-
-    // GET /settings/policy
-    policyGroup.get { req async throws -> PolicyResponse in
-        // The context's shared store is the in-process authority: it accepted
-        // a policy at boot and every HTTP write updates the same actor state
-        // the egress supervisor reads, so no filesystem watcher is needed.
-        // One isolation reads policy, path, load flag, and violations
-        // together, so a concurrent PUT cannot interleave and mix a pre-write
-        // policy with post-write violations in one response.
-        let store = req.application.runeWeaver.policyStore
-        let snapshot = await store.readSnapshot()
-
-        let dto = makePolicyDTO(from: snapshot.policy)
-        return PolicyResponse(
-            policy: dto,
-            path: snapshot.fileURL.path,
-            loadedFromDisk: snapshot.loadedFromDisk,
-            violations: snapshot.violations
-        )
-    }
-
-    // PUT /settings/policy
-    policyGroup.put { req async throws -> PolicyResponse in
-        let body: UpdatePolicyRequest
-        do {
-            body = try req.content.decode(UpdatePolicyRequest.self)
-        } catch let abort as Abort {
-            throw abort
-        } catch {
-            throw Abort(.badRequest, reason: "Invalid policy request: \(error). Gate: request, field: policy.")
-        }
-        let store = req.application.runeWeaver.policyStore
-
-        // Validate before touching disk or memory so a rejected candidate
-        // leaves the file and the live snapshot agreeing instead of diverging.
-        let candidate = try validateStructuredPolicyInput(body.policy)
-
-        // Persist through the actor so verification, serialization, the file
-        // write, and the memory commit share one isolation: a throwing write
-        // never leaves memory ahead of the file, and concurrent readers see
-        // either the pre- or post-write snapshot.
-        do {
-            try await store.replace(candidate)
-        } catch let invariant as PolicyInvariantError {
-            switch invariant {
-            case let .serializationFailed(reason):
-                throw Abort(
-                    .badRequest,
-                    reason: "\(reason) Gate: serialization, field: policy."
-                )
-            case let .invariantViolations(violations):
-                throw Abort(
-                    .badRequest,
-                    reason: "Security policy violates formal invariants: " + violations.joined(separator: "; ") + ". Gate: invariants, field: policy."
-                )
-            case let .notVerified(reason):
-                throw Abort(.badRequest, reason: "\(reason). Gate: invariants, field: policy.")
-            }
-        }
-
-        // Read the authoritative flags in one isolation so the dashboard never
-        // diverges from the supervisor's view.
-        let snapshot = await store.readSnapshot()
-        let dto = makePolicyDTO(from: snapshot.policy)
-        return PolicyResponse(
-            policy: dto,
-            path: snapshot.fileURL.path,
-            loadedFromDisk: snapshot.loadedFromDisk,
-            violations: snapshot.violations
-        )
-    }
-
-    // POST /settings/policy/verify
-    policyGroup.post(PathComponent.constant(ServerPaths.verify)) { req async throws -> VerifyPolicyResponse in
-        let body: VerifyPolicyRequest
-        do {
-            body = try req.content.decode(VerifyPolicyRequest.self)
-        } catch let abort as Abort {
-            throw abort
-        } catch {
-            throw Abort(.badRequest, reason: "Invalid verify request: \(error). Gate: request, field: policy.")
-        }
-        // A candidate check never persists: structural problems and invariant
-        // failures both report as an invalid verdict so editors can preview
-        // without moving the file or the live snapshot.
-        do {
-            _ = try validateStructuredPolicyInput(body.policy)
-            return VerifyPolicyResponse(valid: true, violations: [])
-        } catch let abort as Abort {
-            return VerifyPolicyResponse(valid: false, violations: [abort.reason])
-        } catch {
-            return VerifyPolicyResponse(valid: false, violations: [error.localizedDescription])
-        }
-    }
+/// Merges config-derived origins with stored local exemptions.
+/// The config side is the auto service origins only (`searxng_url`, enabled
+/// media LAN URLs, configured LLM server URLs): the retired
+/// `browser.allowed_origins` never feeds an exemption directly, so the
+/// effective set is auto origins UNION the store snapshot's
+/// `local_exemptions`.
+private func mergedNetworkOrigins(browserConfig: BrowserConfig, mediaConfig: MediaConfig?, llmServerURLs: [String], store: PolicyStore) async -> Set<String> {
+    let base = ApiSSRFGuard.allowlistedOrigins(browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs)
+    let exemptions: Set<String> = await (try? store.snapshot().network.localExemptions) ?? []
+    return base.union(exemptions)
 }
 
-/// HTTP methods a credential binding may name.
-///
-/// Empty stays Any, so the list only narrows when present. Uppercased before
-/// comparison so a lowercase editor spelling still authorizes the same verb
-/// instead of failing closed on casing alone.
-private let allowedPolicyMethods: Set<String> = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
-
-/// Validates a structured policy candidate from the REST contract.
-///
-/// Trims surrounding whitespace, drops blank method and prefix entries that
-/// can only mean Any, rejects blank domain entries and empty host lists that
-/// could only match nothing, enforces the schema version floor, the two-mode
-/// allowlist, the surrogate key alphabet, the method allowlist, and the
-/// leading-slash prefix shape, refuses TOML-breaking scalars that would not
-/// survive a save/load cycle, then runs the two formal invariants. Any
-/// failure throws a 400 naming the gate and field so the editor can repair
-/// the exact entry.
-/// - Parameter dto: Structured candidate from PUT or verify.
-/// - Returns: Normalized core policy ready to serialize and persist.
-/// - Throws: `Abort(.badRequest)` naming the gate and field.
-func validateStructuredPolicyInput(_ dto: SecurityPolicyDTO) throws -> SecurityPolicy {
-    guard dto.version >= 1 else {
-        throw Abort(
-            .badRequest,
-            reason: "Invalid policy version '\(dto.version)': must be >= 1. Gate: version, field: version."
-        )
-    }
-    let mode = try validatedPolicyMode(dto.network.mode)
-    let allowed = try normalizedPolicyDomains(dto.network.allowedDomains, field: "allowed_domains")
-    let blocked = try normalizedPolicyDomains(dto.network.blockedDomains, field: "blocked_domains")
-    var normalizedCredentials: [String: CredentialBinding] = [:]
-    normalizedCredentials.reserveCapacity(dto.credentials.count)
-    for (rawKey, bindingDTO) in dto.credentials {
-        let key = try validatedCredentialKey(rawKey)
-        normalizedCredentials[key] = try normalizedCredentialBinding(key: key, dto: bindingDTO)
-    }
-    let candidate = makeSecurityPolicy(
-        version: dto.version,
-        mode: mode,
-        allowedDomains: Set(allowed),
-        blockedDomains: Set(blocked),
-        credentials: normalizedCredentials
+/// Re-registers browser, web, and API tools over one merged origin set.
+private func reregisterNetworkTools(
+    browserConfig: BrowserConfig, mediaConfig: MediaConfig?,
+    llmServerURLs: [String], origins: Set<String>,
+    supervisor: OutboundEgressSupervisor, context: ServerContext
+) async {
+    let busGateway = await (context.toolBus.tool(named: "browser.navigate") as? BrowserNavigateTool)?.browserGateway
+    let gateway = gatewayForLiveReload(
+        stored: context.browserGateway, busGateway: busGateway, browserConfig: browserConfig,
+        mediaConfig: mediaConfig, llmServerURLs: llmServerURLs, origins: origins, egressSupervisor: supervisor
     )
-    let violations = PolicyInvariantVerifier.verify(candidate)
-    guard violations.isEmpty else {
-        throw Abort(
-            .badRequest,
-            reason: "Security policy violates formal invariants: " + violations.joined(separator: "; ") + ". Gate: invariants, field: policy."
-        )
+    for tool in BrowserTools.makeTools(
+        gateway: gateway, browserConfig: browserConfig, mediaConfig: mediaConfig,
+        llmServerURLs: llmServerURLs, allowlistedOrigins: origins, egressSupervisor: supervisor
+    ) {
+        await reregisterPreservingToggle(tool, on: context)
     }
-    return candidate
-}
-
-/// Resolves the validated egress posture.
-///
-/// Only the two surviving spellings persist. The retired `deny_by_default`
-/// name maps to the fail-closed posture so older editors keep their intent
-/// without persisting ambiguity.
-private func validatedPolicyMode(_ rawValue: String) throws -> EgressMode {
-    let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-    if trimmed == "deny_by_default" {
-        return .allowlistOnly
+    for tool in WebTools.makeTools(
+        browserConfig: browserConfig, mediaConfig: mediaConfig, searchTransport: context.searchTransport,
+        fetchTransport: context.fetchTransport, ensurer: context.searchEnsurer,
+        supervisor: supervisor, extraAllowlistedOrigins: origins
+    ) {
+        await reregisterPreservingToggle(tool, on: context)
     }
-    guard trimmed == EgressMode.allowlistOnly.rawValue || trimmed == EgressMode.unrestricted.rawValue else {
-        throw Abort(
-            .badRequest,
-            reason: "Invalid network.mode '\(rawValue)': must be 'allowlist_only' "
-                + "or 'unrestricted'. Gate: mode, field: network.mode."
-        )
+    for tool in ApiRequestTools.makeTools(supervisor: supervisor, transport: context.apiTransport, browserConfig: browserConfig) {
+        await reregisterPreservingToggle(tool, on: context)
     }
-    return EgressMode(rawValue: trimmed) ?? .allowlistOnly
-}
-
-/// Validates one host entry shared by network domains and credential bindings.
-///
-/// Trims, rejects blanks and TOML-breaking scalars, enforces the exact-or-
-/// single-leading-`*.` shape with whitespace, comma, glob, path, userinfo,
-/// fragment, and port gates, and classifies wildcards through the shared
-/// helper. A lone colon is a port because a valid IPv6 literal always carries
-/// at least two colons, so colon-bearing literals stay storable. Bracketed
-/// IPv6 literals validate only on the binding gate; the network gate rejects
-/// brackets like any other shape the matcher could never equal.
-/// - Parameters:
-///   - raw: Raw entry text.
-///   - field: Full dotted field (for example `network.allowed_domains` or
-///     `credentials.KEY.allowed_hosts`) naming the 400 field.
-///   - gate: Failing gate (`network` or `binding`; TOML failures always use
-///     `serialization`).
-/// - Returns: Trimmed entry ready to store.
-/// - Throws: `Abort(.badRequest)` naming the gate and field.
-/// Context and error-formatting helper for host entry validation.
-private struct HostValidationContext {
-    let gate: String
-    let field: String
-    let isBinding: Bool
-    let bindingKey: String
-    let shortField: String
-
-    init(field: String, gate: String) {
-        self.gate = gate
-        self.field = field
-        self.isBinding = gate == "binding"
-        if isBinding {
-            if field.hasPrefix("credentials."), field.hasSuffix(".allowed_hosts") {
-                let start = field.index(field.startIndex, offsetBy: "credentials.".count)
-                let end = field.index(field.endIndex, offsetBy: -".allowed_hosts".count)
-                self.bindingKey = String(field[start ..< end])
-            } else {
-                self.bindingKey = field
-            }
-            self.shortField = "allowed_hosts"
-        } else {
-            self.bindingKey = ""
-            if field.hasPrefix("network.") {
-                self.shortField = String(field.dropFirst("network.".count))
-            } else {
-                self.shortField = field
-            }
-        }
-    }
-
-    func shapeReason(trimmed: String, detail: String) -> String {
-        if isBinding {
-            return "Invalid credentials '\(bindingKey)' field 'allowed_hosts' value '\(trimmed)': "
-                + detail + "Gate: \(gate), field: \(field)."
-        }
-        return "Invalid network field '\(shortField)' value '\(trimmed)': "
-            + detail + "Gate: \(gate), field: \(field)."
-    }
-
-    func blankAbort() -> Abort {
-        if isBinding {
-            return Abort(
-                .badRequest,
-                reason: "Invalid credentials '\(bindingKey)' field 'allowed_hosts': "
-                    + "must not contain blank entries. "
-                    + "Gate: \(gate), field: \(field)."
-            )
-        }
-        return Abort(
-            .badRequest,
-            reason: "Invalid network field '\(shortField)': must not contain blank entries. "
-                + "Gate: \(gate), field: \(field)."
-        )
-    }
-
-    func tomlBreakingAbort(trimmed: String) -> Abort {
-        if isBinding {
-            return Abort(
-                .badRequest,
-                reason: "Invalid credentials '\(bindingKey)' field 'allowed_hosts' value '\(trimmed)': "
-                    + "carries TOML-breaking characters. "
-                    + "Gate: serialization, field: \(field)."
-            )
-        }
-        return Abort(
-            .badRequest,
-            reason: "Invalid network field '\(shortField)' value '\(trimmed)': "
-                + "carries TOML-breaking characters. "
-                + "Gate: serialization, field: \(field)."
-        )
-    }
-}
-
-/// Validates bracketed IPv6 literals for credential bindings.
-private func validateBracketedIPv6Host(_ trimmed: String, context: HostValidationContext) throws {
-    guard trimmed.hasPrefix("["),
-          trimmed.hasSuffix("]"),
-          trimmed.filter({ $0 == "[" }).count == 1,
-          trimmed.filter({ $0 == "]" }).count == 1
-    else {
-        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "must be an exact host or a single leading '*.example.com' edge. "))
-    }
-    let inner = String(trimmed.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !inner.isEmpty,
-          inner.contains(":"),
-          !inner.contains("["),
-          !inner.contains("]"),
-          !inner.contains("*"),
-          !inner.contains(" ")
-    else {
-        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "must be an exact host or a single leading '*.example.com' edge. "))
-    }
-}
-
-/// Enforces the wildcard domain constraint (single leading `*.example.com`).
-private func validateWildcardHost(_ lowered: String, trimmed: String, context: HostValidationContext) throws {
-    switch AllowedOriginPattern.classifyWildcard(lowered) {
-    case .leading:
-        break
-    case .none, .trailing, .invalidShape, .invalidSuffix, .invalidStem:
-        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "only a single leading '*.example.com' edge authorizes. "))
-    }
-    let bare = String(lowered.dropFirst(2))
-    guard lowered.hasPrefix("*."), !bare.isEmpty,
-          !bare.hasPrefix("."), !bare.hasSuffix(".")
-    else {
-        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "only a single leading '*.example.com' edge authorizes. "))
-    }
-    if lowered.contains(":") {
-        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "only a single leading '*.example.com' edge authorizes. "))
-    }
-}
-
-/// Validates unbracketed host strings against forbidden characters, port colons, and wildcard shapes.
-private func validateUnbracketedHostShape(_ lowered: String, trimmed: String, context: HostValidationContext) throws {
-    if lowered.contains(" ") || lowered.contains("\t")
-        || lowered.contains(",") || lowered.contains("?")
-        || lowered.contains("[") || lowered.contains("]")
-        || lowered.contains("/") || lowered.contains("\\")
-        || lowered.contains("@") || lowered.contains("#")
-    {
-        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "must be an exact host or a single leading '*.example.com' edge. "))
-    }
-    // A canonical URL host never carries a port, and every valid IPv6
-    // literal has at least two colons, so exactly one colon can only be a
-    // port suffix that the matcher could never equal.
-    if lowered.filter({ $0 == ":" }).count == 1 {
-        throw Abort(.badRequest, reason: context.shapeReason(trimmed: trimmed, detail: "must be a host without a port. "))
-    }
-    if lowered.contains("*") {
-        try validateWildcardHost(lowered, trimmed: trimmed, context: context)
-    }
-}
-
-private func validateHostEntry(_ raw: String, field: String, gate: String) throws -> String {
-    let context = HostValidationContext(field: field, gate: gate)
-    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else {
-        throw context.blankAbort()
-    }
-    guard !PolicyStore.containsTOMLBreakingScalar(trimmed) else {
-        throw context.tomlBreakingAbort(trimmed: trimmed)
-    }
-    // Bracketed literals wrap an IPv6 address only: one outer pair with a
-    // colon-bearing inner and no port suffix. The inner strips for the
-    // confinement check downstream, so sensitive bracketed targets still
-    // refuse through the shared verifier rather than this shape gate.
-    if context.isBinding, trimmed.contains("[") || trimmed.contains("]") {
-        try validateBracketedIPv6Host(trimmed, context: context)
-        return trimmed
-    }
-    try validateUnbracketedHostShape(trimmed.lowercased(), trimmed: trimmed, context: context)
-    return trimmed
-}
-
-/// Trims one domain list and rejects blanks, unwritable scalars, and shapes
-/// the matcher could never authorize.
-///
-/// Blank entries could only match an empty host, so they fail closed rather
-/// than dropping silently; only an exact host or a single leading `*.` edge
-/// authorizes at runtime, so every other star shape plus whitespace, comma,
-/// glob syntax, path or userinfo separators, fragments, and port suffixes
-/// refuses here to match the dashboard editor. A lone colon is a port because
-/// a valid IPv6 literal always carries at least two colons, so colon-bearing
-/// address literals stay storable. The two callers pass their field name so
-/// the 400 names the exact list under repair.
-private func normalizedPolicyDomains(_ values: [String], field: String) throws -> [String] {
-    var normalized: [String] = []
-    normalized.reserveCapacity(values.count)
-    for raw in values {
-        try normalized.append(validateHostEntry(raw, field: "network.\(field)", gate: "network"))
-    }
-    return normalized
-}
-
-/// Trims a credential key and enforces the surrogate alphabet.
-///
-/// Keys name Keychain slots, so the REST boundary shares the single core
-/// alphabet instead of keeping a second copy that could drift wider.
-private func validatedCredentialKey(_ rawKey: String) throws -> String {
-    let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard SecretsManager.isValidSurrogateKey(rawKey), !key.isEmpty else {
-        throw Abort(
-            .badRequest,
-            reason: "Invalid credentials key '\(rawKey)': "
-                + "must satisfy SecretsManager.isValidSurrogateKey. "
-                + "Gate: credentials, field: credentials.\(rawKey)."
-        )
-    }
-    guard !PolicyStore.containsTOMLBreakingScalar(key) else {
-        throw Abort(
-            .badRequest,
-            reason: "Invalid credentials key '\(rawKey)': carries TOML-breaking characters. "
-                + "Gate: serialization, field: credentials.\(rawKey)."
-        )
-    }
-    return key
-}
-
-/// Normalizes one per-key binding into its host, method, and prefix scopes.
-private func normalizedCredentialBinding(key: String, dto: CredentialBindingDTO) throws -> CredentialBinding {
-    try CredentialBinding(
-        allowedHosts: Set(normalizedBindingHosts(key: key, values: dto.allowedHosts)),
-        allowedMethods: Set(normalizedBindingMethods(key: key, values: dto.allowedMethods)),
-        allowedPathPrefixes: normalizedBindingPrefixes(key: key, values: dto.allowedPathPrefixes)
-    )
-}
-
-/// Trims binding hosts and rejects blanks, unwritable scalars, and shapes
-/// the matcher could never authorize.
-///
-/// An empty host list authorizes nothing, so it fails closed as unusable
-/// rather than persisting a credential that can never be sent. Only an exact
-/// host, a bracketed IPv6 literal, or a single leading `*.` edge authorizes
-/// at runtime, so every other star shape plus whitespace, comma, glob
-/// syntax, path or userinfo separators, fragments, and port suffixes refuses
-/// here with the binding gate instead of deferring to the generic verifier.
-/// Bracketed literals strip to their inner address for the confinement check
-/// downstream, and a lone colon is a port because a valid IPv6 literal always
-/// carries at least two colons, so colon-bearing address literals stay
-/// storable.
-private func normalizedBindingHosts(key: String, values: [String]) throws -> [String] {
-    var normalized: [String] = []
-    normalized.reserveCapacity(values.count)
-    for rawHost in values {
-        try normalized.append(validateHostEntry(rawHost, field: "credentials.\(key).allowed_hosts", gate: "binding"))
-    }
-    guard !normalized.isEmpty else {
-        throw Abort(
-            .badRequest,
-            reason: "Invalid credentials '\(key)' field 'allowed_hosts': must not be empty. "
-                + "An empty host list authorizes nothing. "
-                + "Gate: binding, field: credentials.\(key).allowed_hosts."
-        )
-    }
-    return normalized
-}
-
-/// Trims and uppercases binding methods against the verb allowlist.
-///
-/// Blank entries drop because empty already means Any; anything remaining
-/// must name a real verb so a typo fails closed instead of widening scope.
-private func normalizedBindingMethods(key: String, values: [String]) throws -> [String] {
-    let droppedBlanks = values.map {
-        $0.trimmingCharacters(in: .whitespacesAndNewlines)
-    }.filter { !$0.isEmpty }
-    var normalized: [String] = []
-    normalized.reserveCapacity(droppedBlanks.count)
-    for rawMethod in droppedBlanks {
-        let uppered = rawMethod.uppercased()
-        guard allowedPolicyMethods.contains(uppered) else {
-            throw Abort(
-                .badRequest,
-                reason: "Invalid credentials '\(key)' field 'allowed_methods' value '\(rawMethod)': "
-                    + "must be one of GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS. "
-                    + "Gate: binding, field: credentials.\(key).allowed_methods."
-            )
-        }
-        normalized.append(uppered)
-    }
-    return normalized
-}
-
-/// Trims binding prefixes and enforces the rooted-path shape.
-///
-/// Blank entries drop because empty already means Any; a surviving prefix
-/// must start with a slash so it compares against the effective route path
-/// the origin server actually handles.
-private func normalizedBindingPrefixes(key: String, values: [String]) throws -> [String] {
-    let droppedBlanks = values.map {
-        $0.trimmingCharacters(in: .whitespacesAndNewlines)
-    }.filter { !$0.isEmpty }
-    var normalized: [String] = []
-    normalized.reserveCapacity(droppedBlanks.count)
-    for prefix in droppedBlanks {
-        guard prefix.hasPrefix("/") else {
-            throw Abort(
-                .badRequest,
-                reason: "Invalid credentials '\(key)' field 'allowed_path_prefixes' value '\(prefix)': "
-                    + "must start with '/'. "
-                    + "Gate: binding, field: credentials.\(key).allowed_path_prefixes."
-            )
-        }
-        guard !PolicyStore.containsTOMLBreakingScalar(prefix) else {
-            throw Abort(
-                .badRequest,
-                reason: "Invalid credentials '\(key)' field 'allowed_path_prefixes' value '\(prefix)': "
-                    + "carries TOML-breaking characters. "
-                    + "Gate: serialization, field: credentials.\(key).allowed_path_prefixes."
-            )
-        }
-        normalized.append(prefix)
-    }
-    return normalized
-}
-
-/// Builds a core policy from normalized REST fields.
-///
-/// The inverse of `makePolicyDTO`: the DTO shape maps one-to-one onto the
-/// network-plus-credentials core, so a validated request and the stored
-/// snapshot convert without loss in either direction.
-/// - Parameters:
-///   - version: Validated schema version, floored at 1 so older or
-///     nonsensical values never persist.
-///   - mode: Validated egress posture.
-///   - allowedDomains: Trimmed allowlist entries.
-///   - blockedDomains: Trimmed blocklist entries.
-///   - credentials: Normalized per-key bindings.
-/// - Returns: Core policy ready to verify and serialize.
-private func makeSecurityPolicy(
-    version: Int,
-    mode: EgressMode,
-    allowedDomains: Set<String>,
-    blockedDomains: Set<String>,
-    credentials: [String: CredentialBinding]
-) -> SecurityPolicy {
-    SecurityPolicy(
-        version: version,
-        network: NetworkEgressPolicy(
-            mode: mode,
-            allowedDomains: allowedDomains,
-            blockedDomains: blockedDomains
-        ),
-        credentials: credentials
-    )
-}
-
-private func makePolicyDTO(from policy: SecurityPolicy) -> SecurityPolicyDTO {
-    let networkDTO = NetworkEgressPolicyDTO(
-        mode: policy.network.mode.rawValue,
-        allowedDomains: policy.network.allowedDomains.sorted(),
-        blockedDomains: policy.network.blockedDomains.sorted()
-    )
-
-    var credsDTO: [String: CredentialBindingDTO] = [:]
-    for (credentialKey, binding) in policy.credentials {
-        credsDTO[credentialKey] = CredentialBindingDTO(
-            allowedHosts: binding.allowedHosts.sorted(),
-            allowedMethods: binding.allowedMethods.sorted(),
-            allowedPathPrefixes: binding.allowedPathPrefixes
-        )
-    }
-
-    return SecurityPolicyDTO(
-        version: policy.version,
-        network: networkDTO,
-        credentials: credsDTO
-    )
 }

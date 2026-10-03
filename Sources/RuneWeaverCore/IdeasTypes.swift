@@ -1,4 +1,4 @@
-// Rune Weaver Core — Durable model for proactive Muse idea suggestions.
+// Rune Weaver Core — Durable model for proactive Wayfinder idea suggestions.
 //
 // Defines the value types behind the "what next?" suggestions the ideas engine
 // proposes from goals, patterns, and memory: the suggestion families it may
@@ -39,7 +39,7 @@ public enum IdeaStatus: String, Sendable, Codable, CaseIterable, Equatable {
     case dismissed
 }
 
-/// One proactive idea suggested by the Muse engine.
+/// One proactive idea suggested by the Wayfinder engine.
 public struct Idea: Sendable, Codable, Equatable, Identifiable {
     /// Stable identifier shared across reads and status changes.
     public let id: UUID

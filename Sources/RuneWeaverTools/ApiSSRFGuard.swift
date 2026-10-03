@@ -160,35 +160,15 @@ public enum ApiSSRFGuard: Sendable {
 
     /// Well-known cloud metadata hostnames plus metadata address literals,
     /// refused even over public DNS and even when an allowlisted name resolves
-    /// to them.
-    public static let blockedMetadataHosts: Set<String> = [
-        "metadata.google.internal",
-        "metadata.google",
-        "metadata.goog",
-        "instance-data.compute.internal",
-        "instance-data",
-        "metadata.azure.internal",
-        "metadata.aws.internal",
-        "metadata",
-        "100.100.100.200"
-    ]
+    /// to them. Single-sourced in `SensitiveAddressRanges` so the guard and the
+    /// policy invariant verifier cannot drift on what counts as metadata.
+    public static let blockedMetadataHosts: Set<String> = SensitiveAddressRanges.blockedMetadataHosts
 
     /// Whether a host is a well-known metadata hostname or metadata literal.
-    /// Intent: exact plus dot-suffix match against the blocked set keeps
-    /// subdomains like `sub.metadata.google.internal` refused while
-    /// `foo-metadata.google-bar.example.com` passes; substring matching
-    /// would overblock the latter, and an address literal such as
-    /// `100.100.100.200` matches exactly so it is refused before any allowlist
-    /// exemption. Invariant: comparison uses the cleaned lowercased base form,
-    /// and empty hosts never match.
+    /// Thin forwarder to the shared Core classifier so Tools callers keep the
+    /// established guard name while exactly one metadata set exists.
     public static func isMetadataHost(_ host: String) -> Bool {
-        let lowered = ApiSSRFOrigin.cleanedHostBase(host)
-        guard !lowered.isEmpty else { return false }
-        if blockedMetadataHosts.contains(lowered) {
-            return true
-        }
-        // Dot-suffix covers subdomains of a blocked name without substring overblocking.
-        return blockedMetadataHosts.contains { lowered.hasSuffix("." + $0) }
+        SensitiveAddressRanges.isMetadataHost(host)
     }
 
     /// Parses one numeric IPv4 part in decimal, octal, or hex.
@@ -278,6 +258,12 @@ public enum ApiSSRFGuard: Sendable {
     public static let dnsResolutionTimeoutSeconds: TimeInterval = 5
 
     /// Allowlisted loopback and homelab origins derived from configuration.
+    /// Effective exemptions are the auto service origins (`searxng_url`,
+    /// enabled media LAN URLs, configured LLM server URLs) only: the retired
+    /// `browser.allowed_origins` is decode-only migration input into
+    /// `local_exemptions` (via `PolicyStore.load(legacyLocalOrigins:)`) and is
+    /// never consulted at runtime, so it never feeds an exemption directly.
+    /// Callers union the returned set with the snapshot's `local_exemptions`.
     public static func allowlistedOrigins(
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
@@ -294,9 +280,6 @@ public enum ApiSSRFGuard: Sendable {
             candidates.append(radarrURL)
         }
         for raw in candidates {
-            insertOriginVariants(raw, into: &origins)
-        }
-        for raw in browserConfig.allowedOrigins {
             insertOriginVariants(raw, into: &origins)
         }
         return origins
@@ -394,6 +377,24 @@ public enum ApiSSRFGuard: Sendable {
         await vetAsync(for: rawURL, allowlistedOrigins: allowlistedOrigins).refusal
     }
 
+    /// Async refusal reason against an explicit exemption set with honest
+    /// wording, or nil when dialable. Same vetting shape as the default
+    /// overload; `hasLLMOrigins` tunes only the loopback denial wording so a
+    /// caller that unions LLM endpoints into its exemption set never denies
+    /// with a reason promising fewer exemptions than the gate honors.
+    /// - Parameters:
+    ///   - rawURL: Candidate URL.
+    ///   - allowlistedOrigins: Precomputed `host:port` exemptions that may be dialed.
+    ///   - hasLLMOrigins: Whether LLM endpoints contribute exemptions, for honest wording.
+    /// - Returns: Refusal reason, or nil when allowed.
+    public static func denyReasonAsync(
+        for rawURL: String,
+        allowlistedOrigins: Set<String>,
+        hasLLMOrigins: Bool
+    ) async -> String? {
+        await vet(for: rawURL, origins: allowlistedOrigins, hasLLMOrigins: hasLLMOrigins).refusal
+    }
+
     /// Async refusal reason for a URL, or nil when the URL may be dialed.
     /// Literal checks run inline on the calling task while DNS hops to the
     /// bounded pool with a fail-closed timeout, so the cooperative pool never
@@ -415,6 +416,52 @@ public enum ApiSSRFGuard: Sendable {
         ).refusal
     }
 
+    /// Whether a URL may be dialed under the SSRF guard.
+    /// Blocking on the calling thread for DNS; prefer `isAllowedAsync` off
+    /// the cooperative pool. Unverified hostnames fail closed. The synchronous
+    /// shape stays for callers that cannot suspend, such as browser bridge
+    /// input checks.
+    public static func isAllowed(
+        _ rawURL: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = []
+    ) -> Bool {
+        denyReason(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs) == nil
+    }
+
+    /// Whether a URL may be dialed under the SSRF guard with precomputed origins.
+    public static func isAllowed(
+        _ rawURL: String,
+        allowlistedOrigins: Set<String> = []
+    ) -> Bool {
+        denyReason(for: rawURL, allowlistedOrigins: allowlistedOrigins) == nil
+    }
+
+    /// Async allow check that keeps blocking DNS on the bounded pool.
+    /// Unverified hostnames fail closed. Dialing callers use `vetAsync`, which
+    /// returns the pinned address the connection must use.
+    public static func isAllowedAsync(
+        _ rawURL: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = []
+    ) async -> Bool {
+        await denyReasonAsync(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs) == nil
+    }
+
+    /// Async allow check with precomputed origins that keeps blocking DNS on the bounded pool.
+    public static func isAllowedAsync(
+        _ rawURL: String,
+        allowlistedOrigins: Set<String> = []
+    ) async -> Bool {
+        await denyReasonAsync(for: rawURL, allowlistedOrigins: allowlistedOrigins) == nil
+    }
+}
+
+// MARK: - Internal DNS Vetting Helpers
+
+extension ApiSSRFGuard {
     /// Shared refusal engine over a precomputed exemption set.
     /// Blocking on the calling thread for DNS: kept for existing callers while
     /// new paths prefer the async vetting, which reuses the same literal stage
@@ -461,13 +508,12 @@ public enum ApiSSRFGuard: Sendable {
     }
 
     /// Bounded async DNS vetting with fail-closed timeout and cancellation.
-    /// Runs the blocking resolver on the capped pool; a wedged lookup keeps
-    /// its slot until return while the waiter fails closed, and queued
-    /// lookups wait without holding threads. Saturation drops fail-closed
-    /// without queueing, and a queued lookup that lost the race to timeout or
-    /// cancellation skips the resolver instead of holding a thread for a
-    /// verdict nobody waits on. A cleared lookup produces the dial pin naming
-    /// the addresses it proved, so callers never resolve the name again.
+    /// Resolution runs through `resolveAddressesAsync`, which hops the blocking
+    /// resolver to the capped pool with the shared fail-closed timeout, so a
+    /// wedged lookup keeps its slot until return while the waiter fails closed.
+    /// The proven addresses are vetted against the resolved-range table, and a
+    /// cleared lookup produces the dial pin naming them so callers never
+    /// resolve the name again.
     /// - Parameters:
     ///   - host: Hostname needing DNS vetting.
     ///   - origins: Precomputed allowed origins/hosts that exempt internal IPs.
@@ -488,30 +534,63 @@ public enum ApiSSRFGuard: Sendable {
                 return vettedIPListVetting(host: host, addresses: stub(host), origins: origins, url: url)
             }
         #endif
-        // Drop-newest when the pool is saturated so a burst cannot stack
-        // unlimited blocking lookups behind a wedged resolver; saturation
-        // reads as unverified rather than permission to dial. The probe never
-        // blocks, so awaiting tasks keep the cooperative pool moving.
-        guard ssrfDNSGate.tryAcquire() else {
-            return .refused(unverifiedDenial(for: host))
+        let addresses = await resolveAddressesAsync(host: host)
+        return vettedIPListVetting(host: host, addresses: addresses, origins: origins, url: url)
+    }
+
+    /// Resolves a hostname to addresses on the bounded SSRF DNS pool.
+    ///
+    /// Single source of resolved addresses for callers that need the addresses
+    /// rather than a dial verdict (`classifyLocalAccess`): the blocking
+    /// resolver runs on the capped pool with the shared fail-closed timeout,
+    /// so a wedged lookup keeps its slot until return while the waiter fails
+    /// closed and never stalls the cooperative pool. Saturation drops without
+    /// queueing, a queued lookup that lost the race to timeout or cancellation
+    /// skips the resolver, and DEBUG stubs answer inline exactly like
+    /// `dnsVettingAsync` so hermetic suites never touch the network or consume
+    /// a pool slot. Saturation, timeout, cancellation, and an empty or failed
+    /// resolution all return no addresses, and callers must treat that absence
+    /// as fail closed. The addresses are vetted by the caller and never
+    /// authorize a dial on their own: any dial path goes through
+    /// `dnsVettingAsync`/`vetAsync` so the resolved-range table still decides.
+    /// - Parameter host: Hostname needing resolution.
+    /// - Returns: Resolved addresses, or an empty list when unproven.
+    static func resolveAddressesAsync(host: String) async -> [String] {
+        if Task.isCancelled {
+            return []
         }
-        // Single one-shot verdict shared by DNS, timeout, and cancellation so a slow
-        // resolver arriving after a timeout cannot resume twice; late arrivals observe
-        // the stored outcome instead of racing. The sleeper holder stays apart from the
-        // verdict lock and is re-checked after storing, so a resume racing registration
-        // still drops the late sleeper instead of leaking sleeps under bursts.
-        let once = CheckedOnce<ApiSSRFVetting>()
-        let sleeper = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
-        return await withTaskCancellationHandler {
-            // The shared once gate never resumes with failure, so the throwing
-            // shape only bridges the shared gate into this Never-style waiter;
-            // any unexpected throw still fails closed rather than dialing.
+        #if DEBUG
+            // Debug-only stub surface, matching `dnsVettingAsync`: a task-scoped
+            // binding wins over the process-global holder, so a lookup-counting
+            // suite stays isolated from concurrent suites that publish globally.
+            // Stubs enforce the fail-closed timeout without consuming permits from
+            // the production ssrfDNSGate.
+            if let stub = activeTestDNSResolver {
+                return await stubResultWithTimeoutAsync(failure: []) {
+                    stub(host)
+                }
+            }
+        #endif
+        return await boundedPoolResultAsync(failure: []) {
+            resolveHostAddresses(host)
+        }
+    }
+
+    #if DEBUG
+        /// Runs a test stub under the fail-closed timeout on the global queue
+        /// without consuming production ssrfDNSGate permits.
+        private static func stubResultWithTimeoutAsync<T: Sendable>(
+            failure: T,
+            operation: @escaping @Sendable () -> T
+        ) async -> T {
+            if Task.isCancelled {
+                return failure
+            }
+            let once = CheckedOnce<T>()
+            let sleeper = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
             do {
-                return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ApiSSRFVetting, Error>) in
+                return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
                     once.set(continuation)
-                    // Register the fail-closed sleeper before queueing DNS so an early
-                    // DNS answer always finds a handle to drop; the winner cancels the
-                    // loser on settle, keeping burst lookups from stacking lingering sleeps.
                     let timeoutTask = Task {
                         let nanos = UInt64((dnsResolutionTimeoutSeconds * 1_000_000_000).rounded(.down))
                         try? await Task.sleep(nanoseconds: nanos)
@@ -521,7 +600,94 @@ public enum ApiSSRFGuard: Sendable {
                             return task
                         }
                         held?.cancel()
-                        once.resume(returning: .refused(unverifiedDenial(for: host)))
+                        once.resume(returning: failure)
+                    }
+                    if once.isSettled {
+                        timeoutTask.cancel()
+                    } else {
+                        sleeper.withLock { $0 = timeoutTask }
+                        if once.isSettled {
+                            let late = sleeper.withLock { current -> Task<Void, Never>? in
+                                let task = current
+                                current = nil
+                                return task
+                            }
+                            late?.cancel()
+                        }
+                    }
+                    DispatchQueue.global().async {
+                        let result = operation()
+                        let held = sleeper.withLock { current -> Task<Void, Never>? in
+                            let task = current
+                            current = nil
+                            return task
+                        }
+                        held?.cancel()
+                        once.resume(returning: result)
+                    }
+                }
+            } catch {
+                return failure
+            }
+        }
+    #endif
+
+    /// Runs one blocking resolver operation on the capped pool under the
+    /// shared fail-closed timeout and cancellation contract.
+    ///
+    /// Single owner of the pool permit, the timeout sleeper, the one-shot
+    /// verdict gate, and the cancellation resume, so the vetting path and the
+    /// local-access classifier cannot drift on how a wedged resolver or a
+    /// saturated pool settles. The probe never blocks, so awaiting tasks keep
+    /// the cooperative pool moving; saturation, timeout, cancellation, and an
+    /// abandoned lookup all return `failure`, which callers choose fail
+    /// closed.
+    /// - Parameters:
+    ///   - failure: Outcome for saturation, timeout, and cancellation.
+    ///   - operation: Blocking work to run on the bounded pool.
+    /// - Returns: The operation's value, or `failure` when none settled.
+    private static func boundedPoolResultAsync<T: Sendable>(
+        failure: T,
+        operation: @escaping @Sendable () -> T
+    ) async -> T {
+        if Task.isCancelled {
+            return failure
+        }
+        // Drop-newest when the pool is saturated so a burst cannot stack
+        // unlimited blocking lookups behind a wedged resolver; saturation
+        // reads as unverified rather than permission to dial.
+        guard ssrfDNSGate.tryAcquire() else {
+            return failure
+        }
+        // Single one-shot verdict shared by the operation, timeout, and
+        // cancellation so a slow resolver arriving after a timeout cannot
+        // resume twice; late arrivals observe the stored outcome instead of
+        // racing. The sleeper holder stays apart from the verdict lock and is
+        // re-checked after storing, so a resume racing registration still drops
+        // the late sleeper instead of leaking sleeps under bursts.
+        let once = CheckedOnce<T>()
+        let sleeper = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
+        return await withTaskCancellationHandler {
+            // The shared once gate never resumes with failure, so the throwing
+            // shape only bridges the shared gate into this Never-style waiter;
+            // any unexpected throw still fails closed rather than dialing.
+            do {
+                return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+                    once.set(continuation)
+                    // Register the fail-closed sleeper before queueing the
+                    // operation so an early answer always finds a handle to
+                    // drop; the winner cancels the loser on settle, keeping
+                    // burst lookups from stacking lingering sleeps.
+                    let timeoutTask = Task {
+                        let nanos = UInt64((dnsResolutionTimeoutSeconds * 1_000_000_000).rounded(.down))
+                        try? await Task.sleep(nanoseconds: nanos)
+                        let held = sleeper.withLock { current -> Task<Void, Never>? in
+                            let task = current
+                            current = nil
+                            return task
+                        }
+                        held?.cancel()
+                        once.resume(returning: failure)
                     }
                     if once.isSettled {
                         timeoutTask.cancel()
@@ -537,22 +703,22 @@ public enum ApiSSRFGuard: Sendable {
                         }
                     }
                     ssrfDNSQueue.addOperation {
-                        // Cooperative removal: when timeout or cancellation already
-                        // won, skip the blocking resolver so a queued burst never
-                        // holds a pool thread for an abandoned verdict.
+                        // Cooperative removal: when timeout or cancellation
+                        // already won, skip the blocking work so a queued burst
+                        // never holds a pool thread for an abandoned verdict.
                         if once.isSettled {
                             ssrfDNSGate.release()
                             return
                         }
                         defer { ssrfDNSGate.release() }
-                        let verdict = vettedDNSVetting(for: host, origins: origins, url: url)
+                        let result = operation()
                         let held = sleeper.withLock { current -> Task<Void, Never>? in
                             let task = current
                             current = nil
                             return task
                         }
                         held?.cancel()
-                        once.resume(returning: verdict)
+                        once.resume(returning: result)
                     }
                     if Task.isCancelled {
                         let held = sleeper.withLock { current -> Task<Void, Never>? in
@@ -561,11 +727,11 @@ public enum ApiSSRFGuard: Sendable {
                             return task
                         }
                         held?.cancel()
-                        once.resume(returning: .refused(unverifiedDenial(for: host)))
+                        once.resume(returning: failure)
                     }
                 }
             } catch {
-                return .refused(unverifiedDenial(for: host))
+                return failure
             }
         } onCancel: {
             let held = sleeper.withLock { current -> Task<Void, Never>? in
@@ -574,7 +740,7 @@ public enum ApiSSRFGuard: Sendable {
                 return task
             }
             held?.cancel()
-            once.resume(returning: .refused(unverifiedDenial(for: host)))
+            once.resume(returning: failure)
         }
     }
 
@@ -620,46 +786,114 @@ public enum ApiSSRFGuard: Sendable {
         }
         return addresses
     }
+}
 
-    /// Whether a URL may be dialed under the SSRF guard.
-    /// Blocking on the calling thread for DNS; prefer `isAllowedAsync` off
-    /// the cooperative pool. Unverified hostnames fail closed. The synchronous
-    /// shape stays for callers that cannot suspend, such as browser bridge
-    /// input checks.
-    public static func isAllowed(
-        _ rawURL: String,
-        browserConfig: BrowserConfig,
-        mediaConfig: MediaConfig? = nil,
-        llmServerURLs: [String] = []
-    ) -> Bool {
-        denyReason(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs) == nil
+// MARK: - Internal Classification Helpers
+
+extension ApiSSRFGuard {
+    /// Classifies whether saving `host` should grant local-network access.
+    ///
+    /// One owner for the save-time verdict, sharing every predicate and
+    /// wording the dial-time gate uses so a stored grant cannot drift from a
+    /// dial decision. Never-exempt targets — metadata hosts and literals,
+    /// direct link-local spellings, and embedded translations of either —
+    /// win over everything and report `.neverDialable`; any other literal in
+    /// loopback, private, CGNAT, reserved, or unique-local space reports
+    /// `.localNetwork` while a public literal reports `.publicDestination`.
+    /// A hostname is proven through the same bounded resolver the guard uses:
+    /// no addresses fail closed to `.unresolved`, any never-exempt address is
+    /// `.neverDialable`, any exemptable-sensitive address is `.localNetwork`,
+    /// and everything else is `.publicDestination`. Accepts a bare host, never
+    /// a URL.
+    /// - Parameter host: Bare host or IP literal to classify.
+    /// - Returns: The local-access verdict for the host.
+    public static func classifyLocalAccess(forHost host: String) async -> LocalAccessVerdict {
+        let cleaned = SensitiveAddressNormalization.cleanedHostBase(host)
+        guard !cleaned.isEmpty else {
+            return .unresolved(reason: "SSRF denied: refusing empty host.")
+        }
+        if let reason = neverExemptLiteralDenial(for: cleaned) {
+            return .neverDialable(reason: reason)
+        }
+        if isLoopbackHost(cleaned) {
+            return .localNetwork
+        }
+        let canonical = normalizedHost(cleaned)
+        if let value = ipv4Value(canonical), isSensitiveIPv4Value(value) {
+            return .localNetwork
+        }
+        // Classify the literal's own prefix as well as the normalized form:
+        // normalization collapses a dotted tail onto its dotted IPv4, which
+        // would drop the link-local, unique-local, or embedded-translation
+        // verdict the literal's prefix carries.
+        if isSensitiveIPv6Host(cleaned) || isSensitiveIPv6Host(canonical) {
+            return .localNetwork
+        }
+        if isIPAddressLiteral(cleaned) {
+            // Literals settle without DNS; sensitive ranges already returned
+            // above, so what remains is a public address.
+            return .publicDestination
+        }
+        let addresses = await resolveAddressesAsync(host: cleaned)
+        guard !addresses.isEmpty else {
+            return .unresolved(reason: unverifiedDenial(for: cleaned))
+        }
+        if addresses.contains(where: { isNeverExemptAddress($0) }) {
+            return .neverDialable(reason: "SSRF denied: hostname '\(cleaned)' resolves to blocked address")
+        }
+        if addresses.contains(where: { isExemptableSensitiveAddress($0) }) {
+            return .localNetwork
+        }
+        return .publicDestination
     }
 
-    /// Whether a URL may be dialed under the SSRF guard with precomputed origins.
-    public static func isAllowed(
-        _ rawURL: String,
-        allowlistedOrigins: Set<String> = []
-    ) -> Bool {
-        denyReason(for: rawURL, allowlistedOrigins: allowlistedOrigins) == nil
+    /// Never-exempt refusal for a cleaned literal or metadata hostname.
+    /// Mirrors the guard's pre-DNS order and wording: metadata hosts and
+    /// literals, direct link-local IPv4/IPv6 spellings, then embedded
+    /// translations whose decoded address is metadata or link-local.
+    /// - Parameter host: Cleaned bare host.
+    /// - Returns: Refusal reason, or nil when the host is not never-exempt.
+    private static func neverExemptLiteralDenial(for host: String) -> String? {
+        if isMetadataHost(host) {
+            return "SSRF denied: refusing metadata host '\(host)'."
+        }
+        if isLinkLocalIPv4(host) {
+            return "SSRF denied: refusing link-local address '\(host)' (169.254.0.0/16)."
+        }
+        if isLinkLocalIPv6(host) {
+            return "SSRF denied: refusing link-local address '\(host)' (fe80::/10)."
+        }
+        return embeddedNeverExemptDenial(for: host)
     }
 
-    /// Async allow check that keeps blocking DNS on the bounded pool.
-    /// Unverified hostnames fail closed. Dialing callers use `vetAsync`, which
-    /// returns the pinned address the connection must use.
-    public static func isAllowedAsync(
-        _ rawURL: String,
-        browserConfig: BrowserConfig,
-        mediaConfig: MediaConfig? = nil,
-        llmServerURLs: [String] = []
-    ) async -> Bool {
-        await denyReasonAsync(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs) == nil
+    /// Whether a resolved address is never exempt from refusal.
+    /// Mirrors the guard's resolved-address order: direct link-local
+    /// IPv4/IPv6, metadata hostnames and literals, and embedded translations
+    /// whose decoded address lands in either range.
+    /// - Parameter address: Resolved address literal.
+    /// - Returns: True when no exemption may cover the address.
+    private static func isNeverExemptAddress(_ address: String) -> Bool {
+        if isLinkLocalIPv4(address) || isLinkLocalIPv6(address) || isMetadataHost(address) {
+            return true
+        }
+        return embeddedNeverExemptDenial(for: address) != nil
     }
 
-    /// Async allow check with precomputed origins that keeps blocking DNS on the bounded pool.
-    public static func isAllowedAsync(
-        _ rawURL: String,
-        allowlistedOrigins: Set<String> = []
-    ) async -> Bool {
-        await denyReasonAsync(for: rawURL, allowlistedOrigins: allowlistedOrigins) == nil
+    /// Whether a resolved address is sensitive but exemption-eligible.
+    /// Mirrors the guard's resolved-address order after the never-exempt
+    /// checks: loopback, sensitive IPv4 ranges, and sensitive IPv6 literals
+    /// (unique-local and embedded sensitive tails) may be covered by an
+    /// exemption.
+    /// - Parameter address: Resolved address literal.
+    /// - Returns: True when an exemption may cover the address.
+    private static func isExemptableSensitiveAddress(_ address: String) -> Bool {
+        if isLoopbackHost(address) {
+            return true
+        }
+        let canonical = normalizedHost(address)
+        if let value = ipv4Value(canonical), isSensitiveIPv4Value(value) {
+            return true
+        }
+        return isSensitiveIPv6Host(address) || isSensitiveIPv6Host(canonical)
     }
 }

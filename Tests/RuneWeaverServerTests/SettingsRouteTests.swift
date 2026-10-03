@@ -1086,6 +1086,126 @@ struct SettingsRouteTests {
     }
 
     @Test
+    func `Policy exemption reaches the rebuilt gateway origins`() async throws {
+        // A stored local exemption must ride the merged origins into the
+        // rebuilt browser gateway and the web.fetch initial guard, so boot
+        // and settings-save paths agree on the effective set.
+        let toml = """
+        version = 1
+        [network]
+        mode = "allowlist_only"
+        allowed_domains = ["127.0.0.1"]
+        blocked_domains = ["169.254.169.254"]
+        local_exemptions = ["192.168.1.10"]
+        """
+        let (store, _, directory) = try await makePolicyRouteStore(contents: toml)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storedExemptions = try await store.snapshot().network.localExemptions
+        #expect(storedExemptions == ["192.168.1.10"])
+        let bootSupervisor = try await OutboundEgressSupervisor.make(policyStore: store)
+        let base = ServerContext.fallbackUnconfigured
+        let context = makeRouteContext(
+            store: store,
+            egressSupervisor: bootSupervisor,
+            toolBus: ToolBus(permissionGate: base.permissionGate)
+        )
+        var config = RuneWeaverConfig.default
+        let body = UpdateSettingsRequest(browserTimeoutSeconds: 45)
+        try body.apply(to: &config)
+        try await reloadLiveNetworkTools(body: body, config: config, context: context)
+        let navigate = try #require(await context.toolBus.tool(named: "browser.navigate") as? BrowserNavigateTool)
+        let gateway = try #require(navigate.browserGateway as? SubprocessPlaywrightGateway)
+        // The merged set carries the policy exemption alongside the
+        // config-derived searxng origin.
+        #expect(gateway.allowlistedOrigins.contains("192.168.1.10"))
+        #expect(gateway.egressSupervisor === bootSupervisor)
+        // The web.fetch initial guard honors the same merged set: the
+        // private literal clears only when the extra origins name it.
+        let guarded = await WebFetchSSRFGuard.denyReasonAsync(
+            for: "http://192.168.1.10/status",
+            browserConfig: config.browser,
+            mediaConfig: config.media,
+            extraAllowlistedOrigins: gateway.allowlistedOrigins
+        )
+        #expect(guarded == nil)
+        let unguarded = await WebFetchSSRFGuard.denyReasonAsync(
+            for: "http://192.168.1.10/status",
+            browserConfig: config.browser,
+            mediaConfig: config.media
+        )
+        #expect(unguarded != nil)
+        // The policy-save refresh rebuilds through the same merged origins
+        // without a settings body, so a committed exemption lands live.
+        let refreshContext = makeRouteContext(
+            store: store,
+            egressSupervisor: bootSupervisor,
+            toolBus: ToolBus(permissionGate: base.permissionGate)
+        )
+        await refreshNetworkToolsAfterPolicySave(context: refreshContext)
+        let refreshedNavigate = try #require(await refreshContext.toolBus.tool(named: "browser.navigate") as? BrowserNavigateTool)
+        let refreshedGateway = try #require(refreshedNavigate.browserGateway as? SubprocessPlaywrightGateway)
+        #expect(refreshedGateway.allowlistedOrigins.contains("192.168.1.10"))
+        #expect(refreshedGateway.egressSupervisor === bootSupervisor)
+    }
+
+    @Test
+    func `PUT settings ignores retired browserAllowedOrigins`() throws {
+        // The retired field decodes for wire compatibility but `apply(to:)`
+        // never writes it, so a PUT carrying a private address persists
+        // nothing and grants nothing. Local-network grants flow only through
+        // `PUT /settings/policy` and `POST /settings/policy/recheck-local/apply`
+        // into `local_exemptions`.
+        var config = RuneWeaverConfig.default
+        #expect(config.browser.allowedOrigins.isEmpty)
+        let body = UpdateSettingsRequest(browserAllowedOrigins: ["192.168.1.10"])
+        try body.apply(to: &config)
+        #expect(config.browser.allowedOrigins.isEmpty)
+    }
+
+    @Test
+    func `Retired browserAllowedOrigins triggers no live network reload`() async throws {
+        // A PUT carrying only the retired field must not rebuild network
+        // tools and must not write exemptions: no gateway may appear on a
+        // fresh bus, the store keeps no exemption, and a later rebuild for a
+        // neighboring knob carries no trace of the retired address.
+        let (store, _, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bootSupervisor = try await OutboundEgressSupervisor.make(policyStore: store)
+        let base = ServerContext.fallbackUnconfigured
+
+        let idleContext = makeRouteContext(
+            store: store,
+            egressSupervisor: bootSupervisor,
+            toolBus: ToolBus(permissionGate: base.permissionGate)
+        )
+        var idleConfig = RuneWeaverConfig.default
+        let idleBody = UpdateSettingsRequest(browserAllowedOrigins: ["192.168.1.10"])
+        try idleBody.apply(to: &idleConfig)
+        #expect(idleConfig.browser.allowedOrigins.isEmpty)
+        try await reloadLiveNetworkTools(body: idleBody, config: idleConfig, context: idleContext)
+        #expect(await idleContext.toolBus.tool(named: "browser.navigate") == nil)
+        #expect(await idleContext.toolBus.tool(named: "web.fetch") == nil)
+        #expect(await idleContext.toolBus.tool(named: "api.request") == nil)
+        #expect(try await store.snapshot().network.localExemptions.isEmpty)
+
+        // Control: the neighboring timeout knob still rebuilds through the
+        // same path, and the rebuilt gateway carries no retired entry.
+        let liveContext = makeRouteContext(
+            store: store,
+            egressSupervisor: bootSupervisor,
+            toolBus: ToolBus(permissionGate: base.permissionGate)
+        )
+        var liveConfig = RuneWeaverConfig.default
+        let liveBody = UpdateSettingsRequest(browserTimeoutSeconds: 45)
+        try liveBody.apply(to: &liveConfig)
+        try await reloadLiveNetworkTools(body: liveBody, config: liveConfig, context: liveContext)
+        let navigate = try #require(await liveContext.toolBus.tool(named: "browser.navigate") as? BrowserNavigateTool)
+        let gateway = try #require(navigate.browserGateway as? SubprocessPlaywrightGateway)
+        #expect(!gateway.allowlistedOrigins.contains("192.168.1.10"))
+        #expect(gateway.egressSupervisor === bootSupervisor)
+    }
+
+    @Test
     func `Configured-service egress derivation feeds boot and settings auto-population`() async throws {
         // One shared derivation must feed both the boot supervisor wiring and
         // the settings save path, or a service source added for one path can
@@ -1341,20 +1461,23 @@ private struct RetiredRawTOMLPolicyBody: Content {
 ///   - blocked: Blocklist entries.
 ///   - credentials: Per-key bindings.
 ///   - version: Schema version carried verbatim.
+///   - localExemptions: Client-supplied exemptions, ignored by the server.
 /// - Returns: DTO mirroring the REST wire shape.
 private func structuredPolicyDTO(
     mode: String = "allowlist_only",
     allowed: [String] = ["93.184.216.34"],
     blocked: [String] = ["169.254.169.254"],
     credentials: [String: CredentialBindingDTO] = [:],
-    version: Int = 1
+    version: Int = 1,
+    localExemptions: [String] = []
 ) -> SecurityPolicyDTO {
     SecurityPolicyDTO(
         version: version,
         network: NetworkEgressPolicyDTO(
             mode: mode,
             allowedDomains: allowed,
-            blockedDomains: blocked
+            blockedDomains: blocked,
+            localExemptions: localExemptions
         ),
         credentials: credentials
     )
@@ -1891,6 +2014,689 @@ struct SettingsPolicyRouteTests {
             #expect(payload.policy.network.blockedDomains == ["fe80::1"])
             #expect(payload.policy.credentials["IPV6_KEY"]?.allowedHosts == ["[2001:db8::1]"])
             #expect(payload.violations.isEmpty)
+        }
+    }
+}
+
+// MARK: - Policy Local Access Classification (PUT)
+
+/// Pins the PUT classification flow: server-derived `localExemptions` with an
+/// atomic failure and a report. Only `PUT /settings/policy` (and the future
+/// re-check apply) may write the field; every other path leaves it untouched.
+@Suite("Settings Policy Local Access")
+struct SettingsPolicyLocalAccessTests {
+    @Test
+    func `PUT grants local access for a newly added internal host and reports it`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            // The private literal needs no resolver hop, so the grant proves
+            // hermetically without DNS.
+            let candidate = UpdatePolicyRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "192.168.1.10"])
+            )
+            let response = try await settingsRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: candidate
+            )
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(payload.policy.network.allowedDomains.sorted() == ["127.0.0.1", "192.168.1.10"])
+            #expect(payload.policy.network.localExemptions == ["192.168.1.10"])
+            let report = try #require(payload.localAccess)
+            #expect(report.granted == ["192.168.1.10"])
+            #expect(report.removed == [])
+            #expect(report.neverDialable == [])
+
+            // The stored snapshot and the file agree on the grant, sorted on
+            // write per the shared contract.
+            let live = try await store.snapshot()
+            #expect(live.network.localExemptions == ["192.168.1.10"])
+            let saved = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(saved.contains("192.168.1.10"))
+            #expect(saved.contains("local_exemptions"))
+        }
+    }
+
+    @Test
+    func `PUT grants nothing for a newly added public destination`() async throws {
+        let (store, _, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            // A public literal settles as `.publicDestination` with no grant.
+            let candidate = UpdatePolicyRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "93.184.216.34"])
+            )
+            let response = try await settingsRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: candidate
+            )
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(payload.policy.network.allowedDomains.sorted() == ["127.0.0.1", "93.184.216.34"])
+            #expect(payload.policy.network.localExemptions == [])
+            let report = try #require(payload.localAccess)
+            #expect(report.granted == [])
+            #expect(report.removed == [])
+            #expect(report.neverDialable == [])
+            let live = try await store.snapshot()
+            #expect(live.network.localExemptions.isEmpty)
+        }
+    }
+
+    @Test
+    func `PUT aborts atomically when an added host cannot resolve`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            let before = try String(contentsOf: fileURL, encoding: .utf8)
+            let beforePolicy = await store.current
+
+            // `.invalid` never resolves, so classification fails closed to
+            // `.unresolved` without a network side effect.
+            let candidate = UpdatePolicyRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "nonexistent-host-abc123.invalid"])
+            )
+            let response = try await settingsRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: candidate
+            )
+            #expect(response.status == .badRequest)
+            let reason = response.body.string ?? ""
+            #expect(reason.contains("nonexistent-host-abc123.invalid"))
+            #expect(reason.contains("Nothing was saved"))
+            #expect(reason.contains("Gate: classification"))
+            #expect(reason.contains("field: network.allowed_domains"))
+
+            // File plus memory stay unchanged: the abort leaves both agreeing
+            // instead of diverging.
+            let after = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(after == before)
+            let livePolicy = await store.current
+            #expect(livePolicy == beforePolicy)
+            let stored = try await store.snapshot()
+            #expect(!stored.network.allowedDomains.contains("nonexistent-host-abc123.invalid"))
+            #expect(stored.network.localExemptions.isEmpty)
+        }
+    }
+
+    @Test
+    func `PUT ignores client-supplied localExemptions`() async throws {
+        let (store, _, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            // The pane draft is display-only: even a crafted grant plus a
+            // crafted public entry cannot alter the stored set.
+            let candidate = UpdatePolicyRequest(
+                policy: structuredPolicyDTO(
+                    allowed: ["127.0.0.1", "192.168.1.10"],
+                    localExemptions: ["evil.example.com", "93.184.216.34"]
+                )
+            )
+            let response = try await settingsRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: candidate
+            )
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(payload.policy.network.localExemptions == ["192.168.1.10"])
+            #expect(!payload.policy.network.localExemptions.contains("evil.example.com"))
+            let report = try #require(payload.localAccess)
+            #expect(report.granted == ["192.168.1.10"])
+            let live = try await store.snapshot()
+            #expect(live.network.localExemptions == ["192.168.1.10"])
+        }
+    }
+
+    @Test
+    func `PUT drops the grant when the entry is deleted`() async throws {
+        let (store, _, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            // Seed one grant through the PUT so the drop path has something to
+            // remove.
+            let seeded = UpdatePolicyRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "192.168.1.10"])
+            )
+            let seedResponse = try await settingsRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: seeded
+            )
+            #expect(seedResponse.status == .ok)
+            let seededLive = try await store.snapshot()
+            #expect(seededLive.network.localExemptions == ["192.168.1.10"])
+
+            // Removing the host drops its grant via the canonical intersect.
+            let pruned = UpdatePolicyRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1"])
+            )
+            let response = try await settingsRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: pruned
+            )
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(payload.policy.network.allowedDomains == ["127.0.0.1"])
+            #expect(payload.policy.network.localExemptions == [])
+            let report = try #require(payload.localAccess)
+            #expect(report.granted == [])
+            #expect(report.removed == ["192.168.1.10"])
+            #expect(report.neverDialable == [])
+            let live = try await store.snapshot()
+            #expect(live.network.localExemptions.isEmpty)
+        }
+    }
+
+    @Test
+    func `PUT never grants wildcard entries`() async throws {
+        let (store, _, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            // The leading edge authorizes at runtime but is never classified,
+            // so it persists name-only with no grant.
+            let candidate = UpdatePolicyRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "*.example.com"])
+            )
+            let response = try await settingsRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: candidate
+            )
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(payload.policy.network.allowedDomains.sorted() == ["*.example.com", "127.0.0.1"])
+            #expect(payload.policy.network.localExemptions == [])
+            let report = try #require(payload.localAccess)
+            #expect(report.granted == [])
+            #expect(report.neverDialable == [])
+            let live = try await store.snapshot()
+            #expect(live.network.localExemptions.isEmpty)
+        }
+    }
+
+    @Test
+    func `PUT persists never-dialable entries name-only and reports them`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            // The metadata hostname refuses before DNS, so the report proves
+            // hermetically.
+            let candidate = UpdatePolicyRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "metadata.google.internal"])
+            )
+            let response = try await settingsRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: candidate
+            )
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(payload.policy.network.allowedDomains.sorted() == ["127.0.0.1", "metadata.google.internal"])
+            #expect(payload.policy.network.localExemptions == [])
+            let report = try #require(payload.localAccess)
+            #expect(report.granted == [])
+            #expect(report.removed == [])
+            #expect(report.neverDialable == ["metadata.google.internal"])
+            let live = try await store.snapshot()
+            #expect(live.network.allowedDomains.contains("metadata.google.internal"))
+            #expect(live.network.localExemptions.isEmpty)
+            let saved = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(saved.contains("metadata.google.internal"))
+        }
+    }
+
+    @Test
+    func `GET exposes localExemptions and sends no report`() async throws {
+        let (store, _, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            let granted = UpdatePolicyRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "192.168.1.10"])
+            )
+            let putResponse = try await settingsRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: granted
+            )
+            #expect(putResponse.status == .ok)
+
+            let response = try await settingsRequest(app: app, method: .GET, path: "/settings/policy")
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(payload.policy.network.localExemptions == ["192.168.1.10"])
+            #expect(payload.localAccess == nil)
+            // The wire emits camelCase and never the snake spelling.
+            let bodyText = response.body.string ?? ""
+            #expect(bodyText.contains("localExemptions"))
+            #expect(!bodyText.contains("local_exemptions"))
+        }
+    }
+
+    @Test
+    func `PUT refreshes network tools after commit`() async throws {
+        let (store, _, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bootSupervisor = try await OutboundEgressSupervisor.make(policyStore: store)
+        let base = ServerContext.fallbackUnconfigured
+        let freshBus = ToolBus(permissionGate: base.permissionGate)
+        let context = makeRouteContext(store: store, egressSupervisor: bootSupervisor, toolBus: freshBus)
+
+        let app = try await Application.make(.testing)
+        do {
+            app.runeWeaver = context
+            registerRuneWeaverRoutes(app)
+            let candidate = UpdatePolicyRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "192.168.1.10"])
+            )
+            let request = Request(
+                application: app,
+                method: .PUT,
+                url: URI(string: "/settings/policy"),
+                on: app.eventLoopGroup.next()
+            )
+            try request.content.encode(candidate)
+            let response = try await app.responder.respond(to: request).get()
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(payload.policy.network.localExemptions == ["192.168.1.10"])
+
+            // The committed exemption lands live: the rebuilt browser gateway
+            // carries it while keeping the boot supervisor for grants.
+            let navigate = try #require(await freshBus.tool(named: "browser.navigate") as? BrowserNavigateTool)
+            let gateway = try #require(navigate.browserGateway as? SubprocessPlaywrightGateway)
+            #expect(gateway.allowlistedOrigins.contains("192.168.1.10"))
+            #expect(gateway.egressSupervisor === bootSupervisor)
+            try await app.asyncShutdown()
+        } catch {
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test
+    func `NetworkEgressPolicyDTO emits camelCase and tolerates snake_case`() throws {
+        // The canonical wire shape is camelCase sorted; snake decodes but never
+        // encodes.
+        let dto = NetworkEgressPolicyDTO(
+            mode: "allowlist_only",
+            allowedDomains: ["127.0.0.1"],
+            blockedDomains: ["169.254.169.254"],
+            localExemptions: ["192.168.1.10"]
+        )
+        let encoded = try JSONEncoder().encode(dto)
+        let text = String(data: encoded, encoding: .utf8) ?? ""
+        #expect(text.contains("localExemptions"))
+        #expect(!text.contains("local_exemptions"))
+
+        let snakePayload = #"{"mode":"allowlist_only","allowed_domains":["127.0.0.1"],"blocked_domains":["169.254.169.254"],"local_exemptions":["192.168.1.10"]}"#
+        let snake = try JSONDecoder().decode(NetworkEgressPolicyDTO.self, from: Data(snakePayload.utf8))
+        #expect(snake.localExemptions == ["192.168.1.10"])
+
+        let camelPayload = #"{"mode":"allowlist_only","allowed_domains":["127.0.0.1"],"blocked_domains":["169.254.169.254"],"localExemptions":["192.168.1.10"]}"#
+        let camel = try JSONDecoder().decode(NetworkEgressPolicyDTO.self, from: Data(camelPayload.utf8))
+        #expect(camel.localExemptions == ["192.168.1.10"])
+    }
+
+    @Test
+    func `validateStructuredPolicyInput ignores client localExemptions`() throws {
+        // The server-owned field never flows from the wire into the candidate:
+        // even a crafted grant verifies to an empty set.
+        let dto = structuredPolicyDTO(
+            allowed: ["127.0.0.1"],
+            localExemptions: ["192.168.1.10"]
+        )
+        let candidate = try validateStructuredPolicyInput(dto)
+        #expect(candidate.network.localExemptions.isEmpty)
+        #expect(candidate.network.allowedDomains == ["127.0.0.1"])
+    }
+}
+
+// MARK: - Policy Recheck Local Exemptions (Preview + Apply)
+
+/// Pins the re-check preview diff and atomic apply: server-side
+/// re-classification of every exact entry with stored wildcard preservation.
+@Suite("Settings Policy Recheck Local")
+struct SettingsPolicyRecheckLocalTests {
+    @Test
+    func `ServerPaths defines recheck-local paths`() {
+        #expect(ServerPaths.recheckLocal == "recheck-local")
+        #expect(ServerPaths.recheckLocalApply == "recheck-local/apply")
+    }
+
+    @Test
+    func `Preview diffs proposed grants without touching disk or memory`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            // Seed two grants through the PUT so the preview has added,
+            // removed, and unchanged to report.
+            let seeded = UpdatePolicyRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "192.168.1.10", "192.168.1.11"])
+            )
+            let seedResponse = try await settingsRequest(
+                app: app, method: .PUT, path: "/settings/policy", body: seeded
+            )
+            #expect(seedResponse.status == .ok)
+            let seededLive = try await store.snapshot()
+            #expect(Set(seededLive.network.localExemptions) == ["192.168.1.10", "192.168.1.11"])
+
+            let before = try String(contentsOf: fileURL, encoding: .utf8)
+            let beforePolicy = await store.current
+
+            // Re-check classifies every exact entry, so the loopback joins the
+            // proposed set even though the PUT never granted it.
+            let previewBody = RecheckLocalExemptionsRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "192.168.1.10", "192.168.1.12"])
+            )
+            let response = try await settingsRequest(
+                app: app, method: .POST, path: "/settings/policy/recheck-local", body: previewBody
+            )
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(RecheckLocalExemptionsResponse.self)
+            #expect(payload.added == ["127.0.0.1", "192.168.1.12"])
+            #expect(payload.removed == ["192.168.1.11"])
+            #expect(payload.unchanged == ["192.168.1.10"])
+            #expect(payload.unresolved == [])
+
+            // Preview never writes: file plus memory stay agreeing.
+            let after = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(after == before)
+            let livePolicy = await store.current
+            #expect(livePolicy == beforePolicy)
+            let stored = try await store.snapshot()
+            #expect(Set(stored.network.localExemptions) == ["192.168.1.10", "192.168.1.11"])
+        }
+    }
+
+    @Test
+    func `Preview preserves wildcard grants without classifying them`() async throws {
+        let toml = """
+        version = 1
+        [network]
+        mode = "allowlist_only"
+        allowed_domains = ["127.0.0.1", "*.example.com"]
+        blocked_domains = ["169.254.169.254"]
+        local_exemptions = ["*.example.com"]
+        """
+        let (store, _, directory) = try await makePolicyRouteStore(contents: toml)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storedExemptions = try await store.snapshot().network.localExemptions
+        #expect(storedExemptions == ["*.example.com"])
+
+        try await withRouteApp(store: store) { app in
+            let beforePolicy = await store.current
+            let previewBody = RecheckLocalExemptionsRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "*.example.com", "192.168.1.10"])
+            )
+            let response = try await settingsRequest(
+                app: app, method: .POST, path: "/settings/policy/recheck-local", body: previewBody
+            )
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(RecheckLocalExemptionsResponse.self)
+            // The wildcard keeps its stored grant without classification while
+            // both local literals propose fresh grants.
+            #expect(payload.unchanged == ["*.example.com"])
+            #expect(payload.added == ["127.0.0.1", "192.168.1.10"])
+            #expect(payload.removed == [])
+            #expect(payload.unresolved == [])
+
+            let livePolicy = await store.current
+            #expect(livePolicy == beforePolicy)
+        }
+    }
+
+    @Test
+    func `Unresolved preview reports while apply aborts with the store unchanged`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            let before = try String(contentsOf: fileURL, encoding: .utf8)
+            let beforePolicy = await store.current
+
+            // `.invalid` never resolves, so preview reports it instead of
+            // erroring while still proposing the provable loopback grant.
+            let previewBody = RecheckLocalExemptionsRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "nonexistent-host-abc123.invalid"])
+            )
+            let preview = try await settingsRequest(
+                app: app, method: .POST, path: "/settings/policy/recheck-local", body: previewBody
+            )
+            #expect(preview.status == .ok)
+            let diff = try preview.content.decode(RecheckLocalExemptionsResponse.self)
+            #expect(diff.unresolved == ["nonexistent-host-abc123.invalid"])
+            #expect(diff.added == ["127.0.0.1"])
+            #expect(diff.removed == [])
+            #expect(diff.unchanged == [])
+            let midFile = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(midFile == before)
+
+            // Apply aborts the whole write atomically with every unresolved
+            // entry named and file plus memory unchanged.
+            let applyBody = RecheckLocalExemptionsRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "nonexistent-host-abc123.invalid"])
+            )
+            let apply = try await settingsRequest(
+                app: app, method: .POST, path: "/settings/policy/recheck-local/apply", body: applyBody
+            )
+            #expect(apply.status == .badRequest)
+            let reason = apply.body.string ?? ""
+            #expect(reason.contains("nonexistent-host-abc123.invalid"))
+            #expect(reason.contains("Nothing was saved"))
+            #expect(reason.contains("Gate: classification"))
+
+            let after = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(after == before)
+            let livePolicy = await store.current
+            #expect(livePolicy == beforePolicy)
+            let stored = try await store.snapshot()
+            #expect(!stored.network.allowedDomains.contains("nonexistent-host-abc123.invalid"))
+            #expect(stored.network.localExemptions.isEmpty)
+        }
+    }
+
+    @Test
+    func `Apply adds and removes grants per the preview and refreshes live tools`() async throws {
+        let (store, fileURL, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bootSupervisor = try await OutboundEgressSupervisor.make(policyStore: store)
+        let base = ServerContext.fallbackUnconfigured
+        let freshBus = ToolBus(permissionGate: base.permissionGate)
+        let context = makeRouteContext(store: store, egressSupervisor: bootSupervisor, toolBus: freshBus)
+
+        // Seed one grant so the apply has a removal to report alongside its
+        // additions.
+        let seededPolicy = SecurityPolicy(
+            version: 1,
+            network: NetworkEgressPolicy(
+                mode: .allowlistOnly,
+                allowedDomains: ["127.0.0.1", "192.168.1.10", "192.168.1.11"],
+                blockedDomains: ["169.254.169.254"],
+                localExemptions: ["192.168.1.10", "192.168.1.11"]
+            ),
+            credentials: [:]
+        )
+        try await store.replace(seededPolicy)
+
+        let app = try await Application.make(.testing)
+        do {
+            app.runeWeaver = context
+            registerRuneWeaverRoutes(app)
+            // Re-check re-classifies every exact entry, so the loopback joins
+            // the final set while the dropped `.11` leaves it.
+            let candidate = RecheckLocalExemptionsRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "192.168.1.10", "192.168.1.12"])
+            )
+            let request = Request(
+                application: app,
+                method: .POST,
+                url: URI(string: "/settings/policy/recheck-local/apply"),
+                on: app.eventLoopGroup.next()
+            )
+            try request.content.encode(candidate)
+            let response = try await app.responder.respond(to: request).get()
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(Set(payload.policy.network.localExemptions) == ["127.0.0.1", "192.168.1.10", "192.168.1.12"])
+            let report = try #require(payload.localAccess)
+            #expect(report.granted == ["127.0.0.1", "192.168.1.12"])
+            #expect(report.removed == ["192.168.1.11"])
+            let live = try await store.snapshot()
+            #expect(Set(live.network.localExemptions) == ["127.0.0.1", "192.168.1.10", "192.168.1.12"])
+            let saved = try String(contentsOf: fileURL, encoding: .utf8)
+            #expect(saved.contains("192.168.1.12"))
+
+            // The committed exemptions land live: the rebuilt browser gateway
+            // carries them while keeping the boot supervisor for grants.
+            let navigate = try #require(await freshBus.tool(named: "browser.navigate") as? BrowserNavigateTool)
+            let gateway = try #require(navigate.browserGateway as? SubprocessPlaywrightGateway)
+            #expect(gateway.allowlistedOrigins.contains("192.168.1.12"))
+            #expect(gateway.allowlistedOrigins.contains("192.168.1.10"))
+            #expect(gateway.egressSupervisor === bootSupervisor)
+            try await app.asyncShutdown()
+        } catch {
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test
+    func `Apply keeps wildcard grants while adding fresh local grants`() async throws {
+        let toml = """
+        version = 1
+        [network]
+        mode = "allowlist_only"
+        allowed_domains = ["127.0.0.1", "*.example.com"]
+        blocked_domains = ["169.254.169.254"]
+        local_exemptions = ["*.example.com"]
+        """
+        let (store, _, directory) = try await makePolicyRouteStore(contents: toml)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            let candidate = RecheckLocalExemptionsRequest(
+                policy: structuredPolicyDTO(allowed: ["127.0.0.1", "*.example.com", "192.168.1.10"])
+            )
+            let response = try await settingsRequest(
+                app: app, method: .POST, path: "/settings/policy/recheck-local/apply", body: candidate
+            )
+            #expect(response.status == .ok)
+            let payload = try response.content.decode(PolicyResponse.self)
+            #expect(Set(payload.policy.network.localExemptions) == ["*.example.com", "127.0.0.1", "192.168.1.10"])
+            let report = try #require(payload.localAccess)
+            #expect(report.granted == ["127.0.0.1", "192.168.1.10"])
+            #expect(report.removed == [])
+            let live = try await store.snapshot()
+            #expect(live.network.localExemptions.contains("*.example.com"))
+        }
+    }
+
+    @Test
+    func `Recheck ignores client-supplied localExemptions`() async throws {
+        let (store, _, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            // The pane draft is display-only: a crafted grant cannot alter the
+            // preview diff or the applied set.
+            let previewBody = RecheckLocalExemptionsRequest(
+                policy: structuredPolicyDTO(
+                    allowed: ["127.0.0.1", "192.168.1.10"],
+                    localExemptions: ["evil.example.com"]
+                )
+            )
+            let preview = try await settingsRequest(
+                app: app, method: .POST, path: "/settings/policy/recheck-local", body: previewBody
+            )
+            #expect(preview.status == .ok)
+            let diff = try preview.content.decode(RecheckLocalExemptionsResponse.self)
+            #expect(!diff.added.contains("evil.example.com"))
+            #expect(!diff.unchanged.contains("evil.example.com"))
+
+            let apply = try await settingsRequest(
+                app: app, method: .POST, path: "/settings/policy/recheck-local/apply", body: previewBody
+            )
+            #expect(apply.status == .ok)
+            let payload = try apply.content.decode(PolicyResponse.self)
+            #expect(!payload.policy.network.localExemptions.contains("evil.example.com"))
+        }
+    }
+
+    @Test
+    func `Domain validation parity with PolicyPane client validator (Finding 10)`() async throws {
+        let (store, _, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withRouteApp(store: store) { app in
+            let valid = [
+                "api.example.com",
+                "*.example.com",
+                "127.0.0.1",
+                "::1",
+                "2001:db8::1",
+                "sub.domain.co.uk"
+            ]
+            for host in valid {
+                let candidate = VerifyPolicyRequest(policy: structuredPolicyDTO(allowed: [host]))
+                let response = try await settingsRequest(
+                    app: app, method: .POST, path: "/settings/policy/verify", body: candidate
+                )
+                #expect(response.status == .ok, "Expected valid host '\(host)' to verify with 200 OK")
+                let payload = try response.content.decode(VerifyPolicyResponse.self)
+                #expect(payload.valid == true, "Expected valid host '\(host)' to have valid == true")
+                #expect(payload.violations.isEmpty)
+            }
+
+            let rejected = [
+                "*",
+                "*.",
+                "*example.com",
+                "api.*",
+                "api.*.com",
+                "http://api.example.com",
+                "api.example.com:8080",
+                "api.example.com/path",
+                "foo@bar",
+                "foo#bar",
+                "foo bar",
+                "foo,bar"
+            ]
+            for host in rejected {
+                let candidate = VerifyPolicyRequest(policy: structuredPolicyDTO(allowed: [host]))
+                let verifyResponse = try await settingsRequest(
+                    app: app, method: .POST, path: "/settings/policy/verify", body: candidate
+                )
+                let payload = try verifyResponse.content.decode(VerifyPolicyResponse.self)
+                #expect(payload.valid == false, "Expected rejected host '\(host)' to fail verification")
+                #expect(!payload.violations.isEmpty)
+
+                let putCandidate = UpdatePolicyRequest(policy: structuredPolicyDTO(allowed: [host]))
+                let putResponse = try await settingsRequest(
+                    app: app, method: .PUT, path: "/settings/policy", body: putCandidate
+                )
+                #expect(putResponse.status == .badRequest, "Expected rejected host '\(host)' to return 400 badRequest on PUT")
+            }
+        }
+    }
+
+    @Test
+    func `PolicyStore optimistic concurrency CAS rejection (Finding 9)`() async throws {
+        let (store, _, directory) = try await makePolicyRouteStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let initialSnapshot = await store.readSnapshot()
+        let initialGen = initialSnapshot.generation
+
+        var policy = initialSnapshot.policy
+        policy.network.allowedDomains.insert("example.com")
+        let updated = try await store.replace(policy, expectedGeneration: initialGen)
+        let nextGen = await store.currentGeneration()
+        #expect(nextGen == initialGen + 1)
+
+        do {
+            try await store.replace(updated, expectedGeneration: initialGen)
+            Issue.record("Expected stale expectedGeneration \(initialGen) to be rejected by CAS check")
+        } catch let PolicyInvariantError.invariantViolations(violations) {
+            #expect(violations.joined().contains("Concurrent modification"))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
         }
     }
 }

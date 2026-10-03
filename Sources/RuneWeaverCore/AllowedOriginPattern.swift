@@ -1,11 +1,13 @@
 // Rune Weaver Core — Shared allowed-origin wildcard policy for validation and matching.
 //
-// Purpose: single source for the `browser.allowed_origins` host-pattern rules so
-// config validation and the SSRF matcher cannot drift on what a wildcard means.
-// Scope: pure string predicates over lowercased patterns only; URL parsing,
-// IPv6 bracket handling, and origin-key comparison stay with their callers.
-// Architectural role: owned by `RuneWeaverCore` so both the config validator and
-// `RuneWeaverTools` resolve the same universal, glob, and single-edge decisions.
+// Purpose: single source for the `browser.allowed_origins` host-pattern rules
+// and the `[network].local_exemptions` entry shape gate, so config validation,
+// the SSRF matcher, and the policy verifier cannot drift on what a wildcard
+// means. Scope: pure string predicates over lowercased patterns only; URL
+// parsing, IPv6 bracket handling, and origin-key comparison stay with their
+// callers. Architectural role: owned by `RuneWeaverCore` so both the config
+// validator and `RuneWeaverTools` resolve the same universal, glob, and
+// single-edge decisions.
 
 import Foundation
 
@@ -103,5 +105,70 @@ public enum AllowedOriginPattern: Sendable {
             }
             return .trailing
         }
+    }
+
+    /// Whether a lowercased, trimmed pattern is a valid `local_exemptions` entry.
+    ///
+    /// The shape gate for owner-declared local-network grants: a valid entry
+    /// names an exact host, an IPv4/IPv6 literal, a single leading `*.` edge,
+    /// a single trailing `.*` edge, or the bare universal `*`. URL syntax,
+    /// file-glob syntax, userinfo, fragments, ports, and whitespace are refused
+    /// so an entry that could never match the host comparison cannot persist as
+    /// a configured grant; never-dialable classification stays with the policy
+    /// verifier so shape and range decisions remain separate gates.
+    /// - Parameter lowered: Lowercased, trimmed entry text.
+    /// - Returns: True when the entry has to-be-classified exemption shape.
+    public static func isValidExemptionEntry(_ lowered: String) -> Bool {
+        guard !lowered.isEmpty else { return false }
+        // Whitespace never survives host comparison, so an entry carrying it
+        // could only read as configured yet never match; fail closed here.
+        guard lowered.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { return false }
+        for forbidden in [",", "?", "[", "]", "/", "\\", "@", "#"] where lowered.contains(forbidden) {
+            return false
+        }
+        // A lone colon can only spell a `host:port` suffix, and exemption
+        // matching is port-less, so a port-qualified entry could never
+        // authorize; IPv6 literals keep their multiple colons.
+        guard lowered.filter({ $0 == ":" }).count != 1 else { return false }
+        if isBareUniversal(lowered) {
+            return true
+        }
+        switch classifyWildcard(lowered) {
+        case .none:
+            return isExactHostShape(lowered)
+        case .leading:
+            return isExactHostShape(String(lowered.dropFirst(2)))
+        case .trailing:
+            return isExactHostShape(String(lowered.dropLast(2)))
+        case .invalidShape, .invalidSuffix, .invalidStem:
+            return false
+        }
+    }
+
+    /// Whether a non-wildcard entry names an exact host or address literal.
+    ///
+    /// Resolver-accepted IPv4 spellings (decimal, hex, octal, and short) and
+    /// IPv6 literals — including mixed dotted tails whose prefix proves out —
+    /// pass as addresses; every other entry must be a dot-separated DNS name
+    /// with non-empty labels. A trailing root dot is tolerated because the
+    /// shared normalizer strips it before comparison.
+    /// - Parameter lowered: Lowercased, trimmed exact entry.
+    /// - Returns: True when the text names a host or address literal.
+    private static func isExactHostShape(_ lowered: String) -> Bool {
+        let cleaned = SensitiveAddressNormalization.cleanedHostBase(lowered)
+        guard !cleaned.isEmpty else { return false }
+        if SensitiveAddressParsing.canonicalIPv4Octets(cleaned) != nil {
+            return true
+        }
+        if cleaned.contains(":") {
+            return SensitiveAddressParsing.ipv6HextetsExpandingDottedTail(cleaned) != nil
+        }
+        for label in cleaned.split(separator: ".", omittingEmptySubsequences: false) {
+            guard !label.isEmpty else { return false }
+            guard label.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) else {
+                return false
+            }
+        }
+        return true
     }
 }

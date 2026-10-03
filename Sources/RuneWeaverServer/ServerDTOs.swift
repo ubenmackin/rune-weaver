@@ -83,6 +83,10 @@ public enum ServerPaths {
     public static let policy = "policy"
     /// Verification subpath under `/settings/policy`.
     public static let verify = "verify"
+    /// Local-access re-check preview subpath under `/settings/policy`.
+    public static let recheckLocal = "recheck-local"
+    /// Local-access re-check apply subpath under `/settings/policy`.
+    public static let recheckLocalApply = "recheck-local/apply"
     /// Status subpath under `/settings/secrets`.
     public static let status = "status"
     /// Single-owner bearer auth group.
@@ -124,7 +128,7 @@ public enum ServerPaths {
     public static let goalAdvance = "advance"
     /// Goal steps subpath under `/goals/:id`.
     public static let goalSteps = "steps"
-    /// Ideas group backing proactive Muse suggestions.
+    /// Ideas group backing proactive Wayfinder suggestions.
     public static let ideas = "ideas"
     /// Ideas summary subpath under `/ideas`.
     /// Registered before `/:id` so the literal wins over the parameter.

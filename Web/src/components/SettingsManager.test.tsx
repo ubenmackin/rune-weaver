@@ -1283,7 +1283,7 @@ describe("SettingsManager", () => {
     expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
   });
 
-  it("restores the homelab allowed origins editor and persists browser.allowed_origins from the modal", async () => {
+  it("retires the homelab allowed origins editor in favor of the Policy tab pointer", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -1337,31 +1337,59 @@ describe("SettingsManager", () => {
     });
     await user.click((await screen.findAllByRole("button", { name: /^Configure$/ }))[0]);
 
-    // The restored editor loads the stored allowlist on open, and the Security
-    // card points private-LAN authorization at it instead of the Policy tab.
-    const originsTextarea = screen.getByLabelText(
-      /Allowed Origins \(one per line\)/i
-    ) as HTMLTextAreaElement;
-    expect(originsTextarea.value).toBe("http://192.168.1.50:11434");
-    expect(screen.getByText(/SSRF guard reads that list/i)).toBeDefined();
+    // The legacy editor is gone even though the server still returns the
+    // wire-compat field, and the compact pointer names the Policy tab.
+    expect(screen.queryByLabelText(/Allowed Origins \(one per line\)/i)).toBeNull();
+    expect(screen.queryByText(/Homelab Allowed Origins/i)).toBeNull();
+    expect(screen.queryByText(/SSRF guard reads that list/i)).toBeNull();
+    expect(
+      screen.getByRole("heading", { name: /Security & Network Policy/i })
+    ).toBeDefined();
+    expect(
+      screen.getByText(
+        /Domain allow\/deny rules and local network access are managed under the Policy tab\./i
+      )
+    ).toBeDefined();
 
-    // Blank lines and surrounding whitespace collapse on save while order is
-    // preserved, so the wire shape matches the engine's allowed_origins array.
-    await user.clear(originsTextarea);
-    await user.type(
-      originsTextarea,
-      "  http://192.168.1.50:11434  \n\nhttp://homeassistant.local:8123\n"
-    );
+    // Auto-Allowed copy exempts configured service origins from SSRF blocking
+    // only, still requires Policy authorization, and no longer claims email
+    // auto-trust (the supervisor ignores emailConfig).
+    expect(
+      screen.getByText(/automatically exempt from SSRF blocking only/i)
+    ).toBeDefined();
+    expect(
+      screen.getByText(/Calls still require Policy authorization or approval/i)
+    ).toBeDefined();
+    expect(
+      screen.queryByText(/email host servers are automatically trusted/i)
+    ).toBeNull();
+    expect(screen.queryByText(/Email servers.*automatically trusted/i)).toBeNull();
+
+    // The pointer navigates to the Policy tab and closes the modal.
+    await user.click(screen.getByRole("button", { name: /Manage Security Policy/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: /^Policy$/i }).getAttribute("aria-selected")
+      ).toBe("true");
+    });
+    expect(
+      screen.queryByRole("heading", { name: /Configure Web, Browser & API Automation/i })
+    ).toBeNull();
+
+    // Reopen the modal and save: the payload carries timeouts without the
+    // retired origins field.
+    await user.click(screen.getByRole("tab", { name: /Tools and Runes/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Browser, Web & API")).toBeDefined();
+    });
+    await user.click((await screen.findAllByRole("button", { name: /^Configure$/ }))[0]);
     await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
 
     await waitFor(() => {
       expect(sentPayload).not.toBeNull();
     });
     expect(putCount).toBe(1);
-    expect((sentPayload as unknown as Record<string, unknown>)["browserAllowedOrigins"]).toEqual([
-      "http://192.168.1.50:11434",
-      "http://homeassistant.local:8123",
-    ]);
+    expect(sentPayload).not.toHaveProperty("browserAllowedOrigins");
     expect((sentPayload as unknown as Record<string, unknown>)["browserFetchTimeoutSeconds"]).toBe(45);
   });
 
@@ -3867,9 +3895,9 @@ describe("SettingsManager policy tab", () => {
     expect(screen.getByText("GITHUB_TOKEN")).toBeDefined();
     expect(screen.getByTestId("policy-save")).toBeDefined();
 
-    // Two surviving invariants banner the pane; the retired raw editor and the
+    // Three surviving invariants banner the pane; the retired raw editor and the
     // candidate Verify button are gone from the new contract.
-    expect(screen.getByText(/All 2 Formal Security Invariants Verified/)).toBeDefined();
+    expect(screen.getByText(/All 3 Formal Security Invariants Verified/)).toBeDefined();
     expect(screen.queryByText(/Raw TOML/i)).toBeNull();
     expect(screen.queryByLabelText(/Edit policy\.toml directly/i)).toBeNull();
     expect(screen.queryByRole("button", { name: /^Verify$/i })).toBeNull();
