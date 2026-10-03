@@ -2379,6 +2379,16 @@ export const GOAL_CADENCE_OPTIONS: Array<{ value: number; label: string }> = [
   { value: 10080, label: "Weekly" },
 ];
 
+// Friendly label for one cadence value so goal cards and example cards speak in
+// the same words the create form offers. Unknown values (a hand-edited config)
+// fall back to a plain interval so nothing renders blank.
+export function goalCadenceLabel(minutes: number): string {
+  return (
+    GOAL_CADENCE_OPTIONS.find((option) => option.value === minutes)?.label ??
+    `every ${minutes}m`
+  );
+}
+
 // Goals cadence bounds mirroring GoalsConfig.minStepIntervalMinutes and
 // maxStepIntervalMinutes; the server owns the 5-20160 range and this mirror is
 // the single source for the client validator.

@@ -2149,6 +2149,36 @@ a {
   margin-top: 4px;
 }
 
+/* Goals empty state: centered explainer steps plus example cards that reuse
+   the preset look with a roomier grid and a cadence accent. */
+.goal-explainer-steps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  max-width: 560px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.goal-example-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  width: 100%;
+  margin-top: 4px;
+}
+
+.goal-example-card {
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+.goal-example-cadence {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--accent-purple);
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

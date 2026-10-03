@@ -304,7 +304,7 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
           </div>
 
           {tab === "approvals" ? <ApprovalsInbox /> : null}
-          {tab === "goals" ? <GoalsManager attentionCount={goalsAttention} /> : null}
+          {tab === "goals" ? <GoalsManager attentionCount={goalsAttention} onOpenSettings={() => setTab("settings")} /> : null}
           {tab === "memory" ? <MemoryBrowser view="memory" /> : null}
           {tab === "indexing" ? <MemoryBrowser view="indexing" /> : null}
           {tab === "runs" ? <RunLogViewer /> : null}

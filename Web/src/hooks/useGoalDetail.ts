@@ -37,7 +37,7 @@ import {
 // fault, so it earns honest copy instead of the raw transport message. Kept
 // as one string builder so both goal surfaces phrase contention identically.
 function goalAdvanceConflictMessage(goalTitle: string): string {
-  return `"${goalTitle}" is already running — wait for the current advancement to finish.`;
+  return `"${goalTitle}" is already running — wait for the current run to finish.`;
 }
 
 // Active goals pause; every resting state (paused, needs input) resumes. The
@@ -182,13 +182,13 @@ export function useGoalDetail(
       onNotice?.(null);
       try {
         await advanceGoal(goal.id);
-        onNotice?.(`Advancing "${goal.title}" now…`);
+        onNotice?.(`Working on "${goal.title}"…`);
         await reload();
       } catch (failure) {
         onError?.(
           failure instanceof ApiError && failure.status === 409
             ? goalAdvanceConflictMessage(goal.title)
-            : goalFailureMessage(failure, "Advance failed"),
+            : goalFailureMessage(failure, `Working on "${goal.title}" failed`),
         );
       } finally {
         setAdvancingGoalId(null);

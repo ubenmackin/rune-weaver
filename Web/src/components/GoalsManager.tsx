@@ -26,6 +26,8 @@ import {
   deleteGoal,
   dismissIdea,
   formatGoalNextAdvance,
+  getSettings,
+  goalCadenceLabel,
   goalEventKindLabel,
   goalProgressPercent,
   goalStatusLabel,
@@ -70,6 +72,28 @@ type GoalFilter = "current" | "all";
 // on the Runs surface.
 const EXPANDED_RUN_LIMIT = 20;
 
+// First-run examples shown when the owner has no goals yet. Each card prefills
+// the create form so a new pursuit starts from a concrete shape instead of a
+// blank statement; cadences reuse the same option values the form offers.
+const GOAL_EXAMPLES: Array<{ title: string; statement: string; cadence: number }> = [
+  {
+    title: "Publish the field guide",
+    statement: "The guide is written, reviewed, and shared with the team.",
+    cadence: 10080,
+  },
+  {
+    title: "Dig into 5 papers on a topic",
+    statement:
+      "Five papers read, each summarized in a running annotated bibliography.",
+    cadence: 1440,
+  },
+  {
+    title: "Get ready for the conference talk",
+    statement: "A finished outline, slides, and a rehearsed Q&A.",
+    cadence: 720,
+  },
+];
+
 // Normalizes an idea list payload, dropping rows a drifted or older engine
 // cannot validate so a malformed entry never reaches the render path.
 function parseIdeaList(raw: unknown): Idea[] {
@@ -83,14 +107,24 @@ interface GoalsManagerProps {
   // Needs-input count owned by the shell's notification hook. The panel only
   // renders it, so the Work trigger badge and this header share one source.
   attentionCount?: number;
+  // The shell owns tab navigation; the panel only asks to open Settings.
+  onOpenSettings?: () => void;
 }
 
-export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) {
+export default function GoalsManager({
+  attentionCount = 0,
+  onOpenSettings,
+}: GoalsManagerProps) {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [filter, setFilter] = useState<GoalFilter>("current");
+
+  // Creation stays available unless settings explicitly turn goals off. Older
+  // engines without the section and transient read failures keep the enabled
+  // UI; the engine still fails closed on submit.
+  const [goalsEnabled, setGoalsEnabled] = useState(true);
 
   // Proactive suggestions shown above the goal list. Dismissed ideas hide
   // under the default filter exactly as abandoned goals do, so an audit of
@@ -204,6 +238,24 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    // Only an explicit false disables creation, so older engines and transient
+    // failures keep the enabled UI; the engine still fails closed on submit.
+    getSettings()
+      .then((settings) => {
+        if (!cancelled && settings.goals?.enabled === false) {
+          setGoalsEnabled(false);
+        }
+      })
+      .catch(() => {
+        // Keep creation available when settings cannot be read.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleSocketFrame = useCallback(
     (frame: WSIncomingFrame) => {
       // The shared hub passes unknown frame types through as generic records, so
@@ -283,6 +335,19 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
     setCadence(DEFAULT_GOALS_STEP_INTERVAL_MINUTES);
   }
 
+  // Prefills the create form from an example card without submitting. It sets
+  // each field directly instead of resetting first so the example survives.
+  function openCreateWithExample(example: {
+    title: string;
+    statement: string;
+    cadence: number;
+  }) {
+    setTitle(example.title);
+    setStatement(example.statement);
+    setCadence(example.cadence);
+    setCreateOpen(true);
+  }
+
   function closeCreate() {
     if (creating) return;
     setCreateOpen(false);
@@ -292,12 +357,12 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmedTitle = title.trim();
-    // The submit control is disabled while the title is blank, so this guard is
-    // the invariant rather than the user-facing validation.
+    // The submit control stays disabled while the title or statement is blank,
+    // so this guard is the invariant rather than the user-facing validation.
     if (!trimmedTitle) return;
     const trimmedStatement = statement.trim();
     if (!trimmedStatement) {
-      setError("A statement of intent is required to create a goal.");
+      setError("Describe what done looks like before creating a goal.");
       return;
     }
     setCreating(true);
@@ -397,7 +462,7 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
         <div>
           <h2>Goals</h2>
           <p className="muted text-sm">
-            Long-horizon pursuits the agent advances on cadence, step by step.
+            Long-horizon pursuits the agent works on a little at a time, step by step.
           </p>
         </div>
 
@@ -434,10 +499,21 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
               resetForm();
               setCreateOpen(true);
             }}
+            disabled={!goalsEnabled}
+            title={!goalsEnabled ? "Goals are turned off" : undefined}
           >
             <PlusIcon size={14} />
             <span>New Goal</span>
           </button>
+          {/* Disabled buttons suppress hover and focus tooltip delivery in
+              several browsers, so the disable reason is visible header text
+              too; the title stays only as a hover supplement where tooltips
+              do reach the user. */}
+          {!goalsEnabled ? (
+            <span className="muted text-sm">
+              Goals are turned off in Settings
+            </span>
+          ) : null}
         </div>
       </div>
 
@@ -534,24 +610,74 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
       </div>
 
       {goals.length === 0 && !loading ? (
-        <div className="empty-state-box">
-          <TargetIcon size={22} />
-          <h3>No goals yet</h3>
-          <p className="muted">
-            Set a long-horizon goal and the agent will plan and advance it on
-            cadence. You can also ask the agent in chat to create one for you.
-          </p>
-          <button
-            type="button"
-            className="primary mt-3"
-            onClick={() => {
-              resetForm();
-              setCreateOpen(true);
-            }}
-          >
-            Create Your First Goal
-          </button>
-        </div>
+        !goalsEnabled ? (
+          <div className="empty-state-box">
+            <TargetIcon size={22} />
+            <h3>Goals are turned off</h3>
+            <p className="muted">
+              Goals are turned off in Settings. Turn on Enable goal pursuit
+              under Goals & Proactivity to have the agent plan and work on
+              longer projects.
+            </p>
+            {onOpenSettings ? (
+              <button
+                type="button"
+                className="primary mt-3"
+                onClick={onOpenSettings}
+              >
+                Open Settings
+              </button>
+            ) : null}
+          </div>
+        ) : (
+          <div className="empty-state-box">
+            <TargetIcon size={22} />
+            <h3>No goals yet</h3>
+            <p className="muted">
+              A goal is something you want to get done that takes more than one
+              sitting. Tell the agent what you&apos;re aiming for, and it will
+              make a plan and work on it a step at a time — checking in with
+              you along the way.
+            </p>
+            <div className="goal-explainer-steps">
+              <span>You describe what done looks like</span>
+              <span aria-hidden="true">→</span>
+              <span>The agent writes a step-by-step plan</span>
+              <span aria-hidden="true">→</span>
+              <span>It works on one step each session, and asks when it&apos;s stuck</span>
+            </div>
+            <h4>Not sure where to start? Try one of these:</h4>
+            <div className="preset-grid goal-example-grid">
+              {GOAL_EXAMPLES.map((example) => (
+                <button
+                  key={example.title}
+                  type="button"
+                  className="preset-card goal-example-card"
+                  onClick={() => openCreateWithExample(example)}
+                >
+                  <span className="preset-card-title">{example.title}</span>
+                  <span className="preset-card-desc">{example.statement}</span>
+                  <span className="goal-example-cadence">
+                    {goalCadenceLabel(example.cadence)}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              className="primary mt-3"
+              onClick={() => {
+                resetForm();
+                setCreateOpen(true);
+              }}
+            >
+              Create Your First Goal
+            </button>
+            <p className="muted text-xs" style={{ margin: 0 }}>
+              Need the same task repeated on a schedule instead? Use Schedules.
+            </p>
+          </div>
+        )
       ) : null}
 
       {goals.length > 0 && visibleGoals.length === 0 && !loading ? (
@@ -588,9 +714,9 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
                   </div>
                   <div className="schedule-card-details muted text-xs">
                     <span>
-                      next advance {formatGoalNextAdvance(goal.status, goal.nextDueAt)}
+                      next work session {formatGoalNextAdvance(goal.status, goal.nextDueAt)}
                     </span>
-                    <span> · cadence {goal.stepIntervalMinutes}m</span>
+                    <span> · {goalCadenceLabel(goal.stepIntervalMinutes)}</span>
                     <span>
                       {" "}
                       · {goal.progress.done}/{goal.progress.total} steps
@@ -604,10 +730,10 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
                     className="ghost run-now-btn"
                     onClick={() => void advance(goal)}
                     disabled={advancingGoalId === goal.id || isTerminal}
-                    title="Fire one advancement now"
-                    aria-label="Advance now"
+                    title="Work on it now"
+                    aria-label="Work on it now"
                   >
-                    {advancingGoalId === goal.id ? "Advancing…" : "Advance now"}
+                    {advancingGoalId === goal.id ? "Working…" : "Work on it now"}
                   </button>
 
                   <button
@@ -677,7 +803,7 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
               </div>
 
               <div className="schedule-card-prompt">
-                <span className="prompt-label">Intent:</span>
+                <span className="prompt-label">Done looks like:</span>
                 <span className="prompt-text">{goal.statement}</span>
               </div>
 
@@ -795,8 +921,8 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
                       <h4 style={{ marginTop: 12 }}>Linked runs</h4>
                       {runsForGoal.length === 0 ? (
                         <p className="muted text-xs">
-                          No runs recorded for this goal yet. Use Advance now to
-                          fire one.
+                          No runs recorded for this goal yet. Use Work on it now to
+                          start one.
                         </p>
                       ) : (
                         <div className="embedded-runs-list">
@@ -852,36 +978,51 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
               </button>
             </div>
             <div className="modal-body">
-              <label htmlFor="goal-title">Goal Title</label>
-              <input
-                id="goal-title"
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
-                placeholder="e.g. Publish the field guide"
-                autoComplete="off"
-              />
-
-              <label htmlFor="goal-statement">Statement of Intent</label>
-              <textarea
-                id="goal-statement"
-                value={statement}
-                onChange={(event) => setStatement(event.target.value)}
-                placeholder="What does done look like, and why does it matter?"
-                rows={4}
-              />
-
-              <label htmlFor="goal-cadence">Advance Cadence</label>
-              <select
-                id="goal-cadence"
-                value={cadence}
-                onChange={(event) => setCadence(Number(event.target.value))}
-              >
-                {GOAL_CADENCE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+              <p className="muted text-sm" style={{ marginTop: 0 }}>
+                Tell the agent what you want to get done. It will make a plan
+                and work on it a step at a time.
+              </p>
+              <div className="form-group">
+                <label htmlFor="goal-title">What do you want to get done?</label>
+                <input
+                  id="goal-title"
+                  type="text"
+                  value={title}
+                  onChange={(event) => setTitle(event.target.value)}
+                  placeholder="e.g. Publish the field guide"
+                  autoComplete="off"
+                  aria-required="true"
+                />
+              </div>
+              <div className="form-group mt-4">
+                <label htmlFor="goal-statement">What does done look like?</label>
+                <textarea
+                  id="goal-statement"
+                  value={statement}
+                  onChange={(event) => setStatement(event.target.value)}
+                  placeholder="e.g. The guide is written, reviewed, and shared with the team."
+                  rows={4}
+                  aria-required="true"
+                />
+                <span className="form-group-hint">
+                  Describe what will be true when this is finished — and why it
+                  matters to you. Required.
+                </span>
+              </div>
+              <div className="form-group mt-4">
+                <label htmlFor="goal-cadence">How often should I work on it?</label>
+                <select
+                  id="goal-cadence"
+                  value={cadence}
+                  onChange={(event) => setCadence(Number(event.target.value))}
+                >
+                  {GOAL_CADENCE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
             <div className="modal-footer">
               <button
@@ -895,7 +1036,11 @@ export default function GoalsManager({ attentionCount = 0 }: GoalsManagerProps) 
               <button
                 type="submit"
                 className="primary"
-                disabled={creating || title.trim().length === 0}
+                disabled={
+                  creating ||
+                  title.trim().length === 0 ||
+                  statement.trim().length === 0
+                }
                 aria-label="Create goal"
               >
                 {creating ? "Creating…" : "Create Goal"}
