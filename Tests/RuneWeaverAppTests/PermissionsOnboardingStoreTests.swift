@@ -30,6 +30,7 @@ import RuneWeaverCore
 import Testing
 
 @Suite("Permissions onboarding store and mappings")
+@MainActor
 struct PermissionsOnboardingStoreTests {
     /// Isolated defaults suite so the suite never touches the owner's real flag.
     private func makeIsolatedDefaults() -> (UserDefaults, String) {

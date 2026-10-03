@@ -12,6 +12,7 @@
 
 import CryptoKit
 import Foundation
+import os
 import RuneWeaverCore
 @testable import RuneWeaverServer
 import Testing
@@ -200,23 +201,24 @@ struct ServerAuthSessionStoreTests {
 /// Test-only clock for the sliding-session suite: a mutable instant the tests
 /// move explicitly, so idle expiry, cookie-renewal throttling, and persistence
 /// coalescing are deterministic instead of sleeping against wall time.
-///
-/// `@unchecked Sendable` is safe because each test drives the clock from its own
-/// task and never mutates it concurrently.
-private final class TestClock: @unchecked Sendable {
+private final class TestClock: Sendable {
+    private let box: OSAllocatedUnfairLock<Date>
+
     /// Current instant handed to the verifier through its injected clock.
-    var now: Date
+    var now: Date {
+        box.withLock { $0 }
+    }
 
     /// Creates a clock pinned to a whole-second instant so `.secondsSince1970`
     /// persistence round-trips byte-for-byte.
     init(now: Date = Date(timeIntervalSince1970: 1_700_000_000)) {
-        self.now = now
+        self.box = OSAllocatedUnfairLock(initialState: now)
     }
 
     /// Moves the clock forward, as if that much wall time had passed.
     /// - Parameter interval: Seconds to advance by.
     func advance(_ interval: TimeInterval) {
-        now = now.addingTimeInterval(interval)
+        box.withLock { $0 = $0.addingTimeInterval(interval) }
     }
 }
 

@@ -4,30 +4,34 @@
 // executes cleanup idempotently, and notifies the termination handler.
 
 import Foundation
+import os
 @testable import RuneWeaverApp
 @testable import RuneWeaverCore
 @testable import RuneWeaverTools
 import Testing
 
-private final class MockSearXNGEnsurer: SearXNGEnsuring, @unchecked Sendable {
-    private let lock = NSLock()
-    private var _ensureCallCount = 0
-    private var _stopCallCount = 0
+private final class MockSearXNGEnsurer: SearXNGEnsuring, Sendable {
+    private struct State: Sendable {
+        var ensureCallCount = 0
+        var stopCallCount = 0
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     var ensureCallCount: Int {
-        lock.withLock { _ensureCallCount }
+        state.withLock { $0.ensureCallCount }
     }
 
     var stopCallCount: Int {
-        lock.withLock { _stopCallCount }
+        state.withLock { $0.stopCallCount }
     }
 
     func ensure(browser _: BrowserConfig) async throws {
-        lock.withLock { _ensureCallCount += 1 }
+        state.withLock { $0.ensureCallCount += 1 }
     }
 
     func stop() async {
-        lock.withLock { _stopCallCount += 1 }
+        state.withLock { $0.stopCallCount += 1 }
     }
 }
 

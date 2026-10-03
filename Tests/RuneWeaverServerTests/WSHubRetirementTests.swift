@@ -143,16 +143,20 @@ struct WSHubRetirementTests {
         do {
             let request = Request(application: app, on: app.eventLoopGroup.any())
 
-            #expect(isAllowedWebSocketOrigin("http://localhost:3000", request: request))
-            #expect(isAllowedWebSocketOrigin("http://127.0.0.1:8080", request: request))
-            #expect(isAllowedWebSocketOrigin("http://[::1]:8080", request: request))
+            #expect(isAllowedWebSocketOrigin("http://localhost:8082", request: request))
+            #expect(!isAllowedWebSocketOrigin("http://localhost:3000", request: request))
+            #expect(isAllowedWebSocketOrigin("http://127.0.0.1:8082", request: request))
+            #expect(!isAllowedWebSocketOrigin("http://127.0.0.1:8080", request: request))
+            #expect(isAllowedWebSocketOrigin("http://[::1]:8082", request: request))
+            #expect(!isAllowedWebSocketOrigin("http://[::1]:8080", request: request))
             #expect(!isAllowedWebSocketOrigin("https://evil.com", request: request))
             #expect(!isAllowedWebSocketOrigin("https://attacker.org", request: request))
             #expect(!isAllowedWebSocketOrigin("not-a-valid-url", request: request))
 
-            // Host-omitting request keeps prior behavior: loopback passes,
+            // Host-omitting request: matching loopback port passes, mismatched port fails,
             // arbitrary cross-site origins fail, and malformed origins fail closed.
-            #expect(isAllowedWebSocketOrigin("http://localhost:3000", request: request))
+            #expect(isAllowedWebSocketOrigin("http://localhost:8082", request: request))
+            #expect(!isAllowedWebSocketOrigin("http://localhost:3000", request: request))
             #expect(!isAllowedWebSocketOrigin("https://evil.com", request: request))
 
             // Reverse-proxy parity: the request Host already passed
@@ -212,7 +216,8 @@ struct WSHubRetirementTests {
                 headers: bracketedHeaders,
                 on: app.eventLoopGroup.any()
             )
-            #expect(isAllowedWebSocketOrigin("http://[::1]:3000", request: bracketedRequest))
+            #expect(!isAllowedWebSocketOrigin("http://[::1]:3000", request: bracketedRequest))
+            #expect(isAllowedWebSocketOrigin("ws://[::1]:8080", request: bracketedRequest))
             #expect(isAllowedWebSocketOrigin("ws://[::1]:8082", request: bracketedRequest))
 
             var bareHeaders = HTTPHeaders()
@@ -222,7 +227,8 @@ struct WSHubRetirementTests {
                 headers: bareHeaders,
                 on: app.eventLoopGroup.any()
             )
-            #expect(isAllowedWebSocketOrigin("http://[::1]:3000", request: bareRequest))
+            #expect(!isAllowedWebSocketOrigin("http://[::1]:3000", request: bareRequest))
+            #expect(isAllowedWebSocketOrigin("http://[::1]:8082", request: bareRequest))
 
             // Non-loopback bracketed IPv6 parity exercises the fixed path:
             // loopback `::1` already passes before parity, so only a

@@ -227,8 +227,11 @@ private func registerAuthSessionRoutes(_ app: Application, auth: ServerAuth) {
 
     // POST /auth/session (login)
     authGroup.post(PathComponent.constant(ServerPaths.session)) { req async throws -> Response in
-        let identity = ServerAuthRequest.clientIdentity(for: req)
-        let isLoopback = ServerAuthRequest.isLoopback(identity)
+        // Throttle on both the derived client and the direct peer, matching the
+        // middleware gate: the header value rotates freely even from loopback,
+        // so the peer bucket is what bounds a rotating guesser.
+        let throttle = ServerAuthRequest.throttleIdentities(for: req)
+        let identity = throttle.identity
 
         // Read token from JSON body or Authorization header
         let bodyToken = (try? req.content.decode(AuthSessionRequestBody.self))?.token?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -241,13 +244,19 @@ private func registerAuthSessionRoutes(_ app: Application, auth: ServerAuth) {
         // retried login — re-presents and re-verifies it.
         guard await auth.verifyOwnerToken(candidate) else {
             RuneWeaverLog.server.warning("Owner auth session login rejected from \(identity).")
-            if let retryAfter = await auth.recordFailure(for: identity, isLoopback: isLoopback) {
+            if let retryAfter = await auth.recordFailure(
+                for: identity,
+                isLoopback: throttle.isLoopback,
+                peerIdentity: throttle.peerIdentity,
+                peerIsLoopback: throttle.peerIsLoopback
+            ) {
                 return ServerAuthMiddleware.throttledResponse(retryAfter: retryAfter)
             }
             return ServerAuthMiddleware.unauthorizedResponse()
         }
 
         await auth.clearFailures(for: identity)
+        await auth.clearFailures(for: throttle.peerIdentity)
         let sessionID = try await auth.createSession()
         let response = Response(
             status: .ok,

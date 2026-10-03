@@ -54,7 +54,19 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         "~/.runeweaver/config.toml",
         "~/.runeweaver/policy.toml",
         "~/.runeweaver/auth_token",
-        "~/.runeweaver/searxng"
+        "~/.runeweaver/searxng",
+        "~/.zshrc",
+        "~/.zprofile",
+        "~/.zshenv",
+        "~/.zlogin",
+        "~/.bashrc",
+        "~/.bash_profile",
+        "~/.profile",
+        "~/.bash_login",
+        "~/.bash_logout",
+        "~/Library/LaunchAgents",
+        "/Library/LaunchAgents",
+        "/Library/LaunchDaemons"
     ]
 
     /// Filename-level denies applied anywhere in the tree via SBPL regex.
@@ -75,7 +87,27 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         // outside the default path still refuses; the SearXNG tree covers the
         // per-install Flask secret generated beside the app's config.
         #"/[^/]*auth_token$"#,
-        #"/\.runeweaver/searxng/"#
+        #"/\.runeweaver/searxng/"#,
+        #"/\.zshrc$"#,
+        #"/\.zprofile$"#,
+        #"/\.zshenv$"#,
+        #"/\.zlogin$"#,
+        #"/\.bashrc$"#,
+        #"/\.bash_profile$"#,
+        #"/\.profile$"#,
+        #"/\.bash_login$"#,
+        #"/\.bash_logout$"#,
+        #"/[^/]*\.bashrc$"#,
+        #"/[^/]*\.zshrc$"#,
+        #"/[^/]*\.profile$"#,
+        #"/[^/]*\.bash_profile$"#,
+        #"/[^/]*\.zshenv$"#,
+        #"/[^/]*\.zprofile$"#,
+        #"/[^/]*\.zlogin$"#,
+        #"/[^/]*\.bash_login$"#,
+        #"/[^/]*\.bash_logout$"#,
+        #"/Library/LaunchAgents/"#,
+        #"/Library/LaunchDaemons/"#
     ]
 
     /// Creates a Seatbelt profile builder.

@@ -274,4 +274,21 @@ struct SeatbeltProfileBuilderTests {
         #expect(process.terminationStatus == 0)
         #expect(outputText.contains("sandbox test content"))
     }
+
+    @Test
+    func `Denies shell startup files and launch agents inside the sandbox`() {
+        let builder = SeatbeltProfileBuilder(
+            allowedReadPaths: ["/Users/test/workspace"],
+            allowedWritePaths: ["/Users/test/workspace"]
+        )
+        let profile = builder.buildProfile()
+
+        #expect(profile.contains(".zshrc"))
+        #expect(profile.contains(".bashrc"))
+        #expect(profile.contains(".profile"))
+        #expect(profile.contains("LaunchAgents"))
+        #expect(profile.contains(#"/\.zshrc$"#))
+        #expect(profile.contains(#"/\.bashrc$"#))
+        #expect(profile.contains(#"/Library/LaunchAgents/"#))
+    }
 }

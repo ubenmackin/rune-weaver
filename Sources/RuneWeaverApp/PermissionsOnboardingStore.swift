@@ -20,11 +20,10 @@ import Foundation
 /// Injected defaults keep tests hermetic: production passes the standard
 /// store while tests pass an isolated suite that is torn down afterwards.
 ///
-/// Unchecked Sendable is sound here because the only shared state is the
-/// held UserDefaults, which is thread-safe for concurrent bool reads and
-/// writes keyed by an immutable string, and the struct itself holds no
-/// other mutable state.
-public struct PermissionsOnboardingStore: @unchecked Sendable {
+/// MainActor isolation ensures thread-safe access from the UI and AppModel
+/// without requiring unchecked Sendable escapes.
+@MainActor
+public struct PermissionsOnboardingStore {
     /// Defaults key holding the completion flag.
     private static let storageKey = "RuneWeaver.permissionsOnboardingCompleted"
 

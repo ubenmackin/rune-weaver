@@ -536,10 +536,18 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
 
         /// Checks if the frontmost app is on the blocklist.
         private func checkBlockedApp(blockedApps: [String]) throws {
-            guard let frontApp = NSWorkspace.shared.frontmostApplication?.localizedName else { return }
-            let loweredFront = frontApp.lowercased()
-            for blocked in blockedApps where loweredFront == blocked.lowercased() {
-                throw DesktopControlError.blockedApp(appName: frontApp)
+            guard let frontApp = NSWorkspace.shared.frontmostApplication else { return }
+            let frontName = frontApp.localizedName ?? ""
+            let frontBundleID = frontApp.bundleIdentifier ?? ""
+            let loweredFront = frontName.lowercased()
+            let loweredBundle = frontBundleID.lowercased()
+            for blocked in blockedApps {
+                let loweredBlocked = blocked.lowercased()
+                if (!loweredFront.isEmpty && loweredFront == loweredBlocked)
+                    || (!loweredBundle.isEmpty && loweredBundle == loweredBlocked)
+                {
+                    throw DesktopControlError.blockedApp(appName: !frontName.isEmpty ? frontName : frontBundleID)
+                }
             }
         }
 
@@ -687,10 +695,22 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
             guard let app = apps.first(where: {
                 $0.localizedName?.lowercased() == lowered
                     || $0.localizedName?.lowercased().contains(lowered) == true
+                    || $0.bundleIdentifier?.lowercased() == lowered
+                    || $0.bundleIdentifier?.lowercased().contains(lowered) == true
             }) else {
                 throw DesktopControlError.actionFailed(
                     index: 0, reason: "Application '\(appName)' not found among running apps"
                 )
+            }
+            let resolvedName = (app.localizedName ?? "").lowercased()
+            let resolvedBundle = (app.bundleIdentifier ?? "").lowercased()
+            for blocked in blockedApps {
+                let loweredBlocked = blocked.lowercased()
+                if (!resolvedName.isEmpty && (resolvedName == loweredBlocked || resolvedName.contains(loweredBlocked)))
+                    || (!resolvedBundle.isEmpty && (resolvedBundle == loweredBlocked || resolvedBundle.contains(loweredBlocked)))
+                {
+                    throw DesktopControlError.blockedApp(appName: app.localizedName ?? appName)
+                }
             }
             app.activate()
             return "Switched to \(app.localizedName ?? appName)"
