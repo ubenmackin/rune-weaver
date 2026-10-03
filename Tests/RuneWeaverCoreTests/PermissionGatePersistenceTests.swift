@@ -781,6 +781,107 @@ struct PermissionGatePersistenceTests {
         }
         #expect(reason.contains("protected Rune Weaver engine files"))
     }
+
+    @Test
+    func `rearmGrant preserves identity, counters, and creation time while recomputing expiry`() async {
+        let gate = PermissionGate()
+        let descriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        await gate.grantTrust(for: descriptor, duration: .oneHour)
+        await gate.recordUse(for: descriptor)
+        await gate.recordUse(for: descriptor)
+
+        guard let before = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor }) else {
+            Issue.record("Expected active grant before re-arm")
+            return
+        }
+        #expect(before.useCount == 2)
+        #expect(before.lastUsedAt != nil)
+        let beforeGrantedAt = before.grantedAt
+        let beforeLastUsed = before.lastUsedAt
+
+        // Re-arming rewrites only the tier and its expiry from confirmation
+        // time: identity, scope, creation time, and liveness counters survive
+        // so dashboards keep proving exercised trust across the change.
+        #expect(await gate.rearmGrant(id: before.id, duration: .oneDay) == .rearmed)
+
+        let active = await gate.activeGrants()
+        #expect(active.count == 1)
+        guard let rearmed = active.first(where: { $0.id == before.id }) else {
+            Issue.record("Expected the same grant row after re-arm")
+            return
+        }
+        #expect(rearmed.id == before.id)
+        #expect(rearmed.actionDescriptor == descriptor)
+        #expect(rearmed.grantedAt == beforeGrantedAt)
+        #expect(rearmed.useCount == 2)
+        #expect(rearmed.lastUsedAt == beforeLastUsed)
+        #expect(rearmed.duration == .oneDay)
+        // Expiry is recomputed from now rather than carried from the original
+        // grant date, so a longer tier extends trust instead of preserving it.
+        #expect(rearmed.expiresAt != nil)
+        if let expiresAt = rearmed.expiresAt {
+            #expect(expiresAt > Date())
+        }
+
+        // Re-arming to the never-expiring tier clears expiry while still
+        // keeping the same row and counters rather than minting a second row.
+        #expect(await gate.rearmGrant(id: before.id, duration: .forever) == .rearmed)
+        let foreverActive = await gate.activeGrants()
+        #expect(foreverActive.count == 1)
+        guard let foreverGrant = foreverActive.first(where: { $0.id == before.id }) else {
+            Issue.record("Expected the same grant row after forever re-arm")
+            return
+        }
+        #expect(foreverGrant.duration == .forever)
+        #expect(foreverGrant.expiresAt == nil)
+        #expect(foreverGrant.grantedAt == beforeGrantedAt)
+        #expect(foreverGrant.useCount == 2)
+        #expect(foreverGrant.lastUsedAt == beforeLastUsed)
+    }
+
+    @Test
+    func `rearmGrant on expired grant reports notFound`() async {
+        let now = Date()
+        let expired = TrustGrant(
+            id: UUID(),
+            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "gone@example.com"),
+            grantedAt: now.addingTimeInterval(-7200),
+            expiresAt: now.addingTimeInterval(-60),
+            duration: .fiveMinutes
+        )
+        // Bootstrap prunes the lapsed row, so the identifier is already gone
+        // before re-arm runs; the miss must report notFound so the route can
+        // stay 404 rather than reading as a tier refusal.
+        let store = InMemoryTrustStore(grants: [expired])
+        let gate = await PermissionGate.load(store: store)
+        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await gate.rearmGrant(id: expired.id, duration: .oneHour) == .notFound)
+        #expect(await gate.rearmGrant(id: UUID(), duration: .oneHour) == .notFound)
+    }
+
+    @Test
+    func `rearmGrant with thisTime reports invalidDuration and keeps the grant`() async {
+        let gate = PermissionGate()
+        let descriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        await gate.grantTrust(for: descriptor, duration: .oneHour)
+        guard let id = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor })?.id else {
+            Issue.record("Expected active grant before re-arm")
+            return
+        }
+
+        // One-shot approvals store no row, so there is no lifetime to extend.
+        // The refusal must name the tier rather than reading as unknown, and
+        // the live grant must survive unchanged for a later durable re-arm.
+        #expect(
+            await gate.rearmGrant(id: id, duration: .thisTime)
+                == .invalidDuration(reason: GrantRearmOutcome.thisTimeRefusal)
+        )
+        let active = await gate.activeGrants()
+        #expect(active.count == 1)
+        #expect(active.first?.duration == .oneHour)
+        #expect(active.first?.actionDescriptor == descriptor)
+        #expect(await gate.isTrusted(descriptor) == true)
+    }
 }
 
 /// Smoke-test contract for the permission gate consulting shell rules before parking.

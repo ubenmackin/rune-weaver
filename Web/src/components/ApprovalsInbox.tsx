@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
+  changeDurationGrant,
   decideApproval,
   listApprovals,
   listTrustGrants,
@@ -123,6 +124,24 @@ function grantUseCount(grant: TrustGrant): number {
   return Math.floor(raw);
 }
 
+// Re-arm preview mirrors the server recomputation (expiry from confirmation
+// time), so the modal shows the wall-clock date the grant would receive if
+// saved now; forever carries no date and previews as never expiring.
+function durableDurationMs(duration: TrustDuration): number | null {
+  switch (duration) {
+    case "fiveMinutes":
+      return 5 * 60 * 1000;
+    case "oneHour":
+      return 60 * 60 * 1000;
+    case "oneDay":
+      return 24 * 60 * 60 * 1000;
+    case "forever":
+      return null;
+    default:
+      return null;
+  }
+}
+
 export default function ApprovalsInbox() {
   const [approvals, setApprovals] = useState<PermissionRequest[]>([]);
   const [durations, setDurations] = useState<Record<string, TrustDuration>>({});
@@ -135,6 +154,14 @@ export default function ApprovalsInbox() {
   const [grants, setGrants] = useState<TrustGrant[]>([]);
   const [wideningId, setWideningId] = useState<string | null>(null);
   const [widenSelections, setWidenSelections] = useState<Record<string, boolean>>({});
+  // Staged widen target renders the shared confirmation modal; the widening
+  // request only fires from the modal so list-row clicks stay non-destructive
+  // and the consequence stays visible before trust expands tool-wide.
+  const [pendingWiden, setPendingWiden] = useState<TrustGrant | null>(null);
+  // Widen failure stays inside the confirmation dialog because the page-level
+  // error renders behind the modal portal backdrop and would be invisible
+  // while staged.
+  const [widenError, setWidenError] = useState<string | null>(null);
   const [revokingId, setRevokingId] = useState<string | null>(null);
   // Staged revoke target renders the shared confirmation modal; the destructive request only
   // fires from the modal so list-row clicks stay non-destructive by default.
@@ -142,6 +169,17 @@ export default function ApprovalsInbox() {
   // Revoke failure stays inside the confirmation dialog because the page-level error renders
   // behind the modal portal backdrop and would be invisible while staged.
   const [revokeError, setRevokeError] = useState<string | null>(null);
+  // Staged re-arm target renders the duration modal; the PATCH only fires from
+  // the modal confirm so row clicks preview without rewriting expiry, and the
+  // staged tier stays local until saved.
+  const [pendingDurationGrant, setPendingDurationGrant] = useState<TrustGrant | null>(null);
+  const [selectedDuration, setSelectedDuration] = useState<TrustDuration>("oneHour");
+  // Duration failure stays inside the modal for the same backdrop reason as
+  // widen/revoke: the page-level error would be hidden while staged.
+  const [durationError, setDurationError] = useState<string | null>(null);
+  // In-flight re-arm id mirrors the widen/revoke locks so a slow PATCH cannot
+  // be double-submitted and sibling rows stay locked until it settles.
+  const [changingDurationId, setChangingDurationId] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   // Grants fetch stays best-effort so a grants outage never clears the
@@ -301,20 +339,36 @@ export default function ApprovalsInbox() {
     }
   }
 
-  // Widen holds one global in-flight lock rather than per-row latches: a
-  // single `wideningId` is the only source of progress, so a second widen
-  // starting while one is pending would overwrite it, re-enable the first
-  // row mid-flight, and let the first completion clear the second's spinner.
-  // Guarding the click keeps the lock honest even if a stale handler fires.
-  async function handleWiden(grant: TrustGrant) {
+  // Staging keeps row clicks non-destructive: the widening request only fires
+  // from the modal confirm, so hover alone never expands trust and a
+  // mis-click never widens without reading the consequence first.
+  function stageWiden(grant: TrustGrant) {
+    setWidenError(null);
+    setPendingWiden(grant);
+  }
+
+  function cancelWiden() {
+    setPendingWiden(null);
+    setWidenError(null);
+  }
+
+  // Confirms the staged widen: posts the tool-wide expansion, refetches so the
+  // card flips to the all-targets scope, then closes. Failures keep the modal
+  // open with the error surfaced inside the dialog so the user can retry or
+  // cancel instead of losing scope.
+  async function confirmWiden() {
+    if (!pendingWiden) return;
     if (wideningId !== null) return;
-    setWideningId(grant.id);
-    setError(null);
+    const id = pendingWiden.id;
+    setWideningId(id);
+    setWidenError(null);
     try {
-      await widenTrustGrant(grant.id);
+      await widenTrustGrant(id);
       await refreshGrants();
+      setPendingWiden(null);
+      setWidenError(null);
     } catch (failure) {
-      setError(
+      setWidenError(
         failure instanceof ApiError ? failure.message : "Failed to widen grant",
       );
     } finally {
@@ -351,8 +405,55 @@ export default function ApprovalsInbox() {
     setRevokeError(null);
   }
 
+  // Staging keeps row clicks non-destructive: the PATCH only fires from the
+  // modal confirm, so opening the dialog never rewrites expiry and the
+  // current tier stays selected until the owner picks another.
+  function stageDurationChange(grant: TrustGrant) {
+    setDurationError(null);
+    setSelectedDuration(
+      grant.duration === "thisTime" ? "fiveMinutes" : grant.duration,
+    );
+    setPendingDurationGrant(grant);
+  }
+
+  function cancelDurationChange() {
+    setPendingDurationGrant(null);
+    setDurationError(null);
+  }
+
+  // Confirms the staged re-arm: patches the tier in place, refetches so the
+  // row expiry updates without a manual refresh, then closes. The server
+  // keeps identity and usage counters, so the client only sends the tier.
+  // Failures keep the modal open with the error inside so the owner can
+  // retry or cancel instead of losing the staged choice.
+  async function confirmDurationChange() {
+    if (!pendingDurationGrant) return;
+    if (changingDurationId !== null) return;
+    const id = pendingDurationGrant.id;
+    const duration = selectedDuration;
+    setChangingDurationId(id);
+    setDurationError(null);
+    try {
+      await changeDurationGrant(id, duration);
+      await refreshGrants();
+      setPendingDurationGrant(null);
+      setDurationError(null);
+    } catch (failure) {
+      setDurationError(
+        failure instanceof ApiError ? failure.message : "Failed to save duration",
+      );
+    } finally {
+      setChangingDurationId(null);
+    }
+  }
+
   // Expired-by-clock rows hide locally so a lapsed grant never lingers
   // until the next server poll.
+  // Live re-arm preview derives from confirmation time, so it ticks with the
+  // same clock that drives expiry countdowns and stays honest while staged.
+  const durationPreviewMs = durableDurationMs(selectedDuration);
+  const durationPreviewDate =
+    durationPreviewMs == null ? null : new Date(nowMs + durationPreviewMs);
   const visibleGrants = grants.filter(
     (grant) => !isGrantExpired(grant, nowMs),
   );
@@ -590,7 +691,12 @@ export default function ApprovalsInbox() {
                 </div>
 
                 <div className="approval-grant-meta text-sm muted">
-                  <span>{durationLabelFor(grant.duration)}</span>
+                  <span className="approval-grant-duration">
+                    {durationLabelFor(grant.duration)}
+                  </span>
+                  <span className="approval-grant-meta-sep" aria-hidden="true">
+                    ·
+                  </span>
                   {expiry ? (
                     <span>
                       Expires {expiry.toLocaleString()} ({relative})
@@ -623,21 +729,26 @@ export default function ApprovalsInbox() {
 
                 <div className="approval-actions-bar">
                   <div className="approval-decision-buttons">
-                    {/* Whole-list widen lock: every widen disables while one is
-                        in flight so overlapping requests cannot corrupt the
-                        shared in-flight id; only the active row shows the
-                        spinner, mirroring the revoke staging lock. Send grants
-                        are per-recipient and withhold the control entirely. */}
+                    {/* Widen staging lock: row clicks only stage the confirmation so
+                        hover states the consequence without expanding trust; the
+                        modal confirm issues the request. Every widen locks while
+                        one is in flight or staged, mirroring the revoke staging
+                        lock. Send grants are per-recipient and withhold the
+                        control entirely. */}
                     {isWidenableGrant(grant) ? (
                       <button
                         type="button"
                         className="secondary"
+                        title={`This approval currently covers only ${(grant.target ?? "").trim()}. Widening allows ${grant.toolName} for any recipient, address, file, or site.`}
                         disabled={
                           wideningId !== null ||
                           revokingId !== null ||
-                          pendingRevoke !== null
+                          changingDurationId !== null ||
+                          pendingRevoke !== null ||
+                          pendingWiden !== null ||
+                          pendingDurationGrant !== null
                         }
-                        onClick={() => void handleWiden(grant)}
+                        onClick={() => stageWiden(grant)}
                       >
                         {wideningId === grant.id ? (
                           <>
@@ -649,6 +760,25 @@ export default function ApprovalsInbox() {
                         )}
                       </button>
                     ) : null}
+                    {/* Re-arm keeps the narrowed scope and only rewrites expiry, so it
+                        stays offered even for per-recipient send rows where widening
+                        has no tool-wide meaning. Staging keeps the row click
+                        non-destructive; the modal confirm issues the PATCH. */}
+                    <button
+                      type="button"
+                      className="ghost"
+                      disabled={
+                        wideningId !== null ||
+                        revokingId !== null ||
+                        changingDurationId !== null ||
+                        pendingRevoke !== null ||
+                        pendingWiden !== null ||
+                        pendingDurationGrant !== null
+                      }
+                      onClick={() => stageDurationChange(grant)}
+                    >
+                      Change duration
+                    </button>
                     {revokingId === grant.id ? (
                       // Disabled in-flight control keeps the row locked while
                       // surfacing progress, mirroring the pending inbox
@@ -663,18 +793,21 @@ export default function ApprovalsInbox() {
                       </button>
                     ) : (
                       <>
-                        {/* Staging lock for confirm-every-revoke: while a revoke is staged
-                            (modal open, not yet confirming) every row disables so a
-                            second Revoke cannot overwrite pendingRevoke and silently
-                            drop the first context. Once confirming, only the
-                            revoking row locks so siblings stay actionable. */}
+                        {/* Staging lock for confirm-every-revoke: while a revoke or a
+                            widen is staged (modal open, not yet confirming)
+                            every row disables so a second action cannot
+                            overwrite the staged context and silently drop the
+                            first scope. Once confirming, only the acting row
+                            locks so siblings stay actionable. */}
                         <button
                           type="button"
                           className="danger"
                           disabled={
                             revokingId !== null
                               ? revokingId === grant.id
-                              : pendingRevoke !== null
+                              : pendingRevoke !== null ||
+                                pendingWiden !== null ||
+                                pendingDurationGrant !== null
                           }
                           onClick={() => {
                             setRevokeError(null);
@@ -757,6 +890,170 @@ export default function ApprovalsInbox() {
               aria-label="Confirm revoke grant"
             >
               {revokingId === pendingRevoke.id ? "Revoking…" : "Revoke"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {/* Widen confirmation via the shared modal so the consequence stays visible
+          before trust expands tool-wide. Staging keeps row clicks
+          non-destructive; only the modal confirm issues the widen request. */}
+      {pendingWiden ? (
+        <Modal
+          label="Confirm widen grant"
+          onClose={() => {
+            if (wideningId === pendingWiden.id) return;
+            cancelWiden();
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Widen to all targets?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={cancelWiden}
+              disabled={wideningId === pendingWiden.id}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              {grantScopeLine(pendingWiden)}
+            </p>
+            <p
+              className="muted text-sm"
+              style={{ margin: "8px 0 0 0", overflowWrap: "anywhere" }}
+            >
+              {pendingWiden.toolName} ·{" "}
+              {durationLabelFor(pendingWiden.duration)}
+              {grantExpiryDate(pendingWiden)
+                ? ` · Expires ${grantExpiryDate(pendingWiden)?.toLocaleString()} (${grantRelativeLabel(grantExpiryDate(pendingWiden), nowMs)})`
+                : " · Never expires"}
+            </p>
+            <p className="muted" style={{ margin: "8px 0 0 0" }}>
+              {`A target is the specific thing this approval is limited to: the recipient or address for send tools, the file path for file tools, or the site or address for web tools. This approval currently covers only "${(pendingWiden.target ?? "").trim()}". Widening removes that limit so ${pendingWiden.toolName} is auto-approved for anything until ${grantExpiryDate(pendingWiden) ? grantExpiryDate(pendingWiden)?.toLocaleString() : "forever"}. Revoke stays available to undo it.`}
+            </p>
+            {widenError ? (
+              <p className="error" role="alert" style={{ margin: "8px 0 0 0" }}>
+                {widenError}
+              </p>
+            ) : null}
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={cancelWiden}
+              disabled={wideningId === pendingWiden.id}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => void confirmWiden()}
+              disabled={wideningId === pendingWiden.id}
+            >
+              {wideningId === pendingWiden.id ? "Widening…" : "Widen to all targets"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {/* Re-arm via the shared modal so the new expiry stays visible before
+          trust is rewritten. Staging keeps row clicks non-destructive; only
+          the modal confirm issues the PATCH and then refetches. */}
+      {pendingDurationGrant ? (
+        <Modal
+          label="Change grant duration"
+          onClose={() => {
+            if (changingDurationId === pendingDurationGrant.id) return;
+            cancelDurationChange();
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Change duration?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={cancelDurationChange}
+              disabled={changingDurationId === pendingDurationGrant.id}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              {grantScopeLine(pendingDurationGrant)}
+            </p>
+            <p
+              className="muted text-sm"
+              style={{ margin: "8px 0 0 0", overflowWrap: "anywhere" }}
+            >
+              {pendingDurationGrant.toolName} ·{" "}
+              {durationLabelFor(pendingDurationGrant.duration)} · Current
+              expiry:{" "}
+              {grantExpiryDate(pendingDurationGrant)
+                ? `Expires ${grantExpiryDate(pendingDurationGrant)?.toLocaleString()} (${grantRelativeLabel(grantExpiryDate(pendingDurationGrant), nowMs)})`
+                : "Never expires"}
+            </p>
+            <fieldset
+              style={{ margin: "12px 0 0 0", border: "none", padding: 0 }}
+            >
+              <legend className="muted text-sm">New duration</legend>
+              {trustDurationOptions
+                .filter((option) => option.value !== "thisTime")
+                .map((option) => (
+                  <label
+                    key={option.value}
+                    style={{ display: "block", margin: "4px 0" }}
+                  >
+                    <input
+                      type="radio"
+                      name="grant-duration"
+                      value={option.value}
+                      checked={selectedDuration === option.value}
+                      onChange={() => setSelectedDuration(option.value)}
+                      disabled={changingDurationId === pendingDurationGrant.id}
+                    />{" "}
+                    {option.label}
+                  </label>
+                ))}
+            </fieldset>
+            <p className="muted text-sm" style={{ margin: "8px 0 0 0" }}>
+              {durationPreviewDate == null
+                ? "Never expires"
+                : `New expiry: ${durationPreviewDate.toLocaleString()} (${grantRelativeLabel(durationPreviewDate, nowMs)})`}
+            </p>
+            {durationError ? (
+              <p className="error" role="alert" style={{ margin: "8px 0 0 0" }}>
+                {durationError}
+              </p>
+            ) : null}
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={cancelDurationChange}
+              disabled={changingDurationId === pendingDurationGrant.id}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void confirmDurationChange()}
+              disabled={changingDurationId === pendingDurationGrant.id}
+            >
+              {changingDurationId === pendingDurationGrant.id
+                ? "Saving…"
+                : "Save duration"}
             </button>
           </div>
         </Modal>

@@ -156,3 +156,19 @@ public struct TrustGrantsResponse: Content, Equatable {
         self.count = grants.count
     }
 }
+
+/// Duration re-arm request for `PATCH /approvals/grants/:id`.
+///
+/// Carries only the replacement tier so the permission gate stays the single
+/// owner of expiry math; a re-arm must extend trust to a durable tier, never
+/// collapse it back to a one-shot approval that stores no grant.
+public struct RearmGrantRequest: Content, Equatable {
+    /// Replacement duration tier.
+    public let duration: TrustDuration
+
+    /// Creates a re-arm request.
+    /// - Parameter duration: Replacement duration tier.
+    public init(duration: TrustDuration) {
+        self.duration = duration
+    }
+}
