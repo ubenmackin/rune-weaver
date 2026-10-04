@@ -249,6 +249,23 @@ private func registerIndexResetRoute(_ app: Application) {
         guard let store = context.indexStore else {
             throw Abort(.serviceUnavailable, reason: "Indexing is not configured.")
         }
+        struct ResetQuery: Decodable {
+            let source: String?
+        }
+        let query = try? req.query.decode(ResetQuery.self)
+        if let rawSource = query?.source?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           !rawSource.isEmpty, rawSource != "all"
+        {
+            guard let source = IndexSource(rawValue: rawSource) else {
+                throw Abort(.badRequest, reason: "Unknown index source '\(rawSource)'. Supported sources: files, mail, messages.")
+            }
+            _ = try await store.clearSource(
+                source,
+                mailCheckpointPath: context.indexMailCheckpointPath,
+                messagesStatePath: context.indexMessagesStatePath
+            )
+            return IndexResetResponse(reset: true)
+        }
         try await store.reset(
             mailCheckpointPath: context.indexMailCheckpointPath,
             messagesStatePath: context.indexMessagesStatePath

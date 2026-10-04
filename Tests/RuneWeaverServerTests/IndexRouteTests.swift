@@ -305,6 +305,37 @@ struct IndexControlRouteTests {
     }
 
     @Test
+    func `Reset endpoint with source=messages clears only messages state and leaves mail checkpoint intact`() async throws {
+        let (coordinator, store, directory) = try makeIndexComponents()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let messagesStateURL = directory.appendingPathComponent("messages-state.json")
+        try JSONEncoder().encode(MessagesIndexState(lastRowID: 12345)).write(to: messagesStateURL, options: .atomic)
+        #expect(FileManager.default.fileExists(atPath: messagesStateURL.path))
+
+        let mailCheckpointURL = directory.appendingPathComponent("mail-index-checkpoint.json")
+        let checkpoints = MailIndexCheckpointStore(path: mailCheckpointURL.path)
+        try await checkpoints.recordBackfillFloor(account: "test", mailbox: "INBOX", floor: 42)
+        #expect(FileManager.default.fileExists(atPath: mailCheckpointURL.path))
+
+        try await withIndexTestApp { app in
+            app.runeWeaver = makeIndexTestContext(
+                coordinator: coordinator,
+                store: store,
+                messagesStatePath: messagesStateURL.path,
+                mailCheckpointPath: mailCheckpointURL.path
+            )
+            registerIndexRoutes(app)
+
+            let reset = try await indexRequest(app: app, method: .POST, path: "/index/reset?source=messages")
+            #expect(reset.status == .ok)
+            #expect(try reset.content.decode(IndexResetResponse.self).reset == true)
+            #expect(!FileManager.default.fileExists(atPath: messagesStateURL.path))
+            #expect(FileManager.default.fileExists(atPath: mailCheckpointURL.path))
+        }
+    }
+
+    @Test
     func `Prune requires an explicit cutoff instead of defaulting to now`() async throws {
         let (coordinator, store, directory) = try makeIndexComponents()
         defer { try? FileManager.default.removeItem(at: directory) }

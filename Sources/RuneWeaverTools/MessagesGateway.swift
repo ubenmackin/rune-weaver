@@ -191,7 +191,7 @@ public struct ProductionMessagesGateway: MessagesGateway {
                 handle: handle,
                 query: query,
                 recipient: recipient,
-                limit: max(limit * 2, 20),
+                limit: limit,
                 since: since,
                 until: until
             )

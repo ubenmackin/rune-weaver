@@ -932,4 +932,111 @@ struct MessagesIndexerTests {
         )
         #expect(try await indexer.currentRowIDWatermark() == 0)
     }
+
+    @Test
+    func `Live search finds historical attributedBody message buried behind newer non-matching messages`() throws {
+        let paths = makeMessagesPaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        try createMessagesFixture(at: paths.database)
+        let handle = try openMessagesFixture(at: paths.database)
+        defer { sqlite3_close(handle) }
+
+        // Insert older matching message (ROWID 1) with attributedBody containing "Disneyland"
+        try insertMessagesFixtureMessage(
+            into: handle,
+            rowID: 1,
+            guid: "guid-disneyland",
+            text: nil,
+            attributedBody: typedStreamBody("Trip to Disneyland next week"),
+            date: 700_000_000_000_000_000,
+            isFromMe: false
+        )
+        try joinMessagesFixtureChat(into: handle, chatID: 1, messageID: 1)
+
+        // Insert 40 newer non-matching messages (ROWID 2...41) with NULL text and non-matching attributedBody
+        for rowID in 2 ... 41 {
+            try insertMessagesFixtureMessage(
+                into: handle,
+                rowID: Int64(rowID),
+                guid: "guid-\(rowID)",
+                text: nil,
+                attributedBody: typedStreamBody("Ordinary message number \(rowID)"),
+                date: 700_000_000_000_000_000 + Int64(rowID * 1_000_000),
+                isFromMe: false
+            )
+            try joinMessagesFixtureChat(into: handle, chatID: 1, messageID: Int64(rowID))
+        }
+
+        // Live search with limit 15 for "Disneyland"
+        // Without streaming cursor scanning, an SQL LIMIT 15 cut off before inspecting older rows.
+        let results = try MessagesDatabaseIO.searchMessages(
+            handle: handle,
+            query: "Disneyland",
+            limit: 15
+        )
+        #expect(results.count == 1)
+        #expect(results.first?.guid == "guid-disneyland")
+        #expect(MessagesIndexer.resolveText(for: results[0]).text?.contains("Trip to Disneyland next week") == true)
+    }
+
+    @Test
+    func `MessagesIndexer generates vector embeddings when embedder is provided`() async throws {
+        let paths = makeMessagesPaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        try createMessagesFixture(at: paths.database)
+        let handle = try openMessagesFixture(at: paths.database)
+        try insertMessagesFixtureMessage(
+            into: handle,
+            rowID: 1,
+            guid: "guid-vec-1",
+            text: "Hello vector message",
+            date: 700_000_000_000_001_000,
+            isFromMe: false
+        )
+        try joinMessagesFixtureChat(into: handle, chatID: 1, messageID: 1)
+        try insertMessagesFixtureMessage(
+            into: handle,
+            rowID: 2,
+            guid: "guid-vec-2",
+            text: nil,
+            attributedBody: typedStreamBody("Attributed vector message"),
+            date: 700_000_000_000_002_000,
+            isFromMe: false
+        )
+        try joinMessagesFixtureChat(into: handle, chatID: 1, messageID: 2)
+        sqlite3_close(handle)
+
+        struct MockEmbedder: EmbeddingsBackend, Sendable {
+            let modelID = "mock-messages-embedder"
+            let dimension: Int? = 3
+            func embed(_ texts: [String]) async throws -> [[Float]] {
+                texts.enumerated().map { index, _ in [Float(index), 1.0, 2.0] }
+            }
+        }
+
+        let store = DocIndexStore(dbPath: paths.store)
+        let indexer = MessagesIndexer(
+            chatDatabasePath: paths.database,
+            store: store,
+            embedder: MockEmbedder(),
+            statePath: paths.state
+        )
+
+        let result = try await indexer.indexAllNewMessages()
+        #expect(result.scanned == 2)
+        #expect(result.indexed == 2)
+        #expect(result.vectorChunks == 2)
+
+        let vectors = try await store.chunkVectors(limit: 10)
+        #expect(vectors.count == 2)
+        #expect(vectors.allSatisfy { $0.isVector && $0.embedding.count == 3 })
+
+        let doc1 = try await store.document(source: .messages, externalID: "guid-vec-1")
+        #expect(doc1 != nil)
+        let doc2 = try await store.document(source: .messages, externalID: "guid-vec-2")
+        #expect(doc2 != nil)
+
+        let stats = try await store.stats()
+        #expect(stats.vectorChunks == 2)
+    }
 }

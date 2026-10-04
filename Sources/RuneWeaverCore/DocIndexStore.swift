@@ -457,6 +457,43 @@ public actor DocIndexStore {
         invalidateStatusCache()
     }
 
+    /// Clears documents and chunks for a specific source (e.g. `.mail`),
+    /// preserving all other indexed sources. The `.mail` branch also resets
+    /// the mail checkpoint so purged messages re-index from the lowest UID;
+    /// `.messages` resets the messages watermark the same way.
+    /// - Parameters:
+    ///   - source: Source to clear.
+    ///   - mailCheckpointPath: Optional mail checkpoint path to reset when source is `.mail`.
+    ///   - messagesStatePath: Optional Messages watermark path to clear when source is `.messages`.
+    /// - Returns: Count of removed documents.
+    @discardableResult
+    public func clearSource(
+        _ source: IndexSource,
+        mailCheckpointPath: String? = nil,
+        messagesStatePath: String? = nil
+    ) async throws -> Int {
+        let dbPath = self.dbPath
+        let removed = try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.clearSource(source: source.rawValue, dbPath: dbPath)
+        }
+        if source == .mail {
+            do {
+                try MailIndexCheckpointStore.reset(path: mailCheckpointPath ?? MailIndexCheckpointStore.defaultPath)
+            } catch {
+                RuneWeaverLog.stores.error("DocIndexStore: failed to reset MailIndexCheckpointStore: \(error.localizedDescription)")
+            }
+        }
+        if source == .messages {
+            do {
+                try MessagesIndexer.resetWatermark(statePath: messagesStatePath ?? MessagesIndexer.defaultStatePath)
+            } catch {
+                RuneWeaverLog.stores.error("DocIndexStore: failed to reset MessagesIndexer watermark: \(error.localizedDescription)")
+            }
+        }
+        invalidateStatusCache()
+        return removed
+    }
+
     /// Current on-disk and logical size breakdown.
     ///
     /// Projects from the same cached snapshot as stats, so one status poll
@@ -688,6 +725,15 @@ enum DocIndexStoreIO {
     static func reset(dbPath: String) throws {
         #if canImport(SQLite3)
             try SQLiteDocIndexStore.reset(dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Clears documents, chunks, and FTS entries for a single source.
+    static func clearSource(source: String, dbPath: String) throws -> Int {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.clearSource(source: source, dbPath: dbPath)
         #else
             throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
         #endif

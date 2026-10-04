@@ -80,7 +80,7 @@ public enum ServerIndexBoot {
             store: store,
             embedder: embedder
         )
-        let messagesStage = IndexClosureStage.messages(config: indexConfig, store: store)
+        let messagesStage = IndexClosureStage.messages(config: indexConfig, store: store, embedder: embedder)
         var stages: [any IndexSourceStage] = [filesStage, mailStage, messagesStage]
         if indexConfig.describeImagesWithLLM, let visionLLM {
             // The store exposes no pending-image listing, so boot wires an empty

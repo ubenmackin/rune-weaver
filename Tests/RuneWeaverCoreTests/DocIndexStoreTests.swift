@@ -724,6 +724,105 @@ struct DocIndexStoreTests {
     }
 
     @Test
+    func `Clear source purges only target source and leaves other sources intact`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+
+        let msgDoc = try await store.upsertDocument(makeDocument(
+            source: .messages,
+            externalID: "msg-1",
+            contentHash: "hash-msg"
+        ))
+        _ = try await store.upsertChunks(
+            documentID: msgDoc.id,
+            chunks: [IndexedChunk(documentID: msgDoc.id, ordinal: 0, text: "message text")]
+        )
+
+        let mailDoc = try await store.upsertDocument(makeDocument(
+            source: .mail,
+            externalID: "mail-1",
+            contentHash: "hash-mail"
+        ))
+        _ = try await store.upsertChunks(
+            documentID: mailDoc.id,
+            chunks: [IndexedChunk(documentID: mailDoc.id, ordinal: 0, text: "mail text")]
+        )
+
+        let sidecars = makeIndexResetSidecars(base: base)
+        try JSONEncoder().encode(MessagesIndexState(lastRowID: 99)).write(
+            to: URL(fileURLWithPath: sidecars.messagesStatePath),
+            options: .atomic
+        )
+        #expect(FileManager.default.fileExists(atPath: sidecars.messagesStatePath))
+
+        // Clear only .messages
+        try await store.clearSource(.messages, messagesStatePath: sidecars.messagesStatePath)
+
+        // Watermark file should be removed
+        #expect(!FileManager.default.fileExists(atPath: sidecars.messagesStatePath))
+
+        // Messages document and chunk should be gone
+        let foundMsg = try await store.document(source: .messages, externalID: "msg-1")
+        #expect(foundMsg == nil)
+        let msgHits = try await store.searchKeyword(query: "message", limit: 5)
+        #expect(msgHits.isEmpty)
+
+        // Mail document and chunk should still exist
+        let foundMail = try await store.document(source: .mail, externalID: "mail-1")
+        #expect(foundMail != nil)
+        let mailHits = try await store.searchKeyword(query: "mail", limit: 5)
+        #expect(mailHits.count == 1)
+    }
+
+    @Test
+    func `Clear mail source resets the mail checkpoint and leaves the messages watermark intact`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+
+        let mailDoc = try await store.upsertDocument(makeDocument(
+            source: .mail,
+            externalID: "mail-ckpt-1",
+            contentHash: "hash-mail-ckpt"
+        ))
+        _ = try await store.upsertChunks(
+            documentID: mailDoc.id,
+            chunks: [IndexedChunk(documentID: mailDoc.id, ordinal: 0, text: "mail checkpoint text")]
+        )
+
+        let sidecars = makeIndexResetSidecars(base: base)
+        try Data("{}".utf8).write(
+            to: URL(fileURLWithPath: sidecars.mailCheckpointPath),
+            options: .atomic
+        )
+        try Data("{}".utf8).write(
+            to: URL(fileURLWithPath: sidecars.messagesStatePath),
+            options: .atomic
+        )
+        #expect(FileManager.default.fileExists(atPath: sidecars.mailCheckpointPath))
+        #expect(FileManager.default.fileExists(atPath: sidecars.messagesStatePath))
+
+        // Clear only .mail
+        try await store.clearSource(
+            .mail,
+            mailCheckpointPath: sidecars.mailCheckpointPath,
+            messagesStatePath: sidecars.messagesStatePath
+        )
+
+        // Mail checkpoint file should be removed so purged mail re-indexes
+        #expect(!FileManager.default.fileExists(atPath: sidecars.mailCheckpointPath))
+        // Messages watermark file should remain intact
+        #expect(FileManager.default.fileExists(atPath: sidecars.messagesStatePath))
+
+        // Mail document and chunk should be gone
+        let foundMail = try await store.document(source: .mail, externalID: "mail-ckpt-1")
+        #expect(foundMail == nil)
+        let mailHits = try await store.searchKeyword(query: "mail", limit: 5)
+        #expect(mailHits.isEmpty)
+    }
+
+    @Test
     func `Per-source and extract-status aggregates group real counts`() async throws {
         let (path, base) = makeIndexPath()
         defer { try? FileManager.default.removeItem(at: base) }
