@@ -929,6 +929,35 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             try exec(handle: handle, sql: "VACUUM;")
         }
 
+        /// Clears documents, chunks, and FTS entries for a single source.
+        static func clearSource(source: String, dbPath: String) throws -> Int {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return 0 }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
+            let removed: Int
+            do {
+                try exec(
+                    handle: handle,
+                    sql: "DELETE FROM indexed_chunks WHERE document_id IN (SELECT id FROM indexed_documents WHERE source = ?);",
+                    parameters: [.text(source)]
+                )
+                try exec(
+                    handle: handle,
+                    sql: "DELETE FROM indexed_documents WHERE source = ?;",
+                    parameters: [.text(source)]
+                )
+                removed = Int(sqlite3_changes(handle))
+                try exec(handle: handle, sql: "COMMIT;")
+            } catch {
+                try? exec(handle: handle, sql: "ROLLBACK;")
+                throw error
+            }
+            try exec(handle: handle, sql: "VACUUM;")
+            return removed
+        }
+
         /// Executes a parameterized SQL statement.
         private static func exec(handle: OpaquePointer?, sql: String, parameters: [SQLiteValue]) throws {
             var statement: OpaquePointer?

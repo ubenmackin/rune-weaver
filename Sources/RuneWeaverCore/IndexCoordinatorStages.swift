@@ -179,6 +179,7 @@ extension IndexClosureStage {
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         extractor: any DocumentTextExtracting = DocumentTextExtractor(),
         contacts: any MessagesContactResolving = MessagesContactNameResolver(),
+        embedder: (any EmbeddingsBackend)? = nil,
         statePath: String = MessagesIndexer.defaultStatePath,
         batchLimit: Int = MessagesIndexer.defaultBatchLimit
     ) -> IndexClosureStage {
@@ -199,6 +200,7 @@ extension IndexClosureStage {
                     store: store,
                     extractor: extractor,
                     contacts: contacts,
+                    embedder: embedder,
                     statePath: statePath,
                     batchLimit: batchLimit
                 )
@@ -212,6 +214,8 @@ extension IndexClosureStage {
                     kind: .messages,
                     scanned: result.scanned,
                     indexed: result.indexed,
+                    vectorChunks: result.vectorChunks,
+                    keywordChunks: max(result.indexed - result.vectorChunks, 0),
                     skipped: max(result.scanned - result.indexed, 0),
                     lastItem: result.hasMore ? "rowid:\(result.lastRowID)" : nil
                 )

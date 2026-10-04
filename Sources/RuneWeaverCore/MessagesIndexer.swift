@@ -303,6 +303,8 @@ public struct MessagesIndexResult: Sendable, Equatable {
     public let scanned: Int
     /// Messages persisted with searchable content.
     public let indexed: Int
+    /// Chunks persisted with a vector embedding.
+    public let vectorChunks: Int
     /// Highest ROWID examined, persisted as the next watermark.
     public let lastRowID: Int64
     /// Whether the snapshot may hold more rows past the batch bound.
@@ -312,11 +314,13 @@ public struct MessagesIndexResult: Sendable, Equatable {
     /// - Parameters:
     ///   - scanned: Messages read in this pass.
     ///   - indexed: Messages persisted.
+    ///   - vectorChunks: Chunks persisted with a vector embedding.
     ///   - lastRowID: Highest ROWID examined.
     ///   - hasMore: Whether more rows remain past the batch bound.
-    public init(scanned: Int, indexed: Int, lastRowID: Int64, hasMore: Bool) {
+    public init(scanned: Int, indexed: Int, vectorChunks: Int = 0, lastRowID: Int64, hasMore: Bool) {
         self.scanned = scanned
         self.indexed = indexed
+        self.vectorChunks = vectorChunks
         self.lastRowID = lastRowID
         self.hasMore = hasMore
     }
@@ -393,6 +397,8 @@ public actor MessagesIndexer {
     private let extractor: any DocumentTextExtracting
     /// Opportunistic handle-to-name resolver.
     private let contacts: any MessagesContactResolving
+    /// Optional embeddings backend for vector-eligible messages.
+    private let embedder: (any EmbeddingsBackend)?
     /// Persisted watermark location.
     private let stateURL: URL
     /// Messages read per pass.
@@ -406,6 +412,7 @@ public actor MessagesIndexer {
     ///   - store: Durable document index receiving indexed messages.
     ///   - extractor: Text-or-vision extractor for attachment bodies.
     ///   - contacts: Opportunistic handle-to-name resolver.
+    ///   - embedder: Optional embeddings backend for vector-eligible messages.
     ///   - statePath: Persisted watermark file; `~` is expanded.
     ///   - batchLimit: Maximum messages read per pass.
     ///   - maxAttachmentBytes: Largest attachment read for text extraction.
@@ -414,6 +421,7 @@ public actor MessagesIndexer {
         store: DocIndexStore,
         extractor: any DocumentTextExtracting = DocumentTextExtractor(),
         contacts: any MessagesContactResolving = MessagesContactNameResolver(),
+        embedder: (any EmbeddingsBackend)? = nil,
         statePath: String = MessagesIndexer.defaultStatePath,
         batchLimit: Int = MessagesIndexer.defaultBatchLimit,
         maxAttachmentBytes: Int = MessagesIndexer.defaultMaxAttachmentBytes
@@ -422,6 +430,7 @@ public actor MessagesIndexer {
         self.store = store
         self.extractor = extractor
         self.contacts = contacts
+        self.embedder = embedder
         self.stateURL = URL(fileURLWithPath: (statePath as NSString).expandingTildeInPath)
         self.batchLimit = min(max(1, batchLimit), Self.maxBatchLimit)
         self.maxAttachmentBytes = max(1, maxAttachmentBytes)
@@ -552,6 +561,7 @@ public actor MessagesIndexer {
             let effectiveLimit = min(max(batchLimit, 1), Self.maxBatchLimit)
             var totalScanned = 0
             var totalIndexed = 0
+            var totalVectors = 0
             var lastRowID = watermark
             while true {
                 // Per-batch checkpoint so a backlog stops at the next batch
@@ -566,6 +576,7 @@ public actor MessagesIndexer {
                 )
                 totalScanned += batch.scanned
                 totalIndexed += batch.indexed
+                totalVectors += batch.vectorChunks
                 lastRowID = batch.lastRowID
                 watermark = batch.lastRowID
                 try writeWatermark(watermark)
@@ -586,6 +597,7 @@ public actor MessagesIndexer {
             return MessagesIndexResult(
                 scanned: totalScanned,
                 indexed: totalIndexed,
+                vectorChunks: totalVectors,
                 lastRowID: lastRowID,
                 hasMore: false
             )
@@ -614,7 +626,10 @@ public actor MessagesIndexer {
                 limit: limit
             )
 
-            var indexed = 0
+            struct PreparedMessage {
+                let payload: MessagesPayload
+            }
+            var prepared: [PreparedMessage] = []
             var lastRowID = watermark
             for row in rows {
                 // Honor cancellation per message so a large batch stops within
@@ -623,18 +638,52 @@ public actor MessagesIndexer {
                 let attachments = try MessagesDatabaseIO.attachments(handle: handle, messageID: row.rowID)
                 let payload = makePayload(from: row, attachments: attachments, names: names)
                 if !payload.combinedText.isEmpty {
-                    let stored = try await store.upsertDocument(payload.document)
-                    _ = try await store.upsertChunks(
-                        documentID: stored.id,
-                        chunks: payload.chunks(documentID: stored.id)
-                    )
-                    indexed += 1
+                    prepared.append(PreparedMessage(payload: payload))
                 }
                 lastRowID = max(lastRowID, row.rowID)
+            }
+
+            var embeddings: [[Float]] = []
+            if let embedder, !prepared.isEmpty {
+                do {
+                    let texts = prepared.map(\.payload.combinedText)
+                    embeddings = try await embedder.embed(texts)
+                } catch let cancel as CancellationError {
+                    throw cancel
+                } catch {
+                    embeddings = []
+                }
+            }
+
+            var indexed = 0
+            var vectorChunks = 0
+            for (index, item) in prepared.enumerated() {
+                try Task.checkCancellation()
+                let stored = try await store.upsertDocument(item.payload.document)
+                let vector = (index < embeddings.count) ? embeddings[index] : []
+                let isVector = !vector.isEmpty
+                let chunks = [
+                    IndexedChunk(
+                        documentID: stored.id,
+                        ordinal: 0,
+                        text: item.payload.combinedText,
+                        embedding: vector,
+                        isVector: isVector
+                    )
+                ]
+                _ = try await store.upsertChunks(
+                    documentID: stored.id,
+                    chunks: chunks
+                )
+                indexed += 1
+                if isVector {
+                    vectorChunks += 1
+                }
             }
             return MessagesIndexResult(
                 scanned: rows.count,
                 indexed: indexed,
+                vectorChunks: vectorChunks,
                 lastRowID: lastRowID,
                 hasMore: rows.count == limit
             )
@@ -1123,7 +1172,8 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
             }
 
             let trimmedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmedQuery.isEmpty && trimmedQuery != "*" {
+            let isFilteredQuery = !trimmedQuery.isEmpty && trimmedQuery != "*"
+            if isFilteredQuery {
                 conditions.append("(m.text LIKE ? OR (m.text IS NULL AND m.attributedBody IS NOT NULL))")
                 bindStrings.append("%\(trimmedQuery)%")
             }
@@ -1138,6 +1188,7 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
             }
 
             let whereClause = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
+            let limitClause = isFilteredQuery ? "" : "\nLIMIT ?;"
             let sql = """
             SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.date, m.is_from_me,
                    m.associated_message_type, m.thread_originator_guid,
@@ -1148,8 +1199,7 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
             LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
             LEFT JOIN chat c ON c.ROWID = cmj.chat_id
             \(whereClause)
-            ORDER BY m.date DESC
-            LIMIT ?;
+            ORDER BY m.date DESC\(limitClause.isEmpty ? ";" : limitClause)
             """
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
@@ -1165,10 +1215,27 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
                 SQLiteHelpers.bindDouble(statement, index: bindIndex, value: value)
                 bindIndex += 1
             }
-            sqlite3_bind_int(statement, bindIndex, SQLiteHelpers.sqliteLimit(limit))
+            if !isFilteredQuery {
+                sqlite3_bind_int(statement, bindIndex, SQLiteHelpers.sqliteLimit(limit))
+            }
             var rows: [MessagesDatabaseRow] = []
+            var scannedCount = 0
             while sqlite3_step(statement) == SQLITE_ROW {
-                rows.append(readRow(statement))
+                scannedCount += 1
+                if scannedCount % 200 == 0 {
+                    try Task.checkCancellation()
+                }
+                let row = readRow(statement)
+                if isFilteredQuery {
+                    let resolved = MessagesIndexer.resolveText(for: row).text ?? ""
+                    if !resolved.localizedCaseInsensitiveContains(trimmedQuery) {
+                        continue
+                    }
+                }
+                rows.append(row)
+                if rows.count >= limit {
+                    break
+                }
             }
             return rows
         }
