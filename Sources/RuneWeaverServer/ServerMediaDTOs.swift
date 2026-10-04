@@ -112,10 +112,10 @@ public struct MediaSettingsUpdate: Content, Equatable {
     }
 }
 
-public extension UpdateSettingsRequest {
+extension UpdateSettingsRequest {
     /// Builds a request from a full media snapshot, routing through the same
     /// merge path so snapshot callers keep working without hand-mapping fields.
-    init(media: MediaConfig) {
+    public init(media: MediaConfig) {
         self.init(media: MediaSettingsUpdate(media))
     }
 }

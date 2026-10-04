@@ -1475,13 +1475,13 @@ private struct ServerAuthGenerationKey: StorageKey {
     typealias Value = Int
 }
 
-public extension Request {
+extension Request {
     /// Whether this request already passed owner bearer authentication.
     ///
     /// The WebSocket upgrade guard reads this marker instead of re-reading the
     /// credential, so the middleware can drop the query token before any
     /// downstream log observes it.
-    var runeWeaverAuthenticated: Bool {
+    public var runeWeaverAuthenticated: Bool {
         get { storage[ServerAuthenticatedKey.self] ?? false }
         set { storage[ServerAuthenticatedKey.self] = newValue }
     }
@@ -1491,7 +1491,7 @@ public extension Request {
     ///
     /// A WebSocket captures this at upgrade so a later rotation can revoke the
     /// connection at the frame boundary, not only when frames are fanned out.
-    var runeWeaverTokenGeneration: Int? {
+    public var runeWeaverTokenGeneration: Int? {
         get { storage[ServerAuthGenerationKey.self] }
         set { storage[ServerAuthGenerationKey.self] = newValue }
     }
@@ -1503,14 +1503,14 @@ private struct ServerAuthApplicationKey: StorageKey {
     typealias Value = ServerAuth
 }
 
-public extension Application {
+extension Application {
     /// Owner bearer verifier installed by `configureRuneWeaver`, or nil for the
     /// no-auth loopback posture.
     ///
     /// `registerRuneWeaverRoutes` reads this to decide whether to gate the
     /// surface, so a context without a verifier stays byte-for-byte the v1
     /// loopback behavior, including the absence of the rotation route.
-    var runeWeaverAuth: ServerAuth? {
+    public var runeWeaverAuth: ServerAuth? {
         get { storage[ServerAuthApplicationKey.self] }
         set { storage[ServerAuthApplicationKey.self] = newValue }
     }
@@ -1666,9 +1666,9 @@ public struct ServerAuthMiddleware: AsyncMiddleware {
 }
 
 /// URL-safe base64 without padding so a token survives query strings and headers.
-private extension Data {
+extension Data {
     /// Encoded token body.
-    var runeWeaverBase64URL: String {
+    fileprivate var runeWeaverBase64URL: String {
         base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")

@@ -52,7 +52,14 @@ import {
   collectWriteReviewOwners,
   isWriteReviewOwner,
 } from "./writeReviewOwnership";
-import { AlertTriangleIcon, SettingsIcon, TargetIcon, WrenchIcon } from "./icons";
+import {
+  AlertTriangleIcon,
+  CheckIcon,
+  CopyIcon,
+  SettingsIcon,
+  TargetIcon,
+  WrenchIcon,
+} from "./icons";
 import GoalDrawer from "./GoalDrawer";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import { useFileReviewHydration } from "../hooks/useFileReviewHydration";
@@ -304,6 +311,51 @@ function flatActionsFromSegments(segments: ChatSegment[]): ToolAction[] {
     if (segment.kind === "tools") flat.push(...segment.actions);
   }
   return flat;
+}
+
+export async function copyToClipboard(text: string): Promise<boolean> {
+  if (
+    typeof navigator !== "undefined" &&
+    navigator.clipboard &&
+    typeof navigator.clipboard.writeText === "function"
+  ) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall through to fallback
+    }
+  }
+  if (typeof document !== "undefined" && typeof document.execCommand === "function") {
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.left = "-9999px";
+      textarea.style.top = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const success = document.execCommand("copy");
+      document.body.removeChild(textarea);
+      return success;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+export function getMessageCopyContent(message: MessageItem): string {
+  const text = (
+    message.text ||
+    (message.segments ? flatTextFromSegments(message.segments) : "")
+  ).trim();
+  if (text.length > 0) return text;
+  if (message.errorText && message.errorText.trim().length > 0) {
+    return message.errorText.trim();
+  }
+  return "";
 }
 
 // Appends one started call to the live timeline, closing the open text segment
@@ -1463,6 +1515,30 @@ export default function ChatView({
   const [decidingApprovalIDs, setDecidingApprovalIDs] = useState<Set<string>>(
     () => new Set<string>(),
   );
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) {
+        clearTimeout(copyTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopyMessage = async (id: string, text: string) => {
+    const success = await copyToClipboard(text);
+    if (success) {
+      if (copyTimeoutRef.current) {
+        clearTimeout(copyTimeoutRef.current);
+      }
+      setCopiedMessageId(id);
+      copyTimeoutRef.current = setTimeout(() => {
+        setCopiedMessageId(null);
+        copyTimeoutRef.current = null;
+      }, 2000);
+    }
+  };
   // Per-session flights for turns left running while the user browses another
   // session. The active view keeps its own pending/in-flight state for
   // rendering while this map preserves every parked session's timeline,
@@ -2096,6 +2172,15 @@ export default function ChatView({
       reapExpiredFlightsAndSurface();
       const parked = parkedFlightsRef.current.get(key);
       if (!parked) {
+        if (backgroundRunningRef.current.has(key)) {
+          markBackgroundRunning(key, false);
+          setInFlightTurn({ toolActions: [], text: "", held: "", segments: [] });
+          setPending(true);
+          pendingRef.current = true;
+          turnSessionIDRef.current = id;
+          activeTurnStartMsRef.current = Date.now();
+          armTurnTimeout();
+        }
         return;
       }
       if (!parked.pending) {
@@ -2167,10 +2252,15 @@ export default function ChatView({
       const ensureFlight = (): ParkedFlight => {
         const existing = parkedFlightsRef.current.get(key);
         if (existing) {
-          existing.updatedAt = Date.now();
+          // Keep the parked timeline immutable so background frames never
+          // mutate a shared snapshot while refreshing its recency.
+          const refreshed: ParkedFlight = {
+            ...existing,
+            updatedAt: Date.now(),
+          };
           parkedFlightsRef.current.delete(key);
-          parkedFlightsRef.current.set(key, existing);
-          return existing;
+          parkedFlightsRef.current.set(key, refreshed);
+          return refreshed;
         }
         const base = loadSessionTokens(frameSessionID);
         const created: ParkedFlight = {
@@ -3416,6 +3506,38 @@ export default function ChatView({
           isActiveRunStatus(nestedStatus)
         ) {
           markBackgroundRunning(normalizedOwner, true);
+          if (normalizedOwner === normalizeSessionID(sessionIDRef.current)) {
+            setPending(true);
+            pendingRef.current = true;
+            turnSessionIDRef.current = normalizedOwner;
+            activeTurnStartMsRef.current = Date.now();
+            armTurnTimeout();
+          } else {
+            const existing = parkedFlightsRef.current.get(normalizedOwner);
+            if (!existing) {
+              const base = loadSessionTokens(normalizedOwner);
+              storeParkedFlight(parkedFlightsRef.current, normalizedOwner, {
+                turn: { toolActions: [], text: "", held: "", segments: [] },
+                pending: true,
+                warnings: [],
+                turnTokens: null,
+                base,
+                cancelled: false,
+                updatedAt: Date.now(),
+              });
+            } else {
+              // Keep the parked timeline immutable so a background start never
+              // mutates a shared snapshot; the running badge above is the
+              // visible state mirror for this ref update.
+              const refreshed: ParkedFlight = {
+                ...existing,
+                pending: true,
+                updatedAt: Date.now(),
+              };
+              parkedFlightsRef.current.delete(normalizedOwner);
+              parkedFlightsRef.current.set(normalizedOwner, refreshed);
+            }
+          }
         } else {
           markBackgroundRunning(normalizedOwner, false);
           // A finished background turn may have completed while hidden; drop
@@ -4888,19 +5010,58 @@ export default function ChatView({
                     </div>
                   </div>
                 ) : null}
-                {/* Completion footer: local relative time with an absolute
-                    tooltip so each agent card carries its when without touching
-                    markdown rendering. Missing stamps render no footer. */}
-                {message.role === "assistant" &&
-                message.completedAt != null ? (
-                  <div
-                    className="message-completed-footer muted text-xs"
-                    style={{ marginTop: "8px" }}
-                    title={new Date(message.completedAt).toLocaleString()}
-                  >
-                    {formatCompletionRelative(message.completedAt)}
-                  </div>
-                ) : null}
+                {/* Message footer: completion relative time on the left (assistant only)
+                    and one-click copy button on the bottom right (both assistant and user). */}
+                {(() => {
+                  const copyContent = getMessageCopyContent(message);
+                  const hasFooter =
+                    (message.role === "assistant" && message.completedAt != null) ||
+                    copyContent.length > 0;
+                  if (!hasFooter) return null;
+                  return (
+                    <div className="message-bubble-footer">
+                      {message.role === "assistant" && message.completedAt != null ? (
+                        <div
+                          className="message-completed-footer muted text-xs"
+                          title={new Date(message.completedAt).toLocaleString()}
+                        >
+                          {formatCompletionRelative(message.completedAt)}
+                        </div>
+                      ) : (
+                        <div />
+                      )}
+                      {copyContent.length > 0 ? (
+                        <button
+                          type="button"
+                          className={`message-copy-btn${copiedMessageId === message.id ? " copied" : ""}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleCopyMessage(message.id, copyContent);
+                          }}
+                          aria-label={
+                            copiedMessageId === message.id
+                              ? "Copied message to clipboard"
+                              : "Copy message"
+                          }
+                          title={
+                            copiedMessageId === message.id
+                              ? "Copied!"
+                              : "Copy message"
+                          }
+                        >
+                          {copiedMessageId === message.id ? (
+                            <>
+                              <CheckIcon size={12} className="copy-icon-success" />
+                              <span className="copy-status-text">Copied</span>
+                            </>
+                          ) : (
+                            <CopyIcon size={12} />
+                          )}
+                        </button>
+                      ) : null}
+                    </div>
+                  );
+                })()}
               </div>
             );
           })}
@@ -5016,6 +5177,38 @@ export default function ChatView({
                   ) : null}
                 </>
               )}
+              {inFlightTurn.text.trim().length > 0 ? (
+                <div className="message-bubble-footer">
+                  <div />
+                  <button
+                    type="button"
+                    className={`message-copy-btn${copiedMessageId === "in-flight" ? " copied" : ""}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleCopyMessage("in-flight", inFlightTurn.text.trim());
+                    }}
+                    aria-label={
+                      copiedMessageId === "in-flight"
+                        ? "Copied message to clipboard"
+                        : "Copy message"
+                    }
+                    title={
+                      copiedMessageId === "in-flight"
+                        ? "Copied!"
+                        : "Copy message"
+                    }
+                  >
+                    {copiedMessageId === "in-flight" ? (
+                      <>
+                        <CheckIcon size={12} className="copy-icon-success" />
+                        <span className="copy-status-text">Copied</span>
+                      </>
+                    ) : (
+                      <CopyIcon size={12} />
+                    )}
+                  </button>
+                </div>
+              ) : null}
             </div>
           ) : null}
 

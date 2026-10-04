@@ -583,9 +583,9 @@ public actor SchedulerStore {
     }
 }
 
-public extension SchedulerJob {
+extension SchedulerJob {
     /// Creates a runtime job from a `config.toml` entry.
-    init(from config: SchedulerJobConfig, id: UUID = UUID(), createdAt: Date = Date(), updatedAt: Date = Date()) {
+    public init(from config: SchedulerJobConfig, id: UUID = UUID(), createdAt: Date = Date(), updatedAt: Date = Date()) {
         let trimmedName = normalizedSchedulerJobName(config.name)
         let schedule = EmailPollRule.storedSchedule(from: config.schedule)
         let rawQuery = config.poll?.query.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -608,7 +608,7 @@ public extension SchedulerJob {
     }
 
     /// Converts this runtime job to a `config.toml` entry.
-    func toJobConfig() -> SchedulerJobConfig {
+    public func toJobConfig() -> SchedulerJobConfig {
         let scheduleValue: String? = EmailPollRule.configSchedule(from: schedule)
         let pollValue: EmailPollRule? = pollRule
         return SchedulerJobConfig(
@@ -623,9 +623,9 @@ public extension SchedulerJob {
     }
 }
 
-public extension SchedulerJobConfig {
+extension SchedulerJobConfig {
     /// Creates a config entry from a runtime job.
-    init(from job: SchedulerJob) {
+    public init(from job: SchedulerJob) {
         self = job.toJobConfig()
     }
 }

@@ -966,10 +966,10 @@ private func rebuildGroupedActions(perNote: [AssistantNoteActions], winners: Too
 
 /// Holds the history-eviction helper so the main actor body stays within the
 /// length budget while sharing file-private state.
-public extension ConversationManager {
+extension ConversationManager {
     /// Summarizes a session's oldest turns on demand.
     @discardableResult
-    func summarize(sessionID: UUID, keeping: Int? = nil) async -> String? {
+    public func summarize(sessionID: UUID, keeping: Int? = nil) async -> String? {
         guard var session = sessions[sessionID] else { return nil }
         let keep = max(1, keeping ?? maxMessages)
         guard session.messages.count > keep else { return session.summary }
@@ -1062,21 +1062,21 @@ public extension ConversationManager {
     }
 
     /// Estimated character-to-token ratio (standard rule of thumb: ~4 characters per token).
-    static let charactersPerToken: Double = 4.0
+    public static let charactersPerToken: Double = 4.0
 
     /// Wire-format overhead per tool definition (function wrapper keys and
     /// framing around name, description, and schema) so the token estimate
     /// stays honest without a magic literal at the call site.
-    static let toolWireOverheadChars: Int = 50
+    public static let toolWireOverheadChars: Int = 50
 
     /// Estimates token count for a list of messages.
-    static func estimateTokens(in messages: [Message]) -> Int {
+    public static func estimateTokens(in messages: [Message]) -> Int {
         let totalChars = messages.reduce(0) { $0 + $1.content.count }
         return Int(ceil(Double(totalChars) / charactersPerToken))
     }
 
     /// Estimates token count for registered tools based on their definitions and schemas.
-    static func estimateToolTokens(in tools: [any Tool]) -> Int {
+    public static func estimateToolTokens(in tools: [any Tool]) -> Int {
         guard !tools.isEmpty else { return 0 }
         // Each tool definition on the wire includes formatting wrappers
         // plus name, description, and raw JSON schema.
@@ -1090,7 +1090,7 @@ public extension ConversationManager {
     /// Phase 1: Truncates oversized tool results in older turns.
     /// Phase 2: Summarizes oldest turns if still over budget.
     @discardableResult
-    func compactHistoryIfNeeded(
+    public func compactHistoryIfNeeded(
         for sessionID: UUID,
         contextLength: Int,
         thresholdPercent: Int,

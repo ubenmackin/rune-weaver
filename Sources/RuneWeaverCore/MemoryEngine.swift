@@ -35,9 +35,9 @@ public struct MemoryResult: Sendable, Codable, Equatable {
 }
 
 /// Observability for one recall pass, safe to log (IDs and scores only, never content).
-public extension MemoryEngine {
+extension MemoryEngine {
     /// Recall diagnostics carried alongside hits for per-turn observability.
-    struct RecallDiagnostics: Sendable, Equatable {
+    public struct RecallDiagnostics: Sendable, Equatable {
         /// Stable identifiers for retrieved hits, in rank order.
         public let hitIDs: [String]
         /// Source raw values for retrieved hits, in rank order.
@@ -73,9 +73,9 @@ public extension MemoryEngine {
 /// Top-level alias so call sites can spell the diagnostics without the owner prefix.
 public typealias RecallDiagnostics = MemoryEngine.RecallDiagnostics
 
-public extension MemoryEngine {
+extension MemoryEngine {
     /// Stable identifier for one recall hit, never content.
-    static func recallHitID(for result: MemoryResult, at index: Int) -> String {
+    public static func recallHitID(for result: MemoryResult, at index: Int) -> String {
         if let id = result.metadata["id"]?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty {
             return id
         }
@@ -89,7 +89,7 @@ public extension MemoryEngine {
     }
 
     /// Builds diagnostics for retrieved hits with the given injection-char estimate.
-    static func recallDiagnostics(for hits: [MemoryResult], injectedChars: Int, skippedDocIndex: Bool) -> RecallDiagnostics {
+    public static func recallDiagnostics(for hits: [MemoryResult], injectedChars: Int, skippedDocIndex: Bool) -> RecallDiagnostics {
         RecallDiagnostics(
             hitIDs: hits.enumerated().map { recallHitID(for: $1, at: $0) },
             sources: hits.map(\.source.rawValue),
@@ -644,9 +644,9 @@ extension MemoryEngine {
 
 // MARK: - MemoryEngine Chat Helpers
 
-public extension MemoryEngine {
+extension MemoryEngine {
     /// Extracts an explicit remember request from chat input.
-    static func rememberFactText(from input: String) -> String? {
+    public static func rememberFactText(from input: String) -> String? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if let suffix = suffixAfterCommand(trimmed, command: "/remember") {
@@ -709,14 +709,14 @@ public extension MemoryEngine {
     }
 
     /// Whether text is storable as an explicit fact.
-    static func isStorableFact(_ content: String) -> Bool {
+    public static func isStorableFact(_ content: String) -> Bool {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         return containsAlphanumeric(trimmed)
     }
 
     /// Builds the acknowledgement text for an explicit remember request.
-    static func rememberAcknowledgementText(for fact: String, stored: Bool) -> String {
+    public static func rememberAcknowledgementText(for fact: String, stored: Bool) -> String {
         guard isStorableFact(fact) else {
             return "Usage: /remember <fact> — what should I remember?"
         }
@@ -724,7 +724,7 @@ public extension MemoryEngine {
     }
 
     /// Validates fact text and returns the trimmed form.
-    internal static func validatedFactText(_ content: String) throws -> String {
+    static func validatedFactText(_ content: String) throws -> String {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw MemoryEngineError.semanticFailed("Fact must not be empty.")
@@ -740,7 +740,7 @@ public extension MemoryEngine {
 
     /// Mirrors one chat turn into episodic memory without throwing.
     @discardableResult
-    func storeChatTurn(
+    public func storeChatTurn(
         content: String,
         sessionID: UUID,
         role: Message.Role = .user,
@@ -759,11 +759,11 @@ public extension MemoryEngine {
     }
 
     /// Shared notice when an episodic mirror write fails.
-    static let mirrorFailureMessage = "Episodic memory write failed; continuing."
+    public static let mirrorFailureMessage = "Episodic memory write failed; continuing."
 
     /// Mirrors one turn into episodic memory with an explicit failure policy.
     @discardableResult
-    func mirrorTurn(
+    public func mirrorTurn(
         content: String,
         sessionID: UUID,
         role: Message.Role = .user,
@@ -785,7 +785,7 @@ public extension MemoryEngine {
 
     /// Mirrors one turn without observing cancellation.
     @discardableResult
-    func mirrorTurnUncancellable(
+    public func mirrorTurnUncancellable(
         content: String,
         sessionID: UUID,
         role: Message.Role = .user
@@ -802,7 +802,7 @@ public extension MemoryEngine {
     }
 
     /// Maximum characters kept from a tool outcome in a compact episodic record.
-    static let episodicToolOutcomeLimit = 2000
+    public static let episodicToolOutcomeLimit = 2000
 
     /// Builds compact episodic content for one tool execution.
     ///
@@ -814,7 +814,7 @@ public extension MemoryEngine {
     /// byte-identically for debugging. Unknown provenance fails closed to
     /// untrusted so a caller that forgets to declare trust cannot silently
     /// persist attacker bytes as trusted history.
-    static func episodicToolRecord(
+    public static func episodicToolRecord(
         toolName: String,
         content: String,
         isError: Bool,
@@ -851,7 +851,7 @@ public extension MemoryEngine {
     /// Fail-closed legacy path: provenance is unknown here, so the record
     /// labels as untrusted rather than trusting by default. Callers with a
     /// declared `contentTrustLevel` use the overload below.
-    static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
+    public static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
         episodicToolRecord(
             toolName: toolName,
             content: result.content,
@@ -861,7 +861,7 @@ public extension MemoryEngine {
     }
 
     /// Builds compact episodic content from a bus result with declared provenance.
-    static func episodicToolRecord(
+    public static func episodicToolRecord(
         toolName: String,
         result: ToolResult,
         trustLevel: ContentTrustLevel,
@@ -879,12 +879,12 @@ public extension MemoryEngine {
     /// Removes tool-call plumbing lines from text.
     /// Delegates to the shared tool-loop scrubber so history cleaning keeps one
     /// placeholder grammar instead of a drifting per-store copy.
-    static func strippingToolPlumbing(from text: String) -> String {
+    public static func strippingToolPlumbing(from text: String) -> String {
         OrchestratorToolLoop.scrubPlaceholderPlumbing(from: text)
     }
 
     /// Stores one fact preferring vectors, falling back to keyword-only.
-    func storeFactWithEmbedder(
+    public func storeFactWithEmbedder(
         content: String,
         source: String,
         embedder: (any EmbeddingsBackend)?
@@ -912,7 +912,7 @@ public extension MemoryEngine {
 
     /// Stores a remembered fact, preferring vectors when a producer is set.
     @discardableResult
-    func storeRememberedFact(
+    public func storeRememberedFact(
         content: String,
         source: String = "chat",
         embedder: (any EmbeddingsBackend)? = nil

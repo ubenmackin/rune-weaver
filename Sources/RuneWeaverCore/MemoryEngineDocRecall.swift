@@ -12,13 +12,13 @@ import Foundation
 
 // MARK: - MemoryEngine Combined Recall
 
-public extension MemoryEngine {
+extension MemoryEngine {
     /// Recalls across episodic, semantic, document-index, and profile tiers.
     ///
     /// `skipDocIndex` mirrors the plan-level freshness skip so direct callers
     /// report the same miss-vs-skip observability as the automatic path; when
     /// true the document fetch is skipped and `skippedDocIndex` reports true.
-    func recall(
+    public func recall(
         query: String,
         embedding: [Float]? = nil,
         limit: Int = 10,
@@ -55,7 +55,7 @@ public extension MemoryEngine {
     /// plan-level skip or no document store is configured, matching
     /// `recallMessageWithDiagnostics`, so callers can distinguish an empty
     /// index or a freshness skip from a miss.
-    func recallWithDiagnostics(
+    public func recallWithDiagnostics(
         query: String,
         embedding: [Float]? = nil,
         limit: Int = 10,
@@ -125,7 +125,7 @@ public extension MemoryEngine {
     ///   - until: Exclusive upper bound on the parent document event time, or nil for unbounded.
     ///   - budgets: Recall budgets carrying the doc-pool multiplier and per-tier cap.
     /// - Returns: Calibrated doc-index results carrying the index watermark.
-    func recallDocuments(
+    public func recallDocuments(
         query: String,
         embedding: [Float]? = nil,
         limit: Int = 5,

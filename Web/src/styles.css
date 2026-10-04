@@ -1128,6 +1128,76 @@ a {
   margin: 14px 0;
 }
 
+/* Message Bubble Footer & Copy Button */
+
+.message-bubble-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  white-space: normal;
+}
+
+.message.user .message-bubble-footer {
+  justify-content: flex-end;
+}
+
+.message.assistant .message-bubble-footer {
+  justify-content: space-between;
+}
+
+.message-completed-footer {
+  font-size: 11px;
+  color: var(--text-muted, #8e8e9f);
+  user-select: none;
+}
+
+.message-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-muted, #8e8e9f);
+  padding: 2px 6px;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: all 0.15s ease;
+  line-height: 1;
+}
+
+.message:hover .message-copy-btn,
+.message-copy-btn:focus-visible,
+.message-copy-btn.copied {
+  opacity: 1;
+}
+
+.message-copy-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-main, #ffffff);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.message-copy-btn.copied {
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.copy-icon-success {
+  color: #10b981;
+}
+
+.copy-status-text {
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
 /* Animated Typing Indicator */
 
 .message.assistant.pending-bubble {
@@ -4145,6 +4215,8 @@ button:disabled {
   top: calc(100% + 6px);
   right: 0;
   min-width: 200px;
+  max-height: min(340px, calc(100vh - 120px));
+  overflow-y: auto;
   margin: 0;
   padding: 6px;
   list-style: none;
@@ -4152,10 +4224,16 @@ button:disabled {
   border: 1px solid var(--border-color);
   border-radius: 8px;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
-  z-index: 30;
+  z-index: 40;
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.split-allow-menu.split-allow-menu-up {
+  top: auto;
+  bottom: calc(100% + 6px);
+  box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.5);
 }
 
 .split-allow-menu-item {

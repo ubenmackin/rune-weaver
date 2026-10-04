@@ -291,23 +291,101 @@ struct RunCancelRouteTests {
     }
 
     @Test
-    func `Non fan-out rows answer conflict and stay untouched`() async throws {
+    func `Active non fan-out rows cancel cleanly and update run status`() async throws {
         try await withRunCancelApp { harness in
-            // Scheduler, goal, and index rows are execution history; none owns
-            // a live swarm, so the honest answer is a conflict rather than a
-            // not-running stop.
+            let sessionID = UUID()
+            let cancelledBox = OSAllocatedUnfairLock<Bool>(initialState: false)
+            await harness.context.activeTurns.register(sessionID: sessionID) {
+                cancelledBox.withLock { $0 = true }
+            }
+
+            for kind in ["scheduler", "goal", "index", "chat"] {
+                let row = await harness.runs.append(
+                    kind: kind,
+                    status: "running",
+                    message: "\(kind) work",
+                    sessionID: kind == "goal" ? sessionID : nil
+                )
+                let response = try await runCancelRequest(
+                    app: harness.app,
+                    method: .POST,
+                    path: "/runs/\(row.id.uuidString)/cancel"
+                )
+                #expect(response.status == .ok)
+                let body = try response.content.decode(RunCancelResponse.self)
+                #expect(body.cancelled == true)
+                #expect(body.scope == "run")
+                #expect(await harness.runs.entry(id: row.id)?.status == "cancelled")
+            }
+
+            #expect(cancelledBox.withLock { $0 } == true)
+            #expect(await harness.context.activeTurns.isActive(sessionID: sessionID) == false)
+        }
+    }
+
+    @Test
+    func `Settled non fan-out rows answer conflict and stay untouched`() async throws {
+        try await withRunCancelApp { harness in
             for kind in ["scheduler", "goal", "index"] {
-                let row = await harness.runs.append(kind: kind, status: "running", message: "\(kind) work")
+                let row = await harness.runs.append(kind: kind, status: "ok", message: "\(kind) work")
                 let response = try await runCancelRequest(
                     app: harness.app,
                     method: .POST,
                     path: "/runs/\(row.id.uuidString)/cancel"
                 )
                 #expect(response.status == .conflict)
-                #expect(refusalReason(response).contains("fan-out"))
-                // A refusal never rewrites history.
-                #expect(await harness.runs.entry(id: row.id)?.status == "running")
+                #expect(refusalReason(response).contains("Nothing running"))
+                #expect(await harness.runs.entry(id: row.id)?.status == "ok")
             }
+        }
+    }
+
+    @Test
+    func `Awaiting approval rows cancel cleanly like running rows`() async throws {
+        try await withRunCancelApp { harness in
+            let sessionID = UUID()
+            let cancelledBox = OSAllocatedUnfairLock<Bool>(initialState: false)
+            await harness.context.activeTurns.register(sessionID: sessionID) {
+                cancelledBox.withLock { $0 = true }
+            }
+            let row = await harness.runs.append(
+                kind: "goal",
+                status: "awaiting_approval",
+                message: "parked work",
+                sessionID: sessionID
+            )
+            let response = try await runCancelRequest(
+                app: harness.app,
+                method: .POST,
+                path: "/runs/\(row.id.uuidString)/cancel"
+            )
+            #expect(response.status == .ok)
+            let body = try response.content.decode(RunCancelResponse.self)
+            #expect(body.cancelled == true)
+            #expect(body.scope == "run")
+            #expect(await harness.runs.entry(id: row.id)?.status == "cancelled")
+            #expect(cancelledBox.withLock { $0 } == true)
+        }
+    }
+
+    @Test
+    func `Cancelled rows resist late success overwrite and reject recancel`() async throws {
+        try await withRunCancelApp { harness in
+            let row = await harness.runs.append(kind: "chat", status: "running", message: "live work")
+            let settled = await harness.runs.cancel(id: row.id, durationMs: 7)
+            #expect(settled?.status == "cancelled")
+            // A late success racing the cancel keeps the owner's stop.
+            let raced = await harness.runs.update(id: row.id, status: "ok", response: "late")
+            #expect(raced?.status == "cancelled")
+            #expect(await harness.runs.entry(id: row.id)?.status == "cancelled")
+            // A second stop answers conflict through the atomic guard.
+            let response = try await runCancelRequest(
+                app: harness.app,
+                method: .POST,
+                path: "/runs/\(row.id.uuidString)/cancel"
+            )
+            #expect(response.status == .conflict)
+            #expect(await harness.runs.entry(id: row.id)?.status == "cancelled")
         }
     }
 

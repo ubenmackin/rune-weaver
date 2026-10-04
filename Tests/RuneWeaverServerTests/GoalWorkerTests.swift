@@ -347,6 +347,13 @@ struct GoalWorkerTests {
         let sessionID = try #require(parked.sessionID)
         #expect(await orchestrator.isSessionParked(sessionID) == true)
 
+        // While the goal turn is parked awaiting approval, a subsequent tick
+        // skips instead of starting a concurrent duplicate execution.
+        let busyTickResults = await worker.tick(now: Date())
+        #expect(busyTickResults.count == 1)
+        #expect(busyTickResults.first?.fired == false)
+        #expect(busyTickResults.first?.skippedReason == "already running")
+
         let pending = await approvals.list().first
         let approvalID = try #require(pending?.id)
         #expect(await approvals.decide(id: approvalID, approved: true) == true)
@@ -540,5 +547,44 @@ struct GoalWorkerTests {
                 == WSProactiveMessageFrame.ideaProposedKind
         }
         #expect(ideaFrames.isEmpty)
+    }
+
+    @Test
+    func `Active turn in tracker prevents duplicate goal advancement`() async throws {
+        let (dbPath, base) = try makeGoalDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = GoalStore(dbPath: dbPath)
+        let goal = try await persistGoal(store: store, nextDueAt: Date().addingTimeInterval(-60))
+
+        let stub = GoalFireStubLLM(answer: "advanced")
+        let conversations = ConversationManager()
+        let bus = ToolBus()
+        let orchestrator = Orchestrator(conversations: conversations, toolBus: bus, llm: stub)
+        let activeTurns = ActiveTurnTracker()
+        let session = await conversations.createSession(goalID: goal.id)
+        await activeTurns.register(sessionID: session.id, onCancel: {})
+
+        let runs = RunLogStore()
+        let engine = makeEnabledGoalEngine(store: store, llm: stub)
+        let worker = ServerSchedulerWorker(
+            scheduler: SchedulerStore(),
+            runs: runs,
+            hub: WSHub(),
+            runLock: SchedulerRunLock(),
+            orchestrator: orchestrator,
+            conversations: conversations,
+            toolBus: bus,
+            goalStore: store,
+            goalEngine: engine,
+            goalRunLock: SchedulerRunLock(),
+            activeTurns: activeTurns
+        )
+
+        let results = await worker.tick(now: Date())
+        #expect(results.count == 1)
+        #expect(results.first?.fired == false)
+        #expect(results.first?.skippedReason == "already running")
+        #expect(await runs.count() == 1)
+        #expect(await runs.list(limit: 1).first?.status == "skipped")
     }
 }

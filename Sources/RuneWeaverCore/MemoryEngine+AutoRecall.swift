@@ -4,29 +4,29 @@ import Foundation
 
 // MARK: - MemoryEngine Automatic Recall Formatting
 
-public extension MemoryEngine {
+extension MemoryEngine {
     /// Maximum memories injected as system context on one chat turn.
     ///
     /// Legacy default for the threshold-based `automaticRecallContext` and
     /// `automaticRecallMessage` overloads below. The budgets-aware overloads
     /// read `RecallBudgets.autoLimit` instead; see `RecallBudgets` for the
     /// single source on the auto path.
-    static let automaticRecallLimit = 5
+    public static let automaticRecallLimit = 5
 
     /// Minimum calibrated score for an injected recall hit.
     ///
     /// Legacy default for the threshold-based overloads. The budgets-aware
     /// overloads read `RecallBudgets.threshold` instead.
-    static let automaticRecallThreshold = 0.1
+    public static let automaticRecallThreshold = 0.1
 
     /// Maximum characters for the injected recall block, header included.
     ///
     /// Legacy default for the threshold-based overloads. The budgets-aware
     /// overloads read `RecallBudgets.maxChars` instead.
-    static let automaticRecallMaxChars = 2000
+    public static let automaticRecallMaxChars = 2000
 
     /// Header labeling injected recall as system context.
-    static let automaticRecallHeader =
+    public static let automaticRecallHeader =
         "Relevant memories (use for context; do not mention unless relevant):"
 
     /// Whether a recall tier may carry attacker-controlled bytes.
@@ -37,7 +37,7 @@ public extension MemoryEngine {
     /// turns stay trusted verbatim so everyday recall pays no label tax.
     /// Semantic facts and profile preferences are owner-stored and stay
     /// trusted verbatim.
-    static func isUntrustedRecallSource(_ source: MemorySource) -> Bool {
+    public static func isUntrustedRecallSource(_ source: MemorySource) -> Bool {
         source == .docIndex
     }
 
@@ -50,7 +50,7 @@ public extension MemoryEngine {
     /// Index chunks always qualify through the single-sourced tier policy
     /// above; all other tiers qualify only when they carry the tool-mirror
     /// prefix.
-    static func shouldLabelRecallResult(_ result: MemoryResult) -> Bool {
+    public static func shouldLabelRecallResult(_ result: MemoryResult) -> Bool {
         if isUntrustedRecallSource(result.source) {
             return true
         }
@@ -71,7 +71,7 @@ public extension MemoryEngine {
     /// always take the outer label regardless — sanitization neutralizes any
     /// forged delimiters inside — so a chunk quoting the banner cannot dodge
     /// labeling.
-    static func isAlreadyLabeledRecallPayload(_ compact: String) -> Bool {
+    public static func isAlreadyLabeledRecallPayload(_ compact: String) -> Bool {
         guard let bannerRange = compact.range(of: ContentTrustLabeler.banner),
               let beginRange = compact.range(of: ContentTrustLabeler.beginPrefix),
               let endRange = compact.range(of: ContentTrustLabeler.endDelimiter)
@@ -85,7 +85,7 @@ public extension MemoryEngine {
     ///
     /// Single source for the header-plus-lines block cap so the
     /// threshold-based and budgets-aware overloads cannot drift.
-    static func truncateRecallBlock(_ block: String, maxChars: Int) -> String {
+    public static func truncateRecallBlock(_ block: String, maxChars: Int) -> String {
         guard block.count > maxChars else { return block }
         if maxChars == 1 {
             return "…"
@@ -106,7 +106,7 @@ public extension MemoryEngine {
     /// byte-identically for debugging. Doc lines always carry one trailing
     /// citation suffix `[date|path|display_name]` built from hit metadata
     /// outside the truncation budget so it is never truncated away.
-    static func automaticRecallContext(
+    public static func automaticRecallContext(
         for results: [MemoryResult],
         threshold: Double = automaticRecallThreshold,
         maxChars: Int = automaticRecallMaxChars,
@@ -121,7 +121,7 @@ public extension MemoryEngine {
     }
 
     /// Wraps recall hits as an injectable system message.
-    static func automaticRecallMessage(
+    public static func automaticRecallMessage(
         for results: [MemoryResult],
         threshold: Double = automaticRecallThreshold,
         maxChars: Int = automaticRecallMaxChars,
@@ -142,7 +142,7 @@ public extension MemoryEngine {
     /// suffix `[date|path|display_name]` outside that truncation budget, and
     /// the whole block keeps the header plus `maxChars` total truncation.
     /// Labeling mirrors the threshold-based helper above.
-    static func automaticRecallContext(
+    public static func automaticRecallContext(
         for results: [MemoryResult],
         budgets: RecallBudgets,
         labelingEnabled: Bool = true
@@ -165,7 +165,7 @@ public extension MemoryEngine {
     /// truncated away. Untrusted payloads label only the content bytes while
     /// the `[source]` prefix and the trailing citation stay outside as
     /// engine-authored routing.
-    static func recallLine(for result: MemoryResult, perHitChars: Int, labelingEnabled: Bool) -> String {
+    public static func recallLine(for result: MemoryResult, perHitChars: Int, labelingEnabled: Bool) -> String {
         let singleLine = singleLineSquashed(result.content)
         let compact = singleLine.count > perHitChars ? String(singleLine.prefix(perHitChars)) + "…" : singleLine
         let citation = citationSuffix(for: result)
@@ -201,7 +201,7 @@ public extension MemoryEngine {
     }
 
     /// Squashes recall content to a single trimmed line.
-    static func singleLineSquashed(_ content: String) -> String {
+    public static func singleLineSquashed(_ content: String) -> String {
         content
             .replacingOccurrences(of: "\n", with: " ")
             .replacingOccurrences(of: "\t", with: " ")
@@ -209,7 +209,7 @@ public extension MemoryEngine {
     }
 
     /// Engine-authored attribution for the untrusted data-only block.
-    static func recallSourceTag(for result: MemoryResult) -> String {
+    public static func recallSourceTag(for result: MemoryResult) -> String {
         if let name = result.metadata["display_name"], !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let trimmedName = singleLineSquashed(name)
             if let path = result.metadata["path"], !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -227,7 +227,7 @@ public extension MemoryEngine {
     /// Doc-index lines always carry a suffix (falling back to the chunk's
     /// `document_id` when the parent lookup missed); other tiers carry one
     /// only when they already hold such metadata.
-    static func citationSuffix(for result: MemoryResult) -> String? {
+    public static func citationSuffix(for result: MemoryResult) -> String? {
         var parts: [String] = []
         if let date = result.metadata["date"]?.trimmingCharacters(in: .whitespacesAndNewlines), !date.isEmpty {
             let squashed = singleLineSquashed(date)
@@ -258,7 +258,7 @@ public extension MemoryEngine {
     }
 
     /// Wraps recall hits as an injectable system message bounded by recall budgets.
-    static func automaticRecallMessage(
+    public static func automaticRecallMessage(
         for results: [MemoryResult],
         budgets: RecallBudgets,
         labelingEnabled: Bool = true
@@ -277,7 +277,7 @@ public extension MemoryEngine {
     /// hits stay pre-threshold (deduped, up to `perTier * 4`); diagnostics
     /// report this injected subset so `recallWithDiagnostics` and
     /// `recallMessageWithDiagnostics` log the same injected set by path.
-    static func injectedRecallHits(from results: [MemoryResult], budgets: RecallBudgets) -> [MemoryResult] {
+    public static func injectedRecallHits(from results: [MemoryResult], budgets: RecallBudgets) -> [MemoryResult] {
         let clamped = budgets.clamped()
         let relevant = results.filter { $0.score >= clamped.threshold }
         return Array(relevant.prefix(clamped.autoLimit))
@@ -286,9 +286,9 @@ public extension MemoryEngine {
 
 // MARK: - MemoryEngine Automatic Recall
 
-public extension MemoryEngine {
+extension MemoryEngine {
     /// Drops the just-mirrored self-echo from recall hits.
-    static func filteredRecallResults(
+    public static func filteredRecallResults(
         _ results: [MemoryResult],
         query: String,
         sessionID: UUID
@@ -305,7 +305,7 @@ public extension MemoryEngine {
     /// In multi-turn history, recall is inserted directly before the active user turn so
     /// all prior (system, user, assistant) turns preserve their prefix-cache tokens.
     /// If no user message is present, recall sits after leading system messages.
-    static func historyWithRecall(_ history: [Message], recall: Message?) -> [Message] {
+    public static func historyWithRecall(_ history: [Message], recall: Message?) -> [Message] {
         guard let recall else { return history }
         guard !history.isEmpty else { return [recall] }
         if let lastUserIndex = history.lastIndex(where: { $0.role == .user }) {
@@ -334,7 +334,7 @@ public extension MemoryEngine {
     /// Embedding is best-effort: cancellation propagates while other errors
     /// fall back to nil for the keyword path. Empty queries, store errors,
     /// and below-threshold hits yield nil without failing the turn.
-    func recallMessage(
+    public func recallMessage(
         for query: String,
         sessionID: UUID,
         embedder: (any EmbeddingsBackend)? = nil,
@@ -366,7 +366,7 @@ public extension MemoryEngine {
     /// Silent-nil recalls (empty query, embedding fallback, store error, or
     /// below-threshold hits) return nil with zero-hit diagnostics so callers
     /// still emit one observability line per turn.
-    func recallMessageWithDiagnostics(
+    public func recallMessageWithDiagnostics(
         for query: String,
         sessionID: UUID,
         embedder: (any EmbeddingsBackend)? = nil,
@@ -441,9 +441,9 @@ public extension MemoryEngine {
 
 // MARK: - Episode Message Conversion
 
-public extension Episode {
+extension Episode {
     /// Converts an episodic turn back to working-memory history.
-    func asMessage() -> Message {
+    public func asMessage() -> Message {
         Message(
             id: id,
             role: role,
@@ -454,7 +454,7 @@ public extension Episode {
     }
 
     /// Converts an episode for session-resume hydration, if replayable.
-    func hydrationMessage() -> Message? {
+    public func hydrationMessage() -> Message? {
         guard role == .tool else { return asMessage() }
         if let callID = metadata["tool_call_id"]?.trimmingCharacters(in: .whitespacesAndNewlines),
            !callID.isEmpty
@@ -467,9 +467,9 @@ public extension Episode {
     }
 }
 
-public extension MemoryEngine {
+extension MemoryEngine {
     /// Converts episodes to replay-safe working history for resume.
-    static func hydrationMessages(from episodes: [Episode]) -> [Message] {
+    public static func hydrationMessages(from episodes: [Episode]) -> [Message] {
         episodes.compactMap { $0.hydrationMessage() }
     }
 }

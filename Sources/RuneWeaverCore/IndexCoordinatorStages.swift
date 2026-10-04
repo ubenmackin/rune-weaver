@@ -7,7 +7,7 @@
 
 import Foundation
 
-public extension IndexClosureStage {
+extension IndexClosureStage {
     /// Builds the files stage over the shared document store.
     ///
     /// Selection is frozen at boot from `config`, while every per-run value
@@ -27,7 +27,7 @@ public extension IndexClosureStage {
     ///   - homeDirectoryURL: Home boundary override, or nil for the real home.
     ///   - nowProvider: Monotonic instant source for the walk.
     /// - Returns: A files source stage.
-    static func files(
+    public static func files(
         config: IndexConfig,
         store: DocIndexStore,
         extractor: any DocumentTextExtracting = DocumentTextExtractor(),
@@ -115,7 +115,7 @@ public extension IndexClosureStage {
     ///   - secrets: Secrets manager resolving account passwords.
     ///   - now: Clock seam for the vector window.
     /// - Returns: A mail source stage.
-    static func mail(
+    public static func mail(
         config: IndexConfig,
         emailConfig: EmailConfig,
         gateway: any MailIndexGateway,
@@ -173,7 +173,7 @@ public extension IndexClosureStage {
     ///   - statePath: Persisted watermark file.
     ///   - batchLimit: Maximum messages read per pass.
     /// - Returns: A Messages source stage.
-    static func messages(
+    public static func messages(
         config: IndexConfig,
         store: DocIndexStore,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
@@ -242,7 +242,7 @@ public extension IndexClosureStage {
     ///   - pendingDocuments: Supplies documents eligible for description.
     ///   - imageData: Supplies original image bytes for one document.
     /// - Returns: A vision source stage.
-    static func vision(
+    public static func vision(
         config: IndexConfig,
         store: DocIndexStore,
         provider: any VisionDescribeProvider,

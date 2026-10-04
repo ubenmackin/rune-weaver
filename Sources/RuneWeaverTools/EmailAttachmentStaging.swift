@@ -3,9 +3,9 @@
 import Foundation
 import RuneWeaverCore
 
-public extension EmailAttachmentTool {
+extension EmailAttachmentTool {
     /// Resolves the Seatbelt-confined isolated-temp destination for a download.
-    static func stagedDestination(
+    public static func stagedDestination(
         stagingPath: String,
         account: String,
         messageID: String,
@@ -37,7 +37,7 @@ public extension EmailAttachmentTool {
     }
 
     /// Sanitizes a filename to its base name, falling back when empty.
-    static func sanitizedFilename(_ filename: String, fallback: String) -> String {
+    public static func sanitizedFilename(_ filename: String, fallback: String) -> String {
         let base = (filename as NSString).lastPathComponent
             .trimmingCharacters(in: .whitespacesAndNewlines)
         var cleaned = base
@@ -68,7 +68,7 @@ public extension EmailAttachmentTool {
     /// Maps an account or message segment to filesystem-safe text.
     /// - Parameter segment: Raw account or message identifier.
     /// - Returns: Text with only alphanumerics, dash, underscore, and dot.
-    static func safeSegment(_ segment: String) -> String {
+    public static func safeSegment(_ segment: String) -> String {
         let mapped = segment.unicodeScalars.map { scalar -> String in
             let value = scalar.value
             let isDigit = value >= 48 && value <= 57

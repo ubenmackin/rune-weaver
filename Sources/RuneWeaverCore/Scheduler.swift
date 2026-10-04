@@ -364,10 +364,10 @@ public enum SchedulerConfigError: Error, Sendable, Equatable {
     case invalidPoll(job: String, detail: String)
 }
 
-public extension SchedulerConfigError {
+extension SchedulerConfigError {
     /// Owning job name, if the failure is scoped to one job.
     /// - Returns: Job name, or nil for job-agnostic failures.
-    var jobName: String? {
+    public var jobName: String? {
         switch self {
         case .emptyName:
             nil
@@ -387,7 +387,7 @@ public extension SchedulerConfigError {
     /// Single-sourced human-readable detail shared by every
     /// `SchedulerConfigError` mapping site so message drift is impossible.
     /// - Returns: Detail message for the failure.
-    var displayDetail: String {
+    public var displayDetail: String {
         switch self {
         case .emptyName:
             "name must not be empty"
@@ -407,7 +407,7 @@ public extension SchedulerConfigError {
     /// Single-sourced field suffix shared by every mapping site so field
     /// drift is impossible. Nil means the failure is job-scoped.
     /// - Returns: Dotted field suffix, or nil for job-level failures.
-    var fieldSuffix: String? {
+    public var fieldSuffix: String? {
         switch self {
         case .emptyName:
             "name"
@@ -1159,9 +1159,9 @@ public actor SchedulerEngine {
     }
 #endif
 
-public extension SchedulerJobConfig {
+extension SchedulerJobConfig {
     /// Loads durable scheduler configs for direct-core entry points.
-    static func persistedConfigs(from dbPath: String) async -> [SchedulerJobConfig] {
+    public static func persistedConfigs(from dbPath: String) async -> [SchedulerJobConfig] {
         #if canImport(SQLite3)
             do {
                 return try await SQLiteSerialIO.run {

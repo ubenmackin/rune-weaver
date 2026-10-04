@@ -86,7 +86,7 @@ public struct ToolContext: Sendable, Equatable {
 
 // MARK: - Tool call placeholder
 
-public extension ToolInput {
+extension ToolInput {
     /// Generous cap for arguments embedded in a persisted placeholder line.
     /// Bounds `sessions`/`messages` persistence and every subsequent wire
     /// serialization when tool payloads grow large (e.g. email bodies), while
@@ -94,10 +94,10 @@ public extension ToolInput {
     /// intact. Over-limit lines truncate with an ellipsis and degrade to `{}`
     /// on the wire via `sanitizedToolCallArgumentsJSON`, keeping strict
     /// backends from 400ing instead of sending a non-object fragment.
-    static let placeholderArgumentsLimit = 4000
+    public static let placeholderArgumentsLimit = 4000
 
     /// Builds the assistant placeholder stored when a turn contains only tool calls.
-    static func placeholderContent(for calls: [ToolInput]) -> String {
+    public static func placeholderContent(for calls: [ToolInput]) -> String {
         guard !calls.isEmpty else { return "Calling tool…" }
         let lines = calls.map { call in
             "Calling \(call.toolName) \(inline(call.argumentsJSON, limit: placeholderArgumentsLimit)) [\(call.callID)]"
@@ -106,7 +106,7 @@ public extension ToolInput {
     }
 
     /// Collapses whitespace and optionally truncates text for single-line display.
-    static func inline(_ text: String, limit: Int? = nil) -> String {
+    public static func inline(_ text: String, limit: Int? = nil) -> String {
         let singleLine = text
             .replacingOccurrences(of: "\r\n", with: " ")
             .replacingOccurrences(of: "\n", with: " ")
@@ -131,7 +131,7 @@ public extension ToolInput {
     /// arguments keep the last bracket (`arg [inner] [c3]` → `c3`), and
     /// inside-bracket spaces trim (`[  c4  ]` → `c4`); prose mentions,
     /// spaced identifiers, and missing pre-bracket spaces reject.
-    static func parsePlaceholderLine(_ line: String) -> ToolInput? {
+    public static func parsePlaceholderLine(_ line: String) -> ToolInput? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("Calling ") else { return nil }
         guard trimmed.hasSuffix("]"), let bracketStart = trimmed.lastIndex(of: "[") else { return nil }

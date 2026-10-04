@@ -313,13 +313,13 @@ public protocol MailIndexGateway: Sendable {
     func closeMailboxSession(credentials: MailIndexCredentials, mailbox: String) async
 }
 
-public extension MailIndexGateway {
+extension MailIndexGateway {
     /// Default status reporting unknown tokens so doubles without STATUS stay usable.
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - mailbox: Mailbox to inspect.
     /// - Returns: Unknown status with nil tokens.
-    func mailboxStatus(credentials _: MailIndexCredentials, mailbox _: String) async throws -> MailIndexMailboxStatus {
+    public func mailboxStatus(credentials _: MailIndexCredentials, mailbox _: String) async throws -> MailIndexMailboxStatus {
         MailIndexMailboxStatus(uidNext: nil, uidValidity: nil)
     }
 
@@ -327,13 +327,13 @@ public extension MailIndexGateway {
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - mailbox: Mailbox the session would read.
-    func openMailboxSession(credentials _: MailIndexCredentials, mailbox _: String) async throws {}
+    public func openMailboxSession(credentials _: MailIndexCredentials, mailbox _: String) async throws {}
 
     /// Default session close that no-ops so existing doubles compile untouched.
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - mailbox: Mailbox whose session would end.
-    func closeMailboxSession(credentials _: MailIndexCredentials, mailbox _: String) async {}
+    public func closeMailboxSession(credentials _: MailIndexCredentials, mailbox _: String) async {}
 }
 
 // MARK: - Errors

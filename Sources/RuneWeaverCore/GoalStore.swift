@@ -97,14 +97,14 @@ public protocol GoalStoring: Sendable {
 /// Convenience overloads so callers can omit the bound without a protocol-level
 /// default argument. The full two-parameter form stays the single requirement
 /// so unbounded reads still spell `nil` explicitly and ride the same SQL path.
-public extension GoalStoring {
+extension GoalStoring {
     /// Lists goals filtered by state with no row bound.
-    func list(status: GoalStatus?) async throws -> [Goal] {
+    public func list(status: GoalStatus?) async throws -> [Goal] {
         try await list(status: status, limit: nil)
     }
 
     /// Lists every goal with no filter and no row bound.
-    func list() async throws -> [Goal] {
+    public func list() async throws -> [Goal] {
         try await list(status: nil, limit: nil)
     }
 }

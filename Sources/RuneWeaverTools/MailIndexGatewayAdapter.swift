@@ -298,9 +298,9 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
     }
 }
 
-private extension MailIndexCredentials {
+extension MailIndexCredentials {
     /// Builds the bridge credential shape from resolved indexing credentials.
-    func resolvedEmailCredentials() -> ResolvedEmailCredentials {
+    fileprivate func resolvedEmailCredentials() -> ResolvedEmailCredentials {
         ResolvedEmailCredentials(
             accountName: accountName,
             host: host,

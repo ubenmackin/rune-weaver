@@ -356,9 +356,9 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
 
 // MARK: - Format dispatch
 
-private extension DocumentTextExtractor {
+extension DocumentTextExtractor {
     /// Extension-to-format map used for primary dispatch.
-    static let formatByExtension: [String: DocumentFormat] = [
+    fileprivate static let formatByExtension: [String: DocumentFormat] = [
         "pdf": .pdf,
         "docx": .docx,
         "xlsx": .xlsx,
@@ -380,7 +380,7 @@ private extension DocumentTextExtractor {
     ]
 
     /// MIME type and UTI-to-format map used when the extension is unknown.
-    static let formatByContentType: [String: DocumentFormat] = [
+    fileprivate static let formatByContentType: [String: DocumentFormat] = [
         "application/pdf": .pdf,
         "com.adobe.pdf": .pdf,
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": .docx,
@@ -411,7 +411,7 @@ private extension DocumentTextExtractor {
     ///   - fileName: File name carrying the extension.
     ///   - contentType: Optional MIME type or UTI.
     /// - Returns: Recognized format, or `.unsupported`.
-    static func detectFormat(fileName: String, contentType: String?) -> DocumentFormat {
+    fileprivate static func detectFormat(fileName: String, contentType: String?) -> DocumentFormat {
         let fileExtension = (fileName as NSString).pathExtension.lowercased()
         if let format = formatByExtension[fileExtension] {
             return format

@@ -303,7 +303,7 @@ public protocol MessageAliasStoring: Sendable {
 
     // MARK: - Pure ranking helpers
 
-    private extension MessagesRecipientResolver {
+    extension MessagesRecipientResolver {
         /// Applies the best history row and the recency bonus to one candidate.
         ///
         /// History wins over a source-provided service or date because it is the
@@ -336,7 +336,7 @@ public protocol MessageAliasStoring: Sendable {
         /// Newest wins because recency drives the resolution bonus; when two rows
         /// carry the same instant, the stronger transport wins so a handle known
         /// on both iMessage and SMS reports its primary service.
-        static func isBetterStat(_ candidate: MessageHandleStats, than current: MessageHandleStats) -> Bool {
+        fileprivate static func isBetterStat(_ candidate: MessageHandleStats, than current: MessageHandleStats) -> Bool {
             switch (candidate.lastMessageAt, current.lastMessageAt) {
             case let (lhs?, rhs?):
                 if lhs != rhs {
@@ -392,7 +392,7 @@ public protocol MessageAliasStoring: Sendable {
         /// A present name always beats nil, and between two present names the
         /// longer one carries more identifying text; equal lengths fall back to
         /// lexicographic order so a merge is reproducible.
-        static func richerDisplayName(_ lhs: String?, _ rhs: String?) -> String? {
+        fileprivate static func richerDisplayName(_ lhs: String?, _ rhs: String?) -> String? {
             switch (lhs, rhs) {
             case (nil, nil): return nil
             case let (lhs?, nil): return lhs
@@ -439,7 +439,7 @@ public protocol MessageAliasStoring: Sendable {
         ///
         /// Matching is case-insensitive so a database row spelling "imessage" or
         /// "sms" still ranks as the transport it names.
-        static func serviceRank(_ service: String?) -> Int {
+        fileprivate static func serviceRank(_ service: String?) -> Int {
             switch service?.lowercased() {
             case "imessage": 0
             case "sms": 1
@@ -486,7 +486,7 @@ public protocol MessageAliasStoring: Sendable {
         ///
         /// Recency breaks name-quality ties toward the handle the owner actually
         /// messages; a stale or undated handle earns nothing.
-        static func recencyBonus(for lastMessageAt: Date?, now: Date) -> Int {
+        fileprivate static func recencyBonus(for lastMessageAt: Date?, now: Date) -> Int {
             guard let lastMessageAt else { return 0 }
             let age = now.timeIntervalSince(lastMessageAt)
             if age <= recentWindow {

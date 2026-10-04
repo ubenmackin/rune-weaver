@@ -1052,11 +1052,11 @@ private struct WSCancelFramePeek: Codable, Sendable {
     let id: UUID?
 }
 
-public extension WSInboundKind {
+extension WSInboundKind {
     /// Classifies raw socket text into a chat, decision, cancel, tool-cancel, or unknown kind.
     /// - Parameter text: Raw socket text frame.
     /// - Returns: The inbound kind, or `unknown` when no shape decodes.
-    static func classify(_ text: String) -> WSInboundKind {
+    public static func classify(_ text: String) -> WSInboundKind {
         guard let data = text.data(using: .utf8) else { return .unknown }
         let peek: WSCancelFramePeek? = {
             do {
@@ -1450,11 +1450,11 @@ public struct ProactiveUpdate: Content, Sendable, Equatable {
     }
 }
 
-public extension UpdateSettingsRequest {
+extension UpdateSettingsRequest {
     /// Builds a request from a full goals snapshot, routing through the same
     /// merge path so snapshot callers keep working without hand-mapping fields.
     /// - Parameter goals: Complete pursuit policy.
-    init(goals: GoalsConfig) {
+    public init(goals: GoalsConfig) {
         self.init(goals: GoalsUpdate(goals))
     }
 
@@ -1462,7 +1462,7 @@ public extension UpdateSettingsRequest {
     /// same merge path so snapshot callers keep working without hand-mapping
     /// fields.
     /// - Parameter proactive: Complete interruption policy.
-    init(proactive: ProactiveConfig) {
+    public init(proactive: ProactiveConfig) {
         self.init(proactive: ProactiveUpdate(proactive))
     }
 }

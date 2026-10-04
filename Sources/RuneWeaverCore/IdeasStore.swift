@@ -69,19 +69,19 @@ public protocol IdeasStoring: Sendable {
 /// Convenience overloads so callers can omit the bound without a protocol-level
 /// default argument. The full two-parameter form stays the single requirement
 /// so unbounded reads still spell `nil` explicitly and ride the same SQL path.
-public extension IdeasStoring {
+extension IdeasStoring {
     /// Lists ideas filtered by status with no row bound.
-    func list(status: IdeaStatus?) async throws -> [Idea] {
+    public func list(status: IdeaStatus?) async throws -> [Idea] {
         try await list(status: status, limit: nil)
     }
 
     /// Lists every idea with no filter and no row bound.
-    func list() async throws -> [Idea] {
+    public func list() async throws -> [Idea] {
         try await list(status: nil, limit: nil)
     }
 
     /// Counts every idea grouped by status.
-    func counts() async throws -> [IdeaStatus: Int] {
+    public func counts() async throws -> [IdeaStatus: Int] {
         try await counts(status: nil)
     }
 }

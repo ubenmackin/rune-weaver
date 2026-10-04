@@ -4158,3 +4158,64 @@ describe("ChatView dashboard integration props", () => {
   });
 });
 
+describe("ChatView message copy buttons", () => {
+  it("renders copy button on both human and agent chat bubbles and copies text", async () => {
+    const user = userEvent.setup();
+    const sessionID = "session-copy-test";
+    const now = new Date().toISOString();
+
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: {
+        writeText: writeTextMock,
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionID,
+            title: "Copy Test Session",
+            messages: [
+              { id: "msg-user-1", role: "user", content: "How do I build the app?", createdAt: now },
+              { id: "msg-agent-1", role: "assistant", content: "Run `make build` to compile.", createdAt: now },
+            ],
+            createdAt: now,
+            updatedAt: now,
+            source: "chat",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    render(<ChatView targetSessionId={sessionID} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("How do I build the app?")).toBeInTheDocument();
+      expect(screen.getByText("make build")).toBeInTheDocument();
+    });
+
+    const copyBtns = screen.getAllByRole("button", { name: "Copy message" });
+    expect(copyBtns.length).toBe(2);
+
+    await user.click(copyBtns[0]);
+    expect(writeTextMock).toHaveBeenCalledWith("How do I build the app?");
+    expect(screen.getByRole("button", { name: "Copied message to clipboard" })).toBeInTheDocument();
+    expect(screen.getByText("Copied")).toBeInTheDocument();
+
+    await user.click(copyBtns[1]);
+    expect(writeTextMock).toHaveBeenCalledWith("Run `make build` to compile.");
+  });
+});
+

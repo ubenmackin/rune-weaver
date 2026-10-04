@@ -564,7 +564,7 @@ public actor PolicyStore {
 /// they operate on values plus the file URL only, so keeping them together
 /// here leaves the isolated policy state and mutation paths scannable in one
 /// place. Members stay on `PolicyStore` itself, so no caller changes.
-public extension PolicyStore {
+extension PolicyStore {
     /// Extracts a comparable host from a bare service entry without a scheme.
     ///
     /// Bracketed literals strip to their inner address (ignoring an optional
@@ -615,7 +615,7 @@ public extension PolicyStore {
     /// serializer/parser pair intact, so callers reject rather than write.
     /// Shared by the settings REST boundary so both layers refuse the same
     /// bytes instead of keeping parallel copies that could drift.
-    static func containsTOMLBreakingScalar(_ value: String) -> Bool {
+    public static func containsTOMLBreakingScalar(_ value: String) -> Bool {
         value.unicodeScalars.contains { $0 == "\"" || $0.value < 0x20 || $0.value == 0x7F }
     }
 
@@ -633,7 +633,7 @@ public extension PolicyStore {
     /// - Parameter policy: Invariant-clean candidate to render.
     /// - Returns: TOML bytes that reparse to `policy`.
     /// - Throws: `PolicyInvariantError.serializationFailed` when the bytes do not read back identically.
-    static func verifiedTOML(for policy: SecurityPolicy) throws -> String {
+    public static func verifiedTOML(for policy: SecurityPolicy) throws -> String {
         let toml = serialize(policy)
         guard let reparsed = try? parse(toml), reparsed == policy else {
             throw PolicyInvariantError.serializationFailed(reason: "Serialized policy does not round-trip; refusing to write policy.toml.")
@@ -649,7 +649,7 @@ public extension PolicyStore {
     /// `[filesystem]` and `[tools.*]` tables are tolerated on load and
     /// ignored without error so older files keep booting; they never
     /// contribute to the resulting posture and are dropped on the next save.
-    static func parse(_ text: String) throws -> SecurityPolicy {
+    public static func parse(_ text: String) throws -> SecurityPolicy {
         let root = try TOMLParser.parse(text)
 
         let version = root.values["version"].flatMap { value -> Int? in
@@ -677,7 +677,7 @@ public extension PolicyStore {
     /// false because it cannot carry a readable key.
     /// - Parameter text: Candidate `policy.toml` contents.
     /// - Returns: True when `[network].local_exemptions` exists in the parsed document.
-    static func containsLocalExemptionsKey(in text: String) -> Bool {
+    public static func containsLocalExemptionsKey(in text: String) -> Bool {
         guard let root = try? TOMLParser.parse(text) else { return false }
         return root.tables["network"]?.values["local_exemptions"] != nil
     }
@@ -784,7 +784,7 @@ public extension PolicyStore {
     /// can never terminate their own quoting and inject document structure.
     /// `verifiedTOML(for:)` proves the result reparses to the same policy
     /// before any caller replaces the on-disk file.
-    static func serialize(_ policy: SecurityPolicy) -> String {
+    public static func serialize(_ policy: SecurityPolicy) -> String {
         var lines: [String] = []
         lines.append("# Rune Weaver Security Policy")
         lines.append("# Declarative security boundaries — network egress plus credential bindings.")

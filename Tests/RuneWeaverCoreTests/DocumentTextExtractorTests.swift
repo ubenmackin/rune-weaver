@@ -309,16 +309,16 @@ private func makePDF(text: String?) -> Data {
     return pdfData as Data
 }
 
-private extension Data {
+extension Data {
     /// Appends a little-endian 16-bit integer.
     /// - Parameter value: Value to append.
-    mutating func appendLittleEndian(_ value: UInt16) {
+    fileprivate mutating func appendLittleEndian(_ value: UInt16) {
         append(contentsOf: [UInt8(value & 0xFF), UInt8((value >> 8) & 0xFF)])
     }
 
     /// Appends a little-endian 32-bit integer.
     /// - Parameter value: Value to append.
-    mutating func appendLittleEndian(_ value: UInt32) {
+    fileprivate mutating func appendLittleEndian(_ value: UInt32) {
         append(contentsOf: [UInt8(value & 0xFF), UInt8((value >> 8) & 0xFF), UInt8((value >> 16) & 0xFF), UInt8((value >> 24) & 0xFF)])
     }
 }

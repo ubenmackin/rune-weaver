@@ -224,13 +224,13 @@ public protocol ApiRequestTransport: Sendable {
     func data(for request: URLRequest, pin: SSRFDialPin) async throws -> (Data, URLResponse)
 }
 
-public extension ApiRequestTransport {
+extension ApiRequestTransport {
     /// Default pinned entry for stub transports.
     ///
     /// Hermetic suites keep implementing only the unpinned entry; production's
     /// live transport overrides this with the pinned dialer, so the default is
     /// never the production path.
-    func data(for request: URLRequest, pin _: SSRFDialPin) async throws -> (Data, URLResponse) {
+    public func data(for request: URLRequest, pin _: SSRFDialPin) async throws -> (Data, URLResponse) {
         try await data(for: request)
     }
 }

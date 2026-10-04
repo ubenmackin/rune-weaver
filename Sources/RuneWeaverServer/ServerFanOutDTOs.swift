@@ -55,11 +55,11 @@ public struct FanOutSettingsUpdate: Content, Sendable, Equatable {
     }
 }
 
-public extension UpdateSettingsRequest {
+extension UpdateSettingsRequest {
     /// Builds a request from a full fan-out snapshot, routing through the same
     /// merge path so snapshot callers keep working without hand-mapping fields.
     /// - Parameter fanout: Complete fan-out policy.
-    init(fanout: FanOutConfig) {
+    public init(fanout: FanOutConfig) {
         self.init(fanout: FanOutSettingsUpdate(fanout))
     }
 }

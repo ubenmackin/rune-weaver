@@ -372,7 +372,7 @@ public enum FilesAccessGuard: Sendable {
 }
 
 /// Deny-matching candidate derivation kept out of the guard's primary body.
-private extension FilesAccessGuard {
+extension FilesAccessGuard {
     /// Candidate views a canonical URL contributes to deny matching: the
     /// filename, the home-relative path plus its trailing suffixes, and the
     /// absolute path — all lowercased for the case-insensitive macOS view.
@@ -380,7 +380,7 @@ private extension FilesAccessGuard {
     ///   - canonical: Canonical URL to view.
     ///   - home: Canonical home boundary.
     /// - Returns: Lowercased candidate views.
-    static func denyCandidateViews(for canonical: URL, home: URL) -> Set<String> {
+    fileprivate static func denyCandidateViews(for canonical: URL, home: URL) -> Set<String> {
         var candidates: Set<String> = [canonical.lastPathComponent.lowercased(), canonical.path.lowercased()]
         guard isInside(canonical.path, root: home.path), canonical.path != home.path else {
             return candidates
@@ -411,7 +411,7 @@ private extension FilesAccessGuard {
     /// rollback prefix is tested first because it contains the staging prefix.
     /// - Parameter filename: Final path component to test.
     /// - Returns: The live filename, or nil when the name is not a sibling.
-    static func liveSiblingName(for filename: String) -> String? {
+    fileprivate static func liveSiblingName(for filename: String) -> String? {
         let lowered = filename.lowercased()
         let prefix: String
         if lowered.hasPrefix(ReviewArtifacts.backupPrefix) {

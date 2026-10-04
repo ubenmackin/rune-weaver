@@ -29,9 +29,9 @@ public protocol Tool: Sendable {
 /// Every pre-existing tool compiles unchanged because this default covers the
 /// requirement; network-derived tools opt into labeling by declaring
 /// `.untrustedExternal` on their own type.
-public extension Tool {
+extension Tool {
     /// Trusted by default; network tools override to untrusted.
-    var contentTrustLevel: ContentTrustLevel {
+    public var contentTrustLevel: ContentTrustLevel {
         .trusted
     }
 }

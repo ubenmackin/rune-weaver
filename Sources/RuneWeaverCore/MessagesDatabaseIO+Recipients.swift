@@ -29,7 +29,7 @@ import Foundation
 #if canImport(SQLite3)
     import SQLite3
 
-    public extension MessagesDatabaseIO {
+    extension MessagesDatabaseIO {
         /// Aggregate message history for one handle in a direct (one-participant) chat.
         ///
         /// A stats value is a read-only snapshot: `lastMessageAt` reflects the
@@ -37,7 +37,7 @@ import Foundation
         /// `messageCount` counts only messages joined to direct chats. Because
         /// the aggregate joins through the chat tables, a direct chat with no
         /// messages contributes nothing at all.
-        struct MessageHandleStats: Sendable, Equatable {
+        public struct MessageHandleStats: Sendable, Equatable {
             /// Canonical handle identifier as stored in `handle.id`.
             public let handle: String
             /// Messaging service label (`handle.service`), or nil when the row carries none.
@@ -75,7 +75,7 @@ import Foundation
         ///   - handle: Open snapshot handle.
         ///   - limit: Maximum handle rows returned; non-positive yields none.
         /// - Returns: Stats ordered by most recent message first.
-        static func recentDirectHandleStats(handle: OpaquePointer?, limit: Int) throws -> [MessageHandleStats] {
+        public static func recentDirectHandleStats(handle: OpaquePointer?, limit: Int) throws -> [MessageHandleStats] {
             guard limit > 0 else { return [] }
             let sql = """
             SELECT h.id, h.service, MAX(m.date) AS last_date, COUNT(m.ROWID) AS message_count
@@ -120,7 +120,7 @@ import Foundation
         /// message went to and when it was sent. The message body is
         /// deliberately absent, so confirmation cannot leak message content
         /// into a caller that only needs to know delivery happened.
-        struct MessageOutgoingRow: Sendable, Equatable {
+        public struct MessageOutgoingRow: Sendable, Equatable {
             /// Handle identifier as stored in `handle.id`.
             public let handle: String
             /// Instant the outgoing message was recorded.
@@ -157,7 +157,7 @@ import Foundation
         /// - Throws: ``MessagesIndexError/databaseUnavailable`` when the
         ///   statement cannot be prepared, so a caller can distinguish "no
         ///   evidence" from "cannot read evidence".
-        static func recentOutgoingHandles(handle: OpaquePointer?, since: Date, limit: Int) throws -> [MessageOutgoingRow] {
+        public static func recentOutgoingHandles(handle: OpaquePointer?, since: Date, limit: Int) throws -> [MessageOutgoingRow] {
             guard limit > 0 else { return [] }
             let macEpochSeconds = TemporalFilter.macEpochSecondsExpression(column: "m.date")
             let sql = """

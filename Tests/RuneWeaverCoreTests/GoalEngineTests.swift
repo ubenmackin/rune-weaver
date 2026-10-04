@@ -460,6 +460,60 @@ struct GoalEngineTests {
         let alreadyAchieved = try await engine.checkCompletion(goalID: goal.id)
         #expect(alreadyAchieved == false)
     }
+
+    @Test
+    func `ReconcileActiveGoalsCompletion achieves active goals with all steps done`() async throws {
+        let (path, base) = makeEngineDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (engine, store) = makeEngine(dbPath: path, llm: StubGoalLLM(texts: []))
+        let goalDone = makeEngineGoal(title: "Done goal")
+        let stepDone = makeEngineStep(goalID: goalDone.id, ordinal: 0, title: "Done step", status: .done)
+        try await store.create(goal: goalDone, steps: [stepDone])
+
+        let goalPending = makeEngineGoal(title: "Pending goal")
+        let stepPending = makeEngineStep(goalID: goalPending.id, ordinal: 0, title: "Pending step", status: .pending)
+        try await store.create(goal: goalPending, steps: [stepPending])
+
+        let reconciled = try await engine.reconcileActiveGoalsCompletion()
+        #expect(reconciled.contains(goalDone.id))
+        #expect(!reconciled.contains(goalPending.id))
+
+        #expect(try await store.goal(id: goalDone.id)?.status == .achieved)
+        #expect(try await store.goal(id: goalPending.id)?.status == .active)
+    }
+
+    @Test
+    func `GoalAdvancementRunner advance skips model turn when all steps are done`() async throws {
+        let (path, base) = makeEngineDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (engine, store) = makeEngine(dbPath: path, llm: StubGoalLLM(texts: []))
+        let goal = makeEngineGoal(title: "Finished goal")
+        let step = makeEngineStep(goalID: goal.id, ordinal: 0, title: "Finished step", status: .done)
+        try await store.create(goal: goal, steps: [step])
+
+        actor CallTracker {
+            var called = false
+            func mark() {
+                called = true
+            }
+        }
+        let tracker = CallTracker()
+        let outcome = try await GoalAdvancementRunner.advance(
+            goal: goal,
+            store: store,
+            engine: engine,
+            runID: UUID(),
+            turn: { _ in
+                await tracker.mark()
+                return GoalAdvancementTurn(text: "Should not run", isParked: false)
+            }
+        )
+
+        let wasCalled = await tracker.called
+        #expect(wasCalled == false)
+        #expect(outcome.text.contains("completed all steps"))
+        #expect(try await store.goal(id: goal.id)?.status == .achieved)
+    }
 }
 
 /// Mutates one goals field on a default config and asserts validation fails

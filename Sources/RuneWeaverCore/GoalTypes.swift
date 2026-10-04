@@ -476,14 +476,14 @@ public enum GoalValidation: Sendable {
     }
 }
 
-public extension GoalsConfig {
+extension GoalsConfig {
     /// Validates an optional cadence hint against the steady pursuit bounds.
     ///
     /// Thin forwarder over the shared validator so routes and CLI call the
     /// config-owned bound without duplicating the range.
     /// - Parameter raw: Raw interval, or nil when omitted.
     /// - Returns: Validated interval, or nil.
-    static func validateCadence(_ raw: Int?) throws -> Int? {
+    public static func validateCadence(_ raw: Int?) throws -> Int? {
         try GoalValidation.validateCadence(raw)
     }
 }

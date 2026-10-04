@@ -52,11 +52,11 @@ public struct DesktopSettingsUpdate: Content, Equatable {
     }
 }
 
-public extension UpdateSettingsRequest {
+extension UpdateSettingsRequest {
     /// Builds a request from a full desktop snapshot, routing through the same
     /// merge path so snapshot callers keep working without hand-mapping fields.
     /// - Parameter desktop: Complete desktop policy.
-    init(desktop: DesktopConfig) {
+    public init(desktop: DesktopConfig) {
         self.init(desktop: DesktopSettingsUpdate(desktop))
     }
 }

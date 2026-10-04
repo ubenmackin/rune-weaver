@@ -283,11 +283,11 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
     }
 }
 
-public extension EmailSearchHit {
+extension EmailSearchHit {
     /// Whether this hit satisfies an attachment-presence filter.
     /// Older hits may carry only a count, so presence derives from either signal;
     /// a nil filter matches every hit so unfiltered callers keep the full list.
-    func matches(hasAttachment: Bool?) -> Bool {
+    public func matches(hasAttachment: Bool?) -> Bool {
         guard let hasAttachment else { return true }
         return (hasAttachments ?? ((attachmentCount ?? 0) > 0)) == hasAttachment
     }
@@ -1199,7 +1199,7 @@ public enum EmailSearchMerge: Sendable {
 
 // MARK: - Agent-visible credential filtering
 
-public extension EmailSearchHit {
+extension EmailSearchHit {
     /// Returns the agent-visible copy of this hit, redacting credential links and codes.
     ///
     /// Snippet and subject rewrite together; sender, date, and mailbox stay
@@ -1208,7 +1208,7 @@ public extension EmailSearchHit {
     /// disabled filter or a non-bearing verdict returns self byte-identically.
     /// - Parameter credentialFilterEnabled: False passes through byte-identically.
     /// - Returns: Redacted copy, or self when no redaction applies.
-    func agentVisible(credentialFilterEnabled: Bool = true) -> EmailSearchHit {
+    public func agentVisible(credentialFilterEnabled: Bool = true) -> EmailSearchHit {
         EmailCredentialFilter.applyFilter(enabled: credentialFilterEnabled, original: self) {
             let visibleSnippet = EmailCredentialFilter.agentVisibleSnippet(
                 subject: subject,
@@ -1234,7 +1234,7 @@ public extension EmailSearchHit {
     }
 }
 
-public extension EmailFullMessage {
+extension EmailFullMessage {
     /// Returns the agent-visible copy of this message, redacting credential links and codes.
     ///
     /// Body and subject rewrite together; sender, recipients, and attachment
@@ -1242,7 +1242,7 @@ public extension EmailFullMessage {
     /// returns self byte-identically.
     /// - Parameter credentialFilterEnabled: False passes through byte-identically.
     /// - Returns: Redacted copy, or self when no redaction applies.
-    func agentVisible(credentialFilterEnabled: Bool = true) -> EmailFullMessage {
+    public func agentVisible(credentialFilterEnabled: Bool = true) -> EmailFullMessage {
         EmailCredentialFilter.applyFilter(enabled: credentialFilterEnabled, original: self) {
             let visibleBody = EmailCredentialFilter.agentVisibleBody(
                 subject: subject,
@@ -1269,7 +1269,7 @@ public extension EmailFullMessage {
     }
 }
 
-public extension EmailSearchEnvelope {
+extension EmailSearchEnvelope {
     /// Returns the agent-visible envelope with every hit filtered.
     ///
     /// Filtering maps over hits so the count and ordering stay identical and
@@ -1277,7 +1277,7 @@ public extension EmailSearchEnvelope {
     /// never redact.
     /// - Parameter credentialFilterEnabled: False passes through byte-identically.
     /// - Returns: Envelope whose messages are agent-visible.
-    func agentVisible(credentialFilterEnabled: Bool = true) -> EmailSearchEnvelope {
+    public func agentVisible(credentialFilterEnabled: Bool = true) -> EmailSearchEnvelope {
         EmailCredentialFilter.applyFilter(enabled: credentialFilterEnabled, original: self) {
             let visible = messages.map { $0.agentVisible(credentialFilterEnabled: credentialFilterEnabled) }
             return EmailSearchEnvelope(
@@ -1291,14 +1291,14 @@ public extension EmailSearchEnvelope {
     }
 }
 
-public extension EmailReadEnvelope {
+extension EmailReadEnvelope {
     /// Returns the agent-visible read envelope with subject and body filtered.
     ///
     /// Only subject and body can change; every other header and the mailbox
     /// label pass through so the agent keeps full routing context.
     /// - Parameter credentialFilterEnabled: False passes through byte-identically.
     /// - Returns: Envelope whose subject and body are agent-visible.
-    func agentVisible(credentialFilterEnabled: Bool = true) -> EmailReadEnvelope {
+    public func agentVisible(credentialFilterEnabled: Bool = true) -> EmailReadEnvelope {
         EmailCredentialFilter.applyFilter(enabled: credentialFilterEnabled, original: self) {
             let visibleBody = EmailCredentialFilter.agentVisibleBody(
                 subject: subject,

@@ -410,6 +410,7 @@ public final class ServerContext: Sendable {
             goalStore: resolvedGoals,
             goalEngine: resolvedEngine,
             ideasEngine: resolvedIdeasEngine,
+            activeTurns: activeTurns,
             proactiveConfig: proactiveConfig,
             judgeLLM: servingLLM
         )
@@ -576,6 +577,7 @@ extension ServerContext {
         /// Interruption policy from `[proactive]` so the worker gate matches file config.
         let proactiveConfig: ProactiveConfig
         let fanOutConfig: FanOutConfig
+        let activeTurns: ActiveTurnTracker
     }
 
     /// Boot-time configuration resolved before durable stores open.
@@ -740,6 +742,7 @@ extension ServerContext {
             goalStore: args.goalStore,
             goalEngine: args.goalEngine,
             ideasEngine: args.ideasEngine,
+            activeTurns: args.activeTurns,
             proactiveConfig: args.proactiveConfig,
             judgeLLM: args.llm
         )
@@ -901,6 +904,7 @@ extension ServerContext {
         // engine can ride the live orchestrator into the fanout.run tool;
         // engine construction is side-effect free, so the earlier position
         // changes nothing else about boot.
+        let activeTurns = ActiveTurnTracker()
         let engines = makeExecutionEngines(args: RuntimeEngineArgs(
             conversations: conversations, bus: services.bus, llm: llm,
             systemPrompt: systemPrompt, engineConfig: engineConfig,
@@ -910,7 +914,8 @@ extension ServerContext {
             durable: services.durable, notifier: notifier,
             indexCoordinator: indexCoordinator, goalStore: services.goalStore,
             goalEngine: services.goalEngine, ideasEngine: services.ideasEngine,
-            proactiveConfig: proactiveConfig, fanOutConfig: fanOutConfig
+            proactiveConfig: proactiveConfig, fanOutConfig: fanOutConfig,
+            activeTurns: activeTurns
         ))
         let egressSupervisor = try await setupEgressAndPolicy(
             policyStore: resolvedPolicyStore, toolConfigs: toolConfigs,
@@ -931,7 +936,7 @@ extension ServerContext {
             config: config, conversations: conversations, toolBus: services.bus, orchestrator: engines.orchestrator,
             memoryEngine: memoryEngine, embedder: embedder, permissionGate: permissionGate, approvals: services.approvals,
             scheduler: services.durable.scheduler, runs: services.durable.runs, hub: services.durable.hub, runLock: services.durable.runLock,
-            activeTurns: ActiveTurnTracker(), steeringQueue: engines.steeringQueue, schedulerWorker: engines.schedulerWorker,
+            activeTurns: activeTurns, steeringQueue: engines.steeringQueue, schedulerWorker: engines.schedulerWorker,
             pluginStore: services.pluginStack.store, pluginDiscovery: services.pluginStack.discovery, toolStates: services.pluginStack.states,
             sandboxConfig: sandboxConfig, filesConfig: toolConfigs.files, bashConfig: toolConfigs.bash, browserConfig: browserConfig,
             indexCoordinator: indexCoordinator, indexStore: indexStore, servingLLM: llm, auth: auth, browserGateway: browserGateway,
@@ -1118,6 +1123,21 @@ private func finalizeServerContext(
     // restore operator intent; tools registered after `make` (builtin
     // plugins in the serve path) re-apply via `restoreToolStates`.
     await context.restoreToolStates()
+    // Reconcile active goals that completed all actionable steps, so restarts
+    // never leave 1/1 finished goals in active status or re-fire them on scheduled ticks.
+    do {
+        let reconciled = try await context.goalEngine.reconcileActiveGoalsCompletion()
+        if !reconciled.isEmpty {
+            for goalID in reconciled {
+                if let goal = try? await context.goals.goal(id: goalID) {
+                    let steps = await (try? context.goals.steps(goalID: goalID)) ?? []
+                    await context.hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
+                }
+            }
+        }
+    } catch {
+        RuneWeaverLog.server.warning("ServerContext: boot goal reconciliation failed: \(error.localizedDescription)")
+    }
     // Warm fills the 60s TTL snapshot so the first dashboard poll finds slow fields cached.
     let store = context.indexStore
     Task.detached(priority: .utility) {

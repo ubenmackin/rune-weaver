@@ -808,9 +808,9 @@ private enum SQLiteStagedFilesStore {
 
 // MARK: - Live review SQLite helpers
 
-private extension SQLiteStagedFilesStore {
+extension SQLiteStagedFilesStore {
     /// Throwing read so the tool can distinguish "no row" from "store failed".
-    static func liveReview(forPath path: String, dbPath: String) throws -> LiveReviewRecord? {
+    fileprivate static func liveReview(forPath path: String, dbPath: String) throws -> LiveReviewRecord? {
         #if canImport(SQLite3)
             let handle = try open(dbPath: dbPath)
             guard let handle else {
@@ -851,7 +851,7 @@ private extension SQLiteStagedFilesStore {
     }
 
     /// Outcome of one pending-row claim attempt.
-    enum LiveReviewClaimOutcome: Equatable {
+    fileprivate enum LiveReviewClaimOutcome: Equatable {
         /// This call wrote the pending row.
         case inserted
         /// A pending row already owned the path: the conflict gate skipped the
@@ -863,14 +863,14 @@ private extension SQLiteStagedFilesStore {
     }
 
     /// Starts a fresh pending review only when no pending row owns the path.
-    static func beginLiveReview(path: String, backupPath: String?, at date: Date, dbPath: String) -> Bool {
+    fileprivate static func beginLiveReview(path: String, backupPath: String?, at date: Date, dbPath: String) -> Bool {
         claimLiveReview(path: path, backupPath: backupPath, at: date, dbPath: dbPath) == .inserted
     }
 
     /// Attempts to write the pending review row, keeping "a pending row
     /// already owns the path" distinct from "the row write failed" so a
     /// cross-process loser never mistakes a winning row for an orphan copy.
-    static func claimLiveReview(path: String, backupPath: String?, at date: Date, dbPath: String) -> LiveReviewClaimOutcome {
+    fileprivate static func claimLiveReview(path: String, backupPath: String?, at date: Date, dbPath: String) -> LiveReviewClaimOutcome {
         #if canImport(SQLite3)
             let handle: OpaquePointer?
             do {
@@ -912,7 +912,7 @@ private extension SQLiteStagedFilesStore {
     }
 
     /// Transitions a pending review once; already-terminal rows are untouched.
-    static func resolveLiveReview(path: String, resolution: FileReviewState, at date: Date, dbPath: String) -> Bool {
+    fileprivate static func resolveLiveReview(path: String, resolution: FileReviewState, at date: Date, dbPath: String) -> Bool {
         #if canImport(SQLite3)
             let handle: OpaquePointer?
             do {
