@@ -444,4 +444,50 @@ struct GoalToolPlumbingTests {
         )
         #expect(badOrdinal.isError == true)
     }
+
+    @Test
+    func `Progress marking final step done achieves goal and triggers notifier`() async throws {
+        let (path, base) = makeGoalToolDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let llm = GoalToolStubLLM(texts: ["[]"])
+        let config = makeGoalToolEnabledConfig()
+        let (engine, store) = makeGoalToolStack(dbPath: path, llm: llm, config: config)
+        let goal = try await persistGoalToolFixture(
+            store: store,
+            title: "Single task goal",
+            steps: [("Only task", .pending)]
+        )
+
+        final class NotifierCapture: @unchecked Sendable {
+            var receivedGoal: Goal?
+            var receivedSteps: [GoalStep] = []
+        }
+        let capture = NotifierCapture()
+
+        let tools = GoalTools.makeTools(
+            engine: engine,
+            store: store,
+            goalsConfig: config,
+            goalUpdatedNotifier: { updatedGoal, steps in
+                capture.receivedGoal = updatedGoal
+                capture.receivedSteps = steps
+            }
+        )
+        let progress = try #require(tools.first { $0.name == "goal.progress" })
+        let result = try await progress.execute(
+            input: ToolInput(
+                toolName: "goal.progress",
+                argumentsJSON: #"{"goalID":"\#(goal.id.uuidString)","stepOrdinal":0,"status":"done"}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(result.isError == false)
+
+        let freshGoal = try await store.goal(id: goal.id)
+        #expect(freshGoal?.status == .achieved)
+        #expect(capture.receivedGoal?.id == goal.id)
+        #expect(capture.receivedGoal?.status == .achieved)
+        #expect(capture.receivedSteps.count == 1)
+        #expect(capture.receivedSteps.first?.status == .done)
+    }
 }

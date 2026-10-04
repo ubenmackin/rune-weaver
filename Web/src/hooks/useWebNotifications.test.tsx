@@ -132,62 +132,119 @@ describe("useWebNotifications goals attention", () => {
     expect(MockNotification.instances).toHaveLength(0);
   });
 
-  it("fires notifications with appropriate titles on run_completed for different kinds", async () => {
+  it("fires notifications with appropriate titles on run_completed for different kinds without badging normal completions", async () => {
     const { hook, capture } = await mountWithSocket();
     expect(hook.result.current.runsBadge).toBe(0);
 
-    // Index run
+    // Index run (successful)
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "run_completed",
       run: {
         id: "run-idx-1",
         kind: "index",
+        status: "ok",
         message: "Index run finished",
         response: "Indexed 10 files",
       },
     });
 
-    await waitFor(() => {
-      expect(hook.result.current.runsBadge).toBe(1);
-    });
+    // Routine completion does not bump badge
+    expect(hook.result.current.runsBadge).toBe(0);
     expect(MockNotification.instances).toHaveLength(1);
     expect(MockNotification.instances[0].title).toBe("Rune Weaver: Index Run Finished");
     expect(MockNotification.instances[0].options?.body).toBe("Indexed 10 files");
 
-    // Scheduler run
+    // Scheduler run (successful)
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "run_completed",
       run: {
         id: "run-sched-1",
         kind: "scheduler",
+        status: "ok",
         message: "Job finished",
       },
     });
+    expect(hook.result.current.runsBadge).toBe(0);
     expect(MockNotification.instances).toHaveLength(2);
     expect(MockNotification.instances[1].title).toBe("Rune Weaver: Job Run Finished");
 
-    // Goal run
+    // Goal run (successful)
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "run_completed",
       run: {
         id: "run-goal-1",
         kind: "goal",
+        status: "ok",
         message: "Goal advanced",
       },
     });
+    expect(hook.result.current.runsBadge).toBe(0);
     expect(MockNotification.instances).toHaveLength(3);
     expect(MockNotification.instances[2].title).toBe("Rune Weaver: Goal Advancement Finished");
 
-    // Chat turn
+    // Chat turn (successful)
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "run_completed",
       run: {
         id: "run-chat-1",
         kind: "chat",
+        status: "ok",
         message: "Chat completed",
       },
     });
+    expect(hook.result.current.runsBadge).toBe(0);
     expect(MockNotification.instances).toHaveLength(4);
     expect(MockNotification.instances[3].title).toBe("Rune Weaver: Chat Finished");
+  });
+
+  it("only increments runsBadge when a run ends in error or failure status", async () => {
+    const { hook, capture } = await mountWithSocket();
+    expect(hook.result.current.runsBadge).toBe(0);
+
+    // Successful run does not bump badge
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        id: "run-ok-1",
+        kind: "chat",
+        status: "ok",
+        message: "Turn complete",
+      },
+    });
+    expect(hook.result.current.runsBadge).toBe(0);
+
+    // Failed run with status: 'error' bumps badge
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        id: "run-err-1",
+        kind: "scheduler",
+        status: "error",
+        message: "Job failed",
+      },
+    });
+    await waitFor(() => {
+      expect(hook.result.current.runsBadge).toBe(1);
+    });
+
+    // Failed run with status: 'failed' bumps badge again
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        id: "run-err-2",
+        kind: "index",
+        status: "failed",
+        message: "Indexing crashed",
+      },
+    });
+    await waitFor(() => {
+      expect(hook.result.current.runsBadge).toBe(2);
+    });
+
+    // Clear runs badge resets counter
+    act(() => {
+      hook.result.current.clearRunsBadge();
+    });
+    expect(hook.result.current.runsBadge).toBe(0);
   });
 });

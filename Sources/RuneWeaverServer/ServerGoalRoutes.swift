@@ -381,6 +381,9 @@ private func registerGoalStepRoute(on goals: RoutesBuilder) {
         } catch let error as GoalStoreError {
             throw mapGoalStoreError(error, raw: rawStep)
         }
+        if status == .done || status == .skipped {
+            try await context.goalEngine.checkCompletion(goalID: goalID)
+        }
         let steps = try await context.goals.steps(goalID: goalID)
         guard let updated = steps.first(where: { $0.id == stepID }) else {
             throw Abort(.notFound, reason: "Unknown step \(rawStep)")

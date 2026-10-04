@@ -289,6 +289,11 @@ extension RuneWeaverConfig {
 
     private func renderSchedulerTOML() -> [String] {
         var lines: [String] = []
+        if scheduler.defaultMaxToolIterations != 25 {
+            lines.append("[scheduler]")
+            lines.append("max_tool_iterations = \(scheduler.defaultMaxToolIterations)")
+            lines.append("")
+        }
         for job in scheduler.jobs {
             lines.append("[[scheduler.jobs]]")
             lines.append("name = \(Self.tomlQuoted(job.name))")
@@ -296,6 +301,12 @@ extension RuneWeaverConfig {
             lines.append("enabled = \(job.enabled ? "true" : "false")")
             if let schedule = job.schedule, !schedule.isEmpty {
                 lines.append("schedule = \(Self.tomlQuoted(schedule))")
+            }
+            if let maxIter = job.maxToolIterations {
+                lines.append("max_tool_iterations = \(maxIter)")
+            }
+            if let onLimit = job.onToolLimit, !onLimit.isEmpty {
+                lines.append("on_tool_limit = \(Self.tomlQuoted(onLimit))")
             }
             if let poll = job.poll {
                 lines.append("poll_account = \(Self.tomlQuoted(poll.account))")
@@ -423,6 +434,8 @@ extension RuneWeaverConfig {
             "max_steps_per_goal = \(goals.maxStepsPerGoal)",
             "plan_timeout_seconds = \(goals.planTimeoutSeconds)",
             "max_triggers_per_goal = \(goals.maxTriggersPerGoal)",
+            "max_tool_iterations = \(goals.maxToolIterations)",
+            "max_step_budget_exceeded_retries = \(goals.maxStepBudgetExceededRetries)",
             ""
         ]
     }

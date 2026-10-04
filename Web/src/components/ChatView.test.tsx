@@ -3863,7 +3863,8 @@ describe("ChatView goal chip", () => {
     installFetch(GOAL_ID);
     render(<ChatView />);
     const chip = await screen.findByTestId("session-goal-chip");
-    expect(chip).toHaveTextContent("field guide");
+    expect(chip).toHaveTextContent("Goal Tracker");
+    expect(chip).toHaveAttribute("title", expect.stringContaining("field guide"));
     expect(chip).toHaveTextContent("1/4");
   });
 
@@ -4020,6 +4021,140 @@ describe("ChatView batched write-review hydration", () => {
     expect(screen.getByText("Staged (Review Required)")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Accept" })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: "Discard" })).toHaveLength(1);
+  });
+});
+
+describe("ChatView dashboard integration props", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  it("switches session when targetSessionId prop is passed", async () => {
+    const targetId = "11111111-2222-3333-4444-555555555555";
+    const onClearTarget = vi.fn();
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes(`/sessions/${targetId}`)) {
+        return jsonResponse({
+          id: targetId,
+          messages: [
+            {
+              id: "msg-1",
+              role: "user",
+              content: "Existing session text",
+              createdAt: "2026-10-03T10:00:00Z",
+            },
+          ],
+        });
+      }
+      return jsonResponse({ sessions: [], messages: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { rerender } = render(
+      <ChatView targetSessionId={null} onClearTargetSessionId={onClearTarget} />,
+    );
+
+    rerender(
+      <ChatView
+        targetSessionId={targetId}
+        onClearTargetSessionId={onClearTarget}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Existing session text")).toBeInTheDocument();
+      expect(onClearTarget).toHaveBeenCalled();
+    });
+  });
+
+  it("auto-starts new session and dispatches when initialPrompt prop is passed", async () => {
+    const onClearPrompt = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/chat") {
+        return jsonResponse({
+          text: "Response to prompt",
+          sessionID: "auto-started-sess",
+          totalTokens: 100,
+        });
+      }
+      return jsonResponse({ sessions: [], messages: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ChatView
+        initialPrompt="Ask RuneWeaver to fix bugs"
+        onClearInitialPrompt={onClearPrompt}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Ask RuneWeaver to fix bugs")).toBeInTheDocument();
+      expect(onClearPrompt).toHaveBeenCalled();
+    });
+  });
+
+  it("does not inherit previous session tokens when auto-starting with initialPrompt", async () => {
+    const onClearPrompt = vi.fn();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ sessions: [], messages: [] })));
+
+    // Seed prior session with tokens
+    localStorage.setItem("rw_active_session_id", "prior-session");
+    localStorage.setItem("rw_session_tokens_prior-session", "50000");
+
+    const { rerender } = render(
+      <ChatView
+        initialPrompt=""
+        onClearInitialPrompt={onClearPrompt}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    // Pass initialPrompt to trigger handleStartNewSessionWithPrompt
+    rerender(
+      <ChatView
+        initialPrompt="Analyze codebase"
+        onClearInitialPrompt={onClearPrompt}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBeGreaterThan(0);
+    });
+
+    const sentFrame = JSON.parse(capture.sentFrames[capture.sentFrames.length - 1]) as {
+      text?: string;
+      sessionID?: string;
+    };
+    expect(sentFrame.text).toBe("Analyze codebase");
+    const freshSessionID = sentFrame.sessionID;
+    expect(freshSessionID).not.toBe("prior-session");
+
+    // Simulate streaming turn_tokens for the new session
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "turn_tokens",
+      sessionID: freshSessionID,
+      turnTotalTokens: 42,
+      roundIndex: 0,
+      roundTokens: 42,
+    });
+
+    // Verify session tokens renders 42 tokens (fresh session base 0 + turn 42), NOT 50,042
+    await waitFor(() => {
+      const sessionMetric = document.querySelector(".status-bar-item--session") as HTMLElement;
+      expect(sessionMetric).not.toBeNull();
+      expect(within(sessionMetric).getByText("42 tokens")).toBeInTheDocument();
+      expect(screen.queryByText(/50,?042/)).not.toBeInTheDocument();
+    });
   });
 });
 

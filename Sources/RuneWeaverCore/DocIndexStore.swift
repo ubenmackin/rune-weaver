@@ -31,6 +31,9 @@ public actor DocIndexStore {
         IndexConfig.defaultDBPath
     }
 
+    /// Maximum results returned when vector scans are bounded by a temporal window.
+    public static let maxVectorWindowResults = 10000
+
     /// How long a status snapshot stays reusable before the next poll recomputes it.
     ///
     /// The snapshot is reused for 60 seconds of idle reads, so repeated
@@ -721,6 +724,9 @@ enum DocIndexStoreIO {
 
         /// Maximum rows returned per read when a caller passes an oversized limit.
         static let maxResults = 1000
+
+        /// Maximum results returned when vector scans are bounded by a temporal window.
+        static let maxVectorWindowResults = DocIndexStore.maxVectorWindowResults
 
         /// Column projection shared by every document read.
         static let documentColumnList =

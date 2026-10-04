@@ -27,6 +27,8 @@ public enum ProactiveEventKind: String, Sendable, Codable, CaseIterable, Equatab
     case goalBlocked
     /// A scheduler or goal turn parked awaiting approval.
     case runParked
+    /// A scheduler or goal turn ran out of tool iteration budget before completing.
+    case runBudgetExceeded = "run_budget_exceeded"
     /// A proactive suggestion the Wayfinder engine proposed outside any turn.
     case ideaProposed
 
@@ -41,7 +43,7 @@ public enum ProactiveEventKind: String, Sendable, Codable, CaseIterable, Equatab
     /// unconditionally.
     var isMilestone: Bool {
         switch self {
-        case .schedulerError, .goalAchieved, .goalNeedsInput, .goalBlocked, .runParked:
+        case .schedulerError, .goalAchieved, .goalNeedsInput, .goalBlocked, .runParked, .runBudgetExceeded:
             true
         case .schedulerOk, .goalStepDone, .ideaProposed:
             false

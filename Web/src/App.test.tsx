@@ -17,7 +17,25 @@ import { clearAuthToken, getAuthToken, isSessionAuthenticated } from "./api";
 import { jsonResponse } from "./test-utils/http";
 import { installViewport } from "./test-utils/viewport";
 
-vi.mock("./components/ChatView", () => ({ default: () => null }));
+vi.mock("./components/ChatView", () => ({
+  default: ({ targetSessionId, initialPrompt }: { targetSessionId?: string; initialPrompt?: string }) => (
+    <div data-testid="chat-view" data-session={targetSessionId} data-prompt={initialPrompt}>
+      Chat
+    </div>
+  ),
+}));
+vi.mock("./components/DashboardView", () => ({
+  default: ({ onOpenSession, onOpenChatWithPrompt }: { onOpenSession?: (id: string) => void; onOpenChatWithPrompt?: (p: string) => void }) => (
+    <div data-testid="dashboard-view">
+      <button data-testid="mock-open-session" onClick={() => onOpenSession?.("sess-test-123")}>
+        Open Session
+      </button>
+      <button data-testid="mock-open-prompt" onClick={() => onOpenChatWithPrompt?.("investigate tests")}>
+        Ask Prompt
+      </button>
+    </div>
+  ),
+}));
 vi.mock("./components/TopNav", () => ({ default: () => <div data-testid="top-nav">TopNav</div> }));
 vi.mock("./components/GoalsManager", () => ({
   default: () => <div data-testid="goals-manager">Goals</div>,
@@ -207,7 +225,7 @@ describe("App mobile shell clearance", () => {
     const tabs = Array.from(bar.querySelectorAll("button")).map((tab) =>
       tab.getAttribute("aria-label"),
     );
-    expect(tabs).toEqual(["Chat", "Approvals", "Work", "Memory"]);
+    expect(tabs).toEqual(["Dashboard", "Chat", "Approvals", "Work", "Memory"]);
     expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
     // Clearance sibling stays mounted so the fixed bar never covers content.
     expect(document.querySelector(".app-main-content")).not.toBeNull();
@@ -266,5 +284,40 @@ describe("App mobile shell clearance", () => {
     );
     expect(document.querySelector(".mobile-bottom-nav")).toBeNull();
     expect(document.querySelector(".standalone-settings")).not.toBeNull();
+  });
+
+  it("routes onOpenSession from DashboardView to ChatView with targetSessionId", async () => {
+    stubAuthenticatedHealth();
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("dashboard-view")).toBeInTheDocument(),
+    );
+
+    const openSessionBtn = screen.getByTestId("mock-open-session");
+    await userEvent.click(openSessionBtn);
+
+    await waitFor(() => {
+      const chatView = screen.getByTestId("chat-view");
+      expect(chatView).toBeInTheDocument();
+      expect(chatView).toHaveAttribute("data-session", "sess-test-123");
+      expect(window.location.hash).toBe("#chat/sess-test-123");
+    });
+  });
+
+  it("routes onOpenChatWithPrompt from DashboardView to ChatView with prompt", async () => {
+    stubAuthenticatedHealth();
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("dashboard-view")).toBeInTheDocument(),
+    );
+
+    const askPromptBtn = screen.getByTestId("mock-open-prompt");
+    await userEvent.click(askPromptBtn);
+
+    await waitFor(() => {
+      const chatView = screen.getByTestId("chat-view");
+      expect(chatView).toBeInTheDocument();
+      expect(chatView).toHaveAttribute("data-prompt", "investigate tests");
+    });
   });
 });

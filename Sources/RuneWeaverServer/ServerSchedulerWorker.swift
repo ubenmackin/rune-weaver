@@ -33,6 +33,7 @@ public actor ServerSchedulerWorker {
     private let orchestrator: Orchestrator
     private let conversations: ConversationManager
     private let toolBus: ToolBus
+    private let approvals: ApprovalQueue?
     private let notifier: (any SchedulerNotifier)?
     private let logger: (@Sendable (String) async -> Void)?
     private let pollChecker: (@Sendable (EmailPollRule) async -> [String])?
@@ -65,6 +66,8 @@ public actor ServerSchedulerWorker {
     /// history, run broadcasts, and the approvals inbox always record so the
     /// audit trail never loses a turn the gate suppresses.
     private let outcomeGate: OutcomeGate
+    private let schedulerConfig: SchedulerConfig
+    private let goalsConfig: GoalsConfig
 
     private let intervalSeconds: TimeInterval
     private var lastCheck: Date
@@ -82,6 +85,7 @@ public actor ServerSchedulerWorker {
         orchestrator: Orchestrator,
         conversations: ConversationManager,
         toolBus: ToolBus,
+        approvals: ApprovalQueue? = nil,
         intervalSeconds: TimeInterval = 60,
         notifier: (any SchedulerNotifier)? = nil,
         logger: (@Sendable (String) async -> Void)? = nil,
@@ -95,7 +99,9 @@ public actor ServerSchedulerWorker {
         goalTriggerBridge: GoalTriggerBridge = GoalTriggerBridge(),
         outcomeGate: OutcomeGate? = nil,
         proactiveConfig: ProactiveConfig = ProactiveConfig(),
-        judgeLLM: (any LLMProvider)? = nil
+        judgeLLM: (any LLMProvider)? = nil,
+        schedulerConfig: SchedulerConfig = .empty,
+        goalsConfig: GoalsConfig = GoalsConfig()
     ) {
         self.scheduler = scheduler
         self.runs = runs
@@ -104,12 +110,15 @@ public actor ServerSchedulerWorker {
         self.orchestrator = orchestrator
         self.conversations = conversations
         self.toolBus = toolBus
+        self.approvals = approvals
         self.intervalSeconds = max(1, intervalSeconds)
         self.lastCheck = Date().addingTimeInterval(-max(1, intervalSeconds))
         self.notifier = notifier
         self.logger = logger
         self.pollChecker = pollChecker
         self.indexCoordinator = indexCoordinator
+        self.schedulerConfig = schedulerConfig
+        self.goalsConfig = goalsConfig
         self.goalStore = goalStore
         self.goalEngine = goalEngine
         self.ideasEngine = ideasEngine
@@ -355,7 +364,13 @@ public actor ServerSchedulerWorker {
         )
         await hub.broadcastProactiveMessage(frame)
     }
+}
 
+// MARK: - Email Poll Evaluation
+
+/// Email poll rule evaluation helpers, extracted from the actor body to keep
+/// the type body length within lint bounds.
+extension ServerSchedulerWorker {
     /// Evaluates a poll rule for a job, returning fresh unseen email count if due.
     private func evaluatePollRule(jobID: UUID, rule: EmailPollRule, now: Date) async -> Int? {
         if let last = lastPollCheck[jobID] {
@@ -418,7 +433,13 @@ public actor ServerSchedulerWorker {
 
         return envelope.messages.map(\.id)
     }
+}
 
+// MARK: - Job Execution
+
+/// Job execution, skip, and failure helpers, extracted from the actor body to keep
+/// the type body length within lint bounds.
+extension ServerSchedulerWorker {
     /// Executes one scheduled job under single-flight locking, logging outcomes.
     private func executeJob(_ job: SchedulerJob, reason: SchedulerFireReason) async -> SchedulerRunResult {
         let startTime = Date()
@@ -444,23 +465,38 @@ public actor ServerSchedulerWorker {
         // stale held lock from a detached release racing the return.
         let result: SchedulerRunResult
         do {
-            let response = try await orchestrator.process(input: UserInput(
-                text: job.prompt,
-                sessionID: sessionID,
-                source: "scheduler"
-            ))
+            let maxIterations = job.maxToolIterations ?? schedulerConfig.defaultMaxToolIterations
+            let policy: ToolLimitPolicy = job.onToolLimit == "park" ? .park : .forceSynthesis
+            let response = try await orchestrator.process(
+                input: UserInput(
+                    text: job.prompt,
+                    sessionID: sessionID,
+                    source: "scheduler",
+                    toolLimitPolicy: policy,
+                    maxToolIterations: maxIterations
+                ),
+                onEvent: { [hub] event in
+                    await broadcastWSEventFrame(event, sessionID: sessionID, hub: hub)
+                }
+            )
+            await broadcastStreamDone(for: response, sessionID: sessionID, hub: hub)
+            if response.isParked, let approvals {
+                await broadcastParkedApprovals(for: response, approvals: approvals, hub: hub)
+            }
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
             // Parked scheduler turns remain as awaiting_approval like chat turns, resolving through
-            // the same inbox resume path in their session. The per-turn parked flag keeps a stale
-            // prior park in this session from mis-marking a fresh normal turn.
-            let parkedStatus = if response.isParked {
+            // the same inbox resume path in their session. Budget exceeded turns finish with
+            // forced diagnostic synthesis and budget_exceeded status.
+            let runStatus = if response.isParked {
                 "awaiting_approval"
+            } else if response.isBudgetExceeded {
+                "budget_exceeded"
             } else {
                 "ok"
             }
             let entry = await runs.update(
                 id: initialEntry.id,
-                status: parkedStatus,
+                status: runStatus,
                 response: response.text,
                 toolActions: response.toolActions,
                 totalTokens: response.totalTokens,
@@ -472,12 +508,19 @@ public actor ServerSchedulerWorker {
             await logger?("Scheduler fired '\(job.name)' (\(reason.displayName)): \(short)")
             // The gate filters interruptions only; the run row and its run
             // broadcast above always record so suppressed turns stay auditable.
-            let eventKind: ProactiveEventKind = response.isParked ? .runParked : .schedulerOk
+            let eventKind: ProactiveEventKind = if response.isParked {
+                .runParked
+            } else if response.isBudgetExceeded {
+                .runBudgetExceeded
+            } else {
+                .schedulerOk
+            }
             let outcomeText = response.text.isEmpty ? job.prompt : response.text
             let decision = await outcomeGate.decide(event: ProactiveEvent(kind: eventKind, title: job.name, outcome: outcomeText))
             if decision.surface {
                 if let notifier {
-                    await notifier.notify(title: "Rune Weaver: \(job.name)", body: short.isEmpty ? job.prompt : short)
+                    let title = response.isBudgetExceeded ? "Rune Weaver: \(job.name) (Budget Exceeded)" : "Rune Weaver: \(job.name)"
+                    await notifier.notify(title: title, body: short.isEmpty ? job.prompt : short)
                 }
                 await broadcastProactive(kind: eventKind, title: job.name, headline: decision.headline, sessionID: sessionID)
             }
@@ -505,13 +548,7 @@ public actor ServerSchedulerWorker {
         await runLock.release(id: job.id, name: job.name)
         return result
     }
-}
 
-// MARK: - Job Skip & Failure Recording
-
-/// Job skip and failure helpers, extracted from the actor body to keep
-/// the type body length within lint bounds.
-extension ServerSchedulerWorker {
     /// Records an audit run entry for a scheduled job that skipped firing because it is already running.
     private func recordJobSkipped(job: SchedulerJob, startTime: Date) async -> SchedulerRunResult {
         let skipMsg = "Skipped '\(job.name)': already running"
@@ -629,12 +666,12 @@ extension ServerSchedulerWorker {
         let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
         // Parked goal turns remain as awaiting_approval like scheduler
         // turns, resolving through the same inbox resume path in their
-        // session. The per-turn parked flag keeps a stale prior park in
-        // this session from mis-marking a fresh normal turn.
-        let parkedStatus = outcome.isParked ? "awaiting_approval" : "ok"
+        // session. Budget exceeded turns finish with forced diagnostic
+        // synthesis and budget_exceeded status.
+        let runStatus = outcome.isParked ? "awaiting_approval" : (outcome.isBudgetExceeded ? "budget_exceeded" : "ok")
         let entry = await runs.update(
             id: runID,
-            status: parkedStatus,
+            status: runStatus,
             response: outcome.text,
             toolActions: outcome.toolActions,
             totalTokens: outcome.totalTokens,
@@ -643,9 +680,18 @@ extension ServerSchedulerWorker {
         if let entry {
             await hub.broadcastRun(entry)
         }
+        if outcome.isParked, let approvals {
+            let pending = await approvals.requests(for: sessionID)
+            let callIDs = Set(outcome.toolActions.map(\.callID))
+            for request in pending where callIDs.isEmpty || callIDs.contains(request.input.callID) {
+                await hub.broadcastApproval(request)
+            }
+        }
         let short = ProactiveEvent.makePreview(outcome.text)
         if outcome.isParked {
             await logger?("Goal '\(goal.title)' parked awaiting approval.")
+        } else if outcome.isBudgetExceeded {
+            await logger?("Goal '\(goal.title)' iteration budget exceeded: \(short)")
         } else {
             await logger?("Goal fired '\(goal.title)': \(short)")
         }
@@ -655,7 +701,8 @@ extension ServerSchedulerWorker {
         let decision = await outcomeGate.decide(event: ProactiveEvent(kind: eventKind, title: goal.title, outcome: outcomeText))
         if decision.surface {
             if let notifier {
-                await notifier.notify(title: "Rune Weaver: \(goal.title)", body: short.isEmpty ? goal.title : short)
+                let title = outcome.isBudgetExceeded ? "Rune Weaver: \(goal.title) (Budget Exceeded)" : "Rune Weaver: \(goal.title)"
+                await notifier.notify(title: title, body: short.isEmpty ? goal.title : short)
             }
             await broadcastProactive(kind: eventKind, title: goal.title, headline: decision.headline, sessionID: sessionID, goalID: goal.id)
         }
@@ -763,21 +810,31 @@ extension ServerSchedulerWorker {
             let turnGoalID = goal.id
             let bumpLogger = logger
             let bumpTitle = goal.title
+            let turnHub = hub
             let outcome = try await GoalAdvancementRunner.advance(
                 goal: goal,
                 store: store,
                 engine: engine,
                 runID: initialEntry.id,
                 turn: { prompt in
-                    let response = try await turnOrchestrator.process(input: UserInput(
-                        text: prompt,
-                        sessionID: turnSessionID,
-                        source: "goal",
-                        goalID: turnGoalID
-                    ))
+                    let response = try await turnOrchestrator.process(
+                        input: UserInput(
+                            text: prompt,
+                            sessionID: turnSessionID,
+                            source: "goal",
+                            goalID: turnGoalID,
+                            toolLimitPolicy: .forceSynthesis,
+                            maxToolIterations: goalsConfig.maxToolIterations
+                        ),
+                        onEvent: { event in
+                            await broadcastWSEventFrame(event, sessionID: turnSessionID, hub: turnHub)
+                        }
+                    )
+                    await broadcastStreamDone(for: response, sessionID: turnSessionID, hub: turnHub)
                     return GoalAdvancementTurn(
                         text: response.text,
                         isParked: response.isParked,
+                        isBudgetExceeded: response.isBudgetExceeded,
                         toolActions: response.toolActions,
                         totalTokens: response.totalTokens
                     )
@@ -877,21 +934,31 @@ extension ServerSchedulerWorker {
             let turnGoalID = goal.id
             let bumpLogger = logger
             let bumpTitle = goal.title
+            let turnHub = hub
             let outcome = try await GoalAdvancementRunner.advance(
                 goal: goal,
                 store: store,
                 engine: engine,
                 runID: initialEntry.id,
                 turn: { prompt in
-                    let response = try await turnOrchestrator.process(input: UserInput(
-                        text: prompt,
-                        sessionID: turnSessionID,
-                        source: "goal",
-                        goalID: turnGoalID
-                    ))
+                    let response = try await turnOrchestrator.process(
+                        input: UserInput(
+                            text: prompt,
+                            sessionID: turnSessionID,
+                            source: "goal",
+                            goalID: turnGoalID,
+                            toolLimitPolicy: .forceSynthesis,
+                            maxToolIterations: goalsConfig.maxToolIterations
+                        ),
+                        onEvent: { event in
+                            await broadcastWSEventFrame(event, sessionID: turnSessionID, hub: turnHub)
+                        }
+                    )
+                    await broadcastStreamDone(for: response, sessionID: turnSessionID, hub: turnHub)
                     return GoalAdvancementTurn(
                         text: response.text,
                         isParked: response.isParked,
+                        isBudgetExceeded: response.isBudgetExceeded,
                         toolActions: response.toolActions,
                         totalTokens: response.totalTokens
                     )
@@ -1002,6 +1069,9 @@ extension ServerSchedulerWorker {
     private func resolveGoalEventKind(goal: Goal, store: GoalStore, outcome: GoalAdvancementTurn) async -> ProactiveEventKind {
         if outcome.isParked {
             return .runParked
+        }
+        if outcome.isBudgetExceeded {
+            return .runBudgetExceeded
         }
         do {
             if let fresh = try await store.goal(id: goal.id) {

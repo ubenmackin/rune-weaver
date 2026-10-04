@@ -423,7 +423,7 @@ describe("TopNav profile menu", () => {
     const topLevel = Array.from(sections.querySelectorAll(".top-nav-item")).map(
       (tab) => tab.textContent?.trim(),
     );
-    expect(topLevel).toEqual(["Chat", "Approvals", "Work", "Memory"]);
+    expect(topLevel).toEqual(["Dashboard", "Chat", "Approvals", "Work", "Memory"]);
     expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
 
     // The Work trigger reveals its children in canonical order.

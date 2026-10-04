@@ -391,7 +391,7 @@ func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerCont
 }
 
 /// Encodes an Encodable payload to JSON UTF-8 text, logging any failure.
-private func encodeWSFrame<T: Encodable>(_ value: T) -> String? {
+func encodeWSFrame<T: Encodable>(_ value: T) -> String? {
     do {
         let data = try JSONEncoder().encode(value)
         return String(data: data, encoding: .utf8)
@@ -466,22 +466,43 @@ func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
 /// Tool progress is advisory and droppable, so it leaves on a detached task
 /// while the tool loop resolves without hub latency; every other frame keeps
 /// the awaited ordering the terminal frames rely on.
-func broadcastWSEventFrame(_ event: OrchestratorEvent, sessionID: UUID, context: ServerContext) async {
+func broadcastWSEventFrame(_ event: OrchestratorEvent, sessionID: UUID, hub: WSHub) async {
     guard !Task.isCancelled else {
         return
     }
     if case let .approval(request) = event {
-        await context.hub.broadcastApproval(request)
+        await hub.broadcastApproval(request)
         return
     }
     if case .toolProgress = event {
         if let frameText = wsEventFrameText(event, sessionID: sessionID) {
-            Task { await context.hub.broadcast(text: frameText) }
+            Task { await hub.broadcast(text: frameText) }
         }
         return
     }
     if let frameText = wsEventFrameText(event, sessionID: sessionID) {
-        await context.hub.broadcast(text: frameText)
+        await hub.broadcast(text: frameText)
+    }
+}
+
+/// Convenience overload for call sites with a ServerContext.
+func broadcastWSEventFrame(_ event: OrchestratorEvent, sessionID: UUID, context: ServerContext) async {
+    await broadcastWSEventFrame(event, sessionID: sessionID, hub: context.hub)
+}
+
+/// Broadcasts a terminal stream done frame to every connected WebSocket client.
+func broadcastStreamDone(
+    for response: OrchestratorResponse,
+    sessionID: UUID,
+    hub: WSHub,
+    steeringQueue: SteeringQueue? = nil
+) async {
+    var done = WSStreamDone(from: response)
+    if let steeringQueue {
+        done.retainedSteerCount = await steeringQueue.pendingCount(for: sessionID)
+    }
+    if let frame = encodeWSFrame(done) {
+        await hub.broadcast(text: frame)
     }
 }
 

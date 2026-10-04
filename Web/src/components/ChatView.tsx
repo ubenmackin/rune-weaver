@@ -1048,6 +1048,10 @@ interface ChatViewProps {
   // false→true edge. Optional, and absent means active, so standalone renders
   // (and tests) behave exactly as they did before the flag existed.
   isActive?: boolean;
+  initialPrompt?: string | null;
+  onClearInitialPrompt?: () => void;
+  targetSessionId?: string | null;
+  onClearTargetSessionId?: () => void;
 }
 
 // Indexes server-derived per-message groups by parent message ID, oldest message
@@ -1422,7 +1426,15 @@ function renderedToolActions(
   return actions;
 }
 
-export default function ChatView({ health, onSelectTab, isActive }: ChatViewProps) {
+export default function ChatView({
+  health,
+  onSelectTab,
+  isActive,
+  initialPrompt,
+  onClearInitialPrompt,
+  targetSessionId,
+  onClearTargetSessionId,
+}: ChatViewProps) {
   const {
     settings: chatSettings,
     updateSettings: updateChatSettings,
@@ -1431,6 +1443,7 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
   const [chatSettingsOpen, setChatSettingsOpen] = useState(false);
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [input, setInput] = useState("");
+
   const [sessionID, setSessionID] = useState<string>(() => {
     const urlSession = getURLSessionID();
     if (urlSession) return urlSession;
@@ -3248,6 +3261,13 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
         // or in another tab; reconcile so decided identifiers evict promptly.
         refreshApprovals();
       }
+      if (sessionGoalIdRef.current) {
+        getGoal(sessionGoalIdRef.current)
+          .then((detail) => {
+            if (detail?.goal) setSessionGoal(detail.goal);
+          })
+          .catch(() => {});
+      }
     } else if (frameType === "cancelled") {
       clearTurnTimeout();
       clearAllToolProgress();
@@ -4120,9 +4140,10 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
     }
   }
 
-  async function send() {
-    const text = input.trim();
+  async function send(overrideText?: string, overrideSessionID?: string) {
+    const text = (overrideText !== undefined ? overrideText : input).trim();
     if (!text || pending) return;
+    const targetSid = overrideSessionID ?? sessionID;
     // Reject oversize sends locally so the timeline never shows a message the
     // engine must refuse with an authoritative length error.
     if (chatTextLength(text) > MAX_CHAT_TEXT_LENGTH) {
@@ -4187,7 +4208,7 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
     );
     historyIndexRef.current = -1;
     draftRef.current = "";
-    persistInputHistory(sessionID, inputHistoryRef.current);
+    persistInputHistory(targetSid, inputHistoryRef.current);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
@@ -4198,7 +4219,7 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
     clearAllToolProgress();
     // Remember the owning session so timeout/close cancels this turn even
     // when the user switches sessions before the terminal frame arrives.
-    turnSessionIDRef.current = sessionID;
+    turnSessionIDRef.current = targetSid;
     activeTurnStartMsRef.current = Date.now();
     // Freeze the prior session base so live token frames add the running turn
     // total onto a stable starting point instead of compounding onto themselves.
@@ -4211,7 +4232,7 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
     if (isOpen()) {
       sendMessage({
         text,
-        sessionID,
+        sessionID: targetSid,
         source: "dashboard",
       });
       // Bound the terminal frame: a drop before done/error releases the
@@ -4222,7 +4243,7 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
 
     // Fallback to REST postChat
     try {
-      const response = await postChat(text, sessionID, "dashboard");
+      const response = await postChat(text, targetSid, "dashboard");
       reconcileReconnecting();
       // The server stored the optimistic bubble, so no retraction remains.
       pendingNormalRef.current = null;
@@ -4232,10 +4253,10 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
       // Validated per-turn parked flag: only an explicit true marks a waiting
       // turn, so absent tags from older engines stay normal completions.
       const isParked = response.isParked === true;
-      const currentSid = response.sessionID || sessionID;
+      const currentSid = response.sessionID || targetSid;
       if (
         response.sessionID &&
-        normalizeSessionID(response.sessionID) !== normalizeSessionID(sessionID)
+        normalizeSessionID(response.sessionID) !== normalizeSessionID(targetSid)
       ) {
         // A REST reply can adopt the authoritative identifier for a send that
         // started under a provisional draft. The session effect reloads recall
@@ -4246,7 +4267,7 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
         inputHistoryRef.current = carryHistoryForward(
           inputHistoryRef.current,
           response.sessionID,
-          sessionID,
+          targetSid,
         );
         setSessionID(response.sessionID);
       }
@@ -4377,7 +4398,7 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
     }
   }
 
-  function handleNewSession() {
+  function resetFreshSessionState(): string {
     // Switching never cancels: the active turn parks into the per-session map
     // and keeps its server slot while the fresh draft starts idle.
     // A fresh draft starts at the bottom, so release any inherited scroll lock.
@@ -4385,6 +4406,7 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
     parkActiveFlight();
     const nextID = newSessionId();
     knownDraftIDRef.current = nextID;
+    sessionIDRef.current = nextID;
     setSessionID(nextID);
     // The drawer belongs to the prior session's goal, so a switch dismisses it
     // rather than reopening over the fresh conversation once its own goal
@@ -4408,6 +4430,10 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
     lastTurnTokensRef.current = null;
     const fresh = loadSessionTokens(nextID);
     setSessionTokens(fresh);
+    // Synchronously commit both the ref and the base ref so any immediate send()
+    // does not read or overwrite the base with the previous session's tokens
+    // before the [sessionTokens] ref-sync effect executes.
+    sessionTokensRef.current = fresh;
     sessionBaseRef.current = fresh;
     const freshContext = loadContextTokens(nextID);
     setContextTokens(freshContext);
@@ -4417,6 +4443,11 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
     inputHistoryRef.current = loadInputHistory(nextID);
     historyIndexRef.current = -1;
     draftRef.current = "";
+    return nextID;
+  }
+
+  function handleNewSession() {
+    resetFreshSessionState();
   }
 
   function handleSelectSession(id: string) {
@@ -4483,6 +4514,31 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
       window.removeEventListener("popstate", handleURLSessionChange);
     };
   }, []);
+
+  function handleStartNewSessionWithPrompt(promptText: string) {
+    const nextID = resetFreshSessionState();
+
+    if (typeof window !== "undefined") {
+      window.location.hash = `chat/${nextID}`;
+    }
+
+    send(promptText, nextID);
+  }
+
+  useEffect(() => {
+    if (initialPrompt && initialPrompt.trim()) {
+      const promptText = initialPrompt.trim();
+      onClearInitialPrompt?.();
+      handleStartNewSessionWithPrompt(promptText);
+    }
+  }, [initialPrompt, onClearInitialPrompt]);
+
+  useEffect(() => {
+    if (targetSessionId && targetSessionId.trim()) {
+      handleSelectSession(targetSessionId.trim());
+      onClearTargetSessionId?.();
+    }
+  }, [targetSessionId, onClearTargetSessionId]);
 
   // Sanitized footer totals share the hub integer contract so a fractional,
   // negative, or NaN payload renders as zero instead of NaN; the limit guards
@@ -4600,7 +4656,7 @@ export default function ChatView({ health, onSelectTab, isActive }: ChatViewProp
                 title={`${sessionGoal.title} — ${sessionGoal.progress.done}/${sessionGoal.progress.total} steps`}
               >
                 <TargetIcon size={13} />
-                <span className="goal-chip-title">{sessionGoal.title}</span>
+                <span className="goal-chip-title">Goal Tracker</span>
                 <span className="goal-chip-progress">
                   {sessionGoal.progress.done}/{sessionGoal.progress.total}
                 </span>

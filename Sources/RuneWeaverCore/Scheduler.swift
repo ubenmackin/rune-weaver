@@ -445,6 +445,20 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
     public var schedule: String?
     /// Email-arrival poll rule, if the job has a mail trigger.
     public var poll: EmailPollRule?
+    /// Maximum tool iterations before limit policy triggers, or nil to inherit section default.
+    public var maxToolIterations: Int?
+    /// Action when tool limit is reached: "fail" (synthesize & budget_exceeded) or "park". Defaults to "fail".
+    public var onToolLimit: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case prompt
+        case enabled
+        case schedule
+        case poll
+        case maxToolIterations = "max_tool_iterations"
+        case onToolLimit = "on_tool_limit"
+    }
 
     /// Creates a job config.
     public init(
@@ -452,13 +466,17 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
         prompt: String,
         enabled: Bool = true,
         schedule: String? = nil,
-        poll: EmailPollRule? = nil
+        poll: EmailPollRule? = nil,
+        maxToolIterations: Int? = nil,
+        onToolLimit: String? = nil
     ) {
         self.name = name
         self.prompt = prompt
         self.enabled = enabled
         self.schedule = schedule
         self.poll = poll
+        self.maxToolIterations = maxToolIterations
+        self.onToolLimit = onToolLimit
     }
 
     /// Whether the job has a cron trigger.
@@ -524,11 +542,33 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
 public struct SchedulerConfig: Sendable, Codable, Equatable {
     /// Configured jobs in file order.
     public var jobs: [SchedulerJobConfig]
+    /// Default tool iterations for scheduled jobs before triggering limit policy (1-100). Defaults to 25.
+    public var defaultMaxToolIterations: Int
 
     /// Creates a scheduler config.
-    /// - Parameter jobs: Configured jobs. Defaults to empty.
-    public init(jobs: [SchedulerJobConfig] = []) {
+    /// - Parameters:
+    ///   - jobs: Configured jobs. Defaults to empty.
+    ///   - defaultMaxToolIterations: Default tool iterations (1-100). Defaults to 25.
+    public init(jobs: [SchedulerJobConfig] = [], defaultMaxToolIterations: Int = 25) {
         self.jobs = jobs
+        self.defaultMaxToolIterations = defaultMaxToolIterations
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case jobs
+        case defaultMaxToolIterations = "max_tool_iterations"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.jobs = try container.decodeIfPresent([SchedulerJobConfig].self, forKey: .jobs) ?? []
+        self.defaultMaxToolIterations = try container.decodeIfPresent(Int.self, forKey: .defaultMaxToolIterations) ?? 25
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(jobs, forKey: .jobs)
+        try container.encode(defaultMaxToolIterations, forKey: .defaultMaxToolIterations)
     }
 
     /// Empty config with no jobs.
@@ -1074,6 +1114,10 @@ public actor SchedulerEngine {
         package let pollIntervalSeconds: Int?
         /// Maximum hits fetched per poll, when set.
         package let pollLimit: Int?
+        /// Maximum tool iterations before limit policy triggers, when set.
+        package let maxToolIterations: Int?
+        /// Action when tool limit is reached ("fail" or "park"), when set.
+        package let onToolLimit: String?
 
         /// Decodes the shared columns starting at an offset.
         package static func decode(_ statement: OpaquePointer?, base: Int32) -> Self? {
@@ -1091,7 +1135,9 @@ public actor SchedulerEngine {
                 pollQuery: SQLiteHelpers.columnText(statement, index: base + 5),
                 pollMailbox: SQLiteHelpers.columnText(statement, index: base + 6),
                 pollIntervalSeconds: SQLiteHelpers.columnInt64(statement, index: base + 7).map { Int($0) },
-                pollLimit: SQLiteHelpers.columnInt64(statement, index: base + 8).map { Int($0) }
+                pollLimit: SQLiteHelpers.columnInt64(statement, index: base + 8).map { Int($0) },
+                maxToolIterations: SQLiteHelpers.columnInt64(statement, index: base + 9).map { Int($0) },
+                onToolLimit: SQLiteHelpers.columnText(statement, index: base + 10)
             )
         }
 
@@ -1151,8 +1197,19 @@ public extension SchedulerJobConfig {
                 return []
             }
             defer { sqlite3_close(handle) }
+            _ = try? SQLiteHelpers.exec(
+                handle: handle,
+                sql: "ALTER TABLE scheduler_jobs ADD COLUMN max_tool_iterations INTEGER;",
+                failure: { _ in LoadError() }
+            )
+            _ = try? SQLiteHelpers.exec(
+                handle: handle,
+                sql: "ALTER TABLE scheduler_jobs ADD COLUMN on_tool_limit TEXT;",
+                failure: { _ in LoadError() }
+            )
             let sql = """
-            SELECT name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox, poll_interval_seconds, poll_limit
+            SELECT name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox,
+                   poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit
             FROM scheduler_jobs
             ORDER BY created_at ASC;
             """
@@ -1171,7 +1228,9 @@ public extension SchedulerJobConfig {
                     prompt: row.prompt,
                     enabled: row.enabled,
                     schedule: row.configSchedule,
-                    poll: row.makePollRule()
+                    poll: row.makePollRule(),
+                    maxToolIterations: row.maxToolIterations,
+                    onToolLimit: row.onToolLimit
                 ))
             }
             return loaded

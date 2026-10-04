@@ -70,6 +70,8 @@ public enum GoalEventKind: String, Sendable, Codable, CaseIterable, Equatable {
     case resumed
     /// Goal paused.
     case paused
+    /// A step turn exhausted its tool iteration budget without finishing.
+    case stepBudgetExceeded = "step_budget_exceeded"
     /// Freeform annotation that carries no lifecycle transition.
     case note
 }

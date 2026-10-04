@@ -54,6 +54,7 @@ import {
   EditIcon,
   FanOutIcon,
   PlusIcon,
+  TargetIcon,
   TrashIcon,
 } from "./icons";
 import Modal from "./Modal";
@@ -174,6 +175,16 @@ function isScheduledSession(session: SessionSummary | null | undefined): boolean
 function isFanOutWorkerSession(session: SessionSummary | null | undefined): boolean {
   const raw = session?.source;
   return typeof raw === "string" && raw.trim().toLowerCase() === "fanout_worker";
+}
+
+// Classifies a session executing or linked to a goal. Goals carry an explicit
+// source ("goal") or a non-empty goalId, distinguishing autonomous goal runs
+// from interactive chats, scheduled jobs, and fan-out workers.
+function isGoalSession(session: SessionSummary | null | undefined): boolean {
+  const raw = session?.source;
+  const isGoalSource = typeof raw === "string" && raw.trim().toLowerCase() === "goal";
+  const hasGoalId = typeof session?.goalId === "string" && session.goalId.trim().length > 0;
+  return isGoalSource || hasGoalId;
 }
 
 // Resolved props for the presentational view. The handheld flag and the
@@ -821,6 +832,16 @@ function SessionSidebarView({
                   className="session-item-icon pending-approval"
                   title="Approval pending"
                   data-testid="session-approval-pending-icon"
+                />
+              );
+            }
+            if (isGoalSession(session)) {
+              return (
+                <TargetIcon
+                  size={14}
+                  className="session-item-icon goal"
+                  title="Goal run"
+                  data-testid="session-goal-icon"
                 />
               );
             }

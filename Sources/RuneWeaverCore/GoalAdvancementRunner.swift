@@ -18,6 +18,8 @@ public struct GoalAdvancementTurn: Sendable, Equatable {
     public let text: String
     /// Whether the turn parked awaiting approval instead of finishing.
     public let isParked: Bool
+    /// Whether the turn ended via forced synthesis because tool iteration budget was exceeded.
+    public let isBudgetExceeded: Bool
     /// Tool invocations performed while answering, for run audit rows.
     public let toolActions: [ToolAction]
     /// Session-billed tokens for the turn, when reported.
@@ -34,12 +36,14 @@ public struct GoalAdvancementTurn: Sendable, Equatable {
     public init(
         text: String,
         isParked: Bool,
+        isBudgetExceeded: Bool = false,
         toolActions: [ToolAction] = [],
         totalTokens: Int? = nil,
         ideas: [Idea] = []
     ) {
         self.text = text
         self.isParked = isParked
+        self.isBudgetExceeded = isBudgetExceeded
         self.toolActions = toolActions
         self.totalTokens = totalTokens
         self.ideas = ideas
@@ -87,9 +91,13 @@ public enum GoalAdvancementRunner {
         goalID: UUID,
         engine: GoalEngine,
         runID: UUID,
-        isParked: Bool
+        isParked: Bool,
+        isBudgetExceeded: Bool = false
     ) async throws -> [Idea] {
         guard !isParked else { return [] }
+        if isBudgetExceeded {
+            return try await engine.postBudgetExceeded(goalID: goalID, runID: runID)
+        }
         return try await engine.postAdvance(goalID: goalID, runID: runID)
     }
 
@@ -153,7 +161,13 @@ public enum GoalAdvancementRunner {
         guard !outcome.isParked else { return outcome }
         let ideas: [Idea]
         do {
-            ideas = try await completeAfterTurn(goalID: goal.id, engine: engine, runID: runID, isParked: outcome.isParked)
+            ideas = try await completeAfterTurn(
+                goalID: goal.id,
+                engine: engine,
+                runID: runID,
+                isParked: outcome.isParked,
+                isBudgetExceeded: outcome.isBudgetExceeded
+            )
         } catch {
             // Same Sendable-only forwarding as above: erase to Any so the
             // conditional check survives without an always-succeeds warning.
@@ -168,6 +182,7 @@ public enum GoalAdvancementRunner {
         return GoalAdvancementTurn(
             text: outcome.text,
             isParked: outcome.isParked,
+            isBudgetExceeded: outcome.isBudgetExceeded,
             toolActions: outcome.toolActions,
             totalTokens: outcome.totalTokens,
             ideas: ideas

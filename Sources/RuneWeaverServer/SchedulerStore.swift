@@ -28,6 +28,10 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     public var pollIntervalSeconds: Int?
     /// Maximum hits fetched per poll (nil means `EmailPollRule/defaultLimit`).
     public var pollLimit: Int?
+    /// Maximum tool iterations before limit policy triggers, or nil to inherit default.
+    public var maxToolIterations: Int?
+    /// Action when tool limit is reached: "fail" (synthesize & budget_exceeded) or "park". Defaults to "fail".
+    public var onToolLimit: String?
     /// When the job was created.
     public var createdAt: Date
     /// When the job was last updated.
@@ -45,6 +49,8 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         pollMailbox: String? = nil,
         pollIntervalSeconds: Int? = nil,
         pollLimit: Int? = nil,
+        maxToolIterations: Int? = nil,
+        onToolLimit: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -58,6 +64,8 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         self.pollMailbox = pollMailbox
         self.pollIntervalSeconds = pollIntervalSeconds
         self.pollLimit = pollLimit.map(EmailPollRule.clampedLimit)
+        self.maxToolIterations = maxToolIterations
+        self.onToolLimit = onToolLimit
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -105,6 +113,10 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
     public var pollIntervalSeconds: Int?
     /// Maximum hits fetched per poll.
     public var pollLimit: Int?
+    /// Maximum tool iterations before limit policy triggers, or nil to inherit default.
+    public var maxToolIterations: Int?
+    /// Action when tool limit is reached: "fail" (synthesize & budget_exceeded) or "park". Defaults to "fail".
+    public var onToolLimit: String?
 
     /// Creates a new-job payload.
     public init(
@@ -116,7 +128,9 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
         pollQuery: String? = nil,
         pollMailbox: String? = nil,
         pollIntervalSeconds: Int? = nil,
-        pollLimit: Int? = nil
+        pollLimit: Int? = nil,
+        maxToolIterations: Int? = nil,
+        onToolLimit: String? = nil
     ) {
         self.name = name
         self.schedule = schedule
@@ -127,6 +141,8 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
         self.pollMailbox = pollMailbox
         self.pollIntervalSeconds = pollIntervalSeconds
         self.pollLimit = pollLimit
+        self.maxToolIterations = maxToolIterations
+        self.onToolLimit = onToolLimit
     }
 }
 
@@ -155,6 +171,10 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
     /// When true, clears the whole poll trigger to nil before applying
     /// any non-nil poll fields in the same payload.
     public var clearPoll: Bool?
+    /// New maximum tool iterations, if changed.
+    public var maxToolIterations: Int?
+    /// New action on tool limit ("fail" or "park"), if changed.
+    public var onToolLimit: String?
 
     /// Creates an update payload.
     public init(
@@ -167,7 +187,9 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         pollMailbox: String? = nil,
         pollIntervalSeconds: Int? = nil,
         pollLimit: Int? = nil,
-        clearPoll: Bool? = nil
+        clearPoll: Bool? = nil,
+        maxToolIterations: Int? = nil,
+        onToolLimit: String? = nil
     ) {
         self.name = name
         self.schedule = schedule
@@ -179,6 +201,8 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         self.pollIntervalSeconds = pollIntervalSeconds
         self.pollLimit = pollLimit
         self.clearPoll = clearPoll
+        self.maxToolIterations = maxToolIterations
+        self.onToolLimit = onToolLimit
     }
 }
 
@@ -240,6 +264,8 @@ public actor SchedulerStore {
             pollMailbox: normalizedMailbox,
             pollIntervalSeconds: input.pollIntervalSeconds,
             pollLimit: input.pollLimit.map(EmailPollRule.clampedLimit),
+            maxToolIterations: input.maxToolIterations,
+            onToolLimit: input.onToolLimit,
             createdAt: now,
             updatedAt: now
         )
@@ -315,6 +341,12 @@ public actor SchedulerStore {
         }
         if let limit = input.pollLimit {
             existing.pollLimit = EmailPollRule.clampedLimit(limit)
+        }
+        if let maxToolIterations = input.maxToolIterations {
+            existing.maxToolIterations = maxToolIterations
+        }
+        if let onToolLimit = input.onToolLimit {
+            existing.onToolLimit = onToolLimit
         }
         try Self.validated(
             name: existing.name,
@@ -568,6 +600,8 @@ public extension SchedulerJob {
             pollMailbox: config.poll?.trimmedMailbox,
             pollIntervalSeconds: config.poll?.pollIntervalSeconds,
             pollLimit: config.poll?.limit,
+            maxToolIterations: config.maxToolIterations,
+            onToolLimit: config.onToolLimit,
             createdAt: createdAt,
             updatedAt: updatedAt
         )
@@ -582,7 +616,9 @@ public extension SchedulerJob {
             prompt: prompt,
             enabled: enabled,
             schedule: scheduleValue,
-            poll: pollValue
+            poll: pollValue,
+            maxToolIterations: maxToolIterations,
+            onToolLimit: onToolLimit
         )
     }
 }
@@ -618,11 +654,23 @@ public extension SchedulerJobConfig {
                     poll_mailbox TEXT,
                     poll_interval_seconds INTEGER,
                     poll_limit INTEGER,
+                    max_tool_iterations INTEGER,
+                    on_tool_limit TEXT,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_scheduler_jobs_name ON scheduler_jobs(name);
                 """,
+                failure: { SchedulerDBError(message: $0) }
+            )
+            _ = try? SQLiteHelpers.exec(
+                handle: handle,
+                sql: "ALTER TABLE scheduler_jobs ADD COLUMN max_tool_iterations INTEGER;",
+                failure: { SchedulerDBError(message: $0) }
+            )
+            _ = try? SQLiteHelpers.exec(
+                handle: handle,
+                sql: "ALTER TABLE scheduler_jobs ADD COLUMN on_tool_limit TEXT;",
                 failure: { SchedulerDBError(message: $0) }
             )
             return handle
@@ -640,7 +688,9 @@ public extension SchedulerJobConfig {
             defer { sqlite3_close(handle) }
 
             let sql = """
-            SELECT id, name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox, poll_interval_seconds, poll_limit, created_at, updated_at
+            SELECT id, name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox,
+                   poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit,
+                   created_at, updated_at
             FROM scheduler_jobs
             ORDER BY created_at ASC;
             """
@@ -657,8 +707,8 @@ public extension SchedulerJobConfig {
                       let row = SchedulerJobRow.decode(statement, base: 1)
                 else { continue }
 
-                let createdAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 10))
-                let updatedAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 11))
+                let createdAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 12))
+                let updatedAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 13))
 
                 loaded.append(SchedulerJob(
                     id: id,
@@ -671,6 +721,8 @@ public extension SchedulerJobConfig {
                     pollMailbox: row.pollMailbox,
                     pollIntervalSeconds: row.pollIntervalSeconds,
                     pollLimit: row.pollLimit,
+                    maxToolIterations: row.maxToolIterations,
+                    onToolLimit: row.onToolLimit,
                     createdAt: createdAt,
                     updatedAt: updatedAt
                 ))
@@ -692,9 +744,9 @@ public extension SchedulerJobConfig {
             let sql = """
             INSERT INTO scheduler_jobs(
                 id, name, schedule, prompt, enabled, poll_account, poll_query,
-                poll_mailbox, poll_interval_seconds, poll_limit, created_at, updated_at
+                poll_mailbox, poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 schedule = excluded.schedule,
@@ -705,6 +757,8 @@ public extension SchedulerJobConfig {
                 poll_mailbox = excluded.poll_mailbox,
                 poll_interval_seconds = excluded.poll_interval_seconds,
                 poll_limit = excluded.poll_limit,
+                max_tool_iterations = excluded.max_tool_iterations,
+                on_tool_limit = excluded.on_tool_limit,
                 updated_at = excluded.updated_at;
             """
             var statement: OpaquePointer?
@@ -725,8 +779,10 @@ public extension SchedulerJobConfig {
             SQLiteHelpers.bindText(statement, index: 8, value: job.pollMailbox)
             SQLiteHelpers.bindInt64(statement, index: 9, value: job.pollIntervalSeconds.map { Int64($0) })
             SQLiteHelpers.bindInt64(statement, index: 10, value: job.pollLimit.map { Int64($0) })
-            SQLiteHelpers.bindDouble(statement, index: 11, value: job.createdAt.timeIntervalSince1970)
-            SQLiteHelpers.bindDouble(statement, index: 12, value: job.updatedAt.timeIntervalSince1970)
+            SQLiteHelpers.bindInt64(statement, index: 11, value: job.maxToolIterations.map { Int64($0) })
+            SQLiteHelpers.bindText(statement, index: 12, value: job.onToolLimit)
+            SQLiteHelpers.bindDouble(statement, index: 13, value: job.createdAt.timeIntervalSince1970)
+            SQLiteHelpers.bindDouble(statement, index: 14, value: job.updatedAt.timeIntervalSince1970)
 
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 let code = sqlite3_errcode(handle)

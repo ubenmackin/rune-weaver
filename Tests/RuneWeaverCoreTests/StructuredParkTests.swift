@@ -350,7 +350,7 @@ struct StructuredParkTests {
             isDryRun: true
         )
         let outcome = try await orchestrator.runTurnLoop(request, pendingEpisodic: &pending)
-        guard case let .finished(finalText, toolActions, _, _) = outcome else {
+        guard case let .finished(finalText, toolActions, _, _, _) = outcome else {
             Issue.record("Dry run must finish without parking")
             return
         }

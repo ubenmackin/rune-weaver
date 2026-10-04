@@ -149,17 +149,20 @@ public extension MemoryEngine {
         // shrinks below `clamped` and needs no lower bound.
         let pool = min(clamped * clampedBudgets.docPoolMultiplier, Self.maxPerTierResults)
         let keyword = await (try? docIndexStore.searchKeyword(query: trimmed, limit: pool, since: since, until: until)) ?? []
-        let vectors = await (try? docIndexStore.chunkVectors(limit: pool, since: since, until: until)) ?? []
+        let vectorLimit = (since != nil || until != nil) ? DocIndexStore.maxVectorWindowResults : min(max(pool * 10, 500), Self.maxPerTierResults)
+        let vectors = await (try? docIndexStore.chunkVectors(limit: vectorLimit, since: since, until: until)) ?? []
         let queryEmbedding = (embedding?.isEmpty == false) ? embedding : nil
         let candidates = Self.docIndexCandidates(keyword: keyword, vectors: vectors, queryEmbedding: queryEmbedding)
         guard !candidates.isEmpty else { return [] }
         let stats = try? await docIndexStore.stats()
         let docIDs = Set(candidates.map(\.chunk.documentID))
         let documents = await (try? docIndexStore.documents(ids: docIDs)) ?? [:]
+        let salient = Set(Tokenization.salientTokens(from: trimmed))
+        let effectiveQueryTokens = salient.isEmpty ? Tokenization.tokenize(trimmed) : salient
         let ranked = Self.rankedDocIndexResults(
             candidates,
             query: trimmed,
-            queryTokens: Tokenization.tokenize(trimmed),
+            queryTokens: effectiveQueryTokens,
             documents: documents,
             indexAsOf: stats?.indexAsOf,
             episodicWeight: clampedBudgets.episodicWeight
@@ -379,9 +382,11 @@ extension MemoryEngine {
         for entry in scoredVectors where cosineByID[entry.chunk.id] == nil {
             cosineByID[entry.chunk.id] = entry.cosine
         }
+        let topVectorLimit = max(keyword.count * 4, 100)
+        let topVectorIDs = Set(cosineOrdered.prefix(topVectorLimit).map(\.chunk.id))
         var candidates: [DocIndexCandidate] = []
         var seen = Set<UUID>()
-        for entry in scoredVectors {
+        for entry in scoredVectors where topVectorIDs.contains(entry.chunk.id) {
             let id = entry.chunk.id
             guard !seen.contains(id) else { continue }
             seen.insert(id)

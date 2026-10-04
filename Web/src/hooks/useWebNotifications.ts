@@ -81,6 +81,8 @@ export function useWebNotifications() {
     return "default";
   });
 
+  // Unread count for runs that ended in an error or failure requiring operator
+  // attention. Routine successful runs ("ok") do not badge the navbar.
   const [runsBadge, setRunsBadge] = useState(0);
   const [approvalsBadge, setApprovalsBadge] = useState(0);
   // Owner-attention count for goals parked awaiting input. Unlike runs, the
@@ -112,14 +114,21 @@ export function useWebNotifications() {
     const frameType = typeof frame.type === "string" ? frame.type : undefined;
     if (frameType === "run_completed" && frame.run && typeof frame.run === "object") {
       const run = frame.run as Record<string, unknown>;
-      setRunsBadge((prev) => prev + 1);
+      const status = typeof run.status === "string" ? run.status.toLowerCase() : undefined;
+      // Only runs that failed, errored, or exceeded tool budget require operator attention.
+      // Routine successful runs ("ok") do not badge the navbar.
+      if (status === "error" || status === "failed" || status === "budget_exceeded") {
+        setRunsBadge((prev) => prev + 1);
+      }
 
       if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
         const kind = typeof run.kind === "string" ? run.kind : undefined;
         const response = typeof run.response === "string" ? run.response : undefined;
         const message = typeof run.message === "string" ? run.message : undefined;
         let label = "Chat Finished";
-        if (kind === "scheduler") {
+        if (status === "budget_exceeded") {
+          label = "Tool Budget Exceeded";
+        } else if (kind === "scheduler") {
           label = "Job Run Finished";
         } else if (kind === "index") {
           label = "Index Run Finished";

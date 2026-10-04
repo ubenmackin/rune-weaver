@@ -801,6 +801,9 @@ extension RuneWeaverConfig {
 
     private static func decodeScheduler(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let scheduler = root.tables["scheduler"] else { return }
+        if let defaultMax = try scheduler.strictInt("max_tool_iterations", field: "scheduler.max_tool_iterations") {
+            config.scheduler.defaultMaxToolIterations = defaultMax
+        }
         let jobNodes = scheduler.arrays["jobs"] ?? []
         guard !jobNodes.isEmpty else { return }
         config.scheduler.jobs = try jobNodes.map(decodeSchedulerJob)
@@ -816,6 +819,8 @@ extension RuneWeaverConfig {
         let schedule = try node.strictString("schedule", field: "scheduler.jobs[\(name)].schedule")
         let enabled = try node.strictBool("enabled", field: "scheduler.jobs[\(name)].enabled") ?? true
         let pollAccount = try node.strictString("poll_account", field: "scheduler.jobs[\(name)].poll_account")
+        let maxToolIterations = try node.strictInt("max_tool_iterations", field: "scheduler.jobs[\(name)].max_tool_iterations")
+        let onToolLimit = try node.strictString("on_tool_limit", field: "scheduler.jobs[\(name)].on_tool_limit")
         let poll: EmailPollRule?
         if let account = pollAccount {
             let query = try node.strictString("poll_query", field: "scheduler.jobs[\(name)].poll_query") ?? ""
@@ -853,7 +858,15 @@ extension RuneWeaverConfig {
             }
             poll = nil
         }
-        return SchedulerJobConfig(name: name, prompt: prompt, enabled: enabled, schedule: schedule, poll: poll)
+        return SchedulerJobConfig(
+            name: name,
+            prompt: prompt,
+            enabled: enabled,
+            schedule: schedule,
+            poll: poll,
+            maxToolIterations: maxToolIterations,
+            onToolLimit: onToolLimit
+        )
     }
 
     private static func decodePlugins(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
@@ -1006,6 +1019,12 @@ extension RuneWeaverConfig {
         }
         if let maxTriggers = try goals.strictInt("max_triggers_per_goal", field: "goals.max_triggers_per_goal") {
             config.goals.maxTriggersPerGoal = maxTriggers
+        }
+        if let maxToolIterations = try goals.strictInt("max_tool_iterations", field: "goals.max_tool_iterations") {
+            config.goals.maxToolIterations = maxToolIterations
+        }
+        if let maxRetries = try goals.strictInt("max_step_budget_exceeded_retries", field: "goals.max_step_budget_exceeded_retries") {
+            config.goals.maxStepBudgetExceededRetries = maxRetries
         }
     }
 

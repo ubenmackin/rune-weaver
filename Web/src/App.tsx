@@ -20,6 +20,7 @@ import {
 } from "./api";
 import ApprovalsInbox from "./components/ApprovalsInbox";
 import ChatView from "./components/ChatView";
+import DashboardView from "./components/DashboardView";
 import GoalsManager from "./components/GoalsManager";
 import LoginView from "./components/LoginView";
 import MemoryBrowser from "./components/MemoryBrowser";
@@ -31,7 +32,7 @@ import StagedChangesDrawer from "./components/StagedChangesDrawer";
 import TopNav, { type Tab } from "./components/TopNav";
 import { useWebNotifications } from "./hooks/useWebNotifications";
 
-const VALID_TABS: Tab[] = ["chat", "approvals", "goals", "memory", "indexing", "runs", "schedules", "settings"];
+const VALID_TABS: Tab[] = ["dashboard", "chat", "approvals", "goals", "memory", "indexing", "runs", "schedules", "settings"];
 
 export function isStandaloneMode(): boolean {
   if (typeof window === "undefined") return false;
@@ -43,7 +44,7 @@ export function isStandaloneMode(): boolean {
 }
 
 function getInitialTab(): Tab {
-  if (typeof window === "undefined") return "chat";
+  if (typeof window === "undefined") return "dashboard";
   if (isStandaloneMode()) return "settings";
   const rawHash = window.location.hash.replace("#", "").toLowerCase();
   const hash = rawHash.split("/")[0].split("?")[0] as Tab;
@@ -51,7 +52,7 @@ function getInitialTab(): Tab {
   const rawPath = window.location.pathname.replace(/^\//, "").toLowerCase();
   const path = rawPath.split("/")[0] as Tab;
   if (VALID_TABS.includes(path)) return path;
-  return "chat";
+  return "dashboard";
 }
 
 // Gate state before the boot probe answers. "checking" renders a neutral loading
@@ -161,6 +162,21 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
   const [tab, setTab] = useState<Tab>(() => (isStandalone ? "settings" : getInitialTab()));
   const [stagedDrawerOpen, setStagedDrawerOpen] = useState(false);
   const [stagedFilesCount, setStagedFilesCount] = useState(0);
+  const [pendingChatPrompt, setPendingChatPrompt] = useState<string | null>(null);
+  const [targetChatSessionId, setTargetChatSessionId] = useState<string | null>(null);
+
+  function handleOpenChatWithPrompt(prompt: string) {
+    setPendingChatPrompt(prompt);
+    handleSelectTab("chat");
+  }
+
+  function handleOpenSession(sessionId: string) {
+    setTargetChatSessionId(sessionId);
+    if (typeof window !== "undefined") {
+      window.location.hash = `chat/${sessionId}`;
+    }
+    handleSelectTab("chat");
+  }
 
   const {
     notificationsEnabled,
@@ -198,7 +214,12 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
     // Writing the hash fires `hashchange`, which would set the same tab a
     // second time; guard the write so selecting the active tab (or an
     // already-synced hash) never triggers the redundant second update.
-    if (typeof window !== "undefined" && window.location.hash !== `#${selected}`) {
+    if (
+      typeof window !== "undefined" &&
+      window.location.hash !== `#${selected}` &&
+      !window.location.hash.startsWith(`#${selected}/`) &&
+      !window.location.hash.startsWith(`#${selected}?`)
+    ) {
       window.location.hash = selected;
     }
     if (selected === "runs") clearRunsBadge();
@@ -300,8 +321,27 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
             style={{ display: tab === "chat" ? "block" : "none", height: tab === "chat" ? "100%" : undefined }}
             aria-hidden={tab !== "chat"}
           >
-            <ChatView health={health} onSelectTab={handleSelectTab} isActive={tab === "chat"} />
+            <ChatView
+              health={health}
+              onSelectTab={handleSelectTab}
+              isActive={tab === "chat"}
+              initialPrompt={pendingChatPrompt}
+              onClearInitialPrompt={() => setPendingChatPrompt(null)}
+              targetSessionId={targetChatSessionId}
+              onClearTargetSessionId={() => setTargetChatSessionId(null)}
+            />
           </div>
+
+          {tab === "dashboard" ? (
+            <DashboardView
+              health={health}
+              stagedFilesCount={stagedFilesCount}
+              onOpenStagedDrawer={() => setStagedDrawerOpen(true)}
+              onSelectTab={handleSelectTab}
+              onOpenChatWithPrompt={handleOpenChatWithPrompt}
+              onOpenSession={handleOpenSession}
+            />
+          ) : null}
 
           {tab === "approvals" ? <ApprovalsInbox /> : null}
           {tab === "goals" ? <GoalsManager attentionCount={goalsAttention} onOpenSettings={() => setTab("settings")} /> : null}
@@ -313,7 +353,7 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
         </div>
       </main>
 
-      {/* Mobile bottom tab bar: four canonical groups with unread badges and drop-up menus. Both
+      {/* Mobile bottom tab bar: five canonical groups with unread badges and drop-up menus. Both
           tab surfaces stay mounted on every viewport while the stylesheet
           owns visibility (max-width reveals the bar and hides the top links,
           min-width does the inverse), so a missing or fail-closed viewport

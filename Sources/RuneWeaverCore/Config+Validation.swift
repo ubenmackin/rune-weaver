@@ -855,6 +855,26 @@ extension RuneWeaverConfig {
     }
 
     private func validateSchedulerSection() throws {
+        if scheduler.defaultMaxToolIterations < 1 || scheduler.defaultMaxToolIterations > 100 {
+            throw ConfigError.validationError(
+                field: "scheduler.max_tool_iterations",
+                message: "must be between 1 and 100 (got \(scheduler.defaultMaxToolIterations))"
+            )
+        }
+        for job in scheduler.jobs {
+            if let maxIter = job.maxToolIterations, !(1 ... 100).contains(maxIter) {
+                throw ConfigError.validationError(
+                    field: "scheduler.jobs[\(job.name)].max_tool_iterations",
+                    message: "must be between 1 and 100 (got \(maxIter))"
+                )
+            }
+            if let onLimit = job.onToolLimit, !["fail", "park"].contains(onLimit) {
+                throw ConfigError.validationError(
+                    field: "scheduler.jobs[\(job.name)].on_tool_limit",
+                    message: "must be 'fail' or 'park' (got '\(onLimit)')"
+                )
+            }
+        }
         do {
             try scheduler.validate()
         } catch let error as SchedulerConfigError {
@@ -1001,6 +1021,18 @@ extension RuneWeaverConfig {
                 message: "must be positive (got \(goals.planTimeoutSeconds))"
             )
         }
+        if goals.maxToolIterations < 1 || goals.maxToolIterations > 100 {
+            throw ConfigError.validationError(
+                field: "goals.max_tool_iterations",
+                message: "must be between 1 and 100 (got \(goals.maxToolIterations))"
+            )
+        }
+        if goals.maxStepBudgetExceededRetries < 1 || goals.maxStepBudgetExceededRetries > 10 {
+            throw ConfigError.validationError(
+                field: "goals.max_step_budget_exceeded_retries",
+                message: "must be between 1 and 10 (got \(goals.maxStepBudgetExceededRetries))"
+            )
+        }
     }
 
     private func validateBashSection() throws {
@@ -1094,7 +1126,9 @@ public extension GoalsConfig {
             maxActiveGoals: min(max(maxActiveGoals, Self.minActiveGoalsBound), Self.maxActiveGoalsBound),
             maxStepsPerGoal: min(max(maxStepsPerGoal, Self.minStepsPerGoalBound), Self.maxStepsPerGoalBound),
             planTimeoutSeconds: max(1, planTimeoutSeconds),
-            maxTriggersPerGoal: min(max(maxTriggersPerGoal, Self.minTriggersPerGoalBound), Self.maxTriggersPerGoalBound)
+            maxTriggersPerGoal: min(max(maxTriggersPerGoal, Self.minTriggersPerGoalBound), Self.maxTriggersPerGoalBound),
+            maxToolIterations: min(max(maxToolIterations, 1), 100),
+            maxStepBudgetExceededRetries: min(max(maxStepBudgetExceededRetries, 1), 10)
         )
     }
 }

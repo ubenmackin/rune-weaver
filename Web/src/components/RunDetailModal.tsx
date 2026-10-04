@@ -75,7 +75,9 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
               ? "IN PROGRESS"
               : run.status === "awaiting_approval"
                 ? "AWAITING APPROVAL"
-                : run.status.toUpperCase()}
+                : run.status === "budget_exceeded"
+                  ? "BUDGET EXCEEDED"
+                  : run.status.toUpperCase()}
           </span>
           <h3>
             {kindLabel}{" "}
@@ -93,6 +95,11 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
       </div>
 
       <div className="modal-body">
+          {run.status === "budget_exceeded" && (
+            <div className="notice-banner warning" style={{ marginBottom: "1rem" }}>
+              <strong>Tool Budget Exceeded:</strong> This run reached its tool iteration limit before completing all actions. Tool execution was halted and diagnostic synthesis was forced. Review the draft report and incomplete actions below.
+            </div>
+          )}
           {/* Metadata Row */}
           <div className="run-meta-grid">
             <div className="meta-card">

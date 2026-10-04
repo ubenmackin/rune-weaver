@@ -200,7 +200,7 @@ extension Orchestrator {
             switch outcome {
             case let .parked(parkedResponse):
                 return parkedResponse
-            case let .finished(finalText, toolActions, loopBilled, contextTokens):
+            case let .finished(finalText, toolActions, loopBilled, contextTokens, isBudgetExceeded):
                 return try await finishResumedTurn(
                     finalText: finalText,
                     toolActions: toolActions,
@@ -208,7 +208,8 @@ extension Orchestrator {
                     contextTokens: contextTokens,
                     parked: parked,
                     resumeWarnings: resumeWarnings,
-                    pendingEpisodic: &pendingEpisodic
+                    pendingEpisodic: &pendingEpisodic,
+                    isBudgetExceeded: isBudgetExceeded
                 )
             }
         } catch let error as CancellationError {
@@ -255,7 +256,8 @@ extension Orchestrator {
         contextTokens: Int? = nil,
         parked: ParkedNarratedApproval,
         resumeWarnings: [String],
-        pendingEpisodic: inout [(content: String, role: Message.Role)]
+        pendingEpisodic: inout [(content: String, role: Message.Role)],
+        isBudgetExceeded: Bool = false
     ) async throws -> OrchestratorResponse {
         let sessionID = parked.sessionID
         let finalNote = await storeFinalAssistantText(finalText, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
@@ -283,7 +285,8 @@ extension Orchestrator {
             contextTokens: resumedContextTokens,
             isParked: false,
             warnings: resumeWarnings,
-            completedAt: finalNote?.createdAt.timeIntervalSince1970
+            completedAt: finalNote?.createdAt.timeIntervalSince1970,
+            isBudgetExceeded: isBudgetExceeded
         )
     }
 
