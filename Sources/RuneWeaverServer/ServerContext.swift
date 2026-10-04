@@ -575,6 +575,7 @@ extension ServerContext {
         let ideasEngine: IdeasEngine?
         /// Interruption policy from `[proactive]` so the worker gate matches file config.
         let proactiveConfig: ProactiveConfig
+        let fanOutConfig: FanOutConfig
     }
 
     /// Boot-time configuration resolved before durable stores open.
@@ -647,6 +648,8 @@ extension ServerContext {
         /// review, so the serve process broadcasts `file_superseded` to live
         /// dashboards; nil keeps the tool silent.
         let supersededReviewNotifier: (@Sendable (String) async -> Void)?
+        /// Hook reporting goal state updates so live dashboards receive real-time goal_updated broadcasts.
+        let goalUpdatedNotifier: (@Sendable (Goal, [GoalStep]) async -> Void)?
         /// Fan-out engine riding the live orchestrator, or nil when the
         /// caller did not wire one (the fanout.run tool then stays
         /// unregistered, mirroring the goal-tools invariant).
@@ -686,6 +689,7 @@ extension ServerContext {
             goalStore: args.goals.store,
             goalConversations: args.goals.conversations,
             goalsConfig: args.configs.goals,
+            goalUpdatedNotifier: args.goalUpdatedNotifier,
             stagedFilesStore: args.stagedFiles,
             supersededReviewNotifier: args.supersededReviewNotifier,
             fanOutEngine: args.fanOutEngine,
@@ -698,6 +702,7 @@ extension ServerContext {
         let orchestrator: Orchestrator
         let schedulerWorker: ServerSchedulerWorker
         let steeringQueue: SteeringQueue
+        let fanOutEngine: FanOutEngine
     }
 
     private static func makeExecutionEngines(
@@ -729,6 +734,7 @@ extension ServerContext {
             orchestrator: orchestrator,
             conversations: args.conversations,
             toolBus: args.bus,
+            approvals: args.approvals,
             notifier: args.notifier,
             indexCoordinator: args.indexCoordinator,
             goalStore: args.goalStore,
@@ -737,7 +743,24 @@ extension ServerContext {
             proactiveConfig: args.proactiveConfig,
             judgeLLM: args.llm
         )
-        return RuntimeEngines(orchestrator: orchestrator, schedulerWorker: schedulerWorker, steeringQueue: steeringQueue)
+        // Fan-out resolves over the shared orchestrator and run-log store so
+        // workers observe the same model posture as chat, with the serving
+        // provider as the background reviewer. Rows travel through the
+        // hub-aware adapter so the swarm's audit trail broadcasts like every
+        // other run kind. Always built so fanout.run registers disabled behind
+        // the tool-state toggle with no config gate.
+        let fanOutEngine = FanOutEngine(
+            orchestrator: orchestrator,
+            runLogs: FanOutRunLogAdapter(runs: args.durable.runs, hub: args.durable.hub),
+            config: args.fanOutConfig,
+            reviewer: args.llm
+        )
+        return RuntimeEngines(
+            orchestrator: orchestrator,
+            schedulerWorker: schedulerWorker,
+            steeringQueue: steeringQueue,
+            fanOutEngine: fanOutEngine
+        )
     }
 
     /// Derives the configured-service egress candidates for the boot supervisor.
@@ -870,9 +893,7 @@ extension ServerContext {
             desktopCapture: desktopCaptureBridge, desktopControl: desktopControlBridge
         )
         let goalComponents = GoalComponents(
-            engine: services.goalEngine,
-            store: services.goalStore,
-            conversations: conversations
+            engine: services.goalEngine, store: services.goalStore, conversations: conversations
         )
         let dbPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
         let stagedFilesStore = StagedFilesStore(dbPath: dbPath)
@@ -880,74 +901,47 @@ extension ServerContext {
         // engine can ride the live orchestrator into the fanout.run tool;
         // engine construction is side-effect free, so the earlier position
         // changes nothing else about boot.
-        let engineArgs = RuntimeEngineArgs(
+        let engines = makeExecutionEngines(args: RuntimeEngineArgs(
             conversations: conversations, bus: services.bus, llm: llm,
             systemPrompt: systemPrompt, engineConfig: engineConfig,
             memoryEngine: memoryEngine, approvals: services.approvals,
-            permissionGate: permissionGate,
-            embedder: embedder, securityConfig: securityConfig,
-            recallBudgets: recallBudgets.clamped(),
+            permissionGate: permissionGate, embedder: embedder,
+            securityConfig: securityConfig, recallBudgets: recallBudgets.clamped(),
             durable: services.durable, notifier: notifier,
             indexCoordinator: indexCoordinator, goalStore: services.goalStore,
-            goalEngine: services.goalEngine,
-            ideasEngine: services.ideasEngine,
-            proactiveConfig: proactiveConfig
-        )
-        let engines = makeExecutionEngines(args: engineArgs)
-        // Fan-out resolves over the shared orchestrator and run-log store so
-        // workers observe the same model posture as chat, with the serving
-        // provider as the background reviewer. Rows travel through the
-        // hub-aware adapter so the swarm's audit trail broadcasts like every
-        // other run kind. Always built so fanout.run registers disabled behind
-        // the tool-state toggle with no config gate.
-        let fanOutEngine = FanOutEngine(
-            orchestrator: engines.orchestrator,
-            runLogs: FanOutRunLogAdapter(runs: services.durable.runs, hub: services.durable.hub),
-            config: fanOutConfig,
-            reviewer: llm
-        )
+            goalEngine: services.goalEngine, ideasEngine: services.ideasEngine,
+            proactiveConfig: proactiveConfig, fanOutConfig: fanOutConfig
+        ))
         let egressSupervisor = try await setupEgressAndPolicy(
-            policyStore: resolvedPolicyStore,
-            toolConfigs: toolConfigs,
-            secrets: secrets,
-            permissionGate: permissionGate
+            policyStore: resolvedPolicyStore, toolConfigs: toolConfigs,
+            secrets: secrets, permissionGate: permissionGate
         )
         try await registerBuiltinTools(BuiltinToolArgs(
             bus: services.bus, configs: toolConfigs, transports: transports,
             memoryEngine: memoryEngine, embedder: embedder,
             goals: goalComponents, stagedFiles: stagedFilesStore,
             supersededReviewNotifier: makeStagedSupersedeNotifier(hub: services.durable.hub),
-            fanOutEngine: fanOutEngine, policyStore: resolvedPolicyStore,
+            goalUpdatedNotifier: { [hub = services.durable.hub] goal, steps in
+                await hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
+            },
+            fanOutEngine: engines.fanOutEngine, policyStore: resolvedPolicyStore,
             egressSupervisor: egressSupervisor
         ))
         let context = ServerContext(
-            config: config, conversations: conversations, toolBus: services.bus,
-            orchestrator: engines.orchestrator, memoryEngine: memoryEngine,
-            embedder: embedder, permissionGate: permissionGate, approvals: services.approvals,
-            scheduler: services.durable.scheduler, runs: services.durable.runs,
-            hub: services.durable.hub, runLock: services.durable.runLock,
-            activeTurns: ActiveTurnTracker(), steeringQueue: engines.steeringQueue,
-            schedulerWorker: engines.schedulerWorker,
-            pluginStore: services.pluginStack.store,
-            pluginDiscovery: services.pluginStack.discovery,
-            toolStates: services.pluginStack.states,
-            sandboxConfig: sandboxConfig, filesConfig: toolConfigs.files,
-            bashConfig: toolConfigs.bash, browserConfig: browserConfig,
-            indexCoordinator: indexCoordinator, indexStore: indexStore,
-            servingLLM: llm, auth: auth, browserGateway: browserGateway,
-            searchTransport: searchTransport, fetchTransport: fetchTransport,
-            apiTransport: apiTransport, mediaTransport: mediaTransport,
-            searchEnsurer: searchEnsurer, mediaSecrets: mediaSecrets,
-            secrets: secrets, desktopCaptureBridge: desktopCaptureBridge,
-            desktopControlBridge: desktopControlBridge, desktopConfig: desktopConfig,
-            goals: services.goalStore, goalEngine: services.goalEngine,
-            goalsConfig: goalsConfig, ideas: services.ideasStore,
-            ideasEngine: services.ideasEngine, ideasConfig: ideasConfig,
-            proactiveConfig: proactiveConfig, stagedFiles: stagedFilesStore,
-            fanOut: fanOutEngine, policyStore: resolvedPolicyStore,
-            egressSupervisor: egressSupervisor,
-            mediaConfig: toolConfigs.media,
-            llmServerURLs: toolConfigs.llmServerURLs
+            config: config, conversations: conversations, toolBus: services.bus, orchestrator: engines.orchestrator,
+            memoryEngine: memoryEngine, embedder: embedder, permissionGate: permissionGate, approvals: services.approvals,
+            scheduler: services.durable.scheduler, runs: services.durable.runs, hub: services.durable.hub, runLock: services.durable.runLock,
+            activeTurns: ActiveTurnTracker(), steeringQueue: engines.steeringQueue, schedulerWorker: engines.schedulerWorker,
+            pluginStore: services.pluginStack.store, pluginDiscovery: services.pluginStack.discovery, toolStates: services.pluginStack.states,
+            sandboxConfig: sandboxConfig, filesConfig: toolConfigs.files, bashConfig: toolConfigs.bash, browserConfig: browserConfig,
+            indexCoordinator: indexCoordinator, indexStore: indexStore, servingLLM: llm, auth: auth, browserGateway: browserGateway,
+            searchTransport: searchTransport, fetchTransport: fetchTransport, apiTransport: apiTransport, mediaTransport: mediaTransport,
+            searchEnsurer: searchEnsurer, mediaSecrets: mediaSecrets, secrets: secrets,
+            desktopCaptureBridge: desktopCaptureBridge, desktopControlBridge: desktopControlBridge, desktopConfig: desktopConfig,
+            goals: services.goalStore, goalEngine: services.goalEngine, goalsConfig: goalsConfig, ideas: services.ideasStore,
+            ideasEngine: services.ideasEngine, ideasConfig: ideasConfig, proactiveConfig: proactiveConfig, stagedFiles: stagedFilesStore,
+            fanOut: engines.fanOutEngine, policyStore: resolvedPolicyStore, egressSupervisor: egressSupervisor,
+            mediaConfig: toolConfigs.media, llmServerURLs: toolConfigs.llmServerURLs
         )
         await finalizeServerContext(context, sandboxConfig: sandboxConfig, onApprovalRequested: onApprovalRequested)
         return context

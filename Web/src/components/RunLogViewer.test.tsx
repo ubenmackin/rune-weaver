@@ -702,4 +702,34 @@ describe("RunLogViewer", () => {
     expect(screen.getByText("CANCELLED")).toBeInTheDocument();
     expect(screen.queryByText("IN PROGRESS")).not.toBeInTheDocument();
   });
+
+  it("renders budget_exceeded status pill and detail modal warning banner", async () => {
+    const user = userEvent.setup();
+    const budgetPayload = {
+      runs: [
+        {
+          id: "budget-run-123",
+          jobID: "daily-digest",
+          kind: "scheduler",
+          status: "budget_exceeded",
+          message: "Daily digest synthesis",
+          response: "Partial draft report collected before reaching tool budget limit.",
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      count: 1,
+    };
+
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(budgetPayload)));
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("Daily digest synthesis")).toBeInTheDocument();
+    });
+    expect(screen.getByText("BUDGET EXCEEDED")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    expect(screen.getByLabelText("Run details")).toBeInTheDocument();
+    expect(screen.getByText("Tool Budget Exceeded:")).toBeInTheDocument();
+    expect(screen.getByText(/Partial draft report collected before reaching tool budget limit/)).toBeInTheDocument();
+  });
 });

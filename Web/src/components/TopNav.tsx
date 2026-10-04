@@ -33,6 +33,7 @@ import type { NavGroupId, NavTabId } from "./navigationConfig";
 
 // Dashboard sections reachable from the top nav and mobile navigation.
 export type Tab =
+  | "dashboard"
   | "chat"
   | "approvals"
   | "goals"

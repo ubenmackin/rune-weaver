@@ -152,15 +152,20 @@ public actor PolicyStore {
     /// unverified for the supervisor factory to refuse.
     /// - Parameters:
     ///   - injected: Shared store when the caller already owns one.
+    ///   - fileURL: Path to `policy.toml`. Defaults to `nil` (`~/.runeweaver/policy.toml`).
     ///   - legacyLocalOrigins: Retired `browser.allowed_origins` entries used
     ///     only while loading a store here, so an injected instance already
     ///     resolved by an earlier call is returned untouched.
     /// - Returns: The single store every supervisor in this process reads.
-    public static func makeLoaded(injected: PolicyStore?, legacyLocalOrigins: [String] = []) async -> PolicyStore {
+    public static func makeLoaded(
+        injected: PolicyStore?,
+        fileURL: URL? = nil,
+        legacyLocalOrigins: [String] = []
+    ) async -> PolicyStore {
         if let injected {
             return injected
         }
-        let created = PolicyStore()
+        let created = PolicyStore(fileURL: fileURL)
         await created.load(legacyLocalOrigins: legacyLocalOrigins)
         return created
     }

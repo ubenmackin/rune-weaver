@@ -11,14 +11,14 @@ import { describe, expect, it, vi } from "vitest";
 import MobileBottomNav from "./MobileBottomNav";
 import { NAV_GROUPS, formatBadgeCount, normalizeBadgeCount } from "./navigationConfig";
 
-const ORDERED_GROUPS = ["chat", "approvals", "work", "memory"] as const;
-const ORDERED_LABELS = ["Chat", "Approvals", "Work", "Memory"];
+const ORDERED_GROUPS = ["dashboard", "chat", "approvals", "work", "memory"] as const;
+const ORDERED_LABELS = ["Dashboard", "Chat", "Approvals", "Work", "Memory"];
 
 describe("MobileBottomNav tab contract", () => {
-  it("renders exactly four groups in fixed order with no Settings entry", () => {
+  it("renders exactly five groups in fixed order with no Settings entry", () => {
     render(<MobileBottomNav currentTab="chat" onSelectTab={() => {}} />);
     const tabs = screen.getAllByRole("button");
-    expect(tabs).toHaveLength(4);
+    expect(tabs).toHaveLength(5);
     expect(tabs.map((tab) => tab.getAttribute("aria-label"))).toEqual(ORDERED_LABELS);
     expect(tabs.map((tab) => tab.textContent)).toEqual(
       expect.arrayContaining(ORDERED_LABELS),

@@ -824,13 +824,22 @@ public struct GoalProgressTool: Tool, Sendable {
     private let conversations: ConversationManager?
     /// Whether `[goals]` is on; off fails closed with the same honest copy as creation.
     private let goalsEnabled: Bool
+    /// Optional hook reporting goal changes so server processes broadcast `goal_updated` to live dashboards.
+    private let goalUpdatedNotifier: (@Sendable (Goal, [GoalStep]) async -> Void)?
 
     /// Creates a progress tool.
-    public init(store: GoalStore, engine: GoalEngine, conversations: ConversationManager? = nil, goalsEnabled: Bool = true) {
+    public init(
+        store: GoalStore,
+        engine: GoalEngine,
+        conversations: ConversationManager? = nil,
+        goalsEnabled: Bool = true,
+        goalUpdatedNotifier: (@Sendable (Goal, [GoalStep]) async -> Void)? = nil
+    ) {
         self.store = store
         self.engine = engine
         self.conversations = conversations
         self.goalsEnabled = goalsEnabled
+        self.goalUpdatedNotifier = goalUpdatedNotifier
     }
 
     /// Resolves the goal, moves one step, and parks blocked work with a note.
@@ -889,6 +898,12 @@ public struct GoalProgressTool: Tool, Sendable {
             if ledgerStatus == .blocked, let note, !note.isEmpty {
                 try await engine.needsInput(goalID: goalID, reason: note)
                 parked = true
+            } else if ledgerStatus == .done || ledgerStatus == .skipped {
+                try await engine.checkCompletion(goalID: goalID)
+            }
+            if let goalUpdatedNotifier, let freshGoal = try await store.goal(id: goalID) {
+                let freshSteps = await (try? store.steps(goalID: goalID)) ?? []
+                await goalUpdatedNotifier(freshGoal, freshSteps)
             }
             let envelope = GoalProgressEnvelope(
                 goalID: goalID.uuidString,
@@ -998,12 +1013,19 @@ public enum GoalTools {
         engine: GoalEngine,
         store: GoalStore,
         conversations: ConversationManager? = nil,
-        goalsConfig: GoalsConfig = GoalsConfig()
+        goalsConfig: GoalsConfig = GoalsConfig(),
+        goalUpdatedNotifier: (@Sendable (Goal, [GoalStep]) async -> Void)? = nil
     ) -> [any Tool] {
         let enabled = goalsConfig.enabled
         let create: any Tool = GoalCreateTool(engine: engine, conversations: conversations, goalsEnabled: enabled)
         let status: any Tool = GoalStatusTool(store: store, goalsEnabled: enabled)
-        let progress: any Tool = GoalProgressTool(store: store, engine: engine, conversations: conversations, goalsEnabled: enabled)
+        let progress: any Tool = GoalProgressTool(
+            store: store,
+            engine: engine,
+            conversations: conversations,
+            goalsEnabled: enabled,
+            goalUpdatedNotifier: goalUpdatedNotifier
+        )
         return [create, status, progress]
     }
 
@@ -1013,9 +1035,16 @@ public enum GoalTools {
         engine: GoalEngine,
         store: GoalStore,
         conversations: ConversationManager? = nil,
-        goalsConfig: GoalsConfig = GoalsConfig()
+        goalsConfig: GoalsConfig = GoalsConfig(),
+        goalUpdatedNotifier: (@Sendable (Goal, [GoalStep]) async -> Void)? = nil
     ) async {
-        for tool in makeTools(engine: engine, store: store, conversations: conversations, goalsConfig: goalsConfig) {
+        for tool in makeTools(
+            engine: engine,
+            store: store,
+            conversations: conversations,
+            goalsConfig: goalsConfig,
+            goalUpdatedNotifier: goalUpdatedNotifier
+        ) {
             await bus.register(tool: tool)
         }
     }

@@ -551,6 +551,40 @@ struct GoalRunsFilterTests {
             #expect(await context.runs.entry(id: receipt.runID)?.goalID == goal.id)
         }
     }
+
+    @Test
+    func `Patch step to done achieves goal when no actionable steps remain`() async throws {
+        try await withGoalApp { app, context in
+            let now = Date()
+            let goal = Goal(
+                title: "Fix bug",
+                statement: "Resolve issue",
+                status: .active,
+                stepIntervalMinutes: 60,
+                nextDueAt: now,
+                createdAt: now,
+                updatedAt: now
+            )
+            let step = GoalStep(goalID: goal.id, ordinal: 0, title: "Apply patch", status: .pending)
+            try await context.goals.create(
+                goal: goal,
+                steps: [step]
+            )
+
+            let response = try await goalRequest(
+                app: app,
+                method: .PATCH,
+                path: "/goals/\(goal.id.uuidString)/steps/\(step.id.uuidString)",
+                body: GoalStepPatchRequest(status: "done", note: "Patched")
+            )
+            #expect(response.status == .ok)
+            let updatedStep = try response.content.decode(GoalStepDTO.self)
+            #expect(updatedStep.status == "done")
+
+            let freshGoal = try await context.goals.goal(id: goal.id)
+            #expect(freshGoal?.status == .achieved)
+        }
+    }
 }
 
 @Suite("Goal Settings Merge")

@@ -39,12 +39,14 @@ private func storeChunk(
     externalID: String,
     text: String,
     embedding: [Float] = [],
-    indexedAt: Date = Date()
+    indexedAt: Date = Date(),
+    mtime: Date? = nil
 ) async throws -> IndexedDocument {
     let document = try await store.upsertDocument(IndexedDocument(
         source: .files,
         externalID: externalID,
         displayName: externalID,
+        mtime: mtime,
         contentHash: "hash-\(externalID)",
         indexedAt: indexedAt
     ))
@@ -404,5 +406,91 @@ struct IndexedRecallTests {
         #expect(results.count == 2)
         #expect(results.first?.content.contains("compassrose") == true)
         #expect(results.last?.content.contains("zeta") == true)
+    }
+
+    @Test
+    func `Salient tokens filter conversational filler words without losing meaning`() {
+        let conversational = "im trying to figure out where we just went on vacation in July. can you help me?"
+        let salient = Tokenization.salientTokens(from: conversational)
+        #expect(salient == ["went", "vacation", "july"])
+
+        // Fallback when query is made entirely of stop words
+        let allStop = "to be or not to be"
+        let fallback = Tokenization.salientTokens(from: allStop)
+        #expect(fallback == ["to", "be", "or", "not", "to", "be"])
+
+        // Fallback for single characters
+        let singleChar = "a"
+        let singleFallback = Tokenization.salientTokens(from: singleChar)
+        #expect(singleFallback == ["a"])
+    }
+
+    @Test
+    func `Conversational query retrieves vacation document without filler penalty`() async throws {
+        let (engine, store, base) = makeIndexedRecallEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        try await storeChunk(
+            in: store,
+            externalID: "vacation-target",
+            text: "Trip to Truckee confirmed! Cabin rental for July vacation."
+        )
+        try await storeChunk(
+            in: store,
+            externalID: "other-doc",
+            text: "Unrelated meeting notes and invoice details."
+        )
+
+        let query = "im trying to figure out where we just went on vacation in July. can you help me?"
+        let results = await engine.recallDocuments(query: query, limit: 5)
+        #expect(!results.isEmpty)
+        #expect(results.first?.metadata["display_name"] == "vacation-target")
+        #expect(results.first?.content.contains("Truckee") == true)
+    }
+
+    @Test
+    func `Dated vector search scans past 20-chunk ceiling to find older target within window`() async throws {
+        let (engine, store, base) = makeIndexedRecallEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let window = try TemporalFilter.parse(since: "2026-07-01", until: "2026-08-01")
+        let earlyJuly = try #require(TemporalFilter.parse(since: "2026-07-05", until: nil).since)
+        let lateJuly = try #require(TemporalFilter.parse(since: "2026-07-25", until: nil).since)
+
+        // Store target document in early July pointing along the query embedding axis
+        let targetDoc = try await storeChunk(
+            in: store,
+            externalID: "truckee-vacation",
+            text: "Cabin rental in Truckee booked for our summer trip",
+            embedding: [1.0, 0.0],
+            mtime: earlyJuly
+        )
+
+        // Store 30 newer vector documents in late July pointing along an orthogonal axis
+        for i in 1 ... 30 {
+            try await storeChunk(
+                in: store,
+                externalID: "noise-\(i)",
+                text: "Daily update report #\(i) with regular status",
+                embedding: [0.0, 1.0],
+                mtime: lateJuly
+            )
+        }
+
+        // Bounded vector read with limit 10,000 must find all 31 vectors in July
+        let allJulyVectors = try await store.chunkVectors(limit: 10000, since: window.since, until: window.until)
+        #expect(allJulyVectors.count == 31)
+
+        // Engine recall with query embedding [1.0, 0.0] within July window must recall the early July target
+        let results = await engine.recallDocuments(
+            query: "where did we go on vacation?",
+            embedding: [1.0, 0.0],
+            limit: 5,
+            since: window.since,
+            until: window.until
+        )
+        #expect(!results.isEmpty)
+        #expect(results.first?.metadata["document_id"] == targetDoc.id.uuidString)
+        #expect(results.first?.content.contains("Truckee") == true)
     }
 }

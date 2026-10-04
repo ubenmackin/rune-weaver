@@ -556,7 +556,9 @@ export default function RunLogViewer() {
                       ? "IN PROGRESS"
                       : run.status === "awaiting_approval"
                         ? "AWAITING APPROVAL"
-                        : run.status.toUpperCase()}
+                        : run.status === "budget_exceeded"
+                          ? "BUDGET EXCEEDED"
+                          : run.status.toUpperCase()}
                   </span>
                   {pendingCount > 0 ? (
                     <span
@@ -626,7 +628,9 @@ export default function RunLogViewer() {
                               ? "IN PROGRESS"
                               : worker.status === "awaiting_approval"
                                 ? "AWAITING APPROVAL"
-                                : worker.status.toUpperCase()}
+                                : worker.status === "budget_exceeded"
+                                  ? "BUDGET EXCEEDED"
+                                  : worker.status.toUpperCase()}
                           </span>
                           <span className="run-kind-tag">{runKindLabel(worker)}</span>
                           <span className="run-prompt-preview">{worker.message}</span>

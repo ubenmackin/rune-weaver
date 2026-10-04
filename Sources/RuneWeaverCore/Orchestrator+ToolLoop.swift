@@ -290,7 +290,18 @@ extension Orchestrator {
         request: TurnLoopRequest,
         pendingEpisodic: inout [(content: String, role: Message.Role)]
     ) async throws -> TurnLoopOutcome? {
-        guard OrchestratorToolLoop.isLimitExceeded(rounds: toolRounds, max: maxToolIterations) else { return nil }
+        let maxLimit = request.effectiveMaxToolIterations ?? maxToolIterations
+        guard OrchestratorToolLoop.isLimitExceeded(rounds: toolRounds, max: maxLimit) else { return nil }
+        if request.toolLimitPolicy == .forceSynthesis {
+            return try await forceSynthesisForBudgetLimit(
+                toolRounds: toolRounds,
+                maxLimit: maxLimit,
+                parkContext: parkContext,
+                refusedCalls: refusedCalls,
+                request: request,
+                pendingEpisodic: &pendingEpisodic
+            )
+        }
         guard !refusedCalls.isEmpty else {
             return try await parkForContinuation(
                 toolRounds: toolRounds,
@@ -336,6 +347,79 @@ extension Orchestrator {
             continuationCall: continueCall,
             request: request,
             pendingEpisodic: &pendingEpisodic
+        )
+    }
+
+    /// Injects diagnostic synthesis instruction when budget limit is reached, suppresses further tool execution,
+    /// and completes the turn marked with `isBudgetExceeded: true`.
+    private func forceSynthesisForBudgetLimit(
+        toolRounds: Int,
+        maxLimit: Int,
+        parkContext: ParkTurnContext,
+        refusedCalls: [RefusedAdmission],
+        request: TurnLoopRequest,
+        pendingEpisodic: inout [(content: String, role: Message.Role)]
+    ) async throws -> TurnLoopOutcome {
+        let completedRounds = max(0, toolRounds - 1)
+        var updatedActions = parkContext.toolActions
+        if !refusedCalls.isEmpty {
+            let refusalNote = assistantNoteMessage(
+                text: parkContext.narratedText,
+                calls: refusedCalls.map(\.call)
+            )
+            await conversations.append(refusalNote, to: request.sessionID)
+            let refusedActions = try await recordRefusedAdmissions(
+                refusedCalls,
+                roundIndex: toolRounds - 1,
+                request: request,
+                pendingEpisodic: &pendingEpisodic
+            )
+            updatedActions.append(contentsOf: refusedActions)
+        }
+
+        var workingMessages = await refreshedWorkingMessages(
+            sessionID: request.sessionID,
+            recall: request.recall,
+            starterPack: request.starterPack,
+            systemPrompt: request.systemPrompt
+        )
+
+        let notice = Message(
+            role: .system,
+            content: """
+            [System Notice]: Maximum tool iteration budget reached (\(completedRounds)/\(maxLimit) rounds). Tool execution is terminated for this turn.
+            1. Explicitly identify which requested actions were completed and which were NOT completed (e.g. unsent messages, incomplete exports).
+            2. Present the full draft or compiled data collected so far so the user can inspect or manually deliver it.
+            """
+        )
+        workingMessages.append(notice)
+
+        let synthesisDraft = try await collectTurn(
+            messages: workingMessages,
+            tools: [],
+            sessionID: request.sessionID,
+            onDelta: { delta in
+                await request.onEvent?(.textDelta(delta))
+            },
+            onReasoningDelta: { reasoning in
+                await request.onEvent?(.reasoningDelta(reasoning))
+            }
+        )
+
+        let totalBilled = (parkContext.billedTokens ?? 0) + (synthesisDraft.billedTokens ?? 0)
+        let effectiveBilled = totalBilled > 0 ? totalBilled : nil
+        let contextTokens = parkContext.contextTokens ?? Self.estimatedContextTokens(
+            for: workingMessages,
+            tools: [],
+            finalText: synthesisDraft.text
+        )
+
+        return .finished(
+            finalText: synthesisDraft.text,
+            toolActions: updatedActions,
+            billedTokens: effectiveBilled,
+            contextTokens: contextTokens,
+            isBudgetExceeded: true
         )
     }
 

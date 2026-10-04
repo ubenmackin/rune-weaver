@@ -9,6 +9,7 @@ import type { ComponentType } from "react";
 import {
   ApprovalsIcon,
   ChatIcon,
+  DashboardIcon,
   IndexDiscoverIcon,
   MemoryIcon,
   RunsIcon,
@@ -24,6 +25,7 @@ export const MOBILE_BREAKPOINT_PX = 640;
 
 // All selectable leaf tab identifiers across both breakpoints.
 export type NavTabId =
+  | "dashboard"
   | "chat"
   | "approvals"
   | "goals"
@@ -32,10 +34,10 @@ export type NavTabId =
   | "memory"
   | "indexing";
 
-// Desktop and mobile top-level group identifiers: Chat and Approvals stand alone
+// Desktop and mobile top-level group identifiers: Dashboard, Chat, and Approvals stand alone
 // as direct views while Work folds Goals, Schedules, and Runs, and Memory folds
 // Search and Memory plus Index Status behind cohesive dropdowns.
-export type NavGroupId = "chat" | "approvals" | "work" | "memory";
+export type NavGroupId = "dashboard" | "chat" | "approvals" | "work" | "memory";
 
 // Icon component shape shared by every navigation entry at both breakpoints.
 type NavIcon = ComponentType<{ size?: number; className?: string }>;
@@ -72,9 +74,10 @@ export interface NavChildGroup {
 export type NavGroupEntry = NavTabEntry | NavChildGroup;
 
 // Canonical navigation structure shared by desktop TopNav and handheld
-// MobileBottomNav: Chat and Approvals are direct tabs, while Work and Memory
+// MobileBottomNav: Dashboard, Chat, and Approvals are direct tabs, while Work and Memory
 // fold their respective sub-surfaces into dropdown/drop-up menus.
 export const NAV_GROUPS: NavGroupEntry[] = [
+  { kind: "tab", id: "dashboard", label: "Dashboard", icon: DashboardIcon },
   { kind: "tab", id: "chat", label: "Chat", icon: ChatIcon },
   { kind: "tab", id: "approvals", label: "Approvals", icon: ApprovalsIcon },
   {

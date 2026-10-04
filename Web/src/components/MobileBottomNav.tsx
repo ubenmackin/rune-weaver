@@ -1,7 +1,7 @@
 // Rune Weaver Dashboard — Mobile bottom navigation bar for narrow viewports.
 //
-// Bottom-layout owner for handheld widths: renders the 4 canonical groups
-// (Chat, Approvals, Work, Memory) with touch-sized targets, drop-up menus for
+// Bottom-layout owner for handheld widths: renders the 5 canonical groups
+// (Dashboard, Chat, Approvals, Work, Memory) with touch-sized targets, drop-up menus for
 // grouped views, and unread badges. Hidden on desktop via stylesheet
 // breakpoints; selection and routing stay with the app shell.
 

@@ -27,10 +27,49 @@ private final class SchedulerStubLLM: LLMProvider, Sendable {
     }
 }
 
+private struct StubWorkerTool: Tool, Sendable {
+    let name = "echo_tool"
+    let description = "Echo tool"
+    let permissionLevel = PermissionLevel.readOnly
+    var inputSchema: JSONSchema {
+        JSONSchema(rawValue: #"{"type":"object"}"#)
+    }
+
+    func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+        .success("ok", callID: input.callID)
+    }
+}
+
+private final class BudgetExceededStubLLM: LLMProvider, Sendable {
+    let modelInfo = ModelInfo(name: "stub", provider: "stub", contextLength: 8192)
+
+    func chat(messages _: [Message], tools: [any Tool]) -> AsyncStream<LLMResponse> {
+        AsyncStream { continuation in
+            if tools.isEmpty {
+                continuation.yield(LLMResponse(delta: "Partial draft: email composed but not sent due to iteration limit."))
+                continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: 15))
+            } else {
+                continuation.yield(LLMResponse(
+                    delta: "Executing tool step...",
+                    toolCalls: [ToolInput(toolName: "echo_tool", argumentsJSON: "{}")]
+                ))
+                continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: 12))
+            }
+            continuation.finish()
+        }
+    }
+
+    func embeddings(text: [String]) async throws -> [[Float]] {
+        Array(repeating: [Float](), count: text.count)
+    }
+}
+
 @Suite("Server Scheduler Worker")
 struct ServerSchedulerWorkerTests {
     private func makeWorker(
-        answer: String = "done"
+        answer: String = "done",
+        llm: (any LLMProvider)? = nil,
+        toolBus: ToolBus? = nil
     ) async throws -> (ServerSchedulerWorker, SchedulerStore, RunLogStore, URL) {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("sched_test_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -41,11 +80,11 @@ struct ServerSchedulerWorkerTests {
             profilePath: tempDir.appendingPathComponent("profile.json").path
         )
         let conversations = ConversationManager(episodesDBPath: dbPath)
-        let bus = ToolBus()
+        let bus = toolBus ?? ToolBus()
         let orchestrator = Orchestrator(
             conversations: conversations,
             toolBus: bus,
-            llm: SchedulerStubLLM(answer: answer),
+            llm: llm ?? SchedulerStubLLM(answer: answer),
             memoryEngine: memoryEngine
         )
         let scheduler = await SchedulerStore.load(dbPath: dbPath)
@@ -175,5 +214,38 @@ struct ServerSchedulerWorkerTests {
         #expect(results.count == 1)
         #expect(results.first?.fired == false)
         #expect(results.first?.skippedReason == "already running")
+    }
+
+    @Test
+    func `Scheduler job exceeding tool budget records budget_exceeded status and surfaces milestone`() async throws {
+        let bus = ToolBus()
+        await bus.register(tool: StubWorkerTool())
+        let stubLLM = BudgetExceededStubLLM()
+        let (worker, scheduler, runs, tempDir) = try await makeWorker(
+            llm: stubLLM,
+            toolBus: bus
+        )
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let job = try await scheduler.create(NewSchedulerJob(
+            name: "budget test job",
+            schedule: "* * * * *",
+            prompt: "Send daily report",
+            maxToolIterations: 1
+        ))
+
+        let now = Date()
+        let nextMinute = now.addingTimeInterval(65)
+        let results = await worker.tick(now: nextMinute)
+
+        #expect(results.count == 1)
+        #expect(results.first?.fired == true)
+        #expect(results.first?.jobName == job.name)
+        #expect(results.first?.responseText?.contains("Partial draft: email composed") == true)
+
+        let logged = await runs.list(limit: 10)
+        #expect(logged.count == 1)
+        #expect(logged.first?.status == "budget_exceeded")
+        #expect(logged.first?.response?.contains("Partial draft: email composed") == true)
     }
 }

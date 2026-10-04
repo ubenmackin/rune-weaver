@@ -827,6 +827,31 @@ describe("fan-out session tree", () => {
     expect(screen.queryByTestId("session-fanout-child-icon")).toBeNull();
   });
 
+  it("renders a dedicated goal badge with TargetIcon for goal sessions", async () => {
+    vi.mocked(listSessions).mockResolvedValue({
+      sessions: [
+        {
+          id: "goal-session-1",
+          title: "Optimize Latency",
+          messageCount: 5,
+          summary: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          source: "goal",
+          goalId: "g-123",
+        },
+      ],
+      count: 1,
+    });
+    renderSidebar("goal-session-1");
+
+    await screen.findByText("Optimize Latency");
+    const goalIcon = screen.getByTestId("session-goal-icon");
+    expect(goalIcon).toBeInTheDocument();
+    expect(goalIcon).toHaveClass("session-item-icon", "goal");
+    expect(goalIcon).toHaveAttribute("title", "Goal run");
+  });
+
   it("toggles the disclosure on Enter without selecting the session", async () => {
     const user = userEvent.setup();
     const onSelectSession = vi.fn();

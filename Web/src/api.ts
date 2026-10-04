@@ -885,6 +885,8 @@ export interface SchedulerJob {
   pollMailbox?: string | null;
   pollIntervalSeconds?: number | null;
   pollLimit?: number | null;
+  maxToolIterations?: number | null;
+  onToolLimit?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -904,6 +906,8 @@ export interface NewSchedulerJobInput {
   pollMailbox?: string | null;
   pollIntervalSeconds?: number | null;
   pollLimit?: number | null;
+  maxToolIterations?: number | null;
+  onToolLimit?: string | null;
 }
 
 export interface UpdateSchedulerJobInput {
@@ -920,6 +924,8 @@ export interface UpdateSchedulerJobInput {
   pollIntervalSeconds?: number | null;
   pollLimit?: number | null;
   clearPoll?: boolean;
+  maxToolIterations?: number | null;
+  onToolLimit?: string | null;
 }
 
 export class ApiError extends Error {

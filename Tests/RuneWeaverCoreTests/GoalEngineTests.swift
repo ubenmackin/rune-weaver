@@ -390,6 +390,76 @@ struct GoalEngineTests {
         let deleted = try await store.goal(id: created.id)
         #expect(deleted == nil)
     }
+
+    @Test
+    func `PostBudgetExceeded records audit event and advances due date before retry cap`() async throws {
+        let (path, base) = makeEngineDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (engine, store) = makeEngine(dbPath: path, llm: StubGoalLLM(texts: [])) {
+            $0.maxStepBudgetExceededRetries = 3
+        }
+        let goal = makeEngineGoal(title: "Aggregate metrics")
+        try await store.create(goal: goal, steps: [makeEngineStep(goalID: goal.id, ordinal: 0, title: "Fetch data")])
+
+        let runID = UUID()
+        _ = try await engine.postBudgetExceeded(goalID: goal.id, runID: runID)
+
+        let events = try await store.events(goalID: goal.id)
+        #expect(events.contains { $0.kind == .stepBudgetExceeded })
+
+        let updated = try await store.goal(id: goal.id)
+        #expect(updated?.status == .active)
+        #expect(updated?.nextDueAt != nil)
+    }
+
+    @Test
+    func `PostBudgetExceeded escalates to needsInput after reaching consecutive retry cap`() async throws {
+        let (path, base) = makeEngineDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (engine, store) = makeEngine(dbPath: path, llm: StubGoalLLM(texts: [])) {
+            $0.maxStepBudgetExceededRetries = 2
+        }
+        let goal = makeEngineGoal(title: "Aggregate metrics")
+        try await store.create(goal: goal, steps: [makeEngineStep(goalID: goal.id, ordinal: 0, title: "Fetch data")])
+
+        let runID1 = UUID()
+        _ = try await engine.postBudgetExceeded(goalID: goal.id, runID: runID1)
+        let intermediate = try await store.goal(id: goal.id)
+        #expect(intermediate?.status == .active)
+
+        let runID2 = UUID()
+        _ = try await engine.postBudgetExceeded(goalID: goal.id, runID: runID2)
+        let final = try await store.goal(id: goal.id)
+        #expect(final?.status == .needsInput)
+
+        let events = try await store.events(goalID: goal.id)
+        #expect(events.contains { $0.kind == .needsInput && $0.message.contains("stalled after 2 budget-exceeded turns") })
+    }
+
+    @Test
+    func `CheckCompletion flips active goal with no actionable steps to achieved`() async throws {
+        let (path, base) = makeEngineDBPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (engine, store) = makeEngine(dbPath: path, llm: StubGoalLLM(texts: []))
+        let goal = makeEngineGoal(title: "Finish project")
+        let step = makeEngineStep(goalID: goal.id, ordinal: 0, title: "Only step")
+        try await store.create(goal: goal, steps: [step])
+
+        // Step still pending: checkCompletion returns false and status remains active
+        let beforeDone = try await engine.checkCompletion(goalID: goal.id)
+        #expect(beforeDone == false)
+        #expect(try await store.goal(id: goal.id)?.status == .active)
+
+        // Mark step done: checkCompletion flips goal to achieved
+        try await store.setStepStatus(goalID: goal.id, stepID: step.id, status: .done, notes: "Complete", lastRunID: nil)
+        let afterDone = try await engine.checkCompletion(goalID: goal.id)
+        #expect(afterDone == true)
+        #expect(try await store.goal(id: goal.id)?.status == .achieved)
+
+        // Re-checking already-achieved goal returns false
+        let alreadyAchieved = try await engine.checkCompletion(goalID: goal.id)
+        #expect(alreadyAchieved == false)
+    }
 }
 
 /// Mutates one goals field on a default config and asserts validation fails

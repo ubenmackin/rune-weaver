@@ -10,7 +10,7 @@ func isParkedTurn(sessionID: UUID, context: ServerContext) async -> Bool {
 }
 
 /// Broadcasts filed narrated approvals for a parked turn.
-func broadcastParkedApprovals(for response: OrchestratorResponse, context: ServerContext) async {
+func broadcastParkedApprovals(for response: OrchestratorResponse, approvals: ApprovalQueue, hub: WSHub) async {
     guard response.isParked else {
         return
     }
@@ -18,24 +18,31 @@ func broadcastParkedApprovals(for response: OrchestratorResponse, context: Serve
     guard !callIDs.isEmpty else {
         return
     }
-    let pending = await context.approvals.requests(for: response.sessionID)
+    let pending = await approvals.requests(for: response.sessionID)
     for request in pending where callIDs.contains(request.input.callID) {
-        await context.hub.broadcastApproval(request)
+        await hub.broadcastApproval(request)
     }
 }
 
-/// Finds the awaiting run owning a resumed parked batch by call overlap.
+/// Convenience overload for call sites with a ServerContext.
+func broadcastParkedApprovals(for response: OrchestratorResponse, context: ServerContext) async {
+    await broadcastParkedApprovals(for: response, approvals: context.approvals, hub: context.hub)
+}
+
+/// Finds the awaiting or actively resuming run owning a resumed parked batch by call overlap.
 func awaitingParkedRun(
     for resumed: OrchestratorResponse,
     decidedCallID: String?,
     context: ServerContext
 ) async -> RunLogEntry? {
-    let awaiting = await context.runs.list(limit: 200, sessionID: resumed.sessionID).filter { $0.status == "awaiting_approval" }
-    guard !awaiting.isEmpty else {
+    let candidates = await context.runs.list(limit: 200, sessionID: resumed.sessionID).filter {
+        $0.status == "running" || $0.status == "awaiting_approval"
+    }
+    guard !candidates.isEmpty else {
         return nil
     }
     if let decidedCallID, !decidedCallID.isEmpty {
-        if let match = awaiting.first(where: { run in
+        if let match = candidates.first(where: { run in
             run.toolActions.contains { $0.callID == decidedCallID }
         }) {
             return match
@@ -43,33 +50,35 @@ func awaitingParkedRun(
     }
     let resumedCallIDs = Set(resumed.toolActions.map(\.callID))
     if !resumedCallIDs.isEmpty {
-        if let match = awaiting.first(where: { run in
+        if let match = candidates.first(where: { run in
             run.toolActions.contains { resumedCallIDs.contains($0.callID) }
         }) {
             return match
         }
     }
-    return awaiting.first
+    return candidates.first
 }
 
-/// Finds the stranded awaiting run for a failed resume by call overlap.
+/// Finds the stranded running or awaiting run for a failed resume by call overlap.
 func strandedParkedRun(
     sessionID: UUID,
     decidedCallID: String?,
     context: ServerContext
 ) async -> RunLogEntry? {
-    let awaiting = await context.runs.list(limit: 200, sessionID: sessionID).filter { $0.status == "awaiting_approval" }
-    guard !awaiting.isEmpty else {
+    let candidates = await context.runs.list(limit: 200, sessionID: sessionID).filter {
+        $0.status == "running" || $0.status == "awaiting_approval"
+    }
+    guard !candidates.isEmpty else {
         return nil
     }
     if let decidedCallID, !decidedCallID.isEmpty {
-        if let match = awaiting.first(where: { run in
+        if let match = candidates.first(where: { run in
             run.toolActions.contains { $0.callID == decidedCallID }
         }) {
             return match
         }
     }
-    return awaiting.first
+    return candidates.first
 }
 
 /// Resolves the final run status for a resumed narrated approval.
@@ -114,6 +123,18 @@ public func resumeNarratedApproval(
         }
     } catch {
         RuneWeaverLog.server.error("ServerSchedulerRoutes: failed to encode WSApprovalDecidedFrame: \(error.localizedDescription)")
+    }
+
+    // If approving, immediately transition the run row to "running" and broadcast run_started
+    // so Working Right Now stream and Chat history badge immediately reflect active execution.
+    if approved, let targetSessionID {
+        if let awaiting = await strandedParkedRun(sessionID: targetSessionID, decidedCallID: decidedCallID, context: context) {
+            let runningEntry = await context.runs.update(
+                id: awaiting.id,
+                status: "running"
+            ) ?? awaiting
+            await context.hub.broadcastRun(runningEntry)
+        }
     }
 
     let resumed: OrchestratorResponse?
@@ -330,109 +351,157 @@ func registerSchedulerCRUDRoutes(_ app: Application) {
 func registerSchedulerRunRoute(_ app: Application) {
     let jobs = app.grouped(PathComponent.constant(ServerPaths.scheduler), PathComponent.constant(ServerPaths.jobs))
     jobs.post(PathComponent.parameter("id"), PathComponent.constant(ServerPaths.run)) { req async throws -> OrchestratorResponse in
-        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-            throw Abort(.badRequest, reason: "id must be a UUID")
-        }
-        let context = req.application.runeWeaver
-        guard let job = await context.scheduler.job(id: id) else {
-            throw Abort(.notFound, reason: "Unknown job \(raw)")
-        }
-        guard job.enabled else {
-            throw Abort(.conflict, reason: "Job \(raw) is disabled")
-        }
-        guard await context.runLock.tryAcquire(id: id, name: job.name) else {
-            // Skipped runs create no conversation, so the audit entry stays
-            // untagged instead of inventing an orphan session for filtering.
-            await context.runs.append(
-                kind: "scheduler",
-                status: "skipped",
-                message: "Skipped '\(job.name)': already running",
-                jobID: id,
-                sessionID: nil
-            )
-            throw Abort(.conflict, reason: "Job \(raw) is already running")
-        }
-        // The single-flight lock is held for the whole turn and released with a
-        // structured await on every terminal path before returning, so the next
-        // acquire never observes a stale held lock from a detached release
-        // racing the return.
-        let startTime = Date()
-        let sessionID = await makeSchedulerRunSession(job: job, startTime: startTime, conversations: context.conversations)
+        try await handleSchedulerRun(req: req)
+    }
+}
 
-        let initialEntry = await context.runs.append(
+/// Handles a manual scheduler job run request by validating the job and reserving the run.
+private func handleSchedulerRun(req: Request) async throws -> OrchestratorResponse {
+    guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+        throw Abort(.badRequest, reason: "id must be a UUID")
+    }
+    let context = req.application.runeWeaver
+    guard let job = await context.scheduler.job(id: id) else {
+        throw Abort(.notFound, reason: "Unknown job \(raw)")
+    }
+    guard job.enabled else {
+        throw Abort(.conflict, reason: "Job \(raw) is disabled")
+    }
+    guard await context.runLock.tryAcquire(id: id, name: job.name) else {
+        // Skipped runs create no conversation, so the audit entry stays
+        // untagged instead of inventing an orphan session for filtering.
+        await context.runs.append(
             kind: "scheduler",
-            status: "running",
-            message: job.prompt,
+            status: "skipped",
+            message: "Skipped '\(job.name)': already running",
             jobID: id,
-            sessionID: sessionID,
-            durationMs: 0
+            sessionID: nil
         )
-        await context.hub.broadcastRun(initialEntry)
+        throw Abort(.conflict, reason: "Job \(raw) is already running")
+    }
+    // The single-flight lock is held for the whole turn and released with a
+    // structured await on every terminal path before returning, so the next
+    // acquire never observes a stale held lock from a detached release
+    // racing the return.
+    let startTime = Date()
+    let sessionID = await makeSchedulerRunSession(job: job, startTime: startTime, conversations: context.conversations)
 
-        do {
-            let response = try await context.orchestrator.process(input: UserInput(
+    let initialEntry = await context.runs.append(
+        kind: "scheduler",
+        status: "running",
+        message: job.prompt,
+        jobID: id,
+        sessionID: sessionID,
+        durationMs: 0
+    )
+    await context.hub.broadcastRun(initialEntry)
+
+    return try await executeManualJobRun(
+        job: job,
+        sessionID: sessionID,
+        initialEntry: initialEntry,
+        startTime: startTime,
+        context: context
+    )
+}
+
+/// Executes the turn for a manual scheduler run, records the outcome, and releases the single-flight lock.
+private func executeManualJobRun(
+    job: SchedulerJob,
+    sessionID: UUID,
+    initialEntry: RunLogEntry,
+    startTime: Date,
+    context: ServerContext
+) async throws -> OrchestratorResponse {
+    do {
+        let policy: ToolLimitPolicy = job.onToolLimit == "park" ? .park : .forceSynthesis
+        let response = try await context.orchestrator.process(
+            input: UserInput(
                 text: job.prompt,
                 sessionID: sessionID,
-                source: "scheduler"
-            ))
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            // Parked scheduler turns remain as awaiting_approval like chat turns, resolving through
-            // the same inbox resume path in their session. The per-turn parked flag keeps a stale
-            // prior park in this session from mis-marking a fresh normal turn.
-            await broadcastParkedApprovals(for: response, context: context)
-            let parkedStatus = if response.isParked {
-                "awaiting_approval"
-            } else {
-                "ok"
+                source: "scheduler",
+                toolLimitPolicy: policy,
+                maxToolIterations: job.maxToolIterations
+            ),
+            onEvent: { event in
+                await broadcastWSEventFrame(event, sessionID: sessionID, context: context)
             }
-            let entry = await context.runs.update(
-                id: initialEntry.id,
-                status: parkedStatus,
-                response: response.text,
-                toolActions: response.toolActions,
-                totalTokens: response.totalTokens,
-                durationMs: durationMs
-            ) ?? initialEntry
-            await context.hub.broadcastRun(entry)
-            await context.runLock.release(id: id, name: job.name)
-            return response
-        } catch let error as CancellationError {
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            let entry = await context.runs.update(
-                id: initialEntry.id,
-                status: "cancelled",
-                durationMs: durationMs
-            ) ?? initialEntry
-            await context.hub.broadcastRun(entry)
-            await context.runLock.release(id: id, name: job.name)
-            throw error
-        } catch let error as OrchestratorError {
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            let entry = await context.runs.update(
-                id: initialEntry.id,
-                status: "error",
-                durationMs: durationMs
-            ) ?? initialEntry
-            await context.hub.broadcastRun(entry)
-            await context.runLock.release(id: id, name: job.name)
-            switch error {
-            case .emptyInput:
-                throw Abort(.badRequest, reason: "text must not be empty")
-            case let .toolLoopExceeded(iterations):
-                throw Abort(.unprocessableEntity, reason: "Tool loop exceeded \(iterations) rounds")
-            case let .llmFailed(detail):
-                throw Abort(.badGateway, reason: detail)
-            }
-        } catch {
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            let entry = await context.runs.update(
-                id: initialEntry.id,
-                status: "error",
-                durationMs: durationMs
-            ) ?? initialEntry
-            await context.hub.broadcastRun(entry)
-            await context.runLock.release(id: id, name: job.name)
-            throw Abort(.badGateway, reason: error.localizedDescription)
+        )
+        await broadcastStreamDone(for: response, sessionID: sessionID, hub: context.hub)
+        let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+        // Parked scheduler turns remain as awaiting_approval like chat turns, resolving through
+        // the same inbox resume path in their session. Budget exceeded turns finish with
+        // forced diagnostic synthesis and budget_exceeded status.
+        await broadcastParkedApprovals(for: response, context: context)
+        let runStatus = if response.isParked {
+            "awaiting_approval"
+        } else if response.isBudgetExceeded {
+            "budget_exceeded"
+        } else {
+            "ok"
         }
+        let entry = await context.runs.update(
+            id: initialEntry.id,
+            status: runStatus,
+            response: response.text,
+            toolActions: response.toolActions,
+            totalTokens: response.totalTokens,
+            durationMs: durationMs
+        ) ?? initialEntry
+        await context.hub.broadcastRun(entry)
+        await context.runLock.release(id: job.id, name: job.name)
+        return response
+    } catch let error as CancellationError {
+        await finalizeSchedulerRun(
+            initialEntry: initialEntry,
+            status: "cancelled",
+            startTime: startTime,
+            job: job,
+            context: context
+        )
+        throw error
+    } catch let error as OrchestratorError {
+        await finalizeSchedulerRun(
+            initialEntry: initialEntry,
+            status: "error",
+            startTime: startTime,
+            job: job,
+            context: context
+        )
+        switch error {
+        case .emptyInput:
+            throw Abort(.badRequest, reason: "text must not be empty")
+        case let .toolLoopExceeded(iterations):
+            throw Abort(.unprocessableEntity, reason: "Tool loop exceeded \(iterations) rounds")
+        case let .llmFailed(detail):
+            throw Abort(.badGateway, reason: detail)
+        }
+    } catch {
+        await finalizeSchedulerRun(
+            initialEntry: initialEntry,
+            status: "error",
+            startTime: startTime,
+            job: job,
+            context: context
+        )
+        throw Abort(.badGateway, reason: error.localizedDescription)
     }
+}
+
+/// Finalizes a manual scheduler run by updating the run entry, broadcasting it, and releasing the single-flight lock.
+private func finalizeSchedulerRun(
+    initialEntry: RunLogEntry,
+    status: String,
+    startTime: Date,
+    job: SchedulerJob,
+    context: ServerContext
+) async {
+    let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+    let entry = await context.runs.update(
+        id: initialEntry.id,
+        status: status,
+        durationMs: durationMs
+    ) ?? initialEntry
+    await context.hub.broadcastRun(entry)
+    await context.runLock.release(id: job.id, name: job.name)
 }

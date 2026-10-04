@@ -191,6 +191,7 @@ public enum BuiltinToolPlugins {
         goalStore: GoalStore? = nil,
         goalConversations: ConversationManager? = nil,
         goalsConfig: GoalsConfig = GoalsConfig(),
+        goalUpdatedNotifier: (@Sendable (Goal, [GoalStep]) async -> Void)? = nil,
         messagesGateway: (any MessagesGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         recipientAliasStore: (any MessageAliasStoring)? = nil,
@@ -257,7 +258,8 @@ public enum BuiltinToolPlugins {
                 engine: goalEngine,
                 store: goalStore,
                 conversations: goalConversations,
-                goalsConfig: goalsConfig
+                goalsConfig: goalsConfig,
+                goalUpdatedNotifier: goalUpdatedNotifier
             )
         }
         tools += try await makeTools(
@@ -400,6 +402,7 @@ public enum BuiltinToolPlugins {
         goalStore: GoalStore? = nil,
         goalConversations: ConversationManager? = nil,
         goalsConfig: GoalsConfig = GoalsConfig(),
+        goalUpdatedNotifier: (@Sendable (Goal, [GoalStep]) async -> Void)? = nil,
         messagesGateway: (any MessagesGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         recipientAliasStore: (any MessageAliasStoring)? = nil,
@@ -436,6 +439,7 @@ public enum BuiltinToolPlugins {
             goalStore: goalStore,
             goalConversations: goalConversations,
             goalsConfig: goalsConfig,
+            goalUpdatedNotifier: goalUpdatedNotifier,
             messagesGateway: messagesGateway,
             chatDatabasePath: chatDatabasePath,
             recipientAliasStore: recipientAliasStore,

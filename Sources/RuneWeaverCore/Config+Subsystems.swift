@@ -373,6 +373,10 @@ public struct GoalsConfig: Sendable, Equatable {
     public var planTimeoutSeconds: Int
     /// Maximum event triggers armed on one goal. Bounds trigger fan-out.
     public var maxTriggersPerGoal: Int
+    /// Maximum tool loop iterations before budget limit triggers for a goal turn (1-100). Defaults to 35.
+    public var maxToolIterations: Int
+    /// Maximum consecutive budget exceeded retries before escalating to needs_input. Defaults to 3.
+    public var maxStepBudgetExceededRetries: Int
 
     /// Default keeps goals off so stock installs stay quiet.
     public static let defaultEnabled = false
@@ -384,6 +388,10 @@ public struct GoalsConfig: Sendable, Equatable {
     public static let defaultMaxStepsPerGoal = 12
     /// Default planning budget waits out slow local models without stalling creation.
     public static let defaultPlanTimeoutSeconds = 60
+    /// Default tool iterations before budget limit triggers for a goal turn.
+    public static let defaultMaxToolIterations = 35
+    /// Default consecutive budget exceeded retries before escalating.
+    public static let defaultMaxStepBudgetExceededRetries = 3
     /// Smallest cadence that still counts as steady rather than busy-looping.
     public static let minStepIntervalMinutes = 5
     /// Largest cadence before a goal reads as abandoned rather than paced.
@@ -414,7 +422,9 @@ public struct GoalsConfig: Sendable, Equatable {
         maxActiveGoals: Int = defaultMaxActiveGoals,
         maxStepsPerGoal: Int = defaultMaxStepsPerGoal,
         planTimeoutSeconds: Int = defaultPlanTimeoutSeconds,
-        maxTriggersPerGoal: Int = defaultMaxTriggersPerGoal
+        maxTriggersPerGoal: Int = defaultMaxTriggersPerGoal,
+        maxToolIterations: Int = defaultMaxToolIterations,
+        maxStepBudgetExceededRetries: Int = defaultMaxStepBudgetExceededRetries
     ) {
         self.enabled = enabled
         self.stepIntervalMinutes = stepIntervalMinutes
@@ -422,6 +432,8 @@ public struct GoalsConfig: Sendable, Equatable {
         self.maxStepsPerGoal = maxStepsPerGoal
         self.planTimeoutSeconds = planTimeoutSeconds
         self.maxTriggersPerGoal = maxTriggersPerGoal
+        self.maxToolIterations = maxToolIterations
+        self.maxStepBudgetExceededRetries = maxStepBudgetExceededRetries
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -431,6 +443,8 @@ public struct GoalsConfig: Sendable, Equatable {
         case maxStepsPerGoal = "max_steps_per_goal"
         case planTimeoutSeconds = "plan_timeout_seconds"
         case maxTriggersPerGoal = "max_triggers_per_goal"
+        case maxToolIterations = "max_tool_iterations"
+        case maxStepBudgetExceededRetries = "max_step_budget_exceeded_retries"
     }
 }
 
@@ -445,6 +459,11 @@ extension GoalsConfig: Codable {
         maxStepsPerGoal = try container.decodeIfPresent(Int.self, forKey: .maxStepsPerGoal) ?? Self.defaultMaxStepsPerGoal
         planTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .planTimeoutSeconds) ?? Self.defaultPlanTimeoutSeconds
         maxTriggersPerGoal = try container.decodeIfPresent(Int.self, forKey: .maxTriggersPerGoal) ?? Self.defaultMaxTriggersPerGoal
+        maxToolIterations = try container.decodeIfPresent(Int.self, forKey: .maxToolIterations) ?? Self.defaultMaxToolIterations
+        maxStepBudgetExceededRetries = try container.decodeIfPresent(
+            Int.self,
+            forKey: .maxStepBudgetExceededRetries
+        ) ?? Self.defaultMaxStepBudgetExceededRetries
     }
 
     /// Encodes a goals config.
@@ -457,6 +476,8 @@ extension GoalsConfig: Codable {
         try container.encode(maxStepsPerGoal, forKey: .maxStepsPerGoal)
         try container.encode(planTimeoutSeconds, forKey: .planTimeoutSeconds)
         try container.encode(maxTriggersPerGoal, forKey: .maxTriggersPerGoal)
+        try container.encode(maxToolIterations, forKey: .maxToolIterations)
+        try container.encode(maxStepBudgetExceededRetries, forKey: .maxStepBudgetExceededRetries)
     }
 }
 

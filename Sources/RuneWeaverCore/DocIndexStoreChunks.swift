@@ -206,7 +206,8 @@ import os
         /// excluded because the comparison never holds for NULL.
         private static func likeSearch(query: String, limit: Int32, handle: OpaquePointer?, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
             let maxLikePatterns = 50
-            let tokens = Array(Tokenization.tokenize(query).sorted().prefix(maxLikePatterns - 1))
+            let salient = Tokenization.salientTokens(from: query)
+            let tokens = Array(salient.prefix(maxLikePatterns - 1))
             guard !tokens.isEmpty else { return [] }
             var patterns = ["%\(likeEscaped(query))%"]
             for token in tokens {
@@ -293,6 +294,8 @@ import os
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
+            let maxLimit = (since != nil || until != nil) ? maxVectorWindowResults : maxResults
+            let clamped = SQLiteHelpers.sqliteLimit(min(limit, maxLimit))
             if since == nil, until == nil {
                 let sql = "SELECT id, document_id, ordinal, chunk_text, embedding, is_vector FROM indexed_chunks "
                     + "WHERE is_vector = 1 ORDER BY rowid DESC LIMIT ?;"
@@ -301,7 +304,7 @@ import os
                     throw DocIndexError.persistenceFailed("Could not prepare vector read")
                 }
                 defer { sqlite3_finalize(statement) }
-                sqlite3_bind_int(statement, 1, SQLiteHelpers.sqliteLimit(min(limit, maxResults)))
+                sqlite3_bind_int(statement, 1, clamped)
                 var results: [IndexedChunk] = []
                 while sqlite3_step(statement) == SQLITE_ROW {
                     if let chunk = readChunk(statement) {
@@ -336,7 +339,7 @@ import os
                 sqlite3_bind_double(statement, bindIndex, upper)
                 bindIndex += 1
             }
-            sqlite3_bind_int(statement, bindIndex, SQLiteHelpers.sqliteLimit(min(limit, maxResults)))
+            sqlite3_bind_int(statement, bindIndex, clamped)
             var results: [IndexedChunk] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 if let chunk = readChunk(statement) {
@@ -377,7 +380,7 @@ import os
 
         /// Escapes user text into a safe FTS5 phrase query.
         private static func ftsEscaped(_ query: String) -> String {
-            let tokens = query.split { $0.isWhitespace || $0.isNewline }.map { String($0) }.filter { !$0.isEmpty }
+            let tokens = Tokenization.salientTokens(from: query)
             guard !tokens.isEmpty else { return "\"\"" }
             let phrases = tokens.map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }
             return phrases.joined(separator: " OR ")

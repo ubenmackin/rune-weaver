@@ -366,6 +366,50 @@ public actor GoalEngine {
         return generated
     }
 
+    /// Evaluates whether an active goal has completed all actionable steps,
+    /// flipping it to achieved if no actionable steps remain.
+    /// - Parameter goalID: Goal to check.
+    /// - Returns: True if the goal was flipped to achieved, false otherwise.
+    @discardableResult
+    public func checkCompletion(goalID: UUID) async throws -> Bool {
+        guard let goal = try await store.goal(id: goalID), goal.status == .active else {
+            return false
+        }
+        let next = try await store.nextActionableStep(goalID: goalID)
+        if next == nil {
+            try await store.setStatus(goalID: goalID, status: .achieved)
+            _ = await ideasEngine?.generate()
+            return true
+        }
+        return false
+    }
+
+    /// Records a budget-exceeded turn outcome, bumping due date or escalating to needs_input.
+    @discardableResult
+    public func postBudgetExceeded(goalID: UUID, runID: UUID) async throws -> [Idea] {
+        guard let goal = try await store.goal(id: goalID) else {
+            throw GoalEngineError.notFound(goalID)
+        }
+        _ = try await store.appendEvent(
+            goalID: goalID,
+            kind: .stepBudgetExceeded,
+            message: "Step iteration budget exceeded by run \(runID.uuidString)."
+        )
+        let recentEvents = try await store.events(goalID: goalID, limit: config.maxStepBudgetExceededRetries)
+        let consecutiveCount = recentEvents.reversed().prefix(while: { $0.kind == .stepBudgetExceeded }).count
+        if consecutiveCount >= config.maxStepBudgetExceededRetries {
+            try await needsInput(
+                goalID: goalID,
+                reason: "Goal step stalled after \(consecutiveCount) budget-exceeded turns; escalating to needs_input."
+            )
+            return []
+        } else {
+            let bumped = Date().addingTimeInterval(TimeInterval(goal.stepIntervalMinutes * 60))
+            try await store.markAdvanced(goalID: goalID, nextDueAt: bumped)
+            return []
+        }
+    }
+
     /// Parks a goal awaiting owner input, keeping the reason visible.
     ///
     /// The status transition logs generically, so the reason travels as its

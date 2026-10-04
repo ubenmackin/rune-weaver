@@ -288,7 +288,7 @@ public actor Orchestrator {
             switch outcome {
             case let .parked(parkedResponse):
                 return parkedResponse
-            case let .finished(finalText, toolActions, loopBilled, contextTokens):
+            case let .finished(finalText, toolActions, loopBilled, contextTokens, isBudgetExceeded):
                 let finalNote = await storeFinalAssistantText(finalText, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
                 try Task.checkCancellation()
                 await flushEpisodic(pendingEpisodic, sessionID: sessionID)
@@ -305,7 +305,8 @@ public actor Orchestrator {
                     sessionTokens: cumulativeTokens,
                     contextTokens: contextTokens,
                     warnings: turnWarnings,
-                    completedAt: finalNote?.createdAt.timeIntervalSince1970
+                    completedAt: finalNote?.createdAt.timeIntervalSince1970,
+                    isBudgetExceeded: isBudgetExceeded
                 )
             }
         } catch let error as CancellationError {
@@ -542,6 +543,8 @@ extension Orchestrator {
         for warning in turnWarnings {
             await onEvent?(.warning(warning))
         }
+        let effectivePolicy = input.toolLimitPolicy ?? (input.source == "scheduler" || input.source == "goal" ? .forceSynthesis : .park)
+        let effectiveMaxIterations = input.maxToolIterations ?? self.maxToolIterations
         let request = TurnLoopRequest(
             workingMessages: workingMessages,
             tools: tools,
@@ -549,7 +552,9 @@ extension Orchestrator {
             starterPack: starterPack,
             sessionID: input.sessionID,
             systemPrompt: effectiveSystemPrompt,
-            onEvent: onEvent
+            onEvent: onEvent,
+            toolLimitPolicy: effectivePolicy,
+            effectiveMaxToolIterations: effectiveMaxIterations
         )
         return (request, turnWarnings)
     }

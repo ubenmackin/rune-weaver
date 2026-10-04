@@ -1190,13 +1190,21 @@ struct PolicyStoreTests {
 
         // A nil injection constructs and loads with the legacy list, so the
         // one-time migration runs exactly there.
-        let created = await PolicyStore.makeLoaded(injected: nil, legacyLocalOrigins: ["airflow.int.volcrypt.com"])
+        let created = await PolicyStore.makeLoaded(
+            injected: nil,
+            fileURL: url,
+            legacyLocalOrigins: ["airflow.int.volcrypt.com"]
+        )
         let createdCurrent = await created.current
         #expect(createdCurrent.network.localExemptions == ["airflow.int.volcrypt.com"])
 
         // An injected instance stays authoritative: resolving again returns the
         // same store without reloading or re-migrating it.
-        let resolved = await PolicyStore.makeLoaded(injected: created, legacyLocalOrigins: ["ignored.example.com"])
+        let resolved = await PolicyStore.makeLoaded(
+            injected: created,
+            fileURL: url,
+            legacyLocalOrigins: ["ignored.example.com"]
+        )
         #expect(resolved === created)
         let resolvedCurrent = await resolved.current
         #expect(resolvedCurrent.network.localExemptions == ["airflow.int.volcrypt.com"])

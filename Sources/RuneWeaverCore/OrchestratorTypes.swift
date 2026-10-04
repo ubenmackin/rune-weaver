@@ -9,6 +9,14 @@ import Foundation
 /// Convenience alias for the conversation role.
 public typealias Role = Message.Role
 
+/// Policy for handling turns that reach the tool loop iteration ceiling.
+public enum ToolLimitPolicy: String, Sendable, Codable, Equatable {
+    /// Parks turn in approval queue requesting continuation (standard for interactive chat).
+    case park
+    /// Injects diagnostic synthesis notice, suppresses further tools, and completes turn as budget exceeded (background).
+    case forceSynthesis
+}
+
 /// User input received by the orchestrator.
 public struct UserInput: Sendable, Codable, Equatable {
     /// Raw user text (or voice transcription).
@@ -37,6 +45,10 @@ public struct UserInput: Sendable, Codable, Equatable {
     /// (e.g. a fan-out worker under the session that invoked the swarm).
     /// Nil never clears a stored parent link.
     public let parentSessionID: UUID?
+    /// Policy on reaching tool iteration limit (defaults to nil, resolved by orchestrator from source).
+    public let toolLimitPolicy: ToolLimitPolicy?
+    /// Turn-level tool iteration limit override (defaults to nil, resolved by orchestrator).
+    public let maxToolIterations: Int?
 
     /// Coding keys matching the persisted and wire shape, with the goal tag on
     /// the shared `goalId` spelling plus a tolerant legacy fallback.
@@ -50,6 +62,8 @@ public struct UserInput: Sendable, Codable, Equatable {
         case allowedTools
         case title
         case parentSessionID
+        case toolLimitPolicy = "tool_limit_policy"
+        case maxToolIterations = "max_tool_iterations"
     }
 
     /// Creates user input.
@@ -61,7 +75,9 @@ public struct UserInput: Sendable, Codable, Equatable {
         goalID: UUID? = nil,
         allowedTools: [String]? = nil,
         title: String? = nil,
-        parentSessionID: UUID? = nil
+        parentSessionID: UUID? = nil,
+        toolLimitPolicy: ToolLimitPolicy? = nil,
+        maxToolIterations: Int? = nil
     ) {
         self.text = text
         self.sessionID = sessionID
@@ -71,6 +87,8 @@ public struct UserInput: Sendable, Codable, Equatable {
         self.allowedTools = allowedTools
         self.title = title
         self.parentSessionID = parentSessionID
+        self.toolLimitPolicy = toolLimitPolicy
+        self.maxToolIterations = maxToolIterations
     }
 
     /// Decodes user input, defaulting a missing goal tag to untagged, a missing
@@ -88,6 +106,8 @@ public struct UserInput: Sendable, Codable, Equatable {
         self.allowedTools = try container.decodeIfPresent([String].self, forKey: .allowedTools)
         self.title = try container.decodeIfPresent(String.self, forKey: .title)
         self.parentSessionID = try container.decodeIfPresent(UUID.self, forKey: .parentSessionID)
+        self.toolLimitPolicy = try container.decodeIfPresent(ToolLimitPolicy.self, forKey: .toolLimitPolicy)
+        self.maxToolIterations = try container.decodeIfPresent(Int.self, forKey: .maxToolIterations)
     }
 
     /// Encodes user input, omitting absent goal, tool-subset, title, and parent
@@ -103,6 +123,8 @@ public struct UserInput: Sendable, Codable, Equatable {
         try container.encodeIfPresent(allowedTools, forKey: .allowedTools)
         try container.encodeIfPresent(title, forKey: .title)
         try container.encodeIfPresent(parentSessionID, forKey: .parentSessionID)
+        try container.encodeIfPresent(toolLimitPolicy, forKey: .toolLimitPolicy)
+        try container.encodeIfPresent(maxToolIterations, forKey: .maxToolIterations)
     }
 
     /// Filters a tool snapshot down to the input's allowed subset.
@@ -227,6 +249,8 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
     /// Completion time as Unix seconds since 1970 on the server clock. Optional so
     /// older engines that omit it still decode; clients fall back to receipt time.
     public let completedAt: Double?
+    /// Whether this turn ran out of tool iteration budget before completing all actions.
+    public let isBudgetExceeded: Bool
 
     /// Coding keys matching the JSON wire shape.
     private enum CodingKeys: String, CodingKey {
@@ -252,6 +276,8 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         case warnings
         /// Completion time as Unix seconds.
         case completedAt
+        /// Whether tool budget was exceeded.
+        case isBudgetExceeded = "is_budget_exceeded"
     }
 
     /// Creates a response.
@@ -266,7 +292,8 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         contextTokens: Int? = nil,
         isParked: Bool = false,
         warnings: [String] = [],
-        completedAt: Double? = nil
+        completedAt: Double? = nil,
+        isBudgetExceeded: Bool = false
     ) {
         self.text = text
         self.sessionID = sessionID
@@ -282,6 +309,7 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         // history reloads share one instant; nil when suppressed text persisted no note
         // keeps equality deterministic and lets clients fall back to receipt time.
         self.completedAt = completedAt
+        self.isBudgetExceeded = isBudgetExceeded
     }
 
     /// Decodes a response, defaulting missing parked flags to not parked and missing warnings to empty
@@ -315,6 +343,7 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         self.isParked = try container.decodeIfPresent(Bool.self, forKey: .isParked) ?? false
         self.warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
         self.completedAt = try container.decodeIfPresent(Double.self, forKey: .completedAt)
+        self.isBudgetExceeded = try container.decodeIfPresent(Bool.self, forKey: .isBudgetExceeded) ?? false
     }
 
     /// Encodes a response.
@@ -337,6 +366,9 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         }
         // Omit an absent completion so older decoders see no new key.
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
+        if isBudgetExceeded {
+            try container.encode(isBudgetExceeded, forKey: .isBudgetExceeded)
+        }
     }
 }
 
@@ -541,6 +573,10 @@ struct TurnLoopRequest {
     /// Whether this turn previews without mutating. Dry runs never park so gated
     /// calls keep their ToolBus preview path instead of filing approvals.
     var isDryRun: Bool = false
+    /// Policy on reaching tool iteration limit.
+    var toolLimitPolicy: ToolLimitPolicy = .park
+    /// Overridden tool iteration limit for this turn, or nil to use orchestrator default.
+    var effectiveMaxToolIterations: Int?
 
     /// Creates a turn-loop request threading the turn's recall and starter pack.
     init(
@@ -555,7 +591,9 @@ struct TurnLoopRequest {
         priorBilledTokens: Int? = nil,
         initialToolRounds: Int = 0,
         initialLlmRoundIndex: Int = 0,
-        isDryRun: Bool = false
+        isDryRun: Bool = false,
+        toolLimitPolicy: ToolLimitPolicy = .park,
+        effectiveMaxToolIterations: Int? = nil
     ) {
         self.workingMessages = workingMessages
         self.tools = tools
@@ -569,12 +607,20 @@ struct TurnLoopRequest {
         self.initialToolRounds = initialToolRounds
         self.initialLlmRoundIndex = initialLlmRoundIndex
         self.isDryRun = isDryRun
+        self.toolLimitPolicy = toolLimitPolicy
+        self.effectiveMaxToolIterations = effectiveMaxToolIterations
     }
 }
 
 /// Outcome of one bounded tool-loop run.
 enum TurnLoopOutcome {
-    case finished(finalText: String, toolActions: [ToolAction], billedTokens: Int?, contextTokens: Int? = nil)
+    case finished(
+        finalText: String,
+        toolActions: [ToolAction],
+        billedTokens: Int?,
+        contextTokens: Int? = nil,
+        isBudgetExceeded: Bool = false
+    )
     case parked(OrchestratorResponse)
 }
 

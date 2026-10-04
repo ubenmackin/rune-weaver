@@ -15,8 +15,9 @@ import {
 } from "./navigationConfig";
 
 describe("navigation contract", () => {
-  it("exposes the canonical desktop order with Work folding goals, schedules, and runs", () => {
+  it("exposes the canonical desktop order with Dashboard, Chat, Approvals and Work folding goals, schedules, and runs", () => {
     expect(NAV_GROUPS.map((entry) => entry.id)).toEqual([
+      "dashboard",
       "chat",
       "approvals",
       "work",
@@ -63,6 +64,8 @@ describe("navigation contract", () => {
     expect(isGroupActive("memory", "memory")).toBe(true);
     expect(isGroupActive("memory", "indexing")).toBe(true);
     expect(isGroupActive("memory", "chat")).toBe(false);
+    expect(isGroupActive("dashboard", "dashboard")).toBe(true);
+    expect(isGroupActive("dashboard", "chat")).toBe(false);
     expect(isGroupActive("approvals", "approvals")).toBe(true);
     expect(isGroupActive("approvals", "runs")).toBe(false);
   });
