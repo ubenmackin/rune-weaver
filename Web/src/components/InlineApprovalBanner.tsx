@@ -18,6 +18,7 @@ export interface InlineApprovalBannerProps {
     widen?: boolean,
     egressDecision?: EgressDecisionTier,
   ) => void;
+  menuPlacement?: "auto" | "up" | "down";
 }
 
 export interface SplitEgressOption {
@@ -127,8 +128,10 @@ export default function InlineApprovalBanner({
   request,
   deciding,
   onDecide,
+  menuPlacement = "auto",
 }: InlineApprovalBannerProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [renderUp, setRenderUp] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState(0);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const chevronRef = useRef<HTMLButtonElement | null>(null);
@@ -136,6 +139,36 @@ export default function InlineApprovalBanner({
 
   const fullArgs = request.input?.argumentsJSON ?? "";
   const visibleArgs = truncateArgs(fullArgs);
+
+  // Position detection: if constrained below, render menu upwards so choices never clip.
+  useEffect(() => {
+    if (!menuOpen) return;
+    if (menuPlacement === "up") {
+      setRenderUp(true);
+      return;
+    }
+    if (menuPlacement === "down") {
+      setRenderUp(false);
+      return;
+    }
+    const updatePosition = () => {
+      const anchor = chevronRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const spaceAbove = rect.top;
+      // If space below is not enough for the full menu (~320px) and there's more space above,
+      // render upward so it never clips into the bottom edge of the panel or screen.
+      setRenderUp(spaceBelow < 320 && spaceAbove > spaceBelow);
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [menuOpen, menuPlacement]);
 
   // Dismiss the duration menu on outside pointer down so it never lingers
   // over the input after the user moves on; the parked turn stays decidable
@@ -395,7 +428,11 @@ export default function InlineApprovalBanner({
                 <span aria-hidden="true">▾</span>
               </button>
               {menuOpen && !deciding ? (
-                <ul className="split-allow-menu" role="menu">
+                <ul
+                  className={`split-allow-menu${renderUp ? " split-allow-menu-up" : ""}`}
+                  role="menu"
+                  data-placement={renderUp ? "top" : "bottom"}
+                >
                   {splitEgressOptions.map((option, index) => (
                     <li key={option.tier} role="none">
                       {option.isDanger ? (
@@ -441,7 +478,11 @@ export default function InlineApprovalBanner({
                 <span aria-hidden="true">▾</span>
               </button>
               {menuOpen && !deciding ? (
-                <ul className="split-allow-menu" role="menu">
+                <ul
+                  className={`split-allow-menu${renderUp ? " split-allow-menu-up" : ""}`}
+                  role="menu"
+                  data-placement={renderUp ? "top" : "bottom"}
+                >
                   {splitAllowOptions.map((option, index) => (
                     <li key={`${option.value}-${option.widen}`} role="none">
                       <button

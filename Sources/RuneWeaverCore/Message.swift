@@ -85,9 +85,9 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
     }
 }
 
-public extension [Message] {
+extension [Message] {
     /// Returns the history with the system prompt first, without duplication.
-    func withSystemPrompt(_ prompt: String?) -> [Message] {
+    public func withSystemPrompt(_ prompt: String?) -> [Message] {
         guard let prompt, !prompt.isEmpty else {
             return self
         }

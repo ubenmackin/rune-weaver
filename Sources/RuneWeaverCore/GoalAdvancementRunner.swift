@@ -137,6 +137,30 @@ public enum GoalAdvancementRunner {
         turn: @Sendable (String) async throws -> GoalAdvancementTurn,
         onPostAdvanceFailure: (@Sendable (any Error & Sendable) async -> Void)? = nil
     ) async throws -> GoalAdvancementTurn {
+        // Pre-flight check: ensure the goal is active before spending a model turn.
+        guard let current = try await store.goal(id: goal.id), current.status == .active else {
+            return GoalAdvancementTurn(
+                text: "Goal is not active.",
+                isParked: false,
+                isBudgetExceeded: false,
+                toolActions: [],
+                totalTokens: 0,
+                ideas: []
+            )
+        }
+        // Pre-flight completion: if all actionable steps are already done, achieve immediately
+        // without calling the model.
+        if let ideas = try await engine.checkCompletionWithIdeas(goalID: goal.id) {
+            return GoalAdvancementTurn(
+                text: "Goal '\(goal.title)' has completed all steps and is achieved.",
+                isParked: false,
+                isBudgetExceeded: false,
+                toolActions: [],
+                totalTokens: 0,
+                ideas: ideas
+            )
+        }
+
         let prompt = try await advancementPrompt(goal: goal, store: store, engine: engine)
         let outcome: GoalAdvancementTurn
         do {

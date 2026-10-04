@@ -381,14 +381,14 @@ public protocol IndexRunReporting: Sendable {
     func runCompleted(_ event: IndexRunEvent) async
 }
 
-public extension IndexRunReporting {
+extension IndexRunReporting {
     /// Default no-op start report.
     /// - Parameter event: The start event.
-    func runStarted(_: IndexRunEvent) async {}
+    public func runStarted(_: IndexRunEvent) async {}
 
     /// Default no-op completion report.
     /// - Parameter event: The completion event.
-    func runCompleted(_: IndexRunEvent) async {}
+    public func runCompleted(_: IndexRunEvent) async {}
 }
 
 /// Reporter that discards every event, used when no transport is wired.
@@ -435,9 +435,9 @@ public protocol IndexSourceStage: Sendable {
     func cancel() async
 }
 
-public extension IndexSourceStage {
+extension IndexSourceStage {
     /// Default no-op cancellation for stages that own no cancellable handle.
-    func cancel() async {}
+    public func cancel() async {}
 }
 
 /// Closure-backed source stage, used to adapt the concrete indexers and to
@@ -1020,9 +1020,9 @@ public actor IndexCoordinator {
 
 // MARK: - Sequencing
 
-private extension IndexCoordinator {
+extension IndexCoordinator {
     /// Stages sorted into the canonical run order.
-    var orderedStages: [any IndexSourceStage] {
+    private var orderedStages: [any IndexSourceStage] {
         stages.enumerated().sorted { lhs, rhs in
             let left = IndexSourceKind.runOrder.firstIndex(of: lhs.element.kind) ?? Int.max
             let right = IndexSourceKind.runOrder.firstIndex(of: rhs.element.kind) ?? Int.max
@@ -1056,7 +1056,7 @@ private extension IndexCoordinator {
     ///     builds from this snapshot so a save landing mid-run never splits
     ///     one run across policies.
     /// - Returns: Whether any stage produced work or a counted failure.
-    func runEnabledStages(totals: inout Totals, startedAt: Date, policy: IndexConfig) async -> Bool {
+    private func runEnabledStages(totals: inout Totals, startedAt: Date, policy: IndexConfig) async -> Bool {
         let enabled = orderedStages.filter(\.isEnabled)
         let overlapStages = enabled.filter { $0.kind == .files || $0.kind == .mail || $0.kind == .messages }
         let remainder = enabled.filter { $0.kind != .files && $0.kind != .mail && $0.kind != .messages }
@@ -1168,7 +1168,7 @@ private extension IndexCoordinator {
     ///   - startedAt: Instant the run began.
     ///   - policy: Per-run policy snapshot fixed at run entry.
     /// - Returns: Whether the stage contributed work or a counted failure.
-    func executeStage(
+    private func executeStage(
         _ stage: any IndexSourceStage,
         totals: inout Totals,
         startedAt: Date,
@@ -1244,7 +1244,7 @@ private extension IndexCoordinator {
     ///   - policy: Shared run snapshot for the overlap batch.
     ///   - startedAt: Instant the run began.
     /// - Returns: Whether the stage contributed work plus its per-stage totals.
-    func executeStage(
+    private func executeStage(
         _ stage: any IndexSourceStage,
         index: Int,
         policy: IndexConfig,
@@ -1286,7 +1286,7 @@ private extension IndexCoordinator {
     ///   - index: Overlap-batch position owning the high-water slot.
     ///   - frame: Peer progress frame.
     ///   - startedAt: Instant the run began.
-    func observeConcurrentProgress(index: Int, frame: ToolProgress, startedAt: Date) async {
+    private func observeConcurrentProgress(index: Int, frame: ToolProgress, startedAt: Date) async {
         let priorScanned = overlapScanned[index] ?? 0
         let priorIndexed = overlapIndexed[index] ?? 0
         overlapScanned[index] = max(priorScanned, frame.scanned)
@@ -1313,7 +1313,7 @@ private extension IndexCoordinator {
     /// - Parameters:
     ///   - index: Overlap-batch position owning the high-water slot.
     ///   - report: Final stage contribution.
-    func finalizeConcurrentProgress(index: Int, report: IndexSourceRunReport) async {
+    private func finalizeConcurrentProgress(index: Int, report: IndexSourceRunReport) async {
         overlapScanned[index] = max(overlapScanned[index] ?? 0, report.scanned)
         overlapIndexed[index] = max(overlapIndexed[index] ?? 0, report.indexed)
         if let item = report.lastItem {
@@ -1338,7 +1338,7 @@ private extension IndexCoordinator {
     ///   - trigger: What would have caused the run.
     ///   - reason: Why the run did not execute.
     /// - Returns: A summary carrying the skip state.
-    func skippedSummary(trigger: IndexRunTrigger, reason: String) -> IndexRunSummary {
+    private func skippedSummary(trigger: IndexRunTrigger, reason: String) -> IndexRunSummary {
         let stamp = now()
         return IndexRunSummary(
             sessionID: UUID(),
@@ -1370,7 +1370,7 @@ private extension IndexCoordinator {
     ///   - trigger: What would have caused the run.
     ///   - reason: Why the run did not execute.
     /// - Returns: A summary carrying the skip state.
-    func reportSkipped(trigger: IndexRunTrigger, reason: String) async -> IndexRunSummary {
+    private func reportSkipped(trigger: IndexRunTrigger, reason: String) async -> IndexRunSummary {
         let summary = skippedSummary(trigger: trigger, reason: reason)
         let eventID = UUID()
         await reporter.runStarted(IndexRunEvent(
@@ -1397,9 +1397,9 @@ private extension IndexCoordinator {
 
 // MARK: - Progress
 
-private extension IndexCoordinator {
+extension IndexCoordinator {
     /// Running totals accumulated across source stages.
-    struct Totals: Sendable {
+    fileprivate struct Totals: Sendable {
         /// Items examined.
         var scanned = 0
         /// Documents written.
@@ -1471,7 +1471,7 @@ private extension IndexCoordinator {
     /// Carries the peer's overlap-batch index so the join folds peers in
     /// canonical order no matter which finishes first, keeping watermarks
     /// identical to serial even when two stages share one kind.
-    struct OverlapStageOutcome: Sendable {
+    fileprivate struct OverlapStageOutcome: Sendable {
         /// Overlap-batch position owning the high-water slot.
         let index: Int
         /// Whether the peer contributed work or a counted failure.
@@ -1485,7 +1485,7 @@ private extension IndexCoordinator {
     /// Single owner for the snapshot shape so the concurrent observer and
     /// the heartbeat cannot drift apart.
     /// - Returns: Totals carrying the current live counters.
-    func liveSnapshot() -> Totals {
+    private func liveSnapshot() -> Totals {
         var snapshot = Totals()
         snapshot.scanned = liveScanned
         snapshot.indexed = liveIndexed
@@ -1503,7 +1503,7 @@ private extension IndexCoordinator {
     /// by reusing the coordinator emit path with identical tokens and counts.
     /// - Parameter startedAt: Instant the run began.
     /// - Returns: The heartbeat task, cancelled when the run settles.
-    func startHeartbeat(startedAt: Date) -> Task<Void, Never> {
+    private func startHeartbeat(startedAt: Date) -> Task<Void, Never> {
         let intervalNanoseconds = instanceHeartbeatIntervalNanoseconds
         return Task<Void, Never> {
             while !Task.isCancelled {
@@ -1522,7 +1522,7 @@ private extension IndexCoordinator {
     /// elapsed, rate, cumulative counts, current item, and phase/stage tokens
     /// as any other frame. No-ops when no run is in flight.
     /// - Parameter startedAt: Instant the run began.
-    func emitHeartbeat(startedAt: Date) async {
+    private func emitHeartbeat(startedAt: Date) async {
         guard running, let phase = livePhase else { return }
         await emit(phase: phase, stage: liveStage, totals: liveSnapshot(), startedAt: startedAt, force: true)
     }
@@ -1537,7 +1537,7 @@ private extension IndexCoordinator {
     ///   - frame: Frame reported by the active stage.
     ///   - baseScanned: Completed scanned total when the stage started.
     ///   - baseIndexed: Completed indexed total when the stage started.
-    func observeStageProgress(_ frame: ToolProgress, baseScanned: Int, baseIndexed: Int) {
+    private func observeStageProgress(_ frame: ToolProgress, baseScanned: Int, baseIndexed: Int) {
         let cumulativeScanned = baseScanned + frame.scanned
         let cumulativeIndexed = baseIndexed + frame.matched
         if cumulativeScanned > liveScanned {
@@ -1558,7 +1558,7 @@ private extension IndexCoordinator {
     ///   - totals: Running totals so far.
     ///   - startedAt: Instant the run began.
     ///   - force: Whether to bypass the cadence floor.
-    func emit(phase: IndexPhase, stage: IndexSourceKind? = nil, totals: Totals, startedAt: Date, force: Bool) async {
+    private func emit(phase: IndexPhase, stage: IndexSourceKind? = nil, totals: Totals, startedAt: Date, force: Bool) async {
         let timestamp = now()
         if !force, let lastFrameAt, timestamp.timeIntervalSince(lastFrameAt) < Self.minimumFrameInterval {
             return
@@ -1591,7 +1591,7 @@ private extension IndexCoordinator {
     /// - Parameters:
     ///   - summary: Completed run summary.
     ///   - startedAt: Instant the run began.
-    func emitFinal(summary: IndexRunSummary, startedAt: Date) async {
+    private func emitFinal(summary: IndexRunSummary, startedAt: Date) async {
         let elapsedMs = max(0, Int(summary.finishedAt.timeIntervalSince(startedAt) * 1000))
         await progress(ToolProgress(
             message: "Index run \(summary.status.rawValue): \(summary.documentsIndexed) indexed, "
@@ -1609,7 +1609,7 @@ private extension IndexCoordinator {
     /// lights the dashboard badges even when the detail response is pruned.
     /// - Parameter summary: Completed run summary.
     /// - Returns: A display-safe one-liner.
-    static func summaryLine(_ summary: IndexRunSummary) -> String {
+    fileprivate static func summaryLine(_ summary: IndexRunSummary) -> String {
         "Index run \(summary.status.rawValue): \(summary.documentsIndexed) indexed, "
             + "\(summary.vectorChunks) vectors, \(summary.keywordChunks) keyword-only, "
             + "\(summary.scanned) scanned, \(summary.errors) errors, "
@@ -1623,7 +1623,7 @@ private extension IndexCoordinator {
     /// depending on summary wording.
     /// - Parameter summary: Completed run summary.
     /// - Returns: A multi-line, content-free summary.
-    static func detailLine(_ summary: IndexRunSummary) -> String {
+    fileprivate static func detailLine(_ summary: IndexRunSummary) -> String {
         var lines = [summaryLine(summary)]
         lines.append("Trigger: \(summary.trigger.rawValue)")
         lines.append("Retired: \(summary.retired)")

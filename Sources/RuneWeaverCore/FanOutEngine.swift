@@ -91,12 +91,12 @@ public protocol OrchestratorFanOutSeam: Sendable {
     func processCollecting(_ input: UserInput) async throws -> FanOutWorkerOutput
 }
 
-public extension OrchestratorFanOutSeam {
+extension OrchestratorFanOutSeam {
     /// Default collecting witness falls back to the plain seam: run the turn
     /// and report no output text. Witness types that predate the merge pass
     /// keep compiling unchanged, and the merge pass fails open to its honest
     /// fallback when nothing was collected.
-    func processCollecting(_ input: UserInput) async throws -> FanOutWorkerOutput {
+    public func processCollecting(_ input: UserInput) async throws -> FanOutWorkerOutput {
         try await process(input)
         return .empty
     }
@@ -154,11 +154,11 @@ public protocol FanOutRunLogging: Sendable {
     func updateFanOutRow(id: UUID, status: String, response: String?, durationMs: Int?) async
 }
 
-public extension FanOutRunLogging {
+extension FanOutRunLogging {
     /// Default settle witness degrades to the status-only flip so witnesses
     /// that predate the response-carrying settle keep compiling unchanged;
     /// stores that audit outputs implement the requirement directly.
-    func updateFanOutRow(id: UUID, status: String, response _: String?, durationMs _: Int?) async {
+    public func updateFanOutRow(id: UUID, status: String, response _: String?, durationMs _: Int?) async {
         await updateFanOutRow(id: id, status: status)
     }
 }

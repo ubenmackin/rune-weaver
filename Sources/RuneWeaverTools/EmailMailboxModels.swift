@@ -299,9 +299,9 @@ public struct EmailMoveEnvelope: Sendable, Equatable, Codable {
     }
 }
 
-public extension EmailBridgeParsing {
+extension EmailBridgeParsing {
     /// Filters a raw `LIST` mailbox list to selectable folders.
-    static func selectableMailboxes(from entries: [(flags: String, mailbox: String)]) -> [String] {
+    public static func selectableMailboxes(from entries: [(flags: String, mailbox: String)]) -> [String] {
         entries.compactMap { entry in
             let lowered = entry.flags.lowercased()
             if lowered.contains("noselect") || lowered.contains("nonexistent") {
@@ -313,7 +313,7 @@ public extension EmailBridgeParsing {
     }
 
     /// Resolves a requested mailbox against the selectable list.
-    static func resolveMailbox(_ requested: String, among available: [String]) -> String? {
+    public static func resolveMailbox(_ requested: String, among available: [String]) -> String? {
         if available.contains(requested) {
             return requested
         }
@@ -322,7 +322,7 @@ public extension EmailBridgeParsing {
     }
 
     /// Resolves a requested mailbox against an already-listed selectable list.
-    static func resolveMailboxAgainstList(requested: String, available: [String]) throws -> String {
+    public static func resolveMailboxAgainstList(requested: String, available: [String]) throws -> String {
         guard !available.isEmpty else {
             throw unknownMailboxError(requested: requested, available: available)
         }
@@ -333,7 +333,7 @@ public extension EmailBridgeParsing {
     }
 
     /// Builds the unknown-mailbox failure without secrets.
-    static func unknownMailboxError(requested: String, available: [String]) -> EmailIMAPError {
+    public static func unknownMailboxError(requested: String, available: [String]) -> EmailIMAPError {
         if available.isEmpty {
             return EmailIMAPError.bridgeFailed("Unknown mailbox '\(requested)' (no selectable mailboxes found)")
         }
@@ -341,7 +341,7 @@ public extension EmailBridgeParsing {
     }
 
     /// Bridge `mailbox-listing` response shape carrying the hierarchy delimiter.
-    struct MailboxListingResponse: Decodable {
+    public struct MailboxListingResponse: Decodable {
         /// Whether the operation succeeded.
         let ok: Bool
         /// Error detail when `ok` is false.
@@ -355,7 +355,7 @@ public extension EmailBridgeParsing {
     /// Decodes a bridge `list` stdout payload carrying mailboxes plus the hierarchy delimiter.
     /// This is the single listing parser; the legacy bare-name parser was removed
     /// so delimiter metadata cannot be silently dropped.
-    static func parseMailboxListingPayload(_ data: Data) throws -> EmailMailboxListing {
+    public static func parseMailboxListingPayload(_ data: Data) throws -> EmailMailboxListing {
         let response = try JSONDecoder().decode(MailboxListingResponse.self, from: data)
         if !response.ok {
             throw EmailIMAPError.bridgeFailed(response.error ?? "IMAP list failed")
@@ -365,18 +365,18 @@ public extension EmailBridgeParsing {
 
     /// Compatibility shim over the single listing parser for existing callers.
     /// Delegates to `parseMailboxListingPayload` so delimiter metadata stays canonical.
-    static func parseListPayload(_ data: Data) throws -> [String] {
+    public static func parseListPayload(_ data: Data) throws -> [String] {
         try parseMailboxListingPayload(data).mailboxes
     }
 
     /// Encodes selectable mailboxes as the `email.listMailboxes` tool output document.
-    static func encodeListMailboxesEnvelope(account: String, mailboxes: [String], delimiter: String? = nil) throws -> String {
+    public static func encodeListMailboxesEnvelope(account: String, mailboxes: [String], delimiter: String? = nil) throws -> String {
         let envelope = EmailListMailboxesEnvelope(account: account, mailboxes: mailboxes, delimiter: delimiter)
         return try encodeListMailboxesEnvelope(envelope)
     }
 
     /// Encodes a mailbox-listing envelope as the `email.listMailboxes` tool output document.
-    static func encodeListMailboxesEnvelope(_ envelope: EmailListMailboxesEnvelope) throws -> String {
+    public static func encodeListMailboxesEnvelope(_ envelope: EmailListMailboxesEnvelope) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(envelope)
@@ -384,7 +384,7 @@ public extension EmailBridgeParsing {
     }
 
     /// Encodes a move result as the `email.move` tool output document.
-    static func encodeMoveEnvelope(_ envelope: EmailMoveEnvelope) throws -> String {
+    public static func encodeMoveEnvelope(_ envelope: EmailMoveEnvelope) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(envelope)

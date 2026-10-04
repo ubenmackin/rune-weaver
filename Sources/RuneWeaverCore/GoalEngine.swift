@@ -325,130 +325,6 @@ public actor GoalEngine {
         return lines.joined(separator: "\n")
     }
 
-    /// Records the aftermath of one advancement run.
-    ///
-    /// Steps already moved through `goal.progress` during the turn, so this
-    /// re-reads them: an empty actionable scan on an active goal means the
-    /// plan is finished and flips to achieved with its completion event. The
-    /// due date always bumps by the goal's own cadence so the next run keeps
-    /// its rhythm. The run identifier lands as an audit event so scheduler
-    /// runs stay correlatable to the advancement they caused. The identifier
-    /// is opaque correlation: the service passes its run-log row while the
-    /// headless loop passes its per-run session, because the CLI keeps no
-    /// durable run log to link.
-    /// - Parameters:
-    ///   - goalID: Goal that just ran.
-    ///   - runID: Opaque correlation for the audit event (run-log ID in the
-    ///     service, per-run session ID headless).
-    /// - Returns: Suggestions generated because this turn achieved the goal,
-    ///   empty when the goal is still active or the ideas engine is unwired.
-    @discardableResult
-    public func postAdvance(goalID: UUID, runID: UUID) async throws -> [Idea] {
-        guard let goal = try await store.goal(id: goalID) else {
-            throw GoalEngineError.notFound(goalID)
-        }
-        let next = try await store.nextActionableStep(goalID: goalID)
-        var generated: [Idea] = []
-        if next == nil, goal.status == .active {
-            // setStatus logs the completion event alongside the transition.
-            try await store.setStatus(goalID: goalID, status: .achieved)
-            // The natural "what next" moment: refresh proactive suggestions
-            // now that a goal just finished. Best-effort only — generate()
-            // self-guards on the ideas config and returns an empty batch on
-            // failure, so a quiet model never fails the advancement that
-            // triggered it. The batch is returned so the caller can surface it
-            // on the proactive frame despite the store's title dedup.
-            generated = await ideasEngine?.generate() ?? []
-        }
-        let bumped = Date().addingTimeInterval(TimeInterval(goal.stepIntervalMinutes * 60))
-        try await store.markAdvanced(goalID: goalID, nextDueAt: bumped)
-        try await store.appendEvent(goalID: goalID, kind: .note, message: "Advanced by run \(runID.uuidString).")
-        return generated
-    }
-
-    /// Evaluates whether an active goal has completed all actionable steps,
-    /// flipping it to achieved if no actionable steps remain.
-    /// - Parameter goalID: Goal to check.
-    /// - Returns: True if the goal was flipped to achieved, false otherwise.
-    @discardableResult
-    public func checkCompletion(goalID: UUID) async throws -> Bool {
-        guard let goal = try await store.goal(id: goalID), goal.status == .active else {
-            return false
-        }
-        let next = try await store.nextActionableStep(goalID: goalID)
-        if next == nil {
-            try await store.setStatus(goalID: goalID, status: .achieved)
-            _ = await ideasEngine?.generate()
-            return true
-        }
-        return false
-    }
-
-    /// Records a budget-exceeded turn outcome, bumping due date or escalating to needs_input.
-    @discardableResult
-    public func postBudgetExceeded(goalID: UUID, runID: UUID) async throws -> [Idea] {
-        guard let goal = try await store.goal(id: goalID) else {
-            throw GoalEngineError.notFound(goalID)
-        }
-        _ = try await store.appendEvent(
-            goalID: goalID,
-            kind: .stepBudgetExceeded,
-            message: "Step iteration budget exceeded by run \(runID.uuidString)."
-        )
-        let recentEvents = try await store.events(goalID: goalID, limit: config.maxStepBudgetExceededRetries)
-        let consecutiveCount = recentEvents.reversed().prefix(while: { $0.kind == .stepBudgetExceeded }).count
-        if consecutiveCount >= config.maxStepBudgetExceededRetries {
-            try await needsInput(
-                goalID: goalID,
-                reason: "Goal step stalled after \(consecutiveCount) budget-exceeded turns; escalating to needs_input."
-            )
-            return []
-        } else {
-            let bumped = Date().addingTimeInterval(TimeInterval(goal.stepIntervalMinutes * 60))
-            try await store.markAdvanced(goalID: goalID, nextDueAt: bumped)
-            return []
-        }
-    }
-
-    /// Parks a goal awaiting owner input, keeping the reason visible.
-    ///
-    /// The status transition logs generically, so the reason travels as its
-    /// own event rather than being folded into the transition message.
-    /// - Parameters:
-    ///   - goalID: Goal to park.
-    ///   - reason: Owner-visible explanation of what is needed.
-    public func needsInput(goalID: UUID, reason: String) async throws {
-        try await store.setStatus(goalID: goalID, status: .needsInput)
-        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            try await store.appendEvent(goalID: goalID, kind: .needsInput, message: trimmed)
-        }
-    }
-
-    /// Pauses pursuit of a goal.
-    /// - Parameter goalID: Goal to pause.
-    public func pause(goalID: UUID) async throws {
-        try await store.setStatus(goalID: goalID, status: .paused)
-    }
-
-    /// Resumes a paused or parked goal back to active.
-    /// - Parameter goalID: Goal to resume.
-    public func resume(goalID: UUID) async throws {
-        try await store.setStatus(goalID: goalID, status: .active)
-    }
-
-    /// Abandons a goal; the terminal note preserves why it was dropped.
-    /// - Parameter goalID: Goal to abandon.
-    public func abandon(goalID: UUID) async throws {
-        try await store.setStatus(goalID: goalID, status: .abandoned)
-    }
-
-    /// Deletes a goal with its steps and events.
-    /// - Parameter goalID: Goal to delete.
-    public func delete(goalID: UUID) async throws {
-        try await store.delete(goalID: goalID)
-    }
-
     // MARK: - Planning internals
 
     /// Builds the single-shot decomposition instruction.
@@ -601,6 +477,128 @@ public actor GoalEngine {
         } catch {
             RuneWeaverLog.scheduler.warning("GoalEngine: failed to persist fallback plan for goal \(goal.id): \(error.localizedDescription)")
         }
+    }
+}
+
+// MARK: - Goal Lifecycle & Status Management
+
+extension GoalEngine {
+    /// Records the aftermath of one advancement run.
+    ///
+    /// Steps already moved through `goal.progress` during the turn, so this
+    /// re-reads them: an empty actionable scan on an active goal means the
+    /// plan is finished and flips to achieved with its completion event. The
+    /// due date always bumps by the goal's own cadence so the next run keeps
+    /// its rhythm. The run identifier lands as an audit event so scheduler
+    /// runs stay correlatable to the advancement they caused.
+    /// - Parameters:
+    ///   - goalID: Goal that just ran.
+    ///   - runID: Opaque correlation for the audit event.
+    /// - Returns: Suggestions generated because this turn achieved the goal.
+    @discardableResult
+    public func postAdvance(goalID: UUID, runID: UUID) async throws -> [Idea] {
+        guard let goal = try await store.goal(id: goalID) else {
+            throw GoalEngineError.notFound(goalID)
+        }
+        let generated = try await checkCompletionWithIdeas(goalID: goalID) ?? []
+        let bumped = Date().addingTimeInterval(TimeInterval(goal.stepIntervalMinutes * 60))
+        try await store.markAdvanced(goalID: goalID, nextDueAt: bumped)
+        try await store.appendEvent(goalID: goalID, kind: .note, message: "Advanced by run \(runID.uuidString).")
+        return generated
+    }
+
+    /// Evaluates whether an active goal has completed all actionable steps,
+    /// flipping it to achieved if no actionable steps remain and returning generated ideas.
+    /// - Parameter goalID: Goal to check.
+    /// - Returns: Generated ideas if goal transitioned to achieved, nil otherwise.
+    @discardableResult
+    public func checkCompletionWithIdeas(goalID: UUID) async throws -> [Idea]? {
+        guard let goal = try await store.goal(id: goalID), goal.status == .active else {
+            return nil
+        }
+        let next = try await store.nextActionableStep(goalID: goalID)
+        if next == nil {
+            try await store.setStatus(goalID: goalID, status: .achieved)
+            return await ideasEngine?.generate() ?? []
+        }
+        return nil
+    }
+
+    /// Evaluates whether an active goal has completed all actionable steps,
+    /// flipping it to achieved if no actionable steps remain.
+    /// - Parameter goalID: Goal to check.
+    /// - Returns: True if the goal was flipped to achieved, false otherwise.
+    @discardableResult
+    public func checkCompletion(goalID: UUID) async throws -> Bool {
+        let ideas = try await checkCompletionWithIdeas(goalID: goalID)
+        return ideas != nil
+    }
+
+    /// Reconciles all active goals that have completed all actionable steps, flipping them to achieved.
+    /// - Returns: List of goal IDs that transitioned to achieved.
+    @discardableResult
+    public func reconcileActiveGoalsCompletion() async throws -> [UUID] {
+        let activeGoals = try await store.list(status: .active)
+        var completed: [UUID] = []
+        for goal in activeGoals where try await checkCompletion(goalID: goal.id) {
+            completed.append(goal.id)
+        }
+        return completed
+    }
+
+    /// Records a budget-exceeded turn outcome, bumping due date or escalating to needs_input.
+    @discardableResult
+    public func postBudgetExceeded(goalID: UUID, runID: UUID) async throws -> [Idea] {
+        guard let goal = try await store.goal(id: goalID) else {
+            throw GoalEngineError.notFound(goalID)
+        }
+        _ = try await store.appendEvent(
+            goalID: goalID,
+            kind: .stepBudgetExceeded,
+            message: "Step iteration budget exceeded by run \(runID.uuidString)."
+        )
+        let recentEvents = try await store.events(goalID: goalID, limit: config.maxStepBudgetExceededRetries)
+        let consecutiveCount = recentEvents.reversed().prefix(while: { $0.kind == .stepBudgetExceeded }).count
+        if consecutiveCount >= config.maxStepBudgetExceededRetries {
+            try await needsInput(
+                goalID: goalID,
+                reason: "Goal step stalled after \(consecutiveCount) budget-exceeded turns; escalating to needs_input."
+            )
+            return []
+        } else {
+            let bumped = Date().addingTimeInterval(TimeInterval(goal.stepIntervalMinutes * 60))
+            try await store.markAdvanced(goalID: goalID, nextDueAt: bumped)
+            return []
+        }
+    }
+
+    /// Parks a goal awaiting owner input, keeping the reason visible.
+    public func needsInput(goalID: UUID, reason: String) async throws {
+        try await store.setStatus(goalID: goalID, status: .needsInput)
+        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            try await store.appendEvent(goalID: goalID, kind: .needsInput, message: trimmed)
+        }
+    }
+
+    /// Pauses pursuit of a goal.
+    public func pause(goalID: UUID) async throws {
+        try await store.setStatus(goalID: goalID, status: .paused)
+    }
+
+    /// Resumes a paused or parked goal back to active.
+    public func resume(goalID: UUID) async throws {
+        try await store.setStatus(goalID: goalID, status: .active)
+    }
+
+    /// Abandons a goal; the terminal note preserves why it was dropped.
+    public func abandon(goalID: UUID) async throws {
+        try await store.setStatus(goalID: goalID, status: .abandoned)
+    }
+
+    /// Deletes a goal with its steps and events.
+    public func delete(goalID: UUID) async throws {
+        try await store.delete(goalID: goalID)
     }
 }
 

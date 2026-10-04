@@ -22,9 +22,9 @@ public protocol EmbeddingsBackend: Sendable {
     func embed(_ texts: [String]) async throws -> [[Float]]
 }
 
-public extension EmbeddingsBackend {
+extension EmbeddingsBackend {
     /// Embeds one query best-effort, preserving cancellation.
-    func embedQuery(_ text: String) async throws -> [Float]? {
+    public func embedQuery(_ text: String) async throws -> [Float]? {
         do {
             let vectors = try await embed([text])
             guard let vector = vectors.first, !vector.isEmpty else { return nil }

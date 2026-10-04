@@ -488,3 +488,117 @@ describe("InlineApprovalBanner network egress approval", () => {
   });
 });
 
+describe("InlineApprovalBanner split menu upward positioning", () => {
+  const toolRequest: PermissionRequest = {
+    id: "app-pos-1",
+    toolName: "files.write",
+    description: "Write files on disk",
+    input: { toolName: "files.write", argumentsJSON: '{"path":"/tmp/test.txt"}', callID: "call-pos-1" },
+    suggestedDurations: ["thisTime"],
+  };
+
+  it("renders upward with split-allow-menu-up class when menuPlacement='up'", async () => {
+    const onDecide = vi.fn();
+    const user = userEvent.setup();
+
+    render(
+      <InlineApprovalBanner
+        request={toolRequest}
+        deciding={false}
+        onDecide={onDecide}
+        menuPlacement="up"
+      />,
+    );
+
+    const chevronBtn = screen.getByRole("button", {
+      name: "Allow options for files.write",
+    });
+    await user.click(chevronBtn);
+
+    const menu = screen.getByRole("menu");
+    expect(menu).toHaveClass("split-allow-menu-up");
+    expect(menu).toHaveAttribute("data-placement", "top");
+
+    // Option clicking works as expected
+    const optionBtn = screen.getByRole("menuitem", { name: "Next hour" });
+    await user.click(optionBtn);
+    expect(onDecide).toHaveBeenCalledWith("app-pos-1", true, "oneHour", false);
+  });
+
+  it("renders downward with data-placement='bottom' when menuPlacement='down'", async () => {
+    const onDecide = vi.fn();
+    const user = userEvent.setup();
+
+    render(
+      <InlineApprovalBanner
+        request={toolRequest}
+        deciding={false}
+        onDecide={onDecide}
+        menuPlacement="down"
+      />,
+    );
+
+    const chevronBtn = screen.getByRole("button", {
+      name: "Allow options for files.write",
+    });
+    await user.click(chevronBtn);
+
+    const menu = screen.getByRole("menu");
+    expect(menu).not.toHaveClass("split-allow-menu-up");
+    expect(menu).toHaveAttribute("data-placement", "bottom");
+  });
+
+  it("dynamically flips upward when space below is constrained", async () => {
+    const onDecide = vi.fn();
+    const user = userEvent.setup();
+
+    // Mock getBoundingClientRect so anchor is near bottom of viewport
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
+      top: 600,
+      bottom: 640,
+      left: 100,
+      right: 300,
+      width: 200,
+      height: 40,
+      x: 100,
+      y: 600,
+      toJSON: () => {},
+    });
+
+    // Window height 700 -> spaceBelow = 700 - 640 = 60 (< 320), spaceAbove = 600 (> 60)
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", {
+      writable: true,
+      configurable: true,
+      value: 700,
+    });
+
+    try {
+      render(
+        <InlineApprovalBanner
+          request={toolRequest}
+          deciding={false}
+          onDecide={onDecide}
+          menuPlacement="auto"
+        />,
+      );
+
+      const chevronBtn = screen.getByRole("button", {
+        name: "Allow options for files.write",
+      });
+      await user.click(chevronBtn);
+
+      const menu = screen.getByRole("menu");
+      expect(menu).toHaveClass("split-allow-menu-up");
+      expect(menu).toHaveAttribute("data-placement", "top");
+    } finally {
+      Object.defineProperty(window, "innerHeight", {
+        writable: true,
+        configurable: true,
+        value: originalInnerHeight,
+      });
+      vi.restoreAllMocks();
+    }
+  });
+});
+

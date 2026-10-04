@@ -745,18 +745,18 @@ public protocol BrowserPlaywrightGateway: Sendable {
     ) async throws -> BrowserActResult
 }
 
-public extension BrowserPlaywrightGateway {
+extension BrowserPlaywrightGateway {
     /// Convenience honoring the text-only default (no screenshot).
     /// - Parameter url: Already-validated http(s) URL.
     /// - Returns: Bounded snapshot without screenshot bytes.
-    func navigate(url: String) async throws -> BrowserSnapshot {
+    public func navigate(url: String) async throws -> BrowserSnapshot {
         try await navigate(url: url, includeScreenshot: false)
     }
 
     /// Default dry-run navigate falling back to the provisioning path.
     /// Concrete gateways that shell out override this to use the fast path
     /// only, so existing test doubles keep working without changes.
-    func navigate(url: String, includeScreenshot: Bool, dryRun: Bool) async throws -> BrowserSnapshot {
+    public func navigate(url: String, includeScreenshot: Bool, dryRun: Bool) async throws -> BrowserSnapshot {
         _ = dryRun
         return try await navigate(url: url, includeScreenshot: includeScreenshot)
     }
@@ -764,7 +764,7 @@ public extension BrowserPlaywrightGateway {
     /// Default session-aware navigate for stubs without grant handling.
     /// Delegates to the session-less dry-run path so existing doubles keep
     /// compiling; the live gateway overrides with grant-aware validation.
-    func navigate(
+    public func navigate(
         url: String,
         includeScreenshot: Bool,
         dryRun: Bool,
@@ -774,7 +774,7 @@ public extension BrowserPlaywrightGateway {
     }
 
     /// Default headed navigate delegating to the headless overload for stubs without headed handling.
-    func navigate(
+    public func navigate(
         url: String,
         includeScreenshot: Bool,
         headed: Bool,
@@ -788,7 +788,7 @@ public extension BrowserPlaywrightGateway {
     /// Default session-aware act for stubs without grant handling.
     /// Delegates to the session-less path so existing doubles keep
     /// compiling; the live gateway overrides with grant-aware validation.
-    func act(
+    public func act(
         action: BrowserActAction,
         ref: String,
         text: String?,

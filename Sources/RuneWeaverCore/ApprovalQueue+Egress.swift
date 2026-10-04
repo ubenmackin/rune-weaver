@@ -13,7 +13,7 @@ import Foundation
 
 // MARK: - ApprovalQueue Egress Host Extraction
 
-public extension ApprovalQueue {
+extension ApprovalQueue {
     /// Extracts every explicit HTTP/HTTPS URL present in free text.
     ///
     /// Single owner of link-detector scanning for egress triage: bash and
@@ -22,7 +22,7 @@ public extension ApprovalQueue {
     /// `extractEgressHost` layers those per tool below.
     /// - Parameter text: Command or typed text to scan.
     /// - Returns: Absolute HTTP/HTTPS URL strings in match order.
-    static func extractLinkURLs(from text: String) -> [String] {
+    public static func extractLinkURLs(from text: String) -> [String] {
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
             return []
         }
@@ -51,7 +51,7 @@ public extension ApprovalQueue {
     /// enforcement screens every host in the batch, so a multi-host batch
     /// badges its first host and cannot approve the whole batch on one badge;
     /// unifying multi-host badging remains a tracked follow-up.
-    static func extractEgressHost(toolName: String, argumentsJSON: String) -> String? {
+    public static func extractEgressHost(toolName: String, argumentsJSON: String) -> String? {
         extractAllEgressHosts(toolName: toolName, argumentsJSON: argumentsJSON).first
     }
 
@@ -65,7 +65,7 @@ public extension ApprovalQueue {
     ///   - toolName: Tool name selecting the scoped extraction.
     ///   - argumentsJSON: Raw tool arguments document.
     /// - Returns: Hosts in first-seen order, without duplicates.
-    static func extractAllEgressHosts(toolName: String, argumentsJSON: String) -> [String] {
+    public static func extractAllEgressHosts(toolName: String, argumentsJSON: String) -> [String] {
         guard let data = argumentsJSON.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return [] }
@@ -181,7 +181,7 @@ public extension ApprovalQueue {
     /// badges while `curl example.com` and `ping 10.0.0.1` still surface.
     /// - Parameter text: Command or typed text to scan.
     /// - Returns: Bare hosts in match order, without duplicates.
-    static func extractAllSchemelessHosts(in text: String) -> [String] {
+    public static func extractAllSchemelessHosts(in text: String) -> [String] {
         let pattern = #"\b(?:((?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,})|(\d{1,3}(?:\.\d{1,3}){3}))(?::\d+)?(?:/[^\s]*)?"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let nsText = text as NSString

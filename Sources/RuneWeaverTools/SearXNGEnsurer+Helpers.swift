@@ -16,7 +16,7 @@
 import Foundation
 import RuneWeaverCore
 
-public extension SearXNGEnsurer {
+extension SearXNGEnsurer {
     /// Whether a base URL is locally managed (loopback) rather than external.
     /// Only loopback bases can be healed by starting the local container; an
     /// external SearXNG needs no local start, so callers report started:false
@@ -24,7 +24,7 @@ public extension SearXNGEnsurer {
     /// addresses (`0.0.0.0`, `::`) are never managed: a container published
     /// there would never converge the loopback probe, so only `127/8`,
     /// `::1`, and `localhost` qualify.
-    static func isManagedBaseURL(_ baseURL: String) -> Bool {
+    public static func isManagedBaseURL(_ baseURL: String) -> Bool {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let url = URL(string: trimmed), let host = url.host, !host.isEmpty else {
             return false
@@ -57,7 +57,7 @@ public extension SearXNGEnsurer {
     /// Known install locations always probed after PATH entries.
     /// A minimal or GUI-launched PATH often omits Homebrew, so the fallback
     /// keeps a standard install discoverable without trusting PATH alone.
-    static let fallbackRuntimeDirectories = ["/opt/homebrew/bin", "/usr/local/bin"]
+    public static let fallbackRuntimeDirectories = ["/opt/homebrew/bin", "/usr/local/bin"]
 
     /// Ordered directories probed for the container runtime.
     /// PATH order wins so an operator override shadows the fallback, while the
@@ -66,7 +66,7 @@ public extension SearXNGEnsurer {
     /// once; blanks are skipped so empty segments never become relative probes.
     /// - Parameter pathValue: Raw `PATH` value, or nil when unset.
     /// - Returns: Deduplicated directories, PATH entries first.
-    static func runtimeSearchDirectories(pathValue: String?) -> [String] {
+    public static func runtimeSearchDirectories(pathValue: String?) -> [String] {
         var ordered: [String] = []
         var seen = Set<String>()
         func append(_ dir: String) {
@@ -89,7 +89,7 @@ public extension SearXNGEnsurer {
     /// Reads the live `PATH` so production and diagnostics share one ordering
     /// instead of drifting between call sites.
     /// - Returns: Deduplicated directories, PATH entries first.
-    static func runtimeSearchDirectories() -> [String] {
+    public static func runtimeSearchDirectories() -> [String] {
         runtimeSearchDirectories(pathValue: ProcessInfo.processInfo.environment["PATH"])
     }
 
@@ -104,7 +104,7 @@ public extension SearXNGEnsurer {
     ///   - searchDirectories: Ordered directories to probe.
     ///   - isExecutable: Filesystem probe, injectable so tests can stub an install.
     /// - Returns: Executable URL, or nil when the Apple Container CLI is missing.
-    static func resolveRuntimeURL(
+    public static func resolveRuntimeURL(
         searchDirectories: [String],
         isExecutable: (String) -> Bool
     ) -> URL? {
@@ -125,7 +125,7 @@ public extension SearXNGEnsurer {
     ///   - pathValue: Raw `PATH` value driving the search ordering.
     ///   - isExecutable: Filesystem probe, injectable so tests can stub an install.
     /// - Returns: Executable URL, or nil when missing everywhere searched.
-    static func resolveRuntimeURL(pathValue: String?, isExecutable: (String) -> Bool) -> URL? {
+    public static func resolveRuntimeURL(pathValue: String?, isExecutable: (String) -> Bool) -> URL? {
         resolveRuntimeURL(searchDirectories: runtimeSearchDirectories(pathValue: pathValue), isExecutable: isExecutable)
     }
 
@@ -134,7 +134,7 @@ public extension SearXNGEnsurer {
     /// dependency instead of adding a second container runtime, so hosts
     /// without `container` fail closed with the escape-hatch guidance.
     /// - Returns: Executable URL, or nil when the Apple Container CLI is missing.
-    static func resolveRuntimeURL() -> URL? {
+    public static func resolveRuntimeURL() -> URL? {
         resolveRuntimeURL(
             searchDirectories: runtimeSearchDirectories(),
             isExecutable: { FileManager.default.isExecutableFile(atPath: $0) }
@@ -143,16 +143,16 @@ public extension SearXNGEnsurer {
 
     /// Fast probe budget for the container system daemon check.
     /// Short so a down daemon fails fast instead of burning the ensure budget.
-    static let daemonProbeTimeoutSeconds: Double = 5
+    public static let daemonProbeTimeoutSeconds: Double = 5
     /// Bounded budget for healing the container system service.
     /// Short enough that the cached-image heals stay responsive ahead of the
     /// minutes-scale readiness watch; the watch backstop does not cover these heals.
-    static let containerSystemStartTimeoutSeconds: Double = 8
+    public static let containerSystemStartTimeoutSeconds: Double = 8
     /// Cap for the stderr tail carried in failure detail.
     /// Keeps dashboard messages readable while preserving the actionable line.
-    static let maxFailureTailChars = 500
+    public static let maxFailureTailChars = 500
     /// Install location for the Apple Container CLI backing search and detonation.
-    static let appleContainerInstallURL = "https://github.com/apple/container"
+    public static let appleContainerInstallURL = "https://github.com/apple/container"
 
     /// Guidance returned when the container runtime cannot be resolved.
     /// Points at the Apple Container install and rules out Docker, so a bare
@@ -161,7 +161,7 @@ public extension SearXNGEnsurer {
     /// re-running the lookup; the list mirrors the resolver ordering.
     /// - Parameter searchedDirectories: Directories probed, defaulting to the live search ordering.
     /// - Returns: Human-readable install guidance naming where it looked.
-    static func installGuidanceMessage(searchedDirectories: [String]? = nil) -> String {
+    public static func installGuidanceMessage(searchedDirectories: [String]? = nil) -> String {
         let searched = (searchedDirectories ?? runtimeSearchDirectories()).joined(separator: ", ")
         return "Container runtime 'container' not found. Install the Apple Container CLI "
             + "(\(appleContainerInstallURL)), then retry. Docker is not supported. "
@@ -175,7 +175,7 @@ public extension SearXNGEnsurer {
     /// unreachable-engine text around the install text.
     /// - Parameter searchedDirectories: Directories probed, defaulting to the live search ordering.
     /// - Returns: Error carrying the install next step.
-    static func runtimeNotFoundError(searchedDirectories: [String]? = nil) -> Error {
+    public static func runtimeNotFoundError(searchedDirectories: [String]? = nil) -> Error {
         let directories = searchedDirectories ?? runtimeSearchDirectories()
         let message = installGuidanceMessage(searchedDirectories: directories)
         return NSError(domain: "RuneWeaverSearXNG", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
@@ -185,7 +185,7 @@ public extension SearXNGEnsurer {
     /// `list` needs the daemon yet changes nothing, so it doubles as the
     /// health probe and the README verify step.
     /// - Returns: Arguments for the daemon probe.
-    static func daemonProbeArguments() -> [String] {
+    public static func daemonProbeArguments() -> [String] {
         ["list"]
     }
 
@@ -193,7 +193,7 @@ public extension SearXNGEnsurer {
     /// Matches the documented `container system start` recovery so the engine,
     /// the escape-hatch script, and the README never diverge.
     /// - Returns: Arguments starting the system service.
-    static func containerSystemStartArguments() -> [String] {
+    public static func containerSystemStartArguments() -> [String] {
         ["system", "start"]
     }
 
@@ -204,7 +204,7 @@ public extension SearXNGEnsurer {
     /// merely mentions `xpc` never triggers the heal.
     /// - Parameter output: Combined stdout plus stderr from the probe.
     /// - Returns: True when the service needs a start.
-    static func isDaemonDown(output: String) -> Bool {
+    public static func isDaemonDown(output: String) -> Bool {
         let lowered = output.lowercased()
         if lowered.range(of: #"\bxpc\W+connection\b"#, options: .regularExpression) != nil {
             return true
@@ -224,7 +224,7 @@ public extension SearXNGEnsurer {
     ///   - text: Raw combined output.
     ///   - limit: Maximum characters to keep.
     /// - Returns: Trimmed single-line tail, or empty when input is blank.
-    static func cappedTail(_ text: String, limit: Int = maxFailureTailChars) -> String {
+    public static func cappedTail(_ text: String, limit: Int = maxFailureTailChars) -> String {
         let collapsed = text.components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }.joined(separator: " ")
         guard !collapsed.isEmpty else { return "" }
@@ -236,7 +236,7 @@ public extension SearXNGEnsurer {
     /// Timeout hint appended when a stage exhausts its budget.
     /// - Parameter timeoutSeconds: Budget that was exceeded.
     /// - Returns: Parenthesized timeout note.
-    static func timeoutNote(timeoutSeconds: Double) -> String {
+    public static func timeoutNote(timeoutSeconds: Double) -> String {
         "(timed out after \(Int(timeoutSeconds))s)"
     }
 
@@ -253,7 +253,7 @@ public extension SearXNGEnsurer {
     ///   - timedOut: Whether the stage hit its timeout.
     ///   - timeoutSeconds: Budget for the timeout note when timed out.
     /// - Returns: Single-line failure fragment.
-    static func failureMessage(
+    public static func failureMessage(
         stage: String,
         exitCode: Int32?,
         output: String?,
@@ -284,7 +284,7 @@ public extension SearXNGEnsurer {
     /// matches the probe. A bare `http://127.0.0.1` no longer silently maps
     /// to 8888 while the probe dials 80, which never converged; 8888 is the
     /// default configured URL's port, not the fallback for a missing port.
-    static func hostPort(from baseURL: String) -> Int {
+    public static func hostPort(from baseURL: String) -> Int {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmed), let host = url.host, !host.isEmpty else {
             return 8888
@@ -305,7 +305,7 @@ public extension SearXNGEnsurer {
     /// executable-adjacent locations, then the repo checkout as a dev fallback
     /// for `swift run` from the source root.
     /// - Returns: Template file URL when found, nil otherwise.
-    static func bundledTemplateURL() -> URL? {
+    public static func bundledTemplateURL() -> URL? {
         var candidates: [URL] = []
         #if SWIFT_PACKAGE && !SWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE
             if let resourceURL = Bundle.module.resourceURL {
@@ -350,7 +350,7 @@ public extension SearXNGEnsurer {
     /// Locates the bundled SearXNG settings for the container mount.
     /// Prefers the per-install override, then the bundled template resolved
     /// without the working directory so installed runs mount real settings.
-    static func bundledSettingsPath() -> String? {
+    public static func bundledSettingsPath() -> String? {
         let override = overrideSettingsPath()
         if FileManager.default.fileExists(atPath: override) {
             return override
@@ -360,7 +360,7 @@ public extension SearXNGEnsurer {
 
     /// Per-install override path carrying the generated Flask secret.
     /// - Returns: `~/.runeweaver/searxng/settings.yml` absolute path.
-    static func overrideSettingsPath() -> String {
+    public static func overrideSettingsPath() -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return (home as NSString).appendingPathComponent(".runeweaver/searxng/settings.yml")
     }
@@ -371,18 +371,18 @@ public extension SearXNGEnsurer {
     /// marker or carrying an older value is regenerated with a fresh secret
     /// and the container is recreated so the new document actually boots
     /// instead of lingering behind a `start` of the old entry.
-    static let settingsTemplateVersion = 2
+    public static let settingsTemplateVersion = 2
 
     /// YAML comment prefix carrying the template version in overrides.
     /// A comment keeps SearXNG parsing untouched while letting both the
     /// engine and the escape-hatch script detect stale installs with a
     /// plain text search instead of parsing YAML.
-    static let settingsTemplateVersionMarkerPrefix = "# rune-weaver-template-version:"
+    public static let settingsTemplateVersionMarkerPrefix = "# rune-weaver-template-version:"
 
     /// Full marker line stamped into freshly generated overrides.
     /// - Parameter version: Template version to stamp, defaulting to current.
     /// - Returns: Comment line carrying the version.
-    static func settingsTemplateVersionMarkerLine(version: Int = settingsTemplateVersion) -> String {
+    public static func settingsTemplateVersionMarkerLine(version: Int = settingsTemplateVersion) -> String {
         "\(settingsTemplateVersionMarkerPrefix) \(version)"
     }
 
@@ -390,14 +390,14 @@ public extension SearXNGEnsurer {
     /// The shell matches `^[[:space:]]*#[[:space:]]*rune-weaver-template-version:`
     /// so `#rune-…` and `#  rune-…` read as stamped; the engine must accept the
     /// same spellings or a variant file reads stale in one and fresh in the other.
-    static let templateVersionMarkerRegex: NSRegularExpression? = try? NSRegularExpression(
+    public static let templateVersionMarkerRegex: NSRegularExpression? = try? NSRegularExpression(
         pattern: "^[\\s]*#[\\s]*rune-weaver-template-version:",
         options: []
     )
 
     /// Version digits after the marker, tolerating surrounding whitespace.
     /// Mirrors the shell `sed` extraction so both sides agree on the stamped number.
-    static let templateVersionNumberRegex: NSRegularExpression? = try? NSRegularExpression(
+    public static let templateVersionNumberRegex: NSRegularExpression? = try? NSRegularExpression(
         pattern: "rune-weaver-template-version:[\\s]*([0-9]+)",
         options: []
     )
@@ -405,7 +405,7 @@ public extension SearXNGEnsurer {
     /// Whether a line carries the template-version marker under shell-tolerant spacing.
     /// - Parameter line: Single override line to test.
     /// - Returns: True when the line matches the tolerant marker shape.
-    static func isTemplateVersionMarkerLine(_ line: String) -> Bool {
+    public static func isTemplateVersionMarkerLine(_ line: String) -> Bool {
         guard let regex = templateVersionMarkerRegex else { return false }
         let range = NSRange(line.startIndex..., in: line)
         return regex.firstMatch(in: line, options: [], range: range) != nil
@@ -418,7 +418,7 @@ public extension SearXNGEnsurer {
     /// so engine and script never disagree on staleness or duplicate the stamp.
     /// - Parameter contents: Override file text.
     /// - Returns: Stamped version, or nil when absent or unparseable.
-    static func overrideTemplateVersion(in contents: String) -> Int? {
+    public static func overrideTemplateVersion(in contents: String) -> Int? {
         // Shared fold keeps marker detection identical for CRLF/CR overrides
         // instead of leaving a stray return on the version line.
         for line in NormalizedText.splitLines(contents) {
@@ -441,7 +441,7 @@ public extension SearXNGEnsurer {
     /// forward-compatible install is never downgraded.
     /// - Parameter contents: Override file text.
     /// - Returns: True when the marker is missing or older than current.
-    static func overrideNeedsMigration(contents: String) -> Bool {
+    public static func overrideNeedsMigration(contents: String) -> Bool {
         guard let stamped = overrideTemplateVersion(in: contents) else { return true }
         return stamped < settingsTemplateVersion
     }
@@ -454,7 +454,7 @@ public extension SearXNGEnsurer {
     /// unreadable file never reads as fresh: it logs and reports stale so a
     /// permission failure fails closed instead of skipping migration.
     /// - Returns: True when an existing override needs migration.
-    static func isStaleOverridePresent() -> Bool {
+    public static func isStaleOverridePresent() -> Bool {
         let path = overrideSettingsPath()
         guard FileManager.default.fileExists(atPath: path) else { return false }
         do {
@@ -471,7 +471,7 @@ public extension SearXNGEnsurer {
     /// Generates a random Flask secret key as lowercase hex.
     /// - Parameter byteCount: Random bytes before hex encoding (clamped 16-64).
     /// - Returns: Hex string twice `byteCount` chars.
-    static func makeSecretKey(byteCount: Int = 32) -> String {
+    public static func makeSecretKey(byteCount: Int = 32) -> String {
         let count = min(max(byteCount, 16), 64)
         var bytes: [UInt8] = []
         bytes.reserveCapacity(count)
@@ -491,7 +491,7 @@ public extension SearXNGEnsurer {
     /// current one without parsing YAML.
     /// - Parameter secretKey: Per-install Flask secret.
     /// - Returns: YAML document mountable at `/etc/searxng/settings.yml`.
-    static func settingsYAML(secretKey: String) -> String {
+    public static func settingsYAML(secretKey: String) -> String {
         """
         # Rune Weaver — Per-install SearXNG settings (generated).
         \(settingsTemplateVersionMarkerLine())
@@ -536,7 +536,7 @@ public extension SearXNGEnsurer {
     ///   - template: Bundled `settings.yml` text.
     ///   - secretKey: Per-install Flask secret.
     /// - Returns: Template with the secret line replaced, or fallback rendering.
-    static func renderedSettingsYAML(template: String, secretKey: String) -> String {
+    public static func renderedSettingsYAML(template: String, secretKey: String) -> String {
         let secretReplacement = "  secret_key: \"\(secretKey)\""
         let markerReplacement = settingsTemplateVersionMarkerLine()
         // Single normalization feeds both the trailing-newline check and the
@@ -592,7 +592,7 @@ public extension SearXNGEnsurer {
     /// - Parameters:
     ///   - data: Encoded settings document to persist.
     ///   - path: Destination override path.
-    static func writeSecretFileAtomically(data: Data, toPath path: String) throws {
+    public static func writeSecretFileAtomically(data: Data, toPath path: String) throws {
         let fileManager = FileManager.default
         let directory = (path as NSString).deletingLastPathComponent
         let tmpName = ".searxng-settings.\(UUID().uuidString).tmp"
@@ -633,7 +633,7 @@ public extension SearXNGEnsurer {
     /// a fresh secret carrying the current marker.
     /// - Returns: Override path when present or created, nil otherwise.
     @discardableResult
-    static func ensureOverrideSettingsFile() -> String? {
+    public static func ensureOverrideSettingsFile() -> String? {
         let fileManager = FileManager.default
         let overridePath = overrideSettingsPath()
         let directory = (overridePath as NSString).deletingLastPathComponent
@@ -724,11 +724,11 @@ public extension SearXNGEnsurer {
 /// so the main `SearXNGEnsurer` actor body stays within the type-length
 /// budget. Behavior is unchanged; the lifecycle entry points keep calling
 /// these helpers through the same `SearXNGEnsurer` namespace.
-public extension SearXNGEnsurer {
+extension SearXNGEnsurer {
     /// Outcome of healing the container system daemon.
     /// Keeps the started flag beside the failure fragment so the cascade can
     /// record which heal actually moved the daemon without extra plumbing.
-    struct DaemonOutcome: Sendable {
+    public struct DaemonOutcome: Sendable {
         public let daemonStarted: Bool
         public let failure: String?
         public init(daemonStarted: Bool, failure: String? = nil) {
@@ -740,7 +740,7 @@ public extension SearXNGEnsurer {
     /// Outcome of the container start-or-run step.
     /// Mirrors the daemon outcome shape so the cascade merges both heals into
     /// one started flag plus the last failure detail.
-    struct ContainerOutcome: Sendable {
+    public struct ContainerOutcome: Sendable {
         public let didStart: Bool
         public let failure: String?
         public init(didStart: Bool, failure: String? = nil) {
@@ -756,7 +756,7 @@ public extension SearXNGEnsurer {
     /// tail, timeout) for server warn logs plus the collapsed Settings
     /// diagnostics element. Both normalize blanks to nil so callers never
     /// render whitespace as detail.
-    struct EnsureReport: Sendable {
+    public struct EnsureReport: Sendable {
         public let reachable: Bool
         public let started: Bool
         public let message: String?
@@ -776,12 +776,12 @@ public extension SearXNGEnsurer {
     /// remediation so it renders once; this key holds the chained stage fragments
     /// for warn logs plus collapsed diagnostics without nesting a second guidance
     /// message inside the banner.
-    static let diagnosticsUserInfoKey = "RuneWeaverSearXNGDiagnostics"
+    public static let diagnosticsUserInfoKey = "RuneWeaverSearXNGDiagnostics"
 
     /// Extracts the per-stage diagnostics chained for an ensure failure.
     /// - Parameter error: Failure from `unreachableError`.
     /// - Returns: Full cascade detail when present, nil for install-only or cancelled paths.
-    static func diagnostics(from error: Error) -> String? {
+    public static func diagnostics(from error: Error) -> String? {
         let raw = (error as NSError).userInfo[diagnosticsUserInfoKey] as? String
         let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
@@ -789,7 +789,7 @@ public extension SearXNGEnsurer {
 
     /// Trimmed banner for a daemon heal that stayed down.
     /// Single cause plus one hatch command; raw stage tail lives in diagnostics only.
-    static func daemonBanner() -> String {
+    public static func daemonBanner() -> String {
         "Container system service failed to start. Run `scripts/searxng-up.sh` to retry."
     }
 
@@ -797,7 +797,7 @@ public extension SearXNGEnsurer {
     /// Covers fresh-run failures (exit plus capped tail stays in diagnostics
     /// plus warn logs) so the banner renders once without leaking raw
     /// registry or runtime output.
-    static func runBanner() -> String {
+    public static func runBanner() -> String {
         "SearXNG container failed to start (run failed). Run `scripts/searxng-up.sh` to retry."
     }
 
@@ -806,7 +806,7 @@ public extension SearXNGEnsurer {
     /// cached, so the next attempt resumes instead of restarting.
     /// - Parameter timeoutSeconds: Pull budget that was exceeded.
     /// - Returns: Retry-with-cached-layers cause plus the single hatch command.
-    static func pullTimeoutBanner(timeoutSeconds: Double = containerImagePullTimeoutSeconds) -> String {
+    public static func pullTimeoutBanner(timeoutSeconds: Double = containerImagePullTimeoutSeconds) -> String {
         "SearXNG image pull timed out after \(Int(timeoutSeconds))s. Retry — downloaded layers are cached. Run `scripts/searxng-up.sh` to retry."
     }
 
@@ -814,14 +814,14 @@ public extension SearXNGEnsurer {
     /// Points at Hub reachability (auth, network, or registry outage) rather
     /// than the run step, so a registry miss never renders as a run failure.
     /// - Returns: Hub-reachability cause plus the single hatch command.
-    static func pullFailedBanner() -> String {
+    public static func pullFailedBanner() -> String {
         "SearXNG image pull failed. Check Docker Hub reachability, then run `scripts/searxng-up.sh` to retry."
     }
 
     /// Trimmed banner for a poll timeout with no heal failure to name.
     /// - Parameter baseURL: Configured `searxng_url`.
     /// - Returns: Not-reachable cause plus the single hatch command.
-    static func timeoutBanner(baseURL: String) -> String {
+    public static func timeoutBanner(baseURL: String) -> String {
         "SearXNG is not reachable at \(baseURL). Start it with `scripts/searxng-up.sh`, then retry."
     }
 
@@ -830,7 +830,7 @@ public extension SearXNGEnsurer {
     /// headline points at the exit rather than the elapsed backstop. Raw exit
     /// plus logs tail stays in diagnostics plus warn logs.
     /// - Returns: Crash cause plus the single hatch command.
-    static func readinessCrashBanner() -> String {
+    public static func readinessCrashBanner() -> String {
         "SearXNG container crashed during startup (exit with logs captured). Run `scripts/searxng-up.sh` to retry."
     }
 
@@ -839,7 +839,7 @@ public extension SearXNGEnsurer {
     /// or the create never committed, so the headline names the disappearance
     /// instead of a timeout note. The last probe plus logs tail stays in diagnostics.
     /// - Returns: Missing cause plus the single hatch command.
-    static func readinessMissingBanner() -> String {
+    public static func readinessMissingBanner() -> String {
         "SearXNG container went missing during startup. Run `scripts/searxng-up.sh` to retry."
     }
 
@@ -849,7 +849,7 @@ public extension SearXNGEnsurer {
     /// last state plus logs tail stays in diagnostics plus warn logs.
     /// - Parameter baseURL: Configured `searxng_url`.
     /// - Returns: Waiting cause with last-state hint plus the single hatch command.
-    static func readinessBackstopBanner(baseURL: String) -> String {
+    public static func readinessBackstopBanner(baseURL: String) -> String {
         "SearXNG did not become reachable at \(baseURL) while waiting (last state captured with logs). Run `scripts/searxng-up.sh` to retry."
     }
 
@@ -860,7 +860,7 @@ public extension SearXNGEnsurer {
     /// diagnostics plus warn logs, never in the banner, mirroring the crash path.
     /// - Parameter statusCode: Failing HTTP status when known, nil for a generic 5xx line.
     /// - Returns: Sick cause plus the single hatch command.
-    static func readinessServerErrorBanner(statusCode: Int? = nil) -> String {
+    public static func readinessServerErrorBanner(statusCode: Int? = nil) -> String {
         if let statusCode, (500 ..< 600).contains(statusCode) {
             return "SearXNG is responding with repeated server errors (HTTP \(statusCode) with body captured). Run `scripts/searxng-up.sh` to retry."
         }
@@ -873,7 +873,7 @@ public extension SearXNGEnsurer {
     /// engine answered but not with a usable page.
     /// - Parameter statusCode: Observed HTTP status.
     /// - Returns: True for 2xx/3xx.
-    static func isReadinessSuccessStatusCode(_ statusCode: Int) -> Bool {
+    public static func isReadinessSuccessStatusCode(_ statusCode: Int) -> Bool {
         (200 ..< 400).contains(statusCode)
     }
 
@@ -882,7 +882,7 @@ public extension SearXNGEnsurer {
     /// connection gaps keep waiting instead of extending the streak.
     /// - Parameter statusCode: Observed HTTP status.
     /// - Returns: True for 5xx.
-    static func isReadinessServerErrorStatusCode(_ statusCode: Int) -> Bool {
+    public static func isReadinessServerErrorStatusCode(_ statusCode: Int) -> Bool {
         (500 ..< 600).contains(statusCode)
     }
 
@@ -892,7 +892,7 @@ public extension SearXNGEnsurer {
     /// trip the fail-fast on its own.
     /// - Parameter bodyTail: Capped, decoded body tail for the probe.
     /// - Returns: True when the tail holds non-blank text.
-    static func isCountableServerErrorBody(_ bodyTail: String) -> Bool {
+    public static func isCountableServerErrorBody(_ bodyTail: String) -> Bool {
         !bodyTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -902,7 +902,7 @@ public extension SearXNGEnsurer {
     /// is capped so the headline cause stays readable in diagnostics.
     /// - Parameter data: Raw HTTP body bytes from the probe.
     /// - Returns: Capped single-line tail, or nil when empty or unparseable.
-    static func countableServerErrorBodyTail(from data: Data) -> String? {
+    public static func countableServerErrorBodyTail(from data: Data) -> String? {
         guard let decoded = String(data: data, encoding: .utf8) else { return nil }
         let tail = cappedTail(decoded)
         return isCountableServerErrorBody(tail) ? tail : nil
@@ -915,7 +915,7 @@ public extension SearXNGEnsurer {
     ///   - statusCode: Observed HTTP status, nil when no response arrived.
     ///   - bodyTail: Capped, decoded body tail, possibly empty.
     /// - Returns: True only for a countable 5xx.
-    static func shouldCountServerError(statusCode: Int?, bodyTail: String) -> Bool {
+    public static func shouldCountServerError(statusCode: Int?, bodyTail: String) -> Bool {
         guard let statusCode, isReadinessServerErrorStatusCode(statusCode) else { return false }
         return isCountableServerErrorBody(bodyTail)
     }
@@ -932,7 +932,7 @@ public extension SearXNGEnsurer {
     ///   - statusCode: Observed HTTP status, nil when no response arrived.
     ///   - bodyTail: Capped, decoded body tail, possibly empty.
     /// - Returns: Streak leaving this probe.
-    static func nextConsecutiveServerErrorCount(current: Int, statusCode: Int?, bodyTail: String) -> Int {
+    public static func nextConsecutiveServerErrorCount(current: Int, statusCode: Int?, bodyTail: String) -> Int {
         if let statusCode, isReadinessSuccessStatusCode(statusCode) {
             return 0
         }
@@ -956,7 +956,7 @@ public extension SearXNGEnsurer {
     /// instead of duplicating the threshold comparison.
     /// - Parameter count: Consecutive countable 5xx responses so far.
     /// - Returns: True once the streak reaches the threshold.
-    static func shouldFailFastOnConsecutiveServerErrors(_ count: Int) -> Bool {
+    public static func shouldFailFastOnConsecutiveServerErrors(_ count: Int) -> Bool {
         count >= SearXNGEnsurer.consecutiveServerErrorThreshold
     }
 
@@ -965,7 +965,7 @@ public extension SearXNGEnsurer {
     /// (2xx/3xx, resets), sick (countable 5xx, advances), broken (definitive
     /// non-5xx such as 4xx, resets), and patience (gaps or empty 5xx, preserves)
     /// apart without a second fetch per tick.
-    struct HTTPProbeSnapshot: Sendable, Equatable {
+    public struct HTTPProbeSnapshot: Sendable, Equatable {
         /// Observed HTTP status, nil when no response arrived or parsing failed.
         public let statusCode: Int?
         /// Capped single-line body tail, empty when none arrived or it was blank.
@@ -1003,7 +1003,7 @@ public extension SearXNGEnsurer {
     /// `logs:` never leaks crash words into the hint.
     /// - Parameter statusCode: Failing HTTP status.
     /// - Returns: Hint such as `http 500`.
-    static func readinessServerErrorStateText(statusCode: Int) -> String {
+    public static func readinessServerErrorStateText(statusCode: Int) -> String {
         "http \(statusCode)"
     }
 
@@ -1015,7 +1015,7 @@ public extension SearXNGEnsurer {
     ///   - statusCode: Failing HTTP status at the threshold trip.
     ///   - bodyTail: Capped body tail to headline, re-capped for safety.
     /// - Returns: Single-line waiting fragment for the diagnostics chain.
-    static func readinessServerErrorDetail(statusCode: Int, bodyTail: String) -> String {
+    public static func readinessServerErrorDetail(statusCode: Int, bodyTail: String) -> String {
         let tail = cappedTail(bodyTail)
         let combined = if tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             "container \(readinessServerErrorStateText(statusCode: statusCode))"
@@ -1035,7 +1035,7 @@ public extension SearXNGEnsurer {
     /// missing never poses as sickness the way the crash router already avoids.
     /// - Parameter detail: Chained per-stage fragments from the cascade.
     /// - Returns: First `http 5xx` status found in a waiting hint, nil otherwise.
-    static func serverErrorStatusCode(in detail: String) -> Int? {
+    public static func serverErrorStatusCode(in detail: String) -> Int? {
         let hint = waitingStateHint(in: detail)
         let pattern = #"\bhttp\s+(5\d\d)\b"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
@@ -1052,7 +1052,7 @@ public extension SearXNGEnsurer {
     /// Small struct replacing the 4-tuple so the large-tuple gate stays
     /// green while the cascade keeps the same down plus exit plus output
     /// plus timeout shape.
-    struct DaemonProbeOutcome: Sendable {
+    public struct DaemonProbeOutcome: Sendable {
         public let isDown: Bool
         public let exitCode: Int32?
         public let output: String
@@ -1086,7 +1086,7 @@ public extension SearXNGEnsurer {
     /// Small struct replacing the 4-tuple so the large-tuple gate stays
     /// green while the cascade keeps the same started plus exit plus
     /// output plus timeout shape.
-    struct SystemStartOutcome: Sendable {
+    public struct SystemStartOutcome: Sendable {
         public let started: Bool
         public let exitCode: Int32?
         public let output: String
@@ -1106,7 +1106,7 @@ public extension SearXNGEnsurer {
     /// binary or permissions error.
     /// - Parameter runtime: Resolved Apple Container CLI.
     /// - Returns: Whether the daemon looks down plus raw exit, output, and timeout flag.
-    static func daemonProbeResult(runtime: URL) async -> DaemonProbeOutcome {
+    public static func daemonProbeResult(runtime: URL) async -> DaemonProbeOutcome {
         if Task.isCancelled {
             return DaemonProbeOutcome(isDown: false, exitCode: nil, output: "", timedOut: false)
         }
@@ -1157,7 +1157,7 @@ public extension SearXNGEnsurer {
     /// budget; the caller re-probes afterwards to confirm the heal.
     /// - Parameter runtime: Resolved Apple Container CLI.
     /// - Returns: Whether the start exited 0 plus raw exit, output, and timeout flag.
-    static func systemStartResult(runtime: URL) async -> SystemStartOutcome {
+    public static func systemStartResult(runtime: URL) async -> SystemStartOutcome {
         if Task.isCancelled {
             return SystemStartOutcome(started: false, exitCode: nil, output: "", timedOut: false)
         }
@@ -1207,7 +1207,7 @@ public extension SearXNGEnsurer {
     /// ensure message thread.
     /// - Parameter runtime: Resolved Apple Container CLI.
     /// - Returns: Whether this call started the daemon plus failure detail when still down.
-    static func ensureDaemonStarted(runtime: URL) async -> DaemonOutcome {
+    public static func ensureDaemonStarted(runtime: URL) async -> DaemonOutcome {
         if Task.isCancelled {
             return DaemonOutcome(daemonStarted: false, failure: nil)
         }
@@ -1291,13 +1291,13 @@ public extension SearXNGEnsurer {
 /// classification. Pure and synchronous so the ticking watch and unit tests
 /// share one gate; terminal states fail fast with the logs tail while
 /// unparseable shapes stay unknown until the 165s backstop.
-public extension SearXNGEnsurer {
+extension SearXNGEnsurer {
     /// Decodes an inspect dump only when it is pure JSON.
     /// Mixed prose plus JSON stays unparseable so the caller keeps waiting
     /// instead of trusting a fragment that never proved container state.
     /// - Parameter output: Combined stdout plus stderr from the inspect probe.
     /// - Returns: Decoded array or object, nil when the dump is not pure JSON.
-    static func decodedInspectJSON(from output: String) -> Any? {
+    public static func decodedInspectJSON(from output: String) -> Any? {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         guard let data = trimmed.data(using: .utf8) else { return nil }
@@ -1311,7 +1311,7 @@ public extension SearXNGEnsurer {
     ///   - key: Logical key such as status or error.
     ///   - dict: Decoded object to search.
     /// - Returns: Value under the logical key, nil when absent.
-    static func inspectValue(forKey key: String, in dict: [String: Any]) -> Any? {
+    public static func inspectValue(forKey key: String, in dict: [String: Any]) -> Any? {
         let wanted = key.lowercased()
         for (candidate, value) in dict where candidate.lowercased() == wanted {
             return value
@@ -1324,7 +1324,7 @@ public extension SearXNGEnsurer {
     /// `"null"` read as healthy so an empty error key never fails the watch.
     /// - Parameter value: Decoded value under an error key.
     /// - Returns: True when the value proves a failure.
-    static func isNonEmptyInspectErrorValue(_ value: Any) -> Bool {
+    public static func isNonEmptyInspectErrorValue(_ value: Any) -> Bool {
         if value is NSNull {
             return false
         }
@@ -1341,7 +1341,7 @@ public extension SearXNGEnsurer {
     /// `errorMessage` from posing as failures the way substring search did.
     /// - Parameter value: Decoded inspect array or object.
     /// - Returns: True when an exact error key holds a failure.
-    static func nonEmptyErrorInDecodedJSON(_ value: Any) -> Bool {
+    public static func nonEmptyErrorInDecodedJSON(_ value: Any) -> Bool {
         if let dict = value as? [String: Any] {
             for (key, entry) in dict {
                 if key.lowercased() == "error", isNonEmptyInspectErrorValue(entry) {
@@ -1368,7 +1368,7 @@ public extension SearXNGEnsurer {
     /// - Parameters:
     ///   - value: Decoded inspect array or object.
     ///   - candidates: Accumulated state-like objects.
-    static func collectInspectStateCandidates(from value: Any, into candidates: inout [[String: Any]]) {
+    public static func collectInspectStateCandidates(from value: Any, into candidates: inout [[String: Any]]) {
         if let dict = value as? [String: Any] {
             var normalized = Set<String>()
             for key in dict.keys {
@@ -1401,7 +1401,7 @@ public extension SearXNGEnsurer {
     /// casing or encoding drift still waits unless the flag is unambiguously set.
     /// - Parameter value: Decoded value under a boolean lifecycle key.
     /// - Returns: True only when the flag is unambiguously set.
-    static func isSetInspectFlag(_ value: Any) -> Bool {
+    public static func isSetInspectFlag(_ value: Any) -> Bool {
         if let flag = value as? Bool {
             return flag
         }
@@ -1421,7 +1421,7 @@ public extension SearXNGEnsurer {
     /// guessing from unrelated fields such as image names or deadlines.
     /// - Parameter value: Decoded inspect array or object.
     /// - Returns: Classified state, nil when no legible state exists.
-    static func stateClassificationFromDecodedJSON(_ value: Any) -> ContainerReadinessState? {
+    public static func stateClassificationFromDecodedJSON(_ value: Any) -> ContainerReadinessState? {
         var candidates: [[String: Any]] = []
         collectInspectStateCandidates(from: value, into: &candidates)
         guard !candidates.isEmpty else { return nil }

@@ -27,21 +27,21 @@ private struct EmailSearchResponseEnvelope: Decodable {
 /// In-process scheduler worker executing scheduled jobs inside `RuneWeaverServer`.
 public actor ServerSchedulerWorker {
     private let scheduler: SchedulerStore
-    private let runs: RunLogStore
-    private let hub: WSHub
+    let runs: RunLogStore
+    let hub: WSHub
     private let runLock: SchedulerRunLock
-    private let orchestrator: Orchestrator
-    private let conversations: ConversationManager
+    let orchestrator: Orchestrator
+    let conversations: ConversationManager
     private let toolBus: ToolBus
-    private let approvals: ApprovalQueue?
-    private let notifier: (any SchedulerNotifier)?
-    private let logger: (@Sendable (String) async -> Void)?
+    let approvals: ApprovalQueue?
+    let notifier: (any SchedulerNotifier)?
+    let logger: (@Sendable (String) async -> Void)?
     private let pollChecker: (@Sendable (EmailPollRule) async -> [String])?
     private let indexCoordinator: IndexCoordinator?
     /// Durable goal registry backing due advancement, nil when goals are unwired.
-    private let goalStore: GoalStore?
+    let goalStore: GoalStore?
     /// Pursuit engine composing advancement prompts and bumping due dates.
-    private let goalEngine: GoalEngine?
+    let goalEngine: GoalEngine?
     /// Optional ideas engine refreshed on a nightly cadence so suggestions
     /// stay fresh even when no goal reaches achieved.
     private let ideasEngine: IdeasEngine?
@@ -59,15 +59,16 @@ public actor ServerSchedulerWorker {
     private var lastIdeasRefresh: Date
     /// Dedicated single-flight lock for goal fires so a slow goal turn never
     /// blocks job fires sharing the job lock, and vice versa.
-    private let goalRunLock: SchedulerRunLock
+    let goalRunLock: SchedulerRunLock
+    let activeTurns: ActiveTurnTracker?
     /// Interruption gate for background notifications and dashboard frames.
     ///
     /// Filters macOS notifications and `proactive_message` frames only; run
     /// history, run broadcasts, and the approvals inbox always record so the
     /// audit trail never loses a turn the gate suppresses.
-    private let outcomeGate: OutcomeGate
+    let outcomeGate: OutcomeGate
     private let schedulerConfig: SchedulerConfig
-    private let goalsConfig: GoalsConfig
+    let goalsConfig: GoalsConfig
 
     private let intervalSeconds: TimeInterval
     private var lastCheck: Date
@@ -77,32 +78,16 @@ public actor ServerSchedulerWorker {
     private var isStarted = false
 
     /// Creates a server scheduler worker.
-    public init(
-        scheduler: SchedulerStore,
-        runs: RunLogStore,
-        hub: WSHub,
-        runLock: SchedulerRunLock,
-        orchestrator: Orchestrator,
-        conversations: ConversationManager,
-        toolBus: ToolBus,
-        approvals: ApprovalQueue? = nil,
-        intervalSeconds: TimeInterval = 60,
-        notifier: (any SchedulerNotifier)? = nil,
-        logger: (@Sendable (String) async -> Void)? = nil,
-        pollChecker: (@Sendable (EmailPollRule) async -> [String])? = nil,
-        indexCoordinator: IndexCoordinator? = nil,
-        goalStore: GoalStore? = nil,
-        goalEngine: GoalEngine? = nil,
-        ideasEngine: IdeasEngine? = nil,
-        goalRunLock: SchedulerRunLock? = nil,
-        triggerEpisodeStore: EpisodeStore? = nil,
-        goalTriggerBridge: GoalTriggerBridge = GoalTriggerBridge(),
-        outcomeGate: OutcomeGate? = nil,
-        proactiveConfig: ProactiveConfig = ProactiveConfig(),
-        judgeLLM: (any LLMProvider)? = nil,
-        schedulerConfig: SchedulerConfig = .empty,
-        goalsConfig: GoalsConfig = GoalsConfig()
-    ) {
+    public init(scheduler: SchedulerStore, runs: RunLogStore, hub: WSHub, runLock: SchedulerRunLock, orchestrator: Orchestrator,
+                conversations: ConversationManager, toolBus: ToolBus, approvals: ApprovalQueue? = nil, intervalSeconds: TimeInterval = 60,
+                notifier: (any SchedulerNotifier)? = nil, logger: (@Sendable (String) async -> Void)? = nil,
+                pollChecker: (@Sendable (EmailPollRule) async -> [String])? = nil, indexCoordinator: IndexCoordinator? = nil,
+                goalStore: GoalStore? = nil, goalEngine: GoalEngine? = nil, ideasEngine: IdeasEngine? = nil,
+                goalRunLock: SchedulerRunLock? = nil, activeTurns: ActiveTurnTracker? = nil, triggerEpisodeStore: EpisodeStore? = nil,
+                goalTriggerBridge: GoalTriggerBridge = GoalTriggerBridge(), outcomeGate: OutcomeGate? = nil,
+                proactiveConfig: ProactiveConfig = ProactiveConfig(), judgeLLM: (any LLMProvider)? = nil,
+                schedulerConfig: SchedulerConfig = .empty, goalsConfig: GoalsConfig = GoalsConfig())
+    {
         self.scheduler = scheduler
         self.runs = runs
         self.hub = hub
@@ -123,6 +108,7 @@ public actor ServerSchedulerWorker {
         self.goalEngine = goalEngine
         self.ideasEngine = ideasEngine
         self.goalRunLock = goalRunLock ?? SchedulerRunLock()
+        self.activeTurns = activeTurns
         // The trigger bridge shares the goals database file, so an unwired
         // episodic store falls back to one over the same path; a nil path
         // leaves the bridge inert rather than polling a phantom store.
@@ -340,7 +326,7 @@ public actor ServerSchedulerWorker {
     /// `milestones`, and `guarded` installs stay silent (the guarded judge
     /// only weighs scheduler successes) while `all` surfaces it as before.
     /// - Parameter idea: Newly persisted suggestion to surface.
-    private func broadcastIdeaProposed(_ idea: Idea) async {
+    func broadcastIdeaProposed(_ idea: Idea) async {
         // The frame decoder rejects blank card text, and a directly-seeded row
         // can carry a whitespace-only body, so trim before choosing the
         // fallback; a blank title falls back too rather than emitting a frame
@@ -463,78 +449,47 @@ extension ServerSchedulerWorker {
         // The single-flight lock is held for the whole turn and released with a
         // structured await before returning, so the next tick never observes a
         // stale held lock from a detached release racing the return.
+        let taskBox = TurnTaskBox()
+        let registration = await activeTurns?.register(sessionID: sessionID, onCancel: { taskBox.cancel() })
         let result: SchedulerRunResult
         do {
             let maxIterations = job.maxToolIterations ?? schedulerConfig.defaultMaxToolIterations
             let policy: ToolLimitPolicy = job.onToolLimit == "park" ? .park : .forceSynthesis
-            let response = try await orchestrator.process(
-                input: UserInput(
-                    text: job.prompt,
-                    sessionID: sessionID,
-                    source: "scheduler",
-                    toolLimitPolicy: policy,
-                    maxToolIterations: maxIterations
-                ),
-                onEvent: { [hub] event in
-                    await broadcastWSEventFrame(event, sessionID: sessionID, hub: hub)
-                }
-            )
+            let runTask: Task<OrchestratorResponse, any Error> = Task {
+                try await orchestrator.process(
+                    input: UserInput(
+                        text: job.prompt,
+                        sessionID: sessionID,
+                        source: "scheduler",
+                        toolLimitPolicy: policy,
+                        maxToolIterations: maxIterations
+                    ),
+                    onEvent: { [hub] event in
+                        await broadcastWSEventFrame(event, sessionID: sessionID, hub: hub)
+                    }
+                )
+            }
+            taskBox.set(runTask)
+            let response = try await runTask.value
+            if let registration {
+                await activeTurns?.unregister(sessionID: sessionID, token: registration.token)
+            }
             await broadcastStreamDone(for: response, sessionID: sessionID, hub: hub)
             if response.isParked, let approvals {
                 await broadcastParkedApprovals(for: response, approvals: approvals, hub: hub)
             }
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            // Parked scheduler turns remain as awaiting_approval like chat turns, resolving through
-            // the same inbox resume path in their session. Budget exceeded turns finish with
-            // forced diagnostic synthesis and budget_exceeded status.
-            let runStatus = if response.isParked {
-                "awaiting_approval"
-            } else if response.isBudgetExceeded {
-                "budget_exceeded"
-            } else {
-                "ok"
-            }
-            let entry = await runs.update(
-                id: initialEntry.id,
-                status: runStatus,
-                response: response.text,
-                toolActions: response.toolActions,
-                totalTokens: response.totalTokens,
-                durationMs: durationMs
-            ) ?? initialEntry
-            await hub.broadcastRun(entry)
-
-            let short = ProactiveEvent.makePreview(response.text)
-            await logger?("Scheduler fired '\(job.name)' (\(reason.displayName)): \(short)")
-            // The gate filters interruptions only; the run row and its run
-            // broadcast above always record so suppressed turns stay auditable.
-            let eventKind: ProactiveEventKind = if response.isParked {
-                .runParked
-            } else if response.isBudgetExceeded {
-                .runBudgetExceeded
-            } else {
-                .schedulerOk
-            }
-            let outcomeText = response.text.isEmpty ? job.prompt : response.text
-            let decision = await outcomeGate.decide(event: ProactiveEvent(kind: eventKind, title: job.name, outcome: outcomeText))
-            if decision.surface {
-                if let notifier {
-                    let title = response.isBudgetExceeded ? "Rune Weaver: \(job.name) (Budget Exceeded)" : "Rune Weaver: \(job.name)"
-                    await notifier.notify(title: title, body: short.isEmpty ? job.prompt : short)
-                }
-                await broadcastProactive(kind: eventKind, title: job.name, headline: decision.headline, sessionID: sessionID)
-            }
-
-            result = SchedulerRunResult(
-                jobName: job.name,
+            result = await recordJobSuccess(
+                job: job,
                 sessionID: sessionID,
-                fired: true,
-                responseText: response.text,
-                fireReason: reason,
-                startedAt: startTime,
-                finishedAt: Date()
+                runID: initialEntry.id,
+                response: response,
+                startTime: startTime,
+                reason: reason
             )
         } catch {
+            if let registration {
+                await activeTurns?.unregister(sessionID: sessionID, token: registration.token)
+            }
             result = await handleJobFailure(
                 job: job,
                 sessionID: sessionID,
@@ -549,13 +504,70 @@ extension ServerSchedulerWorker {
         return result
     }
 
+    private func recordJobSuccess(
+        job: SchedulerJob,
+        sessionID: UUID,
+        runID: UUID,
+        response: OrchestratorResponse,
+        startTime: Date,
+        reason: SchedulerFireReason
+    ) async -> SchedulerRunResult {
+        let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+        let runStatus = if response.isParked {
+            "awaiting_approval"
+        } else if response.isBudgetExceeded {
+            "budget_exceeded"
+        } else {
+            "ok"
+        }
+        if let entry = await runs.update(
+            id: runID,
+            status: runStatus,
+            response: response.text,
+            toolActions: response.toolActions,
+            totalTokens: response.totalTokens,
+            durationMs: durationMs
+        ) {
+            await hub.broadcastRun(entry)
+        }
+
+        let short = ProactiveEvent.makePreview(response.text)
+        await logger?("Scheduler fired '\(job.name)' (\(reason.displayName)): \(short)")
+        let eventKind: ProactiveEventKind = if response.isParked {
+            .runParked
+        } else if response.isBudgetExceeded {
+            .runBudgetExceeded
+        } else {
+            .schedulerOk
+        }
+        let outcomeText = response.text.isEmpty ? job.prompt : response.text
+        let decision = await outcomeGate.decide(event: ProactiveEvent(kind: eventKind, title: job.name, outcome: outcomeText))
+        if decision.surface {
+            if let notifier {
+                let title = response.isBudgetExceeded ? "Rune Weaver: \(job.name) (Budget Exceeded)" : "Rune Weaver: \(job.name)"
+                await notifier.notify(title: title, body: short.isEmpty ? job.prompt : short)
+            }
+            await broadcastProactive(kind: eventKind, title: job.name, headline: decision.headline, sessionID: sessionID)
+        }
+
+        return SchedulerRunResult(
+            jobName: job.name,
+            sessionID: sessionID,
+            fired: true,
+            responseText: response.text,
+            fireReason: reason,
+            startedAt: startTime,
+            finishedAt: Date()
+        )
+    }
+
     /// Records an audit run entry for a scheduled job that skipped firing because it is already running.
     private func recordJobSkipped(job: SchedulerJob, startTime: Date) async -> SchedulerRunResult {
         let skipMsg = "Skipped '\(job.name)': already running"
         await logger?(skipMsg)
-        // Skipped runs create no conversation, so the audit entry stays
-        // untagged and the result reuses the job identifier as a stable
-        // placeholder instead of inventing an orphan session for filtering.
+        // Skipped runs create no conversation, so the audit entry stays untagged
+        // with a nil session while the ephemeral result reuses the job
+        // identifier as a stable placeholder for filtering.
         let entry = await runs.append(
             kind: "scheduler",
             status: "skipped",
@@ -585,6 +597,24 @@ extension ServerSchedulerWorker {
         error: any Error
     ) async -> SchedulerRunResult {
         let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+        if error is CancellationError {
+            let entry = await runs.update(
+                id: initialEntry.id,
+                status: "cancelled",
+                durationMs: durationMs
+            ) ?? initialEntry
+            await hub.broadcastRun(entry)
+            await logger?("Scheduler job '\(job.name)' cancelled.")
+            return SchedulerRunResult(
+                jobName: job.name,
+                sessionID: sessionID,
+                fired: true,
+                errorMessage: "cancelled",
+                fireReason: reason,
+                startedAt: startTime,
+                finishedAt: Date()
+            )
+        }
         let detail = error.localizedDescription
         let entry = await runs.update(
             id: initialEntry.id,
@@ -620,415 +650,9 @@ extension ServerSchedulerWorker {
 
 // MARK: - Goal Advancement Execution
 
-/// Dedicated goal advancement execution methods.
-extension ServerSchedulerWorker {
-    /// Records an audit run entry for a goal that skipped firing because it is already running.
-    private func recordGoalSkipped(goal: Goal, startTime: Date) async -> SchedulerRunResult {
-        let skipMsg = "Skipped goal '\(goal.title)': already running"
-        await logger?(skipMsg)
-        // Skipped goals create no conversation, so the audit entry stays
-        // untagged like the job skip path instead of inventing an orphan
-        // session, while still carrying the goal link for filtering.
-        let entry = await runs.append(
-            kind: "goal",
-            status: "skipped",
-            message: skipMsg,
-            sessionID: nil,
-            goalID: goal.id,
-            durationMs: 0
-        )
-        await hub.broadcastRun(entry)
-        // The ephemeral result still needs a session-shaped identifier for
-        // filtering, so it carries a fresh placeholder that is never
-        // persisted: the audit entry above stays untagged (nil session)
-        // plus the goal link, mirroring the job skip path's untagged row.
-        return SchedulerRunResult(
-            jobName: goal.title,
-            sessionID: UUID(),
-            fired: false,
-            skippedReason: "already running",
-            fireReason: nil,
-            startedAt: startTime,
-            finishedAt: Date(),
-            goalID: goal.id
-        )
-    }
-
-    /// Records an audit run entry and broadcasts results for a successfully advanced or parked goal.
-    private func recordGoalSuccess(
-        goal: Goal,
-        sessionID: UUID,
-        runID: UUID,
-        outcome: GoalAdvancementTurn,
-        startTime: Date,
-        eventKind: ProactiveEventKind = .goalStepDone
-    ) async -> SchedulerRunResult {
-        let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-        // Parked goal turns remain as awaiting_approval like scheduler
-        // turns, resolving through the same inbox resume path in their
-        // session. Budget exceeded turns finish with forced diagnostic
-        // synthesis and budget_exceeded status.
-        let runStatus = outcome.isParked ? "awaiting_approval" : (outcome.isBudgetExceeded ? "budget_exceeded" : "ok")
-        let entry = await runs.update(
-            id: runID,
-            status: runStatus,
-            response: outcome.text,
-            toolActions: outcome.toolActions,
-            totalTokens: outcome.totalTokens,
-            durationMs: durationMs
-        )
-        if let entry {
-            await hub.broadcastRun(entry)
-        }
-        if outcome.isParked, let approvals {
-            let pending = await approvals.requests(for: sessionID)
-            let callIDs = Set(outcome.toolActions.map(\.callID))
-            for request in pending where callIDs.isEmpty || callIDs.contains(request.input.callID) {
-                await hub.broadcastApproval(request)
-            }
-        }
-        let short = ProactiveEvent.makePreview(outcome.text)
-        if outcome.isParked {
-            await logger?("Goal '\(goal.title)' parked awaiting approval.")
-        } else if outcome.isBudgetExceeded {
-            await logger?("Goal '\(goal.title)' iteration budget exceeded: \(short)")
-        } else {
-            await logger?("Goal fired '\(goal.title)': \(short)")
-        }
-        // The gate filters interruptions only; the goal row and its run
-        // broadcast above always record so suppressed steps stay auditable.
-        let outcomeText = outcome.text.isEmpty ? goal.title : outcome.text
-        let decision = await outcomeGate.decide(event: ProactiveEvent(kind: eventKind, title: goal.title, outcome: outcomeText))
-        if decision.surface {
-            if let notifier {
-                let title = outcome.isBudgetExceeded ? "Rune Weaver: \(goal.title) (Budget Exceeded)" : "Rune Weaver: \(goal.title)"
-                await notifier.notify(title: title, body: short.isEmpty ? goal.title : short)
-            }
-            await broadcastProactive(kind: eventKind, title: goal.title, headline: decision.headline, sessionID: sessionID, goalID: goal.id)
-        }
-        // Suggestions born from the achievement ride their own proactive frames.
-        // They are surfaced here rather than only on the nightly pass because
-        // `generate()` returns just the newly inserted rows and the store dedups
-        // their titles, so the next nightly batch would never announce them. Each
-        // frame is gated independently so a suppressed goal outcome never hides a
-        // fresh suggestion.
-        for idea in outcome.ideas {
-            await broadcastIdeaProposed(idea)
-        }
-        return SchedulerRunResult(
-            jobName: goal.title,
-            sessionID: sessionID,
-            fired: true,
-            responseText: outcome.text,
-            fireReason: nil,
-            startedAt: startTime,
-            finishedAt: Date(),
-            goalID: goal.id
-        )
-    }
-
-    /// Records an audit run entry and broadcasts error details for a failed goal advancement.
-    private func recordGoalFailure(
-        goal: Goal,
-        sessionID: UUID,
-        runID: UUID,
-        error: any Error,
-        startTime: Date
-    ) async -> SchedulerRunResult {
-        let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-        let detail = error.localizedDescription
-        let entry = await runs.update(
-            id: runID,
-            status: "error",
-            response: detail,
-            durationMs: durationMs
-        )
-        if let entry {
-            await hub.broadcastRun(entry)
-        }
-        await logger?("Goal failed '\(goal.title)': \(detail)")
-        // Failures break through under every surfacing mode except off; the
-        // error row above always records so the gate never hides a failure
-        // from history.
-        let errorDecision = await outcomeGate.decide(event: ProactiveEvent(kind: .schedulerError, title: goal.title, outcome: detail))
-        if errorDecision.surface {
-            let errorPreview = ProactiveEvent.makePreview(detail)
-            if let notifier {
-                await notifier.notify(title: "Rune Weaver: \(goal.title)", body: errorPreview.isEmpty ? goal.title : errorPreview)
-            }
-            await broadcastProactive(kind: .schedulerError, title: goal.title, headline: errorDecision.headline, sessionID: sessionID, goalID: goal.id)
-        }
-        return SchedulerRunResult(
-            jobName: goal.title,
-            sessionID: sessionID,
-            fired: true,
-            errorMessage: detail,
-            fireReason: nil,
-            startedAt: startTime,
-            finishedAt: Date(),
-            goalID: goal.id
-        )
-    }
-
-    /// Executes one due goal under the dedicated goal single-flight lock.
-    /// Mirrors `executeJob` exactly: a fresh per-run session linked to the
-    /// goal, a `goal` run row cycling running to ok, awaiting_approval, or
-    /// error, then a due-date bump so the next firing keeps its rhythm.
-    /// Parked goal turns stay in their session for the inbox resume path.
-    /// Cancelled turns stay due with a `cancelled` row and rethrow instead of
-    /// recording an error, so cooperative cancellation always propagates.
-    private func executeGoal(_ goal: Goal, store: GoalStore, engine: GoalEngine) async throws -> SchedulerRunResult {
-        let startTime = Date()
-
-        guard await goalRunLock.tryAcquire(id: goal.id, name: goal.title) else {
-            return await recordGoalSkipped(goal: goal, startTime: startTime)
-        }
-
-        let sessionID = await makeGoalRunSession(goal: goal, conversations: conversations)
-
-        let initialEntry = await runs.append(
-            kind: "goal",
-            status: "running",
-            message: goal.title,
-            sessionID: sessionID,
-            goalID: goal.id,
-            durationMs: 0
-        )
-        await hub.broadcastRun(initialEntry)
-
-        // The goal lock is held for the whole turn and released with a
-        // structured await before returning, so the next tick never observes
-        // a stale held lock from a detached release racing the return.
-        let result: SchedulerRunResult
-        do {
-            // One shared advancement path keeps the service and CLI loops from
-            // drifting: bounded audit reads feed the prompt, a parked turn
-            // skips its due bump until the inbox resume completes, and the
-            // run-log row supplies the audit correlation.
-            let turnOrchestrator = orchestrator
-            let turnSessionID = sessionID
-            let turnGoalID = goal.id
-            let bumpLogger = logger
-            let bumpTitle = goal.title
-            let turnHub = hub
-            let outcome = try await GoalAdvancementRunner.advance(
-                goal: goal,
-                store: store,
-                engine: engine,
-                runID: initialEntry.id,
-                turn: { prompt in
-                    let response = try await turnOrchestrator.process(
-                        input: UserInput(
-                            text: prompt,
-                            sessionID: turnSessionID,
-                            source: "goal",
-                            goalID: turnGoalID,
-                            toolLimitPolicy: .forceSynthesis,
-                            maxToolIterations: goalsConfig.maxToolIterations
-                        ),
-                        onEvent: { event in
-                            await broadcastWSEventFrame(event, sessionID: turnSessionID, hub: turnHub)
-                        }
-                    )
-                    await broadcastStreamDone(for: response, sessionID: turnSessionID, hub: turnHub)
-                    return GoalAdvancementTurn(
-                        text: response.text,
-                        isParked: response.isParked,
-                        isBudgetExceeded: response.isBudgetExceeded,
-                        toolActions: response.toolActions,
-                        totalTokens: response.totalTokens
-                    )
-                },
-                onPostAdvanceFailure: { error in
-                    await bumpLogger?("Goal '\(bumpTitle)' post-advance failed: \(error.localizedDescription)")
-                }
-            )
-            let eventKind = await resolveGoalEventKind(goal: goal, store: store, outcome: outcome)
-            result = await recordGoalSuccess(
-                goal: goal,
-                sessionID: sessionID,
-                runID: initialEntry.id,
-                outcome: outcome,
-                startTime: startTime,
-                eventKind: eventKind
-            )
-            // The turn may have moved steps or flipped lifecycle state through
-            // `goal.progress`, so push the fresh row for live dashboards; the
-            // run broadcast above already carried the audit entry.
-            await broadcastGoalSnapshot(goalID: goal.id, store: store)
-        } catch is CancellationError {
-            // Cancelled turns did not advance, so they stay due: mark the run
-            // cancelled (never error), release the lock, then propagate.
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            if let entry = await runs.update(
-                id: initialEntry.id,
-                status: "cancelled",
-                durationMs: durationMs
-            ) {
-                await hub.broadcastRun(entry)
-            }
-            await goalRunLock.release(id: goal.id, name: goal.title)
-            throw CancellationError()
-        } catch {
-            result = await recordGoalFailure(
-                goal: goal,
-                sessionID: sessionID,
-                runID: initialEntry.id,
-                error: error,
-                startTime: startTime
-            )
-            // Even a failed turn bumps the due date (never pins due), so the
-            // row refresh keeps the new due instant visible without a refetch.
-            await broadcastGoalSnapshot(goalID: goal.id, store: store)
-        }
-
-        await goalRunLock.release(id: goal.id, name: goal.title)
-        return result
-    }
-
-    /// Contention signal for manual goal advancement when the goal is already running.
-    ///
-    /// Thrown after recording the honest skipped audit row so the route can
-    /// answer 409 like the manual job run without inventing a second lock.
-    public struct GoalBusyError: Error, Sendable {
-        /// Creates a busy signal.
-        public init() {}
-    }
-
-    /// Advances one goal immediately, bypassing its due cadence.
-    ///
-    /// Shares the single-flight lock, per-run session, run-row lifecycle, and
-    /// proactive gating with the background tick so manual and automatic fires
-    /// cannot stack or drift. The returned identifiers let the route answer
-    /// with both the durable run row and its session without a second lookup.
-    /// - Parameter goalID: Goal to advance.
-    /// - Returns: Run-log identifier plus the per-run session identifier.
-    public func advanceGoalNow(goalID: UUID) async throws -> (runID: UUID, sessionID: UUID) {
-        guard let store = goalStore, let engine = goalEngine else {
-            throw GoalEngineError.disabled
-        }
-        guard await engine.isEnabled else {
-            throw GoalEngineError.disabled
-        }
-        guard let goal = try await store.goal(id: goalID) else {
-            throw GoalStoreError.notFound("No goal \(goalID)")
-        }
-        let startTime = Date()
-        guard await goalRunLock.tryAcquire(id: goal.id, name: goal.title) else {
-            _ = await recordGoalSkipped(goal: goal, startTime: startTime)
-            throw GoalBusyError()
-        }
-        let sessionID = await makeGoalRunSession(goal: goal, conversations: conversations)
-        let initialEntry = await runs.append(
-            kind: "goal",
-            status: "running",
-            message: goal.title,
-            sessionID: sessionID,
-            goalID: goal.id,
-            durationMs: 0
-        )
-        await hub.broadcastRun(initialEntry)
-        do {
-            let turnOrchestrator = orchestrator
-            let turnSessionID = sessionID
-            let turnGoalID = goal.id
-            let bumpLogger = logger
-            let bumpTitle = goal.title
-            let turnHub = hub
-            let outcome = try await GoalAdvancementRunner.advance(
-                goal: goal,
-                store: store,
-                engine: engine,
-                runID: initialEntry.id,
-                turn: { prompt in
-                    let response = try await turnOrchestrator.process(
-                        input: UserInput(
-                            text: prompt,
-                            sessionID: turnSessionID,
-                            source: "goal",
-                            goalID: turnGoalID,
-                            toolLimitPolicy: .forceSynthesis,
-                            maxToolIterations: goalsConfig.maxToolIterations
-                        ),
-                        onEvent: { event in
-                            await broadcastWSEventFrame(event, sessionID: turnSessionID, hub: turnHub)
-                        }
-                    )
-                    await broadcastStreamDone(for: response, sessionID: turnSessionID, hub: turnHub)
-                    return GoalAdvancementTurn(
-                        text: response.text,
-                        isParked: response.isParked,
-                        isBudgetExceeded: response.isBudgetExceeded,
-                        toolActions: response.toolActions,
-                        totalTokens: response.totalTokens
-                    )
-                },
-                onPostAdvanceFailure: { error in
-                    await bumpLogger?("Goal '\(bumpTitle)' post-advance failed: \(error.localizedDescription)")
-                }
-            )
-            let eventKind = await resolveGoalEventKind(goal: goal, store: store, outcome: outcome)
-            _ = await recordGoalSuccess(
-                goal: goal,
-                sessionID: sessionID,
-                runID: initialEntry.id,
-                outcome: outcome,
-                startTime: startTime,
-                eventKind: eventKind
-            )
-            await broadcastGoalSnapshot(goalID: goal.id, store: store)
-            await goalRunLock.release(id: goal.id, name: goal.title)
-            return (runID: initialEntry.id, sessionID: sessionID)
-        } catch is CancellationError {
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            if let entry = await runs.update(
-                id: initialEntry.id,
-                status: "cancelled",
-                durationMs: durationMs
-            ) {
-                await hub.broadcastRun(entry)
-            }
-            await goalRunLock.release(id: goal.id, name: goal.title)
-            throw CancellationError()
-        } catch {
-            _ = await recordGoalFailure(
-                goal: goal,
-                sessionID: sessionID,
-                runID: initialEntry.id,
-                error: error,
-                startTime: startTime
-            )
-            await broadcastGoalSnapshot(goalID: goal.id, store: store)
-            await goalRunLock.release(id: goal.id, name: goal.title)
-            throw error
-        }
-    }
-
-    /// Pushes the current goal row to live sockets after an advancement turn.
-    ///
-    /// Best-effort refresh so dashboards patch one row instead of refetching;
-    /// failures only log because the run row and its broadcast already landed.
-    private func broadcastGoalSnapshot(goalID: UUID, store: GoalStore) async {
-        do {
-            if let goal = try await store.goal(id: goalID) {
-                let steps = await (try? store.steps(goalID: goalID)) ?? []
-                await hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
-            }
-        } catch {
-            await logger?("Goal snapshot broadcast failed: \(error.localizedDescription)")
-        }
-    }
-}
-
-/// Creates an isolated per-run goal session for one advancement fire.
-/// Mirrors `makeSchedulerRunSession`: a fresh identifier keeps background
-/// runs isolated from chat and from each other, while the goal link keeps
-/// runs and sessions joinable without a second lookup.
-func makeGoalRunSession(goal: Goal, conversations: ConversationManager) async -> UUID {
-    let sessionID = UUID()
-    await conversations.ensureSession(id: sessionID, title: goal.title, source: "goal", overwrite: true, goalID: goal.id)
-    return sessionID
-}
+// Goal advancement execution lives in ServerSchedulerWorkerGoalExecution so
+// this worker stays within the file-length budget; the tick and manual
+// advance reach it through the same actor extension.
 
 // MARK: - Proactive surfacing helpers
 
@@ -1052,7 +676,7 @@ extension ServerSchedulerWorker {
     /// headline plus session and goal links so the dashboard can raise a Web
     /// Notification or badge and deep-link without a second lookup, even with
     /// no macOS notifier.
-    private func broadcastProactive(kind: ProactiveEventKind, title: String, headline: String, sessionID: UUID? = nil, goalID: UUID? = nil) async {
+    func broadcastProactive(kind: ProactiveEventKind, title: String, headline: String, sessionID: UUID? = nil, goalID: UUID? = nil) async {
         // The hub owns the single encoding for this wire shape, so build the
         // frame and reuse it instead of duplicating the encode here.
         let frame = WSProactiveMessageFrame(kind: kind.rawValue, title: title, headline: headline, sessionID: sessionID, goalID: goalID)
@@ -1066,7 +690,7 @@ extension ServerSchedulerWorker {
     /// step, with routine step completion as the fallback. Best-effort: store
     /// failures degrade to the routine kind rather than failing the turn, and
     /// the gate still surfaces errors and parked turns from their own paths.
-    private func resolveGoalEventKind(goal: Goal, store: GoalStore, outcome: GoalAdvancementTurn) async -> ProactiveEventKind {
+    func resolveGoalEventKind(goal: Goal, store: GoalStore, outcome: GoalAdvancementTurn) async -> ProactiveEventKind {
         if outcome.isParked {
             return .runParked
         }
@@ -1104,7 +728,7 @@ extension ServerSchedulerWorker {
     /// exchange; the preview already carries the shared 160-character bound.
     /// - Parameter event: Routine outcome awaiting a verdict.
     /// - Returns: User prompt for the judge model.
-    public static func proactiveJudgePrompt(for event: ProactiveEvent) -> String {
+    static func proactiveJudgePrompt(for event: ProactiveEvent) -> String {
         let title = ProactiveEvent.clampHeadline(event.title)
         return """
         You are the interruption judge for Rune Weaver background runs. \
@@ -1124,7 +748,7 @@ extension ServerSchedulerWorker {
     /// outcome.
     /// - Parameter text: Raw judge reply text.
     /// - Returns: Decoded verdict.
-    public static func parseProactiveJudgeResponse(_ text: String) throws -> SurfacingVerdict {
+    static func parseProactiveJudgeResponse(_ text: String) throws -> SurfacingVerdict {
         struct Payload: Decodable {
             let surface: Bool
             let headline: String
@@ -1175,7 +799,7 @@ extension ServerSchedulerWorker {
     /// gate itself enforces the judge timeout, so this closure never sleeps.
     /// - Parameter llm: Provider serving the single judge exchange.
     /// - Returns: Judge closure for a guarded gate.
-    public static func makeProactiveJudge(llm: any LLMProvider) -> ProactiveJudge {
+    static func makeProactiveJudge(llm: any LLMProvider) -> ProactiveJudge {
         let captured = llm
         return { @Sendable event in
             let prompt = proactiveJudgePrompt(for: event)
@@ -1193,84 +817,6 @@ extension ServerSchedulerWorker {
             }
             return try parseProactiveJudgeResponse(text)
         }
-    }
-}
-
-/// Adapter delivering index run lifecycle events onto the server's durable run
-/// log and live WebSocket hub.
-///
-/// A run's start event is appended as a `running` row and broadcast as
-/// `run_started`; its completion event updates that same row and broadcasts
-/// `run_completed`. Both events carry the coordinator's per-run session
-/// identifier, so index runs are filterable in run history exactly like
-/// scheduler turns.
-public struct ServerIndexRunReporter: IndexRunReporting {
-    /// Kind tag applied to index run log rows.
-    public static let kind = "index"
-
-    /// Durable run audit trail.
-    private let runs: RunLogStore
-    /// Live sockets receiving run broadcasts.
-    private let hub: WSHub
-
-    /// Creates a reporter.
-    /// - Parameters:
-    ///   - runs: Run audit trail to persist into.
-    ///   - hub: Socket hub to broadcast through.
-    public init(runs: RunLogStore, hub: WSHub) {
-        self.runs = runs
-        self.hub = hub
-    }
-
-    /// Persists and broadcasts a run start.
-    /// - Parameter event: The start event.
-    public func runStarted(_ event: IndexRunEvent) async {
-        let entry = RunLogEntry(
-            id: event.id,
-            sessionID: event.sessionID,
-            kind: Self.kind,
-            status: event.status.rawValue,
-            message: event.message,
-            timestamp: event.timestamp,
-            response: event.response,
-            durationMs: event.durationMs
-        )
-        await runs.append(entry)
-        await hub.broadcastRun(entry)
-    }
-
-    /// Persists and broadcasts a run completion.
-    ///
-    /// The completion event already carries the end instant, so the update
-    /// stamps it onto the start row: the finished time then reads as seconds
-    /// ago at completion instead of the run's duration ago. The start row keeps
-    /// nothing of the start except message order. Falls back to appending the
-    /// completed entry when the start row is not present, so a completion never
-    /// disappears because its start was pruned.
-    /// - Parameter event: The completion event.
-    public func runCompleted(_ event: IndexRunEvent) async {
-        if let updated = await runs.update(
-            id: event.id,
-            status: event.status.rawValue,
-            response: event.response,
-            durationMs: event.durationMs,
-            timestamp: event.timestamp
-        ) {
-            await hub.broadcastRun(updated)
-            return
-        }
-        let entry = RunLogEntry(
-            id: event.id,
-            sessionID: event.sessionID,
-            kind: Self.kind,
-            status: event.status.rawValue,
-            message: event.message,
-            timestamp: event.timestamp,
-            response: event.response,
-            durationMs: event.durationMs
-        )
-        await runs.append(entry)
-        await hub.broadcastRun(entry)
     }
 }
 

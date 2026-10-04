@@ -2,9 +2,9 @@
 
 import Foundation
 
-public extension ContainerMachineManager {
+extension ContainerMachineManager {
     /// Reports whether a machine has outlived its idle time-to-live.
-    static func isStaleMachine(
+    public static func isStaleMachine(
         _ machine: ContainerMachineInfo,
         maxAgeSeconds: TimeInterval,
         now: Date = Date()
@@ -17,7 +17,7 @@ public extension ContainerMachineManager {
     }
 
     /// Filters a listing down to the machines that have outlived their TTL.
-    static func staleMachines(
+    public static func staleMachines(
         in machines: [ContainerMachineInfo],
         maxAgeSeconds: TimeInterval,
         now: Date = Date()
@@ -26,7 +26,7 @@ public extension ContainerMachineManager {
     }
 
     /// Prunes an explicit machine list with injectable stop/delete operations.
-    static func pruneMachines(
+    public static func pruneMachines(
         _ machines: [ContainerMachineInfo],
         maxAgeSeconds: TimeInterval,
         now: Date,
@@ -59,7 +59,7 @@ public extension ContainerMachineManager {
     }
 
     /// Prunes stale or orphaned container machines synchronously.
-    static func pruneStaleMachinesSync(
+    public static func pruneStaleMachinesSync(
         prefix: String = machinePrefix,
         maxAgeSeconds: TimeInterval = TimeInterval(SandboxConfig.defaultArchiveSessionTTLMinutes * 60),
         now: Date = Date(),
@@ -86,7 +86,7 @@ public extension ContainerMachineManager {
     }
 
     /// Prunes stale or orphaned container machines matching the prefix.
-    static func pruneStaleMachines(
+    public static func pruneStaleMachines(
         prefix: String = machinePrefix,
         maxAgeSeconds: TimeInterval = TimeInterval(SandboxConfig.defaultArchiveSessionTTLMinutes * 60),
         now: Date = Date(),

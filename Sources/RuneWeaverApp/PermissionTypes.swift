@@ -90,9 +90,9 @@ public enum PermissionPane: String, Sendable {
     }
 }
 
-public extension PermissionKind {
+extension PermissionKind {
     /// Short row title shown in the Permissions window.
-    var title: String {
+    public var title: String {
         switch self {
         case .fullDiskAccess:
             "Messages History"
@@ -112,7 +112,7 @@ public extension PermissionKind {
     /// Full Disk Access names the missing-prompt trap explicitly because the
     /// system never asks; the owner must add the app by hand, so the copy
     /// has to say so instead of implying a button will prompt.
-    var rationale: String {
+    public var rationale: String {
         switch self {
         case .fullDiskAccess:
             "Full Disk Access lets Rune Weaver read your local Messages database for search, read, and send "
@@ -129,7 +129,7 @@ public extension PermissionKind {
     }
 
     /// SF Symbol backing the row icon.
-    var systemImage: String {
+    public var systemImage: String {
         switch self {
         case .fullDiskAccess:
             "externaldrive.fill"
@@ -145,7 +145,7 @@ public extension PermissionKind {
     }
 
     /// Settings pane opened when the row needs manual approval.
-    var pane: PermissionPane {
+    public var pane: PermissionPane {
         switch self {
         case .fullDiskAccess:
             .allFiles
@@ -161,9 +161,9 @@ public extension PermissionKind {
     }
 }
 
-public extension PermissionStatus {
+extension PermissionStatus {
     /// Short human-readable state shown in the row subtitle.
-    var label: String {
+    public var label: String {
         switch self {
         case .granted:
             "Granted"

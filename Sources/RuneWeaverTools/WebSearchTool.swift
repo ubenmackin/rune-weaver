@@ -69,8 +69,8 @@ public protocol SearXNGEnsuring: Sendable {
     func stop() async
 }
 
-public extension SearXNGEnsuring {
-    func stop() async {
+extension SearXNGEnsuring {
+    public func stop() async {
         await SearXNGEnsurer.bestEffortStop()
     }
 }
@@ -599,13 +599,13 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
 /// daemon first, then the existence-aware container step, then the shared
 /// readiness watch, claiming a start only when this call started the daemon
 /// or container and the engine answers before the backstop.
-public extension SearXNGEnsurer {
+extension SearXNGEnsurer {
     /// Ordered cascade stages for one ensure attempt.
     /// Kept explicit so the heal order stays reviewable: runtime must resolve
     /// before any daemon probe, the daemon must answer before container
     /// start, the image pull sits ahead of the fresh run only (skipped when
     /// cached), and the readiness watch always comes last under its waiting detail.
-    enum EnsureStage: String, CaseIterable, Sendable {
+    public enum EnsureStage: String, CaseIterable, Sendable {
         case runtime
         case daemon
         case start
@@ -629,7 +629,7 @@ public extension SearXNGEnsurer {
     /// stays unreachable through the watch reports false instead of claiming a start, so
     /// cross-process races never double-claim.
     @discardableResult
-    static func bestEffortStart(browser: BrowserConfig) async -> Bool {
+    public static func bestEffortStart(browser: BrowserConfig) async -> Bool {
         guard isManagedBaseURL(browser.searxngURL) else { return false }
         guard let runtime = resolveRuntimeURL() else { return false }
         if Task.isCancelled {
@@ -665,7 +665,7 @@ public extension SearXNGEnsurer {
     /// - Parameter baseURL: Configured `searxng_url` for port and settings.
     /// - Returns: True only when this call actually started a container or the daemon (exit 0).
     @discardableResult
-    static func bestEffortStart(baseURL: String) async -> Bool {
+    public static func bestEffortStart(baseURL: String) async -> Bool {
         guard isManagedBaseURL(baseURL), resolveRuntimeURL() != nil else { return false }
         return await bestEffortStart(browser: BrowserConfig(searxngURL: baseURL))
     }

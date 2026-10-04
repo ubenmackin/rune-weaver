@@ -1302,7 +1302,7 @@ public struct WSProactiveMessageFrame: Codable, Sendable, Equatable {
     }
 }
 
-public extension WSProactiveMessageFrame {
+extension WSProactiveMessageFrame {
     /// Kind naming a proactive card that announces a freshly proposed idea.
     ///
     /// Ideas ride the existing `proactive_message` frame rather than a new
@@ -1310,5 +1310,5 @@ public extension WSProactiveMessageFrame {
     /// attention badge exactly as it does for a goal parked on owner input,
     /// with the suggestion title and a one-line headline carried in the
     /// existing `title` and `headline` fields.
-    static let ideaProposedKind = "idea_proposed"
+    public static let ideaProposedKind = "idea_proposed"
 }

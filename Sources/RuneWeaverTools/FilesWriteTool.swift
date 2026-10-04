@@ -680,7 +680,7 @@ public struct FilesWriteTool: Tool, Sendable {
 
 // MARK: - Live write disk flow
 
-private extension FilesWriteTool {
+extension FilesWriteTool {
     // MARK: - Target vetting
 
     /// Vets every path a write call derives before any disk access.
@@ -1238,7 +1238,7 @@ private extension FilesWriteTool {
     }
 
     /// Encodes one write envelope into the tool's JSON success shape.
-    func encodeEnvelope(_ envelope: FilesWriteEnvelope, callID: String?) -> ToolOutput {
+    private func encodeEnvelope(_ envelope: FilesWriteEnvelope, callID: String?) -> ToolOutput {
         do {
             let data = try JSONEncoder().encode(envelope)
             let jsonString = String(bytes: data, encoding: .utf8) ?? "{}"

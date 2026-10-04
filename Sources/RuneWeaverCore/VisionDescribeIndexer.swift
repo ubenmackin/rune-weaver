@@ -66,11 +66,11 @@ public protocol VisionDescribeProvider: Sendable {
     func describeImage(_ imageDataURL: String, prompt: String) async -> String?
 }
 
-public extension VisionDescribeProvider {
+extension VisionDescribeProvider {
     /// Default availability so adapters without a health probe compile without
     /// boilerplate while still allowing a real probe to override it.
     /// - Returns: True.
-    func isAvailable() async -> Bool {
+    public func isAvailable() async -> Bool {
         true
     }
 }

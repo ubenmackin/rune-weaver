@@ -642,12 +642,12 @@ public enum SensitiveAddressRanges: Sendable {
 
 // MARK: - Cloud Metadata Hosts
 
-public extension SensitiveAddressRanges {
+extension SensitiveAddressRanges {
     /// Well-known cloud metadata hostnames plus metadata address literals,
     /// refused even over public DNS and even when an allowlisted name resolves
     /// to them. Single-sourced here so the runtime SSRF guard and the policy
     /// invariant verifier cannot drift on what counts as a metadata target.
-    static let blockedMetadataHosts: Set<String> = [
+    public static let blockedMetadataHosts: Set<String> = [
         "metadata.google.internal",
         "metadata.google",
         "metadata.goog",
@@ -668,7 +668,7 @@ public extension SensitiveAddressRanges {
     /// `100.100.100.200` matches exactly so it is refused before any allowlist
     /// exemption. Invariant: comparison uses the cleaned lowercased base form,
     /// and empty hosts never match.
-    static func isMetadataHost(_ host: String) -> Bool {
+    public static func isMetadataHost(_ host: String) -> Bool {
         let lowered = SensitiveAddressNormalization.cleanedHostBase(host)
         guard !lowered.isEmpty else { return false }
         if blockedMetadataHosts.contains(lowered) {

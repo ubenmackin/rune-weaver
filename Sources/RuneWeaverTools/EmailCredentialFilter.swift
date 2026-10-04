@@ -188,9 +188,9 @@ public enum EmailCredentialFilter: Sendable {
 
 // MARK: - Definite signals
 
-private extension EmailCredentialFilter {
+extension EmailCredentialFilter {
     /// Code-adjacent keywords licensing a nearby digit run as a one-time code.
-    static var codeKeywords: [String] {
+    fileprivate static var codeKeywords: [String] {
         [
             "code", "otp", "one-time", "one time", "verification", "verify",
             "passcode", "security code", "login code", "authentication code",
@@ -199,7 +199,7 @@ private extension EmailCredentialFilter {
     }
 
     /// Phrases marking a password-reset message even before URL inspection.
-    static var resetPhrases: [String] {
+    fileprivate static var resetPhrases: [String] {
         [
             "reset your password", "reset password", "password reset",
             "set a new password", "set your new password", "choose a new password",
@@ -210,12 +210,12 @@ private extension EmailCredentialFilter {
     /// URL-path fragments marking a reset link regardless of scheme.
     /// The leading slash (or compound token) keeps prose like "please verify
     /// your email" from classifying without an actual link path.
-    static var resetPathMarkers: [String] {
+    fileprivate static var resetPathMarkers: [String] {
         ["/reset", "reset-password", "reset_password", "password-reset", "password_reset", "password/reset"]
     }
 
     /// Phrases marking a magic sign-in link.
-    static var magicPhrases: [String] {
+    fileprivate static var magicPhrases: [String] {
         [
             "magic link", "sign-in link", "sign in link", "signin link",
             "login link", "log-in link", "log in link"
@@ -225,12 +225,12 @@ private extension EmailCredentialFilter {
     /// URL-path fragments marking a magic link regardless of scheme.
     /// Bare "/login" is intentionally absent: a generic login page without a
     /// token, auth, magic, verify, or sign-in marker is not a credential.
-    static var magicPathMarkers: [String] {
+    fileprivate static var magicPathMarkers: [String] {
         ["token=", "token/", "/auth", "/magic", "/verify", "magic-link", "magic_link", "/signin", "/sign-in"]
     }
 
     /// Weak keywords producing `suspicious` when no definite artifact joins them.
-    static var suspiciousKeywords: [String] {
+    fileprivate static var suspiciousKeywords: [String] {
         [
             "password", "passcode", "verification", "verify", "otp", "2fa",
             "magic", "sign-in", "signin", "sign in", "login", "log-in", "token",
@@ -239,7 +239,7 @@ private extension EmailCredentialFilter {
     }
 
     /// Whether the lowercased text carries a password-reset phrase or link path.
-    static func hasPasswordReset(in lower: String) -> Bool {
+    fileprivate static func hasPasswordReset(in lower: String) -> Bool {
         if resetPhrases.contains(where: { lower.contains($0) }) {
             return true
         }
@@ -247,7 +247,7 @@ private extension EmailCredentialFilter {
     }
 
     /// Whether the lowercased text carries a magic-link phrase or link path.
-    static func hasMagicLink(in lower: String) -> Bool {
+    fileprivate static func hasMagicLink(in lower: String) -> Bool {
         if magicPhrases.contains(where: { lower.contains($0) }) {
             return true
         }
@@ -255,7 +255,7 @@ private extension EmailCredentialFilter {
     }
 
     /// Whether the lowercased text carries only a weak credential hint.
-    static func isSuspicious(_ lower: String) -> Bool {
+    fileprivate static func isSuspicious(_ lower: String) -> Bool {
         suspiciousKeywords.contains(where: { lower.contains($0) })
     }
 
@@ -264,7 +264,7 @@ private extension EmailCredentialFilter {
     /// The subject joins the window so a subject like "Your verification code"
     /// licenses a code at the top of the body, while a year or price pages
     /// away from any keyword never qualifies.
-    static func codeIsCredentialBearing(subject: String, body: String) -> Bool {
+    fileprivate static func codeIsCredentialBearing(subject: String, body: String) -> Bool {
         let combined = subject + "\n" + body
         let lower = combined.lowercased() as NSString
         let ranges = allCodeRanges(in: combined)
@@ -285,7 +285,7 @@ private extension EmailCredentialFilter {
     ///
     /// Covers contiguous 4–8 digits plus the common spaced/dashed 3–3 split
     /// ("123 456", "123-456") so formatted codes classify like compact ones.
-    static func allCodeRanges(in text: String) -> [NSRange] {
+    fileprivate static func allCodeRanges(in text: String) -> [NSRange] {
         let nsText = text as NSString
         var ranges: [NSRange] = []
         if let continuous = try? NSRegularExpression(pattern: "\\b\\d{4,8}\\b") {
@@ -300,11 +300,11 @@ private extension EmailCredentialFilter {
 
 // MARK: - Redaction
 
-private extension EmailCredentialFilter {
+extension EmailCredentialFilter {
     /// Characters stripped from the end of a URL match before replacement.
     /// Trailing prose punctuation is preserved after the placeholder so
     /// "See https://example.com/reset." keeps its period.
-    static var trailingURLPunctuation: CharacterSet {
+    fileprivate static var trailingURLPunctuation: CharacterSet {
         CharacterSet(charactersIn: ".,;:!?)'\"")
     }
 
@@ -314,7 +314,7 @@ private extension EmailCredentialFilter {
     /// without a scheme still redacts. Email addresses are skipped by checking
     /// for a preceding `@`, since redacting the sender's address would only
     /// obscure routing without removing any credential.
-    static func redactURLs(in text: String) -> String {
+    fileprivate static func redactURLs(in text: String) -> String {
         let nsText = text as NSString
         guard let regex = try? NSRegularExpression(
             pattern: "(?:https?://|www\\.)[^\\s<>\"']+|\\b(?:[A-Za-z0-9-]+\\.)+[A-Za-z]{2,}(?:/[^\\s<>\"']*)?"
@@ -350,7 +350,7 @@ private extension EmailCredentialFilter {
     /// Ranges are recomputed on the link-stripped body so digits that left
     /// with a token URL are never considered, and replacement runs back to
     /// front so earlier offsets stay valid as placeholders change the length.
-    static func redactCredentialCodes(subject: String, body: String) -> String {
+    fileprivate static func redactCredentialCodes(subject: String, body: String) -> String {
         let combined = subject + "\n" + body
         let lower = combined.lowercased() as NSString
         let bodyStart = (subject as NSString).length + 1
@@ -379,7 +379,7 @@ private extension EmailCredentialFilter {
     /// with a token URL are never considered. Licensing uses the combined
     /// subject-plus-body window, so a keyword in either half can license a
     /// subject code while an isolated year never qualifies.
-    static func redactSubjectCodes(subject: String, body: String) -> String {
+    fileprivate static func redactSubjectCodes(subject: String, body: String) -> String {
         let combined = subject + "\n" + body
         let lower = combined.lowercased() as NSString
         let subjectLength = (subject as NSString).length

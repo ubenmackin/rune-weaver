@@ -250,9 +250,9 @@ public protocol EmailIMAPGateway: Sendable {
     ) async throws -> EmailMoveResult
 }
 
-public extension EmailIMAPGateway {
+extension EmailIMAPGateway {
     /// Default batch fetch shim for gateways that only implement individual fetch.
-    func batchFetch(
+    public func batchFetch(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
         query: String,
@@ -268,7 +268,7 @@ public extension EmailIMAPGateway {
 
     /// Default attachment-filter shim for gateways that only implement base search.
     /// Applies the filter locally so filtered callers never silently receive unfiltered hits.
-    func search(
+    public func search(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
         query: String,
@@ -281,7 +281,7 @@ public extension EmailIMAPGateway {
 
     /// Default temporal shim routing through the combined filter so stubs without
     /// IMAP date support still honor the window via local post-filtering.
-    func search(
+    public func search(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
         query: String,
@@ -302,7 +302,7 @@ public extension EmailIMAPGateway {
     /// Default combined shim for gateways that only implement the older shapes.
     /// Reapplies the window locally with the shared date parser so day-granular
     /// bridges still honor exact datetimes; undated hits only survive unbounded windows.
-    func search(
+    public func search(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
         query: String,
@@ -322,7 +322,7 @@ public extension EmailIMAPGateway {
     }
 
     /// Default search overload accepting separate `since` and `until` date bounds.
-    func search(
+    public func search(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
         query: String,
@@ -344,12 +344,12 @@ public extension EmailIMAPGateway {
     /// Default compatibility shim over the single required `mailboxListing`.
     /// `mailboxListing` is the only required listing method so conformers cannot
     /// satisfy the protocol with neither method and recurse between defaults.
-    func listMailboxes(credentials: ResolvedEmailCredentials) async throws -> [String] {
+    public func listMailboxes(credentials: ResolvedEmailCredentials) async throws -> [String] {
         try await mailboxListing(credentials: credentials).mailboxes
     }
 
     /// Default move that fails closed for gateways without move support.
-    func move(
+    public func move(
         credentials _: ResolvedEmailCredentials,
         mailbox _: String,
         messageID _: String,
@@ -360,7 +360,7 @@ public extension EmailIMAPGateway {
     }
 
     /// Default status that fails closed for gateways without STATUS support.
-    func status(credentials _: ResolvedEmailCredentials, mailbox _: String) async throws -> EmailMailboxStatus {
+    public func status(credentials _: ResolvedEmailCredentials, mailbox _: String) async throws -> EmailMailboxStatus {
         throw EmailIMAPError.bridgeFailed("IMAP status not supported")
     }
 }
@@ -1078,11 +1078,11 @@ private struct StatusResultResponse: Decodable {
     }
 }
 
-public extension EmailBridgeParsing {
+extension EmailBridgeParsing {
     /// Decodes a bridge `move` stdout payload into the gateway minimal result.
     /// Requires `mailbox`, `destination`, `moved`, and a read flag so partial
     /// payloads fail closed instead of reporting a silent no-op success.
-    static func parseMoveResultPayload(_ data: Data) throws -> EmailMoveResult {
+    public static func parseMoveResultPayload(_ data: Data) throws -> EmailMoveResult {
         let response: MoveResultResponse
         do {
             response = try JSONDecoder().decode(MoveResultResponse.self, from: data)
@@ -1119,7 +1119,7 @@ public extension EmailBridgeParsing {
     /// Decodes a bridge `status` stdout payload into the gateway snapshot.
     /// Requires `mailbox`, `uidNext`, and `uidValidity` so partial payloads
     /// fail closed instead of anchoring a window from a guessed top.
-    static func parseStatusPayload(_ data: Data) throws -> EmailMailboxStatus {
+    public static func parseStatusPayload(_ data: Data) throws -> EmailMailboxStatus {
         let response: StatusResultResponse
         do {
             response = try JSONDecoder().decode(StatusResultResponse.self, from: data)

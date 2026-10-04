@@ -723,15 +723,15 @@ public protocol LLMProvider: Sendable {
     func embeddings(text: [String]) async throws -> [[Float]]
 }
 
-public extension LLMProvider {
+extension LLMProvider {
     /// Session-agnostic fallback so existing backends keep working while only
     /// slot-aware backends override with real pinning.
-    func chat(messages: [Message], tools: [any Tool], sessionID _: String?) -> AsyncStream<LLMResponse> {
+    public func chat(messages: [Message], tools: [any Tool], sessionID _: String?) -> AsyncStream<LLMResponse> {
         chat(messages: messages, tools: tools)
     }
 
     /// UUID convenience forwarding to the string form.
-    func chat(messages: [Message], tools: [any Tool], session: UUID?) -> AsyncStream<LLMResponse> {
+    public func chat(messages: [Message], tools: [any Tool], session: UUID?) -> AsyncStream<LLMResponse> {
         chat(messages: messages, tools: tools, sessionID: session?.uuidString)
     }
 }

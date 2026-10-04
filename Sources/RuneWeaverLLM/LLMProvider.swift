@@ -159,22 +159,22 @@ public enum LLMProviderError: Error, Sendable, Equatable {
 
 // MARK: - Provider conveniences
 
-public extension LLMProvider {
+extension LLMProvider {
     /// Stable provider identifier. Defaults to the active model's
     /// `provider` field; concrete providers override with a constant.
-    var name: String {
+    public var name: String {
         modelInfo.provider
     }
 
     /// Whether the backend answers health checks right now.
-    func isAvailable() async -> Bool {
+    public func isAvailable() async -> Bool {
         true
     }
 
     /// Maps runtime tool plugins to provider-layer definitions.
     /// - Parameter tools: Registered tools the model may call.
     /// - Returns: Definitions in provider wire shape, preserving caller order.
-    func toolDefinitions(for tools: [any Tool]) -> [ToolDefinition] {
+    public func toolDefinitions(for tools: [any Tool]) -> [ToolDefinition] {
         // Ordering stays unsorted here on purpose: the request-body builders own
         // the single canonical name sort at the wire boundary, where the prompt
         // and both endpoints already converge for prefix-stable caching. Sorting
@@ -194,29 +194,29 @@ public protocol ChunkStreamingProvider: LLMProvider {
     func chatChunks(messages: [Message], tools: [ToolDefinition], sessionID: String?) -> AsyncStream<LLMResponseChunk>
 }
 
-public extension ChunkStreamingProvider {
+extension ChunkStreamingProvider {
     /// Session-agnostic fallback for backends without sticky prefix state.
     /// Keeps the router's per-turn session threading compiling for every
     /// provider while only slot-aware backends override with real pinning.
-    func chatChunks(messages: [Message], tools: [ToolDefinition], sessionID _: String?) -> AsyncStream<LLMResponseChunk> {
+    public func chatChunks(messages: [Message], tools: [ToolDefinition], sessionID _: String?) -> AsyncStream<LLMResponseChunk> {
         chatChunks(messages: messages, tools: tools)
     }
 
     /// Session-identifier convenience for callers holding a chat UUID.
     /// Normalizes to the string form so every backend shares one hashing path.
-    func chatChunks(messages: [Message], tools: [ToolDefinition], session: UUID?) -> AsyncStream<LLMResponseChunk> {
+    public func chatChunks(messages: [Message], tools: [ToolDefinition], session: UUID?) -> AsyncStream<LLMResponseChunk> {
         chatChunks(messages: messages, tools: tools, sessionID: session?.uuidString)
     }
 
     /// Streams text via ``chatChunks(messages:tools:)``.
-    func chat(messages: [Message], tools: [any Tool]) -> AsyncStream<LLMResponse> {
+    public func chat(messages: [Message], tools: [any Tool]) -> AsyncStream<LLMResponse> {
         chat(messages: messages, tools: tools, sessionID: nil)
     }
 
     /// Streams text for one chat session via the session-aware chunk path.
     /// Carries the chat identifier end to end so sticky-slot backends can reuse
     /// the cached prefix instead of always falling back to auto-assignment.
-    func chat(messages: [Message], tools: [any Tool], sessionID: String?) -> AsyncStream<LLMResponse> {
+    public func chat(messages: [Message], tools: [any Tool], sessionID: String?) -> AsyncStream<LLMResponse> {
         let definitions = toolDefinitions(for: tools)
         let chunks = chatChunks(messages: messages, tools: definitions, sessionID: sessionID)
         return AsyncStream { continuation in
@@ -247,7 +247,7 @@ public extension ChunkStreamingProvider {
 
     /// UUID convenience for callers holding the chat identifier directly.
     /// Normalizes to the string form so the sticky-slot hash sees one shape.
-    func chat(messages: [Message], tools: [any Tool], session: UUID?) -> AsyncStream<LLMResponse> {
+    public func chat(messages: [Message], tools: [any Tool], session: UUID?) -> AsyncStream<LLMResponse> {
         chat(messages: messages, tools: tools, sessionID: session?.uuidString)
     }
 }

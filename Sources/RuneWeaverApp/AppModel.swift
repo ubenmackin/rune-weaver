@@ -728,14 +728,14 @@ extension AppModel {
 
 // MARK: - Actions & Navigation
 
-public extension AppModel {
-    func approve(id: UUID, duration: TrustDuration = .thisTime, widen: Bool = false) {
+extension AppModel {
+    public func approve(id: UUID, duration: TrustDuration = .thisTime, widen: Bool = false) {
         Task {
             await decideApproval(id: id, approved: true, duration: duration, widen: widen)
         }
     }
 
-    func deny(id: UUID) {
+    public func deny(id: UUID) {
         Task {
             await decideApproval(id: id, approved: false, duration: .thisTime, widen: false)
         }
@@ -782,7 +782,7 @@ public extension AppModel {
     }
 
     /// Whether the web dashboard and web settings can be opened from the menu.
-    var isDashboardAvailable: Bool {
+    public var isDashboardAvailable: Bool {
         // A refused bind leaves no live endpoint while the published fields
         // still fall back to loopback defaults, so availability must require
         // a successful bind instead of a constructible URL alone; otherwise
@@ -795,7 +795,7 @@ public extension AppModel {
     /// scheme or path, and so a concurrent edit cannot produce a half-old address.
     /// When bound to an all-interfaces wildcard (0.0.0.0, ::, [::], *), resolves to 127.0.0.1
     /// so local navigation reaches the service via loopback.
-    func dashboardURL(fragment: String? = nil, queryItems: [URLQueryItem]? = nil) -> URL? {
+    public func dashboardURL(fragment: String? = nil, queryItems: [URLQueryItem]? = nil) -> URL? {
         // Follow the endpoint actually bound at boot (which may come from
         // `[server]`), falling back to the published fields before boot.
         let host = (boundEndpoint?.hostname ?? hostname).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -828,13 +828,13 @@ public extension AppModel {
         return components.url
     }
 
-    func openDashboard() {
+    public func openDashboard() {
         if let url = dashboardURL() {
             NSWorkspace.shared.open(url)
         }
     }
 
-    func openChat(id: UUID) {
+    public func openChat(id: UUID) {
         if let url = dashboardURL(fragment: "chat", queryItems: [URLQueryItem(name: "session", value: id.uuidString)]) {
             NSWorkspace.shared.open(url)
         }
@@ -844,7 +844,7 @@ public extension AppModel {
     /// where the run controls live beside Search and Memory. The fragment
     /// carries the indexing subpath the dashboard routes on, so the inner tab
     /// opens selected instead of the default Search and Memory view.
-    func openIndexStatus() {
+    public func openIndexStatus() {
         if let url = dashboardURL(fragment: "memory/indexing") {
             NSWorkspace.shared.open(url)
         }
@@ -856,7 +856,7 @@ public extension AppModel {
     /// collapse to one cancel; the flag clears on the refresh tick once the
     /// run settles. Returns immediately; the refresh tick hides the section
     /// once the run settles.
-    func cancelIndexRun() {
+    public func cancelIndexRun() {
         guard !isCancellingIndex else { return }
         guard let context = serverContext else {
             RuneWeaverLog.app.warning("Cancel index run requested with no live engine context.")
@@ -872,7 +872,7 @@ public extension AppModel {
         }
     }
 
-    func openSettings() {
+    public func openSettings() {
         if let url = dashboardURL(fragment: "settings", queryItems: [URLQueryItem(name: "standalone", value: "true")]) {
             Task { [weak self] in
                 guard let self else { return }
@@ -882,26 +882,26 @@ public extension AppModel {
         }
     }
 
-    func openOwnerAccess() {
+    public func openOwnerAccess() {
         OwnerAccessWindowController.shared.show(model: self)
     }
 
     /// Marks Permissions onboarding complete and persists it, so the window
     /// opens exactly once per install while the menu entry stays available.
-    func markPermissionsOnboardingCompleted() {
+    public func markPermissionsOnboardingCompleted() {
         hasCompletedPermissionsOnboarding = true
         permissionsOnboardingStore.markCompleted()
     }
 
     /// Opens the Permissions checklist window on demand from the menu or the
     /// first-run gate, always with a fresh live view model from the controller.
-    func openPermissions() {
+    public func openPermissions() {
         PermissionsWindowController.shared.show(model: self)
     }
 
     /// Shuts down background polling, server runner, and the auto-started search engine container.
     /// Idempotent so multiple quit notifications or tests never double-stop.
-    func stopForQuit() async {
+    public func stopForQuit() async {
         guard !isTerminated else { return }
         isTerminated = true
         pollingTask?.cancel()
@@ -922,7 +922,7 @@ public extension AppModel {
         task?.cancel()
     }
 
-    func quit() {
+    public func quit() {
         Task(priority: .userInitiated) { @MainActor [weak self] in
             guard let self else { return }
             await self.stopForQuit()
@@ -931,7 +931,7 @@ public extension AppModel {
     }
 
     /// Signals an emergency abort of all in-flight desktop automation.
-    func emergencyStopDesktop() {
+    public func emergencyStopDesktop() {
         desktopEmergencyStop = true
         isDesktopActive = false
         RuneWeaverLog.app.warning("Desktop emergency stop triggered by user")
@@ -949,12 +949,12 @@ public extension AppModel {
 
 // MARK: - Owner Token Onboarding & Settings Access
 
-public extension AppModel {
+extension AppModel {
     /// Mints the first owner token for a fresh install through the shared
     /// auth store, so the menu bar never reimplements randomness or storage.
     /// The running service keeps its boot-time posture until the
     /// acknowledgement restart, which is why the needs flag stays set here.
-    func generateOwnerToken() {
+    public func generateOwnerToken() {
         guard !isGeneratingOwnerToken else { return }
         // Set synchronously before the Task hops so a double-tap cannot pass
         // the guard twice and persist competing credentials; the async mint
@@ -971,7 +971,7 @@ public extension AppModel {
     /// enforces the previous credential until the acknowledgement restart
     /// adopts the replacement, so a lost copy can be recovered by rotating
     /// again before acknowledging.
-    func rotateOwnerToken() {
+    public func rotateOwnerToken() {
         guard !isGeneratingOwnerToken else { return }
         // Same synchronous single-flight as generation: claim the flag on the
         // MainActor before spawning the mint Task.
@@ -986,7 +986,7 @@ public extension AppModel {
     /// which token is active by fingerprint prefix alone. The raw value is
     /// dropped immediately after hashing; only the prefix and source label
     /// ever reach published state.
-    func refreshOwnerTokenStatus() {
+    public func refreshOwnerTokenStatus() {
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -1024,7 +1024,7 @@ public extension AppModel {
     /// service so the gate adopts the stored credential. Clearing first
     /// guarantees the secret cannot linger in published state past the owner's
     /// confirmation, even if the restart itself fails.
-    func acknowledgeGeneratedToken() {
+    public func acknowledgeGeneratedToken() {
         generatedOnceToken = nil
         restartServerToAdoptToken()
     }
@@ -1033,7 +1033,7 @@ public extension AppModel {
     /// newly minted token takes effect without relaunching the app. The
     /// shutdown mirrors quit (polling, warmup, gate, hub, app) but returns to
     /// boot instead of terminating.
-    func restartServerToAdoptToken() {
+    public func restartServerToAdoptToken() {
         guard !isRestarting else { return }
         // Claim synchronously on the MainActor before the Task hops so a
         // concurrent Retry double-click collapses to one shutdown+boot.

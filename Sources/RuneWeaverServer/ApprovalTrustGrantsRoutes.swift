@@ -16,9 +16,9 @@ import Foundation
 import RuneWeaverCore
 import Vapor
 
-public extension WSHub {
+extension WSHub {
     /// Broadcasts a durable-trust change so dashboards refresh their grants list.
-    func broadcastTrustGrantsChanged() async {
+    public func broadcastTrustGrantsChanged() async {
         // Dashboards refetch `GET /approvals/grants` on this signal, so the
         // payload stays a lightweight discriminator instead of a full snapshot
         // that could drift from the pruned store contents. Routes through the

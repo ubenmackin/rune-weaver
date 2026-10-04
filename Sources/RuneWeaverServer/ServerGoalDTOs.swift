@@ -36,13 +36,13 @@ public typealias GoalDTO = RuneWeaverCore.WSGoalSnapshot
 extension RuneWeaverCore.WSGoalProgress: Content {}
 extension RuneWeaverCore.WSGoalSnapshot: Content {}
 
-public extension RuneWeaverCore.WSGoalSnapshot {
+extension RuneWeaverCore.WSGoalSnapshot {
     /// Builds a DTO from a stored goal plus its plan, deriving progress locally
     /// so list fan-out never issues a second query per row for counts.
     /// - Parameters:
     ///   - goal: Stored goal snapshot.
     ///   - steps: Full plan ordered by ordinal.
-    init(goal: Goal, steps: [GoalStep]) {
+    public init(goal: Goal, steps: [GoalStep]) {
         let done = steps.filter { $0.status == .done }.count
         self.init(
             id: goal.id,
@@ -63,7 +63,7 @@ public extension RuneWeaverCore.WSGoalSnapshot {
     /// Identity now that the REST row aliases the core snapshot; kept so
     /// existing broadcast call sites keep compiling without a second fetch.
     /// - Returns: This snapshot.
-    func wsSnapshot() -> RuneWeaverCore.WSGoalSnapshot {
+    public func wsSnapshot() -> RuneWeaverCore.WSGoalSnapshot {
         self
     }
 }

@@ -144,11 +144,11 @@ public struct BashSettingsUpdate: Content, Equatable {
     }
 }
 
-public extension UpdateSettingsRequest {
+extension UpdateSettingsRequest {
     /// Builds a request from a full bash snapshot, routing through the same
     /// merge path so snapshot callers keep working without hand-mapping fields.
     /// - Parameter bash: Complete bash policy.
-    init(bash: BashConfig) {
+    public init(bash: BashConfig) {
         self.init(bash: BashSettingsUpdate(bash: bash))
     }
 }

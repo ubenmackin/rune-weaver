@@ -19,26 +19,26 @@ public struct EmbeddingBackfillResult: Sendable, Equatable {
     }
 }
 
-public extension MemoryEngine {
+extension MemoryEngine {
     /// Total stored semantic fact count from the shared vector store.
     /// - Returns: Fact count.
-    func semanticFactCount() async -> Int {
+    public func semanticFactCount() async -> Int {
         await semanticStoreCount()
     }
 
     /// All semantic facts, oldest first, from the shared vector store.
     /// - Returns: Stored facts for display commands.
-    func allSemanticFacts() async -> [StoredFact] {
+    public func allSemanticFacts() async -> [StoredFact] {
         await semanticStoreAllFacts().sorted { $0.createdAt < $1.createdAt }
     }
 
     /// Active embedding width of the semantic store, if known.
-    func semanticDimension() async -> Int? {
+    public func semanticDimension() async -> Int? {
         await semanticStoreDimension()
     }
 
     /// Clears every semantic row and resets the derived store width.
-    func clearSemanticStore() async throws {
+    public func clearSemanticStore() async throws {
         do {
             try await semanticStoreClear()
         } catch let error as VectorStoreError {
@@ -50,7 +50,7 @@ public extension MemoryEngine {
 
     /// Compacts the semantic store and revalidates its dimension.
     @discardableResult
-    func reindexSemantic() async throws -> Int {
+    public func reindexSemantic() async throws -> Int {
         do {
             return try await semanticStoreReindex()
         } catch let error as VectorStoreError {
@@ -61,7 +61,7 @@ public extension MemoryEngine {
     }
 
     /// Gives keyword-only rows vectors while preserving identity and order.
-    func backfillEmbeddings(
+    public func backfillEmbeddings(
         embedder: any EmbeddingsBackend,
         batchSize: Int = 32
     ) async throws -> EmbeddingBackfillResult {

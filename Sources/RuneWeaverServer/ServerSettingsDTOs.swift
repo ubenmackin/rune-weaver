@@ -791,11 +791,11 @@ extension UpdateSettingsRequest {
 ///
 /// Kept in an extension so the request struct body stays within the type
 /// length budget; the route reads these without touching the stored patch.
-public extension UpdateSettingsRequest {
+extension UpdateSettingsRequest {
     /// Whether this request carries any bind-affecting `[server]` key.
     /// The settings route uses this to mark `requiresRestart` without
     /// live-reloading the socket or the middleware set.
-    var carriesServerPatch: Bool {
+    public var carriesServerPatch: Bool {
         serverHostname != nil || serverPort != nil || serverAllowedHosts != nil
     }
 
@@ -803,7 +803,7 @@ public extension UpdateSettingsRequest {
     /// The settings route uses this to push the merged budgets into the live
     /// orchestrator without a restart; a save without recall keys leaves the
     /// live engine untouched.
-    var carriesRecallPatch: Bool {
+    public var carriesRecallPatch: Bool {
         memoryRecallPerTierLimit != nil || memoryRecallAutoLimit != nil || memoryRecallThreshold != nil
             || memoryRecallMaxChars != nil || memoryRecallPerHitChars != nil
             || memoryRecallDocPoolMultiplier != nil || memoryRecallEpisodicWeight != nil
@@ -813,7 +813,7 @@ public extension UpdateSettingsRequest {
     /// resolvable owner token and fail closed otherwise. Single-sourced through
     /// `ServerConfig.isLoopbackHostname` so a hostname that saves as loopback
     /// also boots as loopback.
-    static func isLoopbackHostname(_ hostname: String) -> Bool {
+    public static func isLoopbackHostname(_ hostname: String) -> Bool {
         ServerConfig.isLoopbackHostname(hostname)
     }
 
@@ -825,7 +825,7 @@ public extension UpdateSettingsRequest {
     /// hide behind the strip.
     /// - Parameter entry: Raw configured entry.
     /// - Returns: Lowercased, port-stripped host.
-    internal static func normalizedAllowedHost(_ entry: String) -> String {
+    static func normalizedAllowedHost(_ entry: String) -> String {
         ServerEndpointConfig.normalizeHost(entry)
     }
 }

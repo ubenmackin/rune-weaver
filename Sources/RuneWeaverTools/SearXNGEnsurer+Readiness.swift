@@ -29,13 +29,13 @@ private struct InconclusiveListProbeError: Error {}
 /// the fresh-run helper, failure guidance, reachability probing, and bounded
 /// process execution so the main `SearXNGEnsurer` actor body stays within the
 /// type-length budget. Callers keep using the same `SearXNGEnsurer` namespace.
-public extension SearXNGEnsurer {
+extension SearXNGEnsurer {
     /// Arguments probing whether the tracked image is already cached locally.
     /// Exits 0 when cached, so the minutes-budget pull below runs only for
     /// first installs instead of on every ensure.
     /// - Parameter image: Tracked image reference, defaulting to the shared constant.
     /// - Returns: Arguments for the image presence probe.
-    static func imageInspectArguments(image: String = containerImage) -> [String] {
+    public static func imageInspectArguments(image: String = containerImage) -> [String] {
         ["image", "inspect", image]
     }
 
@@ -44,7 +44,7 @@ public extension SearXNGEnsurer {
     /// download; a timed-out pull is safe to retry because layers stay cached.
     /// - Parameter image: Tracked image reference, defaulting to the shared constant.
     /// - Returns: Arguments for the explicit pull step.
-    static func imagePullArguments(image: String = containerImage) -> [String] {
+    public static func imagePullArguments(image: String = containerImage) -> [String] {
         ["image", "pull", image]
     }
 
@@ -52,7 +52,7 @@ public extension SearXNGEnsurer {
     /// Shared by the fast-path start and the wedged half-create fallback so
     /// both spell the name identically instead of drifting between call sites.
     /// - Returns: Arguments reviving the existing container.
-    static func containerStartArguments() -> [String] {
+    public static func containerStartArguments() -> [String] {
         ["start", containerName]
     }
 
@@ -62,7 +62,7 @@ public extension SearXNGEnsurer {
     /// the check honest. Shares the daemon probe verb so the engine, the
     /// escape-hatch script, and diagnostics never drift on the list spelling.
     /// - Returns: Arguments for the existence listing.
-    static func containerListAllArguments() -> [String] {
+    public static func containerListAllArguments() -> [String] {
         ["list", "--all"]
     }
 
@@ -71,7 +71,7 @@ public extension SearXNGEnsurer {
     /// hint when absent, so an absent entry can skip the doomed `start` and go
     /// straight to a fresh `run` without burning the start budget.
     /// - Returns: Arguments inspecting the tracked container entry.
-    static func containerInspectArguments() -> [String] {
+    public static func containerInspectArguments() -> [String] {
         ["inspect", containerName]
     }
 
@@ -80,14 +80,14 @@ public extension SearXNGEnsurer {
     /// script and engine never diverge on the remove verb. Best-effort: a
     /// missing entry ignores the failure, keeping the absent fast path cheap.
     /// - Returns: Arguments removing the tracked container entry.
-    static func containerRemoveArguments() -> [String] {
+    public static func containerRemoveArguments() -> [String] {
         ["rm", containerName]
     }
 
     /// Precompiled token-boundary matcher for the tracked entry.
     /// Shared by every list probe so the watch never recompiles per tick; nil
     /// only when the pattern itself cannot compile, which reads as absent.
-    static let containerExistsRegex: NSRegularExpression? = {
+    public static let containerExistsRegex: NSRegularExpression? = {
         let escaped = NSRegularExpression.escapedPattern(for: containerName)
         return try? NSRegularExpression(
             pattern: "(?<![A-Za-z0-9_.-])\(escaped)(?![A-Za-z0-9_.-])",
@@ -102,7 +102,7 @@ public extension SearXNGEnsurer {
     /// Empty output means absent, never present.
     /// - Parameter output: Combined stdout plus stderr from `list --all`.
     /// - Returns: True when the tracked entry appears as an exact token.
-    static func containerExists(inListOutput output: String) -> Bool {
+    public static func containerExists(inListOutput output: String) -> Bool {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         guard let regex = containerExistsRegex else {
@@ -120,7 +120,7 @@ public extension SearXNGEnsurer {
     /// wedged fallback cover the misread-present race.
     /// - Parameter exitCode: Inspect exit status.
     /// - Returns: True only on exit 0.
-    static func inspectShowsEntryPresent(exitCode: Int32) -> Bool {
+    public static func inspectShowsEntryPresent(exitCode: Int32) -> Bool {
         exitCode == 0
     }
 
@@ -130,7 +130,7 @@ public extension SearXNGEnsurer {
     /// `start` attempt without diagnostics.
     /// - Parameter output: Combined stdout plus stderr from the failed `inspect`.
     /// - Returns: True when the entry is definitively absent.
-    static func inspectIndicatesMissing(output: String) -> Bool {
+    public static func inspectIndicatesMissing(output: String) -> Bool {
         let lowered = output.lowercased()
         if lowered.contains("not found") || lowered.contains("no such") {
             return true
@@ -150,7 +150,7 @@ public extension SearXNGEnsurer {
     /// start timeout so the check never burns the readiness watch budget.
     /// - Parameter runtime: Resolved Apple Container CLI.
     /// - Returns: True when the entry exists in any state.
-    static func containerEntryExists(runtime: URL) async -> Bool {
+    public static func containerEntryExists(runtime: URL) async -> Bool {
         if Task.isCancelled {
             return false
         }
@@ -194,7 +194,7 @@ public extension SearXNGEnsurer {
     ///   - timeout: Probe budget for this caller (start vs readiness).
     /// - Returns: True when the dump names the tracked entry.
     /// - Throws: Cancellation or an inconclusive probe; callers map it to patience.
-    static func listContainsEntry(runtime: URL, timeout: Double) async throws -> Bool {
+    public static func listContainsEntry(runtime: URL, timeout: Double) async throws -> Bool {
         try Task.checkCancellation()
         let (code, output) = try await runProcess(
             executableURL: runtime,
@@ -214,7 +214,7 @@ public extension SearXNGEnsurer {
     /// instead of stalling. Never throws, never claims present on empty output.
     /// - Parameter runtime: Resolved Apple Container CLI.
     /// - Returns: True when the dump names the tracked entry.
-    static func containerEntryExistsViaList(runtime: URL) async -> Bool {
+    public static func containerEntryExistsViaList(runtime: URL) async -> Bool {
         if Task.isCancelled {
             return false
         }
@@ -234,7 +234,7 @@ public extension SearXNGEnsurer {
     /// below. Bounded by the start timeout so a hung remove cannot burn the
     /// readiness watch budget.
     /// - Parameter runtime: Resolved Apple Container CLI.
-    static func removeStaleContainer(runtime: URL) async {
+    public static func removeStaleContainer(runtime: URL) async {
         if Task.isCancelled {
             return
         }
@@ -262,7 +262,7 @@ public extension SearXNGEnsurer {
     ///   - baseURL: Configured `searxng_url`.
     ///   - timeoutSeconds: Settle window for the brief poll.
     /// - Returns: True when the engine answered inside the window.
-    static func pollForReachableBriefly(baseURL: String, timeoutSeconds: Double) async -> Bool {
+    public static func pollForReachableBriefly(baseURL: String, timeoutSeconds: Double) async -> Bool {
         if Task.isCancelled {
             return false
         }
@@ -306,7 +306,7 @@ public extension SearXNGEnsurer {
     ///   - hostPort: Loopback host port derived from `searxng_url`.
     ///   - image: Tracked image reference, defaulting to the shared constant.
     /// - Returns: Arguments creating the fresh container.
-    static func containerRunArguments(settingsPath: String, hostPort: Int, image: String = containerImage) -> [String] {
+    public static func containerRunArguments(settingsPath: String, hostPort: Int, image: String = containerImage) -> [String] {
         [
             "run", "-d",
             "--cpus", "1",
@@ -329,7 +329,7 @@ public extension SearXNGEnsurer {
     /// before failing.
     /// - Parameter output: Combined stdout plus stderr from the failed `run`.
     /// - Returns: True when the output names the same-name conflict.
-    static func isWedgedContainer(output: String) -> Bool {
+    public static func isWedgedContainer(output: String) -> Bool {
         let lowered = output.lowercased()
         if lowered.contains("already exists") || lowered.contains("already in use") {
             return true
@@ -355,7 +355,7 @@ public extension SearXNGEnsurer {
     ///   - runtime: Resolved Apple Container CLI.
     ///   - onStage: Optional live progress callback for the dashboard and CLI.
     /// - Returns: Failure fragment when the pull failed, nil when cached or pulled.
-    static func ensureImageAvailable(runtime: URL, onStage: StartStageReporter? = nil) async -> String? {
+    public static func ensureImageAvailable(runtime: URL, onStage: StartStageReporter? = nil) async -> String? {
         if Task.isCancelled {
             return nil
         }
@@ -438,7 +438,7 @@ public extension SearXNGEnsurer {
     ///   - runtime: Resolved Apple Container CLI.
     ///   - onStage: Optional live progress callback for the dashboard and CLI.
     /// - Returns: Whether this call started a container plus failure detail.
-    static func startExistingOrRun(browser: BrowserConfig, runtime: URL, onStage: StartStageReporter? = nil) async -> ContainerOutcome {
+    public static func startExistingOrRun(browser: BrowserConfig, runtime: URL, onStage: StartStageReporter? = nil) async -> ContainerOutcome {
         if Task.isCancelled {
             return ContainerOutcome(didStart: false, failure: nil)
         }
@@ -541,7 +541,7 @@ public extension SearXNGEnsurer {
     ///   - lastFailure: Failure detail from the start attempt, if any.
     ///   - onStage: Optional live progress callback for the dashboard and CLI.
     /// - Returns: Whether this call started a container plus failure detail.
-    static func runFreshContainer(
+    public static func runFreshContainer(
         browser: BrowserConfig,
         runtime: URL,
         lastFailure: String?,
@@ -665,7 +665,7 @@ public extension SearXNGEnsurer {
     ///   - browser: `[browser]` policy carrying the base URL.
     ///   - runtime: Resolved Apple Container CLI.
     /// - Returns: Start outcome when the wedge revived, nil otherwise.
-    static func startWedgedContainer(browser: BrowserConfig, runtime: URL) async -> ContainerOutcome? {
+    public static func startWedgedContainer(browser: BrowserConfig, runtime: URL) async -> ContainerOutcome? {
         if Task.isCancelled {
             return nil
         }
@@ -701,7 +701,7 @@ public extension SearXNGEnsurer {
     ///   - stage: Cascade stage name for the failure message.
     ///   - timeout: Budget for the timeout note when the spawn timed out.
     /// - Returns: Single-line failure fragment.
-    static func runFailureMessage(error: BoundedProcessError, stage: String, timeout: Double) -> String {
+    public static func runFailureMessage(error: BoundedProcessError, stage: String, timeout: Double) -> String {
         let timedOut = if case .timedOut = error {
             true
         } else {
@@ -719,7 +719,7 @@ public extension SearXNGEnsurer {
     /// Best-effort container stop shared by the server stop route.
     /// A missing runtime or absent container still reports stopped so the
     /// settings toggle never sticks on a 500; later searches re-ensure.
-    static func bestEffortStop() async {
+    public static func bestEffortStop() async {
         guard let runtime = resolveRuntimeURL() else { return }
         do {
             _ = try await runProcess(
@@ -739,7 +739,7 @@ public extension SearXNGEnsurer {
     /// unsafe redirect through the session follower.
     /// - Parameter baseURL: Configured `searxng_url`.
     /// - Returns: True when the engine answers with 2xx/3xx.
-    static func isReachable(baseURL: String) async -> Bool {
+    public static func isReachable(baseURL: String) async -> Bool {
         guard let url = URL(string: baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             return false
         }
@@ -770,7 +770,7 @@ public extension SearXNGEnsurer {
     /// body cannot allocate unbounded per tick before the capped tail.
     /// - Parameter baseURL: Configured `searxng_url`.
     /// - Returns: Status plus capped body tail, or no-response when nothing parsed.
-    static func fetchHTTPProbe(baseURL: String) async -> HTTPProbeSnapshot {
+    public static func fetchHTTPProbe(baseURL: String) async -> HTTPProbeSnapshot {
         if Task.isCancelled {
             return .noResponse
         }
@@ -833,7 +833,7 @@ public extension SearXNGEnsurer {
     ///   - baseURL: Configured `searxng_url`.
     ///   - detail: Chained per-stage fragments from the cascade, if any.
     /// - Returns: Error carrying the trimmed banner plus chained diagnostics.
-    static func unreachableError(baseURL: String, detail: String?) -> Error {
+    public static func unreachableError(baseURL: String, detail: String?) -> Error {
         let trimmed = (detail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let pullStage = EnsureStage.pull.rawValue
         // Match crash, missing, and sickness only on the waiting state hint before
@@ -875,7 +875,7 @@ public extension SearXNGEnsurer {
     /// as a crash or missing state.
     /// - Parameter detail: Chained per-stage fragments from the cascade.
     /// - Returns: Joined state hints before the logs tail.
-    static func waitingStateHint(in detail: String) -> String {
+    public static func waitingStateHint(in detail: String) -> String {
         let segments = detail.components(separatedBy: ";")
         var hints: [String] = []
         for segment in segments {
@@ -897,12 +897,12 @@ public extension SearXNGEnsurer {
     /// Fail-closed guidance naming the manual escape hatch.
     /// - Parameter baseURL: Configured `searxng_url`.
     /// - Returns: Error carrying remediation steps.
-    static func unreachableError(baseURL: String) -> Error {
+    public static func unreachableError(baseURL: String) -> Error {
         unreachableError(baseURL: baseURL, detail: nil)
     }
 
     /// Runs one container process without blocking the cooperative pool.
-    static func runProcess(executableURL: URL, arguments: [String], timeoutSeconds: Double) async throws -> (Int32, String) {
+    public static func runProcess(executableURL: URL, arguments: [String], timeoutSeconds: Double) async throws -> (Int32, String) {
         try Task.checkCancellation()
         do {
             let result = try await BoundedProcessRunner.runAsync(
@@ -934,28 +934,28 @@ public extension SearXNGEnsurer {
 /// budget still converges. The backstop fails with the last observed state plus
 /// logs tail (timeout-only when nothing ever answered), and banners name the
 /// failing stage (crash, sick, stuck) instead of a timeout note.
-public extension SearXNGEnsurer {
+extension SearXNGEnsurer {
     /// Lines of container logs captured when the watch fails.
     /// Small enough to stay readable in diagnostics, large enough to carry the
     /// crash line that explains an exit.
-    static let containerLogsTailLines = 50
+    public static let containerLogsTailLines = 50
     /// Budget for each state or logs probe inside the watch.
     /// Short so one hung inspect never stalls the tick past the next sleep.
-    static let readinessProbeTimeoutSeconds: Double = 5
+    public static let readinessProbeTimeoutSeconds: Double = 5
 
     /// Arguments fetching the tail of container logs without following.
     /// Uses the Apple Container `-n` tail flag so the probe stays bounded even
     /// when the container has logged verbosely since start.
     /// - Parameter tailLines: Lines from the end of the logs, clamped positive.
     /// - Returns: Arguments for the logs probe.
-    static func containerLogsArguments(tailLines: Int = containerLogsTailLines) -> [String] {
+    public static func containerLogsArguments(tailLines: Int = containerLogsTailLines) -> [String] {
         ["logs", "-n", "\(max(1, tailLines))", containerName]
     }
 
     /// Readiness states observed while waiting for the engine to answer.
     /// Only the crash family is terminal; everything else keeps waiting so an
     /// unparseable inspect degrades to patience instead of a false failure.
-    enum ContainerReadinessState: String, Sendable, Equatable, CaseIterable {
+    public enum ContainerReadinessState: String, Sendable, Equatable, CaseIterable {
         case running
         case waiting
         case exited
@@ -979,7 +979,7 @@ public extension SearXNGEnsurer {
     /// Snapshot of one container state probe inside the watch.
     /// Carries the classified state plus the raw hint and exit so failure detail
     /// can name what the watch last saw without re-running the probe.
-    struct ContainerReadinessSnapshot: Sendable, Equatable {
+    public struct ContainerReadinessSnapshot: Sendable, Equatable {
         public let state: ContainerReadinessState
         public let rawState: String
         public let exitCode: Int32?
@@ -1001,7 +1001,7 @@ public extension SearXNGEnsurer {
     /// Success means HTTP answered; failure carries the chained detail plus the
     /// last state and logs tail separately so banners and diagnostics stay honest.
     /// Cancellation is explicit so callers never mistake a cancelled turn for a crash.
-    struct ReadinessWatchOutcome: Sendable, Equatable {
+    public struct ReadinessWatchOutcome: Sendable, Equatable {
         public let succeeded: Bool
         public let failureDetail: String?
         public let lastState: String
@@ -1035,7 +1035,7 @@ public extension SearXNGEnsurer {
     ///   - output: Combined stdout plus stderr from the inspect probe.
     ///   - exitCode: Inspect exit status, when a process ran; nil keeps classification for raw-text callers.
     /// - Returns: Classified state, unknown when the output proves nothing.
-    static func classifyContainerReadiness(output: String, exitCode: Int32?) -> ContainerReadinessState {
+    public static func classifyContainerReadiness(output: String, exitCode: Int32?) -> ContainerReadinessState {
         if inspectIndicatesMissing(output: output) {
             return .missing
         }
@@ -1081,27 +1081,27 @@ public extension SearXNGEnsurer {
     /// Shared so each watch tick avoids recompiling; boundaries keep substrings
     /// such as deadlines from failing a healthy container while JSON dumps
     /// never reach this path because exact state already decided above.
-    static let exitedWordRegex: NSRegularExpression? = try? NSRegularExpression(
+    public static let exitedWordRegex: NSRegularExpression? = try? NSRegularExpression(
         pattern: "\\bexited\\b",
         options: [.caseInsensitive]
     )
-    static let deadWordRegex: NSRegularExpression? = try? NSRegularExpression(
+    public static let deadWordRegex: NSRegularExpression? = try? NSRegularExpression(
         pattern: "\\bdead\\b",
         options: [.caseInsensitive]
     )
-    static let oomKilledWordRegex: NSRegularExpression? = try? NSRegularExpression(
+    public static let oomKilledWordRegex: NSRegularExpression? = try? NSRegularExpression(
         pattern: "\\boom[\\s_\\-]*killed\\b",
         options: [.caseInsensitive]
     )
-    static let failedWordRegex: NSRegularExpression? = try? NSRegularExpression(
+    public static let failedWordRegex: NSRegularExpression? = try? NSRegularExpression(
         pattern: "\\bfailed\\b",
         options: [.caseInsensitive]
     )
-    static let runningWordRegex: NSRegularExpression? = try? NSRegularExpression(
+    public static let runningWordRegex: NSRegularExpression? = try? NSRegularExpression(
         pattern: "\\brunning\\b",
         options: [.caseInsensitive]
     )
-    static let waitingWordRegex: NSRegularExpression? = try? NSRegularExpression(
+    public static let waitingWordRegex: NSRegularExpression? = try? NSRegularExpression(
         pattern: "\\b(created|starting|restarting|paused|removing|waiting)\\b",
         options: [.caseInsensitive]
     )
@@ -1113,7 +1113,7 @@ public extension SearXNGEnsurer {
     ///   - regex: Precompiled word-boundary shape, nil reads as no match.
     ///   - text: Raw inspect text for the fallback path.
     /// - Returns: True when the token appears on word boundaries.
-    static func matchesWord(_ regex: NSRegularExpression?, in text: String) -> Bool {
+    public static func matchesWord(_ regex: NSRegularExpression?, in text: String) -> Bool {
         guard let regex else { return false }
         let range = NSRange(text.startIndex..., in: text)
         return regex.firstMatch(in: text, options: [], range: range) != nil
@@ -1127,7 +1127,7 @@ public extension SearXNGEnsurer {
     /// Only `"error": <non-empty>` counts, so `ErrorLogPath`, log values
     /// containing error, and differently-named keys keep waiting; shared so
     /// each tick avoids recompiling.
-    static let nonEmptyErrorShapeRegex: NSRegularExpression? = try? NSRegularExpression(
+    public static let nonEmptyErrorShapeRegex: NSRegularExpression? = try? NSRegularExpression(
         pattern: "[\"']error[\"']\\s*:\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s,\\}\\]]+))",
         options: [.caseInsensitive]
     )
@@ -1138,7 +1138,7 @@ public extension SearXNGEnsurer {
     /// reason, and bare prose without that shape keeps waiting.
     /// - Parameter output: Combined stdout plus stderr from the inspect probe.
     /// - Returns: True when a non-empty error signal remains.
-    static func hasNonEmptyErrorValue(in output: String) -> Bool {
+    public static func hasNonEmptyErrorValue(in output: String) -> Bool {
         if let json = decodedInspectJSON(from: output) {
             return nonEmptyErrorInDecodedJSON(json)
         }
@@ -1176,7 +1176,7 @@ public extension SearXNGEnsurer {
     /// instead of duplicating the terminal set.
     /// - Parameter state: Classified readiness state.
     /// - Returns: True for exited, errored, or missing.
-    static func isTerminalReadinessState(_ state: ContainerReadinessState) -> Bool {
+    public static func isTerminalReadinessState(_ state: ContainerReadinessState) -> Bool {
         state.isTerminal
     }
 
@@ -1185,7 +1185,7 @@ public extension SearXNGEnsurer {
     /// classifier directly so a vanished entry never renders as a crash.
     /// - Parameter output: Combined stdout plus stderr from the inspect probe.
     /// - Returns: True when the text names an exited or errored state.
-    static func isTerminalReadinessOutput(_ output: String) -> Bool {
+    public static func isTerminalReadinessOutput(_ output: String) -> Bool {
         let state = classifyContainerReadiness(output: output, exitCode: nil)
         return state == .exited || state == .errored
     }
@@ -1197,7 +1197,7 @@ public extension SearXNGEnsurer {
     /// keeps waiting instead of failing on garbage.
     /// - Parameter runtime: Resolved Apple Container CLI.
     /// - Returns: Snapshot naming the current state plus the raw hint.
-    static func fetchContainerReadiness(runtime: URL) async -> ContainerReadinessSnapshot {
+    public static func fetchContainerReadiness(runtime: URL) async -> ContainerReadinessSnapshot {
         if Task.isCancelled {
             return ContainerReadinessSnapshot(state: .unknown, rawState: "unknown", exitCode: nil)
         }
@@ -1253,7 +1253,7 @@ public extension SearXNGEnsurer {
     /// instead of stalling on an unknown probe.
     /// - Parameter runtime: Resolved Apple Container CLI.
     /// - Returns: True only when the dump proves the entry is gone.
-    static func confirmedContainerAbsent(runtime: URL) async -> Bool {
+    public static func confirmedContainerAbsent(runtime: URL) async -> Bool {
         if Task.isCancelled {
             return false
         }
@@ -1271,7 +1271,7 @@ public extension SearXNGEnsurer {
     ///   - runtime: Resolved Apple Container CLI.
     ///   - tailLines: Lines from the end of the logs.
     /// - Returns: Single-line capped tail, or empty when unavailable.
-    static func fetchContainerLogsTail(runtime: URL, tailLines: Int = containerLogsTailLines) async -> String {
+    public static func fetchContainerLogsTail(runtime: URL, tailLines: Int = containerLogsTailLines) async -> String {
         if Task.isCancelled {
             return ""
         }
@@ -1301,7 +1301,7 @@ public extension SearXNGEnsurer {
     ///   - timeoutSeconds: Backstop budget for the timeout note when timed out.
     ///   - exitCode: Inspect exit when the terminal probe ran.
     /// - Returns: Single-line failure fragment for the diagnostics chain.
-    static func readinessFailureDetail(
+    public static func readinessFailureDetail(
         stateText: String,
         logsTail: String,
         timedOut: Bool,
@@ -1344,7 +1344,7 @@ public extension SearXNGEnsurer {
     ///     fast path. Nil preserves the legacy boolean-only watch; provided, it drives success
     ///     (2xx/3xx resets) and countable 5xx streak tracking per tick.
     /// - Returns: Success plus failure detail with last state and logs tail.
-    static func watchReadiness(
+    public static func watchReadiness(
         timeoutSeconds: Double = readinessWatchTimeoutSeconds,
         pollInterval: UInt64 = pollIntervalNanoseconds,
         isReachable: @Sendable @escaping () async -> Bool,
@@ -1404,7 +1404,7 @@ public extension SearXNGEnsurer {
     ///   - runtime: Resolved Apple Container CLI for state and logs probes.
     ///   - timeoutSeconds: Backstop budget, defaulting to the server readiness watch (165s, settling before the longer client cap which suspends while pulling).
     /// - Returns: Success plus failure detail with last state and logs tail.
-    static func watchEngineReadiness(
+    public static func watchEngineReadiness(
         baseURL: String,
         runtime: URL,
         timeoutSeconds: Double = readinessWatchTimeoutSeconds
@@ -1429,7 +1429,7 @@ public extension SearXNGEnsurer {
     ///   - baseURL: Configured `searxng_url` for the reachability probe.
     ///   - timeoutSeconds: Backstop budget, defaulting to the server readiness watch (165s, settling before the longer client cap which suspends while pulling).
     /// - Returns: Success plus poll detail on backstop, never a crash banner.
-    static func watchExternalReadiness(
+    public static func watchExternalReadiness(
         baseURL: String,
         timeoutSeconds: Double = readinessWatchTimeoutSeconds
     ) async -> ReadinessWatchOutcome {

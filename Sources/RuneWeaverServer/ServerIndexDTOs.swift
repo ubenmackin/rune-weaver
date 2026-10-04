@@ -1117,34 +1117,34 @@ public struct IndexSettingsUpdate: Content, Equatable {
     }
 }
 
-public extension UpdateSettingsRequest {
+extension UpdateSettingsRequest {
     /// Builds a request from a full index snapshot, routing through the same
     /// merge path so snapshot callers keep working without hand-mapping fields.
     /// - Parameter index: Complete index policy.
-    init(index: IndexConfig) {
+    public init(index: IndexConfig) {
         self.init(index: IndexSettingsUpdate(index))
     }
 }
 
 // MARK: - Index Route Paths
 
-public extension ServerPaths {
+extension ServerPaths {
     /// Local document index group serving status and control.
-    static let index = "index"
+    public static let index = "index"
     /// Index status subpath under `/index`.
-    static let indexStatus = "status"
+    public static let indexStatus = "status"
     /// Index on-demand run subpath under `/index`.
-    static let indexRun = "run"
+    public static let indexRun = "run"
     /// Index cancellation subpath under `/index`.
-    static let indexCancel = "cancel"
+    public static let indexCancel = "cancel"
     /// Index prune subpath under `/index`.
-    static let indexPrune = "prune"
+    public static let indexPrune = "prune"
     /// Index reset subpath under `/index`.
-    static let indexReset = "reset"
+    public static let indexReset = "reset"
     /// Index reclaim subpath under `/index`.
-    static let indexReclaim = "reclaim"
+    public static let indexReclaim = "reclaim"
     /// Index storage subpath under `/index`.
-    static let indexStorage = "storage"
+    public static let indexStorage = "storage"
 }
 
 // MARK: - Index Settings Merge

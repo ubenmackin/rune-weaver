@@ -304,6 +304,10 @@ public actor RunLogStore {
     /// start instant while the run is still in flight: callers pass an explicit
     /// stamp only when they own the completion moment, and a nil stamp keeps
     /// the stored instant so pre-existing callers behave exactly as before.
+    /// A row already settled to `cancelled` never moves again: a late
+    /// success or failure arriving after a cooperative cancel keeps the
+    /// stored `cancelled` status so the owner's stop is never clobbered to
+    /// `ok` or `error`.
     @discardableResult
     public func update(
         id: UUID,
@@ -318,6 +322,9 @@ public actor RunLogStore {
             return nil
         }
         let existing = entries[index]
+        if existing.status == "cancelled", status != "cancelled" {
+            return existing
+        }
         let updated = RunLogEntry(
             id: existing.id,
             jobID: existing.jobID,
@@ -330,6 +337,53 @@ public actor RunLogStore {
             response: response.map(Self.truncatedResponse) ?? existing.response,
             toolActions: toolActions ?? existing.toolActions,
             totalTokens: totalTokens ?? existing.totalTokens,
+            durationMs: durationMs ?? existing.durationMs
+        )
+        entries[index] = updated
+        if let dbPath {
+            #if canImport(SQLite3)
+                let pruneCap = capacity
+                let persisted = Self.redactedForPersistence(updated)
+                await SQLiteSerialIO.runUncancellable {
+                    SQLiteRunLogStore.write(entry: persisted, dbPath: dbPath, pruneCapacity: pruneCap)
+                }
+            #endif
+        }
+        return updated
+    }
+
+    /// Atomically settles a live run row to `cancelled`.
+    /// Only rows still `running` or `awaiting_approval` accept the
+    /// transition; settled rows return nil so the caller answers 409 instead
+    /// of resurrecting history. The check and the write run in one actor hop,
+    /// so a success settling to `ok` between a route's read and its cancel
+    /// cannot be flipped back to `cancelled`, and the `cancelled`-wins guard
+    /// in `update` covers the opposite order.
+    /// - Parameters:
+    ///   - id: Entry identifier.
+    ///   - durationMs: Wall-clock duration in milliseconds.
+    /// - Returns: Settled entry, or nil when the row is unknown or settled.
+    @discardableResult
+    public func cancel(id: UUID, durationMs: Int? = nil) async -> RunLogEntry? {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else {
+            return nil
+        }
+        let existing = entries[index]
+        guard existing.status == "running" || existing.status == "awaiting_approval" else {
+            return nil
+        }
+        let updated = RunLogEntry(
+            id: existing.id,
+            jobID: existing.jobID,
+            sessionID: existing.sessionID,
+            goalID: existing.goalID,
+            kind: existing.kind,
+            status: "cancelled",
+            message: existing.message,
+            timestamp: existing.timestamp,
+            response: existing.response,
+            toolActions: existing.toolActions,
+            totalTokens: existing.totalTokens,
             durationMs: durationMs ?? existing.durationMs
         )
         entries[index] = updated
@@ -431,6 +485,11 @@ public actor RunLogStore {
     /// Looks up one entry.
     public func entry(id: UUID) async -> RunLogEntry? {
         entries.first { $0.id == id }
+    }
+
+    /// Returns true if any entry for the goal is currently in-flight or awaiting approval.
+    public func hasActiveRun(goalID: UUID) async -> Bool {
+        entries.contains { $0.goalID == goalID && ($0.status == "running" || $0.status == "awaiting_approval") }
     }
 
     /// Number of stored entries.

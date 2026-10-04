@@ -18,3 +18,8 @@
 
 # Disable redundantSelf rule to keep explicit self required by Swift 6 closure capture semantics
 --disable redundantSelf
+
+# WHY: `public extension` does NOT make members public (they default to internal).
+# Without this, SwiftFormat hoists `public func` inside `public extension`
+# back to bare `func`, silently downgrading cross-module API to internal.
+--extensionacl on-declarations

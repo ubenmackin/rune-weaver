@@ -557,7 +557,7 @@ extension ProactiveConfig: Codable {
 
 // MARK: - Configured-service egress candidates
 
-public extension RuneWeaverConfig {
+extension RuneWeaverConfig {
     /// Derives the configured-service egress candidates for policy auto-population.
     ///
     /// Single owner of the SearXNG/Sonarr/Radarr/mail-host derivation so the
@@ -569,7 +569,7 @@ public extension RuneWeaverConfig {
     ///   - media: Optional media policy; absent contributes no Arr URLs.
     ///   - email: Optional mail policy; absent contributes no account hosts.
     /// - Returns: URLs or hostnames to merge into the declarative allowlist.
-    static func serviceEgressCandidates(
+    public static func serviceEgressCandidates(
         browser: BrowserConfig,
         media: MediaConfig? = nil,
         email: EmailConfig? = nil
@@ -593,7 +593,7 @@ public extension RuneWeaverConfig {
     }
 
     /// Convenience over the merged engine config.
-    var serviceEgressCandidates: [String] {
+    public var serviceEgressCandidates: [String] {
         Self.serviceEgressCandidates(browser: browser, media: media, email: email)
     }
 }
