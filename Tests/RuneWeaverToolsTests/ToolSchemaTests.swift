@@ -164,7 +164,9 @@ struct ToolSchemaTests {
                     #expect(properties[key] != nil, "email.search missing property \(key)")
                 }
                 #expect(properties["folder"] == nil)
-                #expect(raw.contains(#""required":["account","query"]"#))
+                // Omitting account searches every configured account, so only query is required.
+                #expect(raw.contains(#""required":["query"]"#))
+                #expect(!raw.contains(#""required":["account""#), "email.search must keep account optional")
             case "email.read":
                 for key in ["account", "id", "mailbox"] {
                     #expect(properties[key] != nil, "email.read missing property \(key)")

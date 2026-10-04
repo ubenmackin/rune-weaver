@@ -12,9 +12,11 @@ public struct EmailSearchTool: Tool, Sendable {
         "Searches IMAP mailboxes (subject, sender, and body) across every selectable folder by default. "
             + "Use when the user asks to find or summarize email. "
             + "Use query \"*\" or empty for the most-recent messages. "
-            + "Pass mailbox to narrow to one folder; each hit labels its mailbox for email.read. "
+            + "Omit account (or pass \"*\") to search every configured account in config sequence. "
+            + "Pass mailbox to narrow to one folder; each hit labels its account and mailbox for email.read. "
             + "Pass hasAttachment (true/false) to filter for messages with or without attachments. "
             + "Pass since/until as YYYY-MM-DD local-day or full ISO8601 datetimes to bound the window (since inclusive, until exclusive). "
+            + "limit caps the merged total across every searched account and mailbox, not the count per source. "
             + "Attachment filtering scans the newest candidates first (up to five times the requested limit, minimum fifty per mailbox), "
             + "so older matches outside that newest window are not returned. "
             + "Returns matching message ids, headers, snippets, and mailboxes."
@@ -27,7 +29,7 @@ public struct EmailSearchTool: Tool, Sendable {
               "properties": {
                 "account": {
                   "type": "string",
-                  "description": "Account nickname from [email.accounts] (e.g. volcrypt, icloud)"
+                  "description": "Account nickname from [email.accounts]; omit or pass blank or * to search every configured account in config sequence"
                 },
                 "query": {
                   "type": "string",
@@ -56,7 +58,7 @@ public struct EmailSearchTool: Tool, Sendable {
                   "description": "Optional exclusive upper bound YYYY-MM-DD local-day or full ISO8601 datetime"
                 }
               },
-              "required":["account","query"],
+              "required":["query"],
               "additionalProperties": false
             }
             """
@@ -107,7 +109,7 @@ public struct EmailSearchTool: Tool, Sendable {
             args = try JSONDecoder().decode(EmailSearchArgs.self, from: Data(input.argumentsJSON.utf8))
         } catch {
             return .failure(
-                "Invalid email.search arguments: expected {\"account\": \"<name>\", \"query\": \"<text>\", \"limit\": <1-50>}.",
+                "Invalid email.search arguments: expected {\"query\": \"<text>\", \"account\": \"<name, omitted for all>\"}.",
                 callID: input.callID
             )
         }
@@ -140,11 +142,7 @@ public struct EmailSearchTool: Tool, Sendable {
         }
         let sinceDate = temporalRange.since
         let untilDate = temporalRange.until
-        let accountName = args.trimmedAccount
         let query = args.trimmedQuery
-        guard !accountName.isEmpty else {
-            return .failure("Invalid email.search arguments: 'account' must not be empty.", callID: input.callID)
-        }
         do {
             try EmailIMAPValidation.validateSearchQuery(query)
         } catch {
@@ -154,24 +152,31 @@ public struct EmailSearchTool: Tool, Sendable {
         // messages instead of sending a literal TEXT "*" that matches nothing on iCloud
         // (imap.mail.me.com:993).
         let effectiveQuery = EmailIMAPValidation.isAllQuery(query) ? "" : query
-        guard let account = emailConfig.account(matching: accountName) else {
-            let available = emailConfig.accounts.map(\.name)
-            return .failure(EmailIMAPError.unknownAccount(name: accountName, available: available).localizedDescription, callID: input.callID)
+        // Account selection happens only after every argument-validation gate has
+        // passed, so invalid input never triggers an account lookup or a credential
+        // read. An omitted/blank/"*" selector fans out over the stored config
+        // sequence; any other name resolves through the single tolerant matcher.
+        let resolvedAccounts: [EmailAccount]
+        if args.isAllAccountsRequest {
+            resolvedAccounts = emailConfig.accounts
+        } else {
+            let accountName = args.trimmedAccount ?? ""
+            guard let account = emailConfig.account(matching: accountName) else {
+                let available = emailConfig.accounts.map(\.name)
+                return .failure(EmailIMAPError.unknownAccount(name: accountName, available: available).localizedDescription, callID: input.callID)
+            }
+            resolvedAccounts = [account]
         }
-        let credentials: ResolvedEmailCredentials
-        do {
-            credentials = try await EmailCredentialResolver.resolvedCredentials(for: account)
-        } catch {
-            return .failure(error.localizedDescription, callID: input.callID)
+        guard !resolvedAccounts.isEmpty else {
+            return .failure("No email accounts configured. Add an [[email.accounts]] entry to config.toml.", callID: input.callID)
         }
         // Gateway validation surfaces by localized copy so both the current validation case and
         // any legacy bridge case with identical copy read the same here; no case matching needed.
         do {
-            if let requested = args.trimmedMailbox {
-                return try await singleMailboxOutput(
-                    account: account,
-                    credentials: credentials,
-                    requested: requested,
+            if resolvedAccounts.count == 1 {
+                return try await singleAccountOutput(
+                    account: resolvedAccounts[0],
+                    requestedMailbox: args.trimmedMailbox,
                     effectiveQuery: effectiveQuery,
                     limit: args.limit,
                     hasAttachment: args.hasAttachment,
@@ -180,14 +185,14 @@ public struct EmailSearchTool: Tool, Sendable {
                     callID: input.callID
                 )
             }
-            return try await fanOutOutput(
-                account: account,
-                credentials: credentials,
+            return try await multiAccountOutput(
+                accounts: resolvedAccounts,
                 effectiveQuery: effectiveQuery,
                 limit: args.limit,
                 hasAttachment: args.hasAttachment,
                 since: sinceDate,
                 until: untilDate,
+                requestedMailbox: args.trimmedMailbox,
                 callID: input.callID
             )
         } catch {
@@ -211,6 +216,85 @@ extension EmailSearchTool {
         return hits.filter { TemporalFilter.matches(date: EmailSearchMerge.date(of: $0), in: range) }
     }
 
+    /// Applies the local attachment plus temporal re-filters and stamps the
+    /// owning account and canonical mailbox onto one mailbox's raw hits.
+    ///
+    /// Every searched hit must carry a non-empty `account` so merged
+    /// multi-account results stay routable back to the account for follow-up
+    /// `email.read`/`email.move` calls.
+    private func labeledHits(
+        _ hits: [EmailSearchHit],
+        accountName: String,
+        mailbox canonical: String,
+        hasAttachment: Bool? = nil,
+        since: Date? = nil,
+        until: Date? = nil
+    ) -> [EmailSearchHit] {
+        filteredByTemporal(filteredByAttachment(hits, hasAttachment: hasAttachment), since: since, until: until).map {
+            EmailSearchHit(
+                id: $0.id,
+                subject: $0.subject,
+                from: $0.from,
+                date: $0.date,
+                snippet: $0.snippet,
+                mailbox: canonical,
+                account: accountName,
+                hasAttachments: $0.hasAttachments,
+                attachmentCount: $0.attachmentCount
+            )
+        }
+    }
+
+    /// Runs the single-account branch of a search: resolve credentials up
+    /// front so credential failures surface as the whole-call failure rather
+    /// than a partially-covered envelope, then route to the explicit-mailbox
+    /// or every-mailbox output. The envelope always carries the account in
+    /// `accounts` and an empty `failedAccounts`.
+    private func singleAccountOutput(
+        account: EmailAccount,
+        requestedMailbox: String?,
+        effectiveQuery: String,
+        limit: Int,
+        hasAttachment: Bool? = nil,
+        since: Date? = nil,
+        until: Date? = nil,
+        callID: String
+    ) async throws -> ToolOutput {
+        let credentials: ResolvedEmailCredentials
+        do {
+            credentials = try await EmailCredentialResolver.resolvedCredentials(for: account)
+        } catch {
+            return .failure(error.localizedDescription, callID: callID)
+        }
+        if let requested = requestedMailbox {
+            return try await singleMailboxOutput(
+                account: account,
+                credentials: credentials,
+                requested: requested,
+                effectiveQuery: effectiveQuery,
+                limit: limit,
+                hasAttachment: hasAttachment,
+                since: since,
+                until: until,
+                accounts: [account.name],
+                failedAccounts: [],
+                callID: callID
+            )
+        }
+        return try await fanOutOutput(
+            account: account,
+            credentials: credentials,
+            effectiveQuery: effectiveQuery,
+            limit: limit,
+            hasAttachment: hasAttachment,
+            since: since,
+            until: until,
+            accounts: [account.name],
+            failedAccounts: [],
+            callID: callID
+        )
+    }
+
     /// Searches one explicit mailbox with a clear unknown-folder error.
     private func singleMailboxOutput(
         account: EmailAccount,
@@ -221,6 +305,8 @@ extension EmailSearchTool {
         hasAttachment: Bool? = nil,
         since: Date? = nil,
         until: Date? = nil,
+        accounts: [String]? = nil,
+        failedAccounts: [String]? = nil,
         callID: String
     ) async throws -> ToolOutput {
         let listed = try await gateway.listMailboxes(credentials: credentials)
@@ -240,18 +326,14 @@ extension EmailSearchTool {
             since: since,
             until: until
         )
-        let labeled = filteredByTemporal(filteredByAttachment(hits, hasAttachment: hasAttachment), since: since, until: until).map {
-            EmailSearchHit(
-                id: $0.id,
-                subject: $0.subject,
-                from: $0.from,
-                date: $0.date,
-                snippet: $0.snippet,
-                mailbox: canonical,
-                hasAttachments: $0.hasAttachments,
-                attachmentCount: $0.attachmentCount
-            )
-        }
+        let labeled = labeledHits(
+            hits,
+            accountName: account.name,
+            mailbox: canonical,
+            hasAttachment: hasAttachment,
+            since: since,
+            until: until
+        )
         // Credential filter runs at the envelope boundary where agent-visible
         // content is built: headers stay visible while snippets redact. The
         // human inbox is untouched; only this tool output carries the filter.
@@ -264,7 +346,9 @@ extension EmailSearchTool {
             query: effectiveQuery,
             messages: capped,
             mailbox: canonical,
-            mailboxes: [canonical]
+            mailboxes: [canonical],
+            accounts: accounts,
+            failedAccounts: failedAccounts
         )
         return .success(content, callID: callID)
     }
@@ -278,6 +362,8 @@ extension EmailSearchTool {
         hasAttachment: Bool? = nil,
         since: Date? = nil,
         until: Date? = nil,
+        accounts: [String]? = nil,
+        failedAccounts: [String]? = nil,
         callID: String
     ) async throws -> ToolOutput {
         let listed = try await gateway.listMailboxes(credentials: credentials)
@@ -299,18 +385,14 @@ extension EmailSearchTool {
                     since: since,
                     until: until
                 )
-                let labeled = filteredByTemporal(filteredByAttachment(hits, hasAttachment: hasAttachment), since: since, until: until).map {
-                    EmailSearchHit(
-                        id: $0.id,
-                        subject: $0.subject,
-                        from: $0.from,
-                        date: $0.date,
-                        snippet: $0.snippet,
-                        mailbox: box,
-                        hasAttachments: $0.hasAttachments,
-                        attachmentCount: $0.attachmentCount
-                    )
-                }
+                let labeled = labeledHits(
+                    hits,
+                    accountName: account.name,
+                    mailbox: box,
+                    hasAttachment: hasAttachment,
+                    since: since,
+                    until: until
+                )
                 // Same envelope-boundary redaction as the single-mailbox path
                 // so fan-out hits cannot bypass the filter.
                 groups.append(
@@ -336,9 +418,371 @@ extension EmailSearchTool {
             query: effectiveQuery,
             messages: merged,
             mailbox: nil,
-            mailboxes: succeeded
+            mailboxes: succeeded,
+            accounts: accounts,
+            failedAccounts: failedAccounts
         )
         return .success(content, callID: callID)
+    }
+
+    /// What one multi-account fan-out child learned about its account.
+    ///
+    /// Carries both the classification (searched / silently skipped / failed)
+    /// and the evidence the parent needs for honest envelope reporting: the
+    /// folders it searched, the folders it saw while listing, and the failure
+    /// text when the account could not be searched. The parent correlates
+    /// outcomes by config-sequence index rather than nickname so duplicate
+    /// account names never merge two accounts into one outcome.
+    private struct AccountSearchOutcome: Sendable {
+        /// Agent-visible hit groups from folders the account actually searched.
+        let groups: [[EmailSearchHit]]
+        /// Folders actually searched, in search order (empty when nothing was searched).
+        ///
+        /// Carries the canonical resolved spelling for a requested folder, so
+        /// the parent can report the name the server actually holds rather
+        /// than the caller's requested spelling.
+        let searchedFolders: [String]
+        /// Selectable folders discovered during listing (empty when listing never succeeded).
+        let availableFolders: [String]
+        /// Failure text when the account could not be searched (credential or gateway failure).
+        let failureText: String?
+        /// Whether the account contributed searched folders to the merged result.
+        var succeeded: Bool {
+            !searchedFolders.isEmpty
+        }
+
+        /// Whether the account was skipped silently because it lacks the requested folder.
+        var skipped: Bool {
+            !succeeded && failureText == nil
+        }
+    }
+
+    /// One child outcome paired with its config-sequence position so the
+    /// parent correlates results by identity rather than nickname when
+    /// `[email.accounts]` repeats a name.
+    private struct IndexedAccountSearchOutcome: Sendable {
+        /// Position of the account inside the config sequence.
+        let index: Int
+        /// What the account's child learned.
+        let outcome: AccountSearchOutcome
+    }
+
+    /// Every child outcome classified by one config-order walk, ready for
+    /// envelope reporting.
+    private struct MultiAccountClassification: Sendable {
+        /// Nicknames of accounts that contributed searched folders, in config order.
+        let succeeded: [String]
+        /// Nicknames of accounts that failed, in config order.
+        let failed: [String]
+        /// Accounts silently skipped for lacking the requested folder.
+        let skippedCount: Int
+        /// Agent-visible hit groups contributed by every succeeding account.
+        let groups: [[EmailSearchHit]]
+        /// Canonical folders actually searched across accounts, first-seen order.
+        let searchedFolders: [String]
+        /// Selectable folders listed by any account, first-seen order.
+        let listedFolders: [String]
+        /// Failure text of the first failing account in config order.
+        let firstFailure: String?
+    }
+
+    /// Runs one account's share of a multi-account search: credentials, listing,
+    /// then either the resolved requested folder or a sequential fan-out across
+    /// every selectable folder — the same per-mailbox pipeline the
+    /// single-account path uses, with hits stamped with the owning account.
+    ///
+    /// Credential and gateway failures are reported inside the outcome rather
+    /// than thrown so the parent stays fail-soft; only `CancellationError`
+    /// escapes, because user cancellation outranks partial coverage.
+    private func accountSearchOutcome(
+        _ account: EmailAccount,
+        effectiveQuery: String,
+        limit: Int,
+        hasAttachment: Bool? = nil,
+        since: Date? = nil,
+        until: Date? = nil,
+        requestedMailbox: String? = nil
+    ) async throws -> AccountSearchOutcome {
+        // Catch cancellation that arrived before this child even started so a
+        // cancelled call cannot keep dialing sibling accounts' credentials.
+        try Task.checkCancellation()
+        let failed = { (text: String?) in
+            AccountSearchOutcome(groups: [], searchedFolders: [], availableFolders: [], failureText: text)
+        }
+        let credentials: ResolvedEmailCredentials
+        do {
+            credentials = try await EmailCredentialResolver.resolvedCredentials(for: account)
+        } catch {
+            if error is CancellationError {
+                throw error
+            }
+            return failed(error.localizedDescription)
+        }
+        let available: [String]
+        do {
+            let listed = try await gateway.listMailboxes(credentials: credentials)
+            available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
+        } catch {
+            if error is CancellationError {
+                throw error
+            }
+            return failed(error.localizedDescription)
+        }
+        func searched(groups: [[EmailSearchHit]], folders: [String]) -> AccountSearchOutcome {
+            AccountSearchOutcome(groups: groups, searchedFolders: folders, availableFolders: available, failureText: nil)
+        }
+        func skipped() -> AccountSearchOutcome {
+            AccountSearchOutcome(groups: [], searchedFolders: [], availableFolders: available, failureText: nil)
+        }
+        func failedSearch(_ text: String?) -> AccountSearchOutcome {
+            AccountSearchOutcome(groups: [], searchedFolders: [], availableFolders: available, failureText: text)
+        }
+        if let requested = requestedMailbox {
+            guard let canonical = EmailBridgeParsing.resolveMailbox(requested, among: available) else {
+                // Skipped silently: the account enters neither `accounts` nor
+                // `failedAccounts`, but `availableFolders` rides along so the
+                // parent can name real folders when no account covers the request.
+                return skipped()
+            }
+            do {
+                let hits = try await gateway.search(
+                    credentials: credentials,
+                    mailbox: canonical,
+                    query: effectiveQuery,
+                    limit: limit,
+                    hasAttachment: hasAttachment,
+                    since: since,
+                    until: until
+                )
+                let labeled = labeledHits(
+                    hits,
+                    accountName: account.name,
+                    mailbox: canonical,
+                    hasAttachment: hasAttachment,
+                    since: since,
+                    until: until
+                )
+                return searched(
+                    groups: [labeled.map { $0.agentVisible(credentialFilterEnabled: securityConfig.emailCredentialFilter) }],
+                    folders: [canonical]
+                )
+            } catch {
+                if error is CancellationError {
+                    throw error
+                }
+                return failedSearch(error.localizedDescription)
+            }
+        }
+        return try await fanOutAccountOutcome(
+            accountName: account.name,
+            credentials: credentials,
+            available: available,
+            effectiveQuery: effectiveQuery,
+            limit: limit,
+            hasAttachment: hasAttachment,
+            since: since,
+            until: until
+        )
+    }
+
+    /// Runs the every-mailbox fan-out share of one account's search: a
+    /// sequential walk over every selectable folder whose per-folder failure
+    /// only degrades coverage, reported as an outcome. A server listing no
+    /// selectable folder mirrors the single-account fan-out failure copy.
+    private func fanOutAccountOutcome(
+        accountName: String,
+        credentials: ResolvedEmailCredentials,
+        available: [String],
+        effectiveQuery: String,
+        limit: Int,
+        hasAttachment: Bool? = nil,
+        since: Date? = nil,
+        until: Date? = nil
+    ) async throws -> AccountSearchOutcome {
+        let nothingSearched = { (text: String) in
+            AccountSearchOutcome(groups: [], searchedFolders: [], availableFolders: available, failureText: text)
+        }
+        guard !available.isEmpty else {
+            // Mirror the single-account fan-out: a server with nothing to
+            // search is a failure with the same unknown-mailbox copy.
+            return nothingSearched(EmailBridgeParsing.unknownMailboxError(requested: "*", available: available).localizedDescription)
+        }
+        var groups: [[EmailSearchHit]] = []
+        var searchedFolders: [String] = []
+        var lastFailure: String?
+        // Mailboxes inside one account stay sequential: they share one bridge
+        // session's worth of server goodwill, and cross-account parallelism
+        // already provides the wall-clock win.
+        for box in available {
+            do {
+                let hits = try await gateway.search(
+                    credentials: credentials,
+                    mailbox: box,
+                    query: effectiveQuery,
+                    limit: limit,
+                    hasAttachment: hasAttachment,
+                    since: since,
+                    until: until
+                )
+                let labeled = labeledHits(
+                    hits,
+                    accountName: accountName,
+                    mailbox: box,
+                    hasAttachment: hasAttachment,
+                    since: since,
+                    until: until
+                )
+                groups.append(labeled.map { $0.agentVisible(credentialFilterEnabled: securityConfig.emailCredentialFilter) })
+                searchedFolders.append(box)
+            } catch {
+                if error is CancellationError {
+                    throw error
+                }
+                lastFailure = error.localizedDescription
+                continue
+            }
+        }
+        if searchedFolders.isEmpty, let lastFailure {
+            return nothingSearched(lastFailure)
+        }
+        return AccountSearchOutcome(groups: groups, searchedFolders: searchedFolders, availableFolders: available, failureText: nil)
+    }
+
+    /// Stitches hits across multiple accounts: one concurrent child per
+    /// account inside a throwing task group, then one merged newest-first
+    /// envelope capped to `limit` — `limit` is the global total, so every
+    /// mailbox in every account may return up to `limit` hits and the merge
+    /// is what enforces the bound.
+    ///
+    /// Outcomes are correlated by config-sequence index rather than nickname:
+    /// duplicate names in `[email.accounts]` are two distinct accounts, and
+    /// keying by name would merge them into one outcome and double-report the
+    /// survivor.
+    ///
+    /// Fail-soft: the call succeeds when at least one account succeeds and
+    /// reports credential/gateway failures honestly in `failedAccounts`,
+    /// while accounts missing the requested folder stay silent. The call
+    /// fails only when no account contributes: the fully-enumerated
+    /// missing-folder rule outranks failure copy so the user learns what to
+    /// retry.
+    private func multiAccountOutput(
+        accounts: [EmailAccount],
+        effectiveQuery: String,
+        limit: Int,
+        hasAttachment: Bool? = nil,
+        since: Date? = nil,
+        until: Date? = nil,
+        requestedMailbox: String? = nil,
+        callID: String
+    ) async throws -> ToolOutput {
+        var outcomes: [IndexedAccountSearchOutcome] = []
+        try await withThrowingTaskGroup(of: IndexedAccountSearchOutcome.self) { group in
+            for (index, account) in accounts.enumerated() {
+                group.addTask {
+                    let outcome = try await self.accountSearchOutcome(
+                        account,
+                        effectiveQuery: effectiveQuery,
+                        limit: limit,
+                        hasAttachment: hasAttachment,
+                        since: since,
+                        until: until,
+                        requestedMailbox: requestedMailbox
+                    )
+                    return IndexedAccountSearchOutcome(index: index, outcome: outcome)
+                }
+            }
+            // A child that throws (only CancellationError escapes a child)
+            // cancels the group and rethrows here, aborting the full call.
+            for try await indexed in group {
+                outcomes.append(indexed)
+            }
+        }
+        let classified = classifyAccountOutcomes(outcomes, accounts: accounts)
+        if classified.succeeded.isEmpty {
+            if let requested = requestedMailbox, classified.skippedCount > 0, classified.failed.isEmpty {
+                // Every account answered the listing and none carries the
+                // requested folder, so the set is fully enumerated and naming
+                // real folders is the honest retry hint. When an account
+                // failed before listing, its contents stay unknown and the
+                // first failure copy is the truthful surface instead.
+                throw EmailBridgeParsing.unknownMailboxError(requested: requested, available: classified.listedFolders)
+            }
+            if let firstFailure = classified.firstFailure {
+                throw EmailIMAPError.bridgeFailed(firstFailure)
+            }
+            // Defensive: execute() rejects an empty config before fan-out, so
+            // reaching here means nothing contributed and nothing reported a
+            // reason.
+            throw EmailIMAPError.bridgeFailed("No email accounts configured. Add an [[email.accounts]] entry to config.toml.")
+        }
+        let merged = EmailSearchMerge.mergedNewestFirst(classified.groups, limit: limit)
+        // Report the canonical resolved folder, not the caller's spelling:
+        // every succeeding account resolved its requested folder to one the
+        // server actually holds, so its first searched folder is the same
+        // name the per-hit labels and the `mailboxes` union already carry
+        // (mirroring what a single-account envelope reports). Where accounts
+        // hold different canonical spellings of the same request, the union
+        // in `mailboxes` stays the complete record.
+        let canonicalMailbox = requestedMailbox.flatMap { _ in classified.searchedFolders.first }
+        let content = try EmailBridgeParsing.encodeSearchEnvelope(
+            account: "all",
+            query: effectiveQuery,
+            messages: merged,
+            mailbox: canonicalMailbox,
+            mailboxes: classified.searchedFolders,
+            accounts: classified.succeeded,
+            failedAccounts: classified.failed
+        )
+        return .success(content, callID: callID)
+    }
+
+    /// Walks the config sequence over index-keyed child outcomes and
+    /// classifies every account into searched / silently skipped / failed,
+    /// deduplicating the searched- and listed-folder unions. Walking in
+    /// config order keeps reporting deterministic despite the task group's
+    /// nondeterministic completion order, and index-based correlation keeps
+    /// duplicate account names counted as the distinct accounts they are.
+    private func classifyAccountOutcomes(
+        _ outcomes: [IndexedAccountSearchOutcome],
+        accounts: [EmailAccount]
+    ) -> MultiAccountClassification {
+        var succeeded: [String] = []
+        var failed: [String] = []
+        var skippedCount = 0
+        var groups: [[EmailSearchHit]] = []
+        var searchedFolders: [String] = []
+        var listedFolders: [String] = []
+        var firstFailure: String?
+        let outcomeByIndex = Dictionary(uniqueKeysWithValues: outcomes.map { ($0.index, $0.outcome) })
+        for (index, account) in accounts.enumerated() {
+            guard let outcome = outcomeByIndex[index] else { continue }
+            if outcome.succeeded {
+                succeeded.append(account.name)
+                groups.append(contentsOf: outcome.groups)
+                for folder in outcome.searchedFolders where !searchedFolders.contains(folder) {
+                    searchedFolders.append(folder)
+                }
+            } else if outcome.skipped {
+                skippedCount += 1
+            } else {
+                failed.append(account.name)
+                if firstFailure == nil {
+                    firstFailure = outcome.failureText
+                }
+            }
+            for folder in outcome.availableFolders where !listedFolders.contains(folder) {
+                listedFolders.append(folder)
+            }
+        }
+        return MultiAccountClassification(
+            succeeded: succeeded,
+            failed: failed,
+            skippedCount: skippedCount,
+            groups: groups,
+            searchedFolders: searchedFolders,
+            listedFolders: listedFolders,
+            firstFailure: firstFailure
+        )
     }
 }
 

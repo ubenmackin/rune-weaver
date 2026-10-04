@@ -1,6 +1,7 @@
 // Rune Weaver Tools Tests — Email bridge and tool behavior coverage.
 
 import Foundation
+import os
 @testable import RuneWeaverCore
 @testable import RuneWeaverTools
 import Testing
@@ -92,6 +93,144 @@ private struct StubArchiveDetonator: EmailArchiveDetonator, Sendable {
             manifestTruncated: false,
             entryData: subpath == nil ? nil : entryData
         )
+    }
+}
+
+/// Two-account config for multi-account fan-out coverage. Each account carries a
+/// distinct username, which is the key the recording gateway uses to serve
+/// per-account responses and to prove which account was actually dialed.
+private func twoAccountTestConfig() -> EmailConfig {
+    EmailConfig(accounts: [
+        EmailAccount(name: "personal", type: "imap", host: "mail.yourdomain.com", port: 993, username: "you@yourdomain.com"),
+        EmailAccount(name: "work", type: "imap", host: "imap.work.example.com", port: 993, username: "worker@work.example.com")
+    ])
+}
+
+/// Personal and work usernames as configured by `twoAccountTestConfig()`.
+private let personalTestUsername = "you@yourdomain.com"
+private let workTestUsername = "worker@work.example.com"
+
+/// Installs passwords for both accounts in `twoAccountTestConfig()` for the
+/// duration of `body` and restores any pre-existing values afterwards. The
+/// work variable is set directly inside the shared credential gate because
+/// that gate is single-flight: nesting a second scoped credential helper
+/// inside it would deadlock, so the save/restore idiom from
+/// `withTestCredential` is mirrored here instead.
+private func withTwoAccountPasswords(_ body: @Sendable () async throws -> Void) async rethrows {
+    try await ToolsTestSupport.withTestCredential(envVar: "EMAIL_PERSONAL_PASSWORD", value: "test-secret") {
+        let saved: String? = "EMAIL_WORK_PASSWORD".withCString { keyPtr in
+            getenv(keyPtr).map { String(cString: $0) }
+        }
+        setenv("EMAIL_WORK_PASSWORD", "test-work-secret", 1)
+        defer {
+            if let saved {
+                setenv("EMAIL_WORK_PASSWORD", saved, 1)
+            } else {
+                unsetenv("EMAIL_WORK_PASSWORD")
+            }
+        }
+        try await body()
+    }
+}
+
+/// Builds a canned hit carrying a valid RFC 2822 date inside September 2025 so
+/// the newest-first merge parses it deterministically; weekday names line up
+/// with the real calendar so strict formatters never reject the fixture.
+private func cannedHit(id: String, day: Int, hour: Int = 9, mailbox: String = "INBOX") -> EmailSearchHit {
+    let weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    let date = "\(weekdays[(day - 1) % 7]), \(String(format: "%02d", day)) Sep 2025 \(String(format: "%02d", hour)):00:00 +0000"
+    return EmailSearchHit(
+        id: id,
+        subject: "Thread \(id)",
+        from: "sender@example.com",
+        date: date,
+        snippet: "canned body for \(id)",
+        mailbox: mailbox
+    )
+}
+
+/// Gateway that records every searched username and serves canned per-username
+/// hits keyed by `ResolvedEmailCredentials.username`, so multi-account fan-out
+/// is pinned without a network.
+///
+/// Usernames are unique per configured account, which makes the recording the
+/// only observable proof that every account was actually dialed for
+/// omitted/blank/star selectors. Served hits deliberately carry no account
+/// label: the tool layer owns routing labels, and these tests must catch it if
+/// labeling ever leaks into (or away from) the gateway boundary.
+///
+/// Concurrency: accounts are searched inside a task group, so the recording
+/// lives behind the same unfair-lock box the shared test support uses; every
+/// other field is immutable, which keeps the gateway safely `Sendable`.
+private final class RecordingAccountGateway: EmailIMAPGateway, Sendable {
+    /// Canned newest-first pool served per username (nil pool means no hits).
+    let hitsByUsername: [String: [EmailSearchHit]]
+    /// Gateway failure text keyed by username; a present key makes that
+    /// account's search fail while still recording the dial attempt.
+    let failuresByUsername: [String: String]
+    /// Per-username mailbox listing override; every account reports `["INBOX"]`
+    /// unless overridden, mirroring a minimal real server.
+    let mailboxesByUsername: [String: [String]]
+    /// Username whose searches are interrupted by a synchronous
+    /// `CancellationError`, simulating a cancellation landing mid-dial. The
+    /// throw is synchronous so the abort is deterministic regardless of
+    /// task-group scheduling.
+    let cancellingUsername: String?
+
+    /// Box guarding the username recording across the concurrent account fan-out.
+    private let recorded = OSAllocatedUnfairLock<[String]>(initialState: [])
+
+    /// Creates a recording gateway with canned per-username behavior.
+    init(
+        hitsByUsername: [String: [EmailSearchHit]] = [:],
+        failuresByUsername: [String: String] = [:],
+        mailboxesByUsername: [String: [String]] = [:],
+        cancellingUsername: String? = nil
+    ) {
+        self.hitsByUsername = hitsByUsername
+        self.failuresByUsername = failuresByUsername
+        self.mailboxesByUsername = mailboxesByUsername
+        self.cancellingUsername = cancellingUsername
+    }
+
+    /// Usernames recorded so far, in call order.
+    var searchedUsernames: [String] {
+        recorded.withLock { $0 }
+    }
+
+    /// Returns `["INBOX"]` for every account unless an override is configured.
+    func mailboxListing(credentials: ResolvedEmailCredentials) async throws -> EmailMailboxListing {
+        EmailMailboxListing(mailboxes: mailboxesByUsername[credentials.username] ?? ["INBOX"], delimiter: "/")
+    }
+
+    /// Records the dialed username, then serves that account's canned pool
+    /// capped to `limit`, or throws the configured gateway failure. The
+    /// cancelling username's search throws `CancellationError` after the dial
+    /// is recorded so cancellation tests still prove the account was reached.
+    func search(credentials: ResolvedEmailCredentials, mailbox _: String, query _: String, limit: Int) async throws -> [EmailSearchHit] {
+        recorded.withLock { $0.append(credentials.username) }
+        if credentials.username == cancellingUsername {
+            throw CancellationError()
+        }
+        if let failure = failuresByUsername[credentials.username] {
+            throw EmailIMAPError.bridgeFailed(failure)
+        }
+        return Array((hitsByUsername[credentials.username] ?? []).prefix(max(1, limit)))
+    }
+
+    /// Search-only double: reads are out of scope and fail closed if reached.
+    func fetch(credentials _: ResolvedEmailCredentials, mailbox _: String, messageID: String) async throws -> EmailFullMessage {
+        throw EmailIMAPError.bridgeFailed("Recording gateway does not fetch message \(messageID)")
+    }
+
+    /// Search-only double: attachment downloads fail closed if reached.
+    func attachment(credentials _: ResolvedEmailCredentials, mailbox _: String, messageID: String, attachmentIndex: Int) async throws -> EmailAttachmentData {
+        throw EmailIMAPError.bridgeFailed("Recording gateway does not fetch attachment \(attachmentIndex) of \(messageID)")
+    }
+
+    /// Search-only double: appends fail closed if reached.
+    func append(credentials _: ResolvedEmailCredentials, mailbox _: String, rawMessage _: Data) async throws {
+        throw EmailIMAPError.bridgeFailed("Recording gateway is read-only")
     }
 }
 
@@ -2188,5 +2327,410 @@ struct EmailToolsTests {
         #expect(result.fellThrough)
         #expect(result.v6Only)
         #expect(result.stable)
+    }
+
+    @Test
+    func `Multi-account search with omitted account merges newest-first across accounts`() async throws {
+        let gateway = RecordingAccountGateway(hitsByUsername: [
+            personalTestUsername: [
+                cannedHit(id: "p2", day: 5),
+                cannedHit(id: "p0", day: 1)
+            ],
+            workTestUsername: [
+                cannedHit(id: "w1", day: 3),
+                cannedHit(id: "w0", day: 2)
+            ]
+        ])
+        let tool = EmailSearchTool(emailConfig: twoAccountTestConfig(), gateway: gateway)
+        try await withTwoAccountPasswords {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"canned","limit":2}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailSearchEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.account == "all")
+            #expect(envelope.accounts == ["personal", "work"])
+            #expect((envelope.failedAccounts ?? []).isEmpty)
+            #expect(envelope.count == 2)
+            #expect(envelope.messages.count == envelope.count)
+            // Global newest-first merge across accounts, capped to the requested limit.
+            #expect(envelope.messages.map(\.id) == ["p2", "w1"])
+            // Every hit carries the owning account so follow-up reads stay routable.
+            #expect(envelope.messages.map(\.account) == ["personal", "work"])
+            for hit in envelope.messages {
+                #expect(!hit.account.isEmpty)
+                #expect(!hit.mailbox.isEmpty)
+            }
+            // The recording proves every configured account was actually dialed.
+            #expect(Set(gateway.searchedUsernames) == Set([personalTestUsername, workTestUsername]))
+        }
+    }
+
+    @Test
+    func `Multi-account search treats blank and star account spellings as all accounts`() async throws {
+        // Omitted, blank-after-trim, and the literal star must all select every
+        // configured account with byte-identical envelope semantics.
+        let payloads: [(String, String)] = [
+            ("omitted", #"{"query":"canned","limit":2}"#),
+            ("blank", #"{"account":"   ","query":"canned","limit":2}"#),
+            ("star", #"{"account":"*","query":"canned","limit":2}"#)
+        ]
+        for (spelling, payload) in payloads {
+            let gateway = RecordingAccountGateway(hitsByUsername: [
+                personalTestUsername: [cannedHit(id: "p2", day: 5), cannedHit(id: "p0", day: 1)],
+                workTestUsername: [cannedHit(id: "w1", day: 3)]
+            ])
+            let tool = EmailSearchTool(emailConfig: twoAccountTestConfig(), gateway: gateway)
+            try await withTwoAccountPasswords {
+                let output = try await tool.execute(
+                    input: ToolInput(toolName: "email.search", argumentsJSON: payload),
+                    context: ToolContext(conversationID: UUID())
+                )
+                #expect(output.isError == false, "spelling: \(spelling)")
+                let envelope = try JSONDecoder().decode(EmailSearchEnvelope.self, from: Data(output.content.utf8))
+                #expect(envelope.account == "all", "spelling: \(spelling)")
+                #expect(envelope.accounts == ["personal", "work"], "spelling: \(spelling)")
+                #expect(envelope.messages.map(\.id) == ["p2", "w1"], "spelling: \(spelling)")
+                #expect(
+                    Set(gateway.searchedUsernames) == Set([personalTestUsername, workTestUsername]),
+                    "spelling: \(spelling)"
+                )
+            }
+        }
+    }
+
+    @Test
+    func `Multi-account search is fail-soft and names the failed account`() async throws {
+        let gateway = RecordingAccountGateway(
+            hitsByUsername: [personalTestUsername: [cannedHit(id: "p2", day: 5), cannedHit(id: "p0", day: 1)]],
+            failuresByUsername: [workTestUsername: "work server offline"]
+        )
+        let tool = EmailSearchTool(emailConfig: twoAccountTestConfig(), gateway: gateway)
+        try await withTwoAccountPasswords {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"canned","limit":5}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            // At least one success keeps the call successful; coverage gaps are
+            // reported on the envelope instead of failing the whole search.
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailSearchEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.account == "all")
+            #expect(envelope.messages.map(\.id) == ["p2", "p0"])
+            #expect(envelope.messages.allSatisfy { $0.account == "personal" })
+            #expect(envelope.accounts == ["personal"])
+            #expect(envelope.failedAccounts == ["work"])
+            // The failing account was still dialed — its failure is a runtime outcome.
+            #expect(Set(gateway.searchedUsernames) == Set([personalTestUsername, workTestUsername]))
+            #expect(!output.content.contains("test-secret"))
+        }
+    }
+
+    @Test
+    func `Multi-account search with mailbox only runs accounts holding the folder`() async throws {
+        let archiveHit = EmailSearchHit(
+            id: "a7",
+            subject: "Archive note",
+            from: "archive@example.com",
+            date: "Thu, 04 Sep 2025 10:00:00 +0000",
+            snippet: "Older archive body",
+            mailbox: "Archive"
+        )
+        let gateway = RecordingAccountGateway(
+            hitsByUsername: [
+                personalTestUsername: [cannedHit(id: "p2", day: 5)],
+                workTestUsername: [archiveHit]
+            ],
+            mailboxesByUsername: [workTestUsername: ["INBOX", "Archive"]]
+        )
+        let tool = EmailSearchTool(emailConfig: twoAccountTestConfig(), gateway: gateway)
+        try await withTwoAccountPasswords {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"canned","mailbox":"Archive","limit":5}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailSearchEnvelope.self, from: Data(output.content.utf8))
+            // An account lacking the requested folder is skipped silently: never
+            // searched, never listed as searched, and never listed as failed.
+            #expect(envelope.messages.map(\.id) == ["a7"])
+            #expect(envelope.messages[0].mailbox == "Archive")
+            #expect(envelope.messages[0].account == "work")
+            #expect(envelope.accounts == ["work"])
+            #expect((envelope.failedAccounts ?? []).isEmpty)
+            #expect(gateway.searchedUsernames == [workTestUsername])
+            // Zero accounts holding the requested folder fails the call naming what is available.
+            let missing = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"canned","mailbox":"Missing","limit":5}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(missing.isError == true)
+            #expect(missing.content.contains("Missing"))
+            #expect(missing.content.contains("INBOX"))
+        }
+    }
+
+    @Test
+    func `Explicit single account search keeps single-account shape with one accounts entry`() async throws {
+        let gateway = RecordingAccountGateway(hitsByUsername: [
+            personalTestUsername: [cannedHit(id: "p2", day: 5), cannedHit(id: "p0", day: 1)]
+        ])
+        let tool = EmailSearchTool(emailConfig: twoAccountTestConfig(), gateway: gateway)
+        try await withTwoAccountPasswords {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"canned","limit":2}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailSearchEnvelope.self, from: Data(output.content.utf8))
+            // Single-account calls echo the account name, never the all-accounts marker.
+            #expect(envelope.account == "personal")
+            #expect(envelope.accounts == ["personal"])
+            #expect((envelope.failedAccounts ?? []).isEmpty)
+            #expect(envelope.messages.map(\.account) == ["personal", "personal"])
+            #expect(Set(gateway.searchedUsernames) == Set([personalTestUsername]))
+        }
+    }
+
+    @Test
+    func `Multi-account search fails when every account fails surfacing the failure text`() async throws {
+        // Shared failure text across both accounts keeps the assertion about
+        // failure-text surfacing (not task-group arrival order) deterministic.
+        let gateway = RecordingAccountGateway(
+            failuresByUsername: [
+                personalTestUsername: "email gateway exploded",
+                workTestUsername: "email gateway exploded"
+            ]
+        )
+        let tool = EmailSearchTool(emailConfig: twoAccountTestConfig(), gateway: gateway)
+        try await withTwoAccountPasswords {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"canned","limit":5}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            // Zero successes fails the whole call rather than returning an empty success.
+            #expect(output.isError == true)
+            #expect(output.content.contains("email gateway exploded"))
+            #expect(Set(gateway.searchedUsernames) == Set([personalTestUsername, workTestUsername]))
+            #expect(!output.content.contains("test-secret"))
+        }
+    }
+
+    @Test
+    func `Multi-account search aborts the whole call when a gateway child is cancelled`() async throws {
+        // The fan-out is fail-soft for ordinary gateway failures but fail-closed
+        // for cancellation: one cancelled child must abort the entire call rather
+        // than let a healthy sibling's hits degrade the result into a partial
+        // envelope. The gateway throws the cancellation synchronously during the
+        // personal account's search while work holds hits that would otherwise
+        // produce a successful partial, so whichever child finishes first, the
+        // only possible outcome is the aborted call.
+        let gateway = RecordingAccountGateway(
+            hitsByUsername: [workTestUsername: [cannedHit(id: "w1", day: 3)]],
+            cancellingUsername: personalTestUsername
+        )
+        let tool = EmailSearchTool(emailConfig: twoAccountTestConfig(), gateway: gateway)
+        try await withTwoAccountPasswords {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"canned","limit":5}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == true)
+            // No envelope comes back at all — not even one covering the healthy account.
+            let envelope = try? JSONDecoder().decode(EmailSearchEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope == nil)
+            #expect(!output.content.contains("w1"))
+            // The surfaced failure is the cancellation itself, not failure-soft copy.
+            #expect(output.content == CancellationError().localizedDescription)
+        }
+    }
+
+    @Test
+    func `Multi-account search with no configured accounts fails before any search`() async throws {
+        // Nothing to fan out to: the call must fail closed without dialing anything.
+        let gateway = RecordingAccountGateway()
+        let tool = EmailSearchTool(emailConfig: EmailConfig(accounts: []), gateway: gateway)
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"canned"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(gateway.searchedUsernames.isEmpty)
+    }
+
+    @Test
+    func `Multi-account search caps merged hits across oversized per-account pools`() async throws {
+        var personalPool: [EmailSearchHit] = []
+        var workPool: [EmailSearchHit] = []
+        // Pools stay newest-first like a real bridge response. Disjoint date
+        // ranges keep the merged order unambiguous: work owns the eight newest dates.
+        for index in stride(from: 7, through: 0, by: -1) {
+            personalPool.append(cannedHit(id: "p\(index)", day: 1 + index))
+            workPool.append(cannedHit(id: "w\(index)", day: 10 + index))
+        }
+        let gateway = RecordingAccountGateway(hitsByUsername: [
+            personalTestUsername: personalPool,
+            workTestUsername: workPool
+        ])
+        let tool = EmailSearchTool(emailConfig: twoAccountTestConfig(), gateway: gateway)
+        try await withTwoAccountPasswords {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"canned","limit":3}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailSearchEnvelope.self, from: Data(output.content.utf8))
+            // `limit` is a global total cap, not a per-account or per-mailbox budget.
+            #expect(envelope.count == 3)
+            #expect(envelope.messages.count == 3)
+            #expect(envelope.messages.map(\.id) == ["w7", "w6", "w5"])
+            #expect(envelope.messages.allSatisfy { $0.account == "work" })
+        }
+    }
+
+    @Test
+    func `Unknown explicit account fails naming available accounts without searching`() async throws {
+        let gateway = RecordingAccountGateway()
+        let tool = EmailSearchTool(emailConfig: twoAccountTestConfig(), gateway: gateway)
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"missing","query":"canned"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        // An explicit unknown name fails before any account is dialed and names
+        // the configured alternatives without echoing any secret.
+        #expect(output.isError == true)
+        #expect(output.content.contains("missing"))
+        #expect(output.content.contains("personal"))
+        #expect(output.content.contains("work"))
+        #expect(gateway.searchedUsernames.isEmpty)
+        #expect(!output.content.contains("test-secret"))
+    }
+
+    @Test
+    func `Search args decode omitted blank and star account as all-accounts requests`() throws {
+        // The selector collapses at the model boundary so the tool layer only
+        // ever sees nil (all) or a concrete trimmed name.
+        let omitted = try JSONDecoder().decode(EmailSearchArgs.self, from: Data(#"{"query":"hi"}"#.utf8))
+        #expect(omitted.account == nil)
+        #expect(omitted.trimmedAccount == nil)
+        #expect(omitted.isAllAccountsRequest == true)
+        let blank = try JSONDecoder().decode(EmailSearchArgs.self, from: Data(#"{"account":"   ","query":"hi"}"#.utf8))
+        #expect(blank.trimmedAccount == nil)
+        #expect(blank.isAllAccountsRequest == true)
+        let star = try JSONDecoder().decode(EmailSearchArgs.self, from: Data(#"{"account":"*","query":"hi"}"#.utf8))
+        #expect(star.trimmedAccount == nil)
+        #expect(star.isAllAccountsRequest == true)
+        let padded = try JSONDecoder().decode(EmailSearchArgs.self, from: Data(#"{"account":" personal ","query":"hi"}"#.utf8))
+        #expect(padded.account == " personal ")
+        #expect(padded.trimmedAccount == "personal")
+        #expect(padded.isAllAccountsRequest == false)
+    }
+
+    @Test
+    func `Legacy search hit without account decodes with empty account`() throws {
+        // Bridge payloads from before per-hit account labeling must still decode.
+        let legacy = Data(
+            #"{"id":"42","subject":"Old wire","from":"boss@example.com","date":"Mon, 01 Sep 2025 09:00:00 +0000","snippet":"pre-account payload"}"#
+                .utf8
+        )
+        let hit = try JSONDecoder().decode(EmailSearchHit.self, from: legacy)
+        #expect(hit.account == "")
+        #expect(hit.mailbox == "INBOX")
+        let encoded = try JSONEncoder().encode(hit)
+        let roundTripped = try JSONDecoder().decode(EmailSearchHit.self, from: encoded)
+        #expect(roundTripped == hit)
+    }
+
+    @Test
+    func `Legacy search envelope without multi-account keys decodes tolerantly`() throws {
+        let legacy = Data(
+            #"{"account":"personal","query":"hi","count":1,"messages":[{"id":"42","subject":"Old wire","from":"boss@example.com","date":"Mon, 01 Sep 2025 09:00:00 +0000","snippet":"pre-multi-account payload"}]}"#
+                .utf8
+        )
+        let envelope = try JSONDecoder().decode(EmailSearchEnvelope.self, from: legacy)
+        #expect(envelope.account == "personal")
+        #expect(envelope.accounts == nil)
+        #expect(envelope.failedAccounts == nil)
+        // Count always derives from the messages, never from the wire value.
+        #expect(envelope.count == envelope.messages.count)
+        #expect(envelope.messages[0].account == "")
+        // Real tool output carries the multi-account keys even for one account:
+        // the search tool always passes `accounts:[name]` and `failedAccounts:[]`,
+        // so a decoded legacy envelope re-encoded like current tool output gains
+        // them rather than keeping the pre-multi-account byte shape.
+        let encoded = try EmailBridgeParsing.encodeSearchEnvelope(
+            account: "personal",
+            query: "hi",
+            messages: envelope.messages,
+            accounts: ["personal"],
+            failedAccounts: []
+        )
+        #expect(encoded.contains("\"accounts\""))
+        #expect(encoded.contains("\"failedAccounts\""))
+        let decoded = try JSONDecoder().decode(EmailSearchEnvelope.self, from: Data(encoded.utf8))
+        #expect(decoded.account == "personal")
+        #expect(decoded.accounts == ["personal"])
+        #expect(decoded.failedAccounts == [])
+        #expect(decoded.messages == envelope.messages)
+        // Omission stays reserved for callers that pass nil keys, which the
+        // search tool no longer does.
+        let withoutKeys = try EmailBridgeParsing.encodeSearchEnvelope(
+            account: "personal",
+            query: "hi",
+            messages: envelope.messages
+        )
+        #expect(!withoutKeys.contains("\"accounts\""))
+        #expect(!withoutKeys.contains("\"failedAccounts\""))
+    }
+
+    @Test
+    func `Multi-account envelope preserves account routing fields through agentVisible and round-trip`() throws {
+        let personalHit = EmailSearchHit(
+            id: "p1",
+            subject: "Roadmap thread",
+            from: "boss@example.com",
+            date: "Mon, 01 Sep 2025 09:00:00 +0000",
+            snippet: "plain planning notes",
+            mailbox: "INBOX",
+            account: "personal"
+        )
+        let workHit = EmailSearchHit(
+            id: "w1",
+            subject: "Vendor thread",
+            from: "vendor@example.com",
+            date: "Tue, 02 Sep 2025 09:00:00 +0000",
+            snippet: "plain vendor notes",
+            mailbox: "INBOX",
+            account: "work"
+        )
+        let envelope = EmailSearchEnvelope(
+            account: "all",
+            query: "roadmap",
+            messages: [workHit, personalHit],
+            accounts: ["personal", "work"],
+            failedAccounts: ["work"]
+        )
+        // The credential filter may rewrite subject/snippet text but must never
+        // touch the account-routing trio or the per-hit account labels.
+        let visible = envelope.agentVisible()
+        #expect(visible.account == "all")
+        #expect(visible.accounts == ["personal", "work"])
+        #expect(visible.failedAccounts == ["work"])
+        #expect(visible.messages.map(\.account) == ["work", "personal"])
+        #expect(visible.count == 2)
+        let encoded = try EmailBridgeParsing.encodeSearchEnvelope(
+            account: visible.account,
+            query: visible.query,
+            messages: visible.messages,
+            accounts: visible.accounts,
+            failedAccounts: visible.failedAccounts
+        )
+        let decoded = try JSONDecoder().decode(EmailSearchEnvelope.self, from: Data(encoded.utf8))
+        #expect(decoded == visible)
+        #expect(decoded.account == "all")
+        #expect(decoded.accounts == ["personal", "work"])
+        #expect(decoded.failedAccounts == ["work"])
+        #expect(decoded.messages.map(\.account) == ["work", "personal"])
     }
 }
