@@ -168,7 +168,7 @@ public struct EmailSearchTool: Tool, Sendable {
             resolvedAccounts = [account]
         }
         guard !resolvedAccounts.isEmpty else {
-            return .failure("Invalid email.search arguments: No email accounts configured.", callID: input.callID)
+            return .failure("No email accounts configured. Add an [[email.accounts]] entry to config.toml.", callID: input.callID)
         }
         // Gateway validation surfaces by localized copy so both the current validation case and
         // any legacy bridge case with identical copy read the same here; no case matching needed.
@@ -713,7 +713,7 @@ extension EmailSearchTool {
             // Defensive: execute() rejects an empty config before fan-out, so
             // reaching here means nothing contributed and nothing reported a
             // reason.
-            throw EmailIMAPError.bridgeFailed("No email accounts configured.")
+            throw EmailIMAPError.bridgeFailed("No email accounts configured. Add an [[email.accounts]] entry to config.toml.")
         }
         let merged = EmailSearchMerge.mergedNewestFirst(classified.groups, limit: limit)
         // Report the canonical resolved folder, not the caller's spelling:

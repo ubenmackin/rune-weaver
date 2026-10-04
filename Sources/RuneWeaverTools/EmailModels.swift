@@ -475,8 +475,9 @@ public struct EmailSearchEnvelope: Sendable, Equatable, Codable {
         failedAccounts = try container.decodeIfPresent([String].self, forKey: .failedAccounts)
     }
 
-    /// Encodes an envelope, omitting nil multi-account keys so single-account
-    /// output keeps its pre-multi-account shape byte-for-byte.
+    /// Encodes an envelope, omitting nil multi-account keys. The search tool
+    /// always passes both keys, so its output always carries them; per-hit
+    /// account labels are always encoded.
     /// - Parameter encoder: Encoder for the envelope document.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
