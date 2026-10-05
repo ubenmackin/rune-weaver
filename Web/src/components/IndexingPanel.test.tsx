@@ -2184,8 +2184,9 @@ describe("IndexingPanel", () => {
     15000,
   );
 
-  it("updates cards mid-run from the polled live snapshot", async () => {
+  it("keeps committed cards frozen mid-run while live stays live, then jumps on completion", async () => {
     let documents = 42;
+    let running = true;
     let live: Record<string, unknown> | null = {
       trigger: "onDemand",
       phase: "extracting",
@@ -2201,7 +2202,7 @@ describe("IndexingPanel", () => {
         return jsonResponse({
           ...statusPayload,
           enabled: true,
-          running: true,
+          running,
           documents,
           live,
         });
@@ -2220,9 +2221,25 @@ describe("IndexingPanel", () => {
     await waitFor(() => {
       expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
     });
-    // Committed growth arrives through the status reload while the run stays
-    // in flight, so the card tracks the new total without settling.
+    await waitFor(() => {
+      expect(screen.getByTestId("index-live-header")).toHaveTextContent("5 scanned");
+    });
+    // Freeze-then-jump: committed growth plus live progress arrive together
+    // while the run stays in flight. The live header tracks the polled
+    // snapshot while the committed card holds the last settled total.
     documents = 87;
+    live = {
+      trigger: "onDemand",
+      phase: "extracting",
+      stage: "files",
+      scanned: 9,
+      indexed: 7,
+      elapsedMs: 2500,
+      current: "notes/ideas.md",
+    };
+    const callsBefore = fetchMock.mock.calls.filter(
+      ([url]) => String(url) === "/index/status",
+    ).length;
     await waitFor(() => {
       expect(capture.onMessage).not.toBeNull();
     });
@@ -2234,23 +2251,59 @@ describe("IndexingPanel", () => {
         response: null,
       },
     });
+    // The frame-triggered live-only poll adopts the new live snapshot.
     await waitFor(() => {
-      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("87");
+      expect(screen.getByTestId("index-live-header")).toHaveTextContent("9 scanned");
     });
-    // The live block stays mounted through the committed update with its
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("7 indexed");
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url) === "/index/status").length,
+    ).toBeGreaterThan(callsBefore);
+    // Committed cards stay frozen mid-run despite the newer status payload.
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
+    // The live block stays mounted through the frozen window with its
     // polled header.
     expect(screen.getByTestId("index-live-progress")).toBeInTheDocument();
     expect(screen.getByTestId("index-live-header")).toHaveTextContent("Reading files…");
+
+    // Atomic jump: the terminal broadcast reloads the full status, so the
+    // committed card jumps to the settled total and the live block unmounts.
+    running = false;
+    live = null;
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        kind: "index",
+        status: "ok",
+        message: "Index run ok: 3 indexed, 5 scanned",
+        response: "Index run ok: 3 indexed, 5 scanned",
+      },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("87");
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("index-live-progress")).toBeNull();
+    });
   });
 
-  it("flashes changed Size/Documents/Chunks values on update only", async () => {
-    let payload = {
+  it("keeps Size/Documents/Chunks frozen mid-run with no flash, then jumps without flash", async () => {
+    let payload: Record<string, unknown> = {
       ...statusPayload,
       enabled: true,
       running: true,
       documents: 42,
       chunks: 100,
       bytes: 2048,
+      live: {
+        trigger: "onDemand",
+        phase: "extracting",
+        stage: "files",
+        scanned: 5,
+        indexed: 3,
+        elapsedMs: 1500,
+        current: "notes/ideas.md",
+      },
     };
     const fetchMock = vi.fn(async (input: string) => {
       const url = String(input);
@@ -2271,6 +2324,9 @@ describe("IndexingPanel", () => {
     await waitFor(() => {
       expect(screen.getByTestId("index-stat-documents-value")).toBeInTheDocument();
     });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-live-header")).toHaveTextContent("5 scanned");
+    });
     // The first snapshot seeds the baseline and never flashes.
     expect(screen.getByTestId("index-stat-size-value")).not.toHaveClass(
       "index-stat-value-flash",
@@ -2282,9 +2338,27 @@ describe("IndexingPanel", () => {
       "index-stat-value-flash",
     );
 
-    // Change only Documents: that value flashes while Size and Chunks stay
-    // plain, and the watermark, pills, and last-run strip never carry it.
-    payload = { ...payload, documents: 60 };
+    // Freeze-then-jump: committed Size/Documents/Chunks plus live progress
+    // arrive together mid-run. Only the live header tracks the poll; every
+    // committed card holds the last settled snapshot with no flash.
+    payload = {
+      ...payload,
+      documents: 60,
+      chunks: 120,
+      bytes: 4096,
+      live: {
+        trigger: "onDemand",
+        phase: "extracting",
+        stage: "files",
+        scanned: 9,
+        indexed: 7,
+        elapsedMs: 2500,
+        current: "notes/ideas.md",
+      },
+    };
+    const callsBefore = fetchMock.mock.calls.filter(
+      ([url]) => String(url) === "/index/status",
+    ).length;
     await waitFor(() => {
       expect(capture.onMessage).not.toBeNull();
     });
@@ -2296,13 +2370,22 @@ describe("IndexingPanel", () => {
         response: null,
       },
     });
+    // Live-only poll lands: the header tracks the new live snapshot.
     await waitFor(() => {
-      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("60");
+      expect(screen.getByTestId("index-live-header")).toHaveTextContent("9 scanned");
     });
-    expect(screen.getByTestId("index-stat-documents-value")).toHaveClass(
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url) === "/index/status").length,
+    ).toBeGreaterThan(callsBefore);
+    // Committed cards stay frozen with no flash mid-run.
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
+    expect(screen.getByTestId("index-stat-chunks-value")).toHaveTextContent("100");
+    expect(screen.getByTestId("index-stat-size-value")).toHaveTextContent("2 KB");
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("7 indexed");
+    expect(screen.getByTestId("index-stat-size-value")).not.toHaveClass(
       "index-stat-value-flash",
     );
-    expect(screen.getByTestId("index-stat-size-value")).not.toHaveClass(
+    expect(screen.getByTestId("index-stat-documents-value")).not.toHaveClass(
       "index-stat-value-flash",
     );
     expect(screen.getByTestId("index-stat-chunks-value")).not.toHaveClass(
@@ -2317,6 +2400,33 @@ describe("IndexingPanel", () => {
     for (const pill of document.querySelectorAll(".index-source-pills .status-pill")) {
       expect(pill).not.toHaveClass("index-stat-value-flash");
     }
+
+    // Atomic jump on completion: the terminal broadcast reloads the full
+    // status, so all three cards jump together still with no flash.
+    payload = { ...payload, running: false, live: null };
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        kind: "index",
+        status: "ok",
+        message: "Index run ok: 3 indexed, 5 scanned",
+        response: "Index run ok: 3 indexed, 5 scanned",
+      },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("60");
+    });
+    expect(screen.getByTestId("index-stat-chunks-value")).toHaveTextContent("120");
+    expect(screen.getByTestId("index-stat-size-value")).toHaveTextContent("4 KB");
+    expect(screen.getByTestId("index-stat-size-value")).not.toHaveClass(
+      "index-stat-value-flash",
+    );
+    expect(screen.getByTestId("index-stat-documents-value")).not.toHaveClass(
+      "index-stat-value-flash",
+    );
+    expect(screen.getByTestId("index-stat-chunks-value")).not.toHaveClass(
+      "index-stat-value-flash",
+    );
   });
 });
 

@@ -10,6 +10,10 @@ import Foundation
 @testable import RuneWeaverCore
 import Testing
 
+#if canImport(SQLite3)
+    import SQLite3
+#endif
+
 // MARK: - Fixtures
 
 /// Records the source order stages are invoked in.
@@ -247,6 +251,119 @@ private func makeIndexTemporaryDirectory() -> URL {
         .appendingPathComponent("runeweaver-indexcoordinator-\(UUID().uuidString)", isDirectory: true)
     try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
+}
+
+/// Single `index_aggregates` row observed without touching the store cache.
+///
+/// Reads the persisted aggregate directly from `index.db` so the run-end
+/// proofs observe what the refresh wrote rather than what an in-memory
+/// snapshot projects. A missing table or row reads as nil, distinguishing a
+/// never-refreshed store from a freshly stamped one.
+private struct IndexAggregateProbeRow: Sendable, Equatable {
+    /// Persisted document count.
+    var documents: Int
+    /// Persisted chunk count.
+    var chunks: Int
+    /// Run that produced the row, when stamped.
+    var producingRunID: String?
+    /// When the refresh last rewrote the row.
+    var updatedAt: Date?
+    /// Newest content watermark carried by the row.
+    var indexAsOf: Date?
+}
+
+/// Opens a raw probe handle with the production busy-timeout.
+///
+/// Mirrors `SQLiteHelpers.openHandle`'s `busy_timeout = 5000` so a probe racing
+/// a parallel aggregate refresh waits instead of failing with `SQLITE_BUSY`.
+/// Probes stay read-only and never change `journal_mode`, so only the timeout
+/// is shared.
+/// - Parameter dbPath: SQLite file path backing the store.
+/// - Returns: Open handle, or nil when the database cannot be opened.
+private func openIndexProbe(dbPath: String) -> OpaquePointer? {
+    #if canImport(SQLite3)
+        var handle: OpaquePointer?
+        guard sqlite3_open(dbPath, &handle) == SQLITE_OK, let opened = handle else { return nil }
+        _ = sqlite3_busy_timeout(opened, 5000)
+        return opened
+    #else
+        return nil
+    #endif
+}
+
+/// Reads the single aggregate row from `index.db`.
+/// - Parameter dbPath: SQLite file path backing the store.
+/// - Returns: The persisted row, or nil when the refresh never ran.
+private func readIndexAggregateRow(dbPath: String) -> IndexAggregateProbeRow? {
+    #if canImport(SQLite3)
+        guard let handle = openIndexProbe(dbPath: dbPath) else { return nil }
+        defer { sqlite3_close(handle) }
+        let sql = "SELECT documents, chunks, producing_run_id, updated_at, index_as_of FROM index_aggregates WHERE id = 0;"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let documents = Int(sqlite3_column_int64(statement, 0))
+        let chunks = Int(sqlite3_column_int64(statement, 1))
+        let producingRunID = sqlite3_column_text(statement, 2).map { String(cString: $0) }
+        let updatedAtValue = sqlite3_column_double(statement, 3)
+        let indexAsOfValue = sqlite3_column_double(statement, 4)
+        // A zero epoch means the refresh never stamped the row, so surface nil
+        // rather than a misleading 1970 date in freshness comparisons.
+        let updatedAt = updatedAtValue > 0 ? Date(timeIntervalSince1970: updatedAtValue) : nil
+        let indexAsOf = indexAsOfValue > 0 ? Date(timeIntervalSince1970: indexAsOfValue) : nil
+        return IndexAggregateProbeRow(
+            documents: documents,
+            chunks: chunks,
+            producingRunID: producingRunID,
+            updatedAt: updatedAt,
+            indexAsOf: indexAsOf
+        )
+    #else
+        return nil
+    #endif
+}
+
+/// Reads one per-source aggregate row from `index.db`.
+/// - Parameters:
+///   - dbPath: SQLite file path backing the store.
+///   - source: Source string to look up (for example `files`).
+/// - Returns: Document and chunk counts, or nil when the refresh never wrote the source.
+private func readIndexAggregateBySource(dbPath: String, source: String) -> (documents: Int, chunks: Int)? {
+    #if canImport(SQLite3)
+        guard let handle = openIndexProbe(dbPath: dbPath) else { return nil }
+        defer { sqlite3_close(handle) }
+        let sql = "SELECT documents, chunks FROM index_aggregate_by_source WHERE source = ?;"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+        _ = source.withCString { sqlite3_bind_text(statement, 1, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return (documents: Int(sqlite3_column_int64(statement, 0)), chunks: Int(sqlite3_column_int64(statement, 1)))
+    #else
+        return nil
+    #endif
+}
+
+/// Reads one per-extract-status aggregate row from `index.db`.
+/// - Parameters:
+///   - dbPath: SQLite file path backing the store.
+///   - status: Status string to look up (for example `extracted`).
+/// - Returns: Document count, or nil when the refresh never wrote the status.
+private func readIndexAggregateByExtractStatus(dbPath: String, status: String) -> Int? {
+    #if canImport(SQLite3)
+        guard let handle = openIndexProbe(dbPath: dbPath) else { return nil }
+        defer { sqlite3_close(handle) }
+        let sql = "SELECT documents FROM index_aggregate_by_extract_status WHERE status = ?;"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+        _ = status.withCString { sqlite3_bind_text(statement, 1, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return Int(sqlite3_column_int64(statement, 0))
+    #else
+        return nil
+    #endif
 }
 
 @Suite("Index Coordinator")
@@ -1219,5 +1336,179 @@ struct IndexCoordinatorTests {
         let observed = await budgets.snapshot()
         #expect(observed.count == 3)
         #expect(observed.allSatisfy { $0 == 7 })
+    }
+
+    @Test
+    func `Completed run refreshes aggregates with fresh rows`() async throws {
+        // A successful pass commits documents then rewrites the aggregate tables
+        // in one refresh, so the persisted row carries the new counts plus a fresh
+        // stamp instead of stale pre-run totals.
+        let directory = makeIndexTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dbPath = directory.appendingPathComponent("docindex.db").path
+        let store = DocIndexStore(dbPath: dbPath)
+        let stateStore = IndexRunStateStore(path: directory.appendingPathComponent("state.json").path)
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, _ in
+            for index in 0 ..< 2 {
+                let document = IndexedDocument(
+                    source: .files,
+                    externalID: "agg-complete-\(index)",
+                    displayName: "agg-complete-\(index)",
+                    contentHash: "agg-complete-hash-\(index)"
+                )
+                let stored = try await store.upsertDocument(document)
+                _ = try await store.upsertChunks(
+                    documentID: stored.id,
+                    chunks: [IndexedChunk(documentID: stored.id, ordinal: 0, text: "aggregate body \(index)")]
+                )
+            }
+            return IndexSourceRunReport(kind: .files, scanned: 2, indexed: 2)
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: []),
+            stages: [stage],
+            store: store,
+            stateStore: stateStore
+        )
+
+        let summary = await coordinator.run()
+
+        #expect(summary.status == .ok)
+        let row = readIndexAggregateRow(dbPath: dbPath)
+        #expect(row != nil)
+        #expect(row?.documents == 2)
+        #expect(row?.chunks == 2)
+        // The refresh stamps which run produced the row plus when, so a fresh
+        // completion always carries an identity and a recent write time.
+        #expect(!(row?.producingRunID?.isEmpty ?? true))
+        #expect(row?.producingRunID == summary.sessionID.uuidString)
+        #expect(row?.updatedAt != nil)
+        #expect(row?.indexAsOf != nil)
+        if let updatedAt = row?.updatedAt {
+            #expect(abs(updatedAt.timeIntervalSince(summary.finishedAt)) < 120)
+        }
+        let bySource = readIndexAggregateBySource(dbPath: dbPath, source: IndexSource.files.rawValue)
+        #expect(bySource?.documents == 2)
+        #expect(bySource?.chunks == 2)
+        let byStatus = readIndexAggregateByExtractStatus(dbPath: dbPath, status: ExtractStatus.extracted.rawValue)
+        #expect(byStatus == 2)
+        let stats = try await store.stats()
+        #expect(stats.documents == 2)
+    }
+
+    @Test
+    func `Cancelled run refreshes partial aggregates`() async throws {
+        // Cancellation stops between batches yet keeps already-committed rows, so
+        // the run-end refresh must persist those partial counts rather than
+        // leaving the pre-run aggregates behind.
+        let directory = makeIndexTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dbPath = directory.appendingPathComponent("docindex.db").path
+        let store = DocIndexStore(dbPath: dbPath)
+        let stateStore = IndexRunStateStore(path: directory.appendingPathComponent("state.json").path)
+        let total = 5
+        let holder = IndexCoordinatorHolder()
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, reporter, isCancelled in
+            var committed = 0
+            for index in 0 ..< total {
+                if isCancelled() {
+                    break
+                }
+                let document = IndexedDocument(
+                    source: .files,
+                    externalID: "agg-cancel-\(index)",
+                    displayName: "agg-cancel-\(index)",
+                    contentHash: "agg-cancel-hash-\(index)"
+                )
+                let stored = try await store.upsertDocument(document)
+                _ = try await store.upsertChunks(
+                    documentID: stored.id,
+                    chunks: [IndexedChunk(documentID: stored.id, ordinal: 0, text: "partial body \(index)")]
+                )
+                committed += 1
+                await reporter(ToolProgress(
+                    message: "Indexing files",
+                    scanned: index + 1,
+                    matched: committed
+                ))
+                // Stop deterministically after the first commit so the refresh
+                // below proves partial data survives the interrupt.
+                if committed == 1 {
+                    await holder.requestCancelOnce()
+                }
+            }
+            return IndexSourceRunReport(kind: .files, scanned: total, indexed: committed)
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: []),
+            stages: [stage],
+            store: store,
+            stateStore: stateStore
+        )
+        await holder.set(coordinator)
+
+        let summary = await coordinator.run()
+
+        #expect(summary.status == .cancelled)
+        #expect(summary.documentsIndexed == 1)
+        let row = readIndexAggregateRow(dbPath: dbPath)
+        #expect(row != nil)
+        #expect(row?.documents == 1)
+        #expect(row?.chunks == 1)
+        #expect(!(row?.producingRunID?.isEmpty ?? true))
+        #expect(row?.producingRunID == summary.sessionID.uuidString)
+        #expect(row?.updatedAt != nil)
+        let stats = try await store.stats()
+        #expect(stats.documents == 1)
+    }
+
+    @Test
+    func `Skipped run leaves aggregates untouched`() async {
+        // A skipped pass writes nothing, so the refresh must not run and the
+        // previously stamped row keeps its counts, identity, and write time.
+        let directory = makeIndexTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dbPath = directory.appendingPathComponent("docindex.db").path
+        let store = DocIndexStore(dbPath: dbPath)
+        let stateStore = IndexRunStateStore(path: directory.appendingPathComponent("state.json").path)
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, _ in
+            for index in 0 ..< 2 {
+                let document = IndexedDocument(
+                    source: .files,
+                    externalID: "agg-skip-\(index)",
+                    displayName: "agg-skip-\(index)",
+                    contentHash: "agg-skip-hash-\(index)"
+                )
+                let stored = try await store.upsertDocument(document)
+                _ = try await store.upsertChunks(
+                    documentID: stored.id,
+                    chunks: [IndexedChunk(documentID: stored.id, ordinal: 0, text: "skip body \(index)")]
+                )
+            }
+            return IndexSourceRunReport(kind: .files, scanned: 2, indexed: 2)
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: []),
+            stages: [stage],
+            store: store,
+            stateStore: stateStore
+        )
+
+        let first = await coordinator.run()
+        #expect(first.status == .ok)
+        let before = readIndexAggregateRow(dbPath: dbPath)
+        #expect(before?.documents == 2)
+        let beforeSource = readIndexAggregateBySource(dbPath: dbPath, source: IndexSource.files.rawValue)
+        #expect(beforeSource?.documents == 2)
+
+        await coordinator.updateConfig(IndexConfig(enabled: false, files: true, roots: []))
+        let skipped = await coordinator.run()
+        #expect(skipped.status == .skipped)
+
+        let after = readIndexAggregateRow(dbPath: dbPath)
+        #expect(after == before)
+        let afterSource = readIndexAggregateBySource(dbPath: dbPath, source: IndexSource.files.rawValue)
+        #expect(afterSource?.documents == beforeSource?.documents)
+        #expect(afterSource?.chunks == beforeSource?.chunks)
     }
 }

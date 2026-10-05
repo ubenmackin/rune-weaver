@@ -72,15 +72,31 @@ private enum LegacyIndexError: Error {
     case failed(String)
 }
 
+#if canImport(SQLite3)
+    /// Opens a raw probe handle with the production busy-timeout.
+    ///
+    /// Mirrors `SQLiteHelpers.openHandle`'s `busy_timeout = 5000` so a probe racing
+    /// a parallel aggregate refresh waits instead of failing with `SQLITE_BUSY`.
+    /// Probes stay read-only and never change `journal_mode`, so only the timeout
+    /// is shared.
+    /// - Parameter path: Database file path.
+    /// - Returns: Open handle. Throws when the database cannot be opened.
+    private func openIndexProbe(atPath path: String) throws -> OpaquePointer {
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let opened = handle else {
+            throw LegacyIndexError.failed("Could not open database")
+        }
+        _ = sqlite3_busy_timeout(opened, 5000)
+        return opened
+    }
+#endif
+
 /// Creates a database with the pre-metadata document schema to exercise the
 /// additive column migration.
 /// - Parameter path: Database file path.
 private func createLegacyIndex(atPath path: String) throws {
     #if canImport(SQLite3)
-        var handle: OpaquePointer?
-        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
-            throw LegacyIndexError.failed("Could not open legacy database")
-        }
+        let handle = try openIndexProbe(atPath: path)
         defer { sqlite3_close(handle) }
         let sql = """
         CREATE TABLE indexed_documents(
@@ -125,10 +141,7 @@ private func createV1Index(atPath path: String) throws -> (documentID: UUID, chu
     let firstChunkID = UUID()
     let secondChunkID = UUID()
     #if canImport(SQLite3)
-        var handle: OpaquePointer?
-        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
-            throw LegacyIndexError.failed("Could not open v1 database")
-        }
+        let handle = try openIndexProbe(atPath: path)
         defer { sqlite3_close(handle) }
         let schema = """
         CREATE TABLE IF NOT EXISTS schema_meta(
@@ -204,10 +217,7 @@ private func createV1Index(atPath path: String) throws -> (documentID: UUID, chu
 /// - Returns: Stored revision, or nil when absent.
 private func readIndexSchemaVersion(atPath path: String) throws -> Int? {
     #if canImport(SQLite3)
-        var handle: OpaquePointer?
-        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
-            throw LegacyIndexError.failed("Could not open database")
-        }
+        let handle = try openIndexProbe(atPath: path)
         defer { sqlite3_close(handle) }
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(handle, "SELECT value FROM schema_meta WHERE key = 'schema_version';", -1, &statement, nil) == SQLITE_OK else {
@@ -229,10 +239,7 @@ private func readIndexSchemaVersion(atPath path: String) throws -> Int? {
 /// - Returns: True when a table with that name exists.
 private func indexTableExists(atPath path: String, name: String) throws -> Bool {
     #if canImport(SQLite3)
-        var handle: OpaquePointer?
-        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
-            throw LegacyIndexError.failed("Could not open database")
-        }
+        let handle = try openIndexProbe(atPath: path)
         defer { sqlite3_close(handle) }
         let escaped = name.replacingOccurrences(of: "'", with: "''")
         let sql = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '\(escaped)';"
@@ -253,10 +260,7 @@ private func indexTableExists(atPath path: String, name: String) throws -> Bool 
 /// - Returns: The `sqlite_master` definition, or nil when absent.
 private func indexFTSDefinition(atPath path: String) throws -> String? {
     #if canImport(SQLite3)
-        var handle: OpaquePointer?
-        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
-            throw LegacyIndexError.failed("Could not open database")
-        }
+        let handle = try openIndexProbe(atPath: path)
         defer { sqlite3_close(handle) }
         var statement: OpaquePointer?
         let sql = "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'indexed_chunks_fts';"
@@ -279,10 +283,7 @@ private func indexFTSDefinition(atPath path: String) throws -> String? {
 /// - Returns: Number of FTS rows matching the query.
 private func ftsMatchCount(atPath path: String, query: String) throws -> Int {
     #if canImport(SQLite3)
-        var handle: OpaquePointer?
-        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
-            throw LegacyIndexError.failed("Could not open database")
-        }
+        let handle = try openIndexProbe(atPath: path)
         defer { sqlite3_close(handle) }
         let escaped = query.replacingOccurrences(of: "'", with: "''")
         let sql = "SELECT COUNT(*) FROM indexed_chunks_fts WHERE indexed_chunks_fts MATCH '\(escaped)';"
@@ -305,10 +306,7 @@ private func ftsMatchCount(atPath path: String, query: String) throws -> Int {
 /// - Returns: Rank values in the order SQLite returned them.
 private func ftsRanks(atPath path: String, query: String) throws -> [Double] {
     #if canImport(SQLite3)
-        var handle: OpaquePointer?
-        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
-            throw LegacyIndexError.failed("Could not open database")
-        }
+        let handle = try openIndexProbe(atPath: path)
         defer { sqlite3_close(handle) }
         let escaped = query.replacingOccurrences(of: "'", with: "''")
         let sql = "SELECT rank FROM indexed_chunks_fts WHERE indexed_chunks_fts MATCH '\(escaped)' ORDER BY rank;"
@@ -334,10 +332,7 @@ private func ftsRanks(atPath path: String, query: String) throws -> [Double] {
 ///   - text: Replacement body without single quotes.
 private func updateIndexedChunkText(atPath path: String, chunkID: UUID, text: String) throws {
     #if canImport(SQLite3)
-        var handle: OpaquePointer?
-        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
-            throw LegacyIndexError.failed("Could not open database")
-        }
+        let handle = try openIndexProbe(atPath: path)
         defer { sqlite3_close(handle) }
         let escaped = text.replacingOccurrences(of: "'", with: "''")
         let sql = "UPDATE indexed_chunks SET chunk_text = '\(escaped)' WHERE id = '\(chunkID.uuidString)';"
@@ -358,10 +353,7 @@ private func updateIndexedChunkText(atPath path: String, chunkID: UUID, text: St
 /// - Returns: Current `PRAGMA data_version` value.
 private func readIndexDataVersion(atPath path: String) throws -> Int {
     #if canImport(SQLite3)
-        var handle: OpaquePointer?
-        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
-            throw LegacyIndexError.failed("Could not open database")
-        }
+        let handle = try openIndexProbe(atPath: path)
         defer { sqlite3_close(handle) }
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(handle, "PRAGMA data_version;", -1, &statement, nil) == SQLITE_OK else {
@@ -375,6 +367,161 @@ private func readIndexDataVersion(atPath path: String) throws -> Int {
     #else
         return 0
     #endif
+}
+
+/// Persisted single-row aggregate read back through raw SQL.
+private struct AggregateSingleRow: Equatable {
+    var documents: Int
+    var chunks: Int
+    var vectorChunks: Int
+    var textBytes: Int64
+    var vectorBytes: Int64
+    var ftsBytes: Int64?
+    var indexAsOf: Double
+    var producingRunID: String?
+}
+
+/// Reads the single `index_aggregates` row through raw SQL.
+///
+/// Probing the table directly proves the refresh wrote durable rows instead
+/// of only warming the in-memory snapshot, and keeps the assertion independent
+/// of the store's cache.
+/// - Parameter path: Database file path.
+/// - Returns: The stored aggregate row, or nil when no refresh has run.
+private func readAggregateSingle(atPath path: String) throws -> AggregateSingleRow? {
+    #if canImport(SQLite3)
+        let handle = try openIndexProbe(atPath: path)
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        let sql = "SELECT documents, chunks, vector_chunks, text_bytes, vector_bytes, fts_bytes, index_as_of, producing_run_id FROM index_aggregates WHERE id = 0;"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw LegacyIndexError.failed("Could not prepare aggregate read")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let ftsBytes: Int64? = sqlite3_column_type(statement, 5) == SQLITE_NULL ? nil : sqlite3_column_int64(statement, 5)
+        let producing: String? = sqlite3_column_text(statement, 7).map { String(cString: $0) }
+        return AggregateSingleRow(
+            documents: Int(sqlite3_column_int64(statement, 0)),
+            chunks: Int(sqlite3_column_int64(statement, 1)),
+            vectorChunks: Int(sqlite3_column_int64(statement, 2)),
+            textBytes: sqlite3_column_int64(statement, 3),
+            vectorBytes: sqlite3_column_int64(statement, 4),
+            ftsBytes: ftsBytes,
+            indexAsOf: sqlite3_column_double(statement, 6),
+            producingRunID: producing
+        )
+    #else
+        return nil
+    #endif
+}
+
+/// Reads per-source aggregate rows through raw SQL.
+/// - Parameter path: Database file path.
+/// - Returns: Mapping from source string to stored counts.
+private func readAggregateBySource(atPath path: String) throws -> [String: (documents: Int, chunks: Int, bytes: Int64)] {
+    #if canImport(SQLite3)
+        let handle = try openIndexProbe(atPath: path)
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT source, documents, chunks, bytes FROM index_aggregate_by_source;", -1, &statement, nil) == SQLITE_OK else {
+            throw LegacyIndexError.failed("Could not prepare source aggregate read")
+        }
+        defer { sqlite3_finalize(statement) }
+        var rows: [String: (documents: Int, chunks: Int, bytes: Int64)] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let source = sqlite3_column_text(statement, 0).map({ String(cString: $0) }) else { continue }
+            rows[source] = (
+                documents: Int(sqlite3_column_int64(statement, 1)),
+                chunks: Int(sqlite3_column_int64(statement, 2)),
+                bytes: sqlite3_column_int64(statement, 3)
+            )
+        }
+        return rows
+    #else
+        return [:]
+    #endif
+}
+
+/// Reads per-status aggregate rows through raw SQL.
+/// - Parameter path: Database file path.
+/// - Returns: Mapping from status string to stored document counts.
+private func readAggregateByStatus(atPath path: String) throws -> [String: Int] {
+    #if canImport(SQLite3)
+        let handle = try openIndexProbe(atPath: path)
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT status, documents FROM index_aggregate_by_extract_status;", -1, &statement, nil) == SQLITE_OK else {
+            throw LegacyIndexError.failed("Could not prepare status aggregate read")
+        }
+        defer { sqlite3_finalize(statement) }
+        var rows: [String: Int] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let status = sqlite3_column_text(statement, 0).map({ String(cString: $0) }) else { continue }
+            rows[status] = Int(sqlite3_column_int64(statement, 1))
+        }
+        return rows
+    #else
+        return [:]
+    #endif
+}
+
+/// Clears the persisted aggregate rows without touching actor state.
+///
+/// Deletes directly through raw SQL so the store still believes its tables
+/// are clean; the next reader must observe the absent row and repair once
+/// through the single writer instead of serving stale content.
+/// - Parameter path: Database file path.
+private func clearAggregateRows(atPath path: String) throws {
+    #if canImport(SQLite3)
+        let handle = try openIndexProbe(atPath: path)
+        defer { sqlite3_close(handle) }
+        var message: UnsafeMutablePointer<CChar>?
+        let sql = "DELETE FROM index_aggregates; DELETE FROM index_aggregate_by_source; DELETE FROM index_aggregate_by_extract_status;"
+        guard sqlite3_exec(handle, sql, nil, nil, &message) == SQLITE_OK else {
+            let detail = message.map { String(cString: $0) } ?? "unknown"
+            sqlite3_free(message)
+            throw LegacyIndexError.failed(detail)
+        }
+    #endif
+}
+
+/// Seeds one document per extraction outcome across all three sources.
+///
+/// Covers every `ExtractStatus` case plus multi-source fan-out so the refresh
+/// test proves each string-keyed row lands instead of only the happy-path
+/// statuses. Chunk bodies give the text and vector legs non-zero totals while
+/// one chunk-less row proves zero-chunk sources still record documents.
+/// - Parameter store: Store to seed.
+/// - Returns: Seeded documents in insertion order.
+private func seedAggregateFixture(store: DocIndexStore) async throws {
+    let extractedFiles = try await store.upsertDocument(makeDocument(externalID: "agg-files-extracted", contentHash: "hash-agg-extracted", extractStatus: .extracted))
+    _ = try await store.upsertChunks(documentID: extractedFiles.id, chunks: [
+        IndexedChunk(documentID: extractedFiles.id, ordinal: 0, text: "aggregate vector body", embedding: [0.1, 0.2]),
+        IndexedChunk(documentID: extractedFiles.id, ordinal: 1, text: "aggregate keyword body")
+    ])
+    let partialFiles = try await store.upsertDocument(makeDocument(externalID: "agg-files-partial", contentHash: "hash-agg-partial", extractStatus: .partial))
+    _ = try await store.upsertChunks(documentID: partialFiles.id, chunks: [
+        IndexedChunk(documentID: partialFiles.id, ordinal: 0, text: "aggregate partial body")
+    ])
+    let metadataMail = try await store.upsertDocument(makeDocument(source: .mail, externalID: "agg-mail-metadata", contentHash: "hash-agg-metadata", extractStatus: .metadataOnly))
+    _ = try await store.upsertChunks(documentID: metadataMail.id, chunks: [
+        IndexedChunk(documentID: metadataMail.id, ordinal: 0, text: "aggregate mail body")
+    ])
+    _ = try await store.upsertDocument(makeDocument(source: .mail, externalID: "agg-mail-unsupported", contentHash: "hash-agg-unsupported", extractStatus: .unsupported))
+    let skippedMessages = try await store.upsertDocument(makeDocument(
+        source: .messages,
+        externalID: "agg-messages-skipped",
+        contentHash: "hash-agg-skipped",
+        extractStatus: .skippedEvicted
+    ))
+    _ = try await store.upsertChunks(documentID: skippedMessages.id, chunks: [
+        IndexedChunk(documentID: skippedMessages.id, ordinal: 0, text: "aggregate skipped body")
+    ])
+    let failedMessages = try await store.upsertDocument(makeDocument(source: .messages, externalID: "agg-messages-failed", contentHash: "hash-agg-failed", extractStatus: .failed))
+    _ = try await store.upsertChunks(documentID: failedMessages.id, chunks: [
+        IndexedChunk(documentID: failedMessages.id, ordinal: 0, text: "aggregate failed body")
+    ])
 }
 
 /// Path guard allowing every candidate, so atomic-commit tests exercise the
@@ -1314,12 +1461,24 @@ struct DocIndexStoreTests {
             #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 1)
         #endif
 
-        // Writes invalidate the cache, so the next poll recomputes and the
-        // concurrent write becomes visible without waiting for expiry.
+        // Freeze-then-jump: writes invalidate the memory snapshot, so the
+        // next poll serves the persisted row frozen with zero aggregate
+        // passes. The concurrent write stays invisible until an explicit
+        // refresh jumps the persisted row forward.
         _ = try await store.upsertDocument(makeDocument(externalID: "cached-doc-2", contentHash: "hash-cached-2"))
         let fresh = try await store.stats()
-        #expect(fresh != first)
-        #expect(fresh.documents == 2)
+        #expect(fresh == first)
+        #expect(fresh.documents == 1)
+        #if canImport(SQLite3)
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 1)
+        #endif
+
+        // An explicit refresh jumps the persisted row forward, revealing the
+        // previously frozen write with one aggregate pass.
+        _ = try await store.refreshAggregates()
+        let jumped = try await store.stats()
+        #expect(jumped != first)
+        #expect(jumped.documents == 2)
         #if canImport(SQLite3)
             #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 2)
         #endif
@@ -1340,19 +1499,28 @@ struct DocIndexStoreTests {
         let first = try await store.stats()
         #expect(first.documents == 1)
 
-        // A write invalidates the snapshot, so the next poll recomputes even
-        // though the TTL has not lapsed.
+        // Freeze-then-jump: a write invalidates the memory snapshot, so the
+        // next poll serves the persisted row frozen with zero aggregate
+        // passes even though the TTL has not lapsed.
         _ = try await store.upsertDocument(makeDocument(externalID: "ttl-doc-2", contentHash: "hash-ttl-2"))
         let invalidated = try await store.stats()
-        #expect(invalidated.documents == 2)
-        #expect(invalidated != first)
+        #expect(invalidated.documents == 1)
+        #expect(invalidated == first)
 
-        // Advancing the injectable clock past the TTL forces one more fresh
-        // pass, keeping the previously revealed write visible.
+        // Advancing the injectable clock past the TTL still serves the
+        // persisted row frozen: the TTL gates the memory snapshot only, and
+        // a cold poll serves single-row reads without a content scan.
         timeLock.withLock { $0 = $0.addingTimeInterval(DocIndexStore.statsCacheTTLSeconds + 1) }
         let refreshed = try await store.stats()
-        #expect(refreshed.documents == 2)
-        #expect(refreshed != first)
+        #expect(refreshed.documents == 1)
+        #expect(refreshed == first)
+
+        // An explicit refresh jumps the persisted row forward, revealing the
+        // previously frozen write.
+        _ = try await store.refreshAggregates()
+        let jumped = try await store.stats()
+        #expect(jumped.documents == 2)
+        #expect(jumped != first)
     }
 
     @Test
@@ -1497,6 +1665,12 @@ struct DocIndexStoreTests {
         #expect(empty.chunks == 0)
 
         _ = try await store.upsertDocument(makeDocument(externalID: "reborn-doc", contentHash: "hash-reborn"))
+        // Freeze-then-jump: the content write invalidates memory but the
+        // persisted row still holds the emptied aggregates, so the next poll
+        // serves frozen empty with zero passes until an explicit refresh jumps.
+        let frozenRevived = try await store.stats()
+        #expect(frozenRevived.documents == 0)
+        _ = try await store.refreshAggregates()
         let revived = try await store.stats()
         #expect(revived.documents == 1)
     }
@@ -1516,6 +1690,647 @@ struct DocIndexStoreTests {
             #expect(SQLiteDocIndexStore.canonicalDBPath(linkPath) == SQLiteDocIndexStore.canonicalDBPath(path))
             SQLiteDocIndexStore.removeEnsuredPath(path)
             SQLiteDocIndexStore.removeEnsuredPath(linkPath)
+        #endif
+    }
+
+    @Test
+    func `Refresh persists exact aggregate rows matching the live snapshot`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        try await seedAggregateFixture(store: store)
+
+        // One refresh call with zero HTTP involved must materialize all three tables.
+        let refreshed = try await store.refreshAggregates()
+        #if canImport(SQLite3)
+            let live = try SQLiteDocIndexStore.statusSnapshot(dbPath: path)
+            // The persisted snapshot is the computed one, so logical legs agree exactly.
+            #expect(refreshed.documents == live.documents)
+            #expect(refreshed.chunks == live.chunks)
+            #expect(refreshed.vectorChunks == live.vectorChunks)
+            #expect(refreshed.textBytes == live.textBytes)
+            #expect(refreshed.vectorBytes == live.vectorBytes)
+            #expect(refreshed.ftsBytes == live.ftsBytes)
+            #expect(refreshed.indexAsOf == live.indexAsOf)
+            #expect(refreshed.bySource == live.bySource)
+            #expect(refreshed.byExtractStatus == live.byExtractStatus)
+
+            // The durable rows project the same values the live query reports.
+            let single = try readAggregateSingle(atPath: path)
+            #expect(single?.documents == live.documents)
+            #expect(single?.chunks == live.chunks)
+            #expect(single?.vectorChunks == live.vectorChunks)
+            #expect(single?.textBytes == live.textBytes)
+            #expect(single?.vectorBytes == live.vectorBytes)
+            #expect(single?.ftsBytes == live.ftsBytes)
+            #expect(single?.indexAsOf == live.indexAsOf.timeIntervalSince1970)
+            #expect(single?.producingRunID == nil)
+
+            // Multi-source fan-out: one row per source holding documents.
+            let bySource = try readAggregateBySource(atPath: path)
+            #expect(bySource.count == 3)
+            let liveBySource = Dictionary(uniqueKeysWithValues: live.bySource.map { ($0.source.rawValue, $0) })
+            for (key, row) in bySource {
+                #expect(row.documents == liveBySource[key]?.documents)
+                #expect(row.chunks == liveBySource[key]?.chunks)
+                #expect(row.bytes == liveBySource[key]?.bytes)
+            }
+            #expect(bySource["files"]?.documents == 2)
+            #expect(bySource["mail"]?.documents == 2)
+            #expect(bySource["messages"]?.documents == 2)
+
+            // Every extraction outcome holds exactly one seeded document.
+            let byStatus = try readAggregateByStatus(atPath: path)
+            #expect(byStatus.count == ExtractStatus.allCases.count)
+            for status in ExtractStatus.allCases {
+                #expect(byStatus[status.rawValue] == 1)
+            }
+            let liveByStatus = Dictionary(uniqueKeysWithValues: live.byExtractStatus.map { ($0.status.rawValue, $0.documents) })
+            #expect(byStatus == liveByStatus)
+
+            // A run identity rides the single row when the caller supplies one.
+            let runID = "run-agg-\(UUID().uuidString)"
+            _ = try await store.refreshAggregates(producingRunID: runID)
+            let withRun = try readAggregateSingle(atPath: path)
+            #expect(withRun?.producingRunID == runID)
+            #expect(withRun?.documents == live.documents)
+        #endif
+    }
+
+    @Test
+    func `Consecutive refreshes are idempotent and warm the status cache`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.removeEnsuredPath(path)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+        #endif
+        let frozen = Date(timeIntervalSince1970: 77000)
+        let store = DocIndexStore(dbPath: path, clock: { frozen })
+        try await seedAggregateFixture(store: store)
+
+        // Two refreshes over unchanged content must land identical durable rows.
+        let first = try await store.refreshAggregates()
+        #if canImport(SQLite3)
+            let firstSingle = try readAggregateSingle(atPath: path)
+            let firstBySource = try readAggregateBySource(atPath: path)
+            let firstByStatus = try readAggregateByStatus(atPath: path)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+        #endif
+        let second = try await store.refreshAggregates()
+        #expect(second == first)
+        #if canImport(SQLite3)
+            let secondSingle = try readAggregateSingle(atPath: path)
+            let secondBySource = try readAggregateBySource(atPath: path)
+            let secondByStatus = try readAggregateByStatus(atPath: path)
+            #expect(secondSingle == firstSingle)
+            #expect(secondBySource.count == firstBySource.count)
+            for (key, row) in secondBySource {
+                #expect(row.documents == firstBySource[key]?.documents)
+                #expect(row.chunks == firstBySource[key]?.chunks)
+                #expect(row.bytes == firstBySource[key]?.bytes)
+            }
+            #expect(secondByStatus == firstByStatus)
+
+            // The refresh warmed the cache, so the next poll is a memory hit.
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+            let stats = try await store.stats()
+            #expect(stats.documents == first.documents)
+            #expect(stats.chunks == first.chunks)
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 0)
+        #endif
+    }
+
+    @Test
+    func `Failed refresh keeps the prior aggregate row`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        try await seedAggregateFixture(store: store)
+        _ = try await store.refreshAggregates()
+        #if canImport(SQLite3)
+            let beforeSingle = try readAggregateSingle(atPath: path)
+            let beforeBySource = try readAggregateBySource(atPath: path)
+            let beforeByStatus = try readAggregateByStatus(atPath: path)
+            #expect(beforeSingle?.documents == 6)
+
+            // Force the replacement transaction to throw after the compute so
+            // the rollback path is exercised instead of a pre-compute open failure.
+            // Scoped to this file so parallel suites over other files never
+            // observe the injected failure.
+            SQLiteDocIndexStore.setAggregateWriteFailureHook({ true }, for: path)
+            defer { SQLiteDocIndexStore.clearAggregateWriteFailureHook(for: path) }
+            do {
+                _ = try await store.refreshAggregates()
+                #expect(Bool(false), "Expected the injected aggregate failure to throw")
+            } catch {
+                #expect(!error.localizedDescription.isEmpty)
+            }
+            SQLiteDocIndexStore.clearAggregateWriteFailureHook(for: path)
+
+            // The prior row survives the failed refresh instead of clearing.
+            let keptSingle = try readAggregateSingle(atPath: path)
+            let keptBySource = try readAggregateBySource(atPath: path)
+            let keptByStatus = try readAggregateByStatus(atPath: path)
+            #expect(keptSingle?.documents == beforeSingle?.documents)
+            #expect(keptSingle?.chunks == beforeSingle?.chunks)
+            #expect(keptSingle?.textBytes == beforeSingle?.textBytes)
+            #expect(keptBySource.count == beforeBySource.count)
+            #expect(keptByStatus == beforeByStatus)
+
+            // A retry after clearing the hook persists again without duplication.
+            _ = try await store.refreshAggregates()
+            let retriedSingle = try readAggregateSingle(atPath: path)
+            #expect(retriedSingle?.documents == beforeSingle?.documents)
+            let retriedByStatus = try readAggregateByStatus(atPath: path)
+            #expect(retriedByStatus == beforeByStatus)
+        #endif
+    }
+
+    @Test
+    func `Prune then read serves fresh aggregates with no intervening run`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let old = try await store.upsertDocument(makeDocument(
+            externalID: "prune-old",
+            contentHash: "hash-prune-old",
+            indexedAt: Date(timeIntervalSince1970: 1000)
+        ))
+        _ = try await store.upsertChunks(
+            documentID: old.id,
+            chunks: [IndexedChunk(documentID: old.id, ordinal: 0, text: "prune expired body")]
+        )
+        let recent = try await store.upsertDocument(makeDocument(
+            externalID: "prune-recent",
+            contentHash: "hash-prune-recent",
+            indexedAt: Date(timeIntervalSince1970: 5000)
+        ))
+        _ = try await store.upsertChunks(
+            documentID: recent.id,
+            chunks: [IndexedChunk(documentID: recent.id, ordinal: 0, text: "prune fresh body")]
+        )
+
+        // The route deletes without starting a run, so the store must persist
+        // fresh aggregates inline for the next status poll to observe.
+        let removed = try await store.prune(before: Date(timeIntervalSince1970: 3000))
+        #expect(removed == 1)
+        #if canImport(SQLite3)
+            let live = try SQLiteDocIndexStore.statusSnapshot(dbPath: path)
+            #expect(live.documents == 1)
+            #expect(live.chunks == 1)
+            let single = try readAggregateSingle(atPath: path)
+            #expect(single?.documents == live.documents)
+            #expect(single?.chunks == live.chunks)
+            #expect(single?.vectorChunks == live.vectorChunks)
+            #expect(single?.textBytes == live.textBytes)
+            #expect(single?.vectorBytes == live.vectorBytes)
+            #expect(single?.ftsBytes == live.ftsBytes)
+            let bySource = try readAggregateBySource(atPath: path)
+            let liveBySource = Dictionary(uniqueKeysWithValues: live.bySource.map { ($0.source.rawValue, $0) })
+            #expect(bySource.count == live.bySource.count)
+            for (key, row) in bySource {
+                #expect(row.documents == liveBySource[key]?.documents)
+                #expect(row.chunks == liveBySource[key]?.chunks)
+                #expect(row.bytes == liveBySource[key]?.bytes)
+            }
+            let byStatus = try readAggregateByStatus(atPath: path)
+            let liveByStatus = Dictionary(uniqueKeysWithValues: live.byExtractStatus.map { ($0.status.rawValue, $0.documents) })
+            #expect(byStatus == liveByStatus)
+            let stats = try await store.stats()
+            #expect(stats.documents == live.documents)
+            #expect(stats.chunks == live.chunks)
+        #endif
+    }
+
+    @Test
+    func `Reset then read serves fresh aggregates with no intervening run`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let first = try await store.upsertDocument(makeDocument(externalID: "reset-a", contentHash: "hash-reset-a"))
+        _ = try await store.upsertChunks(
+            documentID: first.id,
+            chunks: [IndexedChunk(documentID: first.id, ordinal: 0, text: "reset first body")]
+        )
+        let second = try await store.upsertDocument(makeDocument(
+            source: .mail,
+            externalID: "reset-b",
+            contentHash: "hash-reset-b"
+        ))
+        _ = try await store.upsertChunks(
+            documentID: second.id,
+            chunks: [IndexedChunk(documentID: second.id, ordinal: 0, text: "reset second body")]
+        )
+
+        // A full clear must leave the persisted rows emptied so a status poll
+        // with no later run still reports an empty index.
+        let sidecars = makeIndexResetSidecars(base: base)
+        try await store.reset(mailCheckpointPath: sidecars.mailCheckpointPath, messagesStatePath: sidecars.messagesStatePath)
+        #if canImport(SQLite3)
+            let live = try SQLiteDocIndexStore.statusSnapshot(dbPath: path)
+            #expect(live.documents == 0)
+            #expect(live.chunks == 0)
+            let single = try readAggregateSingle(atPath: path)
+            #expect(single?.documents == 0)
+            #expect(single?.chunks == 0)
+            #expect(single?.textBytes == live.textBytes)
+            #expect(single?.vectorBytes == live.vectorBytes)
+            #expect(single?.ftsBytes == live.ftsBytes)
+            let bySource = try readAggregateBySource(atPath: path)
+            #expect(bySource.isEmpty)
+            let byStatus = try readAggregateByStatus(atPath: path)
+            #expect(byStatus.isEmpty)
+            let stats = try await store.stats()
+            #expect(stats.documents == 0)
+            #expect(stats.chunks == 0)
+        #endif
+    }
+
+    @Test
+    func `ClearSource then read serves fresh aggregates with no intervening run`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let filesDoc = try await store.upsertDocument(makeDocument(externalID: "clear-files", contentHash: "hash-clear-files"))
+        _ = try await store.upsertChunks(
+            documentID: filesDoc.id,
+            chunks: [IndexedChunk(documentID: filesDoc.id, ordinal: 0, text: "clear files body")]
+        )
+        let mailDoc = try await store.upsertDocument(makeDocument(
+            source: .mail,
+            externalID: "clear-mail",
+            contentHash: "hash-clear-mail"
+        ))
+        _ = try await store.upsertChunks(
+            documentID: mailDoc.id,
+            chunks: [IndexedChunk(documentID: mailDoc.id, ordinal: 0, text: "clear mail body")]
+        )
+
+        // Clearing one source must drop only its persisted rows while the
+        // surviving source stays counted, all without a later run.
+        let sidecars = makeIndexResetSidecars(base: base)
+        let removed = try await store.clearSource(
+            .mail,
+            mailCheckpointPath: sidecars.mailCheckpointPath,
+            messagesStatePath: sidecars.messagesStatePath
+        )
+        #expect(removed == 1)
+        #if canImport(SQLite3)
+            let live = try SQLiteDocIndexStore.statusSnapshot(dbPath: path)
+            #expect(live.documents == 1)
+            #expect(live.chunks == 1)
+            let single = try readAggregateSingle(atPath: path)
+            #expect(single?.documents == live.documents)
+            #expect(single?.chunks == live.chunks)
+            #expect(single?.textBytes == live.textBytes)
+            #expect(single?.vectorBytes == live.vectorBytes)
+            #expect(single?.ftsBytes == live.ftsBytes)
+            let bySource = try readAggregateBySource(atPath: path)
+            #expect(bySource.count == 1)
+            #expect(bySource["files"]?.documents == 1)
+            #expect(bySource["mail"] == nil)
+            let byStatus = try readAggregateByStatus(atPath: path)
+            let liveByStatus = Dictionary(uniqueKeysWithValues: live.byExtractStatus.map { ($0.status.rawValue, $0.documents) })
+            #expect(byStatus == liveByStatus)
+            let stats = try await store.stats()
+            #expect(stats.documents == live.documents)
+            #expect(stats.chunks == live.chunks)
+        #endif
+    }
+
+    @Test
+    func `RetireUnseenFiles then read serves fresh aggregates with no intervening run`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let keepRun = "run-retire-keep-\(UUID().uuidString)"
+        let keepDoc = makeDocument(externalID: "retire-keep", contentHash: "hash-retire-keep")
+        _ = try await store.upsertDocumentWithChunks(
+            document: keepDoc,
+            chunks: [IndexedChunk(documentID: keepDoc.id, ordinal: 0, text: "retire keep body")],
+            runID: keepRun
+        )
+        let staleDoc = makeDocument(externalID: "retire-stale", contentHash: "hash-retire-stale")
+        _ = try await store.upsertDocumentWithChunks(
+            document: staleDoc,
+            chunks: [IndexedChunk(documentID: staleDoc.id, ordinal: 0, text: "retire stale body")],
+            runID: "run-retire-stale-\(UUID().uuidString)"
+        )
+        let mailDoc = try await store.upsertDocument(makeDocument(
+            source: .mail,
+            externalID: "retire-mail",
+            contentHash: "hash-retire-mail"
+        ))
+        _ = try await store.upsertChunks(
+            documentID: mailDoc.id,
+            chunks: [IndexedChunk(documentID: mailDoc.id, ordinal: 0, text: "retire mail body")]
+        )
+
+        // Reconcile removes only the unstamped files row; mail survives, and the
+        // persisted rows must reflect that split without a later run.
+        let retired = try await store.retireUnseenFiles(runID: keepRun)
+        #expect(retired == 1)
+        #if canImport(SQLite3)
+            let live = try SQLiteDocIndexStore.statusSnapshot(dbPath: path)
+            #expect(live.documents == 2)
+            let single = try readAggregateSingle(atPath: path)
+            #expect(single?.documents == live.documents)
+            #expect(single?.chunks == live.chunks)
+            #expect(single?.textBytes == live.textBytes)
+            #expect(single?.vectorBytes == live.vectorBytes)
+            #expect(single?.ftsBytes == live.ftsBytes)
+            let bySource = try readAggregateBySource(atPath: path)
+            #expect(bySource["files"]?.documents == 1)
+            #expect(bySource["mail"]?.documents == 1)
+            let liveBySource = Dictionary(uniqueKeysWithValues: live.bySource.map { ($0.source.rawValue, $0) })
+            for (key, row) in bySource {
+                #expect(row.documents == liveBySource[key]?.documents)
+                #expect(row.chunks == liveBySource[key]?.chunks)
+                #expect(row.bytes == liveBySource[key]?.bytes)
+            }
+            let byStatus = try readAggregateByStatus(atPath: path)
+            let liveByStatus = Dictionary(uniqueKeysWithValues: live.byExtractStatus.map { ($0.status.rawValue, $0.documents) })
+            #expect(byStatus == liveByStatus)
+            let stats = try await store.stats()
+            #expect(stats.documents == live.documents)
+            #expect(stats.chunks == live.chunks)
+        #endif
+    }
+
+    @Test
+    func `RetireMailboxes then read serves fresh aggregates with no intervening run`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let deniedMailbox = "INBOX-denied-\(UUID().uuidString)"
+        let allowedMailbox = "INBOX-allowed-\(UUID().uuidString)"
+        let deniedDoc = makeDocument(
+            source: .mail,
+            externalID: "retire-denied",
+            contentHash: "hash-retire-denied",
+            mailbox: deniedMailbox
+        )
+        let storedDenied = try await store.upsertDocument(deniedDoc)
+        _ = try await store.upsertChunks(
+            documentID: storedDenied.id,
+            chunks: [IndexedChunk(documentID: storedDenied.id, ordinal: 0, text: "retire denied body")]
+        )
+        let allowedDoc = makeDocument(
+            source: .mail,
+            externalID: "retire-allowed",
+            contentHash: "hash-retire-allowed",
+            mailbox: allowedMailbox
+        )
+        let storedAllowed = try await store.upsertDocument(allowedDoc)
+        _ = try await store.upsertChunks(
+            documentID: storedAllowed.id,
+            chunks: [IndexedChunk(documentID: storedAllowed.id, ordinal: 0, text: "retire allowed body")]
+        )
+        let filesDoc = try await store.upsertDocument(makeDocument(externalID: "retire-files", contentHash: "hash-retire-files"))
+        _ = try await store.upsertChunks(
+            documentID: filesDoc.id,
+            chunks: [IndexedChunk(documentID: filesDoc.id, ordinal: 0, text: "retire files body")]
+        )
+
+        // Denying one mailbox must drop only its rows while the allowed mailbox
+        // and files rows stay counted, all without a later run.
+        let retired = try await store.retireMailboxes([deniedMailbox])
+        #expect(retired == 1)
+        #if canImport(SQLite3)
+            let live = try SQLiteDocIndexStore.statusSnapshot(dbPath: path)
+            #expect(live.documents == 2)
+            let single = try readAggregateSingle(atPath: path)
+            #expect(single?.documents == live.documents)
+            #expect(single?.chunks == live.chunks)
+            #expect(single?.textBytes == live.textBytes)
+            #expect(single?.vectorBytes == live.vectorBytes)
+            #expect(single?.ftsBytes == live.ftsBytes)
+            let bySource = try readAggregateBySource(atPath: path)
+            #expect(bySource["files"]?.documents == 1)
+            #expect(bySource["mail"]?.documents == 1)
+            let liveBySource = Dictionary(uniqueKeysWithValues: live.bySource.map { ($0.source.rawValue, $0) })
+            for (key, row) in bySource {
+                #expect(row.documents == liveBySource[key]?.documents)
+                #expect(row.chunks == liveBySource[key]?.chunks)
+                #expect(row.bytes == liveBySource[key]?.bytes)
+            }
+            let byStatus = try readAggregateByStatus(atPath: path)
+            let liveByStatus = Dictionary(uniqueKeysWithValues: live.byExtractStatus.map { ($0.status.rawValue, $0.documents) })
+            #expect(byStatus == liveByStatus)
+            let stats = try await store.stats()
+            #expect(stats.documents == live.documents)
+            #expect(stats.chunks == live.chunks)
+        #endif
+    }
+
+    @Test
+    func `Reclaim then read serves fresh aggregates with no intervening run`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let document = try await store.upsertDocument(makeDocument(externalID: "reclaim-doc", contentHash: "hash-reclaim"))
+        _ = try await store.upsertChunks(documentID: document.id, chunks: [
+            IndexedChunk(documentID: document.id, ordinal: 0, text: "reclaim vector body", embedding: [0.1, 0.2]),
+            IndexedChunk(documentID: document.id, ordinal: 1, text: "reclaim keyword body")
+        ])
+
+        // VACUUM rewrites page layout so the full-text size shifts even though
+        // counts do not; the persisted rows must match a fresh pass afterwards.
+        _ = try await store.reclaim()
+        #if canImport(SQLite3)
+            let live = try SQLiteDocIndexStore.statusSnapshot(dbPath: path)
+            #expect(live.documents == 1)
+            #expect(live.chunks == 2)
+            let single = try readAggregateSingle(atPath: path)
+            #expect(single?.documents == live.documents)
+            #expect(single?.chunks == live.chunks)
+            #expect(single?.vectorChunks == live.vectorChunks)
+            #expect(single?.textBytes == live.textBytes)
+            #expect(single?.vectorBytes == live.vectorBytes)
+            #expect(single?.ftsBytes == live.ftsBytes)
+            let bySource = try readAggregateBySource(atPath: path)
+            #expect(bySource["files"]?.documents == 1)
+            #expect(bySource["files"]?.chunks == 2)
+            let liveBySource = Dictionary(uniqueKeysWithValues: live.bySource.map { ($0.source.rawValue, $0) })
+            for (key, row) in bySource {
+                #expect(row.documents == liveBySource[key]?.documents)
+                #expect(row.chunks == liveBySource[key]?.chunks)
+                #expect(row.bytes == liveBySource[key]?.bytes)
+            }
+            let byStatus = try readAggregateByStatus(atPath: path)
+            let liveByStatus = Dictionary(uniqueKeysWithValues: live.byExtractStatus.map { ($0.status.rawValue, $0.documents) })
+            #expect(byStatus == liveByStatus)
+            let stats = try await store.stats()
+            #expect(stats.documents == live.documents)
+            #expect(stats.chunks == live.chunks)
+        #endif
+    }
+
+    @Test
+    func `Warm aggregate reads perform zero passes per method`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.removeEnsuredPath(path)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+        #endif
+        let frozen = Date(timeIntervalSince1970: 91000)
+        let store = DocIndexStore(dbPath: path, clock: { frozen })
+        try await seedAggregateFixture(store: store)
+        _ = try await store.refreshAggregates()
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+        #endif
+
+        // Same-store warm reads ride the memory snapshot plus the persisted
+        // rows with no content scan, so every projection stays at zero passes.
+        // Freeze-then-jump: the persisted snapshot now correctly carries true
+        // sizes, so the fast projection serves true bytes, not pending zeros.
+        let stats = try await store.stats()
+        #expect(stats.documents == 6)
+        let breakdown = try await store.storageBreakdown()
+        #expect(breakdown.textBytes == stats.bytes)
+        let fast = try await store.fastStats()
+        #expect(fast.documents == 6)
+        #expect(fast.bytes == stats.bytes)
+        #expect(fast.textBytes == stats.textBytes)
+        #expect(fast.vectorBytes == stats.vectorBytes)
+        #expect(fast.ftsBytes == stats.ftsBytes)
+        #expect(fast.contentBytes == stats.contentBytes)
+        #expect(fast.bySource == stats.bySource)
+        #expect(fast == stats)
+        #if canImport(SQLite3)
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 0)
+        #endif
+
+        // A cold store over the same file holds no memory snapshot, so its
+        // warm reads prove the persisted tables alone serve with zero passes.
+        let cold = DocIndexStore(dbPath: path, clock: { frozen })
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+        #endif
+        let coldFast = try await cold.fastStats()
+        #expect(coldFast.documents == 6)
+        #expect(coldFast.chunks == fast.chunks)
+        #expect(coldFast.vectorChunks == fast.vectorChunks)
+        #expect(coldFast.bySource == fast.bySource)
+        #expect(coldFast.byExtractStatus == fast.byExtractStatus)
+        #expect(coldFast.dbFileBytes == fast.dbFileBytes)
+        #expect(coldFast.walBytes == fast.walBytes)
+        let coldStats = try await cold.stats()
+        #expect(coldStats == stats)
+        let coldBreakdown = try await cold.storageBreakdown()
+        #expect(coldBreakdown == breakdown)
+        #if canImport(SQLite3)
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 0)
+        #endif
+    }
+
+    @Test
+    func `Absent aggregate row repairs once per cold reader`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        try await seedAggregateFixture(store: store)
+        _ = try await store.refreshAggregates()
+        #if canImport(SQLite3)
+            let live = try SQLiteDocIndexStore.statusSnapshot(dbPath: path)
+            #expect(live.documents == 6)
+
+            // Remove the persisted rows without touching actor state, then read
+            // through a cold store holding no memory snapshot: the absent row
+            // must repair exactly once and serve correct numbers.
+            try clearAggregateRows(atPath: path)
+            #expect(try readAggregateSingle(atPath: path) == nil)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+            let coldStats = DocIndexStore(dbPath: path)
+            let repairedStats = try await coldStats.stats()
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 1)
+            #expect(repairedStats.documents == live.documents)
+            #expect(repairedStats.chunks == live.chunks)
+            #expect(repairedStats.bytes == live.textBytes)
+            #expect(try readAggregateSingle(atPath: path)?.documents == live.documents)
+
+            try clearAggregateRows(atPath: path)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+            let coldBreakdown = DocIndexStore(dbPath: path)
+            let repairedBreakdown = try await coldBreakdown.storageBreakdown()
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 1)
+            #expect(repairedBreakdown.textBytes == live.textBytes)
+            #expect(repairedBreakdown.vectorBytes == live.vectorBytes)
+            #expect(repairedBreakdown.ftsBytes == (live.ftsBytes ?? 0))
+            #expect(try readAggregateSingle(atPath: path)?.documents == live.documents)
+
+            try clearAggregateRows(atPath: path)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+            let coldFast = DocIndexStore(dbPath: path)
+            let repairedFast = try await coldFast.fastStats()
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 1)
+            #expect(repairedFast.documents == live.documents)
+            #expect(repairedFast.chunks == live.chunks)
+            // Freeze-then-jump: the repaired persisted row carries true sizes,
+            // so the fast projection serves them, not pending zeros.
+            #expect(repairedFast.bytes == live.textBytes)
+            #expect(repairedFast.textBytes == live.textBytes)
+            #expect(try readAggregateSingle(atPath: path)?.documents == live.documents)
+        #endif
+    }
+
+    @Test
+    func `Aggregate projections equal the live single-pass snapshot`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        try await seedAggregateFixture(store: store)
+        _ = try await store.refreshAggregates()
+        #if canImport(SQLite3)
+            let live = try SQLiteDocIndexStore.statusSnapshot(dbPath: path)
+            let stats = try await store.stats()
+            #expect(stats == live.makeStats())
+            let breakdown = try await store.storageBreakdown()
+            #expect(breakdown == live.makeBreakdown())
+            let fast = try await store.fastStats()
+            // Freeze-then-jump: the persisted snapshot now correctly carries
+            // true sizes, so the fast projection equals the live snapshot's
+            // stats projection, not the fail-closed pending-zero shape from
+            // the cheap COUNT path used only when no row exists.
+            let liveFast = live.makeStats()
+            #expect(fast == liveFast)
+            #expect(fast.documents == live.documents)
+            #expect(fast.chunks == live.chunks)
+            #expect(fast.vectorChunks == live.vectorChunks)
+            #expect(fast.indexAsOf == live.indexAsOf)
+        #endif
+    }
+
+    @Test
+    func `Legacy database without aggregate tables repairs on first read`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.removeEnsuredPath(path)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+            try createLegacyIndex(atPath: path)
+            // The legacy file holds content tables but no aggregate tables;
+            // opening ensures the schema while the first reader persists them.
+            SQLiteDocIndexStore.removeEnsuredPath(path)
+        #endif
+        let store = DocIndexStore(dbPath: path)
+        _ = try await store.upsertDocument(makeDocument(externalID: "legacy-doc", contentHash: "hash-legacy"))
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+            let stats = try await store.stats()
+            #expect(stats.documents == 1)
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 1)
+            #expect(try readAggregateSingle(atPath: path)?.documents == 1)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+            let fast = try await store.fastStats()
+            #expect(fast.documents == 1)
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 0)
+            let breakdown = try await store.storageBreakdown()
+            #expect(breakdown.textBytes == stats.bytes)
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 0)
         #endif
     }
 }

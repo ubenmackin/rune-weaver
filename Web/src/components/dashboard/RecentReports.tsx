@@ -9,10 +9,10 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   formatRunDuration,
-  listRuns,
   parseRunTimestamp,
   type RunLogEntry,
 } from "../../api";
+import { getSharedRecentRuns } from "./sharedRuns";
 import { formatRelativeAgo } from "../../relativeTime";
 import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
 import {
@@ -91,18 +91,38 @@ export default function RecentReports({
 }: RecentReportsProps) {
   const [reports, setReports] = useState<RunLogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // True only for the initial load so co-mounted widgets show a spinner instead
+  // of flashing their empty state before the shared fetch settles. Later
+  // WebSocket refetches reuse the same setter without re-entering loading, so
+  // live updates never flicker back to a skeleton.
+  const [isLoading, setIsLoading] = useState(true);
 
-  const fetchReports = useCallback(async () => {
+  const fetchReports = useCallback(async (forceRefresh = false) => {
     try {
       setError(null);
-      const res = await listRuns(25);
+      // Shared single-flight fetch: concurrent dashboard widgets collapse onto
+      // one `GET /runs` sized for the hungriest caller, then slice locally.
+      // Lifecycle frames force past the freshness window so a newly settled
+      // run appears now instead of at the next poll tick.
+      const runs = await getSharedRecentRuns(25, { forceRefresh });
       // Filter to terminal / completed runs
-      const completed = (res.runs || []).filter(
+      const completed = (runs || []).filter(
         (r) => r.status === "ok" || r.status === "error" || r.status === "completed" || r.status === "budget_exceeded",
       );
       setReports(completed.slice(0, 5));
     } catch (err) {
+      // Surface fetch failures in the banner above: without this the
+      // `{error && banner}` outlet stays dead and failures only reach the log.
+      setError(
+        err instanceof Error && err.message
+          ? `Failed to load recent reports: ${err.message}`
+          : "Failed to load recent reports.",
+      );
       console.warn("Failed to fetch recent reports:", err);
+    } finally {
+      // Settle loading on success and failure alike so a failed first load
+      // falls through to the empty state instead of spinning forever.
+      setIsLoading(false);
     }
   }, []);
 
@@ -114,7 +134,10 @@ export default function RecentReports({
     (frame: WSIncomingFrame) => {
       const frameType = (frame as { type?: string }).type;
       if (frameType === "run_started" || frameType === "run_completed") {
-        fetchReports();
+        // Lifecycle frames carry no payload, so force past the shared
+        // freshness window: a newly settled run must appear now, not when the
+        // TTL lapses.
+        fetchReports(true);
       }
     },
     [fetchReports],
@@ -151,7 +174,12 @@ export default function RecentReports({
 
       {error && <div className="notice-banner error">{error}</div>}
 
-      {reports.length === 0 ? (
+      {isLoading ? (
+        <div className="section-loading">
+          <div className="spinner" />
+          <p>Loading recent reports…</p>
+        </div>
+      ) : reports.length === 0 ? (
         <div className="dashboard-empty-card empty-reports-card">
           <p className="empty-reports-desc">
             No completed runs recorded yet. Automated and chat runs will report outcomes here.

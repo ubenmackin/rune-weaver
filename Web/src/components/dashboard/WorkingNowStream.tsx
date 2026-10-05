@@ -10,10 +10,10 @@ import {
   cancelRun,
   formatRunDuration,
   isActiveRunStatus,
-  listRuns,
   parseRunTimestamp,
   type RunLogEntry,
 } from "../../api";
+import { getSharedRecentRuns } from "./sharedRuns";
 import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
 import { MessageSquareIcon, StopIcon, WrenchIcon } from "../icons";
 
@@ -29,15 +29,34 @@ export default function WorkingNowStream({
   const [activeRuns, setActiveRuns] = useState<RunLogEntry[]>([]);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // True only for the initial load so the widget shows a spinner instead of
+  // the idle card before the shared fetch settles. Later polls and WebSocket
+  // refetches keep the current rows visible instead of flickering to loading.
+  const [isLoading, setIsLoading] = useState(true);
 
-  const fetchActiveRuns = useCallback(async () => {
+  const fetchActiveRuns = useCallback(async (forceRefresh = false) => {
     try {
       setError(null);
-      const res = await listRuns(30);
-      const running = (res.runs || []).filter((r) => isActiveRunStatus(r.status));
+      // Shared single-flight fetch: concurrent dashboard widgets collapse onto
+      // one `GET /runs` sized for the hungriest caller, then filter locally.
+      // Lifecycle frames force past the freshness window so a newly started or
+      // settled run appears now instead of at the next poll tick.
+      const runs = await getSharedRecentRuns(30, { forceRefresh });
+      const running = (runs || []).filter((r) => isActiveRunStatus(r.status));
       setActiveRuns(running);
     } catch (err) {
+      // Surface fetch failures in the banner above: without this the
+      // `{error && banner}` outlet stays dead and failures only reach the log.
+      setError(
+        err instanceof Error && err.message
+          ? `Failed to load live tasks: ${err.message}`
+          : "Failed to load live tasks.",
+      );
       console.warn("Failed to fetch active runs:", err);
+    } finally {
+      // Settle loading on success and failure alike so a failed first load
+      // falls through to the idle state instead of spinning forever.
+      setIsLoading(false);
     }
   }, []);
 
@@ -54,7 +73,9 @@ export default function WorkingNowStream({
         frameType === "run_completed" ||
         frameType === "goal_updated"
       ) {
-        fetchActiveRuns();
+        // Lifecycle frames carry no payload, so run transitions force past
+        // the shared freshness window while goal metadata updates ride it.
+        fetchActiveRuns(frameType !== "goal_updated");
       }
     },
     [fetchActiveRuns],
@@ -114,7 +135,12 @@ export default function WorkingNowStream({
 
       {error && <div className="notice-banner error">{error}</div>}
 
-      {activeRuns.length === 0 ? (
+      {isLoading ? (
+        <div className="section-loading">
+          <div className="spinner" />
+          <p>Loading live tasks…</p>
+        </div>
+      ) : activeRuns.length === 0 ? (
         <div className="dashboard-empty-card idle-card">
           <div className="idle-indicator-row">
             <span className="idle-dot" />

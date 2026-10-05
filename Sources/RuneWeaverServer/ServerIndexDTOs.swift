@@ -43,9 +43,9 @@ public struct IndexSourceCounts: Content, Equatable {
     public let documents: Int
     /// Number of stored chunks belonging to this source.
     public let chunks: Int
-    /// Total chunk text bytes belonging to this source. Zero is the explicit
-    /// pending sentinel from the fast pass, not an estimate; the true slow
-    /// total is filled by `GET /index/storage`.
+    /// Total chunk text bytes belonging to this source from the persisted
+    /// single row; zero only when the row is genuinely absent (fail-closed),
+    /// never a mid-run pending sentinel.
     public let bytes: Int64
 
     /// Creates a per-source content row.
@@ -53,7 +53,7 @@ public struct IndexSourceCounts: Content, Equatable {
     ///   - kind: Source kind token.
     ///   - documents: Indexed document count.
     ///   - chunks: Stored chunk count.
-    ///   - bytes: Total chunk text bytes; zero is the fast-pass pending sentinel filled by `GET /index/storage`.
+    ///   - bytes: Total chunk text bytes from the persisted row.
     public init(kind: String, documents: Int = 0, chunks: Int = 0, bytes: Int64 = 0) {
         self.kind = kind
         self.documents = documents
@@ -615,22 +615,22 @@ public struct IndexStorageResponse: Content, Equatable {
 /// store or coordinator report an honest empty/stopped snapshot instead of
 /// failing. The `live` snapshot is additive: existing callers omit it and
 /// report an idle strip, while the route passes the coordinator's live totals
-/// through when a run is in flight. Fast stats flow through the existing
-/// `stats` parameter with true counts, watermark, and file sizes while slow
-/// size legs stay nil or zero; sizes prefer the optional `storage` breakdown
-/// when warm and fall back to `stats` file sizes when cold, so a cold poll
-/// reports pending zeros for slow legs instead of failing. Effort resolves
-/// from the stored preset on this machine so the dashboard renders workers
-/// without a second fetch.
+/// through when a run is in flight. Stats flow through the existing `stats`
+/// parameter with true counts, watermark, and true sizes from the persisted
+/// single row; sizes prefer the optional `storage` breakdown and fall back to
+/// `stats` true sizes, so the TTL never gates correctness and only a
+/// genuinely absent row renders fail-closed zeros. Effort resolves from the
+/// stored preset on this machine so the dashboard renders workers without a
+/// second fetch.
 ///
 /// - Parameters:
 ///   - config: Active index policy driving enablement and effort.
-///   - stats: Fast or slow aggregate stats, or nil when no store is wired.
+///   - stats: Persisted aggregate stats with true sizes, or nil when no store is wired.
 ///   - running: Whether a run is in flight.
 ///   - lastErrors: Recent run failures, newest first.
 ///   - lastRun: Latest run outcome, or nil when no run has been recorded.
 ///   - live: Live in-flight snapshot, or nil when idle.
-///   - storage: Cached slow breakdown when fresh, or nil for pending slow legs.
+///   - storage: Persisted slow breakdown, or nil for fail-closed zeros when absent.
 /// - Returns: The status snapshot.
 func makeIndexStatusResponse(
     config: IndexConfig,
@@ -652,9 +652,9 @@ func makeIndexStatusResponse(
     let byExtractStatus = (stats?.byExtractStatus ?? []).map { row in
         IndexExtractStatusCounts(status: row.status.rawValue, documents: row.documents)
     }
-    // Slow legs prefer the cached breakdown when warm; cold polls fall back
-    // to fast file sizes for the on-disk pair and pending zeros for the rest,
-    // so fast counts stay visible while slow bytes merge in later.
+    // Slow legs prefer the persisted breakdown and fall back to the persisted
+    // stats true sizes, so every poll serves single-row reads forever with no
+    // TTL gate and no pending-zero cold; only an absent row renders zeros.
     let activeProcessors = max(1, ProcessInfo.processInfo.activeProcessorCount)
     let effort = IndexEffortStatus(
         preset: config.effort,

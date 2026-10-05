@@ -177,10 +177,17 @@ private func makeTemporaryPolicyDirectory() -> URL {
 /// Binding the resolver to the task makes the observation exact: concurrent
 /// suites fall back to the global hook while this task only ever sees its own
 /// canned proof, so the gate-order assertions below measure this test alone.
+/// The global hook is also set as a fail-closed fallback for the same proof
+/// so an actor-hop that loses the task-local binding still vets against the
+/// test's canned addresses instead of real DNS; it is restored afterwards so
+/// parallel suites keep their isolation.
 private func withTaskScopedDNS(
     _ resolver: @escaping @Sendable (String) -> [String],
     _ body: () async throws -> Void
 ) async throws {
+    let savedGlobal = ApiSSRFGuard.testDNSResolver
+    ApiSSRFGuard.testDNSResolver = resolver
+    defer { ApiSSRFGuard.testDNSResolver = savedGlobal }
     try await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
         try await body()
     }

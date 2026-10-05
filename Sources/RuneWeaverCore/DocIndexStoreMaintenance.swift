@@ -24,6 +24,22 @@ import os
     /// Lock guarding the injectable size probe so test overrides stay race-free.
     private let docIndexDbstatProbeLock = OSAllocatedUnfairLock(initialState: DocIndexDbstatProbe?.none)
 
+    /// Decides whether an aggregate refresh should fail, letting tests prove
+    /// a failed refresh keeps the prior row instead of clearing the tables.
+    public typealias DocIndexAggregateFailureHook = @Sendable () -> Bool
+
+    /// Lock guarding the injectable aggregate-write failure hook so parallel
+    /// refreshes and tests never race on the override.
+    private let docIndexAggregateFailureLock = OSAllocatedUnfairLock(initialState: DocIndexAggregateFailureHook?.none)
+
+    /// Lock guarding per-database aggregate-write failure hooks so parallel
+    /// tests over isolated temporary files stay isolated from each other.
+    ///
+    /// Keyed by canonical database path, mirroring the aggregate-pass
+    /// counters below: a hook registered for one file never fails a refresh
+    /// on another file sharing the process-wide store.
+    private let docIndexAggregateFailurePerPathLock = OSAllocatedUnfairLock(initialState: [String: DocIndexAggregateFailureHook]())
+
     /// Raw grouped chunk/text aggregates from the single chunk/text pass.
     ///
     /// `bySource` holds every non-NULL source key from the grouped query,
@@ -149,6 +165,18 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             freeBytes: freeBytes,
             contentBytes: IndexContentBytes.contentBytes(textBytes: textBytes, vectorBytes: vectorBytes)
         )
+    }
+
+    /// Projects the fast status view from the shared snapshot.
+    ///
+    /// Freeze-then-jump: projects true sizes from the persisted single row
+    /// via the shared snapshot so one row carries every leg and status needs
+    /// no second storage fetch. Pending-zero slow legs apply only when no
+    /// persisted row exists (fail-closed zeros from the cheap COUNT path),
+    /// never when a snapshot is in hand.
+    /// - Returns: An index statistics snapshot with true sizes from the persisted row.
+    func makeFastStats() -> IndexStats {
+        makeStats()
     }
 }
 
@@ -365,6 +393,284 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             try computeStatusSnapshot(dbPath: dbPath, dbstatProbe: dbstatProbe)
         }
 
+        /// Injectable hook forcing aggregate refresh writes to fail.
+        ///
+        /// Nil performs every refresh; a hook returning true throws inside the
+        /// replacement transaction so the whole refresh rolls back. Tests use
+        /// it to prove a failed refresh keeps the prior aggregate row instead
+        /// of leaving empty tables behind.
+        static var aggregateWriteFailureHook: DocIndexAggregateFailureHook? {
+            get { docIndexAggregateFailureLock.withLock { $0 } }
+            set { docIndexAggregateFailureLock.withLock { $0 = newValue } }
+        }
+
+        /// Registers a per-database hook forcing aggregate refresh writes to fail.
+        ///
+        /// Scoped by canonical database path so parallel tests over isolated
+        /// temporary files never observe each other's injected failure; prefer
+        /// this over the process-wide `aggregateWriteFailureHook` in new tests.
+        /// A nil hook removes the entry for the path.
+        /// - Parameters:
+        ///   - hook: Hook forcing failure for this database, or nil to clear.
+        ///   - dbPath: SQLite file path the hook applies to.
+        static func setAggregateWriteFailureHook(_ hook: DocIndexAggregateFailureHook?, for dbPath: String) {
+            let key = canonicalDBPath(dbPath)
+            docIndexAggregateFailurePerPathLock.withLock { hooks in
+                if let hook {
+                    hooks[key] = hook
+                } else {
+                    hooks.removeValue(forKey: key)
+                }
+            }
+        }
+
+        /// Clears the per-database aggregate-write failure hook for one file.
+        /// - Parameter dbPath: SQLite file path whose hook is removed.
+        static func clearAggregateWriteFailureHook(for dbPath: String) {
+            let key = canonicalDBPath(dbPath)
+            _ = docIndexAggregateFailurePerPathLock.withLock { $0.removeValue(forKey: key) }
+        }
+
+        /// Recomputes the aggregate tables from a fresh single-pass snapshot.
+        ///
+        /// Reuses the shared `computeStatusSnapshot` pass so the persisted
+        /// rows match a live status poll field-for-field without a second
+        /// table scan, then replaces all three aggregate tables inside one
+        /// transaction: a crash between deletes can never strand a half-filled
+        /// set. `open(dbPath:)` canonicalizes through the shared ensure gate
+        /// internally, so symlink spellings share one schema with the compute
+        /// above. A throwing write rolls back, preserving the previous row
+        /// for readers.
+        /// - Parameters:
+        ///   - dbPath: SQLite file path. `~` is expanded.
+        ///   - producingRunID: Opaque run identity recorded alongside the row, or nil for route-driven refreshes.
+        ///   - updatedAt: Refresh instant recorded in `updated_at`.
+        /// - Returns: The snapshot that was persisted.
+        static func refreshAggregates(
+            dbPath: String,
+            producingRunID: String? = nil,
+            updatedAt: Date = Date()
+        ) throws -> DocIndexStatusSnapshot {
+            let snapshot = try computeStatusSnapshot(dbPath: dbPath, dbstatProbe: dbstatProbeOverride)
+            // `open(dbPath:)` canonicalizes through the shared ensure gate
+            // internally, so the write needs no separate resolution here; only
+            // the failure-hook lookup keys on the canonical path so parallel
+            // tests over isolated files stay isolated from each other.
+            let hookKey = canonicalDBPath(dbPath)
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
+            do {
+                // Per-path hooks are checked before the process-wide hook so a
+                // parallel test's injected failure on another file never fails
+                // this refresh; either hook throwing rolls back this path only.
+                let perPathHook: DocIndexAggregateFailureHook? = docIndexAggregateFailurePerPathLock.withLock { $0[hookKey] }
+                if let perPathHook, perPathHook() {
+                    throw DocIndexError.persistenceFailed("Could not refresh aggregates (injected failure)")
+                }
+                if let hook = aggregateWriteFailureHook, hook() {
+                    throw DocIndexError.persistenceFailed("Could not refresh aggregates (injected failure)")
+                }
+                try writeAggregates(handle: handle, snapshot: snapshot, producingRunID: producingRunID, updatedAt: updatedAt)
+                try exec(handle: handle, sql: "COMMIT;")
+            } catch {
+                try? exec(handle: handle, sql: "ROLLBACK;")
+                throw error
+            }
+            return snapshot
+        }
+
+        /// Replaces all three aggregate tables inside the caller's transaction.
+        ///
+        /// Deletes first so a source or status that no longer holds documents
+        /// disappears instead of lingering as a stale row, then inserts the
+        /// single pinned row plus one row per observed source and status. Only
+        /// sources and statuses holding at least one document are stored, so
+        /// the tables project exactly what the live snapshot reports.
+        /// - Parameters:
+        ///   - handle: Open database handle owning the transaction.
+        ///   - snapshot: Fresh single-pass snapshot to persist.
+        ///   - producingRunID: Opaque run identity, or nil when the caller carries none.
+        ///   - updatedAt: Refresh instant for `updated_at`.
+        private static func writeAggregates(
+            handle: OpaquePointer?,
+            snapshot: DocIndexStatusSnapshot,
+            producingRunID: String?,
+            updatedAt: Date
+        ) throws {
+            try exec(handle: handle, sql: "DELETE FROM index_aggregates; DELETE FROM index_aggregate_by_source; DELETE FROM index_aggregate_by_extract_status;")
+            var single: OpaquePointer?
+            let singleSQL =
+                "INSERT INTO index_aggregates(id, documents, chunks, vector_chunks, text_bytes, vector_bytes, "
+                    + "fts_bytes, index_as_of, updated_at, producing_run_id) VALUES(0, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+            guard sqlite3_prepare_v2(handle, singleSQL, -1, &single, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not prepare aggregate write")
+            }
+            defer { sqlite3_finalize(single) }
+            sqlite3_bind_int64(single, 1, Int64(snapshot.documents))
+            sqlite3_bind_int64(single, 2, Int64(snapshot.chunks))
+            sqlite3_bind_int64(single, 3, Int64(snapshot.vectorChunks))
+            sqlite3_bind_int64(single, 4, snapshot.textBytes)
+            sqlite3_bind_int64(single, 5, snapshot.vectorBytes)
+            SQLiteHelpers.bindInt64(single, index: 6, value: snapshot.ftsBytes)
+            sqlite3_bind_double(single, 7, snapshot.indexAsOf.timeIntervalSince1970)
+            sqlite3_bind_double(single, 8, updatedAt.timeIntervalSince1970)
+            SQLiteHelpers.bindText(single, index: 9, value: producingRunID)
+            guard sqlite3_step(single) == SQLITE_DONE else {
+                throw DocIndexError.persistenceFailed("Could not write aggregates")
+            }
+            for entry in snapshot.bySource {
+                var statement: OpaquePointer?
+                let sql = "INSERT INTO index_aggregate_by_source(source, documents, chunks, bytes) VALUES(?, ?, ?, ?);"
+                guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                    throw DocIndexError.persistenceFailed("Could not prepare source aggregate write")
+                }
+                SQLiteHelpers.bindText(statement, index: 1, value: entry.source.rawValue)
+                sqlite3_bind_int64(statement, 2, Int64(entry.documents))
+                sqlite3_bind_int64(statement, 3, Int64(entry.chunks))
+                sqlite3_bind_int64(statement, 4, entry.bytes)
+                let step = sqlite3_step(statement)
+                sqlite3_finalize(statement)
+                guard step == SQLITE_DONE else {
+                    throw DocIndexError.persistenceFailed("Could not write source aggregates")
+                }
+            }
+            for entry in snapshot.byExtractStatus {
+                var statement: OpaquePointer?
+                let sql = "INSERT INTO index_aggregate_by_extract_status(status, documents) VALUES(?, ?);"
+                guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                    throw DocIndexError.persistenceFailed("Could not prepare status aggregate write")
+                }
+                SQLiteHelpers.bindText(statement, index: 1, value: entry.status.rawValue)
+                sqlite3_bind_int64(statement, 2, Int64(entry.documents))
+                let step = sqlite3_step(statement)
+                sqlite3_finalize(statement)
+                guard step == SQLITE_DONE else {
+                    throw DocIndexError.persistenceFailed("Could not write status aggregates")
+                }
+            }
+        }
+
+        /// Reads the persisted aggregate snapshot without running any content scan.
+        ///
+        /// Serves warm status and storage polls from the three aggregate tables
+        /// plus live file-size probes, so a poll with no intervening writes
+        /// performs zero aggregate passes. The content legs (counts, text and
+        /// vector bytes, watermark, per-source and per-status rows) ride the
+        /// stored rows including the nullable full-text leg; only the on-disk
+        /// pair and the freelist ride live filesystem and PRAGMA probes so the
+        /// projection matches what a live pass would report at this instant.
+        /// A missing single row or a missing aggregate table reads as absent
+        /// rather than failing, letting the caller repair once through the
+        /// single writer. Never touches the aggregate-pass counter, `dbstat`,
+        /// or `LENGTH`, so warm-read proofs observe zero passes here.
+        /// - Parameter dbPath: SQLite file path. `~` is expanded.
+        /// - Returns: The persisted snapshot, or nil when no refresh has run.
+        static func readAggregateSnapshot(dbPath: String) throws -> DocIndexStatusSnapshot? {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            var single: OpaquePointer?
+            let singleSQL = "SELECT documents, chunks, vector_chunks, text_bytes, vector_bytes, fts_bytes, index_as_of FROM index_aggregates WHERE id = 0;"
+            guard sqlite3_prepare_v2(handle, singleSQL, -1, &single, nil) == SQLITE_OK else {
+                sqlite3_finalize(single)
+                return nil
+            }
+            defer { sqlite3_finalize(single) }
+            guard sqlite3_step(single) == SQLITE_ROW else { return nil }
+            let documents = Int(sqlite3_column_int64(single, 0))
+            let chunks = Int(sqlite3_column_int64(single, 1))
+            let vectorChunks = Int(sqlite3_column_int64(single, 2))
+            let textBytes = sqlite3_column_int64(single, 3)
+            let vectorBytes = sqlite3_column_int64(single, 4)
+            let ftsBytes: Int64? = sqlite3_column_type(single, 5) == SQLITE_NULL ? nil : sqlite3_column_int64(single, 5)
+            let indexAsOf = Date(timeIntervalSince1970: sqlite3_column_double(single, 6))
+            var sourceStatement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                handle,
+                "SELECT source, documents, chunks, bytes FROM index_aggregate_by_source;",
+                -1,
+                &sourceStatement,
+                nil
+            ) == SQLITE_OK else {
+                sqlite3_finalize(sourceStatement)
+                return nil
+            }
+            defer { sqlite3_finalize(sourceStatement) }
+            var sourceRows: [String: IndexSourceStats] = [:]
+            while sqlite3_step(sourceStatement) == SQLITE_ROW {
+                guard let key = SQLiteHelpers.columnText(sourceStatement, index: 0) else { continue }
+                // Unknown source keys (manual SQL or a future source value)
+                // never enter the typed breakdown — the child tables stay keyed
+                // by source strings with a fixed wire shape — but their counts
+                // already ride the single-row totals above, so log the skip
+                // instead of dropping silently.
+                guard let source = IndexSource(rawValue: key) else {
+                    RuneWeaverLog.stores.warning("DocIndexStore: ignoring unknown aggregate source '\(key)'")
+                    continue
+                }
+                sourceRows[key] = IndexSourceStats(
+                    source: source,
+                    documents: Int(sqlite3_column_int64(sourceStatement, 1)),
+                    chunks: Int(sqlite3_column_int64(sourceStatement, 2)),
+                    bytes: sqlite3_column_int64(sourceStatement, 3)
+                )
+            }
+            var bySource: [IndexSourceStats] = []
+            for source in IndexSource.allCases {
+                guard let row = sourceRows[source.rawValue] else { continue }
+                bySource.append(row)
+            }
+            var statusStatement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "SELECT status, documents FROM index_aggregate_by_extract_status;", -1, &statusStatement, nil) == SQLITE_OK else {
+                sqlite3_finalize(statusStatement)
+                return nil
+            }
+            defer { sqlite3_finalize(statusStatement) }
+            var statusCounts: [String: Int] = [:]
+            while sqlite3_step(statusStatement) == SQLITE_ROW {
+                guard let key = SQLiteHelpers.columnText(statusStatement, index: 0) else { continue }
+                statusCounts[key] = Int(sqlite3_column_int64(statusStatement, 1))
+            }
+            var byExtractStatus: [IndexExtractStatusStats] = []
+            for status in ExtractStatus.allCases {
+                guard let row = statusCounts[status.rawValue] else { continue }
+                byExtractStatus.append(IndexExtractStatusStats(status: status, documents: row))
+            }
+            // Unknown status keys stay out of the fixed wire shape like unknown
+            // sources above, with their counts preserved in the single-row
+            // totals; log them so a future status value cannot vanish silently.
+            let knownStatuses = Set(ExtractStatus.allCases.map(\.rawValue))
+            for key in statusCounts.keys where !knownStatuses.contains(key) {
+                RuneWeaverLog.stores.warning("DocIndexStore: ignoring unknown aggregate extract status '\(key)'")
+            }
+            // Page-counter probes ride fail-closed zeros: a throwing PRAGMA
+            // must not fail a warm poll that already holds a valid aggregate
+            // row. File sizes then fall back to the filesystem probe while the
+            // reclaimable-bytes leg reports zero instead of a 500.
+            let pageCount = (try? scalarInt(handle: handle, sql: "PRAGMA page_count;")) ?? 0
+            let pageSize = (try? scalarInt(handle: handle, sql: "PRAGMA page_size;")) ?? 0
+            let freelistCount = (try? scalarInt(handle: handle, sql: "PRAGMA freelist_count;")) ?? 0
+            let pageSizeBytes = Int64(max(pageSize, 0))
+            let dbFileBytes = resolvedDbFileBytes(pageCount: pageCount, pageSizeBytes: pageSizeBytes, expandedPath: expanded)
+            let freeBytes = Int64(max(freelistCount, 0)) * pageSizeBytes
+            let walBytes = onDiskBytes(at: expanded + "-wal")
+            return DocIndexStatusSnapshot(
+                documents: documents,
+                chunks: chunks,
+                vectorChunks: vectorChunks,
+                textBytes: textBytes,
+                vectorBytes: vectorBytes,
+                indexAsOf: indexAsOf,
+                bySource: bySource,
+                byExtractStatus: byExtractStatus,
+                dbFileBytes: dbFileBytes,
+                walBytes: walBytes,
+                ftsBytes: ftsBytes,
+                freeBytes: freeBytes
+            )
+        }
+
         /// Computes every status aggregate in one pass over a single open handle.
         ///
         /// Opens once, then runs the document COUNT, the MAX watermark, one
@@ -478,16 +784,21 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
         /// Reads fast index counts without measuring content bytes.
         ///
         /// Owned by `SQLiteDocIndexStore`: opens once and runs only count
-        /// aggregates plus the watermark, so a cold status poll returns true
-        /// document, chunk, vector, per-source, and extraction counts well
+        /// aggregates plus the watermark, so a genuinely absent aggregate row
+        /// still reports true document, chunk, vector, per-source, and
+        /// extraction counts fail-closed with pending-zero slow legs well
         /// under the dashboard budget. Per-source byte totals stay zero to
         /// signal pending slow storage rather than an estimate; text, vector,
         /// and full-text legs stay nil, free and content bytes stay zero, and
         /// file sizes ride `onDiskBytes` so the probe reports what the
-        /// filesystem holds. Never touches the aggregate-pass counter, never
-        /// touches `dbstat`, and never measures `LENGTH`, so slow-pass proofs
-        /// observe exactly one pass per cold storage poll and zero for fast
-        /// polls. An empty store reports the epoch watermark.
+        /// filesystem holds. The actor fast path no longer uses this when a
+        /// persisted row exists — it projects frozen true sizes via the
+        /// shared snapshot instead — so this stays only the fail-closed
+        /// pending-zero shape for a genuinely absent row. Never touches the
+        /// aggregate-pass counter, never touches `dbstat`, and never measures
+        /// `LENGTH`, so slow-pass proofs observe exactly one pass per cold
+        /// storage poll and zero for fast polls. An empty store reports the
+        /// epoch watermark.
         /// - Parameter dbPath: SQLite file path. `~` is expanded.
         /// - Returns: An index statistics snapshot with true counts, true file sizes, and pending slow size fields.
         static func fastStats(dbPath: String) throws -> IndexStats {

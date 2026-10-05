@@ -52,6 +52,32 @@ public enum SQLiteSerialIO {
         }
     }
 
+    /// Runs throwing blocking work on the designated lane serial queue to completion without observing cancellation.
+    ///
+    /// Skips the pre-dispatch cancellation check so terminal maintenance still
+    /// persists partial work when the caller was cancelled; thrown errors still
+    /// propagate to the caller. In-flight work runs to completion like `run`,
+    /// so the file never observes a torn write.
+    /// - Parameters:
+    ///   - lane: Serial queue backing the work.
+    ///   - work: Blocking SQLite work to run off the cooperative thread pool.
+    /// - Returns: The work's result.
+    public static func runIgnoringCancellation<T: Sendable>(
+        lane: Lane = .interactive,
+        _ work: @Sendable @escaping () throws -> T
+    ) async throws -> T {
+        let targetQueue = queue(for: lane)
+        return try await withCheckedThrowingContinuation { continuation in
+            targetQueue.async {
+                do {
+                    try continuation.resume(returning: work())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     /// Runs non-throwing blocking work on the designated lane serial queue to completion.
     public static func runUncancellable<T: Sendable>(
         lane: Lane = .interactive,
