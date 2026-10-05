@@ -275,6 +275,7 @@ public actor Orchestrator {
                 didEmitRecallDiagnostics = true
                 try Task.checkCancellation()
                 await flushEpisodic(pendingEpisodic, sessionID: sessionID)
+                await permissionGate?.clearTaskGrants(for: sessionID)
                 return earlyResponse
             }
 
@@ -293,6 +294,7 @@ public actor Orchestrator {
                 try Task.checkCancellation()
                 await flushEpisodic(pendingEpisodic, sessionID: sessionID)
                 let cumulativeTokens = accumulateSessionTokens(loopBilled, for: sessionID)
+                await permissionGate?.clearTaskGrants(for: sessionID)
                 // Nil when suppressed text persisted no note so equality stays deterministic
                 // and clients fall back to receipt time instead of a wall-clock sample.
                 return OrchestratorResponse(
@@ -310,6 +312,7 @@ public actor Orchestrator {
                 )
             }
         } catch let error as CancellationError {
+            await permissionGate?.clearTaskGrants(for: sessionID)
             await handleProcessCancellation(
                 didEmitRecallDiagnostics: didEmitRecallDiagnostics,
                 text: text,
@@ -319,6 +322,7 @@ public actor Orchestrator {
             )
             throw error
         } catch {
+            await permissionGate?.clearTaskGrants(for: sessionID)
             await handleProcessError(
                 didEmitRecallDiagnostics: didEmitRecallDiagnostics,
                 text: text,

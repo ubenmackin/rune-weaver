@@ -432,8 +432,7 @@ public actor OutboundEgressSupervisor {
         // (`searxng_url`, enabled media LAN URLs, LLM server URLs) with the
         // owner-declared `local_exemptions` from this hop's snapshot, so a
         // policy write applies live with no restart while never-exempt targets
-        // (metadata, link-local, embedded translations) stay refused. The
-        // retired `browser.allowed_origins` never feeds this set.
+        // (metadata, link-local, embedded translations) stay refused.
         let ssrfOrigins = ApiSSRFGuard.allowlistedOrigins(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
@@ -513,8 +512,7 @@ public actor OutboundEgressSupervisor {
         }
 
         // SSRF guard over the same effective exemptions the full gate uses, so
-        // read-only checks honor a live policy exemption identically. The
-        // retired `browser.allowed_origins` never feeds this set.
+        // read-only checks honor a live policy exemption identically.
         let ssrfOrigins = ApiSSRFGuard.allowlistedOrigins(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,

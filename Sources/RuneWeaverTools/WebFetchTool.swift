@@ -91,7 +91,6 @@ public enum WebFetchSSRFGuard: Sendable {
         // Effective exemptions union the config-derived auto origins with the
         // owner-declared local grants so a policy exemption reaches the
         // initial guard; never-exempt targets stay refused inside the guard.
-        // The retired `browser.allowed_origins` never feeds the base set.
         let baseOrigins = ApiSSRFGuard.allowlistedOrigins(
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,

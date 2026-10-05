@@ -1301,7 +1301,6 @@ describe("SettingsManager", () => {
     ];
     const settingsWithOrigins = {
       ...mockSettings,
-      browserAllowedOrigins: ["http://192.168.1.50:11434"],
       browserTimeoutSeconds: 30,
       browserFetchTimeoutSeconds: 45,
     };

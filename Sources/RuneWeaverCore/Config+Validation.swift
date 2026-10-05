@@ -617,9 +617,6 @@ extension RuneWeaverConfig {
                 field: "browser.fetch_timeout_seconds", message: "must be between 1 and 120"
             )
         }
-        for origin in browser.allowedOrigins {
-            try Self.validateAllowedOrigin(origin)
-        }
     }
 
     /// Validates one files list for blank entries and directory escapes.
@@ -672,125 +669,6 @@ extension RuneWeaverConfig {
         let field = "index.mailbox_deny"
         for pattern in patterns where pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ConfigError.validationError(field: field, message: "must not contain empty patterns")
-        }
-    }
-
-    /// Validates one `browser.allowed_origins` entry against the same host semantics the guard enforces.
-    /// A universal `*` would silently disable SSRF vetting, path-scoped URLs would silently
-    /// broaden to their whole host, and control bytes or misplaced wildcards would never match
-    /// yet look authorized, so each shape fails closed here with the entry echoed for repair.
-    private static func validateAllowedOrigin(_ origin: String) throws {
-        let field = "browser.allowed_origins"
-        let trimmed = origin.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw ConfigError.validationError(field: field, message: "must not contain empty strings")
-        }
-        let lowered = trimmed.lowercased()
-        if AllowedOriginPattern.isBareUniversal(lowered) {
-            throw ConfigError.validationError(
-                field: field, message: "must not contain \"*\" (would allow every host)"
-            )
-        }
-        if AllowedOriginPattern.isUniversalWildcardShape(lowered) {
-            throw ConfigError.validationError(
-                field: field, message: "must not contain universal wildcard pattern '\(origin)'"
-            )
-        }
-        if trimmed.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) {
-            throw ConfigError.validationError(
-                field: field, message: "must not contain control characters (got '\(origin)')"
-            )
-        }
-        if trimmed.contains(" ") || trimmed.contains("\t") {
-            // Internal whitespace never survives URL parsing, so the entry could never
-            // match yet would read as configured; fail closed instead of ignoring it.
-            throw ConfigError.validationError(
-                field: field, message: "must not contain whitespace (got '\(origin)')"
-            )
-        }
-        if trimmed.count > 2048 {
-            throw ConfigError.validationError(
-                field: field, message: "must not exceed 2048 characters (got \(trimmed.count))"
-            )
-        }
-        if lowered.contains("://") {
-            guard let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(),
-                  scheme == "http" || scheme == "https", let host = url.host, !host.isEmpty
-            else {
-                throw ConfigError.validationError(
-                    field: field, message: "URL entries must be absolute http(s) URLs with a host (got '\(origin)')"
-                )
-            }
-            // Credentials never belong in the config file: userinfo would persist
-            // secrets in plaintext and diverge from the Keychain-backed contract,
-            // so any URL entry carrying it fails closed here.
-            if url.user != nil || url.password != nil || trimmed.contains("@") {
-                throw ConfigError.validationError(
-                    field: field,
-                    message: "URL entries must not contain userinfo (got '\(origin)')"
-                )
-            }
-            // A path-scoped entry never constrains the guard to that path: matching is
-            // origin/host only, so accepting it would silently broaden to the whole host.
-            let path = url.path
-            if !path.isEmpty, path != "/" {
-                throw ConfigError.validationError(
-                    field: field,
-                    message: "URL entries must not carry a path (got '\(origin)'); list the host instead"
-                )
-            }
-            if url.query != nil || url.fragment != nil {
-                throw ConfigError.validationError(
-                    field: field,
-                    message: "URL entries must not carry a query or fragment (got '\(origin)')"
-                )
-            }
-            return
-        }
-        if trimmed.contains("@") {
-            // A bare entry with userinfo would allowlist a different host than
-            // written once the guard parses it, so it fails closed here.
-            throw ConfigError.validationError(
-                field: field, message: "must not contain userinfo (got '\(origin)')"
-            )
-        }
-        if trimmed.contains("/") || trimmed.contains("?") || trimmed.contains("#") {
-            throw ConfigError.validationError(
-                field: field, message: "must be a host, host:port, wildcard, or http(s) URL without a path (got '\(origin)')"
-            )
-        }
-        if trimmed.contains("[") || trimmed.contains("]") {
-            // Bracketed IPv6 literals (`[::1]`, `[fe80::1]:8080`) are legitimate hosts;
-            // other bracket use belongs to file globs and stays denied.
-            let isBracketedIPv6 = (trimmed.hasPrefix("[") && trimmed.contains("]:")) || (
-                trimmed.hasPrefix("[") && trimmed.hasSuffix("]") && trimmed.contains(":")
-            )
-            if !isBracketedIPv6 {
-                throw ConfigError.validationError(
-                    field: field, message: "must not contain glob syntax (got '\(origin)')"
-                )
-            }
-        }
-        // Wildcard shape stays single-sourced with the SSRF matcher so the two
-        // cannot drift on which edge patterns are dialable. Port-qualified
-        // wildcards fail through the shared classifier, leaving exact
-        // `host:port` to the origin-key check.
-        switch AllowedOriginPattern.classifyWildcard(lowered) {
-        case .none, .leading, .trailing:
-            break
-        case .invalidShape:
-            throw ConfigError.validationError(
-                field: field,
-                message: "wildcards must be a single leading \"*.\" or trailing \".*\" (got '\(origin)')"
-            )
-        case .invalidSuffix:
-            throw ConfigError.validationError(
-                field: field, message: "wildcard suffix must name a host (got '\(origin)')"
-            )
-        case .invalidStem:
-            throw ConfigError.validationError(
-                field: field, message: "wildcard prefix must name a host or IP stem (got '\(origin)')"
-            )
         }
     }
 

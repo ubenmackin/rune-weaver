@@ -1149,25 +1149,11 @@ struct SettingsRouteTests {
     }
 
     @Test
-    func `PUT settings ignores retired browserAllowedOrigins`() throws {
-        // The retired field decodes for wire compatibility but `apply(to:)`
-        // never writes it, so a PUT carrying a private address persists
-        // nothing and grants nothing. Local-network grants flow only through
-        // `PUT /settings/policy` and `POST /settings/policy/recheck-local/apply`
-        // into `local_exemptions`.
-        var config = RuneWeaverConfig.default
-        #expect(config.browser.allowedOrigins.isEmpty)
-        let body = UpdateSettingsRequest(browserAllowedOrigins: ["192.168.1.10"])
-        try body.apply(to: &config)
-        #expect(config.browser.allowedOrigins.isEmpty)
-    }
-
-    @Test
-    func `Retired browserAllowedOrigins triggers no live network reload`() async throws {
-        // A PUT carrying only the retired field must not rebuild network
+    func `Non-network settings update triggers no live network reload`() async throws {
+        // A PUT carrying only non-network fields must not rebuild network
         // tools and must not write exemptions: no gateway may appear on a
         // fresh bus, the store keeps no exemption, and a later rebuild for a
-        // neighboring knob carries no trace of the retired address.
+        // network knob carries only expected entries.
         let (store, _, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
         let bootSupervisor = try await OutboundEgressSupervisor.make(policyStore: store)
@@ -1179,17 +1165,15 @@ struct SettingsRouteTests {
             toolBus: ToolBus(permissionGate: base.permissionGate)
         )
         var idleConfig = RuneWeaverConfig.default
-        let idleBody = UpdateSettingsRequest(browserAllowedOrigins: ["192.168.1.10"])
+        let idleBody = UpdateSettingsRequest(engineName: "NewName")
         try idleBody.apply(to: &idleConfig)
-        #expect(idleConfig.browser.allowedOrigins.isEmpty)
         try await reloadLiveNetworkTools(body: idleBody, config: idleConfig, context: idleContext)
         #expect(await idleContext.toolBus.tool(named: "browser.navigate") == nil)
         #expect(await idleContext.toolBus.tool(named: "web.fetch") == nil)
         #expect(await idleContext.toolBus.tool(named: "api.request") == nil)
         #expect(try await store.snapshot().network.localExemptions.isEmpty)
 
-        // Control: the neighboring timeout knob still rebuilds through the
-        // same path, and the rebuilt gateway carries no retired entry.
+        // Control: the timeout knob still rebuilds through the same path.
         let liveContext = makeRouteContext(
             store: store,
             egressSupervisor: bootSupervisor,
@@ -1201,7 +1185,6 @@ struct SettingsRouteTests {
         try await reloadLiveNetworkTools(body: liveBody, config: liveConfig, context: liveContext)
         let navigate = try #require(await liveContext.toolBus.tool(named: "browser.navigate") as? BrowserNavigateTool)
         let gateway = try #require(navigate.browserGateway as? SubprocessPlaywrightGateway)
-        #expect(!gateway.allowlistedOrigins.contains("192.168.1.10"))
         #expect(gateway.egressSupervisor === bootSupervisor)
     }
 

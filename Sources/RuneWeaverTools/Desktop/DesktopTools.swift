@@ -222,6 +222,23 @@ public struct DesktopActionTool: Tool, Sendable {
             )
             let content = try ToolEnvelopeEncoding.encode(envelope)
             return .success(content)
+        } catch let error as DesktopControlError where error.isOperatorTakeover {
+            await DesktopControlMonitor.shared.endBatch()
+            // Mid-batch takeover keeps its completed steps: the bridge threads
+            // them on the error so the envelope reports partial progress
+            // instead of zeroing the audit trail. Pre-step takeover carries
+            // no partials, so the same path honestly reports zero.
+            let partials = error.partialResults
+            let envelope = DesktopActionEnvelope(
+                success: false,
+                stepsCompleted: partials.count,
+                stepsTotal: args.actions.count,
+                results: partials,
+                error: friendlyError(.operatorTakeover),
+                operatorInterrupted: true
+            )
+            let content = (try? ToolEnvelopeEncoding.encode(envelope)) ?? friendlyError(.operatorTakeover)
+            return .success(content)
         } catch let error as DesktopControlError {
             await DesktopControlMonitor.shared.endBatch()
             return .failure(friendlyError(error))
@@ -252,6 +269,15 @@ public struct DesktopActionTool: Tool, Sendable {
         case .emergencyStopped:
             "EMERGENCY STOP: Desktop automation was aborted by the operator. "
                 + "No further actions were dispatched."
+        case .operatorTakeover:
+            // Mouse-only copy is honest about production sensing: automatic
+            // takeover is cursor displacement past the threshold, with
+            // keyboard abort arriving only as an explicit monitor latch.
+            "OPERATOR TAKEOVER: Desktop automation paused because the operator moved the mouse."
+        case .operatorTakeoverWithPartial:
+            // Same honest signal as the pre-step case; the envelope (not this
+            // message) carries how many steps completed before the abort.
+            "OPERATOR TAKEOVER: Desktop automation paused because the operator moved the mouse."
         case .unsupportedPlatform:
             "Desktop control is only supported on macOS."
         case let .actionFailed(index, reason):
@@ -405,6 +431,23 @@ public struct DesktopActionEnvelope: Sendable, Codable, Equatable {
     public let stepsTotal: Int
     public let results: [DesktopActionStepResult]
     public let error: String?
+    public let operatorInterrupted: Bool?
+
+    public init(
+        success: Bool,
+        stepsCompleted: Int,
+        stepsTotal: Int,
+        results: [DesktopActionStepResult],
+        error: String? = nil,
+        operatorInterrupted: Bool? = nil
+    ) {
+        self.success = success
+        self.stepsCompleted = stepsCompleted
+        self.stepsTotal = stepsTotal
+        self.results = results
+        self.error = error
+        self.operatorInterrupted = operatorInterrupted
+    }
 }
 
 // MARK: - Factory
@@ -428,11 +471,19 @@ public enum DesktopTools {
     /// tool-state toggle: boot-path callers register them disabled
     /// (`isEnabled: false`), stored rows restore operator intent, and no
     /// config gate overrides that state.
+    ///
+    /// Takeover sensing is mouse-only in production: the default control
+    /// bridge ships with a nil takeover detector (no in-process HID key
+    /// poll) and detects the operator automatically via cursor displacement
+    /// past the threshold. A keyboard abort still parks through the explicit
+    /// shared-monitor latch, and tests or host HID bridges inject a detector
+    /// through `controlBridge` instead of this factory claiming a sensor it
+    /// never wires.
     /// - Parameters:
     ///   - desktopConfig: The `[desktop]` configuration section carrying
     ///     capture knobs (dimensions, quality, blocklist).
     ///   - captureBridge: Optional capture bridge (for tests).
-    ///   - controlBridge: Optional control bridge (for tests).
+    ///   - controlBridge: Optional control bridge (for tests and host HID wiring).
     ///   - egressSupervisor: Optional supervisor screening typed URLs against policy.
     /// - Returns: Both desktop tools, in registration order.
     public static func makeTools(

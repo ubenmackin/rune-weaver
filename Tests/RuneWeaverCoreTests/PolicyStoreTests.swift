@@ -4,10 +4,7 @@
 // parsed, validated, serialized, and round-tripped correctly. Legacy
 // filesystem and tool tables are tolerated on load and ignored without
 // error so older files keep booting. Malformed or invariant-violating
-// policies fall back to the safe factory default. The retired
-// `browser.allowed_origins` list migrates once into
-// `[network].local_exemptions`, so a key-present file never reconsults it
-// and a failed migration write stays retryable.
+// policies fall back to the safe factory default.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -1010,220 +1007,54 @@ struct PolicyStoreTests {
         #expect(snapshot.network.blockedDomains.contains("evil.example.com"))
     }
 
-    // MARK: - Legacy Origin Migration
+    // MARK: - Store Factory & Seeding
 
     @Test
-    func `First load imports legacy allowed origins and persists local_exemptions`() async throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rw-policy-migrate-\(UUID().uuidString).toml")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let legacyToml = """
-        [network]
-        mode = "allowlist_only"
-        allowed_domains = ["api.github.com"]
-        blocked_domains = ["169.254.169.254"]
-        """
-        try legacyToml.write(to: url, atomically: true, encoding: .utf8)
-
-        let store = PolicyStore(fileURL: url)
-        await store.load(legacyLocalOrigins: [
-            "airflow.int.volcrypt.com",
-            "*.Corp.Example.com",
-            "192.168.1.10"
-        ])
-
-        // Accepted entries land canonicalized in memory and stay snapshot-able.
-        let current = await store.current
-        #expect(current.network.localExemptions == ["airflow.int.volcrypt.com", "*.corp.example.com", "192.168.1.10"])
-        #expect(await store.loadedFromDisk == true)
-        let snapshot = try await store.snapshot()
-        #expect(snapshot == current)
-
-        // The rewrite carries the key plus the imported grants while leaving
-        // the rest of the network posture untouched.
-        let persisted = try String(contentsOf: url, encoding: .utf8)
-        #expect(PolicyStore.containsLocalExemptionsKey(in: persisted))
-        let reparsed = try PolicyStore.parse(persisted)
-        #expect(reparsed.network.localExemptions == current.network.localExemptions)
-        #expect(reparsed.network.allowedDomains == ["api.github.com"])
-        #expect(reparsed.network.blockedDomains == ["169.254.169.254"])
-    }
-
-    @Test
-    func `A file that already carries local_exemptions ignores legacy origins`() async throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rw-policy-keyed-\(UUID().uuidString).toml")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let keyedToml = """
-        [network]
-        mode = "allowlist_only"
-        local_exemptions = ["kept.example.com"]
-        """
-        try keyedToml.write(to: url, atomically: true, encoding: .utf8)
-
-        let store = PolicyStore(fileURL: url)
-        await store.load(legacyLocalOrigins: ["ignored.example.com", "metadata.google.internal"])
-
-        // Key present means no import and no legacy diagnostics at all, and
-        // the file is left byte-for-byte untouched.
-        let current = await store.current
-        #expect(current.network.localExemptions == ["kept.example.com"])
-        let persisted = try String(contentsOf: url, encoding: .utf8)
-        #expect(persisted == keyedToml)
-        let diagnostics = await store.lastLoadDiagnostics
-        #expect(!diagnostics.contains { $0.localizedCaseInsensitiveContains("legacy") })
-    }
-
-    @Test
-    func `Invalid legacy origins are skipped with diagnostics`() async throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rw-policy-migrate-invalid-\(UUID().uuidString).toml")
-        defer { try? FileManager.default.removeItem(at: url) }
-        try "[network]\nmode = \"allowlist_only\"\n".write(to: url, atomically: true, encoding: .utf8)
-
-        let store = PolicyStore(fileURL: url)
-        await store.load(legacyLocalOrigins: [
-            "airflow.int.volcrypt.com",
-            "metadata.google.internal",
-            "169.254.169.254",
-            "example.com:8080",
-            "http://example.com",
-            ""
-        ])
-
-        // Only the entry that passes the exemption gates survives.
-        let current = await store.current
-        #expect(current.network.localExemptions == ["airflow.int.volcrypt.com"])
-
-        let diagnostics = await store.lastLoadDiagnostics
-        for rejected in ["metadata.google.internal", "169.254.169.254", "example.com:8080", "http://example.com"] {
-            #expect(
-                diagnostics.contains { $0.contains("Skipped legacy browser.allowed_origins entry '\(rejected)'") },
-                "expected a diagnostic for '\(rejected)'"
-            )
-        }
-        #expect(diagnostics.contains { $0.contains("Skipped legacy browser.allowed_origins entry ''") })
-
-        // The persisted file carries only the accepted entry, so a later load
-        // never re-imports a rejected value.
-        let persisted = try String(contentsOf: url, encoding: .utf8)
-        let reparsed = try PolicyStore.parse(persisted)
-        #expect(reparsed.network.localExemptions == ["airflow.int.volcrypt.com"])
-    }
-
-    @Test
-    func `Failed migration write keeps merged posture and retries next load`() async throws {
+    func `Missing file seeds the default policy file`() async throws {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rw-policy-migrate-retry-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer {
-            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
-            try? FileManager.default.removeItem(at: directory)
-        }
-        let url = directory.appendingPathComponent("policy.toml")
-        try "[network]\nmode = \"allowlist_only\"\n".write(to: url, atomically: true, encoding: .utf8)
-        // A read-only parent keeps the existing file readable while making the
-        // atomic rewrite throw, standing in for a full disk or denied write.
-        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: directory.path)
-
-        let store = PolicyStore(fileURL: url)
-        await store.load(legacyLocalOrigins: ["airflow.int.volcrypt.com"])
-
-        // Runtime keeps the imported grant even though the file could not be
-        // rewritten...
-        let current = await store.current
-        #expect(current.network.localExemptions == ["airflow.int.volcrypt.com"])
-        let snapshot = try await store.snapshot()
-        #expect(snapshot.network.localExemptions == ["airflow.int.volcrypt.com"])
-        let failedDiagnostics = await store.lastLoadDiagnostics
-        #expect(failedDiagnostics.contains { $0.contains("will retry next load") })
-        // ...and the on-disk file still lacks the key, so a later load retries.
-        let beforeRetry = try String(contentsOf: url, encoding: .utf8)
-        #expect(!PolicyStore.containsLocalExemptionsKey(in: beforeRetry))
-
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
-        await store.load(legacyLocalOrigins: ["airflow.int.volcrypt.com"])
-
-        let persisted = try String(contentsOf: url, encoding: .utf8)
-        #expect(PolicyStore.containsLocalExemptionsKey(in: persisted))
-        let reparsed = try PolicyStore.parse(persisted)
-        #expect(reparsed.network.localExemptions == ["airflow.int.volcrypt.com"])
-        let retriedDiagnostics = await store.lastLoadDiagnostics
-        #expect(!retriedDiagnostics.contains { $0.contains("will retry next load") })
-        #expect(retriedDiagnostics.contains { $0.contains("Policy loaded successfully") })
-    }
-
-    @Test
-    func `Missing file seeds the default policy with legacy origins`() async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rw-policy-migrate-seed-\(UUID().uuidString)")
+            .appendingPathComponent("rw-policy-seed-\(UUID().uuidString)")
         let url = directory.appendingPathComponent("policy.toml")
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let store = PolicyStore(fileURL: url)
-        await store.load(legacyLocalOrigins: ["airflow.int.volcrypt.com", "metadata.google.internal"])
+        await store.load()
 
-        // The in-memory posture is the factory default plus the accepted
-        // grant, and a missing file still counts as a deny-by-default load.
         let current = await store.current
         #expect(current.network.mode == .allowlistOnly)
         #expect(current.network.allowedDomains == NetworkEgressPolicy.safeDefault.allowedDomains)
-        #expect(current.network.localExemptions == ["airflow.int.volcrypt.com"])
+        #expect(current.network.localExemptions.isEmpty)
         #expect(await store.loadedFromDisk == false)
 
-        // The seeded file carries the same grant under the new key.
         let persisted = try String(contentsOf: url, encoding: .utf8)
-        #expect(PolicyStore.containsLocalExemptionsKey(in: persisted))
         let reparsed = try PolicyStore.parse(persisted)
-        #expect(reparsed.network.localExemptions == ["airflow.int.volcrypt.com"])
+        #expect(reparsed.network.localExemptions.isEmpty)
         let diagnostics = await store.lastLoadDiagnostics
         #expect(diagnostics.contains { $0.contains("Created default policy file") })
-        #expect(diagnostics.contains { $0.contains("Skipped legacy browser.allowed_origins entry 'metadata.google.internal'") })
     }
 
     @Test
-    func `makeLoaded migrates a fresh store and returns an injected one untouched`() async throws {
+    func `makeLoaded loads a fresh store and returns an injected one untouched`() async throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("rw-policy-make-loaded-\(UUID().uuidString).toml")
         defer { try? FileManager.default.removeItem(at: url) }
-        try "[network]\nmode = \"allowlist_only\"\n".write(to: url, atomically: true, encoding: .utf8)
+        try "[network]\nmode = \"allowlist_only\"\nlocal_exemptions = [\"airflow.int.volcrypt.com\"]\n".write(to: url, atomically: true, encoding: .utf8)
 
-        // A nil injection constructs and loads with the legacy list, so the
-        // one-time migration runs exactly there.
+        // A nil injection constructs and loads the file.
         let created = await PolicyStore.makeLoaded(
             injected: nil,
-            fileURL: url,
-            legacyLocalOrigins: ["airflow.int.volcrypt.com"]
+            fileURL: url
         )
         let createdCurrent = await created.current
         #expect(createdCurrent.network.localExemptions == ["airflow.int.volcrypt.com"])
 
         // An injected instance stays authoritative: resolving again returns the
-        // same store without reloading or re-migrating it.
+        // same store without reloading it.
         let resolved = await PolicyStore.makeLoaded(
             injected: created,
-            fileURL: url,
-            legacyLocalOrigins: ["ignored.example.com"]
+            fileURL: url
         )
         #expect(resolved === created)
         let resolvedCurrent = await resolved.current
         #expect(resolvedCurrent.network.localExemptions == ["airflow.int.volcrypt.com"])
-    }
-
-    @Test
-    func `Resaved config omits allowed_origins while legacy decoding stays available`() throws {
-        var config = RuneWeaverConfig.default
-        config.browser.allowedOrigins = ["airflow.int.volcrypt.com"]
-        // The retired key no longer round-trips out of config.toml...
-        #expect(!config.renderTOML().contains("allowed_origins"))
-
-        // ...but decoding keeps accepting it so an older file can feed the
-        // one-time migration into [network].local_exemptions.
-        let legacy = """
-        [browser]
-        allowed_origins = ["airflow.int.volcrypt.com"]
-        """
-        let decoded = try RuneWeaverConfig(decoding: TOMLParser.parse(legacy))
-        #expect(decoded.browser.allowedOrigins == ["airflow.int.volcrypt.com"])
     }
 }

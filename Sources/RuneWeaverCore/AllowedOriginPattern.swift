@@ -1,17 +1,15 @@
 // Rune Weaver Core — Shared allowed-origin wildcard policy for validation and matching.
 //
-// Purpose: single source for the `browser.allowed_origins` host-pattern rules
-// and the `[network].local_exemptions` entry shape gate, so config validation,
-// the SSRF matcher, and the policy verifier cannot drift on what a wildcard
-// means. Scope: pure string predicates over lowercased patterns only; URL
-// parsing, IPv6 bracket handling, and origin-key comparison stay with their
-// callers. Architectural role: owned by `RuneWeaverCore` so both the config
-// validator and `RuneWeaverTools` resolve the same universal, glob, and
-// single-edge decisions.
+// Purpose: single source for host-pattern rules and the `[network].local_exemptions`
+// entry shape gate, so the SSRF matcher and the policy verifier cannot drift on
+// what a wildcard means. Scope: pure string predicates over lowercased patterns only;
+// URL parsing, IPv6 bracket handling, and origin-key comparison stay with their
+// callers. Architectural role: owned by `RuneWeaverCore` so both the policy verifier
+// and `RuneWeaverTools` resolve the same universal, glob, and single-edge decisions.
 
 import Foundation
 
-/// Shared wildcard policy for `browser.allowed_origins` host patterns.
+/// Shared wildcard policy for host patterns.
 /// Lowercased input is assumed; matching callers normalize hosts before comparing
 /// so hex, octal, and short IP spellings converge on one verdict.
 public enum AllowedOriginPattern: Sendable {

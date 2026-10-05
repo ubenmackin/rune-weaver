@@ -225,9 +225,6 @@ Local web search via self-hosted SearXNG and Playwright browser automation.
 | `timeout_seconds` | integer | `30` | Per-action timeout in seconds for Playwright browser automation (`5`–`300`). |
 | `fetch_timeout_seconds` | integer | `15` | Per-request HTTP timeout in seconds for `web.fetch` and `api.request` (`1`–`120`). |
 
-> [!NOTE]
-> Domain allowlists and homelab network exemptions previously in `browser.allowed_origins` have been consolidated into `~/.runeweaver/policy.toml` under `[network].local_exemptions`.
-
 ```toml
 [browser]
 searxng_url = "http://127.0.0.1:8888"

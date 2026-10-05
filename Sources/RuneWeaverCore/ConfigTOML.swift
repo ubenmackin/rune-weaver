@@ -896,9 +896,6 @@ extension RuneWeaverConfig {
         if let maxResults = try browser.strictInt("max_results", field: "browser.max_results") {
             config.browser.maxResults = maxResults
         }
-        if let allowed = try browser.strictStringArray("allowed_origins", field: "browser.allowed_origins") {
-            config.browser.allowedOrigins = allowed
-        }
         if let timeout = try browser.strictInt("timeout_seconds", field: "browser.timeout_seconds") {
             config.browser.timeoutSeconds = timeout
         }

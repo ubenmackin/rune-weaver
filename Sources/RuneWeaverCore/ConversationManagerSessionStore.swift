@@ -123,7 +123,8 @@ enum SessionStoreIO {
                     updated_at REAL NOT NULL,
                     source TEXT,
                     goal_id TEXT,
-                    parent_session_id TEXT
+                    parent_session_id TEXT,
+                    is_archived INTEGER DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS messages(
                     id TEXT PRIMARY KEY,
@@ -153,7 +154,8 @@ enum SessionStoreIO {
                     ("title", "ALTER TABLE sessions ADD COLUMN title TEXT;"),
                     ("source", "ALTER TABLE sessions ADD COLUMN source TEXT;"),
                     ("goal_id", "ALTER TABLE sessions ADD COLUMN goal_id TEXT;"),
-                    ("parent_session_id", "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;")
+                    ("parent_session_id", "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;"),
+                    ("is_archived", "ALTER TABLE sessions ADD COLUMN is_archived INTEGER DEFAULT 0;")
                 ]
                 for (col, alterSQL) in sessionColumnsToAdd where !existingSessions.contains(col) {
                     do {
@@ -236,11 +238,11 @@ enum SessionStoreIO {
         /// so both sides stay index-aligned; an absent parent binds as SQL NULL.
         private static func upsert(session: ConversationSession, handle: OpaquePointer?) throws {
             var sessionStatement: OpaquePointer?
-            let sessionSQL = "INSERT INTO sessions(id, title, summary, created_at, updated_at, source, goal_id, parent_session_id) "
-                + "VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+            let sessionSQL = "INSERT INTO sessions(id, title, summary, created_at, updated_at, source, goal_id, parent_session_id, is_archived) "
+                + "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 + "ON CONFLICT(id) DO UPDATE SET title=excluded.title, summary=excluded.summary, "
                 + "updated_at=excluded.updated_at, source=excluded.source, goal_id=excluded.goal_id, "
-                + "parent_session_id=excluded.parent_session_id;"
+                + "parent_session_id=excluded.parent_session_id, is_archived=excluded.is_archived;"
             guard sqlite3_prepare_v2(handle, sessionSQL, -1, &sessionStatement, nil) == SQLITE_OK else {
                 let code = sqlite3_errcode(handle)
                 throw ConversationManagerError.persistenceFailed("Could not prepare session upsert (code \(code))")
@@ -254,6 +256,7 @@ enum SessionStoreIO {
             bindText(sessionStatement, index: 6, value: session.source)
             bindText(sessionStatement, index: 7, value: session.goalID?.uuidString)
             bindText(sessionStatement, index: 8, value: session.parentSessionID?.uuidString)
+            sqlite3_bind_int(sessionStatement, 9, session.isArchived ? 1 : 0)
             guard sqlite3_step(sessionStatement) == SQLITE_DONE else {
                 throw ConversationManagerError.persistenceFailed("Could not write session \(session.id)")
             }

@@ -345,7 +345,7 @@ public actor ApprovalQueue {
             {
                 return true
             }
-            await permissionGate?.grantTrust(for: descriptor, duration: effectiveDuration)
+            await permissionGate?.grantTrust(for: descriptor, duration: effectiveDuration, sessionID: request.sessionID)
         }
         return true
     }

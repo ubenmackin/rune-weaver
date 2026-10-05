@@ -188,8 +188,7 @@ extension AppModel {
         // the served egress supervisor and the settings policy routes share
         // one instance and an HTTP policy write applies without a restart.
         let policyStore = await PolicyStore.makeLoaded(
-            injected: nil,
-            legacyLocalOrigins: config.browser.allowedOrigins
+            injected: nil
         )
         let plugins: [any Tool]
         do {

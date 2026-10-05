@@ -6,6 +6,10 @@ import Foundation
 public enum TrustDuration: String, Sendable, Codable, Equatable, CaseIterable {
     /// Approve once. No grant is stored.
     case thisTime
+    /// Trust the action for the remainder of the current turn/task.
+    case forTask
+    /// Trust the action for the remainder of the current conversation session.
+    case forSession
     /// Trust the action for the next 5 minutes.
     case fiveMinutes
     /// Trust the action for the next hour.
@@ -19,6 +23,8 @@ public enum TrustDuration: String, Sendable, Codable, Equatable, CaseIterable {
     public var displayName: String {
         switch self {
         case .thisTime: "Only this time"
+        case .forTask: "For rest of this task"
+        case .forSession: "For rest of this session"
         case .fiveMinutes: "Next 5 minutes"
         case .oneHour: "Next hour"
         case .oneDay: "Next day"
@@ -30,6 +36,7 @@ public enum TrustDuration: String, Sendable, Codable, Equatable, CaseIterable {
     public var timeInterval: TimeInterval? {
         switch self {
         case .thisTime: 0
+        case .forTask, .forSession: nil
         case .fiveMinutes: 5 * 60
         case .oneHour: 60 * 60
         case .oneDay: 24 * 60 * 60
@@ -694,6 +701,27 @@ public actor PermissionGate {
     private let store: (any TrustStore)?
     /// Configured plugins directory for protected path enforcement.
     public let pluginsDir: URL?
+    /// Ephemeral grants valid for the remainder of an active task/turn, indexed by session ID.
+    private var taskGrants: [UUID: Set<ActionDescriptor>] = [:]
+    /// Ephemeral grants valid for the remainder of a conversation session, indexed by session ID.
+    private var sessionGrants: [UUID: Set<ActionDescriptor>] = [:]
+    /// First-seen time per session key present in either ephemeral table.
+    ///
+    /// Drives oldest-first eviction and TTL expiry so a process that never
+    /// reports teardown still cannot grow this state without limit; the entry
+    /// lingers only while at least one of the two tables still holds the key.
+    private var ephemeralIssuedAt: [UUID: Date] = [:]
+    /// Maximum sessions tracked across both ephemeral tables before the oldest evict.
+    ///
+    /// Fail-closed bound on in-memory trust so stale session residue cannot
+    /// accumulate without limit when no explicit lifecycle signal arrives.
+    private static let maxTrackedEphemeralSessions = 1000
+    /// Maximum age of an ephemeral session key before it expires.
+    ///
+    /// Turns are minutes-scale, so a day-old key is stale session residue
+    /// rather than live intent; expiry is the backstop behind explicit
+    /// teardown via `clearSessionGrants`.
+    private static let ephemeralSessionTTL: TimeInterval = 24 * 60 * 60
     /// Live bash shell policy consulted before parking `bash.exec` calls.
     private var bashConfig = BashConfig()
     /// Recurring task for pruning expired grants periodically.
@@ -784,9 +812,13 @@ public actor PermissionGate {
     }
 
     /// Prunes expired grants from memory and storage.
+    ///
+    /// Also ages out ephemeral session keys past their TTL so the periodic
+    /// reaper bounds in-memory trust even when no teardown arrives.
     public func pruneExpiredAndPersist() async {
         let now = Date()
         grants.removeAll { $0.isExpired(at: now) }
+        evictStaleEphemeralGrants(now: now)
         if let store {
             try? await store.pruneExpired(at: now)
         }
@@ -882,7 +914,7 @@ public actor PermissionGate {
                     break
                 }
             }
-            if covers(descriptor) {
+            if covers(descriptor, sessionID: sessionID) {
                 return .allowed
             }
             let request = PermissionRequest(
@@ -897,8 +929,21 @@ public actor PermissionGate {
     }
 
     /// Records trust for an action.
-    public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration) async {
-        guard duration != .thisTime else { return }
+    ///
+    /// Fail-closed on unmintable scope: an ephemeral tier without an owning
+    /// session, or a descriptor the per-recipient invariant refuses, stores
+    /// nothing and reports failure so the caller keeps the park/deny instead
+    /// of treating the approval as honored.
+    /// - Parameters:
+    ///   - descriptor: The trusted action to store.
+    ///   - duration: Trust tier; ephemeral tiers require `sessionID`.
+    ///   - sessionID: Owning session for ephemeral tiers; nil means unscoped.
+    /// - Returns: True when the approval may proceed (stored, already covered,
+    ///   or one-shot with nothing to store); false when no grant was minted
+    ///   and the caller must not treat the decision as honored.
+    @discardableResult
+    public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration, sessionID: UUID? = nil) async -> Bool {
+        guard duration != .thisTime else { return true }
         // Every durable mint path funnels through here — the CLI approval
         // handler, `ApprovalQueue.decide`, and the bus passthrough — so the
         // per-recipient send invariant is enforced at one boundary: a
@@ -906,7 +951,35 @@ public actor PermissionGate {
         // canonical handle (display name) is an invalid descriptor and stores
         // nothing. Handle-shaped sends mint their canonical handle exactly as
         // before, and every other tool keeps its tool-wide semantics.
-        guard Self.isGrantable(descriptor) else { return }
+        guard Self.isGrantable(descriptor) else {
+            RuneWeaverLog.stores.warning("PermissionGate: refusing to mint trust for invalid descriptor \(descriptor.toolName).")
+            return false
+        }
+
+        if duration == .forTask {
+            guard let sessionID else {
+                assertionFailure("PermissionGate: forTask grant without owning session mints nothing.")
+                RuneWeaverLog.stores.warning("PermissionGate: forTask grant without owning session mints nothing for \(descriptor.toolName).")
+                return false
+            }
+            taskGrants[sessionID, default: []].insert(descriptor)
+            denials.removeValue(forKey: descriptor)
+            trackEphemeralSession(sessionID)
+            return true
+        }
+
+        if duration == .forSession {
+            guard let sessionID else {
+                assertionFailure("PermissionGate: forSession grant without owning session mints nothing.")
+                RuneWeaverLog.stores.warning("PermissionGate: forSession grant without owning session mints nothing for \(descriptor.toolName).")
+                return false
+            }
+            sessionGrants[sessionID, default: []].insert(descriptor)
+            denials.removeValue(forKey: descriptor)
+            trackEphemeralSession(sessionID)
+            return true
+        }
+
         pruneExpired()
         let now = Date()
         let expiresAt = duration.timeInterval.map { now.addingTimeInterval($0) }
@@ -923,7 +996,7 @@ public actor PermissionGate {
            !Self.expiryLifetime(expiresAt, outlives: existing.expiresAt)
         {
             denials.removeValue(forKey: descriptor)
-            return
+            return true
         }
         grants.removeAll { $0.actionDescriptor == descriptor }
         // A replacement grant starts its usage history fresh so prior
@@ -939,6 +1012,86 @@ public actor PermissionGate {
         grants.append(grant)
         denials.removeValue(forKey: descriptor)
         await persist()
+        return true
+    }
+
+    /// Clears ephemeral task-scoped grants for a session when the turn completes.
+    ///
+    /// Turn owners call this at every turn boundary so task trust never
+    /// outlives the turn that approved it; the TTL plus count bound below
+    /// evict residue when the call never arrives.
+    /// - Parameter sessionID: Session whose task grants expire.
+    public func clearTaskGrants(for sessionID: UUID) {
+        taskGrants.removeValue(forKey: sessionID)
+        releaseEphemeralSessionWhenEmpty(sessionID)
+    }
+
+    /// Clears session-scoped grants when a session is closed or reset.
+    ///
+    /// Session owners call this on teardown (session delete, close, or reset)
+    /// so session trust dies with the conversation that approved it. Grants
+    /// also expire via TTL eviction and the tracked-session bound, so the
+    /// tables cannot grow without bound when no explicit lifecycle signal
+    /// arrives.
+    /// - Parameter sessionID: Session whose ephemeral trust expires.
+    public func clearSessionGrants(for sessionID: UUID) {
+        sessionGrants.removeValue(forKey: sessionID)
+        taskGrants.removeValue(forKey: sessionID)
+        ephemeralIssuedAt.removeValue(forKey: sessionID)
+    }
+
+    /// Clears every ephemeral grant, for full teardown when all sessions reset.
+    ///
+    /// Bulk counterpart to `clearSessionGrants`: drops task plus session
+    /// grants and their eviction bookkeeping together so no stale key survives
+    /// the reset.
+    public func clearAllEphemeralGrants() {
+        taskGrants.removeAll()
+        sessionGrants.removeAll()
+        ephemeralIssuedAt.removeAll()
+    }
+
+    /// Tracks one session key for TTL plus oldest-first bound enforcement.
+    /// - Parameters:
+    ///   - sessionID: Session key just granted ephemeral trust.
+    ///   - now: Reference date so stale eviction and first-seen stamping agree.
+    private func trackEphemeralSession(_ sessionID: UUID, now: Date = Date()) {
+        evictStaleEphemeralGrants(now: now)
+        if ephemeralIssuedAt[sessionID] == nil {
+            ephemeralIssuedAt[sessionID] = now
+        }
+        enforceEphemeralBound()
+    }
+
+    /// Drops the eviction bookkeeping once neither ephemeral table holds the key.
+    /// - Parameter sessionID: Session key to reconsider.
+    private func releaseEphemeralSessionWhenEmpty(_ sessionID: UUID) {
+        guard taskGrants[sessionID] == nil, sessionGrants[sessionID] == nil else { return }
+        ephemeralIssuedAt.removeValue(forKey: sessionID)
+    }
+
+    /// Drops ephemeral session keys older than the session TTL.
+    /// - Parameter now: Reference date, defaulting to now for test control.
+    private func evictStaleEphemeralGrants(now: Date = Date()) {
+        let expired = ephemeralIssuedAt.compactMap { id, issuedAt in
+            now.timeIntervalSince(issuedAt) < Self.ephemeralSessionTTL ? nil : id
+        }
+        for id in expired {
+            taskGrants.removeValue(forKey: id)
+            sessionGrants.removeValue(forKey: id)
+            ephemeralIssuedAt.removeValue(forKey: id)
+        }
+    }
+
+    /// Evicts the oldest ephemeral sessions when the tables exceed their bound.
+    private func enforceEphemeralBound() {
+        guard ephemeralIssuedAt.count > Self.maxTrackedEphemeralSessions else { return }
+        let ordered = ephemeralIssuedAt.sorted { $0.value < $1.value }
+        for (id, _) in ordered.prefix(ephemeralIssuedAt.count - Self.maxTrackedEphemeralSessions) {
+            taskGrants.removeValue(forKey: id)
+            sessionGrants.removeValue(forKey: id)
+            ephemeralIssuedAt.removeValue(forKey: id)
+        }
     }
 
     /// Records one covered use of a live grant without notifying clients.
@@ -966,7 +1119,11 @@ public actor PermissionGate {
         }
         await persist()
     }
+}
 
+// MARK: - Grant Administration & Lifecycle
+
+extension PermissionGate {
     /// Removes one grant by identifier, persisting only when something changed.
     /// Expired grants are pruned first so an expired identifier reports no match.
     /// - Parameter id: Stable grant identifier.
@@ -1118,10 +1275,11 @@ public actor PermissionGate {
 
     /// Whether a live grant covers the descriptor.
     /// - Parameter descriptor: The action to check.
+    /// - Parameter sessionID: Optional session ID to evaluate against task and session-scoped grants.
     /// - Returns: True when a valid grant matches.
-    public func isTrusted(_ descriptor: ActionDescriptor) -> Bool {
+    public func isTrusted(_ descriptor: ActionDescriptor, sessionID: UUID? = nil) -> Bool {
         pruneExpired()
-        return covers(descriptor)
+        return covers(descriptor, sessionID: sessionID)
     }
 
     // MARK: - Private
@@ -1195,16 +1353,52 @@ public actor PermissionGate {
         })
     }
 
-    /// Whether any live grant covers the descriptor, either by exact
-    /// target match or by a tool-wide grant with an empty target.
-    private func covers(_ descriptor: ActionDescriptor) -> Bool {
-        coveringGrantIndex(for: descriptor, at: Date()) != nil
+    /// Whether one ephemeral set covers the descriptor, by exact or tool-wide match.
+    ///
+    /// Single owner of the ephemeral match rule so task and session tables
+    /// cannot drift: an exact tool-plus-target grant wins, with a tool-wide
+    /// empty-target grant as the fallback. Send trust stays per-recipient, so
+    /// an empty send target never matches and never falls back to tool-wide.
+    /// - Parameters:
+    ///   - descriptor: The action to check.
+    ///   - grants: Ephemeral set for one session, or nil when absent.
+    /// - Returns: True when the set covers the descriptor.
+    private func coversEphemeral(_ descriptor: ActionDescriptor, in grants: Set<ActionDescriptor>?) -> Bool {
+        guard let ephemeral = grants else { return false }
+        let isMessagesSend = descriptor.toolName == "messages.send"
+        if !(isMessagesSend && descriptor.target.isEmpty), ephemeral.contains(descriptor) {
+            return true
+        }
+        if !descriptor.target.isEmpty, !isMessagesSend,
+           ephemeral.contains(ActionDescriptor(toolName: descriptor.toolName, target: ""))
+        {
+            return true
+        }
+        return false
+    }
+
+    /// Whether any live or ephemeral task/session grant covers the descriptor,
+    /// either by exact target match or by a tool-wide grant with an empty target.
+    private func covers(_ descriptor: ActionDescriptor, sessionID: UUID? = nil) -> Bool {
+        if let sessionID {
+            if coversEphemeral(descriptor, in: taskGrants[sessionID]) {
+                return true
+            }
+            if coversEphemeral(descriptor, in: sessionGrants[sessionID]) {
+                return true
+            }
+        }
+        return coveringGrantIndex(for: descriptor, at: Date()) != nil
     }
 
     /// Drops expired grants from memory only, without touching storage.
+    ///
+    /// Also ages out ephemeral session keys past their TTL so stale session
+    /// trust cannot linger when no teardown arrives.
     private func pruneExpired() {
         let now = Date()
         grants.removeAll { $0.isExpired(at: now) }
+        evictStaleEphemeralGrants(now: now)
     }
 
     /// Mirrors the current grants to the store in actor order.

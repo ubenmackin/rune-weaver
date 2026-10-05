@@ -242,16 +242,21 @@ public actor ToolBus {
     /// identifier can never abort an unrelated call.
     private var activeCalls: [ToolCallKey: ToolCallCancellation] = [:]
 
+    /// Tracker guarding against duplicate retries of timed-out or unconfirmed mutating actions.
+    public let uncertainTracker: UncertainActionTracker
+
     /// Creates a bus.
     /// Labeling posture lives with the turn owner (`Orchestrator` /
     /// `ChatTurnContext`), never here: the bus carries no `SecurityConfig`
     /// copy so the two can never diverge silently.
     public init(
         approvalHandler: ToolApprovalHandler? = nil,
-        permissionGate: PermissionGate? = nil
+        permissionGate: PermissionGate? = nil,
+        uncertainTracker: UncertainActionTracker? = nil
     ) {
         self.approvalHandler = approvalHandler
         self.permissionGate = permissionGate
+        self.uncertainTracker = uncertainTracker ?? UncertainActionTracker()
     }
 
     /// Sets or clears the approval hook.
@@ -360,8 +365,8 @@ public actor ToolBus {
     }
 
     /// Records graduated trust for an action via the attached gate.
-    public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration) async {
-        await permissionGate?.grantTrust(for: descriptor, duration: duration)
+    public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration, sessionID: UUID? = nil) async {
+        await permissionGate?.grantTrust(for: descriptor, duration: duration, sessionID: sessionID)
     }
 
     /// Executes a tool call with permission checking.
@@ -398,67 +403,22 @@ public actor ToolBus {
                 )
             }
         }
-        var approved = false
-        switch tool.permissionLevel {
-        case .readOnly, .trusted:
-            if let gate = permissionGate {
-                switch await gate.checkPermission(toolCall: effectiveCall, tool: tool, sessionID: context.sessionID) {
-                case .allowed:
-                    break
-                case let .denied(reason):
-                    return .failure(
-                        toolCallID: toolCall.callID,
-                        content: "Tool '\(toolCall.toolName)' was denied: \(reason)",
-                        errorKind: .executionError
-                    )
-                case .requiresApproval:
-                    // Defense in depth: pre-admission partitioning normally parks these before
-                    // execution, but an egress evaluator (or a future gate change) can return
-                    // this verdict for read-only and trusted levels too, so honor it through
-                    // the same handler path as gated writes instead of executing unsupervised.
-                    if let denial = await resolveApproval(tool: tool, call: effectiveCall, context: context) {
-                        return denial
-                    }
-                    approveIfAuthorized(context: context, approved: &approved)
-                }
-            }
-        case .requiresApproval:
-            // Denials hold even for dry runs, while needs-approval previews
-            // through the tool's dryRun path instead of filing; only the side
-            // effect is skipped via the flag the tool already receives.
-            if let gate = permissionGate {
-                switch await gate.checkPermission(toolCall: effectiveCall, tool: tool, sessionID: context.sessionID) {
-                case .allowed:
-                    // Attribute this run to the covering grant so later review
-                    // can see which trust is actually exercised. Persistence
-                    // stays best-effort inside the gate, so a store failure
-                    // never blocks the already-authorized tool call. Dry-run
-                    // previews never execute, so they leave counters alone.
-                    // The covering grant is the authorization, so propagate it
-                    // into the tool context for non-dry-run calls.
-                    if !context.dryRun {
-                        let descriptor = ActionDescriptor.descriptor(for: effectiveCall, tool: tool)
-                        await gate.recordUse(for: descriptor)
-                        approved = true
-                    }
-                case let .denied(reason):
-                    return .failure(
-                        toolCallID: toolCall.callID,
-                        content: "Tool '\(toolCall.toolName)' was denied: \(reason)",
-                        errorKind: .executionError
-                    )
-                case .requiresApproval:
-                    if let denial = await resolveApproval(tool: tool, call: effectiveCall, context: context) {
-                        return denial
-                    }
-                    approveIfAuthorized(context: context, approved: &approved)
-                }
-            } else {
-                if let denial = await resolveApproval(tool: tool, call: effectiveCall, context: context) {
-                    return denial
-                }
-                approveIfAuthorized(context: context, approved: &approved)
-            }
+        if await uncertainTracker.isBlocked(toolName: effectiveCall.toolName, argumentsJSON: effectiveCall.argumentsJSON) {
+            let message = "REFUSED (IDEMPOTENCY_GUARD): Identical mutating action '\(toolCall.toolName)' was previously "
+                + "executed with uncertain outcome (timed out or unconfirmed). You must verify whether the action took effect "
+                + "before re-attempting, or use a read tool to inspect current state."
+            return .failure(
+                toolCallID: toolCall.callID,
+                content: message,
+                errorKind: .idempotencyBlocked
+            )
+        }
+        let approved: Bool
+        switch await evaluateToolPermission(tool: tool, call: effectiveCall, context: context) {
+        case let .authorized(isApproved):
+            approved = isApproved
+        case let .denied(denial):
+            return denial
         }
         let baseContext: ToolContext = if approved {
             ToolContext(
@@ -472,6 +432,83 @@ public actor ToolBus {
         }
         let effectiveContext = progressContext(for: effectiveCall, base: baseContext)
         return await runRegisteredTool(tool: tool, call: effectiveCall, context: effectiveContext)
+    }
+
+    private enum PermissionOutcome {
+        case authorized(approved: Bool)
+        case denied(ToolResult)
+    }
+
+    /// Evaluates permissions for a tool call against the gate and approval handlers.
+    /// Returns `.authorized(approved:)` on authorization, or `.denied(ToolResult)` if denied.
+    private func evaluateToolPermission(
+        tool: any Tool,
+        call: ToolInput,
+        context: ToolContext
+    ) async -> PermissionOutcome {
+        var approved = false
+        switch tool.permissionLevel {
+        case .readOnly, .trusted:
+            if let gate = permissionGate {
+                switch await gate.checkPermission(toolCall: call, tool: tool, sessionID: context.sessionID) {
+                case .allowed:
+                    break
+                case let .denied(reason):
+                    return .denied(.failure(
+                        toolCallID: call.callID,
+                        content: "Tool '\(call.toolName)' was denied: \(reason)",
+                        errorKind: .executionError
+                    ))
+                case .requiresApproval:
+                    // Defense in depth: pre-admission partitioning normally parks these before
+                    // execution, but an egress evaluator (or a future gate change) can return
+                    // this verdict for read-only and trusted levels too, so honor it through
+                    // the same handler path as gated writes instead of executing unsupervised.
+                    if let denial = await resolveApproval(tool: tool, call: call, context: context) {
+                        return .denied(denial)
+                    }
+                    approveIfAuthorized(context: context, approved: &approved)
+                }
+            }
+        case .requiresApproval:
+            // Denials hold even for dry runs, while needs-approval previews
+            // through the tool's dryRun path instead of filing; only the side
+            // effect is skipped via the flag the tool already receives.
+            if let gate = permissionGate {
+                switch await gate.checkPermission(toolCall: call, tool: tool, sessionID: context.sessionID) {
+                case .allowed:
+                    // Attribute this run to the covering grant so later review
+                    // can see which trust is actually exercised. Persistence
+                    // stays best-effort inside the gate, so a store failure
+                    // never blocks the already-authorized tool call. Dry-run
+                    // previews never execute, so they leave counters alone.
+                    // The covering grant is the authorization, so propagate it
+                    // into the tool context for non-dry-run calls.
+                    if !context.dryRun {
+                        let descriptor = ActionDescriptor.descriptor(for: call, tool: tool)
+                        await gate.recordUse(for: descriptor)
+                        approved = true
+                    }
+                case let .denied(reason):
+                    return .denied(.failure(
+                        toolCallID: call.callID,
+                        content: "Tool '\(call.toolName)' was denied: \(reason)",
+                        errorKind: .executionError
+                    ))
+                case .requiresApproval:
+                    if let denial = await resolveApproval(tool: tool, call: call, context: context) {
+                        return .denied(denial)
+                    }
+                    approveIfAuthorized(context: context, approved: &approved)
+                }
+            } else {
+                if let denial = await resolveApproval(tool: tool, call: call, context: context) {
+                    return .denied(denial)
+                }
+                approveIfAuthorized(context: context, approved: &approved)
+            }
+        }
+        return .authorized(approved: approved)
     }
 
     /// Runs one admitted tool call under its per-call cancellation slot.
@@ -520,7 +557,34 @@ public actor ToolBus {
         if activeCalls[key] === slot {
             activeCalls.removeValue(forKey: key)
         }
+        if !result.isError {
+            await uncertainTracker.clear(toolName: call.toolName, argumentsJSON: call.argumentsJSON)
+            return result
+        }
+        if result.errorKind == .uncertainOutcome || Self.isTimeoutOrNetworkLoss(result.content) {
+            if UncertainActionTracker.isMutating(toolName: call.toolName, argumentsJSON: call.argumentsJSON) {
+                await uncertainTracker.recordUncertain(toolName: call.toolName, argumentsJSON: call.argumentsJSON)
+                let message = "REFUSED (IDEMPOTENCY_GUARD): Outcome of call to '\(call.toolName)' is uncertain: "
+                    + "\(result.content). Repeat attempt blocked until verification probe is performed."
+                return .failure(
+                    toolCallID: call.callID,
+                    content: message,
+                    errorKind: .uncertainOutcome
+                )
+            }
+        }
         return result
+    }
+
+    /// Evaluates whether an error content indicates a timeout or network loss.
+    private static func isTimeoutOrNetworkLoss(_ content: String) -> Bool {
+        let lower = content.lowercased()
+        return lower.contains("timed out")
+            || lower.contains("timeout")
+            || lower.contains("connection reset")
+            || lower.contains("network connection was lost")
+            || lower.contains("deadline exceeded")
+            || lower.contains("socket not connected")
     }
 
     /// Cancels one in-flight tool call without ending its owning turn.

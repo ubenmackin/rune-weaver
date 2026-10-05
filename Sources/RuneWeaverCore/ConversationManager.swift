@@ -34,6 +34,8 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
     /// sessions; a nil incoming value never clears a stored link, so untagged
     /// turns cannot drop the nesting.
     public var parentSessionID: UUID?
+    /// Whether this session is archived (e.g. quiet close on uneventful background jobs).
+    public var isArchived: Bool
 
     /// Coding keys matching the persisted and wire shape. The goal link rides
     /// the `goalId` spelling so dashboard payloads read one key; the legacy
@@ -49,6 +51,7 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         case goalID = "goalId"
         case goalIDLegacy = "goalID"
         case parentSessionID
+        case isArchived
     }
 
     /// Prefix for auto-generated titles so the fallback, the auto-title guard,
@@ -96,7 +99,8 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         updatedAt: Date = Date(),
         source: String? = nil,
         goalID: UUID? = nil,
-        parentSessionID: UUID? = nil
+        parentSessionID: UUID? = nil,
+        isArchived: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -107,6 +111,7 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         self.source = source
         self.goalID = goalID
         self.parentSessionID = parentSessionID
+        self.isArchived = isArchived
     }
 
     /// Decodes a session, defaulting a missing goal link to unlinked and a
@@ -125,6 +130,7 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
             ?? container.decodeIfPresent(UUID.self, forKey: .goalIDLegacy)
         self.parentSessionID = try container.decodeIfPresent(UUID.self, forKey: .parentSessionID)
+        self.isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
     }
 
     /// Encodes a session, omitting absent links so older readers see no new
@@ -141,6 +147,9 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
         try container.encodeIfPresent(source, forKey: .source)
         try container.encodeIfPresent(goalID, forKey: .goalID)
         try container.encodeIfPresent(parentSessionID, forKey: .parentSessionID)
+        if isArchived {
+            try container.encode(true, forKey: .isArchived)
+        }
     }
 }
 
@@ -162,6 +171,8 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
     /// swarm). Carried on the listing payload so clients can nest workers
     /// without querying run history; nil for unparented sessions.
     public let parentSessionID: UUID?
+    /// Whether this session is archived.
+    public let isArchived: Bool
 
     /// Coding keys matching the wire shape, with the goal link on the shared
     /// `goalId` spelling plus a tolerant legacy fallback.
@@ -176,6 +187,7 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         case goalID = "goalId"
         case goalIDLegacy = "goalID"
         case parentSessionID
+        case isArchived
     }
 
     public init(
@@ -187,7 +199,8 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         updatedAt: Date,
         source: String? = nil,
         goalID: UUID? = nil,
-        parentSessionID: UUID? = nil
+        parentSessionID: UUID? = nil,
+        isArchived: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -198,6 +211,7 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         self.source = source
         self.goalID = goalID
         self.parentSessionID = parentSessionID
+        self.isArchived = isArchived
     }
 
     /// Decodes a summary, defaulting a missing goal link to unlinked and a
@@ -216,6 +230,7 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
             ?? container.decodeIfPresent(UUID.self, forKey: .goalIDLegacy)
         self.parentSessionID = try container.decodeIfPresent(UUID.self, forKey: .parentSessionID)
+        self.isArchived = try container.decodeIfPresent(Bool.self, forKey: .isArchived) ?? false
     }
 
     /// Encodes a summary, omitting absent links so older dashboards see no new
@@ -232,6 +247,9 @@ public struct SessionSummary: Sendable, Codable, Equatable, Identifiable {
         try container.encodeIfPresent(source, forKey: .source)
         try container.encodeIfPresent(goalID, forKey: .goalID)
         try container.encodeIfPresent(parentSessionID, forKey: .parentSessionID)
+        if isArchived {
+            try container.encode(true, forKey: .isArchived)
+        }
     }
 }
 
@@ -547,9 +565,27 @@ public actor ConversationManager {
                     updatedAt: session.updatedAt,
                     source: session.source,
                     goalID: session.goalID,
-                    parentSessionID: session.parentSessionID
+                    parentSessionID: session.parentSessionID,
+                    isArchived: session.isArchived
                 )
             }
+    }
+
+    /// Sets the archived state of a session and persists the change.
+    /// - Parameters:
+    ///   - id: Session identifier.
+    ///   - isArchived: Whether the session should be hidden from normal sidebar views.
+    public func setSessionArchived(id: UUID, isArchived: Bool) async {
+        var sessionToUpdate: ConversationSession? = sessions[id]
+        if sessionToUpdate == nil {
+            sessionToUpdate = await readSingleMerged(id: id)
+        }
+        guard var session = sessionToUpdate else { return }
+        guard session.isArchived != isArchived else { return }
+        session.isArchived = isArchived
+        session.updatedAt = Date()
+        sessions[id] = session
+        await persist(session)
     }
 
     /// Links a session to a goal, persisting the association.
@@ -660,7 +696,11 @@ public actor ConversationManager {
     public func messageCount(for sessionID: UUID) async -> Int {
         await readSingleMerged(id: sessionID)?.messages.count ?? 0
     }
+}
 
+// MARK: - History Editing & Rollback
+
+extension ConversationManager {
     /// Builds the working history with the system prompt first, excluding temporary waiting-on-approval notices.
     /// Marker identity leads so wording edits cannot leak interim notes to the provider
     /// and recreate consecutive-assistant sequencing failures.

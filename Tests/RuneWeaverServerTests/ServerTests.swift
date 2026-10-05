@@ -136,6 +136,8 @@ struct ServerConfigTests {
         #expect(ServerPaths.run == "run")
         #expect(ServerPaths.runs == "runs")
         #expect(ServerPaths.websocket == "ws")
+        #expect(ServerPaths.archive == "archive")
+        #expect(ServerPaths.unarchive == "unarchive")
     }
 }
 

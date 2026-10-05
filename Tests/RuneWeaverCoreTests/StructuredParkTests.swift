@@ -1046,4 +1046,60 @@ extension StructuredParkTests {
         #expect(await handlerCalls.count == 1)
         #expect(gateway.sentRecipients == ["+15551234567", "+15551234567"])
     }
+
+    @Test
+    func `Operator takeover interrupts execution and parks turn for desktop resume`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+
+        let takeoverContent = #"{"error":"OPERATOR TAKEOVER: Physical mouse movement detected.","operatorInterrupted":true,"results":[],"stepsCompleted":0,"stepsTotal":1,"success":false}"#
+        await bus.register(tool: StructuredParkTool(
+            name: "desktop.action",
+            output: takeoverContent,
+            permissionLevel: .readOnly
+        ))
+        await bus.register(tool: StructuredParkTool(
+            name: "desktop.screenshot",
+            output: #"{"screenshot":"data:image/png;base64,fresh_screen"}"#,
+            permissionLevel: .readOnly
+        ))
+
+        let actionCall = ToolInput(toolName: "desktop.action", argumentsJSON: #"{"actions":[{"action":"click","x":50,"y":50}]}"#, callID: "call_takeover")
+        let llm = StructuredParkLLM(rounds: [
+            StructuredParkRound("", [actionCall]),
+            StructuredParkRound("Resumed and continued.")
+        ])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue,
+            permissionGate: gate
+        )
+        let sessionID = UUID()
+        let response = try await orchestrator.process(input: UserInput(text: "Click button", sessionID: sessionID))
+
+        #expect(response.isParked == true)
+        #expect(await queue.count() == 1)
+        let pending = await queue.list()
+        #expect(pending.first?.toolName == "desktop.resume")
+        #expect(response.text.contains("Desktop automation paused"))
+
+        guard let request = pending.first else {
+            Issue.record("Expected pending desktop.resume request")
+            return
+        }
+        let decided = await queue.decide(id: request.id, approved: true)
+        #expect(decided == true)
+
+        let resumed = try await orchestrator.resumeNarratedApproval(id: request.id, approved: true)
+        #expect(resumed?.isParked == false)
+        #expect(resumed?.text == "Resumed and continued.")
+
+        let history = await conversations.history(for: sessionID)
+        #expect(history.contains { $0.content.contains("[Fresh Display State]") })
+    }
 }

@@ -88,11 +88,9 @@ public enum BuiltinToolPlugins {
     ) async throws -> [any Tool] {
         // Resolve the one store first so the supervisor and the merged
         // origins read the same verified snapshot; an injected store stays
-        // authoritative while nil loads the factory default with the retired
-        // browser origins migrated once.
+        // authoritative while nil loads the factory default.
         let resolvedStore = await PolicyStore.makeLoaded(
-            injected: policyStore,
-            legacyLocalOrigins: browserConfig.allowedOrigins
+            injected: policyStore
         )
         let baseOrigins = ApiSSRFGuard.allowlistedOrigins(
             browserConfig: browserConfig,
@@ -102,9 +100,7 @@ public enum BuiltinToolPlugins {
         // Effective exemptions union the config-derived auto origins
         // (`searxng_url`, enabled media LAN URLs, LLM server URLs) with the
         // owner-declared local grants; never-exempt targets stay refused
-        // inside the guard even when present in either set. The retired
-        // `browser.allowed_origins` never feeds the base set; its sole
-        // consumer is the `legacyLocalOrigins` migration above.
+        // inside the guard even when present in either set.
         let localExemptions: Set<String> = await (try? resolvedStore.snapshot().network.localExemptions) ?? []
         let mergedOrigins = baseOrigins.union(localExemptions)
         let supervisor: OutboundEgressSupervisor = if let egressSupervisor {
@@ -205,8 +201,7 @@ public enum BuiltinToolPlugins {
         // build; the inner web/browser build reuses it instead of loading a
         // second default.
         let resolvedStore = await PolicyStore.makeLoaded(
-            injected: policyStore,
-            legacyLocalOrigins: browserConfig.allowedOrigins
+            injected: policyStore
         )
         let supervisor: OutboundEgressSupervisor = if let egressSupervisor {
             egressSupervisor

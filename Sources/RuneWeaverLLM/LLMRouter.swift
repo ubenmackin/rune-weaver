@@ -17,11 +17,15 @@ public actor LLMRouter {
 
     /// Providers in priority order.
     public let providers: [any LLMProvider]
+    /// Circuit breaker guarding against repeated calls to failing or rate-limited providers.
+    public let circuitBreaker: ProviderCircuitBreaker
 
-    /// Creates a router with the given provider priority.
+    /// Creates a router with the given provider priority and optional circuit breaker.
     /// - Parameter providers: Providers in priority order.
-    public init(providers: [any LLMProvider] = []) {
+    /// - Parameter circuitBreaker: Circuit breaker tracking provider outages and cooldowns.
+    public init(providers: [any LLMProvider] = [], circuitBreaker: ProviderCircuitBreaker? = nil) {
         self.providers = providers
+        self.circuitBreaker = circuitBreaker ?? ProviderCircuitBreaker()
     }
 
     /// Whether the priority provider accepts vision input.
@@ -60,6 +64,7 @@ public actor LLMRouter {
     /// slots follow the turn; nil preserves the session-agnostic path.
     public func chat(messages: [Message], tools: [any Tool], sessionID: String? = nil) -> AsyncStream<LLMResponse> {
         let providers = self.providers
+        let circuitBreaker = self.circuitBreaker
         return AsyncStream { continuation in
             let task = Task {
                 var lastError: String?
@@ -67,6 +72,9 @@ public actor LLMRouter {
                 for provider in providers {
                     if Task.isCancelled {
                         break
+                    }
+                    guard await circuitBreaker.isAvailable(provider: provider) else {
+                        continue
                     }
                     guard await provider.isAvailable() else { continue }
                     // Per-provider vision gate: text-only backends never see
@@ -86,6 +94,9 @@ public actor LLMRouter {
                         )
                         if let message = step.lastError {
                             lastError = message
+                            await circuitBreaker.recordFailure(provider: provider, error: message)
+                        } else if step.didFinish {
+                            await circuitBreaker.recordSuccess(provider: provider)
                         }
                         if step.shouldContinue {
                             continue
@@ -102,6 +113,15 @@ public actor LLMRouter {
                     )
                     if let message = step.lastError {
                         lastError = message
+                        await circuitBreaker.recordFailure(provider: provider, error: message)
+                    } else if step.didFinish {
+                        await circuitBreaker.recordSuccess(provider: provider)
+                    }
+                    // A clean failure before any content streams falls through
+                    // to the next provider exactly like the chunked path, so a
+                    // failing primary never pins the turn while it still cools.
+                    if step.shouldContinue {
+                        continue
                     }
                     didFinish = step.didFinish
                     break
@@ -183,7 +203,8 @@ public actor LLMRouter {
         tools: [any Tool],
         sessionID: String? = nil,
         continuation: AsyncStream<LLMResponse>.Continuation
-    ) async -> (didFinish: Bool, lastError: String?) {
+    ) async -> ChunkedDrainResult {
+        var yieldedContent = false
         var failureMessage: String?
         for await part in provider.chat(messages: messages, tools: tools, sessionID: sessionID) {
             if Task.isCancelled {
@@ -191,8 +212,16 @@ public actor LLMRouter {
             }
             if part.isError {
                 failureMessage = part.errorMessage ?? "unknown error"
-                continuation.yield(part)
+                // Suppress the error chunk when nothing streamed yet so the
+                // caller can fail over without leaking a terminal error
+                // mid-stream; once content is out the turn must settle here.
+                if yieldedContent {
+                    continuation.yield(part)
+                }
                 break
+            }
+            if !part.delta.isEmpty || !part.reasoningDelta.isEmpty || !part.toolCalls.isEmpty {
+                yieldedContent = true
             }
             continuation.yield(part)
             if part.isFinished {
@@ -200,12 +229,18 @@ public actor LLMRouter {
             }
         }
         if let failureMessage {
-            return (true, failureMessage)
+            if !yieldedContent {
+                return ChunkedDrainResult(didFinish: false, lastError: failureMessage, shouldContinue: true)
+            }
+            if !Task.isCancelled {
+                return ChunkedDrainResult(didFinish: true, lastError: failureMessage, shouldContinue: false)
+            }
+            return ChunkedDrainResult(didFinish: false, lastError: failureMessage, shouldContinue: false)
         }
         if Task.isCancelled {
-            return (false, nil)
+            return ChunkedDrainResult(didFinish: false, lastError: nil, shouldContinue: false)
         }
-        return (true, nil)
+        return ChunkedDrainResult(didFinish: true, lastError: nil, shouldContinue: false)
     }
 
     /// Tools safe for one provider's capability on the text-streaming path.
@@ -233,6 +268,8 @@ public actor LLMRouter {
     }
 
     /// Embeds texts via the first healthy provider, falling through on failure.
+    /// Consults the circuit breaker exactly like chat so a cooled provider
+    /// stays rested for embeddings too instead of bypassing its cooldown.
     public func embeddings(text: [String]) async throws -> [[Float]] {
         var lastError: (any Error)?
         for provider in providers {
@@ -241,15 +278,25 @@ public actor LLMRouter {
                 // never masquerades as provider exhaustion.
                 throw CancellationError()
             }
+            // Breaker first so cooling providers rest for embeddings as well
+            // as chat; provider health second for backends that self-report
+            // downtime. Both skips fail closed to the next fallback.
+            guard await circuitBreaker.isAvailable(provider: provider) else { continue }
             guard await provider.isAvailable() else { continue }
             do {
-                return try await provider.embeddings(text: text)
+                let vectors = try await provider.embeddings(text: text)
+                await circuitBreaker.recordSuccess(provider: provider)
+                return vectors
             } catch let error as CancellationError {
                 // Bound rethrow preserves the original cancellation error
                 // instead of recording it for fallthrough.
                 throw error
             } catch {
                 lastError = error
+                // String form carries the status code (for example 429/503)
+                // so the breaker classifies embeddings failures like chat
+                // failures instead of treating every error as generic.
+                await circuitBreaker.recordFailure(provider: provider, error: String(describing: error))
                 continue
             }
         }

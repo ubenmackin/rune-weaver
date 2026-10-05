@@ -259,10 +259,7 @@ public enum ApiSSRFGuard: Sendable {
 
     /// Allowlisted loopback and homelab origins derived from configuration.
     /// Effective exemptions are the auto service origins (`searxng_url`,
-    /// enabled media LAN URLs, configured LLM server URLs) only: the retired
-    /// `browser.allowed_origins` is decode-only migration input into
-    /// `local_exemptions` (via `PolicyStore.load(legacyLocalOrigins:)`) and is
-    /// never consulted at runtime, so it never feeds an exemption directly.
+    /// enabled media LAN URLs, configured LLM server URLs) only.
     /// Callers union the returned set with the snapshot's `local_exemptions`.
     public static func allowlistedOrigins(
         browserConfig: BrowserConfig,

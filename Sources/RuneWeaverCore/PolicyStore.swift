@@ -25,12 +25,6 @@
 // accepted write is immediately visible to the egress supervisor, with
 // file-first commits so a throwing disk write never diverges memory from
 // file.
-//
-// `load(legacyLocalOrigins:)` runs the one-time migration off the retired
-// `browser.allowed_origins` config list: a pre-exemption file imports the
-// entries the exemption gates accept into `[network].local_exemptions`,
-// persists the merge before memory commits, and stops consulting the legacy
-// list as soon as the key exists, so the migration can never run twice.
 
 import Foundation
 
@@ -153,64 +147,43 @@ public actor PolicyStore {
     /// - Parameters:
     ///   - injected: Shared store when the caller already owns one.
     ///   - fileURL: Path to `policy.toml`. Defaults to `nil` (`~/.runeweaver/policy.toml`).
-    ///   - legacyLocalOrigins: Retired `browser.allowed_origins` entries used
-    ///     only while loading a store here, so an injected instance already
-    ///     resolved by an earlier call is returned untouched.
     /// - Returns: The single store every supervisor in this process reads.
     public static func makeLoaded(
         injected: PolicyStore?,
-        fileURL: URL? = nil,
-        legacyLocalOrigins: [String] = []
+        fileURL: URL? = nil
     ) async -> PolicyStore {
         if let injected {
             return injected
         }
         let created = PolicyStore(fileURL: fileURL)
-        await created.load(legacyLocalOrigins: legacyLocalOrigins)
+        await created.load()
         return created
     }
 
     /// Loads the policy from disk, falling back to safe defaults on error.
     ///
-    /// If the file does not exist, creates a default policy file — carrying
-    /// any imported legacy origins — and uses that seeded posture. If the
-    /// file exists but is malformed, records the reason in
+    /// If the file does not exist, creates a default policy file and uses that
+    /// seeded posture. If the file exists but is malformed, records the reason in
     /// `lastLoadDiagnostics` (surfaced verbatim by `snapshot()` rejections)
     /// and falls back to the safe default. A missing file still counts as a
     /// successful (deny-by-default) load so a stock install boots; an
     /// unreadable, unparseable, or invariant-violating file does not, so
     /// `snapshot()` keeps throwing until a later `load()` or `update()`
     /// accepts a policy.
-    ///
-    /// A pre-exemption file (parses and verifies, yet carries no
-    /// `[network].local_exemptions` key) runs the one-time migration from the
-    /// retired `browser.allowed_origins` list: accepted entries land in
-    /// `local_exemptions`, the file is rewritten first, and memory commits
-    /// second. A throwing write keeps the merged posture live and retries on
-    /// the next load because the key still is not on disk; a file that
-    /// already carries the key ignores the legacy list entirely.
-    /// - Parameter legacyLocalOrigins: Raw `browser.allowed_origins` entries
-    ///   to import when the file predates the exemption key.
     /// - Returns: The accepted policy held by the store.
     @discardableResult
-    public func load(legacyLocalOrigins: [String] = []) -> SecurityPolicy {
+    public func load() -> SecurityPolicy {
         var diagnostics: [String] = []
         defer { lastLoadDiagnostics = diagnostics }
 
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             diagnostics.append("Policy file not found at \(fileURL.path). Using safe defaults.")
-            let seeded = Self.importingLegacyLocalOrigins(
-                into: .safeDefault,
-                legacyOrigins: legacyLocalOrigins,
-                diagnostics: &diagnostics
-            )
-            seedDefaultPolicyFile(seeded, diagnostics: &diagnostics)
-            current = seeded
+            seedDefaultPolicyFile(.safeDefault, diagnostics: &diagnostics)
+            current = .safeDefault
             loadedFromDisk = false
             // The seeded factory posture is deny-by-default and invariant-clean,
-            // so a first run boots supervised instead of refusing to start; any
-            // imported legacy entry passed the same exemption gate a load runs.
-            verifiedPolicy = seeded
+            // so a first run boots supervised instead of refusing to start.
+            verifiedPolicy = .safeDefault
             return current
         }
 
@@ -235,44 +208,6 @@ public actor PolicyStore {
                 verifiedPolicy = nil
                 return current
             }
-            // A pre-exemption file migrates exactly once: import the retired
-            // list, persist file-first, then commit memory. The key on disk is
-            // the migration marker, so this branch cannot run twice for one
-            // file and the legacy list is never consulted again after a write.
-            guard Self.containsLocalExemptionsKey(in: text) else {
-                let merged = Self.importingLegacyLocalOrigins(
-                    into: parsed,
-                    legacyOrigins: legacyLocalOrigins,
-                    diagnostics: &diagnostics
-                )
-                if merged != parsed {
-                    let importedCount = merged.network.localExemptions.count - parsed.network.localExemptions.count
-                    diagnostics.append(
-                        "Migrated \(importedCount) legacy browser.allowed_origins "
-                            + "\(importedCount == 1 ? "entry" : "entries") into [network].local_exemptions."
-                    )
-                }
-                do {
-                    let toml = try Self.verifiedTOML(for: merged)
-                    let directory = fileURL.deletingLastPathComponent()
-                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                    try toml.write(to: fileURL, atomically: true, encoding: .utf8)
-                    diagnostics.append("Policy loaded successfully from \(fileURL.path).")
-                } catch {
-                    // The imported grants stay active for this process: dropping
-                    // back to the parsed posture would silently repeal an owner's
-                    // local access, and the key still absent from disk makes the
-                    // next load retry the same migration.
-                    diagnostics.append(
-                        "Could not persist migrated local_exemptions to \(fileURL.path); "
-                            + "will retry next load: \(error.localizedDescription)"
-                    )
-                }
-                current = merged
-                loadedFromDisk = true
-                verifiedPolicy = merged
-                return current
-            }
             current = parsed
             loadedFromDisk = true
             verifiedPolicy = parsed
@@ -285,44 +220,6 @@ public actor PolicyStore {
             verifiedPolicy = nil
             return current
         }
-    }
-
-    /// Imports retired `browser.allowed_origins` entries into `local_exemptions`.
-    ///
-    /// Each raw entry re-enters the same shape plus never-exempt gates the
-    /// invariant verifier runs on a stored exemption, and only then is it
-    /// canonicalized through `NetworkEgressPolicy.canonicalEntry`, so a
-    /// legacy value that could never match (blank, port-qualified, URL,
-    /// glob, metadata, or link-local) is skipped instead of being laundered
-    /// into the posture under a different spelling. Rejections land in
-    /// `lastLoadDiagnostics` so the operator can repair the retired entry.
-    /// - Parameters:
-    ///   - policy: Parsed policy to extend.
-    ///   - legacyOrigins: Raw retired `browser.allowed_origins` values.
-    ///   - diagnostics: Load diagnostics collecting rejection reasons.
-    /// - Returns: `policy` with every accepted entry's canonical form added.
-    private static func importingLegacyLocalOrigins(
-        into policy: SecurityPolicy,
-        legacyOrigins: [String],
-        diagnostics: inout [String]
-    ) -> SecurityPolicy {
-        guard !legacyOrigins.isEmpty else { return policy }
-        var imported: Set<String> = []
-        for raw in legacyOrigins {
-            let probe = SecurityPolicy(network: NetworkEgressPolicy(localExemptions: [raw]))
-            let violations = PolicyInvariantVerifier.verifyLocalExemptions(probe)
-            guard violations.isEmpty else {
-                diagnostics.append(
-                    "Skipped legacy browser.allowed_origins entry '\(raw)': \(violations.joined(separator: " "))"
-                )
-                continue
-            }
-            imported.insert(NetworkEgressPolicy.canonicalEntry(raw))
-        }
-        guard !imported.isEmpty else { return policy }
-        var merged = policy
-        merged.network.localExemptions.formUnion(imported)
-        return merged
     }
 
     /// Updates the active policy, validating invariants before committing.

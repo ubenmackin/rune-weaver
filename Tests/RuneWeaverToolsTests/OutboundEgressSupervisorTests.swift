@@ -659,38 +659,6 @@ struct OutboundEgressSupervisorTests {
         }
     }
 
-    @Test
-    func `Retired browser allowed origins grant no dialing at the supervisor`() async throws {
-        // `browser.allowed_origins` is retired migration input: naming a
-        // private host there must not exempt it at the dial decision, even
-        // though the same browser config object rides every boot path
-        // (`BuiltinToolPlugins`, `ServerContext`, `ServeCommand`,
-        // `AppModelBoot`). Only the snapshot's `local_exemptions` (plus auto
-        // service origins) may exempt.
-        let resolver: @Sendable (String) -> [String] = { _ in ["192.168.1.50"] }
-        try await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
-            let store = PolicyStore(fileURL: URL(fileURLWithPath: "/tmp/test-egress-\(UUID().uuidString).toml"))
-            await store.update(SecurityPolicy(network: NetworkEgressPolicy(mode: .unrestricted, blockedDomains: [])))
-            let supervisor = OutboundEgressSupervisor(
-                policyStore: store,
-                secrets: SecretsManager(inMemory: true),
-                browserConfig: BrowserConfig(allowedOrigins: ["nas.homelab.internal", "192.168.1.*"])
-            )
-            let url = try #require(URL(string: "https://nas.homelab.internal/status"))
-            let result = await supervisor.validate(url: url, method: "GET", headers: [:])
-            switch result {
-            case .allowed: Issue.record("Retired browser.allowed_origins must not exempt private dialing")
-            case let .denied(reason), let .unlistedDomain(_, reason):
-                #expect(reason.contains("resolves to blocked address"))
-            }
-            let readOnly = await supervisor.validateReadOnly(url: url)
-            #expect(readOnly?.contains("resolves to blocked address") == true)
-            // The guard-level set carries the same verdict: the retired list
-            // contributes nothing, so the private literal refuses there too.
-            #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.50/status", browserConfig: BrowserConfig(allowedOrigins: ["192.168.1.*"])) != nil)
-        }
-    }
-
     // MARK: - Response Sweeping
 
     @Test

@@ -22,7 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return .terminateNow
             }
             isTerminating = true
-            Task { @MainActor in
+            Task {
                 await model.stopForQuit()
                 sender.reply(toApplicationShouldTerminate: true)
             }
@@ -285,19 +285,33 @@ struct AppMenuView: View {
         }
 
         // Armed-but-idle desktop control stays out of the menu; the section
-        // appears only while a batch runs, so Emergency Stop is reachable
-        // exactly when it can act and the steady-state menu stays short.
-        if model.isDesktopActive {
+        // appears while a batch runs or while paused waiting for operator resume,
+        // so Emergency Stop / Resume is reachable exactly when needed.
+        if model.isDesktopActive || model.hasPausedDesktopAutomation {
             Divider()
 
             Section("Desktop Control") {
-                HStack {
-                    Image(systemName: model.isDesktopActive ? "eye.fill" : "eye.slash")
-                    Text(model.isDesktopActive ? "Active" : "Idle")
-                }
-                if model.isDesktopActive {
-                    Button("⛔ Emergency Stop") {
-                        model.emergencyStopDesktop()
+                if model.hasPausedDesktopAutomation {
+                    HStack {
+                        Image(systemName: "pause.circle.fill")
+                            .foregroundColor(.yellow)
+                        Text("Paused (Operator took over)")
+                    }
+                    Button("▶️ Resume Agent Control") {
+                        model.resumeDesktopControl()
+                    }
+                    Button("✖️ Cancel Task") {
+                        model.cancelDesktopTask()
+                    }
+                } else {
+                    HStack {
+                        Image(systemName: model.isDesktopActive ? "eye.fill" : "eye.slash")
+                        Text(model.isDesktopActive ? "Active" : "Idle")
+                    }
+                    if model.isDesktopActive {
+                        Button("⛔ Emergency Stop") {
+                            model.emergencyStopDesktop()
+                        }
                     }
                 }
             }

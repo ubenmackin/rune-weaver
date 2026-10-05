@@ -569,6 +569,12 @@ function resolveResultStatus(result: ToolResult): {
   if (result.errorKind === "invalid_syntax") {
     return { kind: "invalid-syntax", label: "Invalid Syntax" };
   }
+  if (result.errorKind === "uncertain_outcome") {
+    return { kind: "error", label: "Uncertain Outcome" };
+  }
+  if (result.errorKind === "idempotency_blocked") {
+    return { kind: "error", label: "Idempotency Blocked" };
+  }
   return { kind: "error", label: "Error" };
 }
 
