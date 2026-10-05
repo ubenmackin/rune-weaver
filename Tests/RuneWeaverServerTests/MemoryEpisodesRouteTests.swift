@@ -297,4 +297,133 @@ struct MemoryEpisodesRouteTests {
             #expect(receipt.episodeCount == 0)
         }
     }
+
+    @Test
+    func `Seeded store returns newest window with matching count as JSON`() async throws {
+        try await withEpisodesApp { app, context in
+            // Seven hundred rows prove the listing stays windowed: the default
+            // read returns twenty newest first while the stored tally names all.
+            let session = UUID()
+            for index in 0 ..< 700 {
+                try await context.memoryEngine.storeEpisodic(
+                    content: "seed-turn-\(String(format: "%04d", index)) harbor lighthouse log",
+                    sessionID: session
+                )
+            }
+            #expect(await context.memoryEngine.episodeCount() == 700)
+
+            let response = try await episodeRequest(app: app, method: .GET, path: "/memory/episodes/recent")
+            #expect(response.status == .ok)
+            let contentType = response.headers.first(name: "Content-Type") ?? ""
+            #expect(contentType.contains("application/json"))
+            #expect(!contentType.contains("text/html"))
+            let decoded = try response.content.decode(EpisodicRecentResponse.self)
+            #expect(decoded.episodes.count == 20)
+            #expect(decoded.count == 20)
+            #expect(decoded.count == decoded.episodes.count)
+            // Newest first with no re-sort downstream: each clock reads at or
+            // after the next one so the preview audits recency honestly.
+            for pair in zip(decoded.episodes, decoded.episodes.dropFirst()) {
+                #expect(pair.0.timestamp >= pair.1.timestamp)
+            }
+        }
+    }
+
+    @Test
+    func `Unknown session reads as empty list with zero count as JSON`() async throws {
+        try await withEpisodesApp { app, context in
+            // A stored session proves the empty read is scoped, not a missing
+            // store: the unknown identifier simply has no rows to preview.
+            try await context.memoryEngine.storeEpisodic(content: "harbor lighthouse keeper log", sessionID: UUID())
+            let unknown = UUID()
+            let response = try await episodeRequest(
+                app: app,
+                method: .GET,
+                path: "/memory/episodes/recent?sessionID=\(unknown.uuidString)"
+            )
+            #expect(response.status == .ok)
+            #expect((response.headers.first(name: "Content-Type") ?? "").contains("application/json"))
+            let decoded = try response.content.decode(EpisodicRecentResponse.self)
+            #expect(decoded.episodes.isEmpty)
+            #expect(decoded.count == 0)
+            #expect(decoded.count == decoded.episodes.count)
+        }
+    }
+
+    @Test
+    func `Malformed sessionID is rejected as JSON bad request`() async throws {
+        try await withEpisodesApp { app, _ in
+            // UUID shape stays validated at the transport edge so the engine
+            // keeps its typed contract instead of branching on raw strings.
+            let response = try await episodeRequest(
+                app: app,
+                method: .GET,
+                path: "/memory/episodes/recent?sessionID=not-a-uuid"
+            )
+            #expect(response.status == .badRequest)
+            #expect((response.headers.first(name: "Content-Type") ?? "").contains("application/json"))
+            #expect((response.body.string ?? "").contains("sessionID must be a UUID"))
+        }
+    }
+
+    @Test
+    func `Malformed limit is rejected as JSON bad request`() async throws {
+        try await withEpisodesApp { app, _ in
+            // The closed range stays single-sourced in the query helper: a
+            // present value must parse inside 1 through 100 instead of clamping.
+            for path in [
+                "/memory/episodes/recent?limit=0",
+                "/memory/episodes/recent?limit=101",
+                "/memory/episodes/recent?limit=not-a-number"
+            ] {
+                let response = try await episodeRequest(app: app, method: .GET, path: path)
+                #expect(response.status == .badRequest)
+                #expect((response.headers.first(name: "Content-Type") ?? "").contains("application/json"))
+                #expect((response.body.string ?? "").contains("limit must be"))
+            }
+            // The default window stays twenty when the query omits the limit.
+            let fallback = try await episodeRequest(app: app, method: .GET, path: "/memory/episodes/recent")
+            #expect(fallback.status == .ok)
+            #expect((fallback.headers.first(name: "Content-Type") ?? "").contains("application/json"))
+        }
+    }
+
+    @Test
+    func `Unknown memory path never falls back to HTML`() async throws {
+        try await withEpisodesApp { app, _ in
+            // API routes register before the dashboard bundle so an unknown
+            // memory path answers JSON 404 instead of the client HTML entry.
+            let response = try await episodeRequest(app: app, method: .GET, path: "/memory/unknown-path")
+            #expect(response.status == .notFound)
+            let contentType = response.headers.first(name: "Content-Type") ?? ""
+            #expect(contentType.contains("application/json"))
+            #expect(!(response.body.string ?? "").lowercased().contains("<html"))
+        }
+    }
+
+    @Test
+    func `Tab counts and listing rows agree after clear`() async throws {
+        try await withEpisodesApp { app, context in
+            // Counts for tab labels come from facts while rows come from the
+            // recent listing; after a clear both settle to zero on the next
+            // read with no restart and no watcher.
+            let session = UUID()
+            try await context.memoryEngine.storeEpisodic(content: "harbor lighthouse alpha", sessionID: session)
+            try await context.memoryEngine.storeEpisodic(content: "harbor manifest beta", sessionID: session)
+            #expect(await context.memoryEngine.episodeCount() == 2)
+
+            let cleared = try await episodeRequest(app: app, method: .DELETE, path: "/memory/episodes")
+            #expect(cleared.status == .ok)
+
+            let facts = try await episodeRequest(app: app, method: .GET, path: "/memory/facts")
+            #expect(facts.status == .ok)
+            #expect(try facts.content.decode(FactsPageResponse.self).episodeCount == 0)
+
+            let recent = try await episodeRequest(app: app, method: .GET, path: "/memory/episodes/recent")
+            #expect(recent.status == .ok)
+            let listing = try recent.content.decode(EpisodicRecentResponse.self)
+            #expect(listing.episodes.isEmpty)
+            #expect(listing.count == 0)
+        }
+    }
 }

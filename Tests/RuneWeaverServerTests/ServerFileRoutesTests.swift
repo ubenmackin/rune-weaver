@@ -330,8 +330,10 @@ struct LiveReviewManagerTests {
                 Issue.record("Expected the symlinked rollback copy to fail the decision closed")
             } catch {
                 // Any refusal shape is acceptable; the invariant is that the
-                // link's target survives and the review stays pending.
-                #expect(error is Error)
+                // link's target survives and the review stays pending, which
+                // the assertions below verify. Reaching here means the
+                // decision failed closed as required.
+                _ = error
             }
         }
 

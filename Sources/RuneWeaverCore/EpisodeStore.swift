@@ -599,7 +599,10 @@ enum EpisodeStoreIO {
             }
         }
 
-        /// Reads one session's episodes, oldest first.
+        /// Reads one session's episodes in insertion order.
+        ///
+        /// Row order preserves replay: turns return in the sequence they were
+        /// stored, so a reloaded session replays identically even when clocks collide.
         static func episodes(sessionID: UUID, dbPath: String, limit: Int?) throws -> [Episode] {
             if let limit, limit <= 0 {
                 return []
@@ -608,7 +611,7 @@ enum EpisodeStoreIO {
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
-            var sql = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes WHERE session_id = ? ORDER BY timestamp ASC, rowid ASC"
+            var sql = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes WHERE session_id = ? ORDER BY rowid ASC"
             if limit != nil {
                 sql += " LIMIT ?"
             }
@@ -631,7 +634,11 @@ enum EpisodeStoreIO {
             return results
         }
 
-        /// Reads one session's newest episodes, oldest first.
+        /// Reads one session's newest episodes, oldest first with a stable identifier tie-break.
+        ///
+        /// The window selects the newest rows by timestamp then identifier so the
+        /// set matches the global newest-first contract; the returned order is
+        /// oldest first within that window for session replay.
         static func recentEpisodes(sessionID: UUID, dbPath: String, limit: Int) throws -> [Episode] {
             guard limit > 0 else { return [] }
             let expanded = (dbPath as NSString).expandingTildeInPath
@@ -639,7 +646,7 @@ enum EpisodeStoreIO {
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
             let sql = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes "
-                + "WHERE session_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT ?;"
+                + "WHERE session_id = ? ORDER BY timestamp DESC, id ASC LIMIT ?;"
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 throw EpisodeStoreError.persistenceFailed("Could not prepare recent episode read")
@@ -653,10 +660,18 @@ enum EpisodeStoreIO {
                     results.append(episode)
                 }
             }
-            return Array(results.reversed())
+            return results.sorted {
+                if $0.timestamp != $1.timestamp {
+                    return $0.timestamp < $1.timestamp
+                }
+                return $0.id.uuidString < $1.id.uuidString
+            }
         }
 
-        /// Reads episodes at or before a cutoff, oldest first.
+        /// Reads episodes at or before a cutoff in insertion order.
+        ///
+        /// Row order keeps compaction deterministic: sessions summarize the same
+        /// rows in the same sequence regardless of equal timestamps.
         static func episodes(olderThan: Date, dbPath: String) throws -> [Episode] {
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
@@ -664,7 +679,7 @@ enum EpisodeStoreIO {
             defer { sqlite3_close(handle) }
             var statement: OpaquePointer?
             let sql = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes "
-                + "WHERE timestamp <= ? ORDER BY timestamp ASC, rowid ASC;"
+                + "WHERE timestamp <= ? ORDER BY rowid ASC;"
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 throw EpisodeStoreError.persistenceFailed("Could not prepare cutoff read")
             }
@@ -679,7 +694,11 @@ enum EpisodeStoreIO {
             return results
         }
 
-        /// Reads the newest episodes across all sessions.
+        /// Reads the newest episodes across all sessions, newest first with a stable identifier tie-break.
+        ///
+        /// Ordering by timestamp then identifier keeps repeated reads identical
+        /// and matches the engine-owned listing contract instead of leaving
+        /// equal timestamps to insertion chance.
         static func recent(dbPath: String, limit: Int) throws -> [Episode] {
             guard limit > 0 else { return [] }
             let expanded = (dbPath as NSString).expandingTildeInPath
@@ -688,7 +707,7 @@ enum EpisodeStoreIO {
             defer { sqlite3_close(handle) }
             var statement: OpaquePointer?
             let sql = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes "
-                + "ORDER BY timestamp DESC, rowid DESC LIMIT ?;"
+                + "ORDER BY timestamp DESC, id ASC LIMIT ?;"
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 throw EpisodeStoreError.persistenceFailed("Could not prepare recent read")
             }

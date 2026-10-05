@@ -168,4 +168,115 @@ struct MemoryEpisodicClearTests {
         let episodicHits = try await engine.searchEpisodes(query: "harbor", limit: 10)
         #expect(episodicHits.isEmpty)
     }
+
+    @Test
+    func `List recent returns newest first`() async throws {
+        let (engine, base) = makeEpisodicClearEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let dbPath = base.appendingPathComponent("episodes.db").path
+        let direct = EpisodeStore(dbPath: dbPath)
+        let session = UUID()
+        let clock = Date(timeIntervalSince1970: 1_700_000_000)
+
+        // Distinct clocks keep the window deterministic without sleeping: each
+        // later row names a later second so newest first is unambiguous.
+        for offset in 0 ..< 5 {
+            let episode = Episode(
+                sessionID: session,
+                role: .user,
+                content: "ordered-turn-\(offset)",
+                timestamp: clock.addingTimeInterval(Double(offset * 10)),
+                metadata: [:]
+            )
+            try await direct.store(episode)
+        }
+        #expect(await engine.episodeCount() == 5)
+
+        // The listing owns newest-first ordering so callers never re-sort.
+        let listed = try await engine.listRecentEpisodes(limit: 5)
+        #expect(listed.count == 5)
+        #expect(listed.map(\.content) == [
+            "ordered-turn-4",
+            "ordered-turn-3",
+            "ordered-turn-2",
+            "ordered-turn-1",
+            "ordered-turn-0"
+        ])
+        for pair in zip(listed, listed.dropFirst()) {
+            #expect(pair.0.timestamp >= pair.1.timestamp)
+        }
+    }
+
+    @Test
+    func `List recent tie-break on identifier is stable`() async throws {
+        let (engine, base) = makeEpisodicClearEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let dbPath = base.appendingPathComponent("episodes.db").path
+        let direct = EpisodeStore(dbPath: dbPath)
+        let session = UUID()
+        let fixed = Date(timeIntervalSince1970: 1_700_000_100)
+
+        // Equal clocks force the stable tie-break: the smaller identifier
+        // sorts first so repeated reads order identically instead of leaving
+        // the pair to sort chance.
+        let smaller = try #require(UUID(uuidString: "00000000-0000-0000-0000-000000000001"))
+        let larger = try #require(UUID(uuidString: "00000000-0000-0000-0000-000000000002"))
+        try await direct.store(Episode(
+            id: larger,
+            sessionID: session,
+            role: .user,
+            content: "tie larger",
+            timestamp: fixed,
+            metadata: [:]
+        ))
+        try await direct.store(Episode(
+            id: smaller,
+            sessionID: session,
+            role: .user,
+            content: "tie smaller",
+            timestamp: fixed,
+            metadata: [:]
+        ))
+
+        let listed = try await engine.listRecentEpisodes(limit: 10)
+        #expect(listed.count == 2)
+        #expect(listed.map(\.id) == [smaller, larger])
+        #expect(listed.first?.content == "tie smaller")
+    }
+
+    @Test
+    func `List recent respects limit window`() async throws {
+        let (engine, base) = makeEpisodicClearEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let session = UUID()
+
+        for index in 0 ..< 5 {
+            try await engine.storeEpisodic(content: "window-turn-\(index)", sessionID: session)
+        }
+        #expect(await engine.episodeCount() == 5)
+
+        // A non-positive window reads as empty rather than an error so stale
+        // cursors degrade to no rows.
+        #expect(try await engine.listRecentEpisodes(limit: 0).isEmpty)
+
+        // A bounded window returns exactly the newest rows, newest first.
+        let window = try await engine.listRecentEpisodes(limit: 2)
+        #expect(window.count == 2)
+        for pair in zip(window, window.dropFirst()) {
+            #expect(pair.0.timestamp >= pair.1.timestamp)
+        }
+
+        // A window wider than the store returns every row, newest first.
+        let wide = try await engine.listRecentEpisodes(limit: 100)
+        #expect(wide.count == 5)
+        for pair in zip(wide, wide.dropFirst()) {
+            #expect(pair.0.timestamp >= pair.1.timestamp)
+        }
+
+        // A session preview stays scoped to its owner while sharing the same
+        // newest-first contract.
+        let scoped = try await engine.listRecentEpisodes(limit: 2, sessionID: session)
+        #expect(scoped.count == 2)
+        #expect(try await engine.listRecentEpisodes(limit: 10, sessionID: UUID()).isEmpty)
+    }
 }

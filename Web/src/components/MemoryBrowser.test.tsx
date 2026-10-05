@@ -149,6 +149,39 @@ describe("MemoryBrowser", () => {
     expect(screen.getByRole("heading", { name: "Search" })).toBeInTheDocument();
   });
 
+  it("starts Facts empty with idle hint and intact counts, fetching only tallies on tab entry", async () => {
+    const user = userEvent.setup();
+    const fetchMock = stubFetch();
+    render(<MemoryBrowser />);
+    // Mount settles tab labels from the counts read before any tab opens.
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /Facts \(1\)/ })).toBeInTheDocument();
+    });
+    expect(screen.getByRole("tab", { name: /Episodes \(2\)/ })).toBeInTheDocument();
+    const factsCallsAfterMount = fetchMock.mock.calls.filter(([url]) =>
+      String(url).startsWith("/memory/facts"),
+    ).length;
+    expect(factsCallsAfterMount).toBeGreaterThan(0);
+    await user.click(screen.getByRole("tab", { name: /Facts/ }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Facts" })).toBeInTheDocument();
+    });
+    // Idle copy owns the never-fetched state with zero rows shown.
+    expect(
+      screen.getByText("Search or show recent to preview facts…"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Dog named Biscuit")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show Recent 20" })).toBeInTheDocument();
+    // Blank facts search stays disabled so padding never fires an empty query.
+    const panel = screen.getByRole("tabpanel", { name: "Facts" });
+    expect(within(panel).getByRole("button", { name: "Search" })).toBeDisabled();
+    // Tab entry fires no row fetch: counts stay settled without a second read.
+    const factsCallsAfterEntry = fetchMock.mock.calls.filter(([url]) =>
+      String(url).startsWith("/memory/facts"),
+    ).length;
+    expect(factsCallsAfterEntry).toBe(factsCallsAfterMount);
+  });
+
   it("searches memories, shows timing, and keeps facts untouched", async () => {
     const user = userEvent.setup();
     const fetchMock = stubFetch();
@@ -437,9 +470,18 @@ describe("MemoryBrowser", () => {
       expect(screen.getByRole("heading", { name: "Facts" })).toBeInTheDocument();
     });
     expect(screen.getByRole("heading", { name: "Knowledge" })).toBeInTheDocument();
+    // Empty-first: tab entry shows the idle hint with zero rows.
+    expect(
+      screen.getByText("Search or show recent to preview facts…"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("First fact")).not.toBeInTheDocument();
+    const factsCallsOnEntry = seenFacts.length;
+    // Explicit Show Recent loads exactly one window.
+    await user.click(screen.getByRole("button", { name: "Show Recent 20" }));
     await waitFor(() => {
       expect(screen.getByText("First fact")).toBeInTheDocument();
     });
+    expect(seenFacts.length).toBeGreaterThan(factsCallsOnEntry);
     expect(screen.queryByText("Second fact")).not.toBeInTheDocument();
     // Every facts read stays windowed; no unbounded list-all ever fires.
     expect(seenFacts.length).toBeGreaterThan(0);
@@ -509,6 +551,11 @@ describe("MemoryBrowser", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("Search facts")).toBeInTheDocument();
     });
+    // Empty-first: no rows until an explicit Search filters.
+    expect(
+      screen.getByText("Search or show recent to preview facts…"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Dog named Biscuit")).not.toBeInTheDocument();
     // Blank search stays disabled so padding cannot fire an empty query.
     expect(screen.getByRole("button", { name: "Search" })).toBeDisabled();
     await user.type(screen.getByLabelText("Search facts"), "biscuit");
@@ -520,6 +567,147 @@ describe("MemoryBrowser", () => {
     expect(
       screen.getByRole("button", { name: "Show Recent 20" }),
     ).toBeInTheDocument();
+  });
+
+  it("shows Facts loading only while busy and empty-result only after a completed zero-row fetch", async () => {
+    const user = userEvent.setup();
+    let resolveFacts!: (value: Response) => void;
+    const gate = new Promise<Response>((resolve) => {
+      resolveFacts = resolve;
+    });
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("/memory/facts") && init?.method !== "POST") {
+        const parsed = new URL(url, "http://localhost");
+        // Mount counts resolve immediately so tab labels settle.
+        if (!parsed.searchParams.get("q") && parsed.searchParams.get("offset") === "0" && fetchMock.mock.calls.filter(([entry]) => String(entry).startsWith("/memory/facts")).length <= 1) {
+          return new Response(
+            JSON.stringify({
+              facts: [],
+              total: 0,
+              preferences: [],
+              semanticCount: 0,
+              episodeCount: 0,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return gate;
+      }
+      if (url.startsWith("/memory/episodes/recent")) {
+        return new Response(JSON.stringify({ episodes: [], count: 0 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryBrowser />);
+    await user.click(screen.getByRole("tab", { name: /Facts/ }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Search facts")).toBeInTheDocument();
+    });
+    // Idle owns the never-fetched state: no loading and no empty-result yet.
+    expect(screen.queryByText("Loading facts…")).not.toBeInTheDocument();
+    expect(screen.queryByText("No facts match the current search.")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show Recent 20" }));
+    // Loading copy renders only while the window is in flight.
+    await waitFor(() => {
+      expect(screen.getByText("Loading facts…")).toBeInTheDocument();
+    });
+    resolveFacts(
+      new Response(
+        JSON.stringify({
+          facts: [],
+          total: 0,
+          preferences: [],
+          semanticCount: 0,
+          episodeCount: 0,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    // Empty-result copy appears only after the completed fetch returns zero rows.
+    await waitFor(() => {
+      expect(
+        screen.getByText("No facts match the current search."),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Loading facts…")).not.toBeInTheDocument();
+  });
+
+  it("shows Facts error with Retry that re-runs the last explicit action", async () => {
+    const user = userEvent.setup();
+    let shouldFail = true;
+    const seen: string[] = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("/memory/facts") && init?.method !== "POST") {
+        // Mount counts succeed so tab labels stay intact.
+        if (fetchMock.mock.calls.filter(([entry]) => String(entry).startsWith("/memory/facts")).length <= 1) {
+          return new Response(
+            JSON.stringify({
+              facts: [],
+              total: 0,
+              preferences: [],
+              semanticCount: 0,
+              episodeCount: 0,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        seen.push(url);
+        if (shouldFail) {
+          return new Response(JSON.stringify({ reason: "boom" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            facts: [
+              {
+                id: "f1",
+                content: "Recovered fact",
+                confidence: 1,
+                source: "dashboard",
+                lastConfirmed: new Date(0).toISOString(),
+              },
+            ],
+            total: 1,
+            preferences: [],
+            semanticCount: 1,
+            episodeCount: 0,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.startsWith("/memory/episodes/recent")) {
+        return new Response(JSON.stringify({ episodes: [], count: 0 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryBrowser />);
+    await user.click(screen.getByRole("tab", { name: /Facts/ }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Search facts")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Show Recent 20" }));
+    await waitFor(() => {
+      expect(screen.getByText(/boom|500/)).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    shouldFail = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(screen.getByText("Recovered fact")).toBeInTheDocument();
+    });
+    expect(seen.length).toBeGreaterThanOrEqual(2);
   });
 
   it("stores a fact from the Facts tab and keeps Add blank-disabled", async () => {
@@ -584,6 +772,8 @@ describe("MemoryBrowser", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<MemoryBrowser />);
     await user.click(screen.getByRole("tab", { name: /Facts/ }));
+    // Empty-first: explicit Show Recent loads the deletable row.
+    await user.click(screen.getByRole("button", { name: "Show Recent 20" }));
     await waitFor(() => {
       expect(screen.getByText("Dog named Biscuit")).toBeInTheDocument();
     });
@@ -650,6 +840,8 @@ describe("MemoryBrowser", () => {
     );
     render(<MemoryBrowser />);
     await user.click(screen.getByRole("tab", { name: /Facts/ }));
+    // Empty-first: explicit Show Recent loads the long row for preview.
+    await user.click(screen.getByRole("button", { name: "Show Recent 20" }));
     await waitFor(() => {
       expect(
         screen.getByRole("button", { name: "Delete fact f-long" }),
@@ -661,25 +853,47 @@ describe("MemoryBrowser", () => {
     expect(dialog).not.toHaveTextContent(longContent);
   });
 
-  it("renders Episodes recency with Title Case cleanup controls", async () => {
+  it("opens Episodes empty with idle hint, zero rows, and a single session input", async () => {
     const user = userEvent.setup();
-    stubFetch();
+    const fetchMock = stubFetch();
     render(<MemoryBrowser />);
+    // Mount settles tab labels from the counts read before any tab opens.
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /Episodes \(2\)/ })).toBeInTheDocument();
+    });
+    const recentCallsAfterMount = fetchMock.mock.calls.filter(([url]) =>
+      String(url).startsWith("/memory/episodes/recent"),
+    ).length;
+    expect(recentCallsAfterMount).toBe(0);
     await user.click(screen.getByRole("tab", { name: /Episodes/ }));
     await waitFor(() => {
-      expect(
-        screen.getByRole("heading", { name: "Episodic Cleanup" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Episodes" })).toBeInTheDocument();
     });
-    expect(screen.getByLabelText("Session UUID")).toBeInTheDocument();
+    // Idle copy owns the never-fetched state with zero rows, no error, no loading.
     expect(
-      screen.getByRole("button", { name: "Clear all episodes" }),
+      screen.getByText("Search or Show Recent to preview turns…"),
     ).toBeInTheDocument();
-    // Blank session input disables only its own button.
-    expect(screen.getByRole("button", { name: "Clear session" })).toBeDisabled();
+    expect(screen.queryByText("Loading episodic turns…")).not.toBeInTheDocument();
+    expect(screen.queryByText("No episodic turns match with current query")).not.toBeInTheDocument();
+    expect(screen.queryByText(/turns shown/)).not.toBeInTheDocument();
+    // Exactly one finder card with one session input feeding Preview.
+    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    expect(within(panel).getAllByLabelText("Session UUID")).toHaveLength(1);
+    expect(within(panel).getByRole("button", { name: "Preview" })).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "Show Recent" })).toBeInTheDocument();
+    expect(screen.queryByText("Episodic Cleanup")).not.toBeInTheDocument();
+    expect(document.querySelector(".episodic-cleanup-panel")).toBeNull();
+    // Tab entry fires no listing fetch: the recent route stays quiet.
+    const recentCallsAfterEntry = fetchMock.mock.calls.filter(([url]) =>
+      String(url).startsWith("/memory/episodes/recent"),
+    ).length;
+    expect(recentCallsAfterEntry).toBe(0);
+    // Search stays blank-disabled so padding never fires an empty query.
+    expect(within(panel).getByRole("button", { name: "Search" })).toBeDisabled();
+    expect(within(panel).getByRole("button", { name: "Preview" })).toBeDisabled();
   });
 
-  it("disables both danger buttons when no episodic turns are stored", async () => {
+  it("disables the danger row when no episodic turns are stored", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
@@ -706,37 +920,48 @@ describe("MemoryBrowser", () => {
     render(<MemoryBrowser />);
     await user.click(screen.getByRole("tab", { name: /Episodes/ }));
     await waitFor(() => {
-      expect(screen.getByText("0 episodic turns stored")).toBeInTheDocument();
+      expect(
+        screen.getByText("Search or Show Recent to preview turns…"),
+      ).toBeInTheDocument();
     });
-    const clearAll = screen.getByRole("button", { name: "Clear all episodes" });
-    const clearSession = screen.getByRole("button", { name: "Clear session" });
+    // Zero stored turns disables the whole-store clear with an honest title,
+    // while the shown-set delete stays disabled with no rows to address.
+    const clearAll = screen.getByRole("button", { name: "Clear All" });
+    const deleteShown = screen.getByRole("button", { name: "Delete All Shown" });
     expect(clearAll).toBeDisabled();
-    expect(clearSession).toBeDisabled();
+    expect(deleteShown).toBeDisabled();
     expect(clearAll).toHaveAttribute("title", "No episodic turns stored");
-    expect(clearSession).toHaveAttribute("title", "No episodic turns stored");
+    // Legacy cleanup footer is gone: exactly one session input remains.
+    expect(screen.getAllByLabelText("Session UUID")).toHaveLength(1);
+    expect(document.querySelector(".episodic-cleanup-panel")).toBeNull();
   });
 
-  it("keeps Clear session disabled on blank input and enables it once typed", async () => {
+  it("keeps Preview disabled on blank input and enables it once typed", async () => {
     const user = userEvent.setup();
     stubFetch();
     render(<MemoryBrowser />);
     await user.click(screen.getByRole("tab", { name: /Episodes/ }));
     await waitFor(() => {
-      expect(screen.getByText("2 episodic turns stored")).toBeInTheDocument();
+      expect(screen.getByLabelText("Session UUID")).toBeInTheDocument();
     });
-    const clearSession = screen.getByRole("button", { name: "Clear session" });
-    expect(clearSession).toBeDisabled();
+    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    // Blank session input disables only Preview so the whole-store path stays available.
+    expect(within(panel).getByRole("button", { name: "Preview" })).toBeDisabled();
     await user.type(screen.getByLabelText("Session UUID"), "   ");
-    expect(screen.getByRole("button", { name: "Clear session" })).toBeDisabled();
+    expect(within(panel).getByRole("button", { name: "Preview" })).toBeDisabled();
     await user.clear(screen.getByLabelText("Session UUID"));
     await user.type(
       screen.getByLabelText("Session UUID"),
       "22222222-2222-2222-2222-222222222222",
     );
-    expect(screen.getByRole("button", { name: "Clear session" })).toBeEnabled();
+    expect(within(panel).getByRole("button", { name: "Preview" })).toBeEnabled();
+    // Contents search stays blank-disabled alongside Preview trimming.
+    expect(within(panel).getByRole("button", { name: "Search" })).toBeDisabled();
+    await user.type(screen.getByLabelText("Search episodic contents"), "biscuit");
+    expect(within(panel).getByRole("button", { name: "Search" })).toBeEnabled();
   });
 
-  it("confirms clear-all behind a modal and reloads recency", async () => {
+  it("confirms Clear All behind a modal and refetches the active finder source", async () => {
     const user = userEvent.setup();
     let cleared = false;
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
@@ -755,8 +980,19 @@ describe("MemoryBrowser", () => {
         );
       }
       if (url.startsWith("/memory/episodes/recent")) {
+        const episodes = cleared
+          ? []
+          : [
+              {
+                id: "11111111-1111-1111-1111-111111111111",
+                sessionID: "22222222-2222-2222-2222-222222222222",
+                role: "user",
+                content: "Recent turn one",
+                timestamp: 1700000000,
+              },
+            ];
         return new Response(
-          JSON.stringify({ episodes: [], count: 0 }),
+          JSON.stringify({ episodes, count: episodes.length }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
@@ -777,10 +1013,15 @@ describe("MemoryBrowser", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<MemoryBrowser />);
     await user.click(screen.getByRole("tab", { name: /Episodes/ }));
+    // Explicit Show Recent loads the window before the danger row arms.
+    await user.click(screen.getByRole("button", { name: "Show Recent" }));
     await waitFor(() => {
-      expect(screen.getByText("2 episodic turns stored")).toBeInTheDocument();
+      expect(screen.getByText("Recent turn one")).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Clear all episodes" }));
+    expect(screen.getByText(/1 turns shown/)).toBeInTheDocument();
+    const clearAll = screen.getByRole("button", { name: "Clear All" });
+    expect(clearAll).toBeEnabled();
+    await user.click(clearAll);
     const dialog = screen.getByRole("dialog", {
       name: "Confirm clear all episodes",
     });
@@ -793,7 +1034,7 @@ describe("MemoryBrowser", () => {
     expect(
       screen.queryByRole("dialog", { name: "Confirm clear all episodes" }),
     ).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Clear all episodes" }));
+    await user.click(screen.getByRole("button", { name: "Clear All" }));
     await user.click(
       screen.getByRole("button", { name: "Confirm clear all episodes" }),
     );
@@ -803,33 +1044,46 @@ describe("MemoryBrowser", () => {
         expect.objectContaining({ method: "DELETE" }),
       );
     });
+    // Dashboard settles by refetching the active finder source plus counts.
     await waitFor(() => {
-      expect(screen.getByText("0 episodic turns stored")).toBeInTheDocument();
+      expect(screen.getByText("No episodic turns match with current query")).toBeInTheDocument();
     });
+    const recentCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).startsWith("/memory/episodes/recent"),
+    ).length;
+    expect(recentCalls).toBeGreaterThan(1);
   });
 
-  it("confirms session clear with the typed session id", async () => {
+  it("shows finder error with Retry that re-runs the recorded source", async () => {
     const user = userEvent.setup();
-    const sessionID = "22222222-2222-2222-2222-222222222222";
-    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+    let shouldFail = true;
+    const seen: string[] = [];
+    const fetchMock = vi.fn(async (input: string) => {
       const url = String(input);
-      if (url.startsWith("/memory/search")) {
+      if (url.startsWith("/memory/episodes/recent")) {
+        seen.push(url);
+        // Mount counts succeed through the facts route; only the finder fails first.
+        if (shouldFail) {
+          return new Response(JSON.stringify({ reason: "boom" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
         return new Response(
-          JSON.stringify({ query: "dog", count: 0, memories: [] }),
+          JSON.stringify({
+            episodes: [
+              {
+                id: "11111111-1111-1111-1111-111111111111",
+                sessionID: "22222222-2222-2222-2222-222222222222",
+                role: "user",
+                content: "Recovered turn",
+                timestamp: 1700000000,
+              },
+            ],
+            count: 1,
+          }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
-      }
-      if (
-        url === `/memory/episodes/session/${sessionID}` &&
-        init?.method === "DELETE"
-      ) {
-        return new Response(null, { status: 204 });
-      }
-      if (url.startsWith("/memory/episodes/recent")) {
-        return new Response(JSON.stringify({ episodes: [], count: 0 }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
       }
       return new Response(
         JSON.stringify({
@@ -837,7 +1091,7 @@ describe("MemoryBrowser", () => {
           total: 0,
           preferences: [],
           semanticCount: 0,
-          episodeCount: 2,
+          episodeCount: 1,
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
@@ -846,22 +1100,23 @@ describe("MemoryBrowser", () => {
     render(<MemoryBrowser />);
     await user.click(screen.getByRole("tab", { name: /Episodes/ }));
     await waitFor(() => {
-      expect(screen.getByText("2 episodic turns stored")).toBeInTheDocument();
+      expect(screen.getByLabelText("Session UUID")).toBeInTheDocument();
     });
-    await user.type(screen.getByLabelText("Session UUID"), sessionID);
-    await user.click(screen.getByRole("button", { name: "Clear session" }));
-    expect(
-      screen.getByRole("dialog", { name: "Confirm clear session episodes" }),
-    ).toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: "Confirm clear session episodes" }),
-    );
+    // Idle owns the never-fetched state: no loading and no error yet.
+    expect(screen.queryByText("Loading episodic turns…")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show Recent" }));
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        `/memory/episodes/session/${sessionID}`,
-        expect.objectContaining({ method: "DELETE" }),
-      );
+      expect(screen.getByText(/boom|500/)).toBeInTheDocument();
     });
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    // Empty-result copy stays hidden while the error owns the pane.
+    expect(screen.queryByText("No episodic turns match with current query")).not.toBeInTheDocument();
+    shouldFail = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(screen.getByText("Recovered turn")).toBeInTheDocument();
+    });
+    expect(seen.length).toBeGreaterThanOrEqual(2);
   });
 
   it("syncs inner tabs from hash changes while open", async () => {
@@ -879,7 +1134,7 @@ describe("MemoryBrowser", () => {
     window.dispatchEvent(new HashChangeEvent("hashchange"));
     await waitFor(() => {
       expect(
-        screen.getByRole("heading", { name: "Episodic Cleanup" }),
+        screen.getByRole("heading", { name: "Episodes" }),
       ).toBeInTheDocument();
     });
     window.location.hash = "";
@@ -1097,6 +1352,18 @@ describe("MemoryBrowser", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<MemoryBrowser />);
     await user.click(screen.getByRole("tab", { name: /Episodes/ }));
+    // Idle owns the never-fetched state until an explicit Show Recent runs.
+    await waitFor(() => {
+      expect(
+        screen.getByText("Search or Show Recent to preview turns…"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Recent turn one")).not.toBeInTheDocument();
+    const recentBefore = seen.filter((entry) =>
+      entry.startsWith("/memory/episodes/recent"),
+    ).length;
+    expect(recentBefore).toBe(0);
+    await user.click(screen.getByRole("button", { name: "Show Recent" }));
     await waitFor(() => {
       expect(screen.getByText("Recent turn one")).toBeInTheDocument();
     });
@@ -1171,6 +1438,7 @@ describe("MemoryBrowser", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<MemoryBrowser />);
     await user.click(screen.getByRole("tab", { name: /Episodes/ }));
+    await user.click(screen.getByRole("button", { name: "Show Recent" }));
     await waitFor(() => {
       expect(screen.getByText("Shown turn one")).toBeInTheDocument();
     });
@@ -1254,6 +1522,7 @@ describe("MemoryBrowser", () => {
     );
     render(<MemoryBrowser />);
     await user.click(screen.getByRole("tab", { name: /Episodes/ }));
+    await user.click(screen.getByRole("button", { name: "Show Recent" }));
     await waitFor(() => {
       expect(screen.getByText("Shown turn one")).toBeInTheDocument();
     });
@@ -1269,7 +1538,7 @@ describe("MemoryBrowser", () => {
     );
   });
 
-  it("shows the finder empty state and separates Clear All behind a divider", async () => {
+  it("shows idle then empty-result only after a completed zero-row fetch", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
@@ -1301,17 +1570,601 @@ describe("MemoryBrowser", () => {
     );
     render(<MemoryBrowser />);
     await user.click(screen.getByRole("tab", { name: /Episodes/ }));
+    // Idle owns the never-fetched state before any explicit fetch.
+    await waitFor(() => {
+      expect(
+        screen.getByText("Search or Show Recent to preview turns…"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Loading episodic turns…")).not.toBeInTheDocument();
+    expect(screen.queryByText("No episodic turns match with current query")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show Recent" }));
+    // Empty-result copy appears only after the completed fetch returns zero rows.
     await waitFor(() => {
       expect(
         screen.getByText("No episodic turns match with current query"),
       ).toBeInTheDocument();
     });
-    // Spacing contract keeps section cards apart and the whole-store clear
-    // behind its own divider instead of crowding the session row.
+    expect(screen.queryByText("Loading episodic turns…")).not.toBeInTheDocument();
+    // Single finder card keeps the session row plus the danger row together.
     expect(
       document.querySelector(".memory-section-card"),
     ).not.toBeNull();
     expect(document.querySelector(".episodic-session-row")).not.toBeNull();
-    expect(document.querySelector(".episodic-clear-all-row")).not.toBeNull();
+    expect(document.querySelector(".episodic-danger-row")).not.toBeNull();
+    expect(document.querySelector(".episodic-cleanup-panel")).toBeNull();
+  });
+
+  it("shows Loading only while the finder is busy", async () => {
+    const user = userEvent.setup();
+    let resolveRecent!: (value: Response) => void;
+    const gate = new Promise<Response>((resolve) => {
+      resolveRecent = resolve;
+    });
+    const fetchMock = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url.startsWith("/memory/episodes/recent")) {
+        return gate;
+      }
+      return new Response(
+        JSON.stringify({
+          facts: [],
+          total: 0,
+          preferences: [],
+          semanticCount: 0,
+          episodeCount: 700,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryBrowser />);
+    await user.click(screen.getByRole("tab", { name: /Episodes/ }));
+    await waitFor(() => {
+      expect(
+        screen.getByText("Search or Show Recent to preview turns…"),
+      ).toBeInTheDocument();
+    });
+    // Idle never renders the loading copy.
+    expect(screen.queryByText("Loading episodic turns…")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show Recent" }));
+    // Loading copy renders only while busy is true.
+    await waitFor(() => {
+      expect(screen.getByText("Loading episodic turns…")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Search or Show Recent to preview turns…")).not.toBeInTheDocument();
+    resolveRecent(
+      new Response(JSON.stringify({ episodes: [], count: 0 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByText("No episodic turns match with current query")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Loading episodic turns…")).not.toBeInTheDocument();
+  });
+
+  it("shows Show Recent as a bounded 20-row window with per-row Delete", async () => {
+    const user = userEvent.setup();
+    const seen: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.startsWith("/memory/episodes/recent")) {
+          seen.push(url);
+          const episodes = Array.from({ length: 20 }, (_, index) => ({
+            id: `11111111-1111-1111-1111-1111111111${String(index).padStart(2, "0")}`,
+            sessionID: "22222222-2222-2222-2222-222222222222",
+            role: index % 2 === 0 ? "user" : "assistant",
+            content: `Window turn ${index + 1}`,
+            timestamp: 1700000000 + index,
+          }));
+          return new Response(JSON.stringify({ episodes, count: 20 }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            facts: [],
+            total: 0,
+            preferences: [],
+            semanticCount: 0,
+            episodeCount: 700,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+    render(<MemoryBrowser />);
+    await user.click(screen.getByRole("tab", { name: /Episodes/ }));
+    await user.click(screen.getByRole("button", { name: "Show Recent" }));
+    await waitFor(() => {
+      expect(screen.getByText("Window turn 1")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Window turn 20")).toBeInTheDocument();
+    expect(screen.getByText(/20 turns shown/)).toBeInTheDocument();
+    // Bounded window stays at the page size with one Delete per shown row.
+    const recentUrl = seen.find((entry) => entry.startsWith("/memory/episodes/recent"));
+    expect(recentUrl).toBeDefined();
+    expect(new URL(recentUrl as string, "http://localhost").searchParams.get("limit")).toBe("20");
+    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    expect(within(panel).getAllByText("Delete")).toHaveLength(20);
+  });
+
+  it("retries a failed contents search with the attempted query instead of recent", async () => {
+    const user = userEvent.setup();
+    const seenSearch: string[] = [];
+    const seenRecent: string[] = [];
+    let searchAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.startsWith("/memory/search")) {
+          seenSearch.push(url);
+          searchAttempts += 1;
+          if (searchAttempts === 1) {
+            return new Response(JSON.stringify({ reason: "boom" }), {
+              status: 500,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              query: "biscuit",
+              count: 1,
+              memories: [
+                {
+                  content: "Biscuit episode recovered",
+                  score: 0.9,
+                  source: "episodic",
+                  metadata: {
+                    id: "11111111-1111-1111-1111-111111111111",
+                    session_id: "22222222-2222-2222-2222-222222222222",
+                    role: "user",
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url.startsWith("/memory/episodes/recent")) {
+          seenRecent.push(url);
+          return new Response(JSON.stringify({ episodes: [], count: 0 }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            facts: [],
+            total: 0,
+            preferences: [],
+            semanticCount: 0,
+            episodeCount: 1,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+    render(<MemoryBrowser />);
+    await user.click(screen.getByRole("tab", { name: /Episodes/ }));
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText("Search episodic contents"),
+      ).toBeInTheDocument();
+    });
+    await user.type(
+      screen.getByLabelText("Search episodic contents"),
+      "biscuit",
+    );
+    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    await user.click(within(panel).getByRole("button", { name: "Search" }));
+    await waitFor(() => {
+      expect(screen.getByText(/boom|500/)).toBeInTheDocument();
+    });
+    // First-attempt contents failure must not fall back to the recency path.
+    expect(seenRecent.length).toBe(0);
+    expect(screen.queryByText("Biscuit episode recovered")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(screen.getByText("Biscuit episode recovered")).toBeInTheDocument();
+    });
+    // Retry re-ran the attempted contents query, never the recent window.
+    expect(searchAttempts).toBe(2);
+    expect(seenSearch.length).toBe(2);
+    expect(seenSearch.every((entry) => entry.includes("q=biscuit"))).toBe(true);
+    expect(seenSearch.every((entry) => entry.includes("limit=50"))).toBe(true);
+    expect(seenRecent.length).toBe(0);
+  });
+
+  it("retries a failed session preview with the attempted session instead of recent", async () => {
+    const user = userEvent.setup();
+    const seenRecent: string[] = [];
+    let sessionAttempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (
+          url.startsWith("/memory/episodes/recent") &&
+          url.includes("sessionID=22222222-2222-2222-2222-222222222222")
+        ) {
+          seenRecent.push(url);
+          sessionAttempts += 1;
+          if (sessionAttempts === 1) {
+            return new Response(JSON.stringify({ reason: "boom" }), {
+              status: 500,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              episodes: [
+                {
+                  id: "11111111-1111-1111-1111-111111111111",
+                  sessionID: "22222222-2222-2222-2222-222222222222",
+                  role: "user",
+                  content: "Session recovered turn",
+                  timestamp: 1700000000,
+                },
+              ],
+              count: 1,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url.startsWith("/memory/episodes/recent")) {
+          seenRecent.push(url);
+          return new Response(JSON.stringify({ episodes: [], count: 0 }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            facts: [],
+            total: 0,
+            preferences: [],
+            semanticCount: 0,
+            episodeCount: 1,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+    render(<MemoryBrowser />);
+    await user.click(screen.getByRole("tab", { name: /Episodes/ }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Session UUID")).toBeInTheDocument();
+    });
+    await user.type(
+      screen.getByLabelText("Session UUID"),
+      "22222222-2222-2222-2222-222222222222",
+    );
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+    await waitFor(() => {
+      expect(screen.getByText(/boom|500/)).toBeInTheDocument();
+    });
+    expect(sessionAttempts).toBe(1);
+    const recentBeforeRetry = seenRecent.length;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(screen.getByText("Session recovered turn")).toBeInTheDocument();
+    });
+    // Retry re-ran the attempted session, not the plain recent window.
+    expect(sessionAttempts).toBe(2);
+    expect(seenRecent.length).toBeGreaterThan(recentBeforeRetry);
+    expect(
+      seenRecent.filter((entry) =>
+        entry.includes("sessionID=22222222-2222-2222-2222-222222222222"),
+      ).length,
+    ).toBe(2);
+  });
+
+  it("retries a failed facts search with the attempted query instead of recent", async () => {
+    const user = userEvent.setup();
+    const seenFacts: string[] = [];
+    let biscuitAttempts = 0;
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("/memory/facts") && init?.method !== "POST") {
+        // Mount counts succeed so tab labels stay intact.
+        if (
+          fetchMock.mock.calls.filter(([entry]) =>
+            String(entry).startsWith("/memory/facts"),
+          ).length <= 1
+        ) {
+          return new Response(
+            JSON.stringify({
+              facts: [],
+              total: 0,
+              preferences: [],
+              semanticCount: 0,
+              episodeCount: 0,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        seenFacts.push(url);
+        if (url.includes("q=biscuit")) {
+          biscuitAttempts += 1;
+          if (biscuitAttempts === 1) {
+            return new Response(JSON.stringify({ reason: "boom" }), {
+              status: 500,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              facts: [
+                {
+                  id: "f1",
+                  content: "Biscuit fact recovered",
+                  confidence: 1,
+                  source: "dashboard",
+                  lastConfirmed: new Date(0).toISOString(),
+                },
+              ],
+              total: 1,
+              preferences: [],
+              semanticCount: 1,
+              episodeCount: 0,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            facts: [],
+            total: 0,
+            preferences: [],
+            semanticCount: 0,
+            episodeCount: 0,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.startsWith("/memory/episodes/recent")) {
+        return new Response(JSON.stringify({ episodes: [], count: 0 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryBrowser />);
+    await user.click(screen.getByRole("tab", { name: /Facts/ }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("Search facts")).toBeInTheDocument();
+    });
+    await user.type(screen.getByLabelText("Search facts"), "biscuit");
+    const panel = screen.getByRole("tabpanel", { name: "Facts" });
+    await user.click(within(panel).getByRole("button", { name: "Search" }));
+    await waitFor(() => {
+      expect(screen.getByText(/boom|500/)).toBeInTheDocument();
+    });
+    expect(biscuitAttempts).toBe(1);
+    expect(screen.queryByText("Biscuit fact recovered")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(screen.getByText("Biscuit fact recovered")).toBeInTheDocument();
+    });
+    // Retry re-ran the attempted facts query rather than the recent window.
+    expect(biscuitAttempts).toBe(2);
+    expect(seenFacts.filter((entry) => entry.includes("q=biscuit")).length).toBe(
+      2,
+    );
+  });
+
+  it("preserves settled finder rows on a later failure (consistent failure semantics)", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.startsWith("/memory/episodes/recent")) {
+          return new Response(
+            JSON.stringify({
+              episodes: [
+                {
+                  id: "11111111-1111-1111-1111-111111111111",
+                  sessionID: "22222222-2222-2222-2222-222222222222",
+                  role: "user",
+                  content: "Kept turn",
+                  timestamp: 1700000000,
+                },
+              ],
+              count: 1,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url.startsWith("/memory/search")) {
+          return new Response(JSON.stringify({ reason: "boom" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            facts: [],
+            total: 0,
+            preferences: [],
+            semanticCount: 0,
+            episodeCount: 1,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+    render(<MemoryBrowser />);
+    await user.click(screen.getByRole("tab", { name: /Episodes/ }));
+    await user.click(screen.getByRole("button", { name: "Show Recent" }));
+    await waitFor(() => {
+      expect(screen.getByText("Kept turn")).toBeInTheDocument();
+    });
+    await user.type(screen.getByLabelText("Search episodic contents"), "zzz");
+    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    await user.click(within(panel).getByRole("button", { name: "Search" }));
+    await waitFor(() => {
+      expect(screen.getByText(/boom|500/)).toBeInTheDocument();
+    });
+    // Preserve-plus-error: the last settled window stays beside the error.
+    expect(screen.getByText("Kept turn")).toBeInTheDocument();
+  });
+
+  it("preserves settled facts rows on a later failure (consistent failure semantics)", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("/memory/facts") && init?.method !== "POST") {
+        const parsed = new URL(url, "http://localhost");
+        const q = parsed.searchParams.get("q") ?? "";
+        if (q === "zzz") {
+          return new Response(JSON.stringify({ reason: "boom" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            facts: [
+              {
+                id: "f1",
+                content: "Kept fact",
+                confidence: 1,
+                source: "dashboard",
+                lastConfirmed: new Date(0).toISOString(),
+              },
+            ],
+            total: 1,
+            preferences: [],
+            semanticCount: 1,
+            episodeCount: 0,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.startsWith("/memory/episodes/recent")) {
+        return new Response(JSON.stringify({ episodes: [], count: 0 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryBrowser />);
+    await user.click(screen.getByRole("tab", { name: /Facts/ }));
+    await user.click(screen.getByRole("button", { name: "Show Recent 20" }));
+    await waitFor(() => {
+      expect(screen.getByText("Kept fact")).toBeInTheDocument();
+    });
+    await user.type(screen.getByLabelText("Search facts"), "zzz");
+    const panel = screen.getByRole("tabpanel", { name: "Facts" });
+    await user.click(within(panel).getByRole("button", { name: "Search" }));
+    await waitFor(() => {
+      expect(screen.getByText(/boom|500/)).toBeInTheDocument();
+    });
+    // Preserve-plus-error: the last settled window stays beside the error.
+    expect(screen.getByText("Kept fact")).toBeInTheDocument();
+  });
+
+  it("keeps danger controls independent of blank session input while Preview stays blank-disabled", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.startsWith("/memory/episodes/recent")) {
+          return new Response(
+            JSON.stringify({
+              episodes: [
+                {
+                  id: "11111111-1111-1111-1111-111111111111",
+                  sessionID: "22222222-2222-2222-2222-222222222222",
+                  role: "user",
+                  content: "Recent turn one",
+                  timestamp: 1700000000,
+                },
+              ],
+              count: 1,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            facts: [],
+            total: 0,
+            preferences: [],
+            semanticCount: 0,
+            episodeCount: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+    render(<MemoryBrowser />);
+    await user.click(screen.getByRole("tab", { name: /Episodes/ }));
+    await user.click(screen.getByRole("button", { name: "Show Recent" }));
+    await waitFor(() => {
+      expect(screen.getByText("Recent turn one")).toBeInTheDocument();
+    });
+    const panel = screen.getByRole("tabpanel", { name: "Episodes" });
+    // Preview alone is blank-disabled; both danger controls ignore the blank
+    // session input and gate on busy plus stored rows instead.
+    expect(within(panel).getByRole("button", { name: "Preview" })).toBeDisabled();
+    expect(
+      within(panel).getByRole("button", { name: "Delete All Shown" }),
+    ).toBeEnabled();
+    expect(within(panel).getByRole("button", { name: "Clear All" })).toBeEnabled();
+  });
+
+  it("does not settle tallies after unmount", async () => {
+    let resolveFacts!: (value: Response) => void;
+    const gate = new Promise<Response>((resolve) => {
+      resolveFacts = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.startsWith("/memory/facts")) {
+          return gate;
+        }
+        if (url.startsWith("/memory/episodes/recent")) {
+          return new Response(JSON.stringify({ episodes: [], count: 0 }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(null, { status: 204 });
+      }),
+    );
+    const { unmount } = render(<MemoryBrowser />);
+    // Unmount while the mount-time tallies are still in flight; settling
+    // after unmount must be dropped rather than throwing.
+    unmount();
+    resolveFacts(
+      new Response(
+        JSON.stringify({
+          facts: [],
+          total: 0,
+          preferences: [],
+          semanticCount: 0,
+          episodeCount: 5,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await gate;
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 });
