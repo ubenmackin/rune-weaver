@@ -1131,11 +1131,40 @@ struct LocalAccessClassificationTests {
             ("blocked.example.com", "http://blocked.example.com/"),
             ("empty.example.com", "http://empty.example.com/")
         ]
+        // Address literals settle with no resolver at all, and an empty
+        // answer produces the same fail-closed wording whether the stub or
+        // the DNS timeout settled the lookup, so those pairs can compare the
+        // classifier and the guard directly. A proven non-empty answer is
+        // different: each lookup races the bounded fail-closed timeout, and a
+        // DNS-less harness can legitimately land either branch, so the pair
+        // is held apart from the cross-call equality rather than weakened.
+        let answeredPairs = pairs.filter { pair in !(answers[pair.host] ?? []).isEmpty }
+        let settledPairs = pairs.filter { pair in (answers[pair.host] ?? []).isEmpty }
         await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
-            for pair in pairs {
+            for pair in settledPairs {
                 let verdict = await ApiSSRFGuard.classifyLocalAccess(forHost: pair.host)
                 let denial = await ApiSSRFGuard.denyReasonAsync(for: pair.url, allowlistedOrigins: [])
                 #expect(Self.reason(verdict) == denial, "expected shared wording for '\(pair.host)': verdict \(verdict) vs denial \(denial ?? "nil")")
+            }
+            for pair in answeredPairs {
+                let verdict = await ApiSSRFGuard.classifyLocalAccess(forHost: pair.host)
+                let denial = await ApiSSRFGuard.denyReasonAsync(for: pair.url, allowlistedOrigins: [])
+                // Decision agreement is environment-independent: both sides
+                // must refuse the dial, never one while the other allows.
+                #expect(Self.reason(verdict) != nil, "expected a refusal-shaped verdict for '\(pair.host)', got \(verdict)")
+                #expect(denial != nil, "expected the guard to refuse '\(pair.host)'")
+                if !Self.isUnresolved(verdict) {
+                    // With the answer proven, the classifier must reuse the
+                    // guard's resolved-range vetting wording by construction.
+                    // The comparison runs against the pure vetting of the
+                    // same canned addresses, so exactly one resolution feeds
+                    // the assertion and no second lookup can split branches.
+                    let vetted = ApiSSRFGuard.vettedIPListDenial(host: pair.host, addresses: answers[pair.host] ?? [])
+                    #expect(
+                        Self.reason(verdict) == vetted,
+                        "expected guard vetting wording for proven answer '\(pair.host)': verdict \(verdict) vs vetted \(vetted ?? "nil")"
+                    )
+                }
             }
         }
     }

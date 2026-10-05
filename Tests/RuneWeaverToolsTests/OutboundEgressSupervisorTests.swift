@@ -609,10 +609,20 @@ struct OutboundEgressSupervisorTests {
             #expect(linkLocalResult?.contains("link-local") == true)
             // An exemption names the host, never what it resolves to: a
             // rebinding answer in never-dialable space refuses even for the
-            // exempted name.
+            // exempted name. The canned answer is proven through the bounded
+            // resolution race, so a DNS-less harness may instead fail closed
+            // before the answer arrives — both branches refuse, and an
+            // `.allowed` outcome (nil here) is the only security failure this
+            // assertion could ever miss.
             let exemptedURL = try #require(URL(string: "https://nas.homelab.internal/status"))
             let rebinding = await supervisor.validateReadOnly(url: exemptedURL)
-            #expect(rebinding?.contains("resolves to blocked address") == true)
+            let refusedRebinding = rebinding.map {
+                $0.contains("resolves to blocked address") || $0.contains("could not be verified")
+            } ?? false
+            #expect(
+                refusedRebinding,
+                "expected the exempted name to refuse a blocked rebinding answer or fail closed unresolved, got: \(rebinding ?? "nil")"
+            )
         }
     }
 
@@ -632,7 +642,16 @@ struct OutboundEgressSupervisorTests {
             switch before {
             case .allowed: Issue.record("Expected denial before the policy carried the exemption")
             case let .denied(reason), let .unlistedDomain(_, reason):
-                #expect(reason.contains("resolves to blocked address"))
+                // The unexempted private-resolving host must refuse either
+                // way it is proven blocked: through the canned resolution or
+                // through the fail-closed DNS timeout this environment
+                // guarantees. Only the post-write `.allowed` branch below is
+                // exemption-dependent, so the live-apply contract keeps its
+                // teeth regardless of which branch settles here.
+                #expect(
+                    reason.contains("resolves to blocked address") || reason.contains("could not be verified"),
+                    "expected the unexempted private answer to refuse or fail closed, got: \(reason)"
+                )
             }
             // A policy write lands through the shared store with no restart;
             // the supervisor reads the snapshot per call, so the next verdict

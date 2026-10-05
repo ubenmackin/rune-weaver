@@ -9,8 +9,16 @@
 // in-bundle login view on logout or a uniform 401. Keeping the authenticated
 // hooks inside a child component means no dashboard socket or API polling runs
 // before the gate opens.
+//
+// Heavy tab-switched views load through React.lazy so each section ships as
+// its own route-level chunk: statically bundling every surface into one entry
+// pushed first-party code past the size ceiling Rollup warns on, while the
+// small above-the-fold shell pieces (login gate, top nav, mobile bar) stay
+// static so first paint never waits on a section chunk. The auth gate renders
+// before any lazy boundary mounts, so an unauthenticated browser never fetches
+// a dashboard chunk at all.
 
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import {
   clearAuthToken,
   getHealth,
@@ -18,19 +26,26 @@ import {
   subscribeAuthState,
   type HealthResponse,
 } from "./api";
-import ApprovalsInbox from "./components/ApprovalsInbox";
-import ChatView from "./components/ChatView";
-import DashboardView from "./components/DashboardView";
-import GoalsManager from "./components/GoalsManager";
 import LoginView from "./components/LoginView";
-import MemoryBrowser from "./components/MemoryBrowser";
 import MobileBottomNav from "./components/MobileBottomNav";
-import RunLogViewer from "./components/RunLogViewer";
-import SchedulerManager from "./components/SchedulerManager";
-import SettingsManager from "./components/SettingsManager";
-import StagedChangesDrawer from "./components/StagedChangesDrawer";
 import TopNav, { type Tab } from "./components/TopNav";
 import { useWebNotifications } from "./hooks/useWebNotifications";
+
+// Route-level chunks for the tab-switched surfaces. Splitting happens at the
+// import mechanism only: props, selection logic, and the shared WebSocket and
+// settings stores live exactly where they did under static imports, and the
+// panel mount/unmount pattern below is unchanged. Each lazy component is
+// created once at module scope, so a section's chunk is fetched on its first
+// render and reused for every later visit across tab switches.
+const ApprovalsInbox = lazy(() => import("./components/ApprovalsInbox"));
+const ChatView = lazy(() => import("./components/ChatView"));
+const DashboardView = lazy(() => import("./components/DashboardView"));
+const GoalsManager = lazy(() => import("./components/GoalsManager"));
+const MemoryBrowser = lazy(() => import("./components/MemoryBrowser"));
+const RunLogViewer = lazy(() => import("./components/RunLogViewer"));
+const SchedulerManager = lazy(() => import("./components/SchedulerManager"));
+const SettingsManager = lazy(() => import("./components/SettingsManager"));
+const StagedChangesDrawer = lazy(() => import("./components/StagedChangesDrawer"));
 
 const VALID_TABS: Tab[] = ["dashboard", "chat", "approvals", "goals", "memory", "indexing", "runs", "schedules", "settings"];
 
@@ -59,6 +74,19 @@ function getInitialTab(): Tab {
 // frame so neither the dashboard nor the login form flashes before the engine
 // reports which posture it is serving.
 type AuthGate = "checking" | "authenticated" | "required";
+
+// Suspense placeholder for a lazy section while its chunk is in flight. Reuses
+// the shell's existing loading frame markup rather than inventing a second
+// progress visual: it occupies the same content slot the section will render
+// into, so the swap from placeholder to view adds no layout shift.
+function SectionProgress() {
+  return (
+    <div className="section-loading">
+      <div className="spinner" />
+      <p>Loading section…</p>
+    </div>
+  );
+}
 
 export default function App() {
   const [authGate, setAuthGate] = useState<AuthGate>("checking");
@@ -282,7 +310,9 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
       <div className="app-root standalone-settings">
         <main className="app-main-content">
           <div className="app-container">
-            <SettingsManager />
+            <Suspense fallback={<SectionProgress />}>
+              <SettingsManager />
+            </Suspense>
           </div>
         </main>
       </div>
@@ -306,11 +336,17 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
         onRequestNotifications={handleRequestNotifications}
       />
 
-      <StagedChangesDrawer
-        isOpen={stagedDrawerOpen}
-        onClose={() => setStagedDrawerOpen(false)}
-        onCountChange={setStagedFilesCount}
-      />
+      {/* The drawer is a page-level overlay that renders nothing while closed,
+          so its in-flight chunk gets a null fallback: any visible placeholder
+          here would be a new element the closed state never had, and count
+          badge wiring simply begins the moment the chunk lands. */}
+      <Suspense fallback={null}>
+        <StagedChangesDrawer
+          isOpen={stagedDrawerOpen}
+          onClose={() => setStagedDrawerOpen(false)}
+          onCountChange={setStagedFilesCount}
+        />
+      </Suspense>
 
       {/* Main Content Area */}
       <main className="app-main-content">
@@ -321,35 +357,75 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
             style={{ display: tab === "chat" ? "block" : "none", height: tab === "chat" ? "100%" : undefined }}
             aria-hidden={tab !== "chat"}
           >
-            <ChatView
-              health={health}
-              onSelectTab={handleSelectTab}
-              isActive={tab === "chat"}
-              initialPrompt={pendingChatPrompt}
-              onClearInitialPrompt={() => setPendingChatPrompt(null)}
-              targetSessionId={targetChatSessionId}
-              onClearTargetSessionId={() => setTargetChatSessionId(null)}
-            />
+            {/* The boundary lives inside the display-toggled wrapper so the
+                loading placeholder follows the panel's own visibility: while
+                chat is not the active tab the chunk fetch is invisible, and
+                once loaded the panel stays mounted exactly as before. */}
+            <Suspense fallback={<SectionProgress />}>
+              <ChatView
+                health={health}
+                onSelectTab={handleSelectTab}
+                isActive={tab === "chat"}
+                initialPrompt={pendingChatPrompt}
+                onClearInitialPrompt={() => setPendingChatPrompt(null)}
+                targetSessionId={targetChatSessionId}
+                onClearTargetSessionId={() => setTargetChatSessionId(null)}
+              />
+            </Suspense>
           </div>
 
           {tab === "dashboard" ? (
-            <DashboardView
-              health={health}
-              stagedFilesCount={stagedFilesCount}
-              onOpenStagedDrawer={() => setStagedDrawerOpen(true)}
-              onSelectTab={handleSelectTab}
-              onOpenChatWithPrompt={handleOpenChatWithPrompt}
-              onOpenSession={handleOpenSession}
-            />
+            <Suspense fallback={<SectionProgress />}>
+              <DashboardView
+                health={health}
+                stagedFilesCount={stagedFilesCount}
+                onOpenStagedDrawer={() => setStagedDrawerOpen(true)}
+                onSelectTab={handleSelectTab}
+                onOpenChatWithPrompt={handleOpenChatWithPrompt}
+                onOpenSession={handleOpenSession}
+              />
+            </Suspense>
           ) : null}
 
-          {tab === "approvals" ? <ApprovalsInbox /> : null}
-          {tab === "goals" ? <GoalsManager attentionCount={goalsAttention} onOpenSettings={() => setTab("settings")} /> : null}
-          {tab === "memory" ? <MemoryBrowser view="memory" /> : null}
-          {tab === "indexing" ? <MemoryBrowser view="indexing" /> : null}
-          {tab === "runs" ? <RunLogViewer /> : null}
-          {tab === "schedules" ? <SchedulerManager /> : null}
-          {tab === "settings" ? <SettingsManager /> : null}
+          {/* Each tab condition keeps its own boundary: mounting a section on
+              first visit and unmounting it on tab switch is the pre-lazy
+              behavior, and a per-tab fallback means a slow chunk for one
+              section never blanks the content of another. */}
+          {tab === "approvals" ? (
+            <Suspense fallback={<SectionProgress />}>
+              <ApprovalsInbox />
+            </Suspense>
+          ) : null}
+          {tab === "goals" ? (
+            <Suspense fallback={<SectionProgress />}>
+              <GoalsManager attentionCount={goalsAttention} onOpenSettings={() => setTab("settings")} />
+            </Suspense>
+          ) : null}
+          {tab === "memory" ? (
+            <Suspense fallback={<SectionProgress />}>
+              <MemoryBrowser view="memory" />
+            </Suspense>
+          ) : null}
+          {tab === "indexing" ? (
+            <Suspense fallback={<SectionProgress />}>
+              <MemoryBrowser view="indexing" />
+            </Suspense>
+          ) : null}
+          {tab === "runs" ? (
+            <Suspense fallback={<SectionProgress />}>
+              <RunLogViewer />
+            </Suspense>
+          ) : null}
+          {tab === "schedules" ? (
+            <Suspense fallback={<SectionProgress />}>
+              <SchedulerManager />
+            </Suspense>
+          ) : null}
+          {tab === "settings" ? (
+            <Suspense fallback={<SectionProgress />}>
+              <SettingsManager />
+            </Suspense>
+          ) : null}
         </div>
       </main>
 

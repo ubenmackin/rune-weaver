@@ -83,6 +83,11 @@ public struct SettingsResponse: Content, Equatable {
     public let ideas: IdeasConfig
     /// Parallel worker fan-out policy backing `fanout.run`.
     public let fanout: FanOutConfig
+    /// Owner-facing assistant persona from `[persona]`. The stored snapshot
+    /// rides the settings GET so the dashboard identity surface round-trips
+    /// without a second endpoint; a persona save itself is boot-held and
+    /// advertised through `requiresRestart`.
+    public let persona: PersonaConfig
     /// HTTP bind interface from `[server] hostname`. Changing it needs a restart
     /// because the socket and the Host gate are fixed at boot.
     public let serverHostname: String
@@ -146,6 +151,7 @@ public struct SettingsResponse: Content, Equatable {
         self.proactive = config.proactive
         self.ideas = config.ideas
         self.fanout = config.fanOut
+        self.persona = config.persona
         self.serverHostname = config.server.hostname
         self.serverPort = config.server.port
         self.serverAllowedHosts = config.server.allowedHosts
@@ -202,6 +208,7 @@ public struct SettingsResponse: Content, Equatable {
         case proactive
         case ideas
         case fanout
+        case persona
         case serverHostname
         case serverPort
         case serverAllowedHosts
@@ -209,14 +216,19 @@ public struct SettingsResponse: Content, Equatable {
         case requiresRestart
     }
 
-    /// Decodes tolerantly so payloads from engines that predate the `[server]`
-    /// bind keys still parse: the bind fields fall back to the loopback
-    /// defaults and `requiresRestart` falls back to false instead of failing
-    /// the settings fetch.
+    /// Decodes tolerantly so payloads from engines that predate an additive
+    /// settings key still parse: the key falls back to its documented default
+    /// — the `[server]` bind fields to the loopback defaults, `requiresRestart`
+    /// to false, and `logLevel` to the engine's documented `info` — instead of
+    /// failing the settings fetch. The posture is deliberately defensive rather
+    /// than strict: every settings-surface key has a known default, so a missing
+    /// key means an older writer on the wire, not a corrupt payload, and
+    /// refusing the whole GET for one absent key would strand the dashboard on
+    /// a surface it can render correctly from the remaining fields.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         engineName = try container.decode(String.self, forKey: .engineName)
-        logLevel = try container.decode(String.self, forKey: .logLevel)
+        logLevel = try container.decodeIfPresent(String.self, forKey: .logLevel) ?? "info"
         compactionThresholdPercent = try container.decodeIfPresent(Int.self, forKey: .compactionThresholdPercent) ?? 80
         maxToolIterations = try container.decodeIfPresent(Int.self, forKey: .maxToolIterations) ?? 10
         defaultProvider = try container.decode(String.self, forKey: .defaultProvider)
@@ -266,6 +278,10 @@ public struct SettingsResponse: Content, Equatable {
         proactive = try container.decodeIfPresent(ProactiveConfig.self, forKey: .proactive) ?? ProactiveConfig()
         ideas = try container.decodeIfPresent(IdeasConfig.self, forKey: .ideas) ?? IdeasConfig()
         fanout = try container.decodeIfPresent(FanOutConfig.self, forKey: .fanout) ?? FanOutConfig()
+        // Absent persona keeps the stock identity so payloads written before
+        // the `[persona]` surface existed still decode instead of failing the
+        // settings fetch, mirroring the config document's own tolerance.
+        persona = try container.decodeIfPresent(PersonaConfig.self, forKey: .persona) ?? PersonaConfig()
         serverHostname = try container.decodeIfPresent(String.self, forKey: .serverHostname) ?? ServerEndpointConfig.defaultHostname
         serverPort = try container.decodeIfPresent(Int.self, forKey: .serverPort) ?? ServerEndpointConfig.defaultPort
         serverAllowedHosts = try container.decodeIfPresent([String].self, forKey: .serverAllowedHosts) ?? []
@@ -325,6 +341,7 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(proactive, forKey: .proactive)
         try container.encode(ideas, forKey: .ideas)
         try container.encode(fanout, forKey: .fanout)
+        try container.encode(persona, forKey: .persona)
         try container.encode(serverHostname, forKey: .serverHostname)
         try container.encode(serverPort, forKey: .serverPort)
         try container.encode(serverAllowedHosts, forKey: .serverAllowedHosts)
@@ -400,6 +417,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let ideas: IdeasUpdate?
     /// Partial fan-out patch; a nil patch preserves the stored `[fanout]` section.
     public let fanout: FanOutSettingsUpdate?
+    /// Partial persona patch; a nil patch preserves the stored `[persona]` section.
+    public let persona: PersonaUpdate?
     /// Bind interface override for `[server] hostname`. Nil preserves the stored value.
     public let serverHostname: String?
     /// Bind port override for `[server] port`. Nil preserves the stored value.
@@ -456,6 +475,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         proactive: ProactiveUpdate? = nil,
         ideas: IdeasUpdate? = nil,
         fanout: FanOutSettingsUpdate? = nil,
+        persona: PersonaUpdate? = nil,
         serverHostname: String? = nil,
         serverPort: Int? = nil,
         serverAllowedHosts: [String]? = nil
@@ -508,6 +528,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.proactive = proactive
         self.ideas = ideas
         self.fanout = fanout
+        self.persona = persona
         self.serverHostname = serverHostname
         self.serverPort = serverPort
         self.serverAllowedHosts = serverAllowedHosts
@@ -540,6 +561,7 @@ extension UpdateSettingsRequest {
         try applyProactive(to: &config.proactive)
         applyIdeas(to: &config.ideas)
         applyFanOut(to: &config.fanOut)
+        try applyPersona(to: &config.persona)
         try applyServer(to: &config.server)
     }
 

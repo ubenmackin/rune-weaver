@@ -1,9 +1,17 @@
 // Rune Weaver Dashboard — Component tests for SettingsManager.
+//
+// Beyond the pane routing, the persona describes pin the [persona] contract:
+// the Engine pane renders the loaded identity, a save issues exactly one
+// partial-patch request carrying only the persona delta, a server 400 lands
+// in the pane's own error banner, the accent picker round-trips all four
+// colorways and degrades an unknown stored key to violet, and every settings
+// read republishes the persona so identity surfaces mirror the owner's edit.
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsManager, { SECRET_STATUS_CHUNK_SIZE, getToolCategory } from "./SettingsManager";
+import { peekPersonaSignals } from "./PersonaAvatar";
 import {
   BASH_PERMISSION_ACTIONS,
   BASH_TIMEOUT_MAX_SECONDS,
@@ -15,6 +23,13 @@ import {
   DEFAULT_BASH_ENABLED,
   DEFAULT_BASH_RULES,
   DEFAULT_BASH_TIMEOUT_SECONDS,
+  DEFAULT_PERSONA_AVATAR,
+  DEFAULT_PERSONA_TONE,
+  MAX_PERSONA_ASSISTANT_NAME_LENGTH,
+  MAX_PERSONA_STYLE_LENGTH,
+  MAX_PERSONA_USER_NAME_LENGTH,
+  PERSONA_AVATAR_COLORS,
+  PERSONA_TONES,
 } from "../api";
 import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
@@ -3977,6 +3992,251 @@ describe("bash defaults and bounds contract", () => {
     expect([...BASH_PERMISSION_ACTIONS]).toEqual(["allow", "ask", "deny"]);
     expect(BASH_TIMEOUT_MIN_SECONDS).toBe(1);
     expect(BASH_TIMEOUT_MAX_SECONDS).toBe(3600);
+  });
+});
+
+describe("SettingsManager persona pane", () => {
+  const STYLE_TEXT = "Answer in complete sentences.";
+  const PERSONA_SETTINGS = {
+    ...mockSettings,
+    persona: {
+      assistant_name: "Zephyra",
+      tone: "concise",
+      style: STYLE_TEXT,
+      user_name: "Kupan",
+      avatar: "rose",
+    },
+  };
+
+  type PutOptions = {
+    putResponse?: (body: Record<string, unknown>) => Response;
+    settings?: Record<string, unknown>;
+  };
+
+  // Routes every request through one stub so the pane's reads (settings,
+  // plugins, tools, run poll, secrets) all answer with the persona-shaped
+  // snapshot, while PUT /settings is captured for the changed-only contract.
+  // A PUT without an explicit response echoes the merged persona exactly the
+  // way the engine's partial merge does, so a save repopulates from truth.
+  function stubPersonaFetch(options: PutOptions = {}): Record<string, unknown>[] {
+    const settings = options.settings ?? PERSONA_SETTINGS;
+    const putBodies: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/settings" && init?.method === "PUT") {
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          putBodies.push(body);
+          if (options.putResponse) return options.putResponse(body);
+          return jsonResponse({
+            ...settings,
+            persona: {
+              ...((settings as { persona?: Record<string, unknown> }).persona ?? {}),
+              ...((body as { persona?: Record<string, unknown> }).persona ?? {}),
+            },
+          });
+        }
+        return jsonResponse(settings);
+      }),
+    );
+    return putBodies;
+  }
+
+  async function openEnginePane(user: ReturnType<typeof userEvent.setup>) {
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /Engine and Logs/i }));
+    return screen.getByTestId("persona-pane");
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedRunsForTesting();
+  });
+
+  it("renders the loaded persona values in the Engine pane", async () => {
+    const user = userEvent.setup();
+    stubPersonaFetch();
+    render(<SettingsManager />);
+    const pane = await openEnginePane(user);
+    expect(within(pane).getByDisplayValue("Zephyra")).toBeDefined();
+    expect((within(pane).getByLabelText("Tone") as HTMLSelectElement).value).toBe(
+      "concise",
+    );
+    expect(within(pane).getByDisplayValue(STYLE_TEXT)).toBeDefined();
+    expect(within(pane).getByDisplayValue("Kupan")).toBeDefined();
+    expect(
+      within(pane).getByTestId("persona-style-count").textContent,
+    ).toContain(`${STYLE_TEXT.length} / ${MAX_PERSONA_STYLE_LENGTH}`);
+    // The stored accent carries the ring, and the picker cells are the
+    // 64px colorway sprites the dashboard ships.
+    expect(
+      within(pane).getByTestId("persona-avatar-rose"),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      within(pane)
+        .getByTestId("persona-avatar-rose")
+        .querySelector("img")
+        ?.getAttribute("src"),
+    ).toBe("/avatars/wisp-rose-idle-64.png");
+    // An untouched pane has no delta to write, so Save stays disabled and a
+    // stray click can never PUT the whole identity back.
+    expect(within(pane).getByTestId("persona-save")).toBeDisabled();
+    // Every settings read republishes the persona into the shared store so
+    // the profile block and chat header mirror this pane without a reload.
+    expect(peekPersonaSignals().persona?.assistant_name).toBe("Zephyra");
+  });
+
+  it("saves exactly one request carrying only the persona delta", async () => {
+    const user = userEvent.setup();
+    const putBodies = stubPersonaFetch();
+    render(<SettingsManager />);
+    const pane = await openEnginePane(user);
+    const nameInput = within(pane).getByLabelText("Assistant Name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Vex");
+    await user.click(within(pane).getByTestId("persona-save"));
+    await waitFor(() => {
+      expect(putBodies.length).toBe(1);
+    });
+    // The partial-patch contract: the wire carries the single changed key
+    // only — no tone, style, user name, or avatar, and nothing outside the
+    // persona section.
+    expect(putBodies[0]).toEqual({ persona: { assistant_name: "Vex" } });
+    await waitFor(() => {
+      expect(screen.getByText(/Persona saved/)).toBeDefined();
+    });
+    // The saved identity publishes live so the nav and chat header re-render
+    // with the new name without waiting for an engine reload.
+    expect(peekPersonaSignals().persona?.assistant_name).toBe("Vex");
+    expect(within(pane).getByTestId("persona-save")).toBeDisabled();
+  });
+
+  it("maps a server 400 to the pane's field-level error banner", async () => {
+    const user = userEvent.setup();
+    stubPersonaFetch({
+      putResponse: () =>
+        jsonResponse(
+          { reason: "persona.tone must be one of concise, warm, formal, playful" },
+          400,
+        ),
+    });
+    render(<SettingsManager />);
+    const pane = await openEnginePane(user);
+    await user.selectOptions(within(pane).getByLabelText("Tone"), "formal");
+    await user.click(within(pane).getByTestId("persona-save"));
+    await waitFor(() => {
+      expect(within(pane).getByTestId("persona-error").textContent).toContain(
+        "persona.tone",
+      );
+    });
+    expect(screen.queryByText(/Persona saved/)).toBeNull();
+  });
+
+  it("selects all four colorways through the avatar picker", async () => {
+    const user = userEvent.setup();
+    const putBodies = stubPersonaFetch();
+    render(<SettingsManager />);
+    const pane = await openEnginePane(user);
+    for (const accent of ["violet", "cyan", "emerald", "rose"]) {
+      await user.click(within(pane).getByTestId(`persona-avatar-${accent}`));
+      expect(
+        within(pane).getByTestId(`persona-avatar-${accent}`),
+      ).toHaveAttribute("aria-pressed", "true");
+      // Exactly one ring at a time so the selection never splits.
+      for (const other of ["violet", "cyan", "emerald", "rose"]) {
+        if (other === accent) continue;
+        expect(
+          within(pane).getByTestId(`persona-avatar-${other}`),
+        ).toHaveAttribute("aria-pressed", "false");
+      }
+    }
+    // The loop ended on the stored rose accent (not dirty); move to emerald
+    // and the save names only the avatar key in the delta.
+    await user.click(within(pane).getByTestId("persona-avatar-emerald"));
+    await user.click(within(pane).getByTestId("persona-save"));
+    await waitFor(() => {
+      expect(putBodies.length).toBe(1);
+    });
+    expect(putBodies[0]).toEqual({ persona: { avatar: "emerald" } });
+  });
+
+  it("falls back to the violet selection when the stored accent is unknown", async () => {
+    const user = userEvent.setup();
+    stubPersonaFetch({
+      settings: {
+        ...PERSONA_SETTINGS,
+        persona: { ...PERSONA_SETTINGS.persona, avatar: "chartreuse" },
+      },
+    });
+    render(<SettingsManager />);
+    const pane = await openEnginePane(user);
+    // A drifted stored accent never blanks the picker: the ring lands on the
+    // master colorway exactly the way the avatar renderer falls back.
+    expect(
+      within(pane).getByTestId("persona-avatar-violet"),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      within(pane).getByTestId("persona-avatar-rose"),
+    ).toHaveAttribute("aria-pressed", "false");
+    // And the untouched baseline is the fallback itself, so nothing is dirty.
+    expect(within(pane).getByTestId("persona-save")).toBeDisabled();
+  });
+
+  it("updates the style character count live while typing", async () => {
+    const user = userEvent.setup();
+    stubPersonaFetch();
+    render(<SettingsManager />);
+    const pane = await openEnginePane(user);
+    await user.type(within(pane).getByLabelText("Style Guidance"), " please");
+    const nextLength = STYLE_TEXT.length + " please".length;
+    expect(
+      within(pane).getByTestId("persona-style-count").textContent,
+    ).toContain(`${nextLength} / ${MAX_PERSONA_STYLE_LENGTH}`);
+  });
+
+  it("renders the stock identity and stays clean when the engine predates [persona]", async () => {
+    const user = userEvent.setup();
+    const legacy = { ...mockSettings };
+    stubPersonaFetch({ settings: legacy });
+    render(<SettingsManager />);
+    const pane = await openEnginePane(user);
+    // Absent persona seeds the stock form: blank assistant name (the engine
+    // keeps its default identity), warm tone, violet accent, nothing dirty.
+    expect(within(pane).getByLabelText("Assistant Name")).toHaveValue("");
+    expect((within(pane).getByLabelText("Tone") as HTMLSelectElement).value).toBe(
+      "warm",
+    );
+    expect(
+      within(pane).getByTestId("persona-avatar-violet"),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(within(pane).getByTestId("persona-save")).toBeDisabled();
+    expect(peekPersonaSignals().persona).toBeNull();
+  });
+});
+
+describe("persona defaults and bounds contract", () => {
+  it("pins the persona mirrors to the engine PersonaConfig", () => {
+    // Single cross-language contract: the server owns the bounds and defaults
+    // in `Sources/RuneWeaverCore/PersonaConfig.swift` (maxAssistantNameLength,
+    // maxStyleLength, maxUserNameLength, defaultTone, defaultAvatar) and the
+    // closed enums `PersonaTone`/`PersonaAvatar`; these mirrors must stay
+    // equal so the pane's inputs and the engine merge never drift. Update
+    // both sides together.
+    expect(MAX_PERSONA_ASSISTANT_NAME_LENGTH).toBe(32);
+    expect(MAX_PERSONA_STYLE_LENGTH).toBe(2000);
+    expect(MAX_PERSONA_USER_NAME_LENGTH).toBe(64);
+    expect(DEFAULT_PERSONA_TONE).toBe("warm");
+    expect(DEFAULT_PERSONA_AVATAR).toBe("violet");
+    expect([...PERSONA_TONES]).toEqual(["concise", "warm", "formal", "playful"]);
+    expect([...PERSONA_AVATAR_COLORS]).toEqual([
+      "violet",
+      "cyan",
+      "emerald",
+      "rose",
+    ]);
   });
 });
 

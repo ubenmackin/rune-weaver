@@ -1,5 +1,8 @@
 // Rune Weaver Dashboard — Settings manager for config.toml configuration.
-// Allows managing LLM providers, engine identity, sandbox policy, memory, voice, web search, and email accounts.
+// Allows managing LLM providers, engine identity, sandbox policy, memory, voice, web search, email accounts, and the owner-facing assistant persona.
+// The persona pane persists [persona] through the shared settings PUT with a
+// changed-only patch and publishes every loaded and saved snapshot to the
+// shared persona store, so identity surfaces mirror the owner's edits live.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -78,6 +81,21 @@ import {
   PROACTIVE_MODES,
   normalizeProactiveMode,
   isValidProactiveMode,
+  DEFAULT_PERSONA_AVATAR,
+  DEFAULT_PERSONA_TONE,
+  MAX_PERSONA_ASSISTANT_NAME_LENGTH,
+  MAX_PERSONA_STYLE_LENGTH,
+  MAX_PERSONA_USER_NAME_LENGTH,
+  PERSONA_AVATAR_COLORS,
+  PERSONA_TONE_OPTIONS,
+  PERSONA_TONES,
+  normalizePersonaAvatarColor,
+  normalizePersonaTone,
+  personaAssistantName,
+  personaStyle,
+  personaUserName,
+  type PersonaData,
+  type PersonaSettingsUpdate,
   formatBlockedAppsText,
   parseBlockedAppsText,
   BASH_PERMISSION_ACTIONS,
@@ -144,6 +162,10 @@ import Modal from "./Modal";
 import RuneMarketplaceModal from "./RuneMarketplaceModal";
 import { IndexPolicyPanel } from "./IndexingPanel";
 import { PolicyPane } from "./PolicyPane";
+import {
+  PersonaAvatar,
+  publishPersonaFromSettings,
+} from "./PersonaAvatar";
 import { ToastStack } from "./Toast";
 import { useRunningRuns } from "../hooks/useRunningRuns";
 import { useToastStack } from "../hooks/useToastStack";
@@ -221,6 +243,25 @@ function isSettingsTab(value: unknown): value is SettingsTab {
     typeof value === "string" &&
     (SETTINGS_TABS as readonly string[]).includes(value)
   );
+}
+
+// Converges a loaded tone/accent spelling to the closed set the engine merge
+// accepts, falling back to the stock default for an unknown or absent value.
+// The populate path and the delta baseline must start from identical converged
+// values: if one kept a drifted stored spelling while the other normalized,
+// the pane would open dirty on a value the owner never typed.
+function canonicalPersonaTone(value: unknown): string {
+  const normalized = normalizePersonaTone(value);
+  return (PERSONA_TONES as readonly string[]).includes(normalized)
+    ? normalized
+    : DEFAULT_PERSONA_TONE;
+}
+
+function canonicalPersonaAvatarColor(value: unknown): string {
+  const normalized = normalizePersonaAvatarColor(value);
+  return (PERSONA_AVATAR_COLORS as readonly string[]).includes(normalized)
+    ? normalized
+    : DEFAULT_PERSONA_AVATAR;
 }
 
 interface ToolCategoryMeta {
@@ -1261,6 +1302,25 @@ export default function SettingsManager() {
   const [proactiveJudgeTimeoutSeconds, setProactiveJudgeTimeoutSeconds] = useState<number | string>(
     DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS
   );
+  // Owner-facing assistant persona ([persona]): assistant name, tone preset,
+  // free-form style guidance, the owner's preferred address name, and the
+  // client-side avatar accent. Drafts hold raw text so a cleared field saves
+  // the documented fallback rather than a coerced default, while tone and
+  // accent drafts stay closed-set (populate normalizes, the picker only ever
+  // writes known spellings). `personaLoadedRef` keeps the last-loaded snapshot
+  // for the changed-only delta: a field the owner never touches stays omitted
+  // so the stored value survives exactly like the goals and proactive patches.
+  const [personaAssistantNameDraft, setPersonaAssistantNameDraft] = useState("");
+  const [personaToneDraft, setPersonaToneDraft] = useState<string>(DEFAULT_PERSONA_TONE);
+  const [personaStyleDraft, setPersonaStyleDraft] = useState("");
+  const [personaUserNameDraft, setPersonaUserNameDraft] = useState("");
+  const [personaAvatarDraft, setPersonaAvatarDraft] = useState<string>(DEFAULT_PERSONA_AVATAR);
+  const personaLoadedRef = useRef<PersonaData>({});
+  const [personaSaving, setPersonaSaving] = useState(false);
+  // Field-level error slot for this pane: the engine names the dotted field
+  // path on a 400, so the message belongs beside the persona fields rather
+  // than in the shared page banner that the full-form save uses.
+  const [personaError, setPersonaError] = useState<string | null>(null);
   // Files & Access lives in the Security pane as the single files editor:
   // the page Save owns persistence through executeSave with
   // validateFilesFields and buildFilesPayload, so guard shapes never fork.
@@ -2343,6 +2403,96 @@ export default function SettingsManager() {
     return null;
   }, [proactiveMode, proactiveJudgeTimeoutSeconds]);
 
+  // Copies one settings fetch into the persona fields, tolerating an absent
+  // [persona] section from older engines by keeping the stock defaults, and
+  // records the loaded snapshot that drives the changed-only delta. Tone and
+  // accent converge to their canonical lowercase spellings the way the engine
+  // normalizers do, so a file-configured `WARM` or a drifted accent never
+  // blanks the select or leaves the picker with no ring.
+  const populatePersonaSettings = useCallback(
+    (persona: PersonaData | undefined | null) => {
+      const loaded = persona ?? {};
+      personaLoadedRef.current = loaded;
+      setPersonaAssistantNameDraft(personaAssistantName(loaded) ?? "");
+      setPersonaToneDraft(canonicalPersonaTone(loaded.tone));
+      setPersonaStyleDraft(personaStyle(loaded));
+      setPersonaUserNameDraft(personaUserName(loaded));
+      setPersonaAvatarDraft(canonicalPersonaAvatarColor(loaded.avatar));
+      setPersonaError(null);
+    },
+    [],
+  );
+
+  // Builds the [persona] delta from the identity drafts: only fields that
+  // moved since the last load travel on the wire, so one save is a partial
+  // patch that preserves every stored key the owner never touched — including
+  // the rest of the persona itself. An emptied assistant name still sends the
+  // blank string, which the engine documents as the fall back to the stock
+  // identity, rather than silently omitting a deliberate clear.
+  const buildPersonaDelta = useCallback((): PersonaSettingsUpdate => {
+    const loaded = personaLoadedRef.current;
+    const delta: PersonaSettingsUpdate = {};
+    const loadedName = personaAssistantName(loaded) ?? "";
+    const nextName = personaAssistantNameDraft.trim();
+    if (nextName !== loadedName) {
+      delta.assistant_name = nextName;
+    }
+    const loadedTone = canonicalPersonaTone(loaded.tone);
+    if (personaToneDraft !== loadedTone) {
+      delta.tone = personaToneDraft;
+    }
+    if (personaStyleDraft !== personaStyle(loaded)) {
+      delta.style = personaStyleDraft;
+    }
+    const loadedUserName = personaUserName(loaded);
+    const nextUserName = personaUserNameDraft.trim();
+    if (nextUserName !== loadedUserName) {
+      delta.user_name = nextUserName;
+    }
+    const loadedAvatar = canonicalPersonaAvatarColor(loaded.avatar);
+    if (personaAvatarDraft !== loadedAvatar) {
+      delta.avatar = personaAvatarDraft;
+    }
+    return delta;
+  }, [
+    personaAssistantNameDraft,
+    personaToneDraft,
+    personaStyleDraft,
+    personaUserNameDraft,
+    personaAvatarDraft,
+  ]);
+
+  // Shared persona validation so the pane rejects an oversized or drifted
+  // field before any network write, mirroring the core normalizer bounds. The
+  // inputs clamp with maxLength already, so these checks are the closed-set
+  // and pasted-shape backstop, not the primary guard.
+  const validatePersonaFields = useCallback((): string | null => {
+    if (personaAssistantNameDraft.length > MAX_PERSONA_ASSISTANT_NAME_LENGTH) {
+      return `Invalid assistant name: must be at most ${MAX_PERSONA_ASSISTANT_NAME_LENGTH} characters.`;
+    }
+    if (!(PERSONA_TONES as readonly string[]).includes(personaToneDraft)) {
+      return `Invalid tone: must be one of ${(PERSONA_TONES as readonly string[]).join(", ")}.`;
+    }
+    if (personaStyleDraft.length > MAX_PERSONA_STYLE_LENGTH) {
+      return `Invalid style guidance: must be at most ${MAX_PERSONA_STYLE_LENGTH} characters.`;
+    }
+    if (personaUserNameDraft.length > MAX_PERSONA_USER_NAME_LENGTH) {
+      return `Invalid user name: must be at most ${MAX_PERSONA_USER_NAME_LENGTH} characters.`;
+    }
+    if (
+      !(PERSONA_AVATAR_COLORS as readonly string[]).includes(personaAvatarDraft)
+    ) {
+      return `Invalid avatar accent: must be one of ${(PERSONA_AVATAR_COLORS as readonly string[]).join(", ")}.`;
+    }
+    return null;
+  }, [
+    personaAssistantNameDraft,
+    personaToneDraft,
+    personaStyleDraft,
+    personaUserNameDraft,
+    personaAvatarDraft,
+  ]);
+
   // Builds the [files] delta for the single page Save via executeSave; no section save remains.
   // Reuses the existing top-level keys (filesDenyPatterns, filesAllowRoots,
   // filesRequireApprovalOnDeny) so the wire contract stays single-shaped.
@@ -2507,6 +2657,13 @@ export default function SettingsManager() {
     // Proactivity fields share one helper so load and save stay symmetric; an
     // absent [proactive] keeps the form defaults instead of blanking the pane.
     populateProactiveSettings(data.proactive);
+    // Persona fields share one helper so load and save stay symmetric; an
+    // absent [persona] keeps the stock identity instead of blanking the pane.
+    // Every settings read then republishes the persona into the shared store
+    // so the profile block and chat header mirror this pane exactly, including
+    // after a persona save whose response carries the merged snapshot.
+    populatePersonaSettings(data.persona);
+    publishPersonaFromSettings(data.persona);
     // Fan-out knobs share one helper so load and save stay symmetric; an
     // absent [fanout] keeps the modal defaults instead of blanking the modal.
     populateFanoutSettings(data.fanout);
@@ -2556,7 +2713,42 @@ export default function SettingsManager() {
       prev ?? { hostname: fileBindHostname, port: fileBindPort, allowedHosts: fileBindHosts }
     );
     setServerRestartRequired(Boolean(data.requiresRestart));
-  }, [populateMediaSettings, populateDesktopSettings, populateBashSettings, populateGoalsSettings, populateIdeasSettings, populateProactiveSettings, populateFanoutSettings]);
+  }, [populateMediaSettings, populateDesktopSettings, populateBashSettings, populateGoalsSettings, populateIdeasSettings, populateProactiveSettings, populatePersonaSettings, populateFanoutSettings]);
+
+  // Persona saves through the shared settings PUT with only the persona delta,
+  // the same partial-patch posture as the modal category saves: the engine
+  // merge preserves every omitted key, and a server 400 (an unknown closed-set
+  // spelling that slipped a pasted value, for example) surfaces the engine's
+  // field-naming message in this pane's own error banner. A save with no delta
+  // never hits the network; the button stays disabled instead. Declared after
+  // `populateForm` because its repopulate dependency is created there first.
+  const handleSavePersona = useCallback(async () => {
+    const validationError = validatePersonaFields();
+    if (validationError) {
+      setPersonaError(validationError);
+      return;
+    }
+    const delta = buildPersonaDelta();
+    if (Object.keys(delta).length === 0) return;
+    setPersonaSaving(true);
+    setPersonaError(null);
+    try {
+      const updated = await updateSettings({ persona: delta });
+      // Repopulating reseeds every draft from the PUT response, re-arms the
+      // delta baseline, and publishes the persona into the shared store so the
+      // profile block and chat header adopt the new identity without a reload.
+      populateForm(updated);
+      pushSuccessToast(
+        "Persona saved. The agent adopts the new identity on engine reload.",
+      );
+    } catch (err) {
+      setPersonaError(
+        err instanceof ApiError ? err.message : "Failed to save persona",
+      );
+    } finally {
+      setPersonaSaving(false);
+    }
+  }, [buildPersonaDelta, populateForm, pushSuccessToast, validatePersonaFields]);
 
   // Reconciles the boot snapshot from /health when the engine advertises its
   // live bind. Older engines omit the keys, in which case the pre-save file
@@ -3864,6 +4056,12 @@ export default function SettingsManager() {
     !areServerAllowedHostsEqual(serverFileHostsForBadge, serverBootHostsForBadge);
   const serverRestartVisible = serverRestartRequired || serverFileDiffersFromBootForBadge;
 
+  // Changed-only baseline for the persona Save: the delta is recomputed from
+  // the drafts against the last-loaded snapshot on every render, so the button
+  // disables exactly when there is nothing to write and an untouched pane can
+  // never issue a spurious PUT.
+  const personaDirty = Object.keys(buildPersonaDelta()).length > 0;
+
   if (loading && !settings) {
     return (
       <div className="section-loading">
@@ -4783,6 +4981,178 @@ export default function SettingsManager() {
                   Seconds the guarded judge may spend before the gate fails open. Range: {PROACTIVE_JUDGE_TIMEOUT_MIN_SECONDS}–{PROACTIVE_JUDGE_TIMEOUT_MAX_SECONDS}. Default is {DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS}.
                 </p>
               </div>
+            </div>
+          </div>
+          {/* Persona: the owner-authored assistant identity ([persona]) lives
+              with the Engine/Goals panes because the persona sentence rides the
+              same prompt identity the engine knobs shape. The block persists
+              through its own partial-patch save so a rename issues exactly one
+              request carrying only the persona delta — every other stored
+              section, and every untouched persona key, survives verbatim.
+              Saved values mirror into the profile block and chat header live;
+              the running engine adopts the new identity on reload. */}
+          <div
+            className="settings-section card"
+            style={{ marginTop: "16px" }}
+            data-testid="persona-pane"
+          >
+            <div className="settings-section-title-group">
+              <h3>Persona</h3>
+              <p className="settings-section-hint">
+                Assistant name, tone, style guidance, and avatar accent. Takes
+                effect on engine reload.
+              </p>
+            </div>
+            {personaError ? (
+              <div className="error-banner" data-testid="persona-error">
+                {personaError}
+              </div>
+            ) : null}
+            <div className="form-row" style={{ marginTop: "1rem" }}>
+              <div className="form-group flex-1">
+                <label htmlFor="persona-assistant-name">Assistant Name</label>
+                <input
+                  id="persona-assistant-name"
+                  type="text"
+                  className="input-field"
+                  maxLength={MAX_PERSONA_ASSISTANT_NAME_LENGTH}
+                  placeholder="Rune Weaver"
+                  value={personaAssistantNameDraft}
+                  onChange={(e) => setPersonaAssistantNameDraft(e.target.value)}
+                />
+                <p
+                  className="settings-field-hint"
+                  style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}
+                >
+                  How the agent names itself. Blank falls back to the stock
+                  identity. Max {MAX_PERSONA_ASSISTANT_NAME_LENGTH} characters.
+                </p>
+              </div>
+              <div className="form-group flex-1">
+                <label htmlFor="persona-tone">Tone</label>
+                <select
+                  id="persona-tone"
+                  className="input-field"
+                  value={personaToneDraft}
+                  onChange={(e) =>
+                    setPersonaToneDraft(
+                      normalizePersonaTone(e.target.value) || personaToneDraft,
+                    )
+                  }
+                >
+                  {PERSONA_TONE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <span className="form-group-hint">
+                  One preset posture sentence folded into the identity line.
+                </span>
+              </div>
+            </div>
+            <div className="form-row" style={{ marginTop: "1rem" }}>
+              <div className="form-group flex-1">
+                <label htmlFor="persona-user-name">Your Name</label>
+                <input
+                  id="persona-user-name"
+                  type="text"
+                  className="input-field"
+                  maxLength={MAX_PERSONA_USER_NAME_LENGTH}
+                  placeholder="(leave blank for no address clause)"
+                  value={personaUserNameDraft}
+                  onChange={(e) => setPersonaUserNameDraft(e.target.value)}
+                />
+                <p
+                  className="settings-field-hint"
+                  style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}
+                >
+                  Preferred spelling for the address clause. Optional. Max{" "}
+                  {MAX_PERSONA_USER_NAME_LENGTH} characters.
+                </p>
+              </div>
+            </div>
+            <div className="form-group" style={{ marginTop: "1rem" }}>
+              <label htmlFor="persona-style">Style Guidance</label>
+              <textarea
+                id="persona-style"
+                className="input-field"
+                rows={4}
+                maxLength={MAX_PERSONA_STYLE_LENGTH}
+                placeholder="Free-form guidance the agent appends to its identity."
+                value={personaStyleDraft}
+                onChange={(e) => setPersonaStyleDraft(e.target.value)}
+              />
+              {/* Live count keeps the owner honest about the stored cap; the
+                  maxLength attribute already refuses overlong input, so this
+                  is visibility, not enforcement. */}
+              <p
+                className="settings-field-hint"
+                data-testid="persona-style-count"
+                style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}
+              >
+                {personaStyleDraft.length} / {MAX_PERSONA_STYLE_LENGTH} characters
+              </p>
+            </div>
+            <div className="form-group" style={{ marginTop: "1rem" }}>
+              <p
+                className="settings-field-hint"
+                style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)" }}
+              >
+                Avatar accent — a client-side colorway for the assistant sprite.
+                It never reaches the prompt.
+              </p>
+              <div
+                className="persona-avatar-grid"
+                role="group"
+                aria-label="Avatar accent"
+                data-testid="persona-avatar-grid"
+              >
+                {PERSONA_AVATAR_COLORS.map((accent) => (
+                  <button
+                    key={accent}
+                    type="button"
+                    data-testid={`persona-avatar-${accent}`}
+                    className={`persona-avatar-option${
+                      personaAvatarDraft === accent ? " selected" : ""
+                    }`}
+                    aria-pressed={personaAvatarDraft === accent}
+                    aria-label={`Avatar accent ${accent}`}
+                    onClick={() => setPersonaAvatarDraft(accent)}
+                  >
+                    {/* The picker swatch is the avatar component itself with
+                        the blink opted out: a live identity surface blinks
+                        because a resting assistant reads as alive, while a
+                        settings swatch that flickered would claim a state it
+                        cannot acknowledge. Same validation and glyph fallback
+                        as every other surface, so a missing frame never
+                        breaks the picker either. */}
+                    <PersonaAvatar
+                      color={accent}
+                      state="idle"
+                      size={64}
+                      blink={false}
+                      label=""
+                    />
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div
+              style={{ marginTop: "1rem", display: "flex", alignItems: "center", gap: "12px" }}
+            >
+              <button
+                type="button"
+                className="primary"
+                data-testid="persona-save"
+                onClick={() => void handleSavePersona()}
+                disabled={personaSaving || !personaDirty}
+              >
+                {personaSaving ? "Saving…" : "Save Persona"}
+              </button>
+              {!personaDirty ? (
+                <span className="form-group-hint">No unsaved persona changes.</span>
+              ) : null}
             </div>
           </div>
           </>

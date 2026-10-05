@@ -1462,3 +1462,5 @@ public struct ToolCancelResponse: Content, Equatable {
 }
 
 // MARK: - Goals + Proactive Settings Patches and Merge live in ServerDTOsGoals.swift
+
+// MARK: - Persona Settings Patch and Merge live in ServerDTOsPersona.swift

@@ -7,6 +7,11 @@
 // Settings stays inside the icon-only profile menu, so the menu must preserve
 // navigation, health detail, and badge behavior even when the handheld
 // stylesheet collapses the trigger to its glyph.
+//
+// The persona describe pins the profile identity contract: a saved persona
+// name and Wisp accent replace the stock glyph live, an unknown accent key
+// falls back to violet, the attention badge drives the sprite state, and an
+// absent persona renders exactly today's UI.
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -14,6 +19,11 @@ import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import TopNav from "./TopNav";
 import { isGroupActive, rolledUpBadge } from "./navigationConfig";
+import {
+  publishAgentWorking,
+  publishPersonaFromSettings,
+  resetPersonaSignalsForTesting,
+} from "./PersonaAvatar";
 import {
   DEFAULT_SEARCH_MAX_RESULTS,
   DEFAULT_SEARCH_SEARXNG_URL,
@@ -868,5 +878,132 @@ describe("TopNav staged drawer trigger", () => {
         .getByTestId("top-nav-staged-btn")
         .querySelector(".top-nav-staged-badge")?.textContent
     ).toBe("3");
+  });
+});
+
+describe("TopNav persona profile", () => {
+  const HEALTH = {
+    status: "ok",
+    engine: "Rune Weaver",
+    version: "0.1.0",
+    model: "gemma-4-9b",
+    provider: "mlx",
+  };
+
+  function renderPersonaNav(overrides: Record<string, unknown> = {}) {
+    const props = {
+      currentTab: "chat",
+      onSelectTab: () => {},
+      health: HEALTH,
+      runsBadge: 0,
+      approvalsBadge: 0,
+      goalsBadge: 0,
+      notificationsEnabled: false,
+      onRequestNotifications: () => {},
+      ...overrides,
+    } as unknown as ComponentProps<typeof TopNav>;
+    return render(<TopNav {...props} />);
+  }
+
+  async function openProfileMenu(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(
+      screen.getByRole("button", { name: /Profile and Settings menu/i }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    // The persona store is a module singleton: every test starts detached so a
+    // prior publish can never leak a saved identity into a fallback check.
+    resetPersonaSignalsForTesting();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+  });
+
+  it("renders the saved persona name and Wisp accent instead of the stock glyph", async () => {
+    const user = userEvent.setup();
+    publishPersonaFromSettings({
+      assistant_name: "Zephyra",
+      tone: "warm",
+      style: "",
+      user_name: "Kupan",
+      avatar: "rose",
+    });
+    publishAgentWorking(true);
+    renderPersonaNav();
+    const triggerImg = document.querySelector(".profile-dropdown-btn img");
+    expect(triggerImg?.getAttribute("src")).toBe(
+      "/avatars/wisp-rose-working-64.png",
+    );
+    await openProfileMenu(user);
+    expect(screen.getByText("Zephyra")).toBeInTheDocument();
+    expect(screen.getByTestId("profile-persona-avatar")).toBeInTheDocument();
+    // The health model line stays exactly where it was beside the new identity.
+    expect(screen.getByText("gemma-4-9b")).toBeInTheDocument();
+  });
+
+  it("falls back to the stock UserIcon and label when no persona exists", async () => {
+    const user = userEvent.setup();
+    renderPersonaNav();
+    // An absent persona is a visual no-op: the pre-persona UI, glyph and
+    // stock label both, with no avatar image anywhere in the profile block.
+    expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
+    await openProfileMenu(user);
+    expect(screen.getByText("Rune Weaver Agent")).toBeInTheDocument();
+    expect(document.querySelector(".profile-avatar img")).toBeNull();
+  });
+
+  it("degrades an unknown stored accent to the violet colorway", () => {
+    publishPersonaFromSettings({ assistant_name: "Vex", avatar: "chartreuse" });
+    renderPersonaNav();
+    expect(
+      document.querySelector(".profile-dropdown-btn img")?.getAttribute("src"),
+    ).toBe("/avatars/wisp-violet-idle-64.png");
+  });
+
+  it("flips the avatar to attention when the approvals badge counts pending filings", () => {
+    publishPersonaFromSettings({ assistant_name: "Vex", avatar: "cyan" });
+    renderPersonaNav({ approvalsBadge: 2 });
+    expect(
+      document.querySelector(".profile-dropdown-btn img")?.getAttribute("src"),
+    ).toContain("wisp-cyan-attention-64");
+  });
+
+  it("flips the avatar to attention for an unread goal nudge alone", () => {
+    publishPersonaFromSettings({ assistant_name: "Vex", avatar: "cyan" });
+    renderPersonaNav({ goalsBadge: 1 });
+    expect(
+      document.querySelector(".profile-dropdown-btn img")?.getAttribute("src"),
+    ).toContain("wisp-cyan-attention-64");
+  });
+
+  it("mirrors a persona saved elsewhere into the mounted profile block without a remount", async () => {
+    const user = userEvent.setup();
+    renderPersonaNav();
+    expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
+    publishPersonaFromSettings({
+      assistant_name: "Zephyra",
+      avatar: "emerald",
+    });
+    await waitFor(() => {
+      expect(
+        document.querySelector(".profile-dropdown-btn img")?.getAttribute("src"),
+      ).toBe("/avatars/wisp-emerald-idle-64.png");
+    });
+    await openProfileMenu(user);
+    expect(screen.getByText("Zephyra")).toBeInTheDocument();
+  });
+
+  it("keeps the stock identity when the settings read fails on mount", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    );
+    renderPersonaNav();
+    await openProfileMenu(user);
+    expect(screen.getByText("Rune Weaver Agent")).toBeInTheDocument();
+    expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
   });
 });

@@ -3501,6 +3501,116 @@ export const DEFAULT_INDEX_CONFIG: IndexConfigData = {
   mailbox_deny: [...DEFAULT_INDEX_MAILBOX_DENY],
 };
 
+// Owner-facing assistant persona mirrored from the engine `PersonaConfig`
+// (Sources/RuneWeaverCore/PersonaConfig.swift). The persona is the only
+// owner-authored identity the prompt carries, so the closed tone/avatar sets
+// and the name and style bounds are pinned to the core here and re-validated
+// server-side — a client can prefer the bounds but never smuggle a shape the
+// file loader would refuse. The stored snapshot rides the settings GET and
+// patches through the `PUT /settings` partial merge; a persona save is
+// boot-held, so the running engine adopts the new identity on reload while
+// the dashboard mirrors it immediately.
+export interface PersonaData {
+  // Canonical wire keys are the snake_case TOML spellings the engine encodes;
+  // the camelCase aliases mirror the dual-alias read of every other section
+  // so file-configured values survive a dashboard round-trip either way.
+  assistant_name?: string;
+  assistantName?: string;
+  tone?: string;
+  style?: string;
+  user_name?: string;
+  userName?: string;
+  avatar?: string;
+}
+
+// Partial persona patch for `PUT /settings`, mirroring the engine
+// `PersonaUpdate`. Every field is optional so a request carrying one key
+// leaves the rest of the stored `[persona]` section untouched; the dashboard
+// sends the snake_case keys the engine persists while the engine also
+// accepts the camelCase aliases, so either spelling writes.
+export interface PersonaSettingsUpdate {
+  assistant_name?: string;
+  assistantName?: string;
+  tone?: string;
+  style?: string;
+  user_name?: string;
+  userName?: string;
+  avatar?: string;
+}
+
+// Closed tone set mirroring `PersonaTone`; single source for the pane select
+// and the client validator so the two cannot drift from the engine merge.
+export const PERSONA_TONES = ["concise", "warm", "formal", "playful"] as const;
+
+// Select options in engine order, labeled for display only — the values are
+// the canonical lowercase raw strings the engine re-validates.
+export const PERSONA_TONE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "concise", label: "Concise" },
+  { value: "warm", label: "Warm" },
+  { value: "formal", label: "Formal" },
+  { value: "playful", label: "Playful" },
+];
+
+// Closed avatar accent set mirroring `PersonaAvatar`. The value selects a
+// client-side colorway only and never reaches a prompt byte.
+export const PERSONA_AVATAR_COLORS = ["violet", "cyan", "emerald", "rose"] as const;
+
+// Manual mirrors of PersonaConfig bounds (maxAssistantNameLength,
+// maxStyleLength, maxUserNameLength) and defaults (defaultAssistantName,
+// defaultTone, defaultAvatar); the server owns the values and the contract
+// tests pin both ends so a drift fails loudly.
+export const MAX_PERSONA_ASSISTANT_NAME_LENGTH = 32;
+export const MAX_PERSONA_STYLE_LENGTH = 2000;
+export const MAX_PERSONA_USER_NAME_LENGTH = 64;
+export const DEFAULT_PERSONA_TONE = "warm";
+export const DEFAULT_PERSONA_AVATAR = "violet";
+
+// Normalizes a tone spelling the way the engine merge does: trim plus
+// lowercase before matching the closed set, so `WARM` saves identically to
+// `warm` and the pane select never blanks on a file-configured casing.
+export function normalizePersonaTone(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+// Normalizes an avatar accent spelling with the same trim-plus-lowercase
+// posture as the tone; callers pair this with `PERSONA_AVATAR_COLORS` to
+// decide between a real accent and the violet fallback.
+export function normalizePersonaAvatarColor(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+// Reads the assistant display name across both wire spellings, normalizing
+// absent or blank payloads to null so identity surfaces fall back to the
+// stock label instead of rendering an empty string.
+export function personaAssistantName(persona: PersonaData | null | undefined): string | null {
+  const raw = persona?.assistant_name ?? persona?.assistantName;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+// Reads the stored avatar accent across both spellings, returning the raw
+// (unvalidated) token or null. `PersonaAvatar` owns the closed-set fallback
+// so accent validation lives in exactly one render path.
+export function personaAvatarColor(persona: PersonaData | null | undefined): string | null {
+  const raw = persona?.avatar;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
+}
+
+// Reads the owner address name across both spellings with the same blank
+// normalization the settings populate path applies.
+export function personaUserName(persona: PersonaData | null | undefined): string {
+  const raw = persona?.user_name ?? persona?.userName;
+  return typeof raw === "string" ? raw : "";
+}
+
+// Reads the free-form style guidance; absent degrades to the empty stored
+// default so the textarea never renders undefined.
+export function personaStyle(persona: PersonaData | null | undefined): string {
+  const raw = persona?.style;
+  return typeof raw === "string" ? raw : "";
+}
+
 export interface SettingsResponse {
   engineName: string;
   logLevel: string;
@@ -3569,6 +3679,10 @@ export interface SettingsResponse {
   // Parallel worker fan-out policy under [fanout]; optional for back-compat
   // with older engines that predate the section.
   fanout?: FanoutConfigData;
+  // Owner-facing assistant persona under [persona]; optional for back-compat
+  // with older engines that predate the section. An absent persona keeps the
+  // stock identity, so identity surfaces fall back instead of blanking.
+  persona?: PersonaData;
   // HTTP bind from [server]; optional for back-compat with older engines that
   // predate the bind keys. Absent degrades to the loopback defaults so the
   // Network pane never renders blank.
@@ -3639,6 +3753,10 @@ export interface UpdateSettingsInput {
   ideas?: IdeasSettingsUpdate;
   // Partial fan-out patch; an omitted patch preserves the stored [fanout] section.
   fanout?: FanoutSettingsUpdate;
+  // Partial persona patch; an omitted patch preserves the stored [persona]
+  // section, so a name-only save never wipes the owner's tone, style, address
+  // name, or accent.
+  persona?: PersonaSettingsUpdate;
   // Bind patch for [server]; an omitted patch preserves the stored section.
   // The engine persists these to the file and returns requiresRestart without
   // live-reloading the bind, so the dashboard shows a restart banner.

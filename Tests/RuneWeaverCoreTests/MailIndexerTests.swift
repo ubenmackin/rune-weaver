@@ -1174,15 +1174,25 @@ struct MailIndexerTests {
     }
 
     @Test
-    func `Unreadable PDF attachments are marked for the vision path`() async throws {
+    func `Attachments that fail text extraction are marked for the vision path`() async throws {
         let base = makeTempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
-        let info = MailIndexAttachmentInfo(filename: "scan.pdf", contentType: "application/pdf", sizeBytes: 30)
-        let bytes = Data("this is not a real pdf document".utf8)
+        // A corrupt office package stands in for an unreadable attachment: the
+        // in-repo ZIP reader rejects the bytes, so extraction fails before any
+        // framework parser runs. A corrupt PDF would exercise the same routing
+        // branch, but CoreGraphics reports the parse failure through an os_log
+        // channel outside the test logging bootstrap, which the zero-noise
+        // gate rejects.
+        let bytes = Data("this is not a zip package".utf8)
+        let info = MailIndexAttachmentInfo(
+            filename: "broken.docx",
+            contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            sizeBytes: bytes.count
+        )
         let attachment = MailIndexAttachmentData(
-            filename: "scan.pdf",
-            contentType: "application/pdf",
+            filename: "broken.docx",
+            contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             sizeBytes: bytes.count,
             data: bytes
         )

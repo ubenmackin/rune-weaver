@@ -4,12 +4,18 @@
 // engine health, so configuration and pursuit stay reachable without crowding
 // chat. Group and profile menus share the same click/keyboard mechanics with no
 // hover-open path, keeping pointer and keyboard orderings deterministic.
+// The profile block also mirrors the saved persona identity from the shared
+// persona store, falling back to the stock label and glyph when no persona
+// exists so an absent persona is a visual no-op.
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { HealthResponse } from "../api";
 import {
   DEFAULT_SEARCH_SEARXNG_URL,
   ensureSearch,
   getSearchHealth,
+  getSettings,
+  personaAssistantName,
+  personaAvatarColor,
   stopSearch,
   resolveSearchMessage,
   resolveSearchURL,
@@ -18,6 +24,14 @@ import {
 import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
 import { useToastStack } from "../hooks/useToastStack";
 import { ToastStack } from "./Toast";
+import {
+  PersonaAvatar,
+  peekPersonaSignals,
+  publishAgentAttention,
+  publishPersonaFromSettings,
+  usePersonaSignals,
+  useResolvedAvatarState,
+} from "./PersonaAvatar";
 import {
   BellIcon,
   ChevronDownIcon,
@@ -143,6 +157,52 @@ export default function TopNav({
   // always delegates to the upstream drawer wiring where the empty state
   // already renders `No staged changes`. Never auto-opens on tool_end.
   const normalizedStagedCount = normalizeBadgeCount(stagedFilesCount);
+
+  // Persona identity for the profile block. The shared persona store owns the
+  // data flow: Settings publishes on every load and save, so a rename lands
+  // here live. The one-shot mount fetch only runs when nobody has loaded
+  // settings yet this session, so a dashboard opened on a saved persona still
+  // shows the Wisp without waiting for a Settings visit — and a failed fetch
+  // keeps the stock identity instead of blanking the block.
+  const { persona, personaLoaded } = usePersonaSignals();
+  const avatarState = useResolvedAvatarState();
+  useEffect(() => {
+    if (personaLoaded) return;
+    let cancelled = false;
+    getSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        // Discard the probe once any other reader has loaded settings first:
+        // the store already carries an equal-or-fresher persona, and a late
+        // response from a stale request must never clobber it. This also
+        // keeps a test (or pane save) that publishes while the probe is in
+        // flight authoritative.
+        if (peekPersonaSignals().personaLoaded) return;
+        publishPersonaFromSettings(settings?.persona);
+      })
+      .catch(() => {
+        // Unknown persona is the stock persona: an unread settings surface
+        // must never strand the profile block on a half-loaded identity.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [personaLoaded]);
+
+  // The avatar's attention signal is the same two global counts the nav already
+  // surfaces — pending approvals and unread goal nudges (the goal-needs-input
+  // badge) — published once here for every identity surface. Badge counting and
+  // clearing stay owned upstream; this effect only mirrors their truth.
+  useEffect(() => {
+    publishAgentAttention(approvalsBadge > 0 || goalsBadge > 0);
+  }, [approvalsBadge, goalsBadge]);
+
+  // The fallback label matches the stock string exactly, so an absent or blank
+  // persona keeps the profile block word-for-word as today, and the avatar
+  // only replaces the static UserIcon once a persona actually exists.
+  const personaDisplayName = personaAssistantName(persona) ?? "Rune Weaver Agent";
+  const personaAccent = personaAvatarColor(persona);
+  const showPersonaAvatar = persona !== null;
 
   // Local transient feedback for the bell: the shared stack owns timers plus
   // the dismiss surface, so this nav never invents a second toast system and
@@ -690,7 +750,21 @@ export default function TopNav({
             aria-controls="profile-menu"
             aria-label="Profile and Settings menu"
           >
-            <UserIcon size={16} className="profile-user-icon" />
+            {showPersonaAvatar ? (
+              // A saved persona swaps the stock glyph for the Wisp even at the
+              // 16px trigger: the srcSet lets the browser pick the 32px sheet
+              // instead of down-scaling 256, and the alt stays empty because
+              // the button's aria-label already names the menu.
+              <PersonaAvatar
+                color={personaAccent}
+                state={avatarState}
+                size={16}
+                className="profile-user-avatar"
+                label=""
+              />
+            ) : (
+              <UserIcon size={16} className="profile-user-icon" />
+            )}
             <span className="status-dot" />
             <span className="profile-btn-label">Profile</span>
             <ChevronDownIcon
@@ -709,10 +783,20 @@ export default function TopNav({
               <div className="profile-menu-header">
                 <div className="profile-header-user">
                   <div className="profile-avatar">
-                    <UserIcon size={16} />
+                    {showPersonaAvatar ? (
+                      <PersonaAvatar
+                        color={personaAccent}
+                        state={avatarState}
+                        size={24}
+                        label=""
+                        dataTestId="profile-persona-avatar"
+                      />
+                    ) : (
+                      <UserIcon size={16} />
+                    )}
                   </div>
                   <div className="profile-header-details">
-                    <span className="profile-name">Rune Weaver Agent</span>
+                    <span className="profile-name">{personaDisplayName}</span>
                     <span className="profile-status-text">
                       <span className="status-dot-sm" /> Connected
                     </span>

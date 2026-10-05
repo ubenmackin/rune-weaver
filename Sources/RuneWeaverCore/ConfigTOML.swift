@@ -465,6 +465,7 @@ extension RuneWeaverConfig {
         try Self.decodeProactive(root, into: &config)
         try Self.decodeIdeas(root, into: &config)
         try Self.decodeFanout(root, into: &config)
+        try Self.decodePersona(root, into: &config)
         self = config
     }
 
@@ -1131,6 +1132,36 @@ extension RuneWeaverConfig {
         if let fullTools = try fanout.strictBool("full_tools", field: "fanout.full_tools") {
             config.fanOut.fullTools = fullTools
         }
+    }
+
+    /// Decodes the additive `[persona]` section, defaulting omitted keys.
+    ///
+    /// An absent table keeps the stock identity so existing files load with
+    /// today's prompt bytes; keys are read one by one through the shared
+    /// normalize-or-reject contract (matching the `[index]` decode style),
+    /// present-but-wrong-typed values throw via the strict accessors instead
+    /// of silently defaulting, and blank names or overlong style guidance
+    /// degrade to the documented fallbacks with a logged note inside the
+    /// normalizers.
+    static func decodePersona(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let persona = root.tables["persona"] else { return }
+        // One leading `try` per assignment covers the throwing strict read,
+        // plus the normalizer where it throws, mirroring the neighboring additive decoders.
+        config.persona.assistantName = try PersonaConfig.normalizedAssistantName(
+            persona.strictString("assistant_name", field: "persona.assistant_name")
+        )
+        config.persona.tone = try PersonaConfig.normalizedTone(
+            persona.strictString("tone", field: "persona.tone")
+        )
+        config.persona.style = try PersonaConfig.normalizedStyle(
+            persona.strictString("style", field: "persona.style")
+        )
+        config.persona.userName = try PersonaConfig.normalizedUserName(
+            persona.strictString("user_name", field: "persona.user_name")
+        )
+        config.persona.avatar = try PersonaConfig.normalizedAvatar(
+            persona.strictString("avatar", field: "persona.avatar")
+        )
     }
 }
 
