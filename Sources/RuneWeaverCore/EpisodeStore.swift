@@ -173,6 +173,20 @@ public actor EpisodeStore {
         }
     }
 
+    /// Atomically counts then deletes all episodes in one store operation.
+    ///
+    /// `SELECT COUNT(*)` and `DELETE FROM episodes` run in one `BEGIN IMMEDIATE`/
+    /// `COMMIT` transaction inside one `SQLiteSerialIO.run`, so a concurrent
+    /// `store`/`delete` on the same engine cannot interleave between the measure
+    /// and the delete and the returned count always names what was removed.
+    /// - Returns: Episode count measured in the same transaction before deleting.
+    public func clearReturningCount() async throws -> Int {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run {
+            try EpisodeStoreIO.clearReturningCount(dbPath: dbPath)
+        }
+    }
+
     // MARK: - Auto-summarization
 
     /// Summarizes sessions whose episodes are older than a cutoff.
@@ -364,6 +378,17 @@ enum EpisodeStoreIO {
         #endif
     }
 
+    /// Atomically counts then deletes all episodes in one transaction.
+    /// - Parameter dbPath: SQLite path (or JSON sidecar anchor).
+    /// - Returns: Episode count measured in the same transaction before deleting.
+    static func clearReturningCount(dbPath: String) throws -> Int {
+        #if canImport(SQLite3)
+            return try SQLiteEpisodeStore.clearReturningCount(dbPath: dbPath)
+        #else
+            return try JSONEpisodeStore.clearReturningCount(dbPath: dbPath)
+        #endif
+    }
+
     /// Rebuilds the FTS5 index. A no-op for the JSON fallback.
     /// - Parameter dbPath: SQLite path (or JSON sidecar anchor).
     static func rebuildFTS(dbPath: String) throws {
@@ -383,6 +408,9 @@ enum EpisodeStoreIO {
         /// - Returns: Open database handle. Caller must close it.
         private static func open(dbPath: String) throws -> OpaquePointer? {
             // Shared busy_timeout/WAL policy lives in `SQLiteHelpers.openHandle`.
+            // Episodic FTS is a plain contentful table, so row removal uses a direct
+            // DELETE by rowid: the FTS5 'delete' command only serves external-content
+            // and contentless tables and fails on recent macOS SQLite.
             let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: EpisodeStoreError.storeUnavailable)
             try SQLiteHelpers.exec(
                 handle: handle,
@@ -402,16 +430,79 @@ enum EpisodeStoreIO {
                     INSERT INTO episodes_fts(rowid, content) VALUES(new.rowid, new.content);
                 END;
                 CREATE TRIGGER IF NOT EXISTS episodes_ad AFTER DELETE ON episodes BEGIN
-                    INSERT INTO episodes_fts(episodes_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+                    DELETE FROM episodes_fts WHERE rowid = old.rowid;
                 END;
                 CREATE TRIGGER IF NOT EXISTS episodes_au AFTER UPDATE ON episodes BEGIN
-                    INSERT INTO episodes_fts(episodes_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+                    DELETE FROM episodes_fts WHERE rowid = old.rowid;
                     INSERT INTO episodes_fts(rowid, content) VALUES(new.rowid, new.content);
                 END;
                 """,
                 failure: EpisodeStoreError.persistenceFailed
             )
+            // One-time repair for databases created with the earlier broken
+            // VALUES('delete', ...) triggers. Steady-state opens stay read-only
+            // (`IF NOT EXISTS` is a no-op once triggers exist) and idempotent
+            // cross-process; legacy bodies are replaced exactly once.
+            try repairLegacyTriggersIfNeeded(handle: handle)
             return handle
+        }
+
+        /// Replaces legacy FTS5 delete-command triggers exactly once.
+        ///
+        /// Probes `sqlite_master` (read-only) for the old `VALUES('delete', ...)`
+        /// trigger body and only rewrites `episodes_ad`/`episodes_au` when present,
+        /// so steady-state opens perform no schema write and concurrent serve +
+        /// CLI runners cannot interleave unconditional `DROP`/`CREATE` into a
+        /// `trigger already exists` failure.
+        /// - Parameter handle: Open database handle being migrated.
+        private static func repairLegacyTriggersIfNeeded(handle: OpaquePointer?) throws {
+            guard hasLegacyDeleteTrigger(handle: handle) else { return }
+            try SQLiteHelpers.exec(
+                handle: handle,
+                sql: """
+                DROP TRIGGER IF EXISTS episodes_ad;
+                CREATE TRIGGER IF NOT EXISTS episodes_ad AFTER DELETE ON episodes BEGIN
+                    DELETE FROM episodes_fts WHERE rowid = old.rowid;
+                END;
+                DROP TRIGGER IF EXISTS episodes_au;
+                CREATE TRIGGER IF NOT EXISTS episodes_au AFTER UPDATE ON episodes BEGIN
+                    DELETE FROM episodes_fts WHERE rowid = old.rowid;
+                    INSERT INTO episodes_fts(rowid, content) VALUES(new.rowid, new.content);
+                END;
+                """,
+                failure: EpisodeStoreError.persistenceFailed
+            )
+        }
+
+        /// Whether `episodes_ad`/`episodes_au` still carry the legacy delete-command body.
+        ///
+        /// The broken triggers used the FTS5 `VALUES('delete', ...)` command syntax,
+        /// which fails on plain contentful tables; the repaired triggers contain no
+        /// quoted `'delete'` literal (only `DELETE FROM`), so a quoted-literal probe
+        /// distinguishes legacy from repaired without a schema write.
+        /// - Parameter handle: Open database handle to probe.
+        /// - Returns: True when a legacy trigger body is present.
+        private static func hasLegacyDeleteTrigger(handle: OpaquePointer?) -> Bool {
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                handle,
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name IN ('episodes_ad', 'episodes_au');",
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK else {
+                return false
+            }
+            defer { sqlite3_finalize(statement) }
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let sql = SQLiteHelpers.columnText(statement, index: 0) {
+                    let lowered = sql.lowercased()
+                    if lowered.contains("'delete'") || lowered.contains("\"delete\"") {
+                        return true
+                    }
+                }
+            }
+            return false
         }
 
         /// Executes a multi-statement SQL string.
@@ -630,6 +721,12 @@ enum EpisodeStoreIO {
             return try searchLike(handle: handle, query: query, limit: limit, since: since, until: until)
         }
 
+    }
+
+    // MARK: - SQLiteEpisodeStore Search
+
+    /// FTS5 and LIKE search helpers for the SQLite episode store.
+    extension SQLiteEpisodeStore {
         private static func searchFTS(handle: OpaquePointer?, query: String, limit: Int, since: Date?, until: Date?) -> [Episode]? {
             let ftsQuery = ftsEscaped(query)
             var sql = "SELECT e.id, e.session_id, e.role, e.content, e.timestamp, e.metadata "
@@ -914,6 +1011,41 @@ enum EpisodeStoreIO {
             try exec(handle: handle, sql: "DELETE FROM episodes; INSERT INTO episodes_fts(episodes_fts) VALUES('rebuild');")
         }
 
+        /// Atomically counts then deletes all episodes in one transaction.
+        ///
+        /// `SELECT COUNT(*)` and `DELETE FROM episodes` run in one `BEGIN IMMEDIATE`/
+        /// `COMMIT` transaction on the already-open handle, so a concurrent writer in
+        /// another process cannot interleave between the measure and the delete.
+        /// - Parameter dbPath: SQLite file path.
+        /// - Returns: Episode count measured in the same transaction before deleting.
+        static func clearReturningCount(dbPath: String) throws -> Int {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return 0 }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
+            do {
+                var countStatement: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, "SELECT COUNT(*) FROM episodes;", -1, &countStatement, nil) == SQLITE_OK else {
+                    throw EpisodeStoreError.persistenceFailed("Could not count episodes")
+                }
+                let deleted: Int
+                if sqlite3_step(countStatement) == SQLITE_ROW {
+                    deleted = Int(sqlite3_column_int(countStatement, 0))
+                } else {
+                    sqlite3_finalize(countStatement)
+                    throw EpisodeStoreError.persistenceFailed("Could not count episodes")
+                }
+                sqlite3_finalize(countStatement)
+                try exec(handle: handle, sql: "DELETE FROM episodes; INSERT INTO episodes_fts(episodes_fts) VALUES('rebuild');")
+                try exec(handle: handle, sql: "COMMIT;")
+                return deleted
+            } catch {
+                try? exec(handle: handle, sql: "ROLLBACK;")
+                throw error
+            }
+        }
+
         /// Rebuilds the FTS5 index from the `episodes` table.
         /// - Parameter dbPath: SQLite file path.
         static func rebuildFTS(dbPath: String) throws {
@@ -924,257 +1056,5 @@ enum EpisodeStoreIO {
             try exec(handle: handle, sql: "INSERT INTO episodes_fts(episodes_fts) VALUES('rebuild');")
         }
     }
-#else
-    /// JSON-file fallback used where the SQLite3 module is unavailable.
-    enum JSONEpisodeStore {
-        /// Directory holding one JSON file per episode.
-        /// - Parameter dbPath: Configured database path used as anchor.
-        /// - Returns: Sidecar directory URL.
-        private static func directory(dbPath: String) -> URL {
-            let expanded = (dbPath as NSString).expandingTildeInPath
-            return URL(fileURLWithPath: expanded + ".episodes", isDirectory: true)
-        }
-
-        /// Reads every stored episode, oldest first.
-        private static func readAll(dbPath: String) throws -> [Episode] {
-            try readEntries(dbPath: dbPath).sorted {
-                if $0.episode.timestamp != $1.episode.timestamp {
-                    return $0.episode.timestamp < $1.episode.timestamp
-                }
-                switch ($0.created, $1.created) {
-                case let (lhs?, rhs?):
-                    if lhs != rhs {
-                        return lhs < rhs
-                    }
-                case (nil, _?):
-                    return true
-                case (_?, nil):
-                    return false
-                case (nil, nil):
-                    break
-                }
-                return $0.episode.id.uuidString < $1.episode.id.uuidString
-            }.map(\.episode)
-        }
-
-        /// Maximum JSON episode files retained or decoded simultaneously.
-        static let maxJSONFiles = 2000
-
-        /// Reads every stored episode with its file creation date.
-        private static func readEntries(dbPath: String) throws -> [(episode: Episode, created: Date?)] {
-            let directoryURL = directory(dbPath: dbPath)
-            guard FileManager.default.fileExists(atPath: directoryURL.path) else { return [] }
-            do {
-                let files = try FileManager.default.contentsOfDirectory(
-                    at: directoryURL,
-                    includingPropertiesForKeys: [.creationDateKey],
-                    options: []
-                )
-                let decoder = JSONDecoder()
-                decoder.dateDecodingStrategy = .secondsSince1970
-                let jsonFiles = files.filter { $0.pathExtension == "json" }
-                let candidateFiles = if jsonFiles.count > maxJSONFiles {
-                    jsonFiles.sorted {
-                        let creationDate1 = (try? $0.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
-                        let creationDate2 = (try? $1.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
-                        return creationDate1 > creationDate2
-                    }.prefix(maxJSONFiles).reversed()
-                } else {
-                    jsonFiles
-                }
-                var entries: [(episode: Episode, created: Date?)] = []
-                entries.reserveCapacity(candidateFiles.count)
-                for file in candidateFiles {
-                    let episode = try decoder.decode(Episode.self, from: Data(contentsOf: file))
-                    let created = (try? file.resourceValues(forKeys: [.creationDateKey]))?.creationDate
-                    entries.append((episode: episode, created: created))
-                }
-                return entries
-            } catch let error as EpisodeStoreError {
-                throw error
-            } catch {
-                throw EpisodeStoreError.persistenceFailed("Could not read episodes: \(error.localizedDescription)")
-            }
-        }
-
-        /// Writes episodes as JSON files (upsert by `id`).
-        static func write(episodes: [Episode], dbPath: String, merge: Bool) throws {
-            let directoryURL = directory(dbPath: dbPath)
-            do {
-                try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-                if !merge {
-                    for file in (try? FileManager.default.contentsOfDirectory(at: directoryURL, includingPropertiesForKeys: nil)) ?? [] {
-                        try? FileManager.default.removeItem(at: file)
-                    }
-                }
-                let encoder = JSONEncoder()
-                encoder.dateEncodingStrategy = .secondsSince1970
-                for episode in episodes {
-                    let data = try encoder.encode(episode)
-                    try data.write(to: directoryURL.appendingPathComponent("\(episode.id.uuidString).json"), options: .atomic)
-                }
-                let allFiles = (try? FileManager.default.contentsOfDirectory(
-                    at: directoryURL,
-                    includingPropertiesForKeys: [.creationDateKey]
-                ))?.filter { $0.pathExtension == "json" } ?? []
-                if allFiles.count > maxJSONFiles {
-                    let sorted = allFiles.sorted {
-                        let creationDate1 = (try? $0.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
-                        let creationDate2 = (try? $1.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
-                        return creationDate1 < creationDate2
-                    }
-                    let excess = sorted.prefix(allFiles.count - maxJSONFiles)
-                    for file in excess {
-                        try? FileManager.default.removeItem(at: file)
-                    }
-                }
-            } catch let error as EpisodeStoreError {
-                throw error
-            } catch {
-                throw EpisodeStoreError.persistenceFailed("Could not write episodes: \(error.localizedDescription)")
-            }
-        }
-
-        /// Reads one session's episodes, oldest first.
-        static func episodes(sessionID: UUID, dbPath: String, limit: Int?) throws -> [Episode] {
-            if let limit, limit <= 0 {
-                return []
-            }
-            let matching = try readAll(dbPath: dbPath).filter { $0.sessionID == sessionID }
-            guard let limit else { return matching }
-            return Array(matching.prefix(limit))
-        }
-
-        /// Reads one session's newest episodes, oldest first.
-        static func recentEpisodes(sessionID: UUID, dbPath: String, limit: Int) throws -> [Episode] {
-            guard limit > 0 else { return [] }
-            let matching = try readAll(dbPath: dbPath).filter { $0.sessionID == sessionID }
-            return Array(matching.suffix(limit))
-        }
-
-        /// Reads episodes at or before a cutoff, oldest first.
-        static func episodes(olderThan: Date, dbPath: String) throws -> [Episode] {
-            try readAll(dbPath: dbPath).filter { $0.timestamp <= olderThan }
-        }
-
-        /// Reads the newest episodes across all sessions.
-        static func recent(dbPath: String, limit: Int) throws -> [Episode] {
-            guard limit > 0 else { return [] }
-            let sorted = try readEntries(dbPath: dbPath).sorted {
-                if $0.episode.timestamp != $1.episode.timestamp {
-                    return $0.episode.timestamp > $1.episode.timestamp
-                }
-                switch ($0.created, $1.created) {
-                case let (lhs?, rhs?):
-                    if lhs != rhs {
-                        return lhs > rhs
-                    }
-                case (nil, _?):
-                    return false
-                case (_?, nil):
-                    return true
-                case (nil, nil):
-                    break
-                }
-                return $0.episode.id.uuidString > $1.episode.id.uuidString
-            }.map(\.episode)
-            return Array(sorted.prefix(limit))
-        }
-
-        /// Token-overlap search over episode content.
-        static func search(query: String, dbPath: String, limit: Int, since: Date? = nil, until: Date? = nil) throws -> [Episode] {
-            guard limit > 0 else { return [] }
-            let all = try readAll(dbPath: dbPath)
-            let queryTokens = Tokenization.tokenize(query)
-            guard !queryTokens.isEmpty else { return [] }
-            // The dated window filters before scoring so the JSON fallback
-            // matches the SQLite predicates (`since` inclusive, `until` exclusive).
-            let windowed = all.filter { episode in
-                if let since, episode.timestamp < since {
-                    return false
-                }
-                if let until, episode.timestamp >= until {
-                    return false
-                }
-                return true
-            }
-            let scored = windowed.compactMap { episode -> (Episode, Int)? in
-                let contentTokens = Tokenization.tokenize(episode.content)
-                guard let raw = Tokenization.keywordScore(
-                    queryTokens: queryTokens,
-                    contentTokens: contentTokens,
-                    content: episode.content,
-                    query: query
-                ) else { return nil }
-                return (episode, raw)
-            }
-            return scored
-                .sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0.timestamp > $1.0.timestamp }
-                .prefix(limit)
-                .map(\.0)
-        }
-
-        /// All session identifiers with stored episodes.
-        /// - Parameter dbPath: Anchor path for the sidecar directory.
-        /// - Returns: Session identifiers.
-        static func sessionIDs(dbPath: String) throws -> [UUID] {
-            try Array(Set(readAll(dbPath: dbPath).map(\.sessionID)))
-        }
-
-        /// Total stored episode count.
-        /// - Parameter dbPath: Anchor path for the sidecar directory.
-        /// - Returns: Episode count.
-        static func count(dbPath: String) throws -> Int {
-            try readAll(dbPath: dbPath).count
-        }
-
-        /// Deletes one episode file. Missing files are a no-op.
-        static func delete(id: UUID, dbPath: String) throws {
-            let fileURL = directory(dbPath: dbPath).appendingPathComponent("\(id.uuidString).json")
-            guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
-            do {
-                try FileManager.default.removeItem(at: fileURL)
-            } catch {
-                throw EpisodeStoreError.persistenceFailed("Could not delete episode: \(error.localizedDescription)")
-            }
-        }
-
-        /// Deletes every episode file for a session.
-        static func deleteSession(_ sessionID: UUID, dbPath: String) throws {
-            for episode in try readAll(dbPath: dbPath) where episode.sessionID == sessionID {
-                try delete(id: episode.id, dbPath: dbPath)
-            }
-        }
-
-        /// Deletes one session's episodes at or before a cutoff.
-        static func deleteSession(beforeOrAt: Date, sessionID: UUID, dbPath: String) throws {
-            for episode in try readAll(dbPath: dbPath)
-                where episode.sessionID == sessionID && episode.timestamp <= beforeOrAt
-            {
-                try delete(id: episode.id, dbPath: dbPath)
-            }
-        }
-
-        /// Replaces one session's old episodes with a summary episode.
-        static func compact(sessionID: UUID, beforeOrAt: Date, replacement: Episode, dbPath: String) throws {
-            try write(episodes: [replacement], dbPath: dbPath, merge: true)
-            for episode in try readAll(dbPath: dbPath)
-                where episode.sessionID == sessionID && episode.timestamp <= beforeOrAt && episode.id != replacement.id
-            {
-                try delete(id: episode.id, dbPath: dbPath)
-            }
-        }
-
-        /// Deletes all episode files.
-        /// - Parameter dbPath: Anchor path for the sidecar directory.
-        static func clear(dbPath: String) throws {
-            let directoryURL = directory(dbPath: dbPath)
-            guard FileManager.default.fileExists(atPath: directoryURL.path) else { return }
-            do {
-                try FileManager.default.removeItem(at: directoryURL)
-            } catch {
-                throw EpisodeStoreError.persistenceFailed("Could not clear episodes: \(error.localizedDescription)")
-            }
-        }
-    }
 #endif
+// JSON-file fallback lives in EpisodeStoreTypes.swift.

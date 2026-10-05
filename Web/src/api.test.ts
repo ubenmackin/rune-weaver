@@ -10,6 +10,7 @@ import {
   canonicalRestartHost,
   changeDurationGrant,
   clearAuthToken,
+  clearEpisodes,
   concurrentTurnsBusyMessage,
   createJob,
   decideApproval,
@@ -18,10 +19,12 @@ import {
   DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES,
   DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE,
   DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
+  deleteEpisode,
   deleteFact,
   deleteGoal,
   deleteJob,
   deleteSecret,
+  deleteSessionEpisodes,
   formatGoalNextAdvance,
   formatRunDuration,
   formatToolProgressElapsedMs,
@@ -197,6 +200,102 @@ describe("dashboard api client", () => {
     expect(facts.episodeCount).toBe(0);
     await deleteFact("f1");
     expect(seen).toContain("/memory/facts/f1");
+  });
+
+  it("clears episodic turns and parses deleted plus remaining counts", async () => {
+    // The whole-store clear posts DELETE to the episodes collection and
+    // returns both the removed tally and the remaining count so the panel can
+    // refresh without a second facts fetch for the number.
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ deletedCount: 3, episodeCount: 0 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const cleared = await clearEpisodes();
+    expect(cleared.deletedCount).toBe(3);
+    expect(cleared.episodeCount).toBe(0);
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(path).toBe("/memory/episodes");
+    expect(init.method).toBe("DELETE");
+    expect(path.startsWith("http")).toBe(false);
+  });
+
+  it("deletes one episodic turn with an encoded id", async () => {
+    // One row deletes through its collection member route; a bodyless 204
+    // resolves to void the same way fact deletes do.
+    const seen: Array<{ path: string; method?: string }> = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      seen.push({ path: input, method: init?.method });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await deleteEpisode("11111111-1111-1111-1111-111111111111");
+    expect(seen[0].path).toBe(
+      "/memory/episodes/11111111-1111-1111-1111-111111111111",
+    );
+    expect(seen[0].method).toBe("DELETE");
+    // Identifiers travel encoded so reserved characters never split the route.
+    await deleteEpisode("a/b c");
+    expect(seen[1].path).toBe("/memory/episodes/a%2Fb%20c");
+    expect(seen[1].method).toBe("DELETE");
+  });
+
+  it("deletes session episodes with an encoded session id", async () => {
+    // The literal session segment keeps this route distinct from the id route
+    // server-side; the client keeps the same shape so the two never collide.
+    const seen: Array<{ path: string; method?: string }> = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      seen.push({ path: input, method: init?.method });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await deleteSessionEpisodes("22222222-2222-2222-2222-222222222222");
+    expect(seen[0].path).toBe(
+      "/memory/episodes/session/22222222-2222-2222-2222-222222222222",
+    );
+    expect(seen[0].method).toBe("DELETE");
+    // Session identifiers travel encoded for the same routing reason as ids.
+    await deleteSessionEpisodes("s/b c");
+    expect(seen[1].path).toBe("/memory/episodes/session/s%2Fb%20c");
+    expect(seen[1].method).toBe("DELETE");
+  });
+
+  it("surfaces episodic 400 reasons as ApiError", async () => {
+    // An invalid UUID rejects with 400 plus the engine reason, surfaced
+    // through the shared fetchJson reason parsing so the panel can render the
+    // honest message in its error slot.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ reason: "id must be a UUID" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    const badId = await deleteEpisode("nope").catch((error: unknown) => error);
+    expect(badId).toBeInstanceOf(ApiError);
+    expect((badId as ApiError).status).toBe(400);
+    expect((badId as ApiError).message).toContain("id must be a UUID");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ reason: "sessionID must be a UUID" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    const badSession = await deleteSessionEpisodes("nope").catch(
+      (error: unknown) => error,
+    );
+    expect(badSession).toBeInstanceOf(ApiError);
+    expect((badSession as ApiError).status).toBe(400);
+    expect((badSession as ApiError).message).toContain(
+      "sessionID must be a UUID",
+    );
   });
 
   it("lists runs and fetches one run", async () => {

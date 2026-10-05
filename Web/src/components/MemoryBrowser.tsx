@@ -6,7 +6,10 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
+  clearEpisodes,
+  deleteEpisode,
   deleteFact,
+  deleteSessionEpisodes,
   getFacts,
   searchMemory,
   storeFact,
@@ -96,6 +99,20 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     null,
   );
   const [deletingFactId, setDeletingFactId] = useState<string | null>(null);
+  // Episodic cleanup state stays beside the fact-delete pair so each destructive
+  // flow owns its pending row plus busy flag: per-hit delete targets one search
+  // hit by metadata id, while the footer panel targets the whole store or one
+  // session behind the same centered Modal pattern. Success refetches facts and
+  // drops local hits so the panel count and search list never go stale.
+  const [sessionInput, setSessionInput] = useState("");
+  const [pendingEpisodicResult, setPendingEpisodicResult] =
+    useState<MemoryResult | null>(null);
+  const [deletingEpisodicId, setDeletingEpisodicId] = useState<string | null>(
+    null,
+  );
+  const [pendingClearAll, setPendingClearAll] = useState(false);
+  const [pendingClearSession, setPendingClearSession] = useState(false);
+  const [cleanupBusy, setCleanupBusy] = useState(false);
 
   const loadFacts = useCallback(async () => {
     try {
@@ -215,6 +232,102 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     setPendingDeleteFact(null);
   }
 
+  // Confirms one per-hit episodic delete by the hit's metadata id, then drops
+  // exactly that row from local results and reloads facts so the footer count
+  // settles without a restart. A hit without an id never reaches here because
+  // its Delete affordance stays hidden.
+  async function confirmDeleteEpisodicResult() {
+    if (!pendingEpisodicResult) return;
+    const target = pendingEpisodicResult;
+    const episodeId = target.metadata?.id;
+    if (!episodeId) {
+      setPendingEpisodicResult(null);
+      return;
+    }
+    setDeletingEpisodicId(episodeId);
+    setError(null);
+    try {
+      await deleteEpisode(episodeId);
+      setResults((previous) =>
+        previous.filter((row) => row.metadata?.id !== episodeId),
+      );
+      await loadFacts();
+      setPendingEpisodicResult(null);
+    } catch (failure) {
+      setError(
+        failure instanceof ApiError
+          ? failure.message
+          : "Delete episodic result failed",
+      );
+    } finally {
+      setDeletingEpisodicId(null);
+    }
+  }
+
+  function cancelDeleteEpisodicResult() {
+    setPendingEpisodicResult(null);
+  }
+
+  // Confirms the whole-store episodic clear behind the same centered Modal as
+  // fact delete. On success the panel refetches facts and drops local hits so
+  // a stale search list cannot resurrect cleared rows.
+  async function confirmClearAllEpisodes() {
+    setCleanupBusy(true);
+    setError(null);
+    try {
+      await clearEpisodes();
+      setResults([]);
+      await loadFacts();
+      setPendingClearAll(false);
+    } catch (failure) {
+      setError(
+        failure instanceof ApiError ? failure.message : "Clear episodes failed",
+      );
+    } finally {
+      setCleanupBusy(false);
+    }
+  }
+
+  function cancelClearAllEpisodes() {
+    setPendingClearAll(false);
+  }
+
+  // Confirms the per-session episodic clear using the trimmed session input at
+  // confirm time, then refetches facts and drops local hits like the
+  // whole-store path. A blank input never reaches here because its button stays
+  // disabled.
+  async function confirmClearSessionEpisodes() {
+    const sessionID = sessionInput.trim();
+    if (!sessionID) return;
+    setCleanupBusy(true);
+    setError(null);
+    try {
+      await deleteSessionEpisodes(sessionID);
+      setResults([]);
+      await loadFacts();
+      setPendingClearSession(false);
+    } catch (failure) {
+      setError(
+        failure instanceof ApiError
+          ? failure.message
+          : "Clear session episodes failed",
+      );
+    } finally {
+      setCleanupBusy(false);
+    }
+  }
+
+  function cancelClearSessionEpisodes() {
+    setPendingClearSession(false);
+  }
+
+  // Zero stored turns disables both destructive footer buttons with an honest
+  // title, while a blank session input disables only its own button so the
+  // whole-store path stays available when episodes exist.
+  const episodeCount = facts?.episodeCount ?? 0;
+  const hasEpisodes = episodeCount > 0;
+  const trimmedSessionInput = sessionInput.trim();
+
   // Stable keys without positional index: duplicates of the same source+content share a base key
   // and are disambiguated by occurrence within that group, so filtering an unrelated row never
   // remounts the survivors. Computed per render from current order only.
@@ -307,6 +420,22 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
                 <div className="memory-card-content">
                   <MarkdownText text={result.content} className="memory-markdown" />
                 </div>
+                {/* Only episodic hits with a stored id offer deletion: semantic and
+                    profile rows have no episode row to delete, and an episodic hit
+                    without metadata id cannot address its row. */}
+                {result.source === "episodic" && result.metadata?.id ? (
+                  <div className="memory-card-actions">
+                    <button
+                      type="button"
+                      className="danger icon-text-btn"
+                      aria-label="Delete episodic result"
+                      onClick={() => setPendingEpisodicResult(result)}
+                    >
+                      <TrashIcon size={14} />
+                      <span>Delete</span>
+                    </button>
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>
@@ -385,6 +514,55 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
             </div>
           </div>
         ) : null}
+
+        {/* Episodic cleanup footer: the count comes from the facts payload so
+            the panel never drifts from the stored store, and both destructive
+            paths confirm behind the centered Modal before refetching facts and
+            dropping stale search hits. Clearing applies immediately with no
+            restart because every read opens the store directly. */}
+        <div className="episodic-cleanup-panel">
+          <h4>Episodic cleanup</h4>
+          <p className="muted text-sm">
+            {facts
+              ? `${facts.episodeCount} episodic turns stored`
+              : "Loading episodic turns…"}
+          </p>
+          <div className="row">
+            <input
+              type="text"
+              aria-label="Session UUID"
+              placeholder="Session UUID…"
+              value={sessionInput}
+              onChange={(event) => setSessionInput(event.target.value)}
+            />
+            <button
+              type="button"
+              className="ghost icon-text-btn"
+              disabled={
+                !hasEpisodes ||
+                trimmedSessionInput.length === 0 ||
+                cleanupBusy
+              }
+              title={!hasEpisodes ? "No episodic turns stored" : undefined}
+              onClick={() => setPendingClearSession(true)}
+            >
+              <TrashIcon size={14} />
+              <span>Clear session</span>
+            </button>
+          </div>
+          <div className="row">
+            <button
+              type="button"
+              className="danger icon-text-btn"
+              disabled={!hasEpisodes || cleanupBusy}
+              title={!hasEpisodes ? "No episodic turns stored" : undefined}
+              onClick={() => setPendingClearAll(true)}
+            >
+              <TrashIcon size={14} />
+              <span>Clear all episodes</span>
+            </button>
+          </div>
+        </div>
           </div>
         </div>
       )}
@@ -447,6 +625,175 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
               aria-label="Confirm delete fact"
             >
               {deletingFactId === pendingDeleteFact.id ? "Deleting…" : "Delete"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {/* Centered Modal for one episodic search-hit delete: confirms the
+          metadata-id delete before dropping the row and reloading facts. */}
+      {pendingEpisodicResult ? (
+        <Modal
+          label="Confirm delete episodic result"
+          onClose={() => {
+            if (deletingEpisodicId !== null) return;
+            cancelDeleteEpisodicResult();
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Delete episodic turn?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={cancelDeleteEpisodicResult}
+              disabled={deletingEpisodicId !== null}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              This will permanently delete this episodic turn. This cannot be
+              undone.
+            </p>
+            <p
+              className="muted text-sm"
+              style={{ margin: "12px 0 0 0", overflowWrap: "anywhere" }}
+            >
+              &ldquo;
+              {pendingEpisodicResult.content.length > 120
+                ? `${pendingEpisodicResult.content.slice(0, 120)}…`
+                : pendingEpisodicResult.content}
+              &rdquo;
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={cancelDeleteEpisodicResult}
+              disabled={deletingEpisodicId !== null}
+            >
+              Keep
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void confirmDeleteEpisodicResult()}
+              disabled={deletingEpisodicId !== null}
+              aria-label="Confirm delete episodic result"
+            >
+              {deletingEpisodicId !== null ? "Deleting…" : "Delete"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {/* Centered Modal for the whole-store episodic clear. Success refetches
+          facts and drops local hits so cleared rows never linger. */}
+      {pendingClearAll ? (
+        <Modal
+          label="Confirm clear all episodes"
+          onClose={() => {
+            if (cleanupBusy) return;
+            cancelClearAllEpisodes();
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Clear all episodes?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={cancelClearAllEpisodes}
+              disabled={cleanupBusy}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              This will permanently delete all {episodeCount} episodic turns.
+              Semantic facts and preferences are kept. This cannot be undone.
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={cancelClearAllEpisodes}
+              disabled={cleanupBusy}
+            >
+              Keep
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void confirmClearAllEpisodes()}
+              disabled={cleanupBusy}
+              aria-label="Confirm clear all episodes"
+            >
+              {cleanupBusy ? "Clearing…" : "Clear all"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {/* Centered Modal for the per-session episodic clear. The trimmed session
+          input addresses the delete; success refetches facts and drops hits. */}
+      {pendingClearSession ? (
+        <Modal
+          label="Confirm clear session episodes"
+          onClose={() => {
+            if (cleanupBusy) return;
+            cancelClearSessionEpisodes();
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Clear session episodes?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={cancelClearSessionEpisodes}
+              disabled={cleanupBusy}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              This will permanently delete episodic turns for this session. This
+              cannot be undone.
+            </p>
+            <p
+              className="muted text-sm"
+              style={{ margin: "12px 0 0 0", overflowWrap: "anywhere" }}
+            >
+              &ldquo;{trimmedSessionInput}&rdquo;
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={cancelClearSessionEpisodes}
+              disabled={cleanupBusy}
+            >
+              Keep
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void confirmClearSessionEpisodes()}
+              disabled={cleanupBusy}
+              aria-label="Confirm clear session episodes"
+            >
+              {cleanupBusy ? "Clearing…" : "Clear session"}
             </button>
           </div>
         </Modal>
