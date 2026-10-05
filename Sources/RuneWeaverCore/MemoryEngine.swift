@@ -627,9 +627,11 @@ public actor MemoryEngine {
         profile.facts.removeAll { $0.id == id }
         touchProfile()
     }
+}
 
-    // MARK: - Extraction
+// MARK: - MemoryEngine Fact Extraction
 
+extension MemoryEngine {
     /// Extracts durable facts and preferences from free text.
     @discardableResult
     public func extractAndStoreFacts(

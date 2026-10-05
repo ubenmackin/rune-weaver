@@ -14,7 +14,6 @@ import {
   clearEpisodes,
   deleteEpisode,
   deleteFact,
-  deleteSessionEpisodes,
   getFacts,
   listRecentEpisodes,
   searchMemory,
@@ -146,9 +145,20 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
   const [semanticCount, setSemanticCount] = useState<number | null>(null);
   const [factsTotalCount, setFactsTotalCount] = useState<number | null>(null);
 
+  // Guards the mount-time tallies so a late counts response never settles
+  // state on an unmounted view; background deletes reuse the same guard.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const refreshCounts = useCallback(async () => {
     try {
       const page = await getFacts("", FACTS_PAGE_SIZE, 0);
+      if (!mountedRef.current) return;
       setEpisodeCount(page.episodeCount);
       setSemanticCount(page.semanticCount);
       setFactsTotalCount(page.total);
@@ -158,22 +168,13 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     }
   }, []);
 
+  // Tab labels settle from the facts route alone so counts stay fresh
+  // without pulling any listing rows. Runs once on mount; tab entry never
+  // fetches and row data appears only through explicit Search, Show Recent,
+  // or More.
   useEffect(() => {
-    let cancelled = false;
-    getFacts("", FACTS_PAGE_SIZE, 0)
-      .then((page) => {
-        if (cancelled) return;
-        setEpisodeCount(page.episodeCount);
-        setSemanticCount(page.semanticCount);
-        setFactsTotalCount(page.total);
-      })
-      .catch(() => {
-        // Counts stay null and labels render without tallies.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void refreshCounts();
+  }, [refreshCounts]);
 
   // Follows deep links while the view is open: hash edits fire hashchange
   // while query-only history moves fire popstate. Skipped when the shell pins
@@ -267,7 +268,17 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
   const [newFact, setNewFact] = useState("");
   const [factsLoadedOnce, setFactsLoadedOnce] = useState(false);
 
+  // Failures preserve the last settled window beside the error (preserve-
+  // plus-error): a failed read never blanks rows the owner already audited.
+  // The finder pane follows the same contract so neither pane lingers
+  // inconsistently.
   async function fetchFactsWindow(nextQuery: string, nextOffset: number, append: boolean) {
+    // Captures the attempted query before the fetch so Retry re-runs the
+    // failed attempt instead of falling back to recent/"". The recent
+    // fallback applies only when no attempt ever ran.
+    if (!append) {
+      setFactsActiveQuery(nextQuery);
+    }
     setFactsBusy(true);
     setFactsError(null);
     try {
@@ -281,13 +292,14 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
         setFactsList((previous) => [...previous, ...page.facts]);
       } else {
         setFactsList(page.facts);
-        setFactsActiveQuery(nextQuery);
       }
       setFactsTotal(page.total);
       setFactsOffset(nextOffset + page.facts.length);
       if (page.preferences) setFactsPreferences(page.preferences);
       setFactsLoadedOnce(true);
     } catch (failure) {
+      // Preserve-plus-error: keeps the last settled rows so a transient
+      // failure never blanks the pane; Retry re-reads factsActiveQuery above.
       setFactsError(failure instanceof ApiError ? failure.message : "Facts failed");
     } finally {
       setFactsBusy(false);
@@ -310,15 +322,9 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     void fetchFactsWindow(factsActiveQuery, factsOffset, true);
   }
 
-  // Lazily previews the first window when the Facts pane first opens so the
-  // default Search paint never pays for a list the owner may not open.
-  useEffect(() => {
-    if (renderTab !== "facts") return;
-    if (factsLoadedOnce || factsBusy) return;
-    void fetchFactsWindow("", 0, false);
-    // Runs on tab entry only; query changes flow through explicit actions.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renderTab]);
+  // Facts stay empty-first: no fetch runs on tab entry. Rows appear only
+  // through the explicit Show Recent, Search, or More controls above, while
+  // tab labels settle from the mount-time counts fetch.
 
   async function addFact() {
     const content = newFact.trim();
@@ -456,9 +462,15 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
 
   // Finds episodic turns by contents: pulls a bounded mixed window then keeps
   // only episodic rows, so semantic and profile hits never enter the finder.
+  // Failures preserve the last settled window beside the error, matching the
+  // facts pane preserve-plus-error contract.
   async function runFinderContentsSearch() {
     const trimmed = finderQuery.trim();
     if (!trimmed) return;
+    // Captures the attempted contents query before the fetch so Retry re-runs
+    // this attempt instead of falling back to the recency window.
+    setFinderSource("contents");
+    setFinderSourceParam(trimmed);
     setFinderBusy(true);
     setFinderError(null);
     try {
@@ -467,58 +479,60 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
         (row) => row.source === "episodic",
       );
       setFinderResults(episodicOnly);
-      setFinderSource("contents");
-      setFinderSourceParam(trimmed);
       setFinderLoadedOnce(true);
     } catch (failure) {
       setFinderError(
         failure instanceof ApiError ? failure.message : "Episodic search failed",
       );
-      setFinderResults([]);
     } finally {
       setFinderBusy(false);
     }
   }
 
   // Previews the newest bounded window so the owner can audit recency without
-  // typing a query first.
+  // typing a query first. Failures preserve the last settled window beside
+  // the error, matching the facts pane preserve-plus-error contract.
   async function runShowRecentFinder() {
+    // Captures the recency attempt before the fetch so Retry re-runs recent
+    // even when this first attempt fails.
+    setFinderSource("recent");
+    setFinderSourceParam("");
     setFinderBusy(true);
     setFinderError(null);
     try {
       const response = await listRecentEpisodes(EPISODES_PAGE_SIZE);
       setFinderResults(response.episodes);
-      setFinderSource("recent");
-      setFinderSourceParam("");
       setFinderLoadedOnce(true);
     } catch (failure) {
       setFinderError(
         failure instanceof ApiError ? failure.message : "Episodes failed",
       );
-      setFinderResults([]);
     } finally {
       setFinderBusy(false);
     }
   }
 
   // Previews one session from the trimmed session input at call time, so
-  // padding never addresses a blank session.
+  // padding never addresses a blank session. Failures preserve the last
+  // settled window beside the error, matching the facts preserve-plus-error
+  // contract.
   async function runPreviewSessionFinder() {
     const trimmed = sessionInput.trim();
     if (!trimmed) return;
+    // Captures the attempted session before the fetch so Retry re-runs this
+    // session instead of falling back to the recency window.
+    setFinderSource("session");
+    setFinderSourceParam(trimmed);
     setFinderBusy(true);
     setFinderError(null);
     try {
       const response = await listRecentEpisodes(EPISODES_PAGE_SIZE, trimmed);
       setFinderResults(response.episodes);
-      setFinderSource("session");
-      setFinderSourceParam(trimmed);
       setFinderLoadedOnce(true);
     } catch (failure) {
       setFinderError(
         failure instanceof ApiError ? failure.message : "Episodes failed",
       );
-      setFinderResults([]);
     } finally {
       setFinderBusy(false);
     }
@@ -550,28 +564,17 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     setFinderLoadedOnce(true);
   }
 
-  // Lazily previews recency when the Episodes pane first opens for the same
-  // reason as facts: the default Search paint never pays for it.
-  useEffect(() => {
-    if (renderTab !== "episodes") return;
-    if (finderLoadedOnce || finderBusy) return;
-    void runShowRecentFinder();
-    // Runs on tab entry only; finder edits flow through explicit actions.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renderTab]);
-
-  // Episodic cleanup state stays beside the fact-delete pair so each
-  // destructive flow owns its pending row plus busy flag: per-hit deletes
-  // target one row by id, while the footer panel targets the whole store or
-  // one session behind the same centered Modal pattern.
+  // Single-path finder owns its preview plus destructive state beside the
+  // fact-delete pair: per-row deletes target one row by id while the finder
+  // danger row targets the shown set or the whole store behind the same
+  // centered Modal pattern. No tab entry fetch runs here; rows appear only
+  // through explicit Search, Show Recent, Preview, or More.
   const [pendingSearchEpisodic, setPendingSearchEpisodic] = useState<MemoryResult | null>(
     null,
   );
   const [pendingEpisodeRow, setPendingEpisodeRow] = useState<EpisodicEpisode | null>(null);
   const [deletingEpisodicId, setDeletingEpisodicId] = useState<string | null>(null);
   const [pendingClearAll, setPendingClearAll] = useState(false);
-  const [pendingClearSession, setPendingClearSession] = useState(false);
-  const [cleanupBusy, setCleanupBusy] = useState(false);
   const [sessionInput, setSessionInput] = useState("");
 
   // Confirms one per-hit Search delete by the hit's metadata id, then drops
@@ -689,72 +692,64 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     setPendingDeleteAllShown(false);
   }
 
+  // Re-runs the recorded finder source after a fetch failure so the Retry
+  // control recovers without the owner retyping. Sources are captured before
+  // each fetch, so Retry re-runs the failed attempt; it falls back to the
+  // recent window only when no attempt ever ran, matching the post-delete
+  // re-read. Failures preserve the last settled window beside the error.
+  async function retryFinder() {
+    if (finderBusy) return;
+    setFinderBusy(true);
+    setFinderError(null);
+    try {
+      await refetchActiveFinderSource();
+    } catch (failure) {
+      setFinderError(
+        failure instanceof ApiError ? failure.message : "Episodes failed",
+      );
+    } finally {
+      setFinderBusy(false);
+    }
+  }
+
   // Confirms the whole-store episodic clear behind the same centered Modal as
   // fact delete. On success the pane reloads the active finder source and
-  // tallies and drops stale recall hits so cleared rows never linger.
+  // tallies so cleared rows never linger. Clearing applies immediately with
+  // no restart because every read opens the store on demand.
   async function confirmClearAllEpisodes() {
-    setCleanupBusy(true);
-    if (renderTab === "episodes") setFinderError(null);
-    else setSearchError(null);
+    setFinderBusy(true);
+    setFinderError(null);
     try {
       await clearEpisodes();
-      setSearchResults([]);
-      setSearchElapsedMs(null);
-      setFinderResults([]);
-      setFinderLoadedOnce(true);
       await refreshCounts();
       await refetchActiveFinderSource();
       setPendingClearAll(false);
     } catch (failure) {
       const message =
         failure instanceof ApiError ? failure.message : "Clear episodes failed";
-      if (renderTab === "episodes") setFinderError(message);
-      else setSearchError(message);
+      setFinderError(message);
+      // Settles tallies plus the active source even on failure so the pane
+      // reflects the stored truth after a rejected clear.
+      try {
+        await refreshCounts();
+        await refetchActiveFinderSource();
+      } catch {
+        // The finder error above already owns the failure copy.
+      }
     } finally {
-      setCleanupBusy(false);
+      setFinderBusy(false);
     }
   }
 
   function cancelClearAllEpisodes() {
+    if (finderBusy) return;
     setPendingClearAll(false);
   }
 
-  // Confirms the per-session episodic clear using the trimmed session input at
-  // confirm time, then reloads the active finder source and tallies like the
-  // whole-store path. A blank input never reaches here because its button
-  // stays disabled.
-  async function confirmClearSessionEpisodes() {
-    const sessionID = sessionInput.trim();
-    if (!sessionID) return;
-    setCleanupBusy(true);
-    if (renderTab === "episodes") setFinderError(null);
-    else setSearchError(null);
-    try {
-      await deleteSessionEpisodes(sessionID);
-      setSearchResults([]);
-      setSearchElapsedMs(null);
-      await refreshCounts();
-      await refetchActiveFinderSource();
-      setPendingClearSession(false);
-    } catch (failure) {
-      const message =
-        failure instanceof ApiError
-          ? failure.message
-          : "Clear session episodes failed";
-      if (renderTab === "episodes") setFinderError(message);
-      else setSearchError(message);
-    } finally {
-      setCleanupBusy(false);
-    }
-  }
-
-  function cancelClearSessionEpisodes() {
-    setPendingClearSession(false);
-  }
-
-  // Zero stored turns disables both destructive buttons with an honest title,
-  // while a blank session input disables only its own button so the
-  // whole-store path stays available when episodes exist.
+  // Preview alone is blank-disabled by the session input; both danger controls
+  // ignore the session input and gate on busy plus stored rows instead: Delete
+  // All Shown on a busy or empty/unaddressable window, Clear All on busy or
+  // zero stored turns with an honest title.
   const resolvedEpisodeCount = episodeCount ?? 0;
   const hasEpisodes = resolvedEpisodeCount > 0;
   const trimmedSessionInput = sessionInput.trim();
@@ -943,7 +938,23 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
 
             {renderTab === "facts" ? (
               <div id="memory-panel-facts" role="tabpanel" aria-label="Facts">
-                {factsError ? <p className="error">{factsError}</p> : null}
+                {factsError ? (
+                  <div className="row">
+                    <p className="error">{factsError}</p>
+                    {/* Retry re-reads the last explicit window from its start
+                        so a transient read can recover without the owner
+                        retyping the query; More simply reloads the same
+                        filter instead of resuming mid-window. */}
+                    <button
+                      type="button"
+                      className="ghost"
+                      disabled={factsBusy}
+                      onClick={() => void fetchFactsWindow(factsActiveQuery, 0, false)}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : null}
                 <div className="memory-facts-section">
                   <h3>Facts</h3>
                   <p className="muted text-sm">
@@ -1010,6 +1021,24 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
                         : "Search or show recent to preview facts…"}
                   </p>
 
+                  {/* Loading copy renders only while a facts window is in
+                      flight so the idle hint never flickers into a spinner. */}
+                  {factsBusy ? (
+                    <p className="muted text-sm">Loading facts…</p>
+                  ) : null}
+
+                  {/* Empty-result copy appears only after a completed fetch
+                      settles with zero rows; the idle hint above owns the
+                      never-fetched state so the two never read alike. */}
+                  {factsLoadedOnce &&
+                  !factsBusy &&
+                  !factsError &&
+                  factsList.length === 0 ? (
+                    <p className="muted text-sm">
+                      No facts match the current search.
+                    </p>
+                  ) : null}
+
                   <div className="facts-list">
                     {factsList.map((fact) => (
                       <div className="card fact-item-card" key={fact.id}>
@@ -1072,7 +1101,19 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
 
             {renderTab === "episodes" ? (
               <div id="memory-panel-episodes" role="tabpanel" aria-label="Episodes">
-                {finderError ? <p className="error">{finderError}</p> : null}
+                {finderError ? (
+                  <div className="row">
+                    <p className="error">{finderError}</p>
+                    <button
+                      type="button"
+                      className="ghost"
+                      disabled={finderBusy}
+                      onClick={() => void retryFinder()}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : null}
                 <div className="memory-section-card memory-search-section">
                   <h3>Episodes</h3>
                   <p className="muted text-sm">
@@ -1108,32 +1149,65 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
                       Show Recent
                     </button>
                   </div>
+                  <div className="row episodic-session-row">
+                    <input
+                      type="text"
+                      aria-label="Session UUID"
+                      placeholder="Session UUID…"
+                      value={sessionInput}
+                      onChange={(event) => setSessionInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") void runPreviewSessionFinder();
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="ghost"
+                      disabled={finderBusy || trimmedSessionInput.length === 0}
+                      onClick={() => void runPreviewSessionFinder()}
+                    >
+                      Preview
+                    </button>
+                  </div>
                   <p className="muted text-sm memory-counts">
-                    {finderLoadedOnce
-                      ? `${resolvedEpisodeCount} episodes stored`
-                      : "Loading episodic turns…"}
+                    {finderBusy
+                      ? "Loading episodic turns…"
+                      : !finderLoadedOnce
+                        ? "Search or Show Recent to preview turns…"
+                        : `${finderResults.length} turns shown`}
                   </p>
-                  {finderLoadedOnce ? (
-                    <div className="row">
-                      <span className="muted text-sm">
-                        {`${finderResults.length} turns shown`}
-                      </span>
-                      {finderResults.length > 0 ? (
-                        <button
-                          type="button"
-                          className="danger icon-text-btn"
-                          disabled={finderBusy}
-                          title={
-                            !hasEpisodes ? "No episodic turns stored" : undefined
-                          }
-                          onClick={() => setPendingDeleteAllShown(true)}
-                        >
-                          <TrashIcon size={14} />
-                          <span>Delete All Shown</span>
-                        </button>
-                      ) : null}
-                    </div>
-                  ) : null}
+                  <div className="row episodic-danger-row">
+                    <button
+                      type="button"
+                      className="danger icon-text-btn"
+                      disabled={
+                        finderBusy ||
+                        finderResults.length === 0 ||
+                        !finderResults.some(
+                          (row) => finderItemId(row) !== undefined,
+                        )
+                      }
+                      title={
+                        finderResults.length === 0
+                          ? "No shown turns to delete"
+                          : undefined
+                      }
+                      onClick={() => setPendingDeleteAllShown(true)}
+                    >
+                      <TrashIcon size={14} />
+                      <span>Delete All Shown</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="danger icon-text-btn"
+                      disabled={finderBusy || !hasEpisodes}
+                      title={!hasEpisodes ? "No episodic turns stored" : undefined}
+                      onClick={() => setPendingClearAll(true)}
+                    >
+                      <TrashIcon size={14} />
+                      <span>Clear All</span>
+                    </button>
+                  </div>
                   {finderResults.length > 0 ? (
                     <div className="memory-results-list">
                       {finderResults.map((item) => {
@@ -1207,71 +1281,12 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
                   ) : null}
                   {finderLoadedOnce &&
                   finderResults.length === 0 &&
-                  !finderBusy ? (
+                  !finderBusy &&
+                  finderError === null ? (
                     <p className="muted text-sm">
                       No episodic turns match with current query
                     </p>
                   ) : null}
-                </div>
-
-                {/* Episodic cleanup footer: the count comes from the facts tallies
-                    so the panel never drifts from the stored store, and both
-                    destructive paths confirm behind the centered Modal before
-                    reloading the active finder source and tallies. Clearing
-                    applies immediately with no restart because every read opens
-                    the store directly. */}
-                <div className="memory-section-card episodic-cleanup-panel">
-                  <h4>Episodic Cleanup</h4>
-                  <p className="muted text-sm">
-                    {episodeCount !== null
-                      ? `${resolvedEpisodeCount} episodic turns stored`
-                      : "Loading episodic turns…"}
-                  </p>
-                  <div className="row episodic-session-row">
-                    <input
-                      type="text"
-                      aria-label="Session UUID"
-                      placeholder="Session UUID…"
-                      value={sessionInput}
-                      onChange={(event) => setSessionInput(event.target.value)}
-                    />
-                    <button
-                      type="button"
-                      className="ghost"
-                      disabled={
-                        finderBusy || trimmedSessionInput.length === 0
-                      }
-                      onClick={() => void runPreviewSessionFinder()}
-                    >
-                      Preview
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost icon-text-btn"
-                      disabled={
-                        !hasEpisodes ||
-                        trimmedSessionInput.length === 0 ||
-                        cleanupBusy
-                      }
-                      title={!hasEpisodes ? "No episodic turns stored" : undefined}
-                      onClick={() => setPendingClearSession(true)}
-                    >
-                      <TrashIcon size={14} />
-                      <span>Clear session</span>
-                    </button>
-                  </div>
-                  <div className="row episodic-clear-all-row">
-                    <button
-                      type="button"
-                      className="danger icon-text-btn"
-                      disabled={!hasEpisodes || cleanupBusy}
-                      title={!hasEpisodes ? "No episodic turns stored" : undefined}
-                      onClick={() => setPendingClearAll(true)}
-                    >
-                      <TrashIcon size={14} />
-                      <span>Clear all episodes</span>
-                    </button>
-                  </div>
                 </div>
               </div>
             ) : null}
@@ -1461,12 +1476,12 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
       ) : null}
 
       {/* Centered Modal for the whole-store episodic clear. Success reloads
-          recency and tallies so cleared rows never linger. */}
+          the active finder source and tallies so cleared rows never linger. */}
       {pendingClearAll ? (
         <Modal
           label="Confirm clear all episodes"
           onClose={() => {
-            if (cleanupBusy) return;
+            if (finderBusy) return;
             cancelClearAllEpisodes();
           }}
           containerClassName="modal-container session-delete-modal"
@@ -1477,7 +1492,7 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
               type="button"
               className="icon-button"
               onClick={cancelClearAllEpisodes}
-              disabled={cleanupBusy}
+              disabled={finderBusy}
               aria-label="Close"
             >
               <CloseIcon size={16} />
@@ -1494,7 +1509,7 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
               type="button"
               className="ghost"
               onClick={cancelClearAllEpisodes}
-              disabled={cleanupBusy}
+              disabled={finderBusy}
             >
               Keep
             </button>
@@ -1502,67 +1517,10 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
               type="button"
               className="danger"
               onClick={() => void confirmClearAllEpisodes()}
-              disabled={cleanupBusy}
+              disabled={finderBusy}
               aria-label="Confirm clear all episodes"
             >
-              {cleanupBusy ? "Clearing…" : "Clear all"}
-            </button>
-          </div>
-        </Modal>
-      ) : null}
-
-      {/* Centered Modal for the per-session episodic clear. The trimmed session
-          input addresses the delete; success reloads recency and tallies. */}
-      {pendingClearSession ? (
-        <Modal
-          label="Confirm clear session episodes"
-          onClose={() => {
-            if (cleanupBusy) return;
-            cancelClearSessionEpisodes();
-          }}
-          containerClassName="modal-container session-delete-modal"
-        >
-          <div className="modal-header">
-            <h3>Clear session episodes?</h3>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={cancelClearSessionEpisodes}
-              disabled={cleanupBusy}
-              aria-label="Close"
-            >
-              <CloseIcon size={16} />
-            </button>
-          </div>
-          <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
-              This will permanently delete episodic turns for this session. This
-              cannot be undone.
-            </p>
-            <p
-              className="muted text-sm"
-              style={{ margin: "12px 0 0 0", overflowWrap: "anywhere" }}
-            >
-              &ldquo;{trimmedSessionInput}&rdquo;
-            </p>
-          </div>
-          <div className="modal-footer">
-            <button
-              type="button"
-              className="ghost"
-              onClick={cancelClearSessionEpisodes}
-              disabled={cleanupBusy}
-            >
-              Keep
-            </button>
-            <button
-              type="button"
-              className="danger"
-              onClick={() => void confirmClearSessionEpisodes()}
-              disabled={cleanupBusy}
-              aria-label="Confirm clear session episodes"
-            >
-              {cleanupBusy ? "Clearing…" : "Clear session"}
+              {finderBusy ? "Clearing…" : "Clear all"}
             </button>
           </div>
         </Modal>

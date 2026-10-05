@@ -304,6 +304,53 @@ describe("dashboard api client", () => {
     );
   });
 
+  it("surfaces recent listing failures as ApiError", async () => {
+    // Malformed limits and sessions reject 400 with the engine reason, while
+    // server failures surface the Abort reason through the shared fetchJson
+    // path so the finder can render the honest message plus Retry.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ reason: "limit must be 1-100" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    const badLimit = await listRecentEpisodes(700).catch((error: unknown) => error);
+    expect(badLimit).toBeInstanceOf(ApiError);
+    expect((badLimit as ApiError).status).toBe(400);
+    expect((badLimit as ApiError).message).toContain("limit must be 1-100");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ reason: "sessionID must be a UUID" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    const badSession = await listRecentEpisodes(20, "nope").catch(
+      (error: unknown) => error,
+    );
+    expect(badSession).toBeInstanceOf(ApiError);
+    expect((badSession as ApiError).status).toBe(400);
+    expect((badSession as ApiError).message).toContain("sessionID must be a UUID");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ reason: "store unavailable" }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    const serverError = await listRecentEpisodes().catch((error: unknown) => error);
+    expect(serverError).toBeInstanceOf(ApiError);
+    expect((serverError as ApiError).status).toBe(500);
+    expect((serverError as ApiError).message).toContain("store unavailable");
+  });
+
   it("passes an abort signal through mixed recall", async () => {
     // The Search pane cancels stale recalls on fresh submits; the signal rides
     // the same recall path so no second transport exists.

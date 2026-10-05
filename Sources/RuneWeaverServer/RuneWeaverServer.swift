@@ -135,6 +135,11 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext, auth
 /// `authConfigured`) from the stored context so the policy that refused or
 /// permitted the bind is the same one gating Host headers; the HTTP server
 /// hostname was already set from that config in `configureRuneWeaver`.
+///
+/// Engine API routes always register before the dashboard bundle so a
+/// `/memory/*` listing never falls through to the single-page client fallback
+/// HTML: known listings answer JSON while unknown memory paths answer JSON
+/// `404`, keeping error copy machine-readable for retry affordances.
 public func registerRuneWeaverRoutes(_ app: Application) {
     app.routes.defaultMaxBodySize = "2mb"
     let serverConfig = app.runeWeaver.config
@@ -874,6 +879,10 @@ private func webSocketGenerationIsRetired(auth: ServerAuth?, generation: Int?) a
 /// middleware forwards these GET paths through to this handler, and both share
 /// the same resolved bundle so the gate's public-path classifier and this
 /// delivery path cannot disagree.
+///
+/// Engine API routes register before this bundle so listings answer JSON; any
+/// `/memory/*` path reaching here is unknown and answers JSON `404` instead of
+/// the single-page HTML fallback, keeping Abort errors machine-readable.
 /// - Parameters:
 ///   - app: Application receiving the routes.
 ///   - bundle: Resolved bundle to serve, or a fresh resolution when omitted.
@@ -883,6 +892,19 @@ public func registerDashboardRoutes(_ app: Application, bundle: DashboardBundle 
     }
     app.get("**") { req async throws -> Response in
         let remainder = req.parameters.getCatchall().joined(separator: "/")
+        let firstComponent = remainder
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .first
+            .map { String($0).lowercased() } ?? ""
+        if firstComponent == ServerPaths.memory.lowercased() {
+            // Vapor negotiates Abort payloads by Accept, so a browser Accept can
+            // still render HTML here; answer explicit JSON so /memory/* never serves HTML.
+            return Response(
+                status: .notFound,
+                headers: HTTPHeaders([("Content-Type", "application/json; charset=utf-8")]),
+                body: .init(string: #"{"reason":"Not found"}"#)
+            )
+        }
         return try await bundle.response(for: req, requestPath: remainder)
     }
 }
