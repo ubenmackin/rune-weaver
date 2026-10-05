@@ -7087,46 +7087,6 @@ export default function SettingsManager() {
                 </button>
               </div>
             </div>
-
-            {/* Auto-Allowed Services Card */}
-            <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
-              <h4 style={{ margin: "0 0 6px 0", fontSize: "0.88rem" }}>Auto-Allowed Services</h4>
-              <p className="muted text-sm" style={{ margin: "0 0 10px 0" }}>
-                Configured Sonarr, Radarr, and SearXNG origins are automatically exempt from SSRF blocking only. Calls still require Policy authorization or approval.
-              </p>
-              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.85rem", padding: "6px 10px", borderRadius: "6px", backgroundColor: "var(--bg-tertiary, #1a202c)" }}>
-                  <span style={{ fontWeight: 500 }}>Sonarr (TV Shows)</span>
-                  {sonarrUrl.trim() ? (
-                    <span className="badge badge-success" style={{ fontSize: "0.75rem" }}>
-                      {sonarrUrl.trim()}
-                    </span>
-                  ) : (
-                    <span className="muted text-xs">Not configured</span>
-                  )}
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.85rem", padding: "6px 10px", borderRadius: "6px", backgroundColor: "var(--bg-tertiary, #1a202c)" }}>
-                  <span style={{ fontWeight: 500 }}>Radarr (Movies)</span>
-                  {radarrUrl.trim() ? (
-                    <span className="badge badge-success" style={{ fontSize: "0.75rem" }}>
-                      {radarrUrl.trim()}
-                    </span>
-                  ) : (
-                    <span className="muted text-xs">Not configured</span>
-                  )}
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.85rem", padding: "6px 10px", borderRadius: "6px", backgroundColor: "var(--bg-tertiary, #1a202c)" }}>
-                  <span style={{ fontWeight: 500 }}>SearXNG (Search)</span>
-                  {searchSearxngURL.trim() ? (
-                    <span className="badge badge-success" style={{ fontSize: "0.75rem" }}>
-                      {searchSearxngURL.trim()}
-                    </span>
-                  ) : (
-                    <span className="muted text-xs">Not configured</span>
-                  )}
-                </div>
-              </div>
-            </div>
           </div>
           <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
             <button
