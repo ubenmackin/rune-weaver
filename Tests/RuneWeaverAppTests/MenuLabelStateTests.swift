@@ -14,7 +14,12 @@
 @testable import RuneWeaverApp
 import Testing
 
+/// `AppMenuLabel.labelState` is MainActor-isolated through its enclosing
+/// SwiftUI view type, so the suite pins that isolation instead of fighting it:
+/// every truth-table call stays synchronous inside `#expect` with no awaits,
+/// mirroring how the bar renders on the main actor in production.
 @Suite("Menu label state")
+@MainActor
 struct MenuLabelStateTests {
     @Test
     func `failed beats cold-start progress`() {

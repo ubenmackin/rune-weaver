@@ -33,6 +33,7 @@ extension RuneWeaverConfig {
         try validateProactiveSection()
         try validateIdeasSection()
         try validateFanoutSection()
+        try validatePersonaSection()
     }
 
     private func validateEngineSection() throws {
@@ -986,6 +987,36 @@ extension RuneWeaverConfig {
             )
         }
     }
+
+    /// Validates the `[persona]` section through the shared normalizers.
+    ///
+    /// Decode and merge paths already repaired at their own boundaries, so this
+    /// enforces the same bounds fail-closed for hand-built configs: a blank
+    /// assistant name and overlong style guidance that would have fallen back
+    /// or truncated on load instead throw here, because the non-mutating check
+    /// cannot repair the stored value and passing would leave a broken identity
+    /// line. Bounds that cannot be repaired on any path throw with the dotted
+    /// field via the shared normalizers. Tone and avatar are closed enums, so
+    /// nothing beyond their decode-time rejection can drift here. The composer
+    /// additionally clamps at render so a prompt never splices even when
+    /// validation is bypassed.
+    private func validatePersonaSection() throws {
+        if persona.assistantName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ConfigError.validationError(
+                field: "persona.assistant_name", message: "must not be blank"
+            )
+        }
+        _ = try PersonaConfig.normalizedAssistantName(persona.assistantName)
+        _ = try PersonaConfig.normalizedUserName(persona.userName)
+        let sanitizedStyle = NormalizedText.singleLineSanitized(persona.style)
+        if sanitizedStyle.count > PersonaConfig.maxStyleLength {
+            throw ConfigError.validationError(
+                field: "persona.style",
+                message: "must not exceed \(PersonaConfig.maxStyleLength) characters (got \(sanitizedStyle.count))"
+            )
+        }
+        _ = PersonaConfig.normalizedStyle(persona.style)
+    }
 }
 
 /// Bounds enforcement for goal pursuit when the config bypasses load-time validation.
@@ -1132,6 +1163,153 @@ public extension BashConfig {
                 message: "must be between \(minTimeoutSeconds) and \(maxTimeoutSeconds) (got \(timeoutSeconds))"
             )
         }
+    }
+}
+
+/// Normalize-or-reject enforcement shared by `[persona]` TOML decoding, JSON
+/// decoding, and load-time validation so the entry paths agree on the
+/// documented persona bounds without drifting on fields or messages.
+///
+/// Blank assistant names and overlong style guidance degrade deliberately —
+/// neither can corrupt the prompt, the name falls back to the stock identity
+/// and the style simply keeps its leading clause — each with a logged note so
+/// the owner sees the silent fix. Shapes that cannot be repaired (an oversized
+/// or unprintable name, an oversized owner name, an unknown tone or avatar
+/// spelling) throw fail-closed with the dotted field path.
+public extension PersonaConfig {
+    /// Normalizes `assistant_name`.
+    ///
+    /// An absent or blank key falls back to the documented default with a
+    /// logged note; a name that cannot fit the identity sentence (over the
+    /// length bound or carrying control characters) throws, because a typo
+    /// would otherwise render a broken "You are …" clause forever.
+    /// - Parameters:
+    ///   - raw: Raw configured value, nil when the key is absent.
+    ///   - field: Dotted field name carried by the thrown error.
+    /// - Returns: The trimmed usable assistant name.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when oversized or unprintable.
+    static func normalizedAssistantName(_ raw: String?, field: String = "persona.assistant_name") throws -> String {
+        guard let raw else { return defaultAssistantName }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            RuneWeaverLog.stores.warning(
+                "PersonaConfig: blank \(field); falling back to default assistant name '\(defaultAssistantName)'"
+            )
+            return defaultAssistantName
+        }
+        if trimmed.count > maxAssistantNameLength {
+            throw ConfigError.validationError(
+                field: field,
+                message: "must not exceed \(maxAssistantNameLength) characters (got \(trimmed.count))"
+            )
+        }
+        // Control characters would splice the identity sentence across prompt
+        // lines, so only printable text passes, mirroring the Host-gate rules.
+        if trimmed.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) {
+            throw ConfigError.validationError(
+                field: field, message: "must contain only printable characters (got '\(trimmed)')"
+            )
+        }
+        return trimmed
+    }
+
+    /// Parses `tone` against the closed preset set.
+    ///
+    /// An absent key keeps the default; an unknown string throws instead of
+    /// silently picking a preset, matching the `[proactive] mode` posture.
+    /// - Parameters:
+    ///   - raw: Raw configured value, nil when the key is absent.
+    ///   - field: Dotted field name carried by the thrown error.
+    /// - Returns: The matching tone after trim and lowercase normalization.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` on any unknown spelling.
+    static func normalizedTone(_ raw: String?, field: String = "persona.tone") throws -> PersonaTone {
+        guard let raw else { return defaultTone }
+        let lowered = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let tone = PersonaTone(rawValue: lowered) else {
+            throw ConfigError.validationError(
+                field: field,
+                message: "must be one of \(PersonaTone.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(raw)')"
+            )
+        }
+        return tone
+    }
+
+    /// Normalizes `style`, squashing it to one control-free line and truncating
+    /// overlong guidance.
+    ///
+    /// The shared single-line scrubber runs before the length bound because the
+    /// composer injects this text verbatim: a multi-line or control-bearing
+    /// value would otherwise splice the identity sentence across prompt lines.
+    /// Truncation plus a logged note remains the documented fail-open posture:
+    /// the leading clause carries the owner's intent, and a refusal would
+    /// turn a stray paste into a boot failure for text that only decorates
+    /// the identity sentence. The bound applies to the sanitized shape that
+    /// actually reaches the prompt, and clean copy is untouched, so stored and
+    /// keyed bytes match the composed bytes.
+    /// - Parameters:
+    ///   - raw: Raw configured value, nil when the key is absent.
+    ///   - field: Dotted field name carried by the logged note.
+    /// - Returns: The sanitized single-line style guidance, truncated to the documented bound when overlong.
+    static func normalizedStyle(_ raw: String?, field: String = "persona.style") -> String {
+        guard let raw else { return defaultStyle }
+        let sanitized = NormalizedText.singleLineSanitized(raw)
+        if sanitized.count > maxStyleLength {
+            RuneWeaverLog.stores.warning(
+                "PersonaConfig: \(field) exceeds \(maxStyleLength) characters (got \(sanitized.count)); truncating to the leading \(maxStyleLength)"
+            )
+            return String(sanitized.prefix(maxStyleLength))
+        }
+        return sanitized
+    }
+
+    /// Normalizes `user_name`.
+    ///
+    /// The shared single-line scrubber runs before the length bound so the
+    /// address clause can never carry a line break or control byte into the
+    /// prompt — the same splicing threat the assistant name refuses outright,
+    /// repaired here because an owner name is display wording the composer
+    /// injects verbatim. An absent or blank key keeps the address clause out of
+    /// the prompt. An oversized name throws rather than truncating: unlike free
+    /// prose, a cut name misrepresents the owner instead of just shortening
+    /// advice, and the bound is checked on the sanitized shape so it constrains
+    /// exactly what reaches the prompt.
+    /// - Parameters:
+    ///   - raw: Raw configured value, nil when the key is absent.
+    ///   - field: Dotted field name carried by the thrown error.
+    /// - Returns: The sanitized single-line owner name.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when oversized.
+    static func normalizedUserName(_ raw: String?, field: String = "persona.user_name") throws -> String {
+        guard let raw else { return defaultUserName }
+        let sanitized = NormalizedText.singleLineSanitized(raw)
+        if sanitized.count > maxUserNameLength {
+            throw ConfigError.validationError(
+                field: field,
+                message: "must not exceed \(maxUserNameLength) characters (got \(sanitized.count))"
+            )
+        }
+        return sanitized
+    }
+
+    /// Parses `avatar` against the closed accent set.
+    ///
+    /// An absent key keeps the default accent; an unknown string throws even
+    /// though the value never reaches the prompt, so a typo surfaces with its
+    /// field path instead of silently rendering the wrong color.
+    /// - Parameters:
+    ///   - raw: Raw configured value, nil when the key is absent.
+    ///   - field: Dotted field name carried by the thrown error.
+    /// - Returns: The matching avatar after trim and lowercase normalization.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` on any unknown spelling.
+    static func normalizedAvatar(_ raw: String?, field: String = "persona.avatar") throws -> PersonaAvatar {
+        guard let raw else { return defaultAvatar }
+        let lowered = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let avatar = PersonaAvatar(rawValue: lowered) else {
+            throw ConfigError.validationError(
+                field: field,
+                message: "must be one of \(PersonaAvatar.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(raw)')"
+            )
+        }
+        return avatar
     }
 }
 

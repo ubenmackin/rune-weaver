@@ -3,10 +3,11 @@
 // Owns `GET`/`PUT /settings`: load, merge, validate, and persist the engine
 // config, then push the saved values into the live engine so orchestrator
 // budgets, media/browser/web/API tools, desktop, bash/files policies, fan-out
-// policy, and index policy take effect without a restart. `[goals]` and `[proactive]`
-// persist to the file through the same partial-patch merge but take effect on
-// restart: the pursuit engine and the scheduler worker hold their policy from
-// boot with no live-reload path. `[server]` bind keys persist
+// policy, and index policy take effect without a restart. `[goals]`,
+// `[proactive]`, `[ideas]`, and `[persona]` persist to the file through the
+// same partial-patch merge but take effect on restart: the pursuit engine,
+// the scheduler worker, the ideas engine, and the prompt composer's identity
+// hold their policy from boot with no live-reload path. `[server]` bind keys persist
 // to the file but never live-reload the socket or the middleware set: they
 // return `requiresRestart` so the dashboard shows a pending-vs-live restart
 // banner instead of pretending the new bind is live. `[files]` saves apply
@@ -108,13 +109,15 @@ private func handlePutSettings(req: Request) async throws -> Response {
         // so any provider delta (including supportsVision) leaves the live
         // model stale until restart.
         let providersChanged = config.llm.providers != oldLLMConfig.providers
-        // `[goals]`, `[proactive]`, and `[ideas]` persist to the file through
-        // the same partial-patch merge but take effect on restart: the pursuit
-        // engine, the scheduler worker, and the ideas engine hold their policy
-        // from boot with no live-reload path. Any patch carrying those keys must
-        // advertise a restart instead of silently claiming live.
-        let goalsProactiveOrIdeasChanged = body.goals != nil || body.proactive != nil || body.ideas != nil
-        let needsRestart = serverChanged || llmChanged || providersChanged || goalsProactiveOrIdeasChanged
+        // `[goals]`, `[proactive]`, `[ideas]`, and `[persona]` persist to the
+        // file through the same partial-patch merge but take effect on restart:
+        // the pursuit engine, the scheduler worker, the ideas engine, and the
+        // prompt composer's owner-authored identity hold their policy from boot
+        // with no live-reload path. Any patch carrying those keys must advertise
+        // a restart instead of silently claiming live.
+        let bootHeldSectionPatchPresent =
+            body.goals != nil || body.proactive != nil || body.ideas != nil || body.persona != nil
+        let needsRestart = serverChanged || llmChanged || providersChanged || bootHeldSectionPatchPresent
         let liveContext = req.application.runeWeaver
         // Fail-closed bind guard: a changed non-loopback hostname persists
         // only when an owner token resolves. Without one the save is

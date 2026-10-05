@@ -57,6 +57,7 @@ extension RuneWeaverConfig {
         lines += renderProactiveTOML()
         lines += renderIdeasTOML()
         lines += renderFanOutTOML()
+        lines += renderPersonaTOML()
         return lines.joined(separator: "\n")
     }
 
@@ -502,6 +503,25 @@ extension RuneWeaverConfig {
             "max_workers = \(fanOut.maxWorkers)",
             "worker_timeout_seconds = \(fanOut.workerTimeoutSeconds)",
             "full_tools = \(fanOut.fullTools ? "true" : "false")",
+            ""
+        ]
+    }
+
+    /// Renders the additive `[persona]` section.
+    ///
+    /// Every key renders, including empty style and owner name, so a saved
+    /// file documents the full persona and a round-trip never depends on an
+    /// implicit default silently diverging from what was written. Tone and
+    /// avatar render as their closed string spellings, matching the decode
+    /// contract on both sides.
+    private func renderPersonaTOML() -> [String] {
+        [
+            "[persona]",
+            "assistant_name = \(Self.tomlQuoted(persona.assistantName))",
+            "tone = \(Self.tomlQuoted(persona.tone.rawValue))",
+            "style = \(Self.tomlQuoted(persona.style))",
+            "user_name = \(Self.tomlQuoted(persona.userName))",
+            "avatar = \(Self.tomlQuoted(persona.avatar.rawValue))",
             ""
         ]
     }

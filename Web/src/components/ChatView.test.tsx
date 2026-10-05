@@ -6,6 +6,9 @@
 // collapses to a glanceable line on mobile and expands to full metrics. Also
 // pins the transcript's batched write-review hydration: every rendered
 // files.write card hydrates through one review-status request per card set.
+// The persona describe pins the identity header contract (name and Wisp
+// rendered only when a persona exists, today's UI otherwise) and ChatView's
+// single-writer claim over the avatar activity clock and working flag.
 
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -13,6 +16,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import ChatView, { messageListHasActiveSelection } from "./ChatView";
 import { resetSharedSocket } from "../hooks/useSharedWebSocket";
 import { resetSharedRunsForTesting, useRunningRuns } from "../hooks/useRunningRuns";
+import {
+  peekPersonaSignals,
+  publishPersonaFromSettings,
+  resetPersonaSignalsForTesting,
+} from "./PersonaAvatar";
 import { jsonResponse } from "../test-utils/http";
 import { installViewport } from "../test-utils/viewport";
 import {
@@ -4216,6 +4224,132 @@ describe("ChatView message copy buttons", () => {
 
     await user.click(copyBtns[1]);
     expect(writeTextMock).toHaveBeenCalledWith("Run `make build` to compile.");
+  });
+});
+
+describe("ChatView persona header", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    // The persona store is a module singleton; every identity test starts from
+    // a detached snapshot so the fallback checks prove real absence.
+    resetPersonaSignalsForTesting();
+    localStorage.clear();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ sessions: [], count: 0 })),
+    );
+  });
+
+  it("shows the persona name and Wisp avatar beside the session title", async () => {
+    publishPersonaFromSettings({
+      assistant_name: "Zephyra",
+      tone: "concise",
+      style: "",
+      user_name: "",
+      avatar: "cyan",
+    });
+    render(<ChatView />);
+    const identity = await screen.findByTestId("chat-persona-identity");
+    expect(within(identity).getByText("Zephyra")).toBeInTheDocument();
+    const img = identity.querySelector("img");
+    expect(img?.getAttribute("src")).toBe("/avatars/wisp-cyan-idle-64.png");
+    expect(img?.getAttribute("width")).toBe("32");
+    // The session title stays primary; the identity sits beside it, not over it.
+    expect(screen.getByRole("heading", { name: "Chat" })).toBeInTheDocument();
+  });
+
+  it("renders today's header verbatim when the persona is absent", async () => {
+    publishPersonaFromSettings(undefined);
+    render(<ChatView />);
+    await screen.findByRole("heading", { name: "Chat" });
+    expect(screen.queryByTestId("chat-persona-identity")).toBeNull();
+    expect(document.querySelector(".persona-avatar")).toBeNull();
+  });
+
+  it("is the single activity writer: a REST turn completion advances the shared clock", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input === "/chat") {
+          return jsonResponse({
+            text: "done",
+            sessionID: "s1",
+            toolActions: [],
+          });
+        }
+        return jsonResponse({ sessions: [], count: 0 });
+      }),
+    );
+    expect(peekPersonaSignals().lastActivityAtMs).toBe(0);
+    render(<ChatView />);
+    await user.type(screen.getByLabelText("Chat input"), "hi");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(screen.getByText("done")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(peekPersonaSignals().lastActivityAtMs).toBeGreaterThan(0);
+    });
+    // The turn settled, so the working mirror clears with it.
+    expect(peekPersonaSignals().working).toBe(false);
+  });
+
+  it("advances the activity clock on WS run frames, including other sessions' runs", async () => {
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    expect(peekPersonaSignals().lastActivityAtMs).toBe(0);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        id: "r1",
+        kind: "goal",
+        status: "ok",
+        sessionID: "other-session",
+      },
+    });
+    // A run frame from any session is agent traffic: the clock moves before
+    // the ownership routing below can ignore the frame.
+    expect(peekPersonaSignals().lastActivityAtMs).toBeGreaterThan(0);
+  });
+
+  it("publishes the working flag while a run is in flight and clears it when it settles", async () => {
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_started",
+      run: {
+        id: "r1",
+        kind: "goal",
+        status: "running",
+        sessionID: "other-session",
+      },
+    });
+    await waitFor(() => {
+      expect(peekPersonaSignals().working).toBe(true);
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        id: "r1",
+        kind: "goal",
+        status: "ok",
+        sessionID: "other-session",
+      },
+    });
+    await waitFor(() => {
+      expect(peekPersonaSignals().working).toBe(false);
+    });
   });
 });
 

@@ -1149,6 +1149,9 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var ideas = IdeasConfig()
     /// Parallel worker fan-out policy. Availability flows through tool registration.
     public var fanOut = FanOutConfig()
+    /// Owner-facing assistant persona woven into the prompt identity line.
+    /// An absent `[persona]` table keeps the stock identity and today's prompt bytes.
+    public var persona = PersonaConfig()
 
     /// Creates a root config from section configs.
     public init(
@@ -1173,7 +1176,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         bash: BashConfig = BashConfig(),
         proactive: ProactiveConfig = ProactiveConfig(),
         ideas: IdeasConfig = IdeasConfig(),
-        fanOut: FanOutConfig = FanOutConfig()
+        fanOut: FanOutConfig = FanOutConfig(),
+        persona: PersonaConfig = PersonaConfig()
     ) {
         self.engine = engine
         self.server = server
@@ -1197,6 +1201,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.proactive = proactive
         self.ideas = ideas
         self.fanOut = fanOut
+        self.persona = persona
     }
 
     /// Config with sensible defaults matching `config.toml.example`.
@@ -1293,6 +1298,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         case proactive
         case ideas
         case fanOut = "fanout"
+        case persona
     }
 
     /// Decodes a persisted config, defaulting absent additive sections.
@@ -1302,8 +1308,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     /// proactive surfacing, or idea suggestions existed decode with hardened,
     /// disabled, surfacing, and opt-in defaults instead of throwing.
     /// Present-but-wrong-typed values still throw like every prior section.
-    /// Only the security, goals, bash, proactive, ideas, and fanout sections
-    /// are absent-tolerant; every other section decodes strictly so a
+    /// Only the security, goals, bash, proactive, ideas, fanout, and persona
+    /// sections are absent-tolerant; every other section decodes strictly so a
     /// truncated payload cannot silently load as hardened defaults.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: Decoder) throws {
@@ -1330,9 +1336,12 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.proactive = try container.decodeIfPresent(ProactiveConfig.self, forKey: .proactive) ?? ProactiveConfig()
         self.ideas = try container.decodeIfPresent(IdeasConfig.self, forKey: .ideas) ?? IdeasConfig()
         self.fanOut = try container.decodeIfPresent(FanOutConfig.self, forKey: .fanOut) ?? FanOutConfig()
+        // Absent persona keeps the stock identity so payloads written before
+        // the section existed compose today's prompt byte-for-byte.
+        self.persona = try container.decodeIfPresent(PersonaConfig.self, forKey: .persona) ?? PersonaConfig()
     }
 
-    /// Encodes every section, including the defense policy, goal pursuit, proactive surfacing, and idea suggestions.
+    /// Encodes every section, including the defense policy, goal pursuit, proactive surfacing, idea suggestions, and persona.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -1358,6 +1367,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         try container.encode(proactive, forKey: .proactive)
         try container.encode(ideas, forKey: .ideas)
         try container.encode(fanOut, forKey: .fanOut)
+        try container.encode(persona, forKey: .persona)
     }
 }
 

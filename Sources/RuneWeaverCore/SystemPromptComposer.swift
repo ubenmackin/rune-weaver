@@ -1,4 +1,8 @@
 // Rune Weaver Core — Dynamic system prompt composition from the live tool registry.
+//
+// Owner-authored persona copy is screened through the shared single-line
+// scrubber before it reaches the identity block or the cache-key digest, so no
+// load path can splice the composed prompt structure across lines.
 
 import CryptoKit
 import Foundation
@@ -210,9 +214,10 @@ public enum VisionSchemaFilter: Sendable {
 
 /// Lock-guarded prompt cache state for prefix-stable reuse.
 private struct PromptCacheState: Sendable {
-    /// Rendered prompts keyed by scheduled branch plus current date only.
+    /// Rendered prompts keyed by scheduled branch, current date, and the canonical persona string.
     /// Registry contents never enter the key because schemas travel strictly on the wire,
-    /// so toggling tools reuses the same prefix bytes for server cache hits.
+    /// so toggling tools reuses the same prefix bytes for server cache hits, while any
+    /// persona change is a deliberate miss so a customized identity never serves stale bytes.
     var prompts: [String: String] = [:]
     /// Insertion order for deterministic eviction, oldest first.
     var order: [String] = []
@@ -221,7 +226,8 @@ private struct PromptCacheState: Sendable {
 public enum SystemPromptComposer {
     /// Shared prefix-stable prompt cache; bounded so toggling tools cannot grow memory.
     private static let promptCache = OSAllocatedUnfairLock(initialState: PromptCacheState())
-    /// Maximum cached variants kept; two scheduled branches across recent dates plus headroom for rollover.
+    /// Maximum cached variants kept; two scheduled branches across recent dates for one
+    /// active persona plus headroom for rollover and a live persona swap during reload.
     private static let maxCachedPrompts = 8
 
     /// Static rule teaching the delimited untrusted-content contract.
@@ -266,12 +272,17 @@ public enum SystemPromptComposer {
     }
 
     /// Prompt cache key.
-    /// Prompt content depends on whether the turn is scheduled and the current date grounding.
-    /// Because tool schemas are sent strictly on the wire via native tool definitions, the system prompt
-    /// is 100% prefix-stable and never invalidates KV-cache on tool registry changes.
+    /// Prompt content depends on whether the turn is scheduled, the current date grounding,
+    /// and the owner's persona. Because tool schemas are sent strictly on the wire via native
+    /// tool definitions, the system prompt is 100% prefix-stable and never invalidates KV-cache
+    /// on tool registry changes; the canonical persona string is framed into the digest so any
+    /// persona change is a guaranteed cache miss. Callers pass the prompt-safe projection of
+    /// the persona, so the digest carries exactly the bytes the identity line renders and two
+    /// personas that compose identically can never claim separate cache slots.
     private static func cacheKey(
         scheduled: Bool,
-        currentDate: String = currentDateString()
+        currentDate: String = currentDateString(),
+        persona: PersonaConfig = PersonaConfig()
     ) -> String {
         var framed = Data()
         func appendFramed(_ string: String) {
@@ -283,6 +294,7 @@ public enum SystemPromptComposer {
         }
         appendFramed(scheduled ? "scheduled" : "base")
         appendFramed(currentDate)
+        appendFramed(persona.canonicalCacheString)
         let digest = SHA256.hash(data: framed)
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -306,32 +318,137 @@ public enum SystemPromptComposer {
         }
     }
 
+    /// Projects the persona onto the byte shape that may reach the prompt.
+    ///
+    /// The owner-authored `assistantName`, `style`, and `userName` fields pass
+    /// through the shared single-line scrubber here so the cache-key digest and
+    /// the rendered identity derive from the same sanitized bytes. Load and
+    /// patch paths normalize at their own boundaries, but a hand-built config
+    /// can bypass them entirely, and keying the raw fields would let a dirty
+    /// value and its scrubbed twin claim separate slots. The scrubber is
+    /// idempotent and a no-op on the empty defaults, so the stock persona keeps
+    /// its legacy prompt bytes and its established cache key untouched. A name
+    /// that scrubs to empty reads as the stock identity so a blank hand-built
+    /// value cannot render a broken address, and style clamps to its documented
+    /// bound so the cached bytes already carry the truncation the loader applies.
+    private static func promptSafePersona(_ persona: PersonaConfig) -> PersonaConfig {
+        var safe = persona
+        let scrubbedName = NormalizedText.singleLineSanitized(persona.assistantName)
+        safe.assistantName = NormalizedText.value(scrubbedName) ?? PersonaConfig.defaultAssistantName
+        let scrubbedStyle = NormalizedText.singleLineSanitized(persona.style)
+        if scrubbedStyle.count > PersonaConfig.maxStyleLength {
+            safe.style = String(scrubbedStyle.prefix(PersonaConfig.maxStyleLength))
+        } else {
+            safe.style = scrubbedStyle
+        }
+        safe.userName = NormalizedText.singleLineSanitized(persona.userName)
+        return safe
+    }
+
     /// Composes the default chat system prompt.
     ///
     /// The registry arguments are intentionally ignored and kept only so existing call sites
     /// keep compiling without churn: schemas travel strictly on the wire via native tool
     /// definitions, so registry contents never affect prompt bytes or cache identity, which
-    /// covers the scheduled branch plus date only.
+    /// covers the scheduled branch, the date, and the canonical persona string. The persona
+    /// defaults to the stock identity so an unset `[persona]` table renders today's prompt
+    /// byte-for-byte. Its freeform fields are projected through the prompt-safe shape before
+    /// keying and rendering, so no input — TOML, JSON, settings patch, or hand-built — can
+    /// reach the identity sentence with line breaks or control characters.
     public static func compose(
         tools _: [any Tool] = [],
         supportsVision _: Bool = true,
-        currentDate: String = currentDateString()
+        currentDate: String = currentDateString(),
+        persona: PersonaConfig = PersonaConfig()
     ) -> String {
-        let key = cacheKey(scheduled: false, currentDate: currentDate)
+        let persona = promptSafePersona(persona)
+        let key = cacheKey(scheduled: false, currentDate: currentDate, persona: persona)
         if let cached = cachedPrompt(forKey: key) {
             return cached
         }
-        let prompt = renderPrompt(currentDate: currentDate)
+        let prompt = renderPrompt(currentDate: currentDate, persona: persona)
         storeCachedPrompt(prompt, forKey: key)
         return prompt
     }
 
+    /// The stock identity sentence rendered for an untouched persona.
+    ///
+    /// Kept verbatim so removing `[persona]` restores today's prompt bytes and
+    /// existing installs keep their server-side KV-cache prefixes.
+    static let legacyIdentityLine = "You are Rune Weaver, a helpful personal assistant across mail, memory, files, and the web."
+
+    /// The exact static preset sentence for one tone.
+    ///
+    /// Single-sourced here so the identity block is the only place tone wording
+    /// lives; every sentence ends with its own period so the identity line
+    /// concatenates it verbatim without doubling punctuation.
+    static func presetSentence(for tone: PersonaTone) -> String {
+        switch tone {
+        case .concise:
+            "Keep replies short and direct; no small talk."
+        case .warm:
+            "Be warm and encouraging while staying focused."
+        case .formal:
+            "Be polite and professional; avoid slang."
+        case .playful:
+            "A light, playful touch is welcome; never at the expense of clarity."
+        }
+    }
+
+    /// Renders the persona identity line that replaces the stock sentence.
+    ///
+    /// A default identity collapses to the legacy line byte-for-byte. Any
+    /// customization composes "You are {name}, {preset sentence}" plus the
+    /// owner's style guidance and the owner-name address clause when set.
+    /// One line on purpose: the composed provenance marker must stay on line
+    /// two for the position-anchored `isComposedPrompt`. Every freeform field
+    /// is squashed through the shared single-line scrubber at this injection
+    /// point as the last line of defense — the normalizers and the prompt-safe
+    /// projection already screen them upstream, but the guarantee that no
+    /// multi-line or control-bearing owner text can splice the prompt must
+    /// hold for whatever persona shape reaches the builder, including a direct
+    /// call that bypasses the projection. The name falls back to the stock
+    /// identity when scrubbing leaves it blank and the style clamps to its
+    /// documented bound here as well, so cached bytes and rendered bytes agree
+    /// even when validation never ran. Blank style or owner name omit their
+    /// clause through the shared absence agreement, and the avatar never
+    /// appears here because it is client-side only.
+    static func identityLine(for persona: PersonaConfig) -> String {
+        let scrubbedName = NormalizedText.singleLineSanitized(persona.assistantName)
+        let effectiveName = NormalizedText.value(scrubbedName) ?? PersonaConfig.defaultAssistantName
+        let scrubbedStyle = NormalizedText.singleLineSanitized(persona.style)
+        let clampedStyle =
+            scrubbedStyle.count > PersonaConfig.maxStyleLength
+                ? String(scrubbedStyle.prefix(PersonaConfig.maxStyleLength))
+                : scrubbedStyle
+        let scrubbedUser = NormalizedText.singleLineSanitized(persona.userName)
+        let effective = PersonaConfig(
+            assistantName: effectiveName,
+            tone: persona.tone,
+            style: clampedStyle,
+            userName: scrubbedUser,
+            avatar: persona.avatar
+        )
+        guard !effective.isDefaultIdentity else {
+            return legacyIdentityLine
+        }
+        var line = "You are \(effectiveName), \(presetSentence(for: persona.tone))"
+        if let style = NormalizedText.value(clampedStyle) {
+            line += " \(style)"
+        }
+        if let userName = NormalizedText.value(scrubbedUser) {
+            line += " The owner's preferred name is \(userName), use it sparingly and naturally."
+        }
+        return line
+    }
+
     /// Renders the full system prompt text.
     private static func renderPrompt(
-        currentDate: String = currentDateString()
+        currentDate: String = currentDateString(),
+        persona: PersonaConfig = PersonaConfig()
     ) -> String {
         var lines: [String] = []
-        lines.append("You are Rune Weaver, a helpful personal assistant across mail, memory, files, and the web.")
+        lines.append(identityLine(for: persona))
         lines.append(composedMarker)
         lines.append("")
         lines.append(
@@ -377,13 +494,15 @@ public enum SystemPromptComposer {
     ///
     /// The registry arguments are intentionally ignored and kept only for call-site
     /// compatibility: the prompt carries no per-tool text, so the audit reports prefix
-    /// bytes only with an empty per-tool breakdown.
+    /// bytes only with an empty per-tool breakdown. The persona is measured in its
+    /// prompt-safe projection so the audited bytes always equal the composed bytes.
     public static func byteAudit(
         tools _: [any Tool] = [],
         supportsVision _: Bool = true,
-        currentDate: String = currentDateString()
+        currentDate: String = currentDateString(),
+        persona: PersonaConfig = PersonaConfig()
     ) -> PromptByteAudit {
-        let prompt = renderPrompt(currentDate: currentDate)
+        let prompt = renderPrompt(currentDate: currentDate, persona: promptSafePersona(persona))
         return PromptByteAudit(totalBytes: prompt.utf8.count, perTool: [])
     }
 
@@ -391,16 +510,16 @@ public enum SystemPromptComposer {
     ///
     /// Compatibility entry point: the bus is intentionally ignored because schemas travel
     /// strictly on the wire, so the prefix-stable prompt never varies with registry contents.
-    public static func compose(toolBus _: ToolBus) async -> String {
-        compose()
+    public static func compose(toolBus _: ToolBus, persona: PersonaConfig = PersonaConfig()) async -> String {
+        compose(persona: persona)
     }
 
     /// Composes the default system prompt from the live registry with vision awareness.
     ///
-    /// Compatibility entry point: both arguments are intentionally ignored for the same
+    /// Compatibility entry point: both registry arguments are intentionally ignored for the same
     /// wire-only reason as above, keeping existing call sites compiling without churn.
-    public static func compose(toolBus _: ToolBus, supportsVision: Bool) async -> String {
-        compose(supportsVision: supportsVision)
+    public static func compose(toolBus _: ToolBus, supportsVision: Bool, persona: PersonaConfig = PersonaConfig()) async -> String {
+        compose(supportsVision: supportsVision, persona: persona)
     }
 
     /// Resolves the effective system prompt, preserving the flag override.
@@ -410,44 +529,50 @@ public enum SystemPromptComposer {
     public static func resolve(
         flag: String?,
         tools: [any Tool] = [],
-        supportsVision: Bool = true
+        supportsVision: Bool = true,
+        persona: PersonaConfig = PersonaConfig()
     ) -> String {
         if let flag, !flag.isEmpty {
             return flag
         }
-        return compose(tools: tools, supportsVision: supportsVision)
+        return compose(tools: tools, supportsVision: supportsVision, persona: persona)
     }
 
     /// Resolves the effective system prompt from the live tool registry.
     ///
     /// Compatibility entry point: the bus is intentionally ignored for the same wire-only
     /// reason as composition.
-    public static func resolve(flag: String?, toolBus _: ToolBus) async -> String {
-        resolve(flag: flag)
+    public static func resolve(flag: String?, toolBus _: ToolBus, persona: PersonaConfig = PersonaConfig()) async -> String {
+        resolve(flag: flag, persona: persona)
     }
 
     /// Resolves the effective prompt from the live registry with vision awareness.
     ///
     /// Compatibility entry point: both registry arguments are intentionally ignored for the
     /// same wire-only reason as composition.
-    public static func resolve(flag: String?, toolBus _: ToolBus, supportsVision: Bool) async -> String {
-        resolve(flag: flag, supportsVision: supportsVision)
+    public static func resolve(flag: String?, toolBus _: ToolBus, supportsVision: Bool, persona: PersonaConfig = PersonaConfig()) async -> String {
+        resolve(flag: flag, supportsVision: supportsVision, persona: persona)
     }
 
     /// Composes the system prompt customized for automated scheduled runs.
     ///
     /// The registry arguments are intentionally ignored and kept only for call-site
-    /// compatibility: the scheduled branch varies only by date, never by registry contents.
+    /// compatibility: the scheduled branch varies only by date and the canonical
+    /// persona string, never by registry contents. The persona is projected to its
+    /// prompt-safe shape before keying, mirroring the base branch so the scheduled
+    /// digest matches its rendered identity bytes too.
     public static func composeScheduled(
         tools: [any Tool] = [],
         supportsVision: Bool = true,
-        currentDate: String = currentDateString()
+        currentDate: String = currentDateString(),
+        persona: PersonaConfig = PersonaConfig()
     ) -> String {
-        let key = cacheKey(scheduled: true, currentDate: currentDate)
+        let persona = promptSafePersona(persona)
+        let key = cacheKey(scheduled: true, currentDate: currentDate, persona: persona)
         if let cached = cachedPrompt(forKey: key) {
             return cached
         }
-        var base = compose(tools: tools, supportsVision: supportsVision, currentDate: currentDate)
+        var base = compose(tools: tools, supportsVision: supportsVision, currentDate: currentDate, persona: persona)
         base += "\n\n"
         base += """
         Scheduled task guidance:
@@ -462,17 +587,17 @@ public enum SystemPromptComposer {
     /// Composes the scheduled system prompt from the live tool registry.
     ///
     /// Compatibility entry point: the bus is intentionally ignored because the scheduled
-    /// branch keys only by date, never by registry contents.
-    public static func composeScheduled(toolBus _: ToolBus) async -> String {
-        composeScheduled()
+    /// branch keys only by date plus persona, never by registry contents.
+    public static func composeScheduled(toolBus _: ToolBus, persona: PersonaConfig = PersonaConfig()) async -> String {
+        composeScheduled(persona: persona)
     }
 
     /// Composes the scheduled prompt from the live registry with vision awareness.
     ///
-    /// Compatibility entry point: both arguments are intentionally ignored for the same
+    /// Compatibility entry point: both registry arguments are intentionally ignored for the same
     /// wire-only reason as above.
-    public static func composeScheduled(toolBus _: ToolBus, supportsVision: Bool) async -> String {
-        composeScheduled(supportsVision: supportsVision)
+    public static func composeScheduled(toolBus _: ToolBus, supportsVision: Bool, persona: PersonaConfig = PersonaConfig()) async -> String {
+        composeScheduled(supportsVision: supportsVision, persona: persona)
     }
 
     /// Validated schema for one tool, or nil when the schema must be omitted from the prompt.

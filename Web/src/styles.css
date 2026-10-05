@@ -7942,6 +7942,110 @@ button.ghost.staged-expand-all-btn {
   text-decoration: underline;
 }
 
+/* ==========================================================================
+   Persona Avatar — Wisp sprite, avatar picker, and identity chrome
+   ========================================================================== */
+
+/* The sprite sheets carry their own soft drop shadow from the generator, so
+ * the avatar never needs a frame or border of its own; width/height attrs pin
+ * the rendered size and the image simply shrinks inside picker cells, the chat
+ * header row, and the 16px nav trigger. */
+.persona-avatar {
+  display: inline-block;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Sleeping slow-floats: one motion-only keyframe on the avatar layer, mirroring
+ * the existing gentle-loop language (typingBounce/dashboardPulse) with no new
+ * color token, so a dimmed Wisp still reads alive without demanding attention. */
+.persona-avatar--sleeping {
+  animation: personaFloat 5s ease-in-out infinite;
+}
+
+/* Working gently pulses through the existing shared pulse token so the busy
+ * motion language stays one system between sprite states and run badges. */
+.persona-avatar--working {
+  animation: pulseTool 2s infinite ease-in-out;
+}
+
+/* Attention is deliberately static: the amber ring is baked into the frame and
+ * is the signal itself, so motion on top of it would cheapen both. */
+@keyframes personaFloat {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+/* Avatar picker: pill-styled buttons around the 64px colorway sprites. The
+ * grid is auto-fit so all four accents always share the pane's width budget
+ * instead of overflowing on narrow drawers. */
+.persona-avatar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(76px, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.persona-avatar-option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-subtle);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.persona-avatar-option:hover {
+  border-color: var(--accent-purple);
+}
+
+.persona-avatar-option:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+/* The selected ring reuses the shared input-focus language (2px accent purple)
+ * rather than inventing a selection color, keeping the picker inside the
+ * existing token budget. */
+.persona-avatar-option.selected {
+  box-shadow: 0 0 0 2px var(--accent-purple);
+  border-color: var(--accent-purple);
+}
+
+/* Chat header identity row: small and muted so the session title stays primary
+ * while the owner still sees who is answering. */
+.chat-persona-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-persona-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .persona-avatar--sleeping,
+  .persona-avatar--working {
+    animation: none;
+  }
+}
+
 /* Responsive Breakpoints */
 @media (max-width: 900px) {
   .dashboard-main-grid {

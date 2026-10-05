@@ -9,6 +9,17 @@ log_level = "info"  # trace | debug | info | notice | warning | error | critical
 # compaction_threshold_percent = 80  # Context compaction threshold in percent (10-100); oldest turns fold into a rolling summary past this budget.
 # max_tool_iterations = 10  # Max consecutive tool rounds per turn before continuation approval (1-100).
 
+# [persona]
+# # Assistant persona woven into the prompt identity line. Every key is optional
+# # and an absent section keeps the stock identity, so deleting [persona] restores
+# # today's prompt byte-for-byte. Any customization rewrites the identity sentence
+# # and misses the prompt cache until the next turn.
+# assistant_name = "Rune Weaver"  # How the assistant refers to itself (1-32 printable chars; blank falls back to the default with a logged note).
+# tone = "warm"  # concise | warm | formal | playful — one static preset sentence appended to the identity.
+# style = ""  # Owner-authored style guidance appended after the preset (max 2000 chars; overlong is truncated with a logged note).
+# user_name = ""  # Owner's preferred name the assistant may use sparingly (max 64 chars; omitted from the prompt when blank).
+# avatar = "violet"  # violet | cyan | emerald | rose — client-side accent only; never enters prompt text.
+
 [server]
 # Engine HTTP API bind endpoint. Loopback is the v1 default. A non-loopback
 # hostname is refused at boot unless owner auth resolves a token (auth-before-

@@ -1,5 +1,9 @@
 // Rune Weaver Dashboard — Interactive chat interface with session history sidebar,
 // animated typing indicator, distinct tool activity display, and attached status bar.
+// This view is also the single writer of the persona avatar's liveness signals: it
+// sees every turn terminal, every run frame, and every REST completion, so the
+// activity clock and working flag published here are the values every identity
+// surface renders, with no extra transport.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -25,6 +29,8 @@ import {
   parseToolProgress,
   placeholderCallIDsInText,
   postChat,
+  personaAssistantName,
+  personaAvatarColor,
   resolveMaxConcurrentChatTurns,
   sortToolActionsByRound,
   textContainsPlaceholderForCall,
@@ -61,6 +67,13 @@ import {
   WrenchIcon,
 } from "./icons";
 import GoalDrawer from "./GoalDrawer";
+import {
+  PersonaAvatar,
+  publishAgentActivity,
+  publishAgentWorking,
+  usePersonaSignals,
+  useResolvedAvatarState,
+} from "./PersonaAvatar";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import { useFileReviewHydration } from "../hooks/useFileReviewHydration";
 import { useChatSettings } from "../chatSettings";
@@ -1550,6 +1563,19 @@ export default function ChatView({
   // drives rendering; both hold normalized lowercase identifiers.
   const [backgroundRunningIDs, setBackgroundRunningIDs] = useState<string[]>([]);
   const backgroundRunningRef = useRef<Set<string>>(new Set());
+  // Persona identity mirror for the chat header, plus avatar liveness. This
+  // view is the single writer of the activity clock and the working flag: it
+  // sees every turn-terminal frame, every run frame, and every REST completion,
+  // so no other surface publishes those signals and no new transport rides
+  // them. The persona field itself is published by Settings (and the nav's
+  // one-shot load); the header only renders what the store carries.
+  const { persona } = usePersonaSignals();
+  const headerAvatarState = useResolvedAvatarState();
+  const personaDisplayName = personaAssistantName(persona);
+  const agentWorking = pending || backgroundRunningIDs.length > 0;
+  useEffect(() => {
+    publishAgentWorking(agentWorking);
+  }, [agentWorking]);
   // True while the shared socket is down. The input stays usable for drafts
   // and running turns keep their server slot; recovery clears the notice on
   // reconnect instead of cancelling anything.
@@ -2571,6 +2597,21 @@ export default function ChatView({
     const frameSessionID =
       typeof data.sessionID === "string" ? data.sessionID : undefined;
     const frameType = typeof data.type === "string" ? data.type : undefined;
+
+    // Avatar liveness mirror: every turn-terminal and run-lifecycle frame that
+    // reaches this handler is agent traffic regardless of which session owns
+    // it, so the activity clock advances before the routing below can park or
+    // drop the frame. The store keeps the clock monotonic, so duplicate late
+    // frames never rewind it.
+    if (
+      frameType === "done" ||
+      frameType === "cancelled" ||
+      frameType === "error" ||
+      frameType === "run_started" ||
+      frameType === "run_completed"
+    ) {
+      publishAgentActivity(Date.now());
+    }
 
     // Frames for a hidden session must never leak into the active view, but
     // they still grow that session's parked flight so returning restores the
@@ -4517,6 +4558,10 @@ export default function ChatView({
       activeTurnStartMsRef.current = null;
       setInFlightTurn(null);
       setPending(false);
+      // A REST completion arrives only while the socket is down, when no run
+      // or done frames can report liveness — so this path is the activity
+      // clock's only source for turn-ends without a stream.
+      publishAgentActivity(Date.now());
     }
   }
 
@@ -4761,6 +4806,24 @@ export default function ChatView({
               </button>
             )}
             <h2>Chat</h2>
+            {/* Persona identity beside the session title: the title stays
+                primary, so the avatar and name read small and muted. An
+                absent persona (or a name that normalizes blank) renders
+                exactly today's header — no identity row at all. */}
+            {personaDisplayName ? (
+              <span
+                className="chat-persona-identity"
+                data-testid="chat-persona-identity"
+              >
+                <PersonaAvatar
+                  color={personaAvatarColor(persona)}
+                  state={headerAvatarState}
+                  size={32}
+                  label=""
+                />
+                <span className="chat-persona-name">{personaDisplayName}</span>
+              </span>
+            ) : null}
             <span className="session-id-tag font-mono" title={sessionID}>
               {sessionID.slice(0, 8)}
             </span>

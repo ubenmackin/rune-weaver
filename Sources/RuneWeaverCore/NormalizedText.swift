@@ -2,9 +2,11 @@
 //
 // Centralizes the optional-copy absence agreement plus the single CRLF/CR fold
 // and trailing-newline-as-terminator split so TOML decoding, history coverage,
-// narration fallback, file reads, archive listing, and template rendering agree
-// on line boundaries. Lives in its own type so display, parsing, and template
-// callers share one fold instead of drifting across per-file extensions.
+// narration fallback, file reads, archive listing, template rendering, and the
+// owner-authored prompt-injection screening all agree on line boundaries and
+// on what counts as a control character. Lives in its own type so display,
+// parsing, prompt-composition, and template callers share one fold and one
+// scrubber instead of drifting across per-file extensions.
 
 import Foundation
 
@@ -64,5 +66,26 @@ public enum NormalizedText: Sendable {
             parts.removeLast()
         }
         return parts
+    }
+
+    /// Squashes owner-authored free text to one prompt-injection-safe line.
+    /// Reuses the shared line-ending fold and split so every line break becomes
+    /// exactly one space (word boundaries survive the squash), drops the
+    /// remaining C0 plus DEL control scalars that could smuggle invisible bytes
+    /// past a reader, and trims with the shared absence agreement so padding
+    /// never reaches the prompt. The control predicate mirrors the printable
+    /// rules the config boundaries enforce so one definition of "control" holds
+    /// across validation and injection surfaces. Idempotent and a no-op on
+    /// clean single-line copy, so defaults and already-sanitized values pass
+    /// through byte-identically.
+    /// - Parameter text: Raw owner-authored text.
+    /// - Returns: One control-free line without padding or line endings.
+    public static func singleLineSanitized(_ text: String) -> String {
+        let squashed = splitLines(text).joined(separator: " ")
+        var sanitized = ""
+        for scalar in squashed.unicodeScalars where scalar.value >= 0x20 && scalar.value != 0x7F {
+            sanitized.unicodeScalars.append(scalar)
+        }
+        return sanitized.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

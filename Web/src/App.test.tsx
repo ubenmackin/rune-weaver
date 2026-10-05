@@ -1,15 +1,19 @@
-// Rune Weaver Dashboard — Component tests for the App owner-auth gate and mobile shell.
+// Rune Weaver Dashboard — Component tests for the App owner-auth gate, lazy
+// section mounting, and the mobile shell.
 //
 // The engine serves the dashboard bundle publicly, so the shell decides the
 // posture from the health shape: a full payload mounts the authenticated
 // dashboard (or the no-auth loopback surface), while the minimal liveness
 // object renders the in-bundle login gate. Child views are stubbed so these
 // tests exercise only the gate wiring, never a live socket or data poll. The
-// shell matrix additionally pins the mobile bottom bar: it mounts alongside
-// the content with clearance on handheld widths while standalone stays
-// chromeless.
+// stubs mount behind the shell's route-level lazy boundaries exactly like the
+// real chunks do, so every assertion on a lazy surface awaits its Suspense
+// boundary through waitFor — the same way these tests already await the async
+// health-probe render — and never races a placeholder frame. The shell matrix
+// additionally pins the mobile bottom bar: it mounts alongside the content
+// with clearance on handheld widths while standalone stays chromeless.
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -39,6 +43,9 @@ vi.mock("./components/DashboardView", () => ({
 vi.mock("./components/TopNav", () => ({ default: () => <div data-testid="top-nav">TopNav</div> }));
 vi.mock("./components/GoalsManager", () => ({
   default: () => <div data-testid="goals-manager">Goals</div>,
+}));
+vi.mock("./components/RunLogViewer", () => ({
+  default: () => <div data-testid="run-log-viewer">Runs</div>,
 }));
 vi.mock("./components/SettingsManager", () => ({ default: () => <div data-testid="settings-manager">Settings</div> }));
 vi.mock("./hooks/useWebNotifications", () => ({
@@ -187,6 +194,49 @@ describe("App goals deep link", () => {
       expect(screen.getByTestId("goals-manager")).toBeInTheDocument();
     });
     expect(document.querySelector(".app-root")).not.toBeNull();
+  });
+});
+
+describe("App lazy section mounting", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    clearAuthToken();
+    window.sessionStorage.clear();
+    window.history.pushState({}, "", "/");
+  });
+
+  afterEach(() => {
+    window.history.pushState({}, "", "/");
+  });
+
+  it("mounts a lazily-loaded section on first visit while chat stays mounted underneath", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ status: "ok", engine: "Rune Weaver", version: "0.1.0" }),
+      ),
+    );
+    render(<App />);
+    // The dashboard tab and the always-mounted chat panel are separate lazy
+    // boundaries: both must flush through their Suspense placeholder before
+    // any tab-switch assertion below is meaningful.
+    await waitFor(() => {
+      expect(screen.getByTestId("dashboard-view")).toBeInTheDocument();
+      expect(screen.getByTestId("chat-view")).toBeInTheDocument();
+    });
+
+    // Route-level splitting must not change tab-switch semantics: a hash
+    // navigation to an unvisited section mounts it when its chunk lands, the
+    // section being left unmounts, and the display-hidden chat panel survives
+    // the switch exactly as it did under static imports.
+    await act(async () => {
+      window.location.hash = "runs";
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("run-log-viewer")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("dashboard-view")).toBeNull();
+    expect(screen.getByTestId("chat-view")).toBeInTheDocument();
   });
 });
 
