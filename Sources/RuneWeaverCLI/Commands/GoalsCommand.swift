@@ -629,7 +629,8 @@ enum GoalsCLIHelpers {
             goalsConfig: loaded.config.goals,
             goalEngine: engine,
             goalStore: store,
-            goalConversations: conversations
+            goalConversations: conversations,
+            workspaceConfig: loaded.config.workspace
         )
         let orchestrator = Orchestrator(
             conversations: conversations,

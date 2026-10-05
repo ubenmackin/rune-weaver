@@ -301,7 +301,8 @@ extension ServeCommand {
             goalConversations: deps.conversations,
             goalLLM: selected,
             policyStore: seed.policyStore,
-            recipientAliasStore: deps.recipientAliasStore
+            recipientAliasStore: deps.recipientAliasStore,
+            workspaceConfig: loaded.config.workspace
         )
     }
 
@@ -459,7 +460,8 @@ extension ServeCommand {
             secrets: sharedSecrets,
             runs: runs,
             hub: hub,
-            policyStore: policyStore
+            policyStore: policyStore,
+            workspaceConfig: loaded.config.workspace
         )
         await registerAndVerifyTools(
             context: context,
@@ -498,7 +500,11 @@ extension ServeCommand {
         deps: ToolBootstrapDependencies,
         seed: ToolBuildSeed
     ) async throws -> [any Tool] {
-        try await CLIShared.pluginTools(
+        // Agent pins share the preview registry with the served bus so the
+        // startup prompt snapshot never drifts from the live tools.
+        let previewWorkspace = WorkspaceStore(config: loaded.config.workspace)
+        let previewAgents = AgentToolStore(dbPath: loaded.config.memory.episodesDBPath, workspaceStore: previewWorkspace)
+        return try await CLIShared.pluginTools(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
             bashConfig: loaded.config.bash,
@@ -515,7 +521,10 @@ extension ServeCommand {
             goalConversations: deps.conversations,
             goalsConfig: loaded.config.goals,
             policyStore: seed.policyStore,
-            recipientAliasStore: deps.recipientAliasStore
+            recipientAliasStore: deps.recipientAliasStore,
+            workspaceConfig: loaded.config.workspace,
+            workspaceStore: previewWorkspace,
+            agentToolStore: previewAgents
         )
     }
 

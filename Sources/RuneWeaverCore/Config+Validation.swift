@@ -33,6 +33,7 @@ extension RuneWeaverConfig {
         try validateProactiveSection()
         try validateIdeasSection()
         try validateFanoutSection()
+        try validateWorkspaceSection()
         try validatePersonaSection()
     }
 
@@ -988,6 +989,34 @@ extension RuneWeaverConfig {
         }
     }
 
+    /// Validates the `[workspace]` section.
+    ///
+    /// Quotas bound shell scratch so a stray download cannot fill the disk and
+    /// a quota walk cannot dominate a turn; the temp TTL bounds `tmp/` growth
+    /// without manual cleanup. The store clamps again at use so an unvalidated
+    /// hand-built config degrades to the nearest sane bound instead of
+    /// refusing to run.
+    private func validateWorkspaceSection() throws {
+        if workspace.quotaMB < WorkspaceConfig.minQuotaMB || workspace.quotaMB > WorkspaceConfig.maxQuotaMB {
+            throw ConfigError.validationError(
+                field: "workspace.quota_mb",
+                message: "must be between \(WorkspaceConfig.minQuotaMB) and \(WorkspaceConfig.maxQuotaMB) (got \(workspace.quotaMB))"
+            )
+        }
+        if workspace.quotaFiles < WorkspaceConfig.minQuotaFiles || workspace.quotaFiles > WorkspaceConfig.maxQuotaFiles {
+            throw ConfigError.validationError(
+                field: "workspace.quota_files",
+                message: "must be between \(WorkspaceConfig.minQuotaFiles) and \(WorkspaceConfig.maxQuotaFiles) (got \(workspace.quotaFiles))"
+            )
+        }
+        if workspace.tmpTTLDays < WorkspaceConfig.minTmpTTLDays || workspace.tmpTTLDays > WorkspaceConfig.maxTmpTTLDays {
+            throw ConfigError.validationError(
+                field: "workspace.tmp_ttl_days",
+                message: "must be between \(WorkspaceConfig.minTmpTTLDays) and \(WorkspaceConfig.maxTmpTTLDays) (got \(workspace.tmpTTLDays))"
+            )
+        }
+    }
+
     /// Validates the `[persona]` section through the shared normalizers.
     ///
     /// Decode and merge paths already repaired at their own boundaries, so this
@@ -1119,15 +1148,56 @@ public extension BashConfig {
         3600
     }
 
+    /// Smallest CPU budget that still allows one useful burst of work.
+    static var minCPUSeconds: Int {
+        1
+    }
+
+    /// Largest CPU budget before a stray digit holds a run past any plausible shell turn.
+    static var maxCPUSeconds: Int {
+        3600
+    }
+
+    /// Smallest address-space budget that still fits a shell plus one child.
+    static var minMemoryMB: Int {
+        64
+    }
+
+    /// Largest address-space budget before scratch rivals the host's memory.
+    static var maxMemoryMB: Int {
+        8192
+    }
+
     /// Validates the stored bash policy, throwing a descriptive error on failure.
     ///
-    /// Covers the rule list and the timeout together so file-load and any
-    /// full-snapshot check share one contract.
+    /// Covers the rule list, the wall-clock timeout, and the resource bounds
+    /// together so file-load and any full-snapshot check share one contract.
     /// - Throws: ``ConfigError/validationError(field:message:)`` when the rule
-    ///   list is empty, a rule pattern is blank, or the timeout is out of bounds.
+    ///   list is empty, a rule pattern is blank, or any bound is out of range.
     func validate() throws {
         try Self.validateRules(rules)
         try Self.validateTimeoutSeconds(timeoutSeconds)
+        try Self.validateCPUSeconds(cpuSeconds)
+        try Self.validateMemoryMB(memoryMB)
+    }
+
+    /// Returns a copy clamped into the validated ranges.
+    ///
+    /// The shell clamps at use so a hand-built config degrades to the nearest
+    /// sane bound instead of refusing to run; load-time validation fails
+    /// closed, and both postures share the same range constants so they cannot
+    /// drift.
+    /// - Returns: Config with the timeout and resource bounds pulled inside bounds.
+    func clamped() -> BashConfig {
+        BashConfig(
+            enabled: enabled,
+            defaultAction: defaultAction,
+            rules: rules,
+            timeoutSeconds: min(max(timeoutSeconds, Self.minTimeoutSeconds), Self.maxTimeoutSeconds),
+            allowNetwork: allowNetwork,
+            cpuSeconds: min(max(cpuSeconds, Self.minCPUSeconds), Self.maxCPUSeconds),
+            memoryMB: min(max(memoryMB, Self.minMemoryMB), Self.maxMemoryMB)
+        )
     }
 
     /// Validates an ordered rule list, requiring at least one non-blank pattern.
@@ -1161,6 +1231,36 @@ public extension BashConfig {
             throw ConfigError.validationError(
                 field: "bash.timeout_seconds",
                 message: "must be between \(minTimeoutSeconds) and \(maxTimeoutSeconds) (got \(timeoutSeconds))"
+            )
+        }
+    }
+
+    /// Validates the CPU time budget in seconds.
+    ///
+    /// Bounds keep a zero budget (which would kill every command instantly)
+    /// or an unbounded budget from persisting through any write path.
+    /// - Parameter cpuSeconds: CPU time budget in seconds.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when outside 1-3600.
+    static func validateCPUSeconds(_ cpuSeconds: Int) throws {
+        if cpuSeconds < minCPUSeconds || cpuSeconds > maxCPUSeconds {
+            throw ConfigError.validationError(
+                field: "bash.cpu_seconds",
+                message: "must be between \(minCPUSeconds) and \(maxCPUSeconds) (got \(cpuSeconds))"
+            )
+        }
+    }
+
+    /// Validates the address-space budget in megabytes.
+    ///
+    /// Bounds keep a trivially small budget (which would fail every spawn)
+    /// or a host-scale budget from persisting through any write path.
+    /// - Parameter memoryMB: Address-space budget in megabytes.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when outside 64-8192.
+    static func validateMemoryMB(_ memoryMB: Int) throws {
+        if memoryMB < minMemoryMB || memoryMB > maxMemoryMB {
+            throw ConfigError.validationError(
+                field: "bash.memory_mb",
+                message: "must be between \(minMemoryMB) and \(maxMemoryMB) (got \(memoryMB))"
             )
         }
     }

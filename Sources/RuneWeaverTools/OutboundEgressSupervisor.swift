@@ -525,6 +525,36 @@ public actor OutboundEgressSupervisor {
         )
     }
 
+    /// Compares screened dials against caller-declared hosts.
+    ///
+    /// The second opinion behind `bash.exec` `network_hosts` and desktop
+    /// URL-typing: the tool extracts every host its command or typed text
+    /// would dial, and this pure check reports which of those lack a
+    /// declaration. Callers deny on any non-empty result before consulting
+    /// `validate`, so an undeclared dial fails even when the policy would
+    /// allow it. Both sides canonicalize through the shared host normalizer,
+    /// so `Example.COM` covers `example.com` while distinct hosts never
+    /// alias; an empty declaration means every screened host is undeclared.
+    /// - Parameters:
+    ///   - screenedHosts: Hosts extracted from the command or typed text.
+    ///   - declaredHosts: Caller-declared `network_hosts` for this turn.
+    /// - Returns: Screened hosts with no declaration, in first-seen order.
+    public nonisolated func checkHosts(_ screenedHosts: [String], against declaredHosts: [String]) -> [String] {
+        let declared = Set(declaredHosts.map { SensitiveAddressNormalization.normalizedHost($0) }.filter { !$0.isEmpty })
+        var seen = Set<String>()
+        var undeclared: [String] = []
+        for raw in screenedHosts {
+            let canonical = SensitiveAddressNormalization.normalizedHost(raw)
+            guard !canonical.isEmpty else { continue }
+            guard !seen.contains(canonical) else { continue }
+            seen.insert(canonical)
+            if !declared.contains(canonical) {
+                undeclared.append(raw)
+            }
+        }
+        return undeclared
+    }
+
     /// Sweeps resolved secret values from response content.
     ///
     /// `ApiRequestTool` calls this on every encoded envelope at its output

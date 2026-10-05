@@ -76,7 +76,8 @@ struct StatusCommand: AsyncParsableCommand {
             browserConfig: config.browser,
             llmConfig: config.llm,
             securityConfig: config.security,
-            secrets: sharedSecrets
+            secrets: sharedSecrets,
+            workspaceConfig: config.workspace
         )
         let toolNames = await toolBus.toolNames().sorted()
         if toolNames.isEmpty {

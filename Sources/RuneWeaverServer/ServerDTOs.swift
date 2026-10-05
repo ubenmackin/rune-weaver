@@ -153,6 +153,23 @@ public enum ServerPaths {
     public static let ideaDismiss = "dismiss"
     /// Idea accept subpath under `/ideas/:id`.
     public static let ideaAccept = "accept"
+    /// Agent scratch workspace group backing usage plus temp pruning.
+    public static let workspace = "workspace"
+    /// Workspace usage subpath under `/workspace`.
+    public static let workspaceUsage = "usage"
+    /// Workspace temp subpath under `/workspace`.
+    public static let workspaceTmp = "tmp"
+    /// Temp prune subpath under `/workspace/tmp`.
+    public static let workspacePrune = "prune"
+    /// Hash-pinned agent script registry group.
+    /// Kebab spelling matches the multi-word route convention (`tool-actions`,
+    /// `review-status`, `live-accept`) rather than the single `tool_cancel`
+    /// snake outlier, so dashboards build the path with one rule.
+    public static let agentTools = "agent-tools"
+    /// Promotion subpath under `/agent-tools`.
+    public static let agentToolsPromote = "promote"
+    /// Verified run subpath under `/agent-tools/:id`.
+    public static let agentToolsRun = "run"
     /// Engine API version served on `/health`.
     /// Single-sourced through `RuneWeaverVersion` so health, User-Agents,
     /// and providers cannot drift.
@@ -1460,6 +1477,8 @@ public struct ToolCancelResponse: Content, Equatable {
         self.cancelled = cancelled
     }
 }
+
+// MARK: - Workspace + Agent Tools live in ServerDTOsAgentTools.swift
 
 // MARK: - Goals + Proactive Settings Patches and Merge live in ServerDTOsGoals.swift
 

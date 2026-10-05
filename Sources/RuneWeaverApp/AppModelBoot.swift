@@ -181,6 +181,10 @@ extension AppModel {
         )
         let goalStore = GoalStore(dbPath: config.memory.episodesDBPath)
         let goalEngine = GoalEngine(store: goalStore, llm: selectedProvider, config: config.goals)
+        // Agent pins share the same episodes file as goals so the menu-bar app,
+        // the CLI, and the service observe one registry instead of drifting.
+        let agentWorkspace = WorkspaceStore(config: config.workspace)
+        let agentTools = AgentToolStore(dbPath: config.memory.episodesDBPath, workspaceStore: agentWorkspace)
         // The send tool learns confirmed name-to-handle mappings here, in the
         // same shared episodes database as goals and run history.
         let recipientAliasStore = RecipientAliasStore(dbPath: config.memory.episodesDBPath)
@@ -202,7 +206,9 @@ extension AppModel {
                 goalStore: goalStore,
                 goalConversations: conversations,
                 policyStore: policyStore,
-                recipientAliasStore: recipientAliasStore
+                recipientAliasStore: recipientAliasStore,
+                workspaceStore: agentWorkspace,
+                agentToolStore: agentTools
             )
         } catch {
             // Fail-closed boot: a policy that cannot be verified means no
@@ -280,7 +286,8 @@ extension AppModel {
             secrets: pipeline.secrets,
             runs: pipeline.runs,
             hub: pipeline.hub,
-            policyStore: pipeline.policyStore
+            policyStore: pipeline.policyStore,
+            workspaceConfig: pipeline.config.workspace
         )
     }
 

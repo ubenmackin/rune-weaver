@@ -49,7 +49,12 @@ public actor FilesIndexer {
     /// Media libraries are excluded because the index is for documents, not
     /// media; VCS, dependency, and cache trees are excluded because their
     /// contents are machine output; and `.runeweaver` is excluded so the index
-    /// never indexes its own database or logs. Named distinctly from
+    /// never indexes its own database or logs. Agent scratch stays excluded
+    /// through a scoped `.runeweaver/workspace` path-prefix check in
+    /// `isExcluded` (plus `walkDisposition`), not through a bare `workspace`
+    /// entry here, so user trees like `~/projects/workspace/` and files named
+    /// `workspace` stay indexable while scratch never enters recall.
+    /// Named distinctly from
     /// `IndexConfig.defaultExcludePatterns` (the editable exclude-editor seed)
     /// so the unconditional prune list cannot be confused with user configuration.
     public static let alwaysSkippedPatterns = [
@@ -867,6 +872,15 @@ extension FilesIndexer {
         if filename.hasPrefix("._") {
             return .skip(countSkipped: true, prune: isItemDirectory)
         }
+        // Scoped scratch prune on the absolute path: covers walks rooted
+        // inside `.runeweaver/workspace` itself, where the relative path no
+        // longer carries the prefix but the absolute path still does.
+        if Self.isWorkspaceScratchURL(url) {
+            if isItemDirectory {
+                return .skip(countSkipped: false, prune: true)
+            }
+            return .skip(countSkipped: true, prune: false)
+        }
         let relative = Self.relativePath(of: url, root: policy.rootURL)
         if Self.isExcluded(relativePath: relative, filename: filename, patterns: policy.excludePatterns) {
             // Excluded trees prune without walking them, so only a top-level
@@ -1148,22 +1162,90 @@ extension FilesIndexer {
         vectors.count == expectedCount ? vectors : nil
     }
 
+    /// Reports whether components hold the scoped scratch prefix.
+    ///
+    /// Single-sourced so relative-path and absolute-URL checks agree: only a
+    /// consecutive `.runeweaver`/`workspace` pair counts, never a bare
+    /// `workspace` component or a file named `workspace` elsewhere.
+    /// - Parameter components: Lowercased `/`-separated path components.
+    /// - Returns: True when the path lies inside `.runeweaver/workspace`.
+    static func isWorkspaceScratchComponents(_ components: [String]) -> Bool {
+        guard components.count >= 2 else { return false }
+        for index in 0 ..< (components.count - 1) {
+            if components[index] == ".runeweaver", components[index + 1] == "workspace" {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Reports whether a root-relative path lies inside agent scratch.
+    /// - Parameter relativePath: Path relative to the walk root.
+    /// - Returns: True only for the `.runeweaver/workspace` subtree.
+    static func isWorkspaceScratchRelativePath(_ relativePath: String) -> Bool {
+        let components = relativePath.lowercased().split(separator: "/").map(String.init)
+        return isWorkspaceScratchComponents(components)
+    }
+
+    /// Reports whether an absolute file URL lies inside agent scratch.
+    ///
+    /// Covers walks rooted inside the scratch tree itself, where the
+    /// root-relative path no longer carries the `.runeweaver` prefix but the
+    /// absolute path still does.
+    /// - Parameter url: Candidate file or directory URL.
+    /// - Returns: True only for the `.runeweaver/workspace` subtree.
+    static func isWorkspaceScratchURL(_ url: URL) -> Bool {
+        let components = url.standardizedFileURL.path.lowercased().split(separator: "/").map(String.init)
+        return isWorkspaceScratchComponents(components)
+    }
+
     /// Reports whether a candidate is excluded by the given patterns.
     ///
     /// Static so the shared walk classification stays off the actor: the
     /// matcher itself is case-sensitive, so both sides lower to agree with
-    /// the case-insensitive filesystem.
+    /// the case-insensitive filesystem. Plain directory names (no slash or
+    /// glob syntax) match any path component so an excluded tree stays
+    /// excluded for files nested beneath it even when the walker would have
+    /// pruned the parent. Agent scratch is scoped separately: only the
+    /// `.runeweaver/workspace` prefix counts, never a bare `workspace`
+    /// component or a file named `workspace`, so a stale `workspace` pattern
+    /// in configuration stays inert outside scratch.
     /// - Parameters:
     ///   - relativePath: Path relative to the walk root.
     ///   - filename: Final path component.
     ///   - patterns: Built-in plus configured exclude patterns.
     /// - Returns: True when the candidate is skipped.
     static func isExcluded(relativePath: String, filename: String, patterns: [String]) -> Bool {
-        patterns.contains {
-            SharedGlobMatching.matchesPath(
-                pattern: $0.lowercased(),
-                relativePath: relativePath.lowercased(),
-                filename: filename.lowercased()
+        let loweredRelative = relativePath.lowercased()
+        let loweredFilename = filename.lowercased()
+        let components = loweredRelative.split(separator: "/").map(String.init)
+        // Scoped scratch exclusion first: unconditional, independent of
+        // whether any pattern still names `workspace`.
+        if isWorkspaceScratchComponents(components) {
+            return true
+        }
+        return patterns.contains { raw in
+            let pattern = raw.lowercased()
+            // A bare `workspace` pattern never matches by component: only the
+            // scoped prefix above excludes scratch, so user trees like
+            // `~/projects/workspace/notes.md` stay indexable.
+            if raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "workspace" {
+                return false
+            }
+            // Bare directory names guard the whole subtree: any component
+            // match excludes nested files without requiring a glob.
+            if !pattern.contains("/"), !pattern.contains("*"), !pattern.contains("?"), !pattern.contains("[") {
+                if loweredFilename == pattern {
+                    return true
+                }
+                if components.contains(pattern) {
+                    return true
+                }
+            }
+            return SharedGlobMatching.matchesPath(
+                pattern: pattern,
+                relativePath: loweredRelative,
+                filename: loweredFilename
             )
         }
     }

@@ -4760,5 +4760,248 @@ export async function getFileReviewStates(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Agent scratch workspace + hash-pinned agent tools
+// ---------------------------------------------------------------------------
+
+// Bounded usage snapshot for `GET /workspace/usage`. Quotas ride along so the
+// dashboard renders both bars from one fetch; `truncated` marks the walk as a
+// lower bound when the tree outgrew the entry cap.
+export interface WorkspaceUsageResponse {
+  bytes: number;
+  files: number;
+  truncated: boolean;
+  quotaMB: number;
+  quotaFiles: number;
+}
+
+// Prune receipt for `POST /workspace/tmp/prune`. Counts top-level `tmp/`
+// entries removed; a fresh workspace prunes to zero without an error.
+export interface WorkspacePruneResponse {
+  removed: number;
+}
+
+// One pinned script row for the `/agent-tools` routes. Dates ride the same
+// dual wire shape as run timestamps (ISO strings or Unix seconds), so callers
+// normalize through parseRunTimestamp instead of assuming one encoding.
+export interface AgentTool {
+  id: string;
+  name: string;
+  scriptPath: string;
+  sha256: string;
+  status: string;
+  createdAt?: string | number;
+  updatedAt?: string | number;
+}
+
+export interface AgentToolsResponse {
+  tools: AgentTool[];
+  count: number;
+}
+
+// Single client mirror of the engine `WorkspaceConfig` bounds
+// (Sources/RuneWeaverCore/Config.swift). The server owns the values; this
+// mirror only labels quota bars before the first usage fetch and documents
+// the file-owned ranges for the dashboard hint.
+export const DEFAULT_WORKSPACE_QUOTA_MB = 500;
+export const DEFAULT_WORKSPACE_QUOTA_FILES = 10000;
+export const DEFAULT_WORKSPACE_TMP_TTL_DAYS = 7;
+export const WORKSPACE_QUOTA_MB_MIN = 10;
+export const WORKSPACE_QUOTA_MB_MAX = 10240;
+export const WORKSPACE_QUOTA_FILES_MIN = 100;
+export const WORKSPACE_QUOTA_FILES_MAX = 100000;
+
+// Eligible promotion directory, relative to the workspace root. Only scripts
+// beneath this prefix may be pinned; the store re-checks containment
+// server-side, so this constant is the early client hint rather than the
+// security boundary. Relative spellings resolve against the workspace root
+// with this `tools/` base, matching the store's single-source relative base.
+export const WORKSPACE_TOOLS_PREFIX = "tools/";
+
+// Reports whether a caller-supplied path names a file inside the eligible
+// promotion directory. Accepts workspace-relative spellings by `tools/`
+// prefix (plus the legacy `workspace/tools/` alias the store strips to the
+// same file), absolute spellings by `.runeweaver/workspace/tools/` segment,
+// and tilde spellings by the single `~/.runeweaver/workspace/tools/` prefix,
+// so `tools/cleanup.sh`, `workspace/tools/cleanup.sh`, and their absolute
+// forms agree without letting `tools-evil/x` or `workspace/tools-evil/x`
+// prefix-match, without letting a bare `/workspace/tools/` segment (e.g.
+// `/tmp/workspace/tools/x`, `~/workspace/tools/x`) hint-promotable a path
+// the store would refuse, and without letting a nested tilde segment
+// (`~/a/b/.runeweaver/workspace/tools/x`) hint promotable; the directory
+// itself never qualifies because promotion pins a file.
+export function isPromotableScriptPath(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith(WORKSPACE_TOOLS_PREFIX)) {
+    return trimmed.length > WORKSPACE_TOOLS_PREFIX.length;
+  }
+  // Legacy alias: workspace-relative spellings carrying the redundant
+  // `workspace/` lead strip store-side to the same `tools/` file, so hint
+  // them promotable when they name a file beneath the eligible directory.
+  const legacyPrefix = "workspace/tools/";
+  if (trimmed.startsWith(legacyPrefix)) {
+    return trimmed.length > legacyPrefix.length;
+  }
+  // Tilde-anchored spellings resolve against home beneath the single
+  // `~/.runeweaver/workspace/tools/` root, so only that prefix qualifies; a
+  // nested segment (`~/a/b/.runeweaver/workspace/tools/x`) expands outside
+  // the eligible directory and must not hint promotable. Checked before the
+  // absolute segment so a tilde path cannot match `/.runeweaver/...` mid-string.
+  const tildePrefix = "~/.runeweaver/workspace/tools/";
+  if (trimmed.startsWith("~")) {
+    return trimmed.startsWith(tildePrefix) && trimmed.length > tildePrefix.length;
+  }
+  const segment = "/.runeweaver/workspace/tools/";
+  const at = trimmed.indexOf(segment);
+  if (at !== -1) {
+    return trimmed.length > at + segment.length;
+  }
+  return false;
+}
+
+// Client-side promote validation mirroring the store's ASCII-only slug set
+// (ASCII letters, numbers, `-`, `_`, `.`, at most 64 chars; see
+// AgentToolStore.validatedName `isASCII && alphanumerics` plus
+// SeatbeltProfileBuilder DNS labels) plus the eligible-directory prefix.
+// Returns the first honest reason so the form can render one message instead
+// of firing a round trip the engine would refuse with the same words.
+export function validateAgentToolPromote(
+  name: unknown,
+  scriptPath: unknown,
+): string | null {
+  const trimmedName = typeof name === "string" ? name.trim() : "";
+  if (!trimmedName) return "Name must not be empty.";
+  if (trimmedName.length > 64) {
+    return "Name must be 64 characters or fewer.";
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(trimmedName)) {
+    return "Name may use only letters, numbers, '-', '_', and '.'.";
+  }
+  const trimmedPath = typeof scriptPath === "string" ? scriptPath.trim() : "";
+  if (!trimmedPath) {
+    return "Script path must not be empty. Only scripts inside tools/ can be promoted.";
+  }
+  if (trimmedPath.endsWith("/")) {
+    return "Script path must name a file inside tools/, not the directory itself.";
+  }
+  if (!isPromotableScriptPath(trimmedPath)) {
+    return "Only scripts inside tools/ can be promoted (got '" + trimmedPath + "').";
+  }
+  return null;
+}
+
+// Short hash prefix for dense rows. Lowercases first so mixed-case pins still
+// group, then caps at 12 chars so a full 64-char digest never stretches the
+// card; short or blank digests render as-is rather than padding.
+export function shortAgentToolHash(sha256: unknown): string {
+  if (typeof sha256 !== "string" || !sha256) return "";
+  return sha256.toLowerCase().slice(0, 12);
+}
+
+// Human byte tally shared by the quota bar and prune receipts. Uses 1024
+// steps with one decimal so a 500 MB quota and a few-kilobyte scratch file
+// read on one scale; non-finite or negative payloads read as 0 B instead of
+// NaN.
+export function formatWorkspaceBytes(bytes: unknown): string {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = Math.floor(bytes);
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const rounded = unit === 0 ? String(Math.round(value)) : value.toFixed(1);
+  return `${rounded} ${units[unit]}`;
+}
+
+// Whole-percent quota fill for the usage bar. Clamps so a drifted over-quota
+// walk fills the track instead of overflowing it; a non-positive quota
+// degrades to 0 rather than dividing by zero.
+export function workspaceQuotaPercent(used: unknown, quota: unknown): number {
+  if (
+    typeof used !== "number" ||
+    typeof quota !== "number" ||
+    !Number.isFinite(used) ||
+    !Number.isFinite(quota) ||
+    quota <= 0
+  ) {
+    return 0;
+  }
+  const percent = (used / quota) * 100;
+  return Math.max(0, Math.min(100, Math.round(percent)));
+}
+
+// Reads bounded scratch usage with quotas for the dashboard bars. A missing
+// workspace reads as an honest empty snapshot server-side, so the viewer
+// renders zero instead of an error; a walk failure surfaces as ApiError.
+export function getWorkspaceUsage(): Promise<WorkspaceUsageResponse> {
+  return fetchJson<WorkspaceUsageResponse>("/workspace/usage");
+}
+
+// Clears expired `tmp/` entries. Missing `tmp/` prunes to zero rather than
+// failing, so a fresh workspace resolves normally; the receipt names the
+// removed top-level entries.
+export function pruneWorkspaceTmp(): Promise<WorkspacePruneResponse> {
+  return fetchJson<WorkspacePruneResponse>("/workspace/tmp/prune", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+// Lists every pinned script ordered by name for stable rendering. Empty when
+// none are promoted.
+export function listAgentTools(): Promise<AgentToolsResponse> {
+  return fetchJson<AgentToolsResponse>("/agent-tools");
+}
+
+// Promotes a `tools/` script, pinning its exact bytes. The client
+// validates the slug plus the eligible-directory prefix first so an outside
+// path fails without a round trip; the store re-validates and answers 400
+// with the honest reason when the file is missing or outside.
+export function promoteAgentTool(
+  name: string,
+  scriptPath: string,
+): Promise<AgentTool> {
+  return fetchJson<AgentTool>("/agent-tools/promote", {
+    method: "POST",
+    body: JSON.stringify({ name, script_path: scriptPath }),
+  });
+}
+
+// Enables or disables one pinned script by identifier. Sends the canonical
+// `status` spelling the PATCH route prefers; the server also accepts the
+// boolean and action spellings, so hand-built callers converge on one state.
+export function setAgentToolStatus(
+  id: string,
+  enabled: boolean,
+): Promise<AgentTool> {
+  return fetchJson<AgentTool>(`/agent-tools/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status: enabled ? "enabled" : "disabled" }),
+  });
+}
+
+// Runs one pinned script with literal argv. Verification re-hashes before
+// dispatch, so a changed script answers 400 instead of executing; a second
+// run while one is in flight answers 409. The result reuses the chat
+// ToolResult shape so turns and runs render through one path.
+export function runAgentTool(
+  id: string,
+  argv: string[] = [],
+): Promise<ToolResult> {
+  return fetchJson<ToolResult>(
+    `/agent-tools/${encodeURIComponent(id)}/run`,
+    {
+      method: "POST",
+      body: JSON.stringify({ argv }),
+    },
+  );
+}
+
 
 

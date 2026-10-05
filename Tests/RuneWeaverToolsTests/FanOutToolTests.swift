@@ -90,10 +90,10 @@ private func makeFreshBus(seam: StubFanOutWorkerSeam, logs: StubFanOutRunLog) as
 @Suite("FanOutTool")
 struct FanOutToolTests {
     @Test
-    func `Ships-disabled set pins the desktop and fanout tools`() {
+    func `Ships-disabled set pins the desktop, fanout, and agent tools`() {
         // Single-source contract: every fresh-registration site consumes this
         // set, so the boot paths cannot drift on which tools ship disabled.
-        #expect(BuiltinToolPlugins.shipsDisabledToolNames == ["desktop.screenshot", "desktop.action", "fanout.run"])
+        #expect(BuiltinToolPlugins.shipsDisabledToolNames == ["desktop.screenshot", "desktop.action", "fanout.run", "tool.promote", "tool.run"])
     }
 
     @Test

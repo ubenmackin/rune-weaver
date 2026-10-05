@@ -3,6 +3,17 @@
 import Foundation
 
 /// Builder for macOS Seatbelt (SBPL) profiles used by `sandbox-exec`.
+///
+/// Network confinement is blanket-allow whenever `allowNetwork` is true:
+/// per-host `remote tcp` filters are not expressible on current macOS (the
+/// kernel only accepts `localhost` or `*` as IP, so hostnames reject as
+/// kleene star), so the profile carries `(allow network*)` and per-host
+/// enforcement lives in the supervisor's string screening instead. That
+/// screening is best-effort: it sees explicit URLs, schemeless host text,
+/// and typed URLs, but misses dials that never surface as recognizable host
+/// strings (non-URL spellings, raw IP forms outside the screened text, and
+/// encoded or obfuscated forms), so a screened pass is not a proof of
+/// no-egress — defense in depth, not a boundary.
 public struct SeatbeltProfileBuilder: Sendable, Equatable {
     /// Directories permitted for read-only access (in addition to system defaults).
     public var allowedReadPaths: Set<String>
@@ -14,6 +25,19 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
     public var deniedPaths: Set<String>
     /// Whether outbound and inbound network access is permitted.
     public var allowNetwork: Bool
+    /// Declared egress hosts constraining sandboxed network dials.
+    ///
+    /// Retained for approval surfacing and supervisor screening: the sandbox
+    /// stays blanket-allow (`allow network*` when `allowNetwork` is true)
+    /// whether this set is empty or not, because per-host SBPL is not
+    /// expressible on current macOS (the kernel only accepts `localhost` or
+    /// `*` as IP, so hostnames reject as kleene star). The supervisor remains
+    /// the per-host enforcement point through best-effort string screening
+    /// (undeclared deny, declared-plus-policy-allowed allow), which sees
+    /// explicit URLs, schemeless host text, and typed URLs but misses dials
+    /// that never surface as recognizable host strings (non-URL spellings
+    /// and encoded or obfuscated forms).
+    public var allowedEgressHosts: [String]
 
     /// Default system read paths essential for standard binaries and runtimes.
     public static let defaultSystemReadPaths: [String] = [
@@ -110,19 +134,28 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         #"/Library/LaunchDaemons/"#
     ]
 
+    /// Maximum declared egress hosts honored per profile.
+    ///
+    /// Bounds SBPL size and keeps the approval surface reviewable: beyond ten
+    /// the owner cannot meaningfully authorize destinations, so callers must
+    /// split the work rather than widening silently.
+    public static let maxEgressHosts = 10
+
     /// Creates a Seatbelt profile builder.
     public init(
         allowedReadPaths: [String] = [],
         allowedWritePaths: [String] = [],
         allowedTempPaths: [String] = [],
         deniedPaths: [String] = [],
-        allowNetwork: Bool = false
+        allowNetwork: Bool = false,
+        allowedEgressHosts: [String] = []
     ) {
         self.allowedReadPaths = Set(allowedReadPaths)
         self.allowedWritePaths = Set(allowedWritePaths)
         self.allowedTempPaths = Set(allowedTempPaths)
         self.deniedPaths = Set(deniedPaths)
         self.allowNetwork = allowNetwork
+        self.allowedEgressHosts = allowedEgressHosts
     }
 
     /// Creates a Seatbelt-confined temp directory for staged document writes.
@@ -214,16 +247,57 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         lines.append("(version 1)")
         lines.append("(deny default)")
         lines.append("")
-
-        // Network policy
-        lines.append(";; Network access policy")
-        if allowNetwork {
-            lines.append("(allow network*)")
-        } else {
-            lines.append("(deny network*)")
-        }
+        appendNetworkPolicy(to: &lines)
         lines.append("")
+        appendProcessCompat(to: &lines)
+        lines.append(contentsOf: bootstrapLiterals())
+        // Binary launch stays covered by the process exec/fork allows above combined with the file-
+        // read and executable-mapping allows below: the kernel reads binaries through file-read
+        // rights and maps them through file-map-executable rights, so both stay scoped to the same...
+        let sanitizedTemp = Set(Self.sanitizedAllowPaths(allowedTempPaths))
+        appendWriteIsolation(to: &lines, sanitizedTemp: sanitizedTemp)
+        appendReadPolicy(to: &lines, sanitizedTemp: sanitizedTemp)
+        appendExecPolicy(to: &lines, sanitizedTemp: sanitizedTemp)
+        appendDenyPolicy(to: &lines)
+        return lines.joined(separator: "\n")
+    }
 
+    /// Appends the network access policy with blanket-allow plus supervisor screening.
+    ///
+    /// The sandbox stays blanket-allow whenever `allowNetwork` is true,
+    /// whether or not hosts are declared: per-host `remote tcp` with hostnames
+    /// is not expressible on current macOS (the kernel only accepts
+    /// `localhost` or `*` as IP, so hostnames reject as kleene star), so
+    /// narrowing declared hosts to deny-all would grant less capability than
+    /// declaring nothing and leave `network_hosts` unusable. The supervisor
+    /// remains the per-host enforcement point through best-effort string
+    /// screening (undeclared deny, declared-plus-policy-allowed allow), which
+    /// sees explicit URLs, schemeless host text, and typed URLs but misses
+    /// dials that never surface as recognizable host strings (non-URL
+    /// spellings and encoded or obfuscated forms) — a screened pass narrows
+    /// the dial surface without proving no-egress.
+    /// - Parameter lines: Profile lines to append to.
+    private func appendNetworkPolicy(to lines: inout [String]) {
+        lines.append(";; Network access policy")
+        guard allowNetwork else {
+            lines.append("(deny network*)")
+            return
+        }
+        let scopedHosts = Self.sanitizedEgressHosts(allowedEgressHosts)
+        if !scopedHosts.isEmpty {
+            let declaredHostCount = allowedEgressHosts.count
+            let validHostCount = scopedHosts.count
+            RuneWeaverLog.sandbox.info(
+                "SeatbeltProfileBuilder: blanket-allow network with supervisor screening (validHosts=\(validHostCount) declared=\(declaredHostCount))."
+            )
+        }
+        lines.append("(allow network*)")
+    }
+
+    /// Appends process and system-service compat for deny-default launch.
+    ///
+    /// - Parameter lines: Profile lines to append to.
+    private func appendProcessCompat(to lines: inout [String]) {
         // Process and system-service compat: a deny-default sandbox cannot launch the dynamic
         // linker or query kernel state without these, so they reopen only execution and discovery
         // while file and network confinement below still holds.
@@ -248,14 +322,14 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
         lines.append("(allow system-socket)")
         lines.append("(allow file-ioctl)")
         lines.append("")
-        lines.append(contentsOf: bootstrapLiterals())
-        // Binary launch stays covered by the process exec/fork allows above combined with the file-
-        // read and executable-mapping allows below: the kernel reads binaries through file-read
-        // rights and maps them through file-map-executable rights, so both stay scoped to the same...
+    }
 
-        let sanitizedTemp = Set(Self.sanitizedAllowPaths(allowedTempPaths))
-        appendWriteIsolation(to: &lines, sanitizedTemp: sanitizedTemp)
-
+    /// Appends filesystem read isolation for system and workspace roots.
+    ///
+    /// - Parameters:
+    ///   - lines: Profile lines to append to.
+    ///   - sanitizedTemp: Confined temp dirs already sanitized for interpolation.
+    private func appendReadPolicy(to lines: inout [String], sanitizedTemp: Set<String>) {
         // Filesystem read policy: deny-default already blocks reads, so reopen only minimal system
         // roots plus caller workspace roots.
         lines.append(";; Filesystem read isolation: allow only system and workspace roots")
@@ -273,11 +347,23 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
             lines.append(")")
             lines.append("")
         }
+    }
 
+    /// Appends executable-mapping confinement excluding temp staging.
+    ///
+    /// - Parameters:
+    ///   - lines: Profile lines to append to.
+    ///   - sanitizedTemp: Confined temp dirs excluded from execution.
+    private func appendExecPolicy(to lines: inout [String], sanitizedTemp: Set<String>) {
         // Executable mapping stays confined to the same roots as reads minus temp: dyld maps system
         // libraries and the target binary via file-map-executable rather than file-read, so deny-
         // default would otherwise abort before main runs.
-        let executablePaths = sortedRead.filter { !sanitizedTemp.contains($0) }
+        var allRead = Set(Self.defaultSystemReadPaths)
+        allRead.formUnion(Self.defaultSystemWritePaths)
+        allRead.formUnion(Self.sanitizedAllowPaths(allowedReadPaths))
+        allRead.formUnion(Self.sanitizedAllowPaths(allowedWritePaths))
+        allRead.formUnion(sanitizedTemp)
+        let executablePaths = allRead.sorted().filter { !sanitizedTemp.contains($0) }
         if !executablePaths.isEmpty {
             lines.append("(allow file-map-executable")
             for path in executablePaths {
@@ -295,7 +381,12 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
             lines.append(")")
             lines.append("")
         }
+    }
 
+    /// Appends explicit credential denies plus filename-level secret denies.
+    ///
+    /// - Parameter lines: Profile lines to append to.
+    private func appendDenyPolicy(to lines: inout [String]) {
         // Denied sensitive paths (highest priority overrides)
         lines.append(";; Explicit credential and sensitive directory denials")
         var allDeny = Set(Self.expandPaths(Self.defaultDeniedPaths))
@@ -309,7 +400,6 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
             lines.append(")")
             lines.append("")
         }
-
         // Filename-level secret denies: catch bare names wherever they sit,
         // including inside an allowed workspace where subpath allows would
         // otherwise reopen them.
@@ -323,8 +413,6 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
             lines.append(")")
             lines.append("")
         }
-
-        return lines.joined(separator: "\n")
     }
 
     /// Escapes a path for interpolation inside an SBPL quoted string.
@@ -360,5 +448,145 @@ public struct SeatbeltProfileBuilder: Sendable, Equatable {
             }
         }
         return escaped
+    }
+}
+
+extension SeatbeltProfileBuilder {
+    /// Declared-host validation failures for `network_hosts`.
+    ///
+    /// Carries only the offending value so shell and desktop surfaces keep
+    /// their own output idiom while sharing one validity rule: both tools
+    /// map the error to `ToolOutput.failure` without duplicating the
+    /// max-count or per-host checks.
+    public enum DeclaredHostValidationError: Error, Sendable, Equatable {
+        /// More hosts declared than `maxEgressHosts` allows.
+        case tooMany(count: Int)
+        /// One raw entry that is not a plain hostname or address literal.
+        case invalidHost(String)
+
+        /// Human-readable reason, safe to surface to the owner.
+        public var message: String {
+            switch self {
+            case let .tooMany(count):
+                "Invalid argument 'network_hosts': must contain at most"
+                    + " \(SeatbeltProfileBuilder.maxEgressHosts)"
+                    + " hosts (got \(count))."
+            case let .invalidHost(rawHost):
+                "Invalid argument 'network_hosts': '\(rawHost)'"
+                    + " is not a valid hostname or IP address."
+            }
+        }
+    }
+
+    /// Validates raw `network_hosts` without touching sandbox or supervisor.
+    ///
+    /// Over-limit or malformed entries throw before any confinement contact
+    /// so a misspelled destination never widens silently. Single-sources the
+    /// rule previously duplicated across shell and desktop tools: max-count
+    /// plus per-host `sanitizedEgressHosts([raw]).isEmpty` plus sanitize.
+    /// - Parameter hosts: Raw declared hosts from the caller.
+    /// - Returns: Canonical hosts in first-seen order, at most `maxEgressHosts`.
+    public static func validatedDeclaredHosts(_ hosts: [String]) throws -> [String] {
+        if hosts.count > maxEgressHosts {
+            throw DeclaredHostValidationError.tooMany(count: hosts.count)
+        }
+        for rawHost in hosts
+            where sanitizedEgressHosts([rawHost]).isEmpty
+        {
+            throw DeclaredHostValidationError.invalidHost(rawHost)
+        }
+        return sanitizedEgressHosts(hosts)
+    }
+
+    /// Validated egress hosts safe to interpolate into SBPL remote filters.
+    ///
+    /// Accepts single-label names (`localhost`), dotted hostnames, IPv4 quads,
+    /// and bracketed or bare IPv6 literals; rejects wildcards, port-qualified
+    /// entries, URLs, and SBPL-breaking scalars so a crafted host cannot split
+    /// the profile. Comparison canonicalizes through the shared host
+    /// normalizer, dedupes case-insensitively, and caps at `maxEgressHosts` in
+    /// first-seen order so the sandbox and the supervisor agree on identity.
+    /// - Parameter hosts: Raw declared hosts from the caller.
+    /// - Returns: Canonical hosts in first-seen order, at most `maxEgressHosts`.
+    public static func sanitizedEgressHosts(_ hosts: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for raw in hosts {
+            guard out.count < maxEgressHosts else { break }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            guard isValidEgressHost(trimmed) else { continue }
+            let canonical = SensitiveAddressNormalization.normalizedHost(trimmed)
+            guard !canonical.isEmpty else { continue }
+            guard !seen.contains(canonical) else { continue }
+            seen.insert(canonical)
+            out.append(canonical)
+        }
+        return out
+    }
+
+    /// Whether one raw host is a plain hostname or address literal.
+    ///
+    /// Hostnames allow ASCII letters, digits, hyphens, and dots with no empty
+    /// label and no leading or trailing hyphen, mirroring the dashboard
+    /// `^[A-Za-z0-9._-]+$` slug/host contract so Unicode homographs (`café`,
+    /// Cyrillic) never pass as declared hosts; address literals defer to the
+    /// shared IPv4/IPv6 parsers so `127.0.0.1` and `::1` pass while `999.1.1.1`
+    /// and `host:443` refuse. The check is syntactic only — reachability still
+    /// flows through the policy allowlist and the SSRF guard.
+    private static func isValidEgressHost(_ host: String) -> Bool {
+        if host.contains("\n") || host.contains("\r") || host.contains("\0") {
+            return false
+        }
+        if host.contains(" ") || host.contains("\t") {
+            return false
+        }
+        if host.contains("\"") || host.contains("(") || host.contains(")") || host.contains(";") {
+            return false
+        }
+        // "/" already rejects "://" spellings, so no separate scheme check.
+        if host.contains("/") || host.contains("*") || host.contains("\\") {
+            return false
+        }
+        if host.contains("@") || host.contains("?") || host.contains("#") {
+            return false
+        }
+        var bare = host
+        if bare.hasPrefix("["), bare.hasSuffix("]"), bare.count >= 2 {
+            bare = String(bare.dropFirst().dropLast())
+        }
+        if bare.isEmpty {
+            return false
+        }
+        if bare.lowercased() == "localhost" {
+            return true
+        }
+        // Port-qualified spellings never count as hosts: a colon means an
+        // IPv6 literal or nothing, so IPv4 resolution must not see the raw
+        // `host:port` text and launder its numeric tail into an address.
+        if bare.contains(":") {
+            return SensitiveAddressParsing.ipv6Hextets(bare) != nil
+        }
+        if SensitiveAddressParsing.canonicalIPv4Octets(bare) != nil {
+            return true
+        }
+        let labels = bare.split(separator: ".", omittingEmptySubsequences: false)
+        guard !labels.isEmpty, labels.count <= 253 else { return false }
+        for label in labels {
+            guard !label.isEmpty, label.count <= 63 else { return false }
+            guard label.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }) else { return false }
+            guard !label.hasPrefix("-"), !label.hasSuffix("-") else { return false }
+        }
+        if labels.count == 1 {
+            let single = String(labels[0])
+            guard let first = single.first, first.isASCII, first.isLetter || first.isNumber else { return false }
+        }
+        return true
+    }
+}
+
+extension SeatbeltProfileBuilder.DeclaredHostValidationError: LocalizedError {
+    public var errorDescription: String? {
+        message
     }
 }

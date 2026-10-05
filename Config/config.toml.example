@@ -292,7 +292,7 @@ jpeg_quality = 0.75
 blocked_apps = ["Terminal", "iTerm2", "Keychain Access", "System Settings", "System Preferences", "1Password", "Bitwarden"]
 
 [bash]
-# Commands run in the engine home directory by default, with an optional
+# Commands run in ~/.runeweaver/workspace by default, with an optional
 # per-call `cwd` override inside allowed roots, confined by the Seatbelt
 # sandbox (sandbox-exec, deny-default; not Apple Container).
 # Granular shell execution policy. Rules evaluate top-to-bottom and the
@@ -308,6 +308,13 @@ default_action = "ask"
 timeout_seconds = 30
 # Whether commands may use the network inside the sandbox.
 allow_network = false
+# CPU time budget in seconds applied via `ulimit -t` before each command (1-3600).
+# Best-effort: threads share the budget and sleeping processes accrue almost no
+# CPU time, so sleep-heavy commands run to the wall-clock timeout above.
+cpu_seconds = 120
+# Address-space budget in megabytes applied via `ulimit -v` before each command (64-8192).
+# Best-effort: over-reports on macOS where shared libraries inflate the count.
+memory_mb = 1024
 
 [[bash.rules]]
 pattern = "*"
@@ -462,6 +469,17 @@ timeout_seconds = 20
 # max_workers = 2  # Max workers running at once (1-8).
 # worker_timeout_seconds = 0  # Wall-clock budget per worker turn; 0 = no timeout.
 # full_tools = false  # True widens workers to the full tool registry; false keeps the read-only subset.
+
+# [workspace]
+# Agent scratch directory backing the default shell working directory.
+# An absent section keeps the documented quotas; out-of-range values fail
+# closed at load while hand-built configs clamp to the nearest bound at use.
+# Only scripts inside workspace/tools/ may be promoted to the agent-tool
+# registry; the dashboard Tools tab and `rune-weaver workspace` manage usage,
+# pruning, and promotion against these quotas.
+# quota_mb = 500  # Total bytes permitted under ~/.runeweaver/workspace (10-10240).
+# quota_files = 10000  # Total files permitted under the workspace (100-100000).
+# tmp_ttl_days = 7  # Days tmp/ entries survive before boot pruning; 0 clears on every boot (0-90).
 
 [security]
 # Harness-level defense policy for external content. Both keys default ON;

@@ -206,12 +206,35 @@ enum CLIShared {
         LLMOrigins.serverURLs(from: llmConfig)
     }
 
+    /// Ensures the agent scratch workspace exists and clears expired `tmp/`.
+    ///
+    /// Every bash-invoking CLI command calls this before building its tool
+    /// bus so a fresh boot creates the 0700 root and a stale `tmp/` never
+    /// accumulates across runs. The workspace management command shares the
+    /// same stores direct-core with no session linkage. Failures stay
+    /// best-effort with a dim note because the per-turn quota gate still
+    /// fails closed when the directory is missing.
+    /// - Parameters:
+    ///   - config: Quotas and retention from `[workspace]`.
+    ///   - store: Injected store for tests; nil derives from `config`.
+    static func ensureWorkspace(config: WorkspaceConfig = WorkspaceConfig(), store: WorkspaceStore? = nil) async {
+        let resolved = store ?? WorkspaceStore(config: config)
+        do {
+            _ = try await resolved.ensure()
+            _ = try await resolved.pruneTmp()
+        } catch {
+            print(TerminalStyle.dim("Workspace unavailable: \(error.localizedDescription)"))
+        }
+    }
+
     /// Built-in plugin tools registered into every CLI `ToolBus`.
     ///
     /// Goal tools join only when both the engine and store arrive (nil keeps them
     /// unregistered); a disabled `[goals]` section still registers through the same
     /// path and fails closed inside each tool so the surface stays inspectable.
-    /// Fan-out tools follow the ships-disabled invariant: the tool joins only when
+    /// Agent script tools join only when the pin store arrives (nil keeps them
+    /// unregistered) and share the live shell plus workspace so the CLI and the
+    /// service observe one hash-pinned registry. Fan-out tools follow the ships-disabled invariant: the tool joins only when
     /// the fan-out engine arrives (nil keeps it unregistered), and it registers
     /// disabled behind the tool-state toggle with no config gate overriding it.
     ///
@@ -244,11 +267,19 @@ enum CLIShared {
         goalsConfig: GoalsConfig = GoalsConfig(),
         fanOutEngine: FanOutEngine? = nil,
         policyStore: PolicyStore? = nil,
-        recipientAliasStore: (any MessageAliasStoring)? = nil
+        recipientAliasStore: (any MessageAliasStoring)? = nil,
+        workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
+        workspaceStore: WorkspaceStore? = nil,
+        agentToolStore: AgentToolStore? = nil
     ) async throws -> [any Tool] {
         let browser = browserConfig ?? BrowserConfig()
         let baseOrigins = llmServerURLs
         let combinedOrigins = baseOrigins + Self.llmServerURLs(from: llmConfig).filter { !baseOrigins.contains($0) }
+        // Scratch boots beside the tool registry so CLI turns observe the
+        // same default cwd and quota gate as the service without duplicating
+        // the ensure call in every command.
+        await ensureWorkspace(config: workspaceConfig, store: workspaceStore)
+        let resolvedWorkspaceStore = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
         do {
             return try await BuiltinToolPlugins.makeAllTools(
                 emailConfig: emailConfig,
@@ -270,7 +301,10 @@ enum CLIShared {
                 goalsConfig: goalsConfig,
                 recipientAliasStore: recipientAliasStore,
                 fanOutEngine: fanOutEngine,
-                policyStore: policyStore
+                policyStore: policyStore,
+                workspaceConfig: workspaceConfig,
+                workspaceStore: resolvedWorkspaceStore,
+                agentToolStore: agentToolStore
             )
         } catch {
             cliPrintError(TerminalStyle.error("Security policy rejected: \(error.localizedDescription)"))
@@ -291,7 +325,9 @@ enum CLIShared {
     /// a disabled `[goals]` section still registers and fails closed inside each
     /// tool. When only the policy plus an LLM arrive, the store and engine build
     /// here from the episodes path so chat and serve need no second wiring step.
-    /// Fan-out tools follow the same ships-disabled posture: the optional engine
+    /// Agent script tools follow the same one-registry posture: an explicit pin
+    /// store wins, otherwise one builds over the resolved episodes path with the
+    /// effective workspace so dashboard and CLI pins never drift. Fan-out tools follow the same ships-disabled posture: the optional engine
     /// passes through so a caller that wired one sees the fanout.run tool
     /// registered disabled, while nil keeps it unregistered (the CLI builds no
     /// engine here because the orchestrator and run-log store arrive after the
@@ -329,7 +365,10 @@ enum CLIShared {
         goalLLM: (any LLMProvider)? = nil,
         fanOutEngine: FanOutEngine? = nil,
         policyStore: PolicyStore? = nil,
-        recipientAliasStore: (any MessageAliasStoring)? = nil
+        recipientAliasStore: (any MessageAliasStoring)? = nil,
+        workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
+        workspaceStore: WorkspaceStore? = nil,
+        agentToolStore: AgentToolStore? = nil
     ) async throws -> ToolBus {
         let bus = ToolBus(
             approvalHandler: approvalHandler,
@@ -352,6 +391,12 @@ enum CLIShared {
         // confirmed name sends without a second wiring step, and construction is
         // path-only, so callers that never send pay no I/O.
         let effectiveAliasStore = recipientAliasStore ?? RecipientAliasStore(dbPath: rawPath)
+        // Agent pins share the same episodes file as goals so the dashboard
+        // and the CLI observe one registry; an explicit store wins untouched
+        // for tests that hand-build an isolated registry, otherwise one builds
+        // over the resolved path with the effective workspace.
+        let effectiveWorkspace = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
+        let effectiveAgentStore = agentToolStore ?? AgentToolStore(dbPath: rawPath, workspaceStore: effectiveWorkspace)
         let shipsDisabled = BuiltinToolPlugins.shipsDisabledToolNames
         for tool in try await pluginTools(
             emailConfig: emailConfig,
@@ -373,7 +418,10 @@ enum CLIShared {
             goalsConfig: goalsConfig ?? GoalsConfig(),
             fanOutEngine: fanOutEngine,
             policyStore: policyStore,
-            recipientAliasStore: effectiveAliasStore
+            recipientAliasStore: effectiveAliasStore,
+            workspaceConfig: workspaceConfig,
+            workspaceStore: effectiveWorkspace,
+            agentToolStore: effectiveAgentStore
         ) {
             await bus.register(tool: tool, isEnabled: !shipsDisabled.contains(tool.name))
         }

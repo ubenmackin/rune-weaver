@@ -6,6 +6,11 @@
 // in the shared tab-form banner, the accent picker round-trips all four
 // colorways and degrades an unknown stored key to violet, and every settings
 // read republishes the persona so identity surfaces mirror the owner's edit.
+// The Tools tab owns the workspace scratch and promoted-tool surfaces in this
+// file's scope: usage bars read GET /workspace/usage, tmp pruning confirms
+// through the shared modal, promoted rows toggle through PATCH
+// /agent-tools/:id, and the promote form validates the workspace/tools/
+// prefix before any network write.
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -25,11 +30,17 @@ import {
   DEFAULT_BASH_TIMEOUT_SECONDS,
   DEFAULT_PERSONA_AVATAR,
   DEFAULT_PERSONA_TONE,
+  formatWorkspaceBytes,
+  isPromotableScriptPath,
   MAX_PERSONA_ASSISTANT_NAME_LENGTH,
   MAX_PERSONA_STYLE_LENGTH,
   MAX_PERSONA_USER_NAME_LENGTH,
   PERSONA_AVATAR_COLORS,
   PERSONA_TONES,
+  shortAgentToolHash,
+  validateAgentToolPromote,
+  workspaceQuotaPercent,
+  WORKSPACE_TOOLS_PREFIX,
 } from "../api";
 import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
@@ -4430,6 +4441,183 @@ describe("persona defaults and bounds contract", () => {
       "emerald",
       "rose",
     ]);
+  });
+});
+
+describe("SettingsManager workspace and promoted tools", () => {
+  const workspaceUsagePayload = {
+    bytes: 12 * 1024 * 1024,
+    files: 120,
+    truncated: false,
+    quotaMB: 500,
+    quotaFiles: 10000,
+  };
+  const agentToolRow = {
+    id: "11111111-1111-4111-8111-111111111111",
+    name: "cleanup",
+    scriptPath: "/Users/test/.runeweaver/workspace/tools/cleanup.sh",
+    sha256: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+    status: "enabled",
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  };
+
+  function stubWorkspaceFetch(overrides: {
+    onFetch?: (url: string, init?: RequestInit) => Response | Promise<Response> | null;
+    agentTools?: unknown[];
+  } = {}) {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const tools = overrides.agentTools ?? [agentToolRow];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      calls.push({ url: urlStr, init });
+      const override = overrides.onFetch?.(urlStr, init);
+      if (override) return override;
+      if (urlStr === "/workspace/usage") return jsonResponse(workspaceUsagePayload);
+      if (urlStr === "/workspace/tmp/prune" && init?.method === "POST") {
+        return jsonResponse({ removed: 3 });
+      }
+      if (urlStr === "/agent-tools") return jsonResponse({ tools, count: (tools as unknown[]).length });
+      if (urlStr === "/agent-tools/promote" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { name: string; script_path: string };
+        return jsonResponse({ ...agentToolRow, name: body.name, scriptPath: body.script_path });
+      }
+      if (urlStr.startsWith("/agent-tools/") && urlStr.endsWith("/run") && init?.method === "POST") {
+        return jsonResponse({ toolCallID: "call_1", content: "ok", isError: false });
+      }
+      if (urlStr.startsWith("/agent-tools/") && init?.method === "PATCH") {
+        const body = JSON.parse(String(init.body)) as { status: string };
+        return jsonResponse({ ...agentToolRow, status: body.status ?? "disabled" });
+      }
+      if (urlStr.includes("/tools") && !urlStr.includes("agent-tools")) {
+        return jsonResponse({ tools: [] });
+      }
+      if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });
+      if (urlStr === "/settings" && init?.method === "PUT") {
+        return jsonResponse({ ...mockSettings, ...(JSON.parse(String(init.body)) as object) });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return { fetchMock, calls };
+  }
+
+  async function openToolsTab() {
+    const user = userEvent.setup();
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /Tools and Runes/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Workspace Storage")).toBeDefined();
+    });
+    return user;
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedRunsForTesting();
+  });
+
+  it("renders usage bars from GET /workspace/usage and prunes through a confirm", async () => {
+    const { calls } = stubWorkspaceFetch();
+    const user = await openToolsTab();
+
+    await waitFor(() => {
+      expect(screen.getByText(/12\.0 MB of 500 MB/)).toBeDefined();
+    });
+    expect(screen.getByText(/120 of 10,000 files/)).toBeDefined();
+    expect(calls.some((c) => c.url === "/workspace/usage")).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: /Prune tmp/i }));
+    expect(screen.getByRole("heading", { name: /Prune workspace tmp\?/i })).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "Confirm prune workspace tmp" }));
+    await waitFor(() => {
+      expect(calls.some((c) => c.url === "/workspace/tmp/prune" && c.init?.method === "POST")).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/Pruned 3 tmp entries/)).toBeDefined();
+    });
+  });
+
+  it("toggles a promoted tool through PATCH /agent-tools/:id", async () => {
+    const { calls } = stubWorkspaceFetch();
+    const user = await openToolsTab();
+
+    await waitFor(() => {
+      expect(screen.getByText("cleanup")).toBeDefined();
+    });
+    expect(screen.getByText("abcdef123456")).toBeDefined();
+    const toggle = screen.getByRole("switch", { name: /cleanup Enabled/i });
+    await user.click(toggle);
+    await waitFor(() => {
+      expect(
+        calls.some((c) => c.url === `/agent-tools/${agentToolRow.id}` && c.init?.method === "PATCH"),
+      ).toBe(true);
+    });
+    const patch = calls.find((c) => c.url === `/agent-tools/${agentToolRow.id}` && c.init?.method === "PATCH");
+    expect(String(patch?.init?.body)).toContain("disabled");
+  });
+
+  it("validates the tools/ prefix before any promote write", async () => {
+    const { calls } = stubWorkspaceFetch({ agentTools: [] });
+    const user = await openToolsTab();
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Tool name")).toBeDefined();
+    });
+    await user.type(screen.getByLabelText("Tool name"), "cleanup");
+    await user.type(screen.getByLabelText("Script path"), "workspace/other/cleanup.sh");
+    await user.click(screen.getByRole("button", { name: /Promote tool/i }));
+    await waitFor(() => {
+      // The static form hint, the live prefix warning, and the validation
+      // error share the same canonical prefix copy, so scope to all matches
+      // and pin the one naming the rejected path.
+      const matches = screen.getAllByText(/Only scripts inside tools\//);
+      expect(matches.length).toBeGreaterThanOrEqual(1);
+      expect(matches.some((el) => el.textContent?.includes("workspace/other/cleanup.sh"))).toBe(
+        true,
+      );
+    });
+    expect(calls.some((c) => c.url === "/agent-tools/promote")).toBe(false);
+
+    await user.clear(screen.getByLabelText("Script path"));
+    await user.type(screen.getByLabelText("Script path"), "workspace/tools/cleanup.sh");
+    await user.click(screen.getByRole("button", { name: /Promote tool/i }));
+    await waitFor(() => {
+      expect(calls.some((c) => c.url === "/agent-tools/promote" && c.init?.method === "POST")).toBe(true);
+    });
+  });
+
+  it("pins the workspace CLI matrix on the shared client validators", () => {
+    // Mirrors the `workspace tools` command grammar the CLI enforces
+    // direct-core: only the eligible directory promotes, names stay in the
+    // store slug set, and quota math never divides by zero on older payloads.
+    expect(WORKSPACE_TOOLS_PREFIX).toBe("tools/");
+    expect(isPromotableScriptPath("tools/cleanup.sh")).toBe(true);
+    expect(isPromotableScriptPath("workspace/tools/cleanup.sh")).toBe(true);
+    expect(isPromotableScriptPath("workspace/other/cleanup.sh")).toBe(false);
+    expect(isPromotableScriptPath("tools/")).toBe(false);
+    expect(isPromotableScriptPath("workspace/tools/")).toBe(false);
+    expect(isPromotableScriptPath("/Users/test/.runeweaver/workspace/tools/cleanup.sh")).toBe(true);
+    expect(isPromotableScriptPath("~/.runeweaver/workspace/tools/cleanup.sh")).toBe(true);
+    expect(isPromotableScriptPath("~/.runeweaver/workspace/tools/")).toBe(false);
+    // Bare `/workspace/tools/` segments outside `~/.runeweaver/workspace/`
+    // must not hint-promotable: the store would refuse them with 400.
+    expect(isPromotableScriptPath("~/workspace/tools/cleanup.sh")).toBe(false);
+    expect(isPromotableScriptPath("/tmp/workspace/tools/cleanup.sh")).toBe(false);
+    expect(isPromotableScriptPath("/workspace/tools/cleanup.sh")).toBe(false);
+    expect(validateAgentToolPromote("cleanup", "tools/cleanup.sh")).toBeNull();
+    expect(validateAgentToolPromote("cleanup", "workspace/tools/cleanup.sh")).toBeNull();
+    expect(validateAgentToolPromote("cleanup", "workspace/other/x.sh")).toContain("tools/");
+    expect(validateAgentToolPromote("cleanup", "/tmp/workspace/tools/x.sh")).toContain("tools/");
+    expect(validateAgentToolPromote("cleanup", "~/workspace/tools/x.sh")).toContain("tools/");
+    expect(validateAgentToolPromote("bad name!", "tools/x.sh")).toContain("only letters");
+    expect(shortAgentToolHash(agentToolRow.sha256)).toBe("abcdef123456");
+    expect(formatWorkspaceBytes(12 * 1024 * 1024)).toBe("12.0 MB");
+    expect(workspaceQuotaPercent(12 * 1024 * 1024, 500 * 1024 * 1024)).toBe(2);
+    expect(workspaceQuotaPercent(1, 0)).toBe(0);
   });
 });
 

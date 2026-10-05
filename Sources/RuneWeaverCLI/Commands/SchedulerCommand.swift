@@ -253,7 +253,8 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             goalsConfig: loaded.config.goals,
             goalEngine: goalEngine,
             goalStore: goalStore,
-            goalConversations: conversations
+            goalConversations: conversations,
+            workspaceConfig: loaded.config.workspace
         )
         let orchestrator = Orchestrator(
             conversations: conversations,

@@ -343,22 +343,22 @@ struct WebFetchSafetyTests {
 
     @Test
     func `Non-text payloads are unsupported with finalUrl`() async throws {
-        // Canned public proof keeps the stubbed payload hermetic without a production bypass.
-        try await WebTestSupport.withPublicDNS {
-            let page = try #require(URL(string: "https://example.com/photo.png"))
-            let transport = WebTestSupport.RoutingFetchTransport { _ in
-                (Data(repeating: 0x89, count: 16), WebTestSupport.okResponse(for: page, contentType: "image/png"))
-            }
-            let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
-            let output = try await tool.execute(
-                input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://example.com/photo.png"}"#),
-                context: ToolContext(conversationID: UUID())
-            )
-            #expect(!output.isError)
-            let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
-            #expect(envelope.status == "unsupported")
-            #expect(envelope.finalUrl == "https://example.com/photo.png")
+        // Public literals need no DNS proof, so no stub is required: the
+        // literal stage alone decides while unverified hostnames still fail
+        // closed elsewhere, keeping the payload hermetic without a bypass.
+        let page = try #require(URL(string: "http://93.184.216.34/photo.png"))
+        let transport = WebTestSupport.RoutingFetchTransport { _ in
+            (Data(repeating: 0x89, count: 16), WebTestSupport.okResponse(for: page, contentType: "image/png"))
         }
+        let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"http://93.184.216.34/photo.png"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(!output.isError)
+        let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.status == "unsupported")
+        #expect(envelope.finalUrl == "http://93.184.216.34/photo.png")
     }
 
     @Test
