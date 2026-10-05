@@ -143,11 +143,20 @@ public enum SensitiveAddressParsing: Sendable {
     }
 
     /// Resolves the IPv4 octets hidden inside an IPv6 literal.
+    ///
+    /// Dotted tails prove only with a proven IPv6 prefix: a bare
+    /// `host:port` spelling (for example `api.example.com:443`) must not
+    /// collapse onto its numeric port and read as an address literal, so the
+    /// prefix is verified with the same two-hextet proof the dotted-literal
+    /// check uses before the tail is accepted.
     static func octetsFromMappedIPv6(_ lowered: String) -> IPv4Octets? {
         if lowered.contains(".") {
             guard let lastColon = lowered.lastIndex(of: ":") else { return nil }
             let tail = String(lowered[lowered.index(after: lastColon)...])
             guard !tail.isEmpty, !tail.contains(":") else { return nil }
+            guard canonicalIPv4Octets(tail) != nil else { return nil }
+            let prefix = String(lowered[..<lastColon])
+            guard ipv6Hextets(prefix + ":0:0") != nil else { return nil }
             return canonicalIPv4Octets(tail)
         }
         guard let groups = ipv6Hextets(lowered) else { return nil }

@@ -726,6 +726,10 @@ public struct BashRule: Sendable, Codable, Equatable {
 }
 
 /// `[bash]` — granular shell execution policy.
+///
+/// CPU and memory bounds ride `ulimit` inside the shell so every spawned
+/// command inherits them without a new supervisor process; the wall-clock
+/// timeout stays the hard backstop because `ulimit` is best-effort on macOS.
 public struct BashConfig: Sendable, Codable, Equatable {
     /// Whether the bash tool is enabled. Defaults to true.
     public var enabled: Bool
@@ -738,25 +742,39 @@ public struct BashConfig: Sendable, Codable, Equatable {
     public var timeoutSeconds: Int
     /// Whether outbound and inbound network access is permitted in sandbox. Defaults to false.
     public var allowNetwork: Bool
+    /// CPU time budget in seconds applied via `ulimit -t` before each command.
+    /// Sleeping processes accrue almost no CPU time, so a sleep-heavy command
+    /// can run past this budget up to the wall-clock timeout.
+    public var cpuSeconds: Int
+    /// Address-space budget in megabytes applied via `ulimit -v` before each command.
+    public var memoryMB: Int
 
     /// Default rules: all commands require approval (`*` -> `ask`).
     public static let defaultRules: [BashRule] = [
         BashRule(pattern: "*", action: .ask)
     ]
     public static let defaultTimeoutSeconds: Int = 30
+    /// Default CPU budget keeps tight loops from spinning past a couple minutes.
+    public static let defaultCPUSeconds: Int = 120
+    /// Default address-space budget fits compilers and scripts without inviting OOM swaps.
+    public static let defaultMemoryMB: Int = 1024
 
     public init(
         enabled: Bool = true,
         defaultAction: BashPermissionAction = .ask,
         rules: [BashRule] = defaultRules,
         timeoutSeconds: Int = defaultTimeoutSeconds,
-        allowNetwork: Bool = false
+        allowNetwork: Bool = false,
+        cpuSeconds: Int = defaultCPUSeconds,
+        memoryMB: Int = defaultMemoryMB
     ) {
         self.enabled = enabled
         self.defaultAction = defaultAction
         self.rules = rules
         self.timeoutSeconds = timeoutSeconds
         self.allowNetwork = allowNetwork
+        self.cpuSeconds = cpuSeconds
+        self.memoryMB = memoryMB
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -765,6 +783,8 @@ public struct BashConfig: Sendable, Codable, Equatable {
         case rules
         case timeoutSeconds = "timeout_seconds"
         case allowNetwork = "allow_network"
+        case cpuSeconds = "cpu_seconds"
+        case memoryMB = "memory_mb"
     }
 
     public init(from decoder: Decoder) throws {
@@ -774,6 +794,8 @@ public struct BashConfig: Sendable, Codable, Equatable {
         self.rules = try container.decodeIfPresent([BashRule].self, forKey: .rules) ?? Self.defaultRules
         self.timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds) ?? Self.defaultTimeoutSeconds
         self.allowNetwork = try container.decodeIfPresent(Bool.self, forKey: .allowNetwork) ?? false
+        self.cpuSeconds = try container.decodeIfPresent(Int.self, forKey: .cpuSeconds) ?? Self.defaultCPUSeconds
+        self.memoryMB = try container.decodeIfPresent(Int.self, forKey: .memoryMB) ?? Self.defaultMemoryMB
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -783,6 +805,8 @@ public struct BashConfig: Sendable, Codable, Equatable {
         try container.encode(rules, forKey: .rules)
         try container.encode(timeoutSeconds, forKey: .timeoutSeconds)
         try container.encode(allowNetwork, forKey: .allowNetwork)
+        try container.encode(cpuSeconds, forKey: .cpuSeconds)
+        try container.encode(memoryMB, forKey: .memoryMB)
     }
 }
 
@@ -1099,6 +1123,91 @@ extension FanOutConfig: Codable {
     }
 }
 
+/// `[workspace]` — agent scratch directory quotas and temp retention.
+///
+/// The workspace is the default working directory for shell execution, so it
+/// needs explicit bounds: a size cap keeps stray downloads from filling the
+/// disk, a file cap keeps quota walks and shell globs cheap, and a temp TTL
+/// keeps `tmp/` from accumulating across runs without manual cleanup.
+public struct WorkspaceConfig: Sendable, Equatable {
+    /// Total bytes permitted under the workspace root. Clamped `10...10240` MB.
+    public var quotaMB: Int
+    /// Total files permitted under the workspace root. Clamped `100...100000`.
+    public var quotaFiles: Int
+    /// Days `tmp/` entries survive before pruning. Zero clears on every boot. Clamped `0...90`.
+    public var tmpTTLDays: Int
+
+    /// Default size cap keeps scratch generous without risking the disk.
+    public static let defaultQuotaMB = 500
+    /// Smallest size cap that still fits a working checkout plus outputs.
+    public static let minQuotaMB = 10
+    /// Largest size cap before scratch rivals the index database scale.
+    public static let maxQuotaMB = 10240
+    /// Default file cap keeps quota walks bounded on a laptop.
+    public static let defaultQuotaFiles = 10000
+    /// Fewest files worth configuring before the quota walk is trivial.
+    public static let minQuotaFiles = 100
+    /// Most files before a quota walk dominates a shell turn.
+    public static let maxQuotaFiles = 100_000
+    /// Default temp retention keeps a week of scratch for debugging.
+    public static let defaultTmpTTLDays = 7
+    /// Smallest retention; zero means clear `tmp/` on every boot.
+    public static let minTmpTTLDays = 0
+    /// Longest retention before `tmp/` reads as storage rather than scratch.
+    public static let maxTmpTTLDays = 90
+
+    /// Creates a workspace config.
+    public init(
+        quotaMB: Int = defaultQuotaMB,
+        quotaFiles: Int = defaultQuotaFiles,
+        tmpTTLDays: Int = defaultTmpTTLDays
+    ) {
+        self.quotaMB = quotaMB
+        self.quotaFiles = quotaFiles
+        self.tmpTTLDays = tmpTTLDays
+    }
+
+    /// Returns a copy clamped into the validated ranges.
+    /// The engine clamps at use so a hand-built config degrades to the
+    /// nearest sane bound instead of refusing to run or oversubscribing;
+    /// load-time validation fails closed, and both postures share the same
+    /// range constants so they cannot drift.
+    /// - Returns: Config with quotas and retention pulled inside bounds.
+    public func clamped() -> WorkspaceConfig {
+        WorkspaceConfig(
+            quotaMB: min(max(quotaMB, Self.minQuotaMB), Self.maxQuotaMB),
+            quotaFiles: min(max(quotaFiles, Self.minQuotaFiles), Self.maxQuotaFiles),
+            tmpTTLDays: min(max(tmpTTLDays, Self.minTmpTTLDays), Self.maxTmpTTLDays)
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case quotaMB = "quota_mb"
+        case quotaFiles = "quota_files"
+        case tmpTTLDays = "tmp_ttl_days"
+    }
+}
+
+extension WorkspaceConfig: Codable {
+    /// Decodes a workspace config, defaulting every omitted key.
+    /// - Parameter decoder: Decoder for the config document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        quotaMB = try container.decodeIfPresent(Int.self, forKey: .quotaMB) ?? Self.defaultQuotaMB
+        quotaFiles = try container.decodeIfPresent(Int.self, forKey: .quotaFiles) ?? Self.defaultQuotaFiles
+        tmpTTLDays = try container.decodeIfPresent(Int.self, forKey: .tmpTTLDays) ?? Self.defaultTmpTTLDays
+    }
+
+    /// Encodes a workspace config.
+    /// - Parameter encoder: Encoder for the config document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(quotaMB, forKey: .quotaMB)
+        try container.encode(quotaFiles, forKey: .quotaFiles)
+        try container.encode(tmpTTLDays, forKey: .tmpTTLDays)
+    }
+}
+
 // MARK: - Subsystem configs (Home, Plugins, Browser, Desktop, Security, Goals, Proactive) live in Config+Subsystems.swift
 
 // MARK: - Root config
@@ -1149,6 +1258,9 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var ideas = IdeasConfig()
     /// Parallel worker fan-out policy. Availability flows through tool registration.
     public var fanOut = FanOutConfig()
+    /// Agent scratch quotas and temp retention backing the default shell directory.
+    /// An absent `[workspace]` table keeps the documented defaults.
+    public var workspace = WorkspaceConfig()
     /// Owner-facing assistant persona woven into the prompt identity line.
     /// An absent `[persona]` table keeps the stock identity and today's prompt bytes.
     public var persona = PersonaConfig()
@@ -1177,6 +1289,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         proactive: ProactiveConfig = ProactiveConfig(),
         ideas: IdeasConfig = IdeasConfig(),
         fanOut: FanOutConfig = FanOutConfig(),
+        workspace: WorkspaceConfig = WorkspaceConfig(),
         persona: PersonaConfig = PersonaConfig()
     ) {
         self.engine = engine
@@ -1201,6 +1314,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.proactive = proactive
         self.ideas = ideas
         self.fanOut = fanOut
+        self.workspace = workspace
         self.persona = persona
     }
 
@@ -1298,6 +1412,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         case proactive
         case ideas
         case fanOut = "fanout"
+        case workspace
         case persona
     }
 
@@ -1308,7 +1423,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     /// proactive surfacing, or idea suggestions existed decode with hardened,
     /// disabled, surfacing, and opt-in defaults instead of throwing.
     /// Present-but-wrong-typed values still throw like every prior section.
-    /// Only the security, goals, bash, proactive, ideas, fanout, and persona
+    /// Only the security, goals, bash, proactive, ideas, fanout, workspace, and persona
     /// sections are absent-tolerant; every other section decodes strictly so a
     /// truncated payload cannot silently load as hardened defaults.
     /// - Parameter decoder: Source decoder.
@@ -1336,12 +1451,13 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.proactive = try container.decodeIfPresent(ProactiveConfig.self, forKey: .proactive) ?? ProactiveConfig()
         self.ideas = try container.decodeIfPresent(IdeasConfig.self, forKey: .ideas) ?? IdeasConfig()
         self.fanOut = try container.decodeIfPresent(FanOutConfig.self, forKey: .fanOut) ?? FanOutConfig()
+        self.workspace = try container.decodeIfPresent(WorkspaceConfig.self, forKey: .workspace) ?? WorkspaceConfig()
         // Absent persona keeps the stock identity so payloads written before
         // the section existed compose today's prompt byte-for-byte.
         self.persona = try container.decodeIfPresent(PersonaConfig.self, forKey: .persona) ?? PersonaConfig()
     }
 
-    /// Encodes every section, including the defense policy, goal pursuit, proactive surfacing, idea suggestions, and persona.
+    /// Encodes every section, including the defense policy, goal pursuit, proactive surfacing, idea suggestions, workspace, and persona.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -1367,6 +1483,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         try container.encode(proactive, forKey: .proactive)
         try container.encode(ideas, forKey: .ideas)
         try container.encode(fanOut, forKey: .fanOut)
+        try container.encode(workspace, forKey: .workspace)
         try container.encode(persona, forKey: .persona)
     }
 }

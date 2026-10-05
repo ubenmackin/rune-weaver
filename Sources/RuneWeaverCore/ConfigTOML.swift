@@ -465,6 +465,7 @@ extension RuneWeaverConfig {
         try Self.decodeProactive(root, into: &config)
         try Self.decodeIdeas(root, into: &config)
         try Self.decodeFanout(root, into: &config)
+        try Self.decodeWorkspace(root, into: &config)
         try Self.decodePersona(root, into: &config)
         self = config
     }
@@ -1044,6 +1045,15 @@ extension RuneWeaverConfig {
         if let allowNetwork = try bash.strictBool("allow_network", field: "bash.allow_network") {
             config.bash.allowNetwork = allowNetwork
         }
+        // Resource bounds stay type-only here like the wall-clock timeout;
+        // range checks land in validation so decode never invents a clamp
+        // that would hide a typo from the dotted-field diagnostic.
+        if let cpuSeconds = try bash.strictInt("cpu_seconds", field: "bash.cpu_seconds") {
+            config.bash.cpuSeconds = cpuSeconds
+        }
+        if let memoryMB = try bash.strictInt("memory_mb", field: "bash.memory_mb") {
+            config.bash.memoryMB = memoryMB
+        }
         if let ruleTables = root.arrays["bash.rules"] ?? root.tables["bash"]?.arrays["rules"] {
             var rules: [BashRule] = []
             for (idx, node) in ruleTables.enumerated() {
@@ -1131,6 +1141,25 @@ extension RuneWeaverConfig {
         }
         if let fullTools = try fanout.strictBool("full_tools", field: "fanout.full_tools") {
             config.fanOut.fullTools = fullTools
+        }
+    }
+
+    /// Decodes the additive `[workspace]` section, defaulting omitted keys.
+    ///
+    /// An absent table keeps the documented scratch quotas so existing files
+    /// load untouched; present-but-wrong-typed values throw instead of
+    /// silently defaulting, matching the `[fanout]` decode style, and range
+    /// checks land in validation so decode stays type-only.
+    static func decodeWorkspace(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let workspace = root.tables["workspace"] else { return }
+        if let quotaMB = try workspace.strictInt("quota_mb", field: "workspace.quota_mb") {
+            config.workspace.quotaMB = quotaMB
+        }
+        if let quotaFiles = try workspace.strictInt("quota_files", field: "workspace.quota_files") {
+            config.workspace.quotaFiles = quotaFiles
+        }
+        if let ttlDays = try workspace.strictInt("tmp_ttl_days", field: "workspace.tmp_ttl_days") {
+            config.workspace.tmpTTLDays = ttlDays
         }
     }
 

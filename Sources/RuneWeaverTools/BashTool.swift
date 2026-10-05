@@ -1,4 +1,10 @@
 // Rune Weaver Tools — Fine-grained sandboxed bash execution tool.
+//
+// Resource bounds are best-effort `ulimit` guards, not cgroup-grade isolation:
+// CPU time (`ulimit -t`) is shared across threads so a threaded child burns the
+// budget faster than wall time suggests; address space (`ulimit -v`, RLIMIT_AS)
+// over-reports on macOS where shared libraries inflate the count; the
+// wall-clock timeout remains the hard backstop that always ends the run.
 
 import Foundation
 import os
@@ -19,17 +25,25 @@ public struct BashArgs: Codable, Sendable, Equatable {
     public let timeoutSeconds: Int?
     /// Optional flag to request network access in Seatbelt sandbox.
     public let requestNetwork: Bool
+    /// Declared egress hosts constraining this call's network dials (max 10).
+    ///
+    /// Empty means no host claim; a non-empty set must cover every host the
+    /// command dials, and the supervisor denies undeclared dials even when
+    /// the policy would otherwise allow them.
+    public let networkHosts: [String]
 
     public init(
         command: String,
         cwd: String? = nil,
         timeoutSeconds: Int? = nil,
-        requestNetwork: Bool = false
+        requestNetwork: Bool = false,
+        networkHosts: [String] = []
     ) {
         self.commandArgs = BashCommandArgs(command: command)
         self.cwd = cwd
         self.timeoutSeconds = timeoutSeconds
         self.requestNetwork = requestNetwork
+        self.networkHosts = networkHosts
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -37,6 +51,7 @@ public struct BashArgs: Codable, Sendable, Equatable {
         case cwd
         case timeoutSeconds
         case requestNetworkSnake = "request_network"
+        case networkHostsSnake = "network_hosts"
     }
 
     public init(from decoder: Decoder) throws {
@@ -53,6 +68,10 @@ public struct BashArgs: Codable, Sendable, Equatable {
         // so a camel `true` never enables network.
         let snakeNet = try container.decodeIfPresent(Bool.self, forKey: .requestNetworkSnake)
         self.requestNetwork = snakeNet ?? false
+        // Strict wire carries only snake `network_hosts` for the same reason:
+        // a camel spelling never declares destinations, so undeclared dials
+        // still deny instead of slipping through on a misspelled key.
+        self.networkHosts = try container.decodeIfPresent([String].self, forKey: .networkHostsSnake) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -63,7 +82,36 @@ public struct BashArgs: Codable, Sendable, Equatable {
         if requestNetwork {
             try container.encode(requestNetwork, forKey: .requestNetworkSnake)
         }
+        if !networkHosts.isEmpty {
+            try container.encode(networkHosts, forKey: .networkHostsSnake)
+        }
     }
+}
+
+/// How a shell run ended, distinguishing policy refusal from process fate.
+///
+/// `clean` means the process exited on its own (any exit code) without a
+/// timeout or resource kill; `wall_timeout` means the wall-clock watchdog
+/// terminated it; `resource_limit` is CPU-only — it means the CPU `ulimit`
+/// killed it: a SIGXCPU signal death (24), or its `128 + signal` wrapper
+/// spelling (152) with the shell's `cpu time limit` diagnostic on stderr
+/// proving the limiter fired rather than a voluntary `exit 152`. A bare
+/// diagnostic without a limiter-implying status stays `clean` so a voluntary
+/// phrase on stderr (for example echoing `cpu time limit` then `exit 1`)
+/// never reads as a resource bound; `denied` means policy refused to spawn
+/// it at all. Memory-limit deaths stay `clean`: SIGKILL (9 / 137) shares its
+/// status across OOM, manual, and sandbox kills, and `ulimit -v` malloc
+/// failures surface as ordinary non-zero exits, so neither reads as a
+/// resource bound without CPU-limit corroboration.
+public enum BashKillReason: String, Sendable, Codable, Equatable {
+    /// The process exited on its own without a timeout or resource kill.
+    case clean
+    /// The wall-clock watchdog terminated the run.
+    case wallTimeout = "wall_timeout"
+    /// The CPU limit killed the run (CPU-only; memory kills stay `clean`).
+    case resourceLimit = "resource_limit"
+    /// Policy refused to spawn the command.
+    case denied
 }
 
 /// JSON payload returned in `ToolOutput.content` for `bash.exec`.
@@ -77,6 +125,23 @@ public struct BashResultEnvelope: Codable, Sendable, Equatable {
     public let denied: Bool
     public let error: String?
     public let reason: String?
+    /// How the run ended; `denied` mirrors a refused spawn while the other
+    /// cases distinguish wall-clock kills from CPU-only resource-limit kills
+    /// (memory-limit deaths stay `clean`).
+    public let killReason: BashKillReason
+
+    private enum CodingKeys: String, CodingKey {
+        case command
+        case stdout
+        case stderr
+        case exitCode
+        case approvalRequired
+        case isChained
+        case denied
+        case error
+        case reason
+        case killReason = "kill_reason"
+    }
 
     public init(
         command: String,
@@ -87,7 +152,8 @@ public struct BashResultEnvelope: Codable, Sendable, Equatable {
         isChained: Bool = false,
         denied: Bool = false,
         error: String? = nil,
-        reason: String? = nil
+        reason: String? = nil,
+        killReason: BashKillReason? = nil
     ) {
         self.command = command
         self.stdout = stdout
@@ -98,6 +164,54 @@ public struct BashResultEnvelope: Codable, Sendable, Equatable {
         self.denied = denied
         self.error = error
         self.reason = reason
+        // An omitted reason stays honest: refused spawns read as denied,
+        // everything else reads as a clean exit until the runner proves otherwise.
+        if let killReason {
+            self.killReason = killReason
+        } else if denied {
+            self.killReason = .denied
+        } else {
+            self.killReason = .clean
+        }
+    }
+
+    /// Decodes an envelope, defaulting absent reasons for payloads written
+    /// before the kill-reason contract so old success JSON still reads clean
+    /// and old refusals still read denied.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        command = try container.decode(String.self, forKey: .command)
+        stdout = try container.decodeIfPresent(String.self, forKey: .stdout) ?? ""
+        stderr = try container.decodeIfPresent(String.self, forKey: .stderr) ?? ""
+        exitCode = try container.decodeIfPresent(Int32.self, forKey: .exitCode) ?? 0
+        approvalRequired = try container.decodeIfPresent(Bool.self, forKey: .approvalRequired) ?? false
+        isChained = try container.decodeIfPresent(Bool.self, forKey: .isChained) ?? false
+        denied = try container.decodeIfPresent(Bool.self, forKey: .denied) ?? false
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+        reason = try container.decodeIfPresent(String.self, forKey: .reason)
+        if let decoded = try container.decodeIfPresent(BashKillReason.self, forKey: .killReason) {
+            killReason = decoded
+        } else if denied {
+            killReason = .denied
+        } else {
+            killReason = .clean
+        }
+    }
+
+    /// Encodes an envelope with the snake-case kill reason beside the
+    /// existing camel-case keys.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(command, forKey: .command)
+        try container.encode(stdout, forKey: .stdout)
+        try container.encode(stderr, forKey: .stderr)
+        try container.encode(exitCode, forKey: .exitCode)
+        try container.encode(approvalRequired, forKey: .approvalRequired)
+        try container.encode(isChained, forKey: .isChained)
+        try container.encode(denied, forKey: .denied)
+        try container.encodeIfPresent(error, forKey: .error)
+        try container.encodeIfPresent(reason, forKey: .reason)
+        try container.encode(killReason, forKey: .killReason)
     }
 }
 
@@ -142,11 +256,42 @@ private final class TaskBox: Sendable {
     }
 }
 
+/// Wall-clock timeout description for the `bash.exec` JSON schema.
+///
+/// Single-sourced outside `BashTool` so the schema literal stays within
+/// line-length bounds while the decoded JSON bytes stay identical.
+private let bashTimeoutSchemaDescription =
+    "Optional wall-clock timeout in seconds (1-3600, defaults to bash.timeout_seconds). "
+        + "Wall time may exceed CPU time for sleeping processes: sleep-heavy commands accrue "
+        + "almost no CPU time against bash.cpu_seconds, so the wall-clock timeout is the bound that ends them. "
+        + "Kill reasons are CPU-only: memory-limit deaths (SIGKILL 9/137, ulimit -v malloc failures) stay clean."
+
+/// Declared-hosts description for the `bash.exec` JSON schema.
+///
+/// Single-sourced outside `BashTool` for the same line-length reason.
+private let bashNetworkHostsSchemaDescription =
+    "Declared egress hosts for this call (max 10 hostnames or IPs). "
+        + "Every host the command dials must be declared here; "
+        + "undeclared dials deny even when policy.toml would allow them."
+
+/// Sandbox launch target for one run.
+///
+/// Replaces the prior 3-tuple so the helper stays within the tuple-size
+/// lint budget while keeping executable, arguments, and refusal together.
+private struct BashSandboxTarget: Sendable {
+    let executableURL: URL?
+    let arguments: [String]?
+    let failure: ToolOutput?
+}
+
 /// Tool for executing shell commands with granular per-command permissions,
 /// strict chaining protection, and optional Seatbelt sandbox confinement.
 public struct BashTool: Tool {
     public let name = "bash.exec"
-    public let description = "Executes a shell command in a sandboxed bash environment with fine-grained permissions."
+    public let description =
+        "Executes a shell command in a sandboxed bash environment with fine-grained permissions. "
+            + "Network access is host-scoped: declare destinations in network_hosts (max 10); "
+            + "undeclared dial attempts are denied and audited."
 
     public let inputSchema = JSONSchema(rawValue: """
     {
@@ -162,11 +307,17 @@ public struct BashTool: Tool {
         },
         "timeoutSeconds": {
           "type": "integer",
-          "description": "Optional timeout in seconds."
+          "description": "\(bashTimeoutSchemaDescription)"
         },
         "request_network": {
           "type": "boolean",
           "description": "Optional flag to request network access in Seatbelt sandbox (gates on operator approval)."
+        },
+        "network_hosts": {
+          "type": "array",
+          "description": "\(bashNetworkHostsSchemaDescription)",
+          "maxItems": 10,
+          "items": {"type": "string"}
         }
       },
       "required": ["command"],
@@ -192,37 +343,53 @@ public struct BashTool: Tool {
     public let allowUnsandboxedFallback: Bool
     /// Outbound egress supervisor screening URLs and targets against policy.toml.
     public let egressSupervisor: OutboundEgressSupervisor?
+    /// Scratch quotas backing the default working directory and the pre-exec quota gate.
+    public let workspaceConfig: WorkspaceConfig
+    /// Workspace store owning the default directory; nil derives one from `workspaceConfig`.
+    /// Tests inject an isolated store so the default cwd never touches the real home.
+    public let workspaceStore: WorkspaceStore?
 
     /// Creates a bash execution tool.
     public init(
         bashConfig: BashConfig = BashConfig(),
         filesConfig: FilesConfig = FilesConfig(),
         allowUnsandboxedFallback: Bool = false,
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor? = nil,
+        workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
+        workspaceStore: WorkspaceStore? = nil
     ) {
         self.bashConfig = bashConfig
         self.filesConfig = filesConfig
         self.allowUnsandboxedFallback = allowUnsandboxedFallback
         self.egressSupervisor = egressSupervisor
+        self.workspaceConfig = workspaceConfig
+        self.workspaceStore = workspaceStore
+    }
+
+    /// Resolves the workspace store for this turn.
+    ///
+    /// The injected store wins untouched for hermetic tests; otherwise a fresh
+    /// store derives from the configured quotas so every turn observes file
+    /// config without sharing mutable walk state across turns.
+    /// - Returns: Store owning the default working directory.
+    private var effectiveWorkspaceStore: WorkspaceStore {
+        workspaceStore ?? WorkspaceStore(config: workspaceConfig)
     }
 
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         guard bashConfig.enabled else {
             return .failure("Bash tool is disabled by configuration.", callID: input.callID)
         }
-
         let decoder = JSONDecoder()
         guard let data = input.argumentsJSON.data(using: .utf8),
               let args = try? decoder.decode(BashArgs.self, from: data)
         else {
             return .failure("Invalid arguments for bash.exec: failed to parse JSON.", callID: input.callID)
         }
-
         let trimmedCommand = args.command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedCommand.isEmpty else {
             return .failure("Invalid argument 'command': command must not be empty.", callID: input.callID)
         }
-
         // Dry-run preview mode
         if context.dryRun {
             let decision = BashSecurity.evaluate(command: trimmedCommand, config: bashConfig)
@@ -235,10 +402,8 @@ public struct BashTool: Tool {
             )
             return .success(encodeEnvelope(envelope), callID: input.callID)
         }
-
         // Evaluate security policy & chaining protection
         let decision = BashSecurity.evaluate(command: trimmedCommand, config: bashConfig)
-
         // Deny rule always fails closed. Approval itself rides the permission
         // gate and inbox, never model-supplied arguments.
         if decision.isDenied {
@@ -252,7 +417,6 @@ public struct BashTool: Tool {
             )
             return .failure(encodeEnvelope(envelope), callID: input.callID)
         }
-
         // Ask decisions park for human approval via the permission gate and
         // inbox; the tool reports approvalRequired and never executes, so a
         // model-supplied flag cannot self-approve an ask or chained command.
@@ -269,65 +433,101 @@ public struct BashTool: Tool {
             )
             return .failure(encodeEnvelope(envelope), callID: input.callID)
         }
-
+        // Declared egress hosts bound this call's dials.
+        let hostsResult = checkedDeclaredHosts(args, callID: input.callID)
+        if let hostsFailure = hostsResult.failure {
+            return hostsFailure
+        }
+        let declaredHosts = hostsResult.hosts ?? []
         if let networkEnvelope = validateNetworkAccess(
             command: trimmedCommand,
             args: args,
+            declaredHosts: declaredHosts,
             decision: decision,
             context: context
         ) {
             return .failure(encodeEnvelope(networkEnvelope), callID: input.callID)
         }
+        return try await executeValidated(
+            command: trimmedCommand,
+            args: args,
+            declaredHosts: declaredHosts,
+            context: context,
+            callID: input.callID
+        )
+    }
 
+    /// Runs a validated command through quota, workspace, and sandbox spawn.
+    ///
+    /// Callers complete decode plus policy gates first; this helper owns the
+    /// network screen plus quota plus directory plus timeout plus spawn tail
+    /// so `execute` stays within the body-length budget.
+    /// - Parameters:
+    ///   - command: Trimmed shell command already passing policy gates.
+    ///   - args: Decoded tool arguments carrying network and cwd requests.
+    ///   - declaredHosts: Canonical hosts bound to this call's dials.
+    ///   - context: Turn context carrying approval and session identity.
+    ///   - callID: Tool call identifier for output envelopes.
+    /// - Returns: Success or failure output for the spawned run.
+    private func executeValidated(
+        command: String,
+        args: BashArgs,
+        declaredHosts: [String],
+        context: ToolContext,
+        callID: String
+    ) async throws -> ToolOutput {
+        let decision = BashSecurity.evaluate(command: command, config: bashConfig)
         let effectiveAllowNetwork = bashConfig.allowNetwork || (args.requestNetwork && context.approved)
-
         // Screen explicit URLs if network is allowed
         if effectiveAllowNetwork,
-           let envelope = await screenExplicitURLs(command: trimmedCommand, sessionID: context.sessionID)
+           let envelope = await screenExplicitURLs(
+               command: command,
+               declaredHosts: declaredHosts,
+               sessionID: context.sessionID
+           )
         {
-            return .failure(encodeEnvelope(envelope), callID: input.callID)
+            return .failure(encodeEnvelope(envelope), callID: callID)
         }
-
-        // Validate cwd if supplied
-        var workingDirURL: URL?
-        if let rawCwd = args.cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !rawCwd.isEmpty {
-            let fileDecision = FilesAccessGuard.evaluate(path: rawCwd, filesConfig: filesConfig)
-            guard fileDecision.allowed else {
-                let envelope = BashResultEnvelope(
-                    command: trimmedCommand,
-                    approvalRequired: fileDecision.requiresApproval,
-                    denied: true,
-                    error: "Working directory access denied: \(fileDecision.reason ?? "outside allowed roots")",
-                    reason: fileDecision.reason
-                )
-                return .failure(encodeEnvelope(envelope), callID: input.callID)
-            }
-            workingDirURL = URL(fileURLWithPath: fileDecision.resolvedPath)
+        let workspace = effectiveWorkspaceStore
+        if let quotaFailure = await checkedQuotaFailure(
+            workspace: workspace,
+            command: command,
+            decision: decision,
+            callID: callID
+        ) {
+            return quotaFailure
         }
-
-        // Per-invocation timeout stays inside the configured bounds so a
-        // negative or oversized value cannot trap the sleep conversion below.
-        let validatedTimeoutSeconds: Int
-        if let requested = args.timeoutSeconds {
-            guard (1 ... 3600).contains(requested) else {
-                return .failure(
-                    "Invalid argument 'timeoutSeconds': must be between 1 and 3600 (got \(requested)).",
-                    callID: input.callID
-                )
-            }
-            validatedTimeoutSeconds = requested
-        } else {
-            validatedTimeoutSeconds = min(max(bashConfig.timeoutSeconds, 1), 3600)
+        let cwdResult = await checkedWorkingDirectory(
+            args,
+            workspace: workspace,
+            command: command,
+            decision: decision,
+            callID: callID
+        )
+        if let cwdFailure = cwdResult.failure {
+            return cwdFailure
         }
-
+        let timeoutResult = checkedTimeout(args, callID: callID)
+        if let timeoutFailure = timeoutResult.failure {
+            return timeoutFailure
+        }
+        let validatedTimeoutSeconds = timeoutResult.seconds ?? bashConfig.timeoutSeconds
         // Execute command
         let timeout = TimeInterval(validatedTimeoutSeconds)
+        // The verified agent-tool staged copy lives in workspace/tmp, which
+        // sits beside the tools cwd rather than inside it. Allow that one
+        // scratch directory for reads so confined shells can map the
+        // immutable copy in production (where the workspace sits under home
+        // outside the system-temp defaults) without widening writes.
+        let workspaceTmpPath = await workspace.root().appendingPathComponent(WorkspaceStore.tmpDirectoryName).path
         return try await runProcess(
-            command: trimmedCommand,
-            workingDirURL: workingDirURL,
+            command: command,
+            workingDirURL: cwdResult.url,
             timeoutSeconds: timeout,
             allowNetwork: effectiveAllowNetwork,
-            callID: input.callID
+            allowedEgressHosts: declaredHosts,
+            additionalReadPaths: [workspaceTmpPath],
+            callID: callID
         )
     }
 
@@ -336,44 +536,44 @@ public struct BashTool: Tool {
         workingDirURL: URL?,
         timeoutSeconds: TimeInterval,
         allowNetwork: Bool,
+        allowedEgressHosts: [String] = [],
+        additionalReadPaths: [String] = [],
         callID: String
     ) async throws -> ToolOutput {
-        let sandboxExecPath = "/usr/bin/sandbox-exec"
-        let isSandboxAvailable = FileManager.default.isExecutableFile(atPath: sandboxExecPath)
-
         let process = Process()
+        // The execute path always resolves a working directory (explicit cwd
+        // or the ensured workspace root, failing closed otherwise), so the
+        // home fallback below only serves direct `runProcess` callers and never
+        // masks a workspace failure in normal turns.
         let effectiveWorkingDir = workingDirURL ?? FileManager.default.homeDirectoryForCurrentUser
 
-        if isSandboxAvailable {
-            let allowedWrites: [String] = if let workingDirURL {
-                SeatbeltProfileBuilder.defaultSystemWritePaths + [workingDirURL.path]
-            } else {
-                SeatbeltProfileBuilder.defaultSystemWritePaths
-            }
-            let profileBuilder = SeatbeltProfileBuilder(
-                allowedReadPaths: SeatbeltProfileBuilder.defaultSystemReadPaths + [effectiveWorkingDir.path],
-                allowedWritePaths: allowedWrites,
-                deniedPaths: SeatbeltProfileBuilder.defaultDeniedPaths,
-                allowNetwork: allowNetwork
-            )
-            let profile = profileBuilder.buildProfile()
-            process.executableURL = URL(fileURLWithPath: sandboxExecPath)
-            process.arguments = ["-p", profile, "/bin/bash", "-c", command]
-        } else if allowUnsandboxedFallback {
-            process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            process.arguments = ["-c", command]
-        } else {
-            return .failure("Sandbox execution unavailable and unsandboxed execution disabled.", callID: callID)
+        // Bounds clamp at use so a hand-built config degrades to the nearest
+        // sane limit instead of trapping the shell or inviting OOM swaps;
+        // load-time validation already rejects those values fail-closed.
+        let clamped = bashConfig.clamped()
+        let boundedCommand = Self.resourceLimitedCommand(
+            command,
+            cpuSeconds: clamped.cpuSeconds,
+            memoryMB: clamped.memoryMB
+        )
+
+        let sandboxTarget = configuredSandboxTarget(
+            workingDirURL: workingDirURL,
+            effectiveWorkingDir: effectiveWorkingDir,
+            boundedCommand: boundedCommand,
+            allowNetwork: allowNetwork,
+            allowedEgressHosts: allowedEgressHosts,
+            additionalReadPaths: additionalReadPaths,
+            callID: callID
+        )
+        if let sandboxFailure = sandboxTarget.failure {
+            return sandboxFailure
         }
+        process.executableURL = sandboxTarget.executableURL
+        process.arguments = sandboxTarget.arguments
 
         process.currentDirectoryURL = effectiveWorkingDir
-
-        // Safe filtered environment
-        var env = ProcessInfo.processInfo.environment
-        let allowedKeys = ["PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM"]
-        env = env.filter { allowedKeys.contains($0.key) }
-        env["RUNEWEAVER_BASH"] = "1"
-        process.environment = env
+        process.environment = filteredEnvironment(for: effectiveWorkingDir)
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -398,6 +598,10 @@ public struct BashTool: Tool {
             }
 
             let taskBox = TaskBox()
+            // Set only when the watchdog actually kills the run so a
+            // resource-limit death that lands near the deadline still reads as
+            // a resource kill instead of a wall timeout.
+            let timedOut = OSAllocatedUnfairLock<Bool>(initialState: false)
             taskBox.task = Task {
                 // Bounds were validated before dispatch; clamp again so the
                 // nanosecond conversion below cannot trap on out-of-range input.
@@ -405,6 +609,7 @@ public struct BashTool: Tool {
                 let nanoseconds = UInt64(boundedTimeoutSeconds * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: nanoseconds)
                 if process.isRunning {
+                    timedOut.withLock { $0 = true }
                     process.terminate()
                 }
             }
@@ -421,6 +626,13 @@ public struct BashTool: Tool {
                 let finalErr = stderrBuffer.stringValue
 
                 let exitCode = proc.terminationStatus
+                let wasTimeout = timedOut.withLock { $0 }
+                let killReason = Self.killReason(
+                    didTimeOut: wasTimeout,
+                    terminationReason: proc.terminationReason,
+                    terminationStatus: proc.terminationStatus,
+                    stderr: finalErr
+                )
                 let envelope = BashResultEnvelope(
                     command: command,
                     stdout: finalOut,
@@ -430,7 +642,8 @@ public struct BashTool: Tool {
                     isChained: false,
                     denied: false,
                     error: exitCode != 0 ? "Command exited with status \(exitCode)" : nil,
-                    reason: nil
+                    reason: nil,
+                    killReason: killReason
                 )
 
                 let json = encodeEnvelope(envelope)
@@ -453,17 +666,343 @@ public struct BashTool: Tool {
             }
         }
     }
+}
+
+extension BashTool {
+    /// Validates `network_hosts` without touching sandbox or supervisor.
+    ///
+    /// Thin wrapper over `SeatbeltProfileBuilder.validatedDeclaredHosts` so
+    /// shell and desktop share one validity rule; over-limit or malformed
+    /// entries refuse before any confinement contact.
+    /// - Returns: Hosts plus an optional failure envelope to return directly.
+    private func checkedDeclaredHosts(
+        _ args: BashArgs,
+        callID: String
+    ) -> (hosts: [String]?, failure: ToolOutput?) {
+        do {
+            return try (SeatbeltProfileBuilder.validatedDeclaredHosts(args.networkHosts), nil)
+        } catch let error as SeatbeltProfileBuilder.DeclaredHostValidationError {
+            return (nil, .failure(error.message, callID: callID))
+        } catch {
+            return (nil, .failure(error.localizedDescription, callID: callID))
+        }
+    }
+
+    /// Runs the pre-exec quota gate before spawning.
+    ///
+    /// Refuses over-quota turns with guidance instead of executing and
+    /// growing scratch.
+    /// - Returns: Failure envelope, or nil when quota allows execution.
+    private func checkedQuotaFailure(
+        workspace: WorkspaceStore,
+        command: String,
+        decision: BashDecision,
+        callID: String
+    ) async -> ToolOutput? {
+        do {
+            try await workspace.checkQuota()
+            return nil
+        } catch {
+            let message = if let quotaError = error as? WorkspaceError {
+                "Workspace quota exceeded: \(quotaError.reason) Prune workspace/tmp before retrying."
+            } else {
+                "Workspace quota check failed: \(error.localizedDescription)"
+            }
+            let envelope = BashResultEnvelope(
+                command: command,
+                approvalRequired: false,
+                isChained: decision.isChained,
+                denied: true,
+                error: message,
+                reason: message
+            )
+            return .failure(encodeEnvelope(envelope), callID: callID)
+        }
+    }
+
+    /// Resolves the working directory for one turn.
+    ///
+    /// An explicit cwd keeps the guard flow so outside-root paths still
+    /// refuse with the configured roots named, while the omitted case
+    /// ensures the workspace (failing closed on error, never falling back
+    /// to home) so every shell starts in bounded scratch. The inside-workspace
+    /// fast path resolves symlinks before the prefix check (mirroring
+    /// `AgentToolStore.isContainedInTools`), so a symlinked parent such as
+    /// `workspace/link -> /tmp` with `cwd: link` falls through to the guard
+    /// instead of pinning `currentDirectoryURL` to the symlink and bypassing
+    /// `FilesAccessGuard` plus quota/Seatbelt assumptions. Inside-workspace
+    /// candidates union the workspace root into the allow roots so hermetic
+    /// test workspaces under system temp pass, while deny patterns still
+    /// refuse because evaluation checks deny first. The union covers only
+    /// the tool's own bounded scratch, never an arbitrary outside path.
+    /// - Returns: Directory plus an optional failure envelope to return directly.
+    private func checkedWorkingDirectory(
+        _ args: BashArgs,
+        workspace: WorkspaceStore,
+        command: String,
+        decision: BashDecision,
+        callID: String
+    ) async -> (url: URL?, failure: ToolOutput?) {
+        let rawCwd = args.cwd?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !rawCwd.isEmpty {
+            let workspaceRoot = await workspace.root().standardizedFileURL
+            let expandedCwd = (rawCwd as NSString).expandingTildeInPath
+            let candidateCwd: URL = if expandedCwd.hasPrefix("/") {
+                URL(fileURLWithPath: expandedCwd).standardizedFileURL
+            } else {
+                workspaceRoot.appendingPathComponent(expandedCwd).standardizedFileURL
+            }
+            // Resolve symlinks on both sides before the prefix check so a
+            // symlinked parent cannot hide an outside target behind an inside
+            // spelling; the trailing-slash form keeps `workspace-evil/` from
+            // prefix-matching the root. A resolved escape falls through to the
+            // guard below, which refuses unless an allowed root covers it.
+            let resolvedRoot = workspaceRoot.resolvingSymlinksInPath().standardizedFileURL
+            let resolvedCandidate = candidateCwd.resolvingSymlinksInPath().standardizedFileURL
+            let insideWorkspace = resolvedCandidate.path == resolvedRoot.path
+                || resolvedCandidate.path.hasPrefix(resolvedRoot.path + "/")
+            // Workspace-contained candidates union the workspace root into
+            // the allow roots so the tool's own bounded scratch passes even
+            // when it sits outside the configured roots (for example a
+            // hermetic test workspace under system temp), while deny
+            // patterns still refuse because evaluation checks deny first.
+            // Evaluation uses the absolute canonical path so relative
+            // spellings resolve against the workspace root rather than the
+            // process directory.
+            var effectiveFilesConfig = filesConfig
+            if insideWorkspace {
+                let workspacePath = resolvedRoot.path
+                if !effectiveFilesConfig.allowRoots.contains(workspacePath) {
+                    effectiveFilesConfig.allowRoots.append(workspacePath)
+                }
+            }
+            let fileDecision = FilesAccessGuard.evaluate(path: resolvedCandidate.path, filesConfig: effectiveFilesConfig)
+            guard fileDecision.allowed else {
+                let envelope = BashResultEnvelope(
+                    command: command,
+                    approvalRequired: fileDecision.requiresApproval,
+                    denied: true,
+                    error: "Working directory access denied:"
+                        + " \(fileDecision.reason ?? "outside allowed roots")",
+                    reason: fileDecision.reason
+                )
+                return (nil, .failure(encodeEnvelope(envelope), callID: callID))
+            }
+            return (URL(fileURLWithPath: fileDecision.resolvedPath), nil)
+        } else {
+            do {
+                return try await (workspace.ensure(), nil)
+            } catch {
+                let message = if let workspaceError = error as? WorkspaceError {
+                    "Workspace unavailable: \(workspaceError.reason)"
+                } else {
+                    "Workspace unavailable: \(error.localizedDescription)"
+                }
+                let envelope = BashResultEnvelope(
+                    command: command,
+                    approvalRequired: false,
+                    isChained: decision.isChained,
+                    denied: true,
+                    error: message,
+                    reason: message
+                )
+                return (nil, .failure(encodeEnvelope(envelope), callID: callID))
+            }
+        }
+    }
+
+    /// Validates the per-invocation timeout inside configured bounds.
+    ///
+    /// A negative or oversized value cannot trap the sleep conversion below.
+    /// - Returns: Seconds plus an optional failure envelope to return directly.
+    private func checkedTimeout(
+        _ args: BashArgs,
+        callID: String
+    ) -> (seconds: Int?, failure: ToolOutput?) {
+        if let requested = args.timeoutSeconds {
+            guard (1 ... 3600).contains(requested) else {
+                let message =
+                    "Invalid argument 'timeoutSeconds': must be between 1 and 3600"
+                        + " (got \(requested))."
+                return (nil, .failure(message, callID: callID))
+            }
+            return (requested, nil)
+        } else {
+            return (min(max(bashConfig.timeoutSeconds, 1), 3600), nil)
+        }
+    }
+}
+
+extension BashTool {
+    /// Builds the `ulimit` prefix bounding CPU time and address space.
+    ///
+    /// The prefix uses `;` (not `&&`) so a failed `ulimit` still runs the
+    /// command best-effort instead of refusing it; the wall-clock watchdog
+    /// stays the hard backstop regardless.
+    /// - Parameters:
+    ///   - cpuSeconds: CPU time budget in seconds, already clamped to 1-3600.
+    ///   - memoryMB: Address-space budget in megabytes, already clamped to 64-8192.
+    /// - Returns: Shell prefix ending in `; ` (e.g. `ulimit -t 5; ulimit -v 524288; `).
+    public static func resourcePrefix(cpuSeconds: Int, memoryMB: Int) -> String {
+        "ulimit -t \(cpuSeconds); ulimit -v \(memoryMB * 1024); "
+    }
+
+    /// Wraps a model command with the `ulimit` resource prefix.
+    ///
+    /// Clamping here keeps direct callers honest even when the stored config
+    /// was hand-built past its bounds; the validated file-load path already
+    /// rejects those values fail-closed with the dotted field.
+    /// - Parameters:
+    ///   - command: Model-authored shell command.
+    ///   - cpuSeconds: CPU time budget in seconds.
+    ///   - memoryMB: Address-space budget in megabytes.
+    /// - Returns: Prefixed command for `bash -c`.
+    public static func resourceLimitedCommand(
+        _ command: String,
+        cpuSeconds: Int,
+        memoryMB: Int
+    ) -> String {
+        let boundedCPU = min(max(cpuSeconds, BashConfig.minCPUSeconds), BashConfig.maxCPUSeconds)
+        let boundedMemory = min(max(memoryMB, BashConfig.minMemoryMB), BashConfig.maxMemoryMB)
+        return resourcePrefix(cpuSeconds: boundedCPU, memoryMB: boundedMemory) + command
+    }
+
+    /// Classifies how a run ended from its wait status.
+    ///
+    /// The timeout flag wins because a signal death landing near the deadline
+    /// still reads as a wall kill only when the watchdog set the flag. The
+    /// contract is CPU-only: only a SIGXCPU signal death (24, CPU limit)
+    /// maps outright; its `128 + signal` wrapper spelling (152) maps only
+    /// with the shell's `cpu time limit` diagnostic on stderr proving the
+    /// limiter fired rather than a voluntary `exit 152`. The diagnostic never
+    /// maps on its own: it is scoped to the wrapper spelling so a voluntary
+    /// phrase on stderr with any other status (for example `exit 1`) stays
+    /// `clean`. Memory-limit deaths stay `clean`: SIGKILL (9 / 137) shares
+    /// its status across OOM, manual, and sandbox kills, and `ulimit -v`
+    /// malloc failures surface as ordinary non-zero exits, so neither reads
+    /// as a resource bound without CPU-limit corroboration.
+    /// - Parameters:
+    ///   - didTimeOut: Whether the wall-clock watchdog terminated the run.
+    ///   - terminationReason: Exit versus uncaught-signal from the wait status.
+    ///   - terminationStatus: Signal number or exit code from the wait status.
+    ///   - stderr: Captured stderr corroborating the wrapper spelling.
+    /// - Returns: The matching kill reason.
+    public static func killReason(
+        didTimeOut: Bool,
+        terminationReason: Process.TerminationReason,
+        terminationStatus: Int32,
+        stderr: String = ""
+    ) -> BashKillReason {
+        if didTimeOut {
+            return .wallTimeout
+        }
+        // Raw signal numbers avoid a Darwin/Glibc import split; 24 is SIGXCPU
+        // (CPU limit). The signal death itself is the corroboration, so no
+        // diagnostic is required. SIGKILL (9) is deliberately excluded: it
+        // may be OOM, manual, or sandbox action.
+        if terminationReason == .uncaughtSignal,
+           terminationStatus == 24
+        {
+            return .resourceLimit
+        }
+        // Wrappers report signals as 128 + signal instead of a signal death;
+        // only the SIGXCPU spelling (152) counts, never the SIGKILL one (137),
+        // and only with the shell diagnostic so a voluntary `exit 152` stays
+        // clean. Scoping the substring to this status keeps a voluntary
+        // `cpu time limit` phrase with any other exit (for example `exit 1`)
+        // from reading as a limiter kill.
+        if terminationReason == .exit,
+           terminationStatus == 152,
+           !stderr.isEmpty,
+           stderr.localizedCaseInsensitiveContains("cpu time limit")
+        {
+            return .resourceLimit
+        }
+        return .clean
+    }
+
+    /// Sandbox target for one run, configuring executable plus arguments.
+    ///
+    /// Sandboxed execution stays preferred; the unsandboxed fallback runs
+    /// only when the construction site opted in, otherwise the turn refuses
+    /// instead of inheriting host privileges. Additional read paths carry
+    /// workspace scratch (for example workspace/tmp holding the verified
+    /// agent-tool staged copy) so confined shells can map the immutable
+    /// copy without widening writes.
+    /// - Returns: Executable plus arguments, or a failure to return directly.
+    private func configuredSandboxTarget(
+        workingDirURL: URL?,
+        effectiveWorkingDir: URL,
+        boundedCommand: String,
+        allowNetwork: Bool,
+        allowedEgressHosts: [String],
+        additionalReadPaths: [String] = [],
+        callID: String
+    ) -> BashSandboxTarget {
+        let sandboxExecPath = "/usr/bin/sandbox-exec"
+        let isSandboxAvailable = FileManager.default.isExecutableFile(atPath: sandboxExecPath)
+        if isSandboxAvailable {
+            let allowedWrites: [String] = if let workingDirURL {
+                SeatbeltProfileBuilder.defaultSystemWritePaths + [workingDirURL.path]
+            } else {
+                SeatbeltProfileBuilder.defaultSystemWritePaths
+            }
+            let builder = SeatbeltProfileBuilder(
+                allowedReadPaths: SeatbeltProfileBuilder.defaultSystemReadPaths
+                    + [effectiveWorkingDir.path]
+                    + additionalReadPaths,
+                allowedWritePaths: allowedWrites,
+                deniedPaths: SeatbeltProfileBuilder.defaultDeniedPaths,
+                allowNetwork: allowNetwork,
+                allowedEgressHosts: allowedEgressHosts
+            )
+            let profile = builder.buildProfile()
+            return BashSandboxTarget(
+                executableURL: URL(fileURLWithPath: sandboxExecPath),
+                arguments: ["-p", profile, "/bin/bash", "-c", boundedCommand],
+                failure: nil
+            )
+        } else if allowUnsandboxedFallback {
+            return BashSandboxTarget(
+                executableURL: URL(fileURLWithPath: "/bin/bash"),
+                arguments: ["-c", boundedCommand],
+                failure: nil
+            )
+        } else {
+            let message = "Sandbox execution unavailable and unsandboxed execution disabled."
+            return BashSandboxTarget(executableURL: nil, arguments: nil, failure: .failure(message, callID: callID))
+        }
+    }
+
+    /// Safe filtered environment for one run.
+    ///
+    /// `PWD` tracks the logical working directory so `pwd` without `-P`
+    /// reports the sanctioned path the turn resolved instead of the
+    /// kernel's physical `/private/var` spelling.
+    /// - Parameter workingDir: Sanctioned directory for this turn.
+    /// - Returns: Filtered environment with `PWD` plus the bash marker.
+    private func filteredEnvironment(for workingDir: URL) -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let allowedKeys = ["PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM"]
+        env = env.filter { allowedKeys.contains($0.key) }
+        env["PWD"] = workingDir.path
+        env["RUNEWEAVER_BASH"] = "1"
+        return env
+    }
 
     private func validateNetworkAccess(
         command: String,
         args: BashArgs,
+        declaredHosts: [String] = [],
         decision: BashDecision,
         context: ToolContext
     ) -> BashResultEnvelope? {
         let requiresNetwork = BashNetworkGuard.requiresNetworkAccess(command)
         if requiresNetwork, !bashConfig.allowNetwork, !args.requestNetwork {
-            let diagnostic = "Command requires network access, but network access is disabled in Seatbelt sandbox "
-                + "(bash.allow_network = false). Retry with request_network: true to request operator approval."
+            let diagnostic = "Command requires network access,"
+                + " but network access is disabled in Seatbelt sandbox"
+                + " (bash.allow_network = false)."
+                + " Retry with request_network: true to request operator approval."
             return BashResultEnvelope(
                 command: command,
                 approvalRequired: false,
@@ -474,33 +1013,78 @@ public struct BashTool: Tool {
             )
         }
         if args.requestNetwork, !context.approved {
+            // The approval card names destinations instead of a blank check:
+            // the owner authorizes the declared hosts, not open egress.
+            let hostList = declaredHosts.sorted().joined(separator: ", ")
+            let hostClause = hostList.isEmpty ? "no declared hosts" : "hosts: \(hostList)"
+            let diagnostic = "Command requests network access (\(hostClause)) and requires operator approval."
             return BashResultEnvelope(
                 command: command,
                 approvalRequired: true,
                 isChained: decision.isChained,
                 denied: false,
-                error: "Command requests network access and requires operator approval.",
-                reason: "request_network enabled"
+                error: diagnostic,
+                reason: "request_network enabled (\(hostClause))"
             )
         }
         return nil
     }
 
-    private func screenExplicitURLs(command: String, sessionID: UUID) async -> BashResultEnvelope? {
-        guard let supervisor = egressSupervisor else { return nil }
-        // Explicit URLs screen individually; the schemeless fallback covers
-        // `curl example.com` spellings with no link match, both resolved
-        // through the approval queue's single-owner extraction.
+    /// Screens every dial in a command against declared hosts plus policy.
+    ///
+    /// Declared coverage runs first so an undeclared dial denies even when the
+    /// policy would allow it; the supervisor remains the second opinion on
+    /// declared hosts rather than widening them. Denials audit through the
+    /// shared tool log so the trail survives the envelope.
+    private func screenExplicitURLs(
+        command: String,
+        declaredHosts: [String] = [],
+        sessionID: UUID
+    ) async -> BashResultEnvelope? {
+        let hosts = collectedScreenHosts(in: command)
+        // Fail-closed on missing supervision: this gate runs only when
+        // network egress is allowed, so a nil supervisor would otherwise
+        // let the command run unscreened. Host-bearing commands deny even
+        // if screening widens later.
+        guard let supervisor = egressSupervisor else {
+            return nilSupervisorEnvelope(command: command, hosts: hosts)
+        }
+        // Declared-hosts gate runs before policy: every screened dial must be
+        // declared in `network_hosts`, so a command naming an undeclared host
+        // denies even when the policy would allow it.
+        let screenedNames = hosts.compactMap(\.url.host).filter { !$0.isEmpty }
+        let undeclared = supervisor.checkHosts(screenedNames, against: declaredHosts)
+        if !undeclared.isEmpty {
+            return undeclaredHostsEnvelope(
+                command: command,
+                undeclared: Set(undeclared),
+                declaredHosts: declaredHosts
+            )
+        }
+        return await screenedPolicyVerdict(
+            command: command,
+            hosts: hosts,
+            sessionID: sessionID
+        )
+    }
+
+    /// Collects explicit plus schemeless hosts for one command.
+    ///
+    /// Explicit URLs screen individually; the schemeless fallback covers
+    /// `curl example.com` spellings with no link match, both resolved
+    /// through the approval queue's single-owner extraction.
+    /// - Parameter command: Raw shell command.
+    /// - Returns: Display plus URL pairs in first-seen order.
+    private func collectedScreenHosts(in command: String) -> [(display: String, url: URL)] {
         var hosts: [(display: String, url: URL)] = []
         for rawURL in BashNetworkGuard.extractURLs(from: command) {
             if let parsed = URL(string: rawURL) {
                 hosts.append((display: rawURL, url: parsed))
             }
         }
-        // Commands mixing explicit links and bare hosts (`curl https://a.com
-        // && curl b.com`) screen every bare host: the schemeless pass loops
-        // all regex matches instead of the first, so a second schemeless
-        // host cannot execute unscreened after the first is approved.
+        // Commands mixing explicit links and bare hosts screen every bare
+        // host so a second schemeless host cannot run unscreened after
+        // the first is approved.
         for bareHost in Self.schemelessHosts(in: command) {
             guard let assumed = URL(string: "https://" + bareHost),
                   let assumedHost = assumed.host,
@@ -511,10 +1095,51 @@ public struct BashTool: Tool {
             else { continue }
             hosts.append((display: bareHost, url: assumed))
         }
+        return hosts
+    }
+
+    /// Builds the undeclared-host refusal for one command.
+    ///
+    /// - Returns: Denied envelope naming the undeclared hosts.
+    private func undeclaredHostsEnvelope(
+        command: String,
+        undeclared: Set<String>,
+        declaredHosts: [String]
+    ) -> BashResultEnvelope {
+        let listed = undeclared.sorted().joined(separator: ", ")
+        let declared = declaredHosts.sorted().joined(separator: ", ")
+        let declaredClause = declared.isEmpty ? "no declared hosts" : "declared: \(declared)"
+        RuneWeaverLog.tools.warning(
+            "bash.exec denied undeclared host(s) \(listed) (\(declaredClause)) in command: \(command)"
+        )
+        let diagnostic = "Command dials undeclared host(s) \(listed) not in network_hosts (\(declaredClause))"
+        return BashResultEnvelope(
+            command: command,
+            approvalRequired: false,
+            isChained: false,
+            denied: true,
+            error: diagnostic,
+            reason: diagnostic
+        )
+    }
+
+    /// Screens collected hosts against the egress policy.
+    ///
+    /// One charge per host per command: repeats reuse the verdict instead
+    /// of consuming a one-shot grant twice in the same check. A missing
+    /// supervisor denies fail-closed: the caller already established
+    /// network egress is allowed, so unscreened hosts must not run.
+    /// - Returns: Refusal envelope, or nil when every host is allowed.
+    private func screenedPolicyVerdict(
+        command: String,
+        hosts: [(display: String, url: URL)],
+        sessionID: UUID
+    ) async -> BashResultEnvelope? {
+        guard let supervisor = egressSupervisor else {
+            return nilSupervisorEnvelope(command: command, hosts: hosts)
+        }
         var validatedHosts = Set<String>()
         for (display, parsed) in hosts {
-            // One charge per host per command: repeats reuse the verdict
-            // instead of consuming a one-shot grant twice in the same check.
             if let host = parsed.host, !host.isEmpty {
                 let canonical = SensitiveAddressNormalization.normalizedHost(host)
                 if validatedHosts.contains(canonical) {
@@ -549,6 +1174,40 @@ public struct BashTool: Tool {
         return nil
     }
 
+    /// Builds the fail-closed refusal when egress supervision is missing.
+    ///
+    /// The screening gate runs only when network egress is allowed, so a
+    /// nil supervisor would otherwise let the command run unscreened; the
+    /// supervisor stays the second opinion on declared hosts and never
+    /// widens them. Host-bearing commands deny even if screening widens
+    /// later to cover host-free spells.
+    /// - Parameters:
+    ///   - command: Raw shell command.
+    ///   - hosts: Screened display plus URL pairs already collected.
+    /// - Returns: Denied envelope naming the missing supervision.
+    private func nilSupervisorEnvelope(
+        command: String,
+        hosts: [(display: String, url: URL)]
+    ) -> BashResultEnvelope {
+        let screened = hosts.compactMap(\.url.host).filter { !$0.isEmpty }
+        let hostClause = screened.isEmpty
+            ? "no screened hosts"
+            : "screened: \(screened.sorted().joined(separator: ", "))"
+        RuneWeaverLog.tools.warning(
+            "bash.exec denied (\(hostClause)) without egress supervision in command: \(command)"
+        )
+        let diagnostic = "Egress supervision unavailable:"
+            + " denying network-capable command fail-closed (\(hostClause))."
+        return BashResultEnvelope(
+            command: command,
+            approvalRequired: false,
+            isChained: false,
+            denied: true,
+            error: diagnostic,
+            reason: diagnostic
+        )
+    }
+
     /// Resolves schemeless hosts from a command through single-owner extraction.
     ///
     /// Loops every bare-host match so multi-host commands screen each host
@@ -568,8 +1227,32 @@ public struct BashTool: Tool {
         if let data = try? encoder.encode(envelope), let str = String(data: data, encoding: .utf8) {
             return str
         }
-        return """
-        {"command":"\(envelope.command)","exitCode":\(envelope.exitCode),"stdout":"\(envelope.stdout)","stderr":"\(envelope.stderr)"}
-        """
+        // Encoder failure stays escaped and fail-closed: never interpolate
+        // raw command or output text into JSON. JSONSerialization escapes
+        // quotes, backslashes, and control characters.
+        var fallback: [String: Any] = [
+            "command": envelope.command,
+            "stdout": envelope.stdout,
+            "stderr": envelope.stderr,
+            "exitCode": Int(envelope.exitCode),
+            "approvalRequired": envelope.approvalRequired,
+            "isChained": envelope.isChained,
+            "denied": envelope.denied,
+            "kill_reason": envelope.killReason.rawValue
+        ]
+        if let error = envelope.error {
+            fallback["error"] = error
+        }
+        if let reason = envelope.reason {
+            fallback["reason"] = reason
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: fallback, options: [.sortedKeys]),
+           let str = String(data: data, encoding: .utf8)
+        {
+            return str
+        }
+        // JSONSerialization cannot fail on string, number, and bool values,
+        // but the static literal keeps the contract total without interpolation.
+        return "{\"command\":\"\",\"denied\":true,\"kill_reason\":\"denied\"}"
     }
 }

@@ -313,46 +313,6 @@ public actor DesktopControlMonitor {
     }
 }
 
-// MARK: - Control protocol
-
-/// Protocol for desktop control so tests can inject a stub.
-public protocol DesktopControlling: Sendable {
-    /// Executes a batch of actions sequentially, aborting on first failure.
-    func executeBatch(
-        actions: [DesktopAction],
-        scaleX: Double,
-        scaleY: Double,
-        blockedApps: [String]
-    ) async throws -> [DesktopActionStepResult]
-
-    /// Session-aware batch entry point threading the egress session grant.
-    /// Declared as a requirement (not an extension-only helper) so the live
-    /// bridge's grant-aware implementation dispatches dynamically; stubs
-    /// inherit the session-less fallback below.
-    func executeBatch(
-        actions: [DesktopAction],
-        scaleX: Double,
-        scaleY: Double,
-        blockedApps: [String],
-        sessionID: UUID?
-    ) async throws -> [DesktopActionStepResult]
-}
-
-extension DesktopControlling {
-    /// Default session-aware batch for stubs without grant handling.
-    /// Delegates to the session-less batch so existing conformers keep
-    /// compiling; the live bridge overrides with grant-aware screening.
-    func executeBatch(
-        actions: [DesktopAction],
-        scaleX: Double,
-        scaleY: Double,
-        blockedApps: [String],
-        sessionID _: UUID?
-    ) async throws -> [DesktopActionStepResult] {
-        try await executeBatch(actions: actions, scaleX: scaleX, scaleY: scaleY, blockedApps: blockedApps)
-    }
-}
-
 // MARK: - Live control bridge
 
 /// Live desktop control using CGEvent and NSWorkspace.
@@ -439,11 +399,16 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     }
 
     /// Validates batch parameters and preflight safety checks before dispatching.
+    ///
+    /// Declared hosts travel from the tool's `network_hosts` claim into the
+    /// shared supervisor check, so typed URLs face the same declared-versus-
+    /// screened gate as shell commands instead of a desktop-only variant.
     private func validateBatchPreflight(
         actions: [DesktopAction],
         scaleX: Double,
         scaleY: Double,
-        sessionID: UUID?
+        sessionID: UUID?,
+        declaredHosts: [String] = []
     ) async throws {
         try Task.checkCancellation()
         try await checkEmergencyStopOrTakeover()
@@ -466,7 +431,7 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
                 + "must be finite, positive, and at most \(Self.maxScaleFactor)"
             throw DesktopControlError.actionFailed(index: 0, reason: reason)
         }
-        try await screenBatchURLs(actions: actions, sessionID: sessionID)
+        try await screenBatchURLs(actions: actions, sessionID: sessionID, declaredHosts: declaredHosts)
     }
 
     #if canImport(CoreGraphics) && canImport(AppKit)
@@ -506,11 +471,37 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
         blockedApps: [String],
         sessionID: UUID?
     ) async throws -> [DesktopActionStepResult] {
+        try await executeBatch(
+            actions: actions,
+            scaleX: scaleX,
+            scaleY: scaleY,
+            blockedApps: blockedApps,
+            sessionID: sessionID,
+            declaredHosts: []
+        )
+    }
+
+    /// Executes a batch screened against declared hosts plus session grants.
+    ///
+    /// Routes typed URLs through the identical supervisor host check the shell
+    /// uses: undeclared dials deny before policy evaluation, declared dials
+    /// still require the policy to permit them, and the typed-URL refusal
+    /// names the host so the approval card authorizes destinations.
+    public func executeBatch(
+        actions: [DesktopAction],
+        scaleX: Double,
+        scaleY: Double,
+        blockedApps: [String],
+        sessionID: UUID?,
+        declaredHosts: [String]
+    ) async throws -> [DesktopActionStepResult] {
+        let sanitizedDeclared = SeatbeltProfileBuilder.sanitizedEgressHosts(declaredHosts)
         try await validateBatchPreflight(
             actions: actions,
             scaleX: scaleX,
             scaleY: scaleY,
-            sessionID: sessionID
+            sessionID: sessionID,
+            declaredHosts: sanitizedDeclared
         )
 
         #if canImport(CoreGraphics) && canImport(AppKit)
@@ -586,46 +577,179 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     /// action still covers the identical host later in the same batch.
     /// Triage badges the first host only while this gate screens every host
     /// in every action, so multi-host batches re-park iteratively instead of
-    /// approving the whole batch on one badge.
-    private func screenBatchURLs(actions: [DesktopAction], sessionID: UUID?) async throws {
-        guard let supervisor = egressSupervisor else { return }
+    /// approving the whole batch on one badge. The declared-hosts check runs
+    /// first through the shared supervisor helper, so an undeclared typed
+    /// host denies even when the policy would allow it.
+    private func screenBatchURLs(actions: [DesktopAction], sessionID: UUID?, declaredHosts: [String] = []) async throws {
+        let batchHosts = collectedBatchHosts(from: actions)
+        // Fail-closed on missing supervision: typed hosts without a
+        // supervisor would run unscreened. Host-free batches need no
+        // screening and still proceed.
+        guard let supervisor = egressSupervisor else {
+            guard !batchHosts.isEmpty else { return }
+            throw nilSupervisorError(hosts: batchHosts)
+        }
+        let undeclared = supervisor.checkHosts(batchHosts, against: declaredHosts)
+        if !undeclared.isEmpty {
+            throw undeclaredHostsError(undeclared: Set(undeclared), declaredHosts: declaredHosts)
+        }
         var validatedHosts = Set<String>()
         for action in actions {
             guard case let .typeText(text) = action else { continue }
-            var candidates: [(display: String, url: URL)] = []
-            for rawURL in Self.extractURLs(from: text) {
-                guard let parsed = URL(string: rawURL) else { continue }
-                candidates.append((display: rawURL, url: parsed))
-            }
-            // Typed bare hosts (`example.com`) never form a link match, so
-            // the schemeless pass loops every match like `bash.exec`: each
-            // uncovered bare host screens alongside the link hosts.
-            for bareHost in ApprovalQueue.extractAllSchemelessHosts(in: text) {
-                guard let assumed = URL(string: "https://" + bareHost),
-                      let assumedHost = assumed.host, !assumedHost.isEmpty
-                else { continue }
-                let canonicalAssumed = SensitiveAddressNormalization.normalizedHost(assumedHost)
-                guard !candidates.contains(where: {
-                    $0.url.host.map { SensitiveAddressNormalization.normalizedHost($0) } == canonicalAssumed
-                })
-                else { continue }
-                candidates.append((display: bareHost, url: assumed))
-            }
-            for (display, parsed) in candidates {
-                guard let host = parsed.host, !host.isEmpty
-                else { continue }
-                let canonical = SensitiveAddressNormalization.normalizedHost(host)
-                guard !validatedHosts.contains(canonical) else { continue }
-                validatedHosts.insert(canonical)
-                let verdict = await supervisor.validate(url: parsed, sessionID: sessionID)
-                switch verdict {
-                case .allowed:
-                    break
-                case let .denied(reason):
-                    throw DesktopControlError.blockedURL(host: parsed.host ?? display, url: display, reason: reason)
-                case let .unlistedDomain(host, reason):
-                    throw DesktopControlError.blockedURL(host: host, url: display, reason: reason)
-                }
+            let candidates = batchCandidates(for: text)
+            try await validateBatchCandidates(
+                candidates,
+                sessionID: sessionID,
+                validatedHosts: &validatedHosts
+            )
+        }
+    }
+
+    /// Collects every typed host once for the declared check.
+    ///
+    /// Sees the whole batch before any per-host policy charge is consumed,
+    /// so a grant consumed for one action still covers the identical host
+    /// later in the same batch.
+    /// - Parameter actions: Batch actions.
+    /// - Returns: Hosts in first-seen order, deduped canonically.
+    private func collectedBatchHosts(from actions: [DesktopAction]) -> [String] {
+        var batchHosts: [String] = []
+        var batchSeen = Set<String>()
+        for action in actions {
+            guard case let .typeText(text) = action else { continue }
+            collectBatchHosts(from: text, seen: &batchSeen, hosts: &batchHosts)
+        }
+        return batchHosts
+    }
+
+    /// Collects link plus schemeless hosts from one typed text.
+    ///
+    /// - Parameters:
+    ///   - text: Typed text.
+    ///   - seen: Canonical hosts already collected.
+    ///   - hosts: Hosts in first-seen order.
+    private func collectBatchHosts(from text: String, seen: inout Set<String>, hosts: inout [String]) {
+        for rawURL in Self.extractURLs(from: text) {
+            guard let host = URL(string: rawURL)?.host, !host.isEmpty else { continue }
+            let canonical = SensitiveAddressNormalization.normalizedHost(host)
+            guard !seen.contains(canonical) else { continue }
+            seen.insert(canonical)
+            hosts.append(host)
+        }
+        for bareHost in ApprovalQueue.extractAllSchemelessHosts(in: text) {
+            guard let assumedHost = URL(string: "https://" + bareHost)?.host,
+                  !assumedHost.isEmpty
+            else { continue }
+            let canonical = SensitiveAddressNormalization.normalizedHost(assumedHost)
+            guard !seen.contains(canonical) else { continue }
+            seen.insert(canonical)
+            hosts.append(assumedHost)
+        }
+    }
+
+    /// Builds the undeclared typed-host refusal for one batch.
+    ///
+    /// - Returns: Blocked-URL error naming the first undeclared host.
+    private func undeclaredHostsError(
+        undeclared: Set<String>,
+        declaredHosts: [String]
+    ) -> DesktopControlError {
+        let listed = undeclared.sorted().joined(separator: ", ")
+        let declaredClause = declaredHosts.isEmpty
+            ? "no declared hosts"
+            : "declared: \(declaredHosts.sorted().joined(separator: ", "))"
+        RuneWeaverLog.tools.warning(
+            "desktop.action denied undeclared typed host(s) \(listed) (\(declaredClause))"
+        )
+        let first = undeclared.sorted().first ?? ""
+        return DesktopControlError.blockedURL(
+            host: first,
+            url: first,
+            reason: "Typed host '\(first)' not in declared hosts (\(declaredClause))"
+        )
+    }
+
+    /// Builds the fail-closed refusal when egress supervision is missing.
+    ///
+    /// Typed hosts without a supervisor would run unscreened, so the first
+    /// host denies instead of passing; the supervisor stays the second
+    /// opinion on declared hosts and never widens them.
+    /// - Parameters:
+    ///   - hosts: Screened hosts in first-seen order.
+    ///   - display: Optional display URL for the first host.
+    /// - Returns: Blocked-URL error naming the first host.
+    private func nilSupervisorError(hosts: [String], display: String? = nil) -> DesktopControlError {
+        let listed = hosts.sorted().joined(separator: ", ")
+        RuneWeaverLog.tools.warning(
+            "desktop.action denied typed host(s) \(listed) without egress supervision"
+        )
+        let first = hosts.sorted().first ?? ""
+        let shown = display ?? first
+        return DesktopControlError.blockedURL(
+            host: first,
+            url: shown,
+            reason: "Egress supervision unavailable:"
+                + " denying typed host '\(first)' fail-closed."
+        )
+    }
+
+    /// Collects link plus schemeless candidates for one typed text.
+    ///
+    /// Typed bare hosts never form a link match, so the schemeless pass
+    /// loops every match like `bash.exec`: each uncovered bare host
+    /// screens alongside the link hosts.
+    /// - Parameter text: Typed text.
+    /// - Returns: Display plus URL pairs in first-seen order.
+    private func batchCandidates(for text: String) -> [(display: String, url: URL)] {
+        var candidates: [(display: String, url: URL)] = []
+        for rawURL in Self.extractURLs(from: text) {
+            guard let parsed = URL(string: rawURL) else { continue }
+            candidates.append((display: rawURL, url: parsed))
+        }
+        for bareHost in ApprovalQueue.extractAllSchemelessHosts(in: text) {
+            guard let assumed = URL(string: "https://" + bareHost),
+                  let assumedHost = assumed.host, !assumedHost.isEmpty
+            else { continue }
+            let canonicalAssumed = SensitiveAddressNormalization.normalizedHost(assumedHost)
+            guard !candidates.contains(where: {
+                $0.url.host.map { SensitiveAddressNormalization.normalizedHost($0) } == canonicalAssumed
+            })
+            else { continue }
+            candidates.append((display: bareHost, url: assumed))
+        }
+        return candidates
+    }
+
+    /// Screens one candidate list against the egress policy.
+    ///
+    /// Repeat-screened hosts vet once, so a grant consumed for one action
+    /// still covers the identical host later in the same batch. A missing
+    /// supervisor denies fail-closed: host-bearing candidates must not run
+    /// unscreened, while host-free candidates need no screening.
+    private func validateBatchCandidates(
+        _ candidates: [(display: String, url: URL)],
+        sessionID: UUID?,
+        validatedHosts: inout Set<String>
+    ) async throws {
+        guard let supervisor = egressSupervisor else {
+            guard let first = candidates.first(where: { !($0.url.host ?? "").isEmpty }) else { return }
+            let hosts = candidates.compactMap(\.url.host).filter { !$0.isEmpty }
+            throw nilSupervisorError(hosts: hosts, display: first.display)
+        }
+        for (display, parsed) in candidates {
+            guard let host = parsed.host, !host.isEmpty
+            else { continue }
+            let canonical = SensitiveAddressNormalization.normalizedHost(host)
+            guard !validatedHosts.contains(canonical) else { continue }
+            validatedHosts.insert(canonical)
+            let verdict = await supervisor.validate(url: parsed, sessionID: sessionID)
+            switch verdict {
+            case .allowed:
+                break
+            case let .denied(reason):
+                throw DesktopControlError.blockedURL(host: parsed.host ?? display, url: display, reason: reason)
+            case let .unlistedDomain(host, reason):
+                throw DesktopControlError.blockedURL(host: host, url: display, reason: reason)
             }
         }
     }

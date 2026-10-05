@@ -137,7 +137,9 @@ public struct DesktopActionTool: Tool, Sendable {
     public let name = "desktop.action"
     public let description =
         "Executes batched macOS desktop actions (switch_app, click, type_text, key_press, mouse_move, "
-            + "double_click, drag, scroll, delay); approval-gated, disabled by default."
+            + "double_click, drag, scroll, delay); approval-gated, disabled by default. "
+            + "Typed URLs are host-scoped: declare destinations in network_hosts (max 10); "
+            + "undeclared hosts are denied."
     public let inputSchema = JSONSchema(
         rawValue: #"{"type":"object","properties":{"#
             + #""actions":{"type":"array","#
@@ -165,7 +167,11 @@ public struct DesktopActionTool: Tool, Sendable {
             + #""scale_x":{"type":"number","#
             + #""description":"Horizontal scale factor from screenshot coordinates to native.","default":1.0},"#
             + #""scale_y":{"type":"number","#
-            + #""description":"Vertical scale factor from screenshot coordinates to native.","default":1.0}"#
+            + #""description":"Vertical scale factor from screenshot coordinates to native.","default":1.0},"#
+            + #""network_hosts":{"type":"array","#
+            + #""description":"Declared egress hosts for typed URLs (max 10 hostnames or IPs). Every host typed "#
+            + #"in the batch must be declared here; undeclared hosts deny even when policy would allow them.","#
+            + #""maxItems":10,"items":{"type":"string"}}"#
             + #"},"required":["actions"],"additionalProperties":false}"#
     )
     public let permissionLevel = PermissionLevel.requiresApproval
@@ -195,6 +201,11 @@ public struct DesktopActionTool: Tool, Sendable {
 
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         let args = try DesktopActionArgs.decode(from: input.argumentsJSON)
+        let hostsResult = checkedDeclaredHosts(args, callID: input.callID)
+        if let hostsFailure = hostsResult.failure {
+            return hostsFailure
+        }
+        let declaredHosts = hostsResult.hosts ?? []
 
         // URL screening lives in the control bridge's session-aware batch
         // entry point, reached dynamically through the protocol requirement
@@ -210,7 +221,8 @@ public struct DesktopActionTool: Tool, Sendable {
                 scaleX: args.scaleX,
                 scaleY: args.scaleY,
                 blockedApps: blockedApps,
-                sessionID: context.sessionID
+                sessionID: context.sessionID,
+                declaredHosts: declaredHosts
             )
             await DesktopControlMonitor.shared.endBatch()
             let envelope = DesktopActionEnvelope(
@@ -248,6 +260,24 @@ public struct DesktopActionTool: Tool, Sendable {
         } catch {
             await DesktopControlMonitor.shared.endBatch()
             throw error
+        }
+    }
+
+    /// Validates `network_hosts` through the shared Seatbelt checker.
+    ///
+    /// Thin wrapper over `SeatbeltProfileBuilder.validatedDeclaredHosts` so
+    /// shell and desktop share one validity rule.
+    /// - Returns: Hosts plus an optional failure envelope to return directly.
+    private func checkedDeclaredHosts(
+        _ args: DesktopActionArgs,
+        callID: String?
+    ) -> (hosts: [String]?, failure: ToolOutput?) {
+        do {
+            return try (SeatbeltProfileBuilder.validatedDeclaredHosts(args.networkHosts), nil)
+        } catch let error as SeatbeltProfileBuilder.DeclaredHostValidationError {
+            return (nil, .failure(error.message, callID: callID))
+        } catch {
+            return (nil, .failure(error.localizedDescription, callID: callID))
         }
     }
 
@@ -320,11 +350,13 @@ struct DesktopActionArgs: Codable {
     let actions: [DesktopAction]
     let scaleX: Double
     let scaleY: Double
+    let networkHosts: [String]
 
     private enum CodingKeys: String, CodingKey {
         case actions
         case scaleX = "scale_x"
         case scaleY = "scale_y"
+        case networkHosts = "network_hosts"
     }
 
     init(from decoder: Decoder) throws {
@@ -332,6 +364,7 @@ struct DesktopActionArgs: Codable {
         actions = try container.decode([DesktopAction].self, forKey: .actions)
         scaleX = try container.decodeIfPresent(Double.self, forKey: .scaleX) ?? 1.0
         scaleY = try container.decodeIfPresent(Double.self, forKey: .scaleY) ?? 1.0
+        networkHosts = try container.decodeIfPresent([String].self, forKey: .networkHosts) ?? []
     }
 
     static func decode(from json: String) throws -> DesktopActionArgs {

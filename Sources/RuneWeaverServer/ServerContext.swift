@@ -265,6 +265,14 @@ public final class ServerContext: Sendable {
         set { desktopConfigBox.withLock { $0 = newValue } }
     }
 
+    /// Scratch workspace owning the default shell directory, the eligible
+    /// `tools/` promotion directory, and the quota plus retention policy.
+    public let workspaceStore: WorkspaceStore
+    /// Hash-pinned agent script registry backing promotion plus verified runs.
+    public let agentTools: AgentToolStore
+    /// Single-flight lock serializing agent-tool runs within this process.
+    public let agentRunLock: AgentToolRunLock
+
     /// Creates a server context.
     /// The `steeringQueue` must be the identical instance handed to
     /// `orchestrator` at its creation: routes enqueue through the context
@@ -330,7 +338,11 @@ public final class ServerContext: Sendable {
         egressSupervisor: OutboundEgressSupervisor? = nil,
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
-        policyWriteLock: PolicyWriteLock = PolicyWriteLock()
+        policyWriteLock: PolicyWriteLock = PolicyWriteLock(),
+        workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
+        workspaceStore: WorkspaceStore? = nil,
+        agentTools: AgentToolStore? = nil,
+        agentRunLock: AgentToolRunLock? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -448,6 +460,13 @@ public final class ServerContext: Sendable {
         self.desktopCaptureBridge = desktopCaptureBridge
         self.desktopControlBridge = desktopControlBridge
         self.desktopConfigBox = OSAllocatedUnfairLock(initialState: desktopConfig)
+        // Scratch plus pins resolve over the same episodes file as goals so
+        // the dashboard and the CLI observe one registry; an explicit store
+        // wins untouched for tests that hand-build an isolated workspace.
+        let resolvedWorkspace = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
+        self.workspaceStore = resolvedWorkspace
+        self.agentTools = agentTools ?? AgentToolStore(dbPath: defaultDBPath, workspaceStore: resolvedWorkspace)
+        self.agentRunLock = agentRunLock ?? AgentToolRunLock()
         // Fail fast when the context would enqueue through a different queue than
         // the turn loop dequeues through; such a pair accepts steering yet never
         // delivers it, so surface the wiring mistake at construction.
@@ -531,6 +550,7 @@ extension ServerContext {
         let llmServerURLs: [String]
         let security: SecurityConfig
         let goals: GoalsConfig
+        let workspace: WorkspaceConfig
     }
 
     private struct GoalComponents: Sendable {
@@ -646,6 +666,11 @@ extension ServerContext {
         let embedder: (any EmbeddingsBackend)?
         let goals: GoalComponents
         let stagedFiles: StagedFilesStore
+        /// Workspace store backing the shell default directory and quota gate.
+        let workspaceStore: WorkspaceStore?
+        /// Hash-pinned agent script store; nil keeps `tool.promote`/`tool.run`
+        /// unregistered, mirroring the goal-tools invariant.
+        let agentToolStore: AgentToolStore?
         /// Propagation hook reporting a live write that superseded a staged
         /// review, so the serve process broadcasts `file_superseded` to live
         /// dashboards; nil keeps the tool silent.
@@ -696,7 +721,10 @@ extension ServerContext {
             supersededReviewNotifier: args.supersededReviewNotifier,
             fanOutEngine: args.fanOutEngine,
             policyStore: args.policyStore,
-            egressSupervisor: args.egressSupervisor
+            egressSupervisor: args.egressSupervisor,
+            workspaceConfig: args.configs.workspace,
+            workspaceStore: args.workspaceStore,
+            agentToolStore: args.agentToolStore
         )
     }
 
@@ -862,7 +890,11 @@ extension ServerContext {
         desktopControlBridge: (any DesktopControlling)? = nil,
         runs: RunLogStore? = nil,
         hub: WSHub? = nil,
-        policyStore: PolicyStore? = nil
+        policyStore: PolicyStore? = nil,
+        workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
+        workspaceStore: WorkspaceStore? = nil,
+        agentTools: AgentToolStore? = nil,
+        agentRunLock: AgentToolRunLock? = nil
     ) async throws -> ServerContext {
         // Resolve the one store for this process before any tool registers:
         // an injected store is authoritative, while the factory default is
@@ -872,6 +904,17 @@ extension ServerContext {
             injected: policyStore
         )
         await permissionGate.updateBashConfig(bashConfig)
+        // Scratch workspace boots beside the other durable stores so a fresh
+        // boot creates the 0700 root and clears expired `tmp/` before any
+        // shell turn runs; failures stay best-effort with a log because the
+        // per-turn quota gate still fails closed when the directory is missing.
+        let resolvedWorkspaceStore = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
+        do {
+            _ = try await resolvedWorkspaceStore.ensure()
+            _ = try await resolvedWorkspaceStore.pruneTmp()
+        } catch {
+            RuneWeaverLog.server.warning("ServerContext: workspace boot skipped: \(error.localizedDescription)")
+        }
         let services = await bootstrapServices(
             permissionGate: permissionGate,
             config: BootstrapConfig(
@@ -886,7 +929,8 @@ extension ServerContext {
         let toolConfigs = ToolConfigs(
             email: emailConfig, files: filesConfig, bash: bashConfig, sandbox: sandboxConfig,
             browser: browserConfig, media: mediaConfig, desktop: desktopConfig,
-            llmServerURLs: llmServerURLs, security: securityConfig, goals: goalsConfig
+            llmServerURLs: llmServerURLs, security: securityConfig, goals: goalsConfig,
+            workspace: workspaceConfig
         )
         let transports = ToolTransports(
             gateway: browserGateway, search: searchTransport, fetch: fetchTransport,
@@ -899,6 +943,10 @@ extension ServerContext {
         )
         let dbPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
         let stagedFilesStore = StagedFilesStore(dbPath: dbPath)
+        // Agent pins share the same episodes file as goals so the dashboard
+        // and the CLI observe one registry; an injected store wins untouched
+        // for tests that hand-build an isolated registry.
+        let resolvedAgentTools = agentTools ?? AgentToolStore(dbPath: dbPath, workspaceStore: resolvedWorkspaceStore)
         // Execution engines build before tool registration so the fan-out
         // engine can ride the live orchestrator into the fanout.run tool;
         // engine construction is side-effect free, so the earlier position
@@ -924,6 +972,8 @@ extension ServerContext {
             bus: services.bus, configs: toolConfigs, transports: transports,
             memoryEngine: memoryEngine, embedder: embedder,
             goals: goalComponents, stagedFiles: stagedFilesStore,
+            workspaceStore: resolvedWorkspaceStore,
+            agentToolStore: resolvedAgentTools,
             supersededReviewNotifier: makeStagedSupersedeNotifier(hub: services.durable.hub),
             goalUpdatedNotifier: { [hub = services.durable.hub] goal, steps in
                 await hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
@@ -945,7 +995,9 @@ extension ServerContext {
             goals: services.goalStore, goalEngine: services.goalEngine, goalsConfig: goalsConfig, ideas: services.ideasStore,
             ideasEngine: services.ideasEngine, ideasConfig: ideasConfig, proactiveConfig: proactiveConfig, stagedFiles: stagedFilesStore,
             fanOut: engines.fanOutEngine, policyStore: resolvedPolicyStore, egressSupervisor: egressSupervisor,
-            mediaConfig: toolConfigs.media, llmServerURLs: toolConfigs.llmServerURLs
+            mediaConfig: toolConfigs.media, llmServerURLs: toolConfigs.llmServerURLs,
+            workspaceConfig: workspaceConfig, workspaceStore: resolvedWorkspaceStore,
+            agentTools: resolvedAgentTools, agentRunLock: agentRunLock
         )
         await finalizeServerContext(context, sandboxConfig: sandboxConfig, onApprovalRequested: onApprovalRequested)
         return context

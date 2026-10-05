@@ -826,7 +826,20 @@ extension ApiSSRFGuard {
             // above, so what remains is a public address.
             return .publicDestination
         }
-        let addresses = await resolveAddressesAsync(host: cleaned)
+        // Capture the task-scoped proof in this task before hopping: the
+        // stub runs on a global queue without task-local inheritance, so a
+        // concurrent suite publishing globally must never steer this lookup.
+        // Reading once here keeps hostname answers pinned to the caller's binding.
+        #if DEBUG
+            let capturedStub = activeTestDNSResolver
+            let addresses: [String] = if let stub = capturedStub {
+                await stubResultWithTimeoutAsync(failure: []) { stub(cleaned) }
+            } else {
+                await resolveAddressesAsync(host: cleaned)
+            }
+        #else
+            let addresses = await resolveAddressesAsync(host: cleaned)
+        #endif
         guard !addresses.isEmpty else {
             return .unresolved(reason: unverifiedDenial(for: cleaned))
         }

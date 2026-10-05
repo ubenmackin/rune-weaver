@@ -130,6 +130,20 @@ import {
   type UpdateSettingsInput,
   checkSecretStatus,
   storeSecret,
+  formatWorkspaceBytes,
+  getWorkspaceUsage,
+  isPromotableScriptPath,
+  listAgentTools,
+  promoteAgentTool,
+  pruneWorkspaceTmp,
+  runAgentTool,
+  setAgentToolStatus,
+  shortAgentToolHash,
+  validateAgentToolPromote,
+  workspaceQuotaPercent,
+  WORKSPACE_TOOLS_PREFIX,
+  type AgentTool,
+  type WorkspaceUsageResponse,
 } from "../api";
 import {
   AlertTriangleIcon,
@@ -1369,6 +1383,28 @@ export default function SettingsManager() {
   // Tracks the single builtin tool row with an in-flight toggle so sibling
   // rows stay interactive while one request is pending.
   const [togglingToolName, setTogglingToolName] = useState<string | null>(null);
+  // Agent scratch workspace usage plus the hash-pinned script registry live on
+  // the Tools tab beside the builtin switches. Usage quotas arrive from
+  // GET /workspace/usage rather than GET /settings because the settings patch
+  // carries no workspace section; quotas render read-only with a config-file
+  // hint instead of an editor that would 400. The registry stays separate
+  // from plugin runes so a promoted shell script never shares fate with an
+  // external package.
+  const [workspaceUsage, setWorkspaceUsage] = useState<WorkspaceUsageResponse | null>(null);
+  const [workspaceLoading, setWorkspaceLoading] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [pruningWorkspace, setPruningWorkspace] = useState(false);
+  const [pendingPruneWorkspace, setPendingPruneWorkspace] = useState(false);
+  const [agentTools, setAgentTools] = useState<AgentTool[]>([]);
+  const [agentToolsLoading, setAgentToolsLoading] = useState(false);
+  const [agentToolsError, setAgentToolsError] = useState<string | null>(null);
+  const [togglingAgentToolId, setTogglingAgentToolId] = useState<string | null>(null);
+  const [runningAgentToolId, setRunningAgentToolId] = useState<string | null>(null);
+  const [agentRunOutput, setAgentRunOutput] = useState<Record<string, string>>({});
+  const [promoteName, setPromoteName] = useState("");
+  const [promoteScriptPath, setPromoteScriptPath] = useState("");
+  const [promoteError, setPromoteError] = useState<string | null>(null);
+  const [promotingTool, setPromotingTool] = useState(false);
 
   const loadPluginsData = useCallback(async () => {
     try {
@@ -1897,6 +1933,141 @@ export default function SettingsManager() {
       pushErrorToast(err instanceof Error ? err.message : `Failed to update ${categoryId} tools.`);
     } finally {
       setTogglingCategory(null);
+    }
+  };
+
+  // Loads bounded scratch usage for the Tools-tab quota bars. A malformed
+  // payload degrades to an honest error instead of rendering a partial bar,
+  // so a drifted engine never shows a quota without its numerator.
+  const refreshWorkspaceUsage = useCallback(async () => {
+    setWorkspaceLoading(true);
+    setWorkspaceError(null);
+    try {
+      const usage = await getWorkspaceUsage();
+      if (
+        typeof usage?.bytes !== "number" ||
+        typeof usage?.files !== "number" ||
+        typeof usage?.quotaMB !== "number" ||
+        typeof usage?.quotaFiles !== "number"
+      ) {
+        setWorkspaceUsage(null);
+        setWorkspaceError("Workspace usage returned an unexpected response; quotas unknown.");
+        return;
+      }
+      setWorkspaceUsage(usage);
+    } catch (err) {
+      setWorkspaceUsage(null);
+      setWorkspaceError(err instanceof Error ? err.message : "Failed to load workspace usage.");
+    } finally {
+      setWorkspaceLoading(false);
+    }
+  }, []);
+
+  // Loads the pinned-script registry for the Tools-tab section. Unknown rows
+  // stay listed so a tampered script remains visible behind its disabled pill
+  // instead of vanishing from review.
+  const refreshAgentTools = useCallback(async () => {
+    setAgentToolsLoading(true);
+    setAgentToolsError(null);
+    try {
+      const res = await listAgentTools();
+      setAgentTools(Array.isArray(res?.tools) ? res.tools : []);
+    } catch (err) {
+      setAgentTools([]);
+      setAgentToolsError(err instanceof Error ? err.message : "Failed to load promoted tools.");
+    } finally {
+      setAgentToolsLoading(false);
+    }
+  }, []);
+
+  // Prunes expired tmp/ entries after the confirm modal. The receipt counts
+  // top-level entries removed, so the toast names the count and the bars
+  // refresh instead of optimistically zeroing.
+  const handleConfirmPruneWorkspace = async () => {
+    if (pruningWorkspace) return;
+    setPendingPruneWorkspace(false);
+    setPruningWorkspace(true);
+    try {
+      const receipt = await pruneWorkspaceTmp();
+      const removed = typeof receipt?.removed === "number" ? receipt.removed : 0;
+      pushSuccessToast(
+        removed === 1 ? "Pruned 1 tmp entry." : `Pruned ${removed} tmp entries.`
+      );
+      await refreshWorkspaceUsage();
+    } catch (err) {
+      pushErrorToast(err instanceof Error ? err.message : "Failed to prune workspace tmp.");
+    } finally {
+      setPruningWorkspace(false);
+    }
+  };
+
+  // Flips one promoted script without touching siblings. The PATCH body
+  // carries the canonical status spelling; the updated row replaces one entry
+  // instead of refetching the list so a concurrent promotion never vanishes.
+  const handleToggleAgentTool = async (tool: AgentTool) => {
+    const nextEnabled = tool.status !== "enabled";
+    setTogglingAgentToolId(tool.id);
+    try {
+      const updated = await setAgentToolStatus(tool.id, nextEnabled);
+      setAgentTools((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      pushSuccessToast(
+        nextEnabled ? `Enabled agent tool '${tool.name}'.` : `Disabled agent tool '${tool.name}'.`
+      );
+    } catch (err) {
+      pushErrorToast(err instanceof Error ? err.message : `Failed to update agent tool '${tool.name}'.`);
+    } finally {
+      setTogglingAgentToolId(null);
+    }
+  };
+
+  // Runs one pinned script with no extra argv. Verification re-hashes before
+  // dispatch, so a tampered row answers 400 and lands disabled; the output
+  // stores per tool id so concurrent runs never overwrite each other.
+  const handleRunAgentTool = async (tool: AgentTool) => {
+    if (runningAgentToolId !== null) return;
+    setRunningAgentToolId(tool.id);
+    try {
+      const result = await runAgentTool(tool.id, []);
+      const content = typeof result?.content === "string" ? result.content : "";
+      setAgentRunOutput((prev) => ({ ...prev, [tool.id]: content || "(no output)" }));
+      if (result?.isError) {
+        pushErrorToast(content || `Agent tool '${tool.name}' reported an error.`);
+      } else {
+        pushSuccessToast(`Ran agent tool '${tool.name}'.`);
+      }
+    } catch (err) {
+      pushErrorToast(err instanceof Error ? err.message : `Failed to run agent tool '${tool.name}'.`);
+    } finally {
+      setRunningAgentToolId(null);
+    }
+  };
+
+  // Promotes a workspace/tools/ script after the client-side prefix check.
+  // The form validates before any network write so an outside path fails
+  // with the same words the store would refuse, without a round trip.
+  const handlePromoteAgentTool = async () => {
+    const problem = validateAgentToolPromote(promoteName, promoteScriptPath);
+    if (problem) {
+      setPromoteError(problem);
+      return;
+    }
+    if (promotingTool) return;
+    setPromotingTool(true);
+    setPromoteError(null);
+    try {
+      const created = await promoteAgentTool(promoteName.trim(), promoteScriptPath.trim());
+      setAgentTools((prev) => {
+        const next = prev.filter((t) => t.id !== created.id && t.name !== created.name);
+        return [...next, created].sort((a, b) => a.name.localeCompare(b.name));
+      });
+      setPromoteName("");
+      setPromoteScriptPath("");
+      pushSuccessToast(`Promoted agent tool '${created.name}'.`);
+      await refreshWorkspaceUsage();
+    } catch (err) {
+      setPromoteError(err instanceof Error ? err.message : "Failed to promote agent tool.");
+    } finally {
+      setPromotingTool(false);
     }
   };
 
@@ -2795,6 +2966,17 @@ export default function SettingsManager() {
       void refreshBootBind();
     }
   }, [activeTab, refreshBootBind]);
+
+  // Loads scratch quotas plus the pinned registry when the Tools tab opens so
+  // the bars reflect the live tree rather than a stale mount. Runs on tab
+  // entry only; prune, toggle, run, and promote refresh their own slice
+  // without an extra probe so the pane never flashes empty mid-action.
+  useEffect(() => {
+    if (activeTab === "tools") {
+      void refreshWorkspaceUsage();
+      void refreshAgentTools();
+    }
+  }, [activeTab, refreshWorkspaceUsage, refreshAgentTools]);
 
   // Clears the sticky restart flag once the saved file converges with the
   // re-anchored boot: the health poll moves live to the new boot after an
@@ -5227,6 +5409,92 @@ export default function SettingsManager() {
               )}
             </div>
 
+            {/* Agent scratch workspace: bounded usage plus tmp pruning. Quotas
+                arrive from the usage route because the settings patch carries
+                no workspace section, so they render read-only with a
+                config-file hint instead of an editor that would refuse. */}
+            <section aria-label="Workspace storage" style={{ margin: "8px 0 16px 0", padding: "16px", borderRadius: "8px", backgroundColor: "var(--bg-card, #1e2533)", border: "1px solid var(--border-color, #2d3748)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "8px", marginBottom: "8px" }}>
+                <div>
+                  <h4 style={{ margin: 0 }}>Workspace Storage</h4>
+                  <p className="settings-section-hint" style={{ margin: "4px 0 0 0" }}>
+                    Bounded agent scratch under ~/.runeweaver/workspace. Quotas live in [workspace] in the config file.
+                  </p>
+                </div>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button
+                    type="button"
+                    className="ghost icon-text-btn"
+                    onClick={() => void refreshWorkspaceUsage()}
+                    disabled={workspaceLoading || pruningWorkspace}
+                  >
+                    <RefreshIcon size={14} className={workspaceLoading ? "spin" : ""} />
+                    <span>{workspaceLoading ? "Loading…" : "Refresh"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost icon-text-btn"
+                    onClick={() => setPendingPruneWorkspace(true)}
+                    disabled={workspaceLoading || pruningWorkspace}
+                  >
+                    <TrashIcon size={14} />
+                    <span>{pruningWorkspace ? "Pruning…" : "Prune tmp"}</span>
+                  </button>
+                </div>
+              </div>
+              {workspaceError ? (
+                <div className="error-banner" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <AlertTriangleIcon size={16} />
+                  <span>{workspaceError}</span>
+                </div>
+              ) : workspaceLoading && !workspaceUsage ? (
+                <p className="muted text-sm" style={{ margin: 0 }}>Loading workspace usage…</p>
+              ) : workspaceUsage ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                  {(() => {
+                    const quotaBytes = workspaceUsage.quotaMB * 1024 * 1024;
+                    const bytesPercent = workspaceQuotaPercent(workspaceUsage.bytes, quotaBytes);
+                    const filesPercent = workspaceQuotaPercent(workspaceUsage.files, workspaceUsage.quotaFiles);
+                    const bar = (percent: number) => (
+                      <div style={{ height: "8px", borderRadius: "4px", background: "var(--bg-secondary, #141822)", overflow: "hidden" }}>
+                        <div style={{ width: `${percent}%`, height: "100%", background: percent >= 90 ? "#f56565" : percent >= 70 ? "#ed8936" : "#48bb78", transition: "width 0.2s ease" }} />
+                      </div>
+                    );
+                    return (
+                      <>
+                        <div>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem", marginBottom: "4px" }}>
+                            <span>Disk usage</span>
+                            <span className="muted">
+                              {formatWorkspaceBytes(workspaceUsage.bytes)} of {workspaceUsage.quotaMB} MB ({bytesPercent}%)
+                            </span>
+                          </div>
+                          {bar(bytesPercent)}
+                        </div>
+                        <div>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem", marginBottom: "4px" }}>
+                            <span>File usage</span>
+                            <span className="muted">
+                              {workspaceUsage.files.toLocaleString("en-US")} of {workspaceUsage.quotaFiles.toLocaleString("en-US")} files ({filesPercent}%)
+                            </span>
+                          </div>
+                          {bar(filesPercent)}
+                        </div>
+                        <div style={{ fontSize: "0.78rem", color: "var(--text-secondary, #a0aec0)" }}>
+                          Quota: {workspaceUsage.quotaMB} MB / {workspaceUsage.quotaFiles.toLocaleString("en-US")} files
+                          {" · "}
+                          To raise quotas, edit [workspace] quota_mb / quota_files in the config file.
+                          {workspaceUsage.truncated ? " · Walk truncated; actual usage may be higher." : ""}
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+              ) : (
+                <p className="muted text-sm" style={{ margin: 0 }}>Workspace usage unknown.</p>
+              )}
+            </section>
+
             {/* Warning banners */}
             {pendingCount > 0 && (
               <div
@@ -5709,6 +5977,185 @@ export default function SettingsManager() {
                 </div>
               );
             })()}
+
+            {/* Promoted agent tools: hash-pinned workspace/tools/ scripts the
+                owner blessed for later runs. Promotion pins exact bytes, runs
+                re-hash before dispatch, and a changed script lands disabled
+                instead of executing silently. */}
+            <section aria-label="Promoted agent tools" style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid var(--border-color, #2d3748)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "8px", marginBottom: "8px" }}>
+                <div className="settings-section-title-group">
+                  <h4 style={{ margin: "0 0 4px 0" }}>Promoted Agent Tools</h4>
+                  <p className="settings-section-hint" style={{ margin: 0 }}>
+                    Owner-blessed scripts from {WORKSPACE_TOOLS_PREFIX}. Only that directory is eligible; every run verifies the pinned hash first.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="ghost icon-text-btn"
+                  onClick={() => void refreshAgentTools()}
+                  disabled={agentToolsLoading}
+                >
+                  <RefreshIcon size={14} className={agentToolsLoading ? "spin" : ""} />
+                  <span>{agentToolsLoading ? "Loading…" : "Refresh"}</span>
+                </button>
+              </div>
+              {agentToolsError ? (
+                <div className="error-banner" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <AlertTriangleIcon size={16} />
+                  <span>{agentToolsError}</span>
+                </div>
+              ) : agentToolsLoading && agentTools.length === 0 ? (
+                <p className="muted text-sm">Loading promoted tools…</p>
+              ) : agentTools.length === 0 ? (
+                <div className="empty-state-box" style={{ padding: "20px", textAlign: "center" }}>
+                  <WrenchIcon size={28} />
+                  <p>No agent tools promoted yet.</p>
+                  <p className="muted text-sm" style={{ marginTop: "4px" }}>
+                    Promote a script from {WORKSPACE_TOOLS_PREFIX} below to bless it for later runs.
+                  </p>
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                  {agentTools.map((tool) => {
+                    const enabled = tool.status === "enabled";
+                    const busy = togglingAgentToolId === tool.id || runningAgentToolId === tool.id;
+                    const output = agentRunOutput[tool.id];
+                    return (
+                      <div
+                        key={tool.id}
+                        style={{ padding: "12px 14px", borderRadius: "8px", backgroundColor: "var(--bg-card, #1e2533)", border: "1px solid var(--border-color, #2d3748)" }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                            <code style={{ fontWeight: 600 }}>{tool.name}</code>
+                            <span style={{ fontSize: "0.72rem", padding: "2px 6px", borderRadius: "4px", backgroundColor: "#2d3748", color: "#a0aec0" }} title={tool.sha256}>
+                              {shortAgentToolHash(tool.sha256) || "no-pin"}
+                            </span>
+                            <span
+                              style={{
+                                fontSize: "0.72rem",
+                                padding: "2px 8px",
+                                borderRadius: "4px",
+                                fontWeight: 600,
+                                backgroundColor: enabled ? "rgba(72, 187, 120, 0.2)" : "rgba(160, 174, 192, 0.2)",
+                                color: enabled ? "#48bb78" : "#a0aec0",
+                              }}
+                            >
+                              {enabled ? "ENABLED" : "DISABLED"}
+                            </span>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                            <label className="toggle-label tool-switch" style={{ display: "flex", alignItems: "center", gap: "8px", cursor: busy ? "wait" : "pointer" }}>
+                              <input
+                                type="checkbox"
+                                role="switch"
+                                className="tool-switch-input"
+                                aria-label={`${tool.name} ${enabled ? "Enabled" : "Disabled"}`}
+                                aria-checked={enabled}
+                                checked={enabled}
+                                onChange={() => void handleToggleAgentTool(tool)}
+                                disabled={busy}
+                              />
+                              <span className="tool-switch-track" data-on={enabled ? "true" : "false"} aria-hidden="true">
+                                <span className="tool-switch-thumb" />
+                              </span>
+                              <span className="tool-switch-state">
+                                {togglingAgentToolId === tool.id ? "Updating…" : enabled ? "Enabled" : "Disabled"}
+                              </span>
+                            </label>
+                            <button
+                              type="button"
+                              className="ghost icon-text-btn"
+                              onClick={() => void handleRunAgentTool(tool)}
+                              disabled={busy || !enabled}
+                              title={enabled ? `Run ${tool.name}` : `Re-enable ${tool.name} before running`}
+                            >
+                              <span>{runningAgentToolId === tool.id ? "Running…" : "Run"}</span>
+                            </button>
+                          </div>
+                        </div>
+                        <div className="muted text-sm" style={{ marginTop: "4px", fontSize: "0.78rem" }}>
+                          <code>{tool.scriptPath}</code>
+                        </div>
+                        {output ? (
+                          <pre style={{ margin: "8px 0 0 0", padding: "8px 10px", borderRadius: "6px", background: "var(--bg-secondary, #141822)", fontSize: "0.78rem", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                            {output}
+                          </pre>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {/* Promote editor is a div, not a form: the Tools tab already
+                  lives inside the shared settings <form>, and a nested form
+                  is invalid HTML (validateDOMNesting) that would also bubble
+                  Enter to the outer Save. Enter is handled via onKeyDown
+                  below so keyboard submit still promotes. */}
+              <div
+                style={{ marginTop: "14px", padding: "12px", borderRadius: "8px", background: "var(--bg-secondary, #141822)", border: "1px solid var(--border-color, #2d3748)" }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !promotingTool) {
+                    e.preventDefault();
+                    void handlePromoteAgentTool();
+                  }
+                }}
+              >
+                <h5 style={{ margin: "0 0 8px 0" }}>Promote a script</h5>
+                <div className="form-row" style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                  <div className="form-group" style={{ flex: "1 1 160px" }}>
+                    <label htmlFor="promote-tool-name">Tool name</label>
+                    <input
+                      id="promote-tool-name"
+                      type="text"
+                      className="input-field"
+                      placeholder="cleanup"
+                      value={promoteName}
+                      onChange={(e) => {
+                        setPromoteName(e.target.value);
+                        if (promoteError) setPromoteError(null);
+                      }}
+                      disabled={promotingTool}
+                    />
+                  </div>
+                  <div className="form-group" style={{ flex: "2 1 240px" }}>
+                    <label htmlFor="promote-tool-path">Script path</label>
+                    <input
+                      id="promote-tool-path"
+                      type="text"
+                      className="input-field"
+                      placeholder="workspace/tools/cleanup.sh"
+                      value={promoteScriptPath}
+                      onChange={(e) => {
+                        setPromoteScriptPath(e.target.value);
+                        if (promoteError) setPromoteError(null);
+                      }}
+                      disabled={promotingTool}
+                    />
+                    <span className="form-group-hint">
+                      Only scripts inside {WORKSPACE_TOOLS_PREFIX} can be promoted.
+                    </span>
+                  </div>
+                </div>
+                {promoteScriptPath.trim() && !isPromotableScriptPath(promoteScriptPath) ? (
+                  <p className="muted text-sm" style={{ color: "#ed8936", margin: "6px 0 0 0" }}>
+                    Only scripts inside {WORKSPACE_TOOLS_PREFIX} can be promoted.
+                  </p>
+                ) : null}
+                {promoteError ? (
+                  <div className="error-banner" style={{ marginTop: "8px", display: "flex", alignItems: "center", gap: "8px" }}>
+                    <AlertTriangleIcon size={16} />
+                    <span>{promoteError}</span>
+                  </div>
+                ) : null}
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "10px" }}>
+                  <button type="button" className="primary" disabled={promotingTool} onClick={() => void handlePromoteAgentTool()}>
+                    {promotingTool ? "Promoting…" : "Promote tool"}
+                  </button>
+                </div>
+              </div>
+            </section>
 
             {/* Plugin Configuration */}
             <div style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid var(--border-color, #2d3748)" }}>
@@ -7078,6 +7525,57 @@ export default function SettingsManager() {
           void loadPluginsData();
         }}
       />
+
+      {/* Workspace tmp prune confirmation via the shared modal: pruning
+          deletes expired tmp/ entries and cannot be undone, so an explicit
+          confirm stands between the button and the POST. */}
+      {pendingPruneWorkspace ? (
+        <Modal
+          label="Confirm prune workspace tmp"
+          onClose={() => {
+            if (pruningWorkspace) return;
+            setPendingPruneWorkspace(false);
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Prune workspace tmp?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setPendingPruneWorkspace(false)}
+              disabled={pruningWorkspace}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              This deletes expired entries under workspace/tmp/. This cannot be undone.
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setPendingPruneWorkspace(false)}
+              disabled={pruningWorkspace}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void handleConfirmPruneWorkspace()}
+              disabled={pruningWorkspace}
+              aria-label="Confirm prune workspace tmp"
+            >
+              {pruningWorkspace ? "Pruning…" : "Prune tmp"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
 
       {/* Persisted plugin uninstall confirmation via the shared modal. */}
       {pendingUninstallPlugin ? (

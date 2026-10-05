@@ -1,14 +1,21 @@
 // Rune Weaver Tools — Built-in tool plugin registration surface.
 //
 // Single-sources the full built-in suite (Email, Messages, Files, Bash, Memory,
-// Goals, Fan-out, Web, Browser, API, Media, Desktop) shared by CLI, the menu-bar app, and serve. `CLIShared.makeToolBus`,
+// Goals, Agent scripts, Fan-out, Web, Browser, API, Media, Desktop) shared by CLI, the menu-bar app, and serve. `CLIShared.makeToolBus`,
 // `AppModel`, and `ServerContext.make` all build through this helper so the
 // registry cannot drift between entry points. Web, browser, and API tools run
 // under one `[browser]` policy; `api.request` additionally exempts the
 // configured LLM origins from the SSRF loopback deny. Goal tools register only
 // when both the engine and store arrive (nil means unregistered); a disabled
 // `[goals]` section still registers and fails closed inside each tool so the
-// surface stays visible instead of shape-shifting. Fan-out tools follow the
+// surface stays visible instead of shape-shifting. Agent script tools follow
+// the same optional-store posture: they join only when the pin store arrives
+// (nil keeps them unregistered) and share the live shell plus workspace so the
+// CLI and the service observe one hash-pinned registry. Agent scripts are
+// tool-invoked-only capabilities, so they follow the ships-disabled invariant
+// like fan-out and desktop: they register disabled behind the tool-state
+// toggle (see `shipsDisabledToolNames`), and the toggle is the sole authority.
+// Fan-out tools follow the
 // ships-disabled invariant: registration rides the optional fan-out engine
 // (nil means unregistered), and the tool registers disabled behind the
 // tool-state toggle like the desktop tools, so a stock install never puts
@@ -23,26 +30,6 @@ import RuneWeaverCore
 
 /// Shared built-in tool suites registered on every `ToolBus` by CLI, app, and serve.
 public enum BuiltinToolPlugins {
-    /// Tool names in registration order for the web/browser subset.
-    public static var toolNames: [String] {
-        WebTools.toolNames + BrowserTools.toolNames + ApiRequestTools.toolNames
-    }
-
-    /// All built-in tool names across every suite in registration order
-    /// (email, messages, files, bash, memory, goals, web, browser, api, media, desktop, fanout).
-    public static var allToolNames: [String] {
-        EmailTools.toolNames
-            + MessagesTools.toolNames
-            + FilesTools.toolNames
-            + ["bash.exec"]
-            + MemoryTools.toolNames
-            + GoalTools.toolNames
-            + toolNames
-            + MediaTools.toolNames
-            + DesktopTools.allToolNames
-            + FanOutTools.toolNames
-    }
-
     /// Tool names that ship disabled on every fresh registration.
     ///
     /// The tool-state toggle is the sole authority for these capabilities: boot
@@ -52,7 +39,7 @@ public enum BuiltinToolPlugins {
     /// until the operator enables them. Every fresh-registration site consumes
     /// this set so the boot paths cannot drift.
     public static let shipsDisabledToolNames: Set<String> = Set(
-        DesktopTools.allToolNames + FanOutTools.toolNames
+        DesktopTools.allToolNames + FanOutTools.toolNames + AgentTools.toolNames
     )
 
     /// Builds the shared five-tool set for one `[browser]` policy.
@@ -138,13 +125,20 @@ public enum BuiltinToolPlugins {
             )
     }
 
-    /// Builds the full built-in tool suite (Email, Messages, Files, Bash, Memory, Goals, Web, Browser, API, Media, Desktop, Fan-out)
+    /// Builds the full built-in tool suite (Email, Messages, Files, Bash, Memory, Goals, Agent scripts, Web, Browser, API, Media, Desktop, Fan-out)
     /// from component configurations.
     ///
     /// Goal tools join only when both the engine and store arrive; nil keeps them
     /// unregistered so callers without pursuit wiring see no shape change. A disabled
     /// `[goals]` section still registers through the same path and fails closed inside
     /// each tool, keeping `GET /tools` stable instead of shape-shifting with config.
+    /// Agent script tools join only when the pin store arrives; nil keeps them
+    /// unregistered so callers without workspace wiring see no shape change. They
+    /// share the live shell plus workspace with `bash.exec`, so the CLI and the
+    /// service observe one hash-pinned registry instead of two drifting ones.
+    /// They are tool-invoked-only capabilities, so they register disabled behind
+    /// the tool-state toggle (see `shipsDisabledToolNames`) with no config gate
+    /// overriding that state.
     /// Fan-out tools follow the ships-disabled invariant: the tool joins only when
     /// the fan-out engine arrives (nil keeps it unregistered), and it registers
     /// disabled behind the tool-state toggle (see `shipsDisabledToolNames`) with
@@ -195,7 +189,10 @@ public enum BuiltinToolPlugins {
         supersededReviewNotifier: (@Sendable (String) async -> Void)? = nil,
         fanOutEngine: FanOutEngine? = nil,
         policyStore: PolicyStore? = nil,
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor? = nil,
+        workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
+        workspaceStore: WorkspaceStore? = nil,
+        agentToolStore: AgentToolStore? = nil
     ) async throws -> [any Tool] {
         // Resolve the one store first so exactly one instance backs this
         // build; the inner web/browser build reuses it instead of loading a
@@ -238,13 +235,18 @@ public enum BuiltinToolPlugins {
         )
         // Bash always registers so GET /tools stays stable; a disabled
         // config fails closed inside BashTool.execute via its enabled guard.
-        tools.append(
-            BashTool(
-                bashConfig: bashConfig,
-                filesConfig: filesConfig ?? FilesConfig(),
-                egressSupervisor: supervisor
-            )
+        // The workspace scratch quotas travel with the shell so the default
+        // cwd and the pre-exec quota gate observe file config. The instance
+        // is retained so the agent script runner can delegate to the same
+        // shell instead of minting a second policy.
+        let bashTool = BashTool(
+            bashConfig: bashConfig,
+            filesConfig: filesConfig ?? FilesConfig(),
+            egressSupervisor: supervisor,
+            workspaceConfig: workspaceConfig,
+            workspaceStore: workspaceStore
         )
+        tools.append(bashTool)
         if let memoryEngine {
             tools += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
         }
@@ -256,6 +258,14 @@ public enum BuiltinToolPlugins {
                 goalsConfig: goalsConfig,
                 goalUpdatedNotifier: goalUpdatedNotifier
             )
+        }
+        if let agentToolStore {
+            // The agent runner shares the live shell plus workspace with
+            // `bash.exec` so verification, cwd pinning, and quota gating stay
+            // single-sourced; a derived store keeps hermetic callers working
+            // when no explicit workspace was injected.
+            let effectiveWorkspace = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
+            tools += AgentTools.makeTools(store: agentToolStore, bash: bashTool, workspace: effectiveWorkspace)
         }
         tools += try await makeTools(
             browserConfig: browserConfig,
@@ -317,7 +327,9 @@ public enum BuiltinToolPlugins {
         fanOutEngine: FanOutEngine? = nil,
         policyStore: PolicyStore? = nil,
         egressSupervisor: OutboundEgressSupervisor? = nil,
-        recipientAliasStore: (any MessageAliasStoring)? = nil
+        recipientAliasStore: (any MessageAliasStoring)? = nil,
+        workspaceStore: WorkspaceStore? = nil,
+        agentToolStore: AgentToolStore? = nil
     ) async throws -> [any Tool] {
         let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
         return try await makeAllTools(
@@ -347,7 +359,10 @@ public enum BuiltinToolPlugins {
             recipientAliasStore: recipientAliasStore,
             fanOutEngine: fanOutEngine,
             policyStore: policyStore,
-            egressSupervisor: egressSupervisor
+            egressSupervisor: egressSupervisor,
+            workspaceConfig: config.workspace,
+            workspaceStore: workspaceStore,
+            agentToolStore: agentToolStore
         )
     }
 
@@ -357,11 +372,15 @@ public enum BuiltinToolPlugins {
     ///
     /// Capabilities in `shipsDisabledToolNames` always register but arrive
     /// disabled: persisted tool-state rows re-apply via `restoreToolStates`, so a
-    /// stock install never puts screen capture or parallel worker fan-out in front
-    /// of the model at boot until the operator enables the tool-state toggle. Goal
+    /// stock install never puts screen capture, parallel worker fan-out, or
+    /// owner-promoted scripts in front of the model at boot until the operator
+    /// enables the tool-state toggle. Goal
     /// tools register only when both the engine and store arrive, and they arrive
     /// enabled even when `[goals]` is off so the honest disabled copy (not a
-    /// bus-disabled line) answers. Fan-out tools follow the same ships-disabled
+    /// bus-disabled line) answers. Agent script tools register only when the pin
+    /// store arrives, sharing the live shell plus workspace so dashboard and CLI
+    /// see one registry, and they arrive disabled with the tool-state toggle as
+    /// the sole authority — no second gate. Fan-out tools follow the same ships-disabled
     /// posture: they register only when the fan-out engine arrives, and they arrive
     /// disabled with the tool-state toggle as the sole authority — no second gate.
     /// - Parameter policyStore: Shared security policy store; nil builds and
@@ -405,7 +424,10 @@ public enum BuiltinToolPlugins {
         supersededReviewNotifier: (@Sendable (String) async -> Void)? = nil,
         fanOutEngine: FanOutEngine? = nil,
         policyStore: PolicyStore? = nil,
-        egressSupervisor: OutboundEgressSupervisor? = nil
+        egressSupervisor: OutboundEgressSupervisor? = nil,
+        workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
+        workspaceStore: WorkspaceStore? = nil,
+        agentToolStore: AgentToolStore? = nil
     ) async throws {
         let shipsDisabled = Self.shipsDisabledToolNames
         for tool in try await makeAllTools(
@@ -442,7 +464,10 @@ public enum BuiltinToolPlugins {
             supersededReviewNotifier: supersededReviewNotifier,
             fanOutEngine: fanOutEngine,
             policyStore: policyStore,
-            egressSupervisor: egressSupervisor
+            egressSupervisor: egressSupervisor,
+            workspaceConfig: workspaceConfig,
+            workspaceStore: workspaceStore,
+            agentToolStore: agentToolStore
         ) {
             // Every other builtin keeps the enabled-by-default registration;
             // capabilities in `shipsDisabledToolNames` ship disabled so only an
@@ -450,6 +475,29 @@ public enum BuiltinToolPlugins {
             // registration).
             await bus.register(tool: tool, isEnabled: !shipsDisabled.contains(tool.name))
         }
+    }
+}
+
+extension BuiltinToolPlugins {
+    /// Tool names in registration order for the web/browser subset.
+    public static var toolNames: [String] {
+        WebTools.toolNames + BrowserTools.toolNames + ApiRequestTools.toolNames
+    }
+
+    /// All built-in tool names across every suite in registration order
+    /// (email, messages, files, bash, memory, goals, agent scripts, web, browser, api, media, desktop, fanout).
+    public static var allToolNames: [String] {
+        EmailTools.toolNames
+            + MessagesTools.toolNames
+            + FilesTools.toolNames
+            + ["bash.exec"]
+            + MemoryTools.toolNames
+            + GoalTools.toolNames
+            + AgentTools.toolNames
+            + toolNames
+            + MediaTools.toolNames
+            + DesktopTools.allToolNames
+            + FanOutTools.toolNames
     }
 
     /// Builds the mandatory egress supervisor from the already-resolved store.

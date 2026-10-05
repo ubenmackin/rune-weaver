@@ -57,6 +57,7 @@ extension RuneWeaverConfig {
         lines += renderProactiveTOML()
         lines += renderIdeasTOML()
         lines += renderFanOutTOML()
+        lines += renderWorkspaceTOML()
         lines += renderPersonaTOML()
         return lines.joined(separator: "\n")
     }
@@ -451,6 +452,8 @@ extension RuneWeaverConfig {
             "default_action = \(Self.tomlQuoted(bash.defaultAction.rawValue))",
             "timeout_seconds = \(bash.timeoutSeconds)",
             "allow_network = \(bash.allowNetwork ? "true" : "false")",
+            "cpu_seconds = \(bash.cpuSeconds)",
+            "memory_mb = \(bash.memoryMB)",
             ""
         ]
         for rule in bash.rules {
@@ -503,6 +506,21 @@ extension RuneWeaverConfig {
             "max_workers = \(fanOut.maxWorkers)",
             "worker_timeout_seconds = \(fanOut.workerTimeoutSeconds)",
             "full_tools = \(fanOut.fullTools ? "true" : "false")",
+            ""
+        ]
+    }
+
+    /// Renders the additive `[workspace]` section.
+    ///
+    /// Every knob renders so a saved file documents the scratch quotas and a
+    /// round-trip never depends on an implicit default silently diverging from
+    /// what was written.
+    private func renderWorkspaceTOML() -> [String] {
+        [
+            "[workspace]",
+            "quota_mb = \(workspace.quotaMB)",
+            "quota_files = \(workspace.quotaFiles)",
+            "tmp_ttl_days = \(workspace.tmpTTLDays)",
             ""
         ]
     }
