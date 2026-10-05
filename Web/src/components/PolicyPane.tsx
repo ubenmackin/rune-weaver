@@ -563,6 +563,9 @@ export interface NetworkEgressEditorsProps {
   onModeChange?: (mode: string) => void;
   onAllowedDomainsChange?: (domains: string[]) => void;
   onBlockedDomainsChange?: (domains: string[]) => void;
+  onRecheck?: () => void;
+  rechecking?: boolean;
+  applying?: boolean;
 }
 
 // Structured network egress editors. The mode select offers exactly the two
@@ -581,28 +584,57 @@ export function NetworkEgressEditors({
   onModeChange,
   onAllowedDomainsChange,
   onBlockedDomainsChange,
+  onRecheck,
+  rechecking,
+  applying,
 }: NetworkEgressEditorsProps) {
   const allowedList = allowedDomains ?? [];
   const blockedList = blockedDomains ?? [];
   const localList = localExemptions ?? [];
-  const allowedText = formatDomainLines(allowedList);
-  const blockedText = formatDomainLines(blockedList);
+  // Display buffers keep the typed text while the parent draft stays canonical,
+  // so a trailing space stays visible instead of vanishing on the next render.
+  const [allowedBuffer, setAllowedBuffer] = useState<string>(() => formatDomainLines(allowedList));
+  const [blockedBuffer, setBlockedBuffer] = useState<string>(() => formatDomainLines(blockedList));
   const localText = formatDomainLines(localList);
   const shadowWarnings = findEgressShadowWarnings(allowedList, blockedList);
   const invalidAllowed = allowedList.filter((entry) => !isValidDomainLine(entry));
   const invalidBlocked = blockedList.filter((entry) => !isValidDomainLine(entry));
 
+  useEffect(() => {
+    const propText = formatDomainLines(allowedList);
+    if (JSON.stringify(parseDomainLines(allowedBuffer)) !== JSON.stringify(allowedList)) {
+      setAllowedBuffer(propText);
+    }
+  }, [allowedList]);
+
+  useEffect(() => {
+    const propText = formatDomainLines(blockedList);
+    if (JSON.stringify(parseDomainLines(blockedBuffer)) !== JSON.stringify(blockedList)) {
+      setBlockedBuffer(propText);
+    }
+  }, [blockedList]);
+
   function handleAllowedTextChange(raw: string) {
+    setAllowedBuffer(raw);
     if (onAllowedDomainsChange) onAllowedDomainsChange(parseDomainLines(raw));
   }
 
   function handleBlockedTextChange(raw: string) {
+    setBlockedBuffer(raw);
     if (onBlockedDomainsChange) onBlockedDomainsChange(parseDomainLines(raw));
   }
 
   return (
-    <section aria-label="Network egress" data-testid="network-egress-editors">
-      <h4>Network egress</h4>
+    <section aria-label="Network egress" data-testid="network-egress-editors" className="policy-network-section">
+      <div className="settings-section-header">
+        <h4>Network egress</h4>
+        {onRecheck ? (
+          <button type="button" className="ghost" data-testid="policy-recheck"
+            onClick={onRecheck} disabled={rechecking || applying}>
+            {rechecking ? "Checking…" : "Re-check local access"}
+          </button>
+        ) : null}
+      </div>
       <p className="settings-section-hint">
         Outbound boundaries. One binding pairs one key with hosts, methods, and path
         prefixes below.
@@ -632,7 +664,7 @@ export function NetworkEgressEditors({
           id="policy-allowed-domains"
           aria-label="Allowed domains"
           className="input-field"
-          value={allowedText}
+          value={allowedBuffer}
           onChange={(event) => handleAllowedTextChange(event.target.value)}
           placeholder="api.example.com"
           rows={5}
@@ -654,7 +686,7 @@ export function NetworkEgressEditors({
           id="policy-blocked-domains"
           aria-label="Blocked domains"
           className="input-field"
-          value={blockedText}
+          value={blockedBuffer}
           onChange={(event) => handleBlockedTextChange(event.target.value)}
           placeholder="metadata.google.internal"
           rows={5}
@@ -680,14 +712,13 @@ export function NetworkEgressEditors({
           value={localText}
           readOnly
           placeholder="No local exemptions"
-          rows={3}
+          rows={5}
         />
         <span className="form-group-hint" data-testid="local-exemptions-count">
           {localList.length} {localList.length === 1 ? "host" : "hosts"} — read-only, one per line
         </span>
         <span className="form-group-hint" data-testid="local-exemptions-hint">
-          Exact hosts resolving to private addresses are granted when added. Wildcards never
-          auto-grant. Metadata and link-local hosts are never allowed.
+          Not editable here — the server derives these grants. Exact hosts in Allowed domains that resolve to private addresses are granted when added or via Re-check local access. Wildcards never auto-grant. Metadata and link-local hosts are never allowed.
         </span>
       </div>
       {shadowWarnings.length > 0 ? (
@@ -1011,7 +1042,8 @@ export function PolicyPane() {
   const [localGranted, setLocalGranted] = useState<string[]>([]);
   const [localRemoved, setLocalRemoved] = useState<string[]>([]);
   const [neverDialableHosts, setNeverDialableHosts] = useState<string[]>([]);
-  // Re-check preview state. Preview never writes; Confirm applies.
+  // Re-check preview state. Preview never writes; Apply grants persists the
+  // re-classified set while Cancel discards the preview without writing.
   const [recheckPreview, setRecheckPreview] = useState<LocalRecheckPreview | null>(null);
   const [recheckOpen, setRecheckOpen] = useState<boolean>(false);
   const [rechecking, setRechecking] = useState<boolean>(false);
@@ -1237,7 +1269,7 @@ export function PolicyPane() {
   }
 
   // Applies the previewed re-check, then refreshes the draft, banner, and
-  // last-loaded tracking from the response. Confirm stays disabled while
+  // last-loaded tracking from the response. Apply grants stays disabled while
   // unresolved is non-empty; a 400 keeps the draft and surfaces the server
   // reason naming unresolved hosts.
   async function handleApplyRecheck() {
@@ -1476,6 +1508,9 @@ export function PolicyPane() {
               onModeChange={handleModeChange}
               onAllowedDomainsChange={handleAllowedDomainsChangeFromEditor}
               onBlockedDomainsChange={handleBlockedDomainsChangeFromEditor}
+              onRecheck={() => void handleRecheck()}
+              rechecking={rechecking}
+              applying={applying}
             />
           </section>
 
@@ -1574,8 +1609,8 @@ export function PolicyPane() {
               </div>
               <div className="modal-body">
                 <p className="muted text-sm" style={{ margin: "0 0 8px 0" }}>
-                  Preview of the local-access grants this draft would create. Confirm
-                  re-classifies every exact host server-side and applies the result.
+                  Preview of the local-access grants this draft would create. Apply grants
+                  re-classifies every exact host server-side and persists the result.
                 </p>
                 <div data-testid="policy-recheck-added" style={{ marginBottom: "8px" }}>
                   <strong>Added ({recheckPreview.added.length}):</strong>{" "}
@@ -1598,7 +1633,7 @@ export function PolicyPane() {
                     <p className="muted text-sm" style={{ margin: "4px 0 0 0" }}>
                       Cannot apply while {recheckPreview.unresolved.length}{" "}
                       {recheckPreview.unresolved.length === 1 ? "host remains" : "hosts remain"}{" "}
-                      unresolved. Resolve or remove these hosts before confirming.
+                      unresolved. Resolve or remove these hosts before applying.
                     </p>
                   </div>
                 ) : null}
@@ -1629,23 +1664,11 @@ export function PolicyPane() {
                   onClick={() => void handleApplyRecheck()}
                   disabled={recheckPreview.unresolved.length > 0 || applying}
                 >
-                  {applying ? "Applying…" : "Confirm"}
+                  {applying ? "Applying…" : "Apply grants"}
                 </button>
               </div>
             </Modal>
           ) : null}
-
-          <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "16px" }}>
-            <button
-              type="button"
-              className="ghost"
-              data-testid="policy-recheck"
-              onClick={() => void handleRecheck()}
-              disabled={!draft || rechecking || applying}
-            >
-              {rechecking ? "Checking…" : "Re-check local access"}
-            </button>
-          </div>
 
           <div className="settings-footer">
             {changed ? <span className="muted text-sm">Unsaved changes.</span> : null}

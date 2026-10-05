@@ -98,6 +98,11 @@ describe("PolicyPane", () => {
     expect(await screen.findByText("Keychain Stored")).toBeDefined();
     expect(screen.getByText(/All 3 Formal Security Invariants Verified/)).toBeDefined();
     expect(screen.getByTestId("policy-location").textContent).toContain("Customized");
+    // The egress editors own their vertical rhythm, so the section carries the
+    // scoped spacing class that separates each hint from the next label.
+    expect(screen.getByTestId("network-egress-editors").className).toContain(
+      "policy-network-section"
+    );
 
     // The retired contract is gone: no raw editor and no Verify button.
     expect(screen.queryByText(/Raw TOML/i)).toBeNull();
@@ -638,8 +643,13 @@ describe("PolicyPane", () => {
     const area = screen.getByTestId("policy-local-exemptions") as HTMLTextAreaElement;
     expect(area.value).toContain("airflow.int.volcrypt.com");
     expect(area.readOnly).toBe(true);
+    // The local display matches the editable editors in height so the section
+    // keeps one vertical rhythm even though the field itself never edits.
+    expect(area.rows).toBe(5);
     expect(screen.getByTestId("local-exemptions-count").textContent).toContain("1");
     const hint = screen.getByTestId("local-exemptions-hint").textContent ?? "";
+    expect(hint).toContain("Not editable here");
+    expect(hint).toContain("Re-check local access");
     expect(hint).toContain("private addresses");
     expect(hint).toContain("Wildcards never");
     expect(hint).toContain("Metadata");
@@ -865,7 +875,9 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
-    await user.click(screen.getByTestId("policy-recheck"));
+    await user.click(
+      within(screen.getByTestId("network-egress-editors")).getByTestId("policy-recheck")
+    );
 
     const modal = await screen.findByTestId("policy-recheck-modal");
     expect(within(modal).getByTestId("policy-recheck-added").textContent).toContain(
@@ -877,6 +889,9 @@ describe("PolicyPane", () => {
     const confirm = within(modal).getByTestId(
       "policy-recheck-confirm"
     ) as HTMLButtonElement;
+    // The persist action reads as Apply grants so its write consequence is
+    // explicit beside the discarding Cancel; Cancel closes without writing.
+    expect(confirm.textContent).toBe("Apply grants");
     expect(confirm.disabled).toBe(false);
 
     await user.click(confirm);
@@ -917,7 +932,9 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
-    await user.click(screen.getByTestId("policy-recheck"));
+    await user.click(
+      within(screen.getByTestId("network-egress-editors")).getByTestId("policy-recheck")
+    );
 
     const modal = await screen.findByTestId("policy-recheck-modal");
     expect(within(modal).getByTestId("policy-recheck-unresolved").textContent).toContain(
@@ -942,5 +959,47 @@ describe("PolicyPane", () => {
     expect(saveButton).toHaveClass("primary-button");
     expect(saveButton).toHaveClass("save-button");
     expect(saveButton.closest(".settings-footer")).not.toBeNull();
+  });
+
+  it("keeps a trailing space visible while the draft records the trimmed host", async () => {
+    stubPaneFetch(() => jsonResponse(panePolicyPayload));
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    // A trailing space is display-only: the textarea keeps it while the draft
+    // parses the trimmed host, so the count still names the host with no error.
+    const allowed = screen.getByLabelText("Allowed domains") as HTMLTextAreaElement;
+    await user.clear(allowed);
+    await user.type(allowed, "api.example.com ");
+    await waitFor(() => {
+      expect((screen.getByLabelText("Allowed domains") as HTMLTextAreaElement).value).toBe(
+        "api.example.com "
+      );
+    });
+    expect(screen.getByTestId("allowed-domains-count").textContent).toContain("1 host");
+    expect(screen.queryByTestId("allowed-domains-error")).toBeNull();
+  });
+
+  it("keeps an internal-space line visible and names it in the inline error", async () => {
+    stubPaneFetch(() => jsonResponse(panePolicyPayload));
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    // An internal space never matches at runtime, so the text stays visible
+    // and the inline error names the line instead of eating the space.
+    const allowed = screen.getByLabelText("Allowed domains") as HTMLTextAreaElement;
+    await user.clear(allowed);
+    await user.type(allowed, "foo bar");
+    await waitFor(() => {
+      expect((screen.getByLabelText("Allowed domains") as HTMLTextAreaElement).value).toBe(
+        "foo bar"
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("allowed-domains-error")).toBeDefined();
+    });
+    expect(screen.getByTestId("allowed-domains-error").textContent).toContain("foo bar");
   });
 });

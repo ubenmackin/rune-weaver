@@ -1351,15 +1351,9 @@ describe("SettingsManager", () => {
       )
     ).toBeDefined();
 
-    // Auto-Allowed copy exempts configured service origins from SSRF blocking
-    // only, still requires Policy authorization, and no longer claims email
+    // The service summary card is gone and the modal no longer claims email
     // auto-trust (the supervisor ignores emailConfig).
-    expect(
-      screen.getByText(/automatically exempt from SSRF blocking only/i)
-    ).toBeDefined();
-    expect(
-      screen.getByText(/Calls still require Policy authorization or approval/i)
-    ).toBeDefined();
+    expect(screen.queryByText(/Auto-Allowed Services/i)).toBeNull();
     expect(
       screen.queryByText(/email host servers are automatically trusted/i)
     ).toBeNull();

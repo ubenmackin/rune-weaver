@@ -3316,6 +3316,20 @@ button:disabled {
   margin-top: 2px;
 }
 
+/* Network egress editors keep a single 16px rhythm between the heading, hint
+   paragraphs, and field groups; zeroing the inner margins keeps the gap from doubling. */
+.policy-network-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.policy-network-section h4 {
+  margin: 0;
+}
+.policy-network-section .settings-section-hint {
+  margin: 0;
+}
+
 .flex-1 { flex: 1; min-width: 200px; }
 .flex-2 { flex: 2; min-width: 300px; }
 
