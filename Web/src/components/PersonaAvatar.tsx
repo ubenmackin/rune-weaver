@@ -8,7 +8,8 @@
 // through which persona identity and agent liveness travel between the components that
 // own them (Settings publishes the saved persona; ChatView publishes activity and
 // working state; TopNav publishes the attention badges it already receives) and the
-// components that render them (the top-nav profile block and the chat header).
+// component that renders the single avatar image (the dashboard greeting cluster;
+// profile and chat surfaces show text identity only).
 // Scope: rendering and client-owned liveness signals only. Persona persistence stays
 // on the settings save path, and the sprite bytes stay the deterministic output of the
 // generator script; this module never fabricates an identity, invents an asset, or
@@ -18,7 +19,10 @@
 // image that cannot load falls back to the brand `RuneGlyph` — so server data can never
 // throw here and the user can never see a broken image. The store mirrors the shared
 // `useRunningRuns` external-store idiom (module state, listener set, `useSyncExternalStore`,
-// test-only reset) rather than prop-drilling identity through every screen.
+// test-only reset) rather than prop-drilling identity through every screen. Motion is
+// transform-only float gated behind `prefers-reduced-motion: no-preference` with a
+// static-frame fallback, and the sleeping dim lives in the prerendered asset itself,
+// never in a CSS filter, so reduced-motion owners always see a still frame.
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 import {
@@ -270,29 +274,38 @@ export function resetPersonaSignalsForTesting(): void {
 // Largest delay `setTimeout` can actually represent: both Node and the HTML
 // timer spec treat anything above the signed 32-bit ceiling as an overflow —
 // Node warns and fires after 1 ms, browsers refuse the wake silently.
-const MAX_TIMER_DELAY_MS = 2_147_483_647;
+// Exported so the dashboard greeting cluster shares the single clamp instead
+// of mirroring the literal.
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
-// Resolves the sprite state from the shared signals for one identity surface.
-// The pure priority is re-evaluated on every relevant store change; the only
-// extra machinery is a timer that wakes the component when the idle clock
-// crosses `AVATAR_SLEEP_MS`, so idle→sleeping lands without any polling.
-// Attention and working short-circuit sleeping, so no timer is armed while
-// either is active.
+// Single clamp for every sleep-deadline wake: keeps an epoch-scale remaining
+// duration inside the platform timer ceiling. On a coherent clock the clamp
+// is inert because the deadline sits at most `AVATAR_SLEEP_MS` away.
+export function clampSleepWakeDelay(remainingMs: number): number {
+  return Math.min(remainingMs, MAX_TIMER_DELAY_MS);
+}
+
+// Shared idle→sleeping clock. Returns a `nowMs` that advances exactly when the
+// idle clock crosses `AVATAR_SLEEP_MS`, so idle→sleeping lands without any
+// polling. Attention and working short-circuit sleeping, so no timer arms
+// while either is active.
 //
-// The wake delay is always re-derived from the absolute sleep deadline against
-// the CURRENT `Date.now()` and clamped to `MAX_TIMER_DELAY_MS`, so an epoch
-// scale timestamp can never be passed as a duration. On a coherent clock the
-// clamp is inert — the deadline is at most `AVATAR_SLEEP_MS` away, so one
-// timer still lands exactly on the threshold. Only when two clock sources
-// disagree (a test clock parked at epoch beside a store value written by a
-// real `Date.now()`) does the effect re-arm on each fire until the deadline
-// genuinely passes, keeping the idle→sleeping landing intact in that
-// pathological case instead of overflowing the timer into an immediate wake.
-export function useResolvedAvatarState(): AvatarState {
-  const { attention, working, lastActivityAtMs } = usePersonaSignals();
+// The wake delay is always re-derived from the absolute sleep deadline
+// against the CURRENT `Date.now()` and clamped, so an epoch scale timestamp
+// can never be passed as a duration. On a coherent clock one timer still
+// lands exactly on the threshold. Only when two clock sources disagree (a
+// test clock parked at epoch beside a store value written by a real
+// `Date.now()`) does the effect re-arm on each fire until the deadline
+// genuinely passes, keeping the landing intact in that pathological case
+// instead of overflowing the timer into an immediate wake.
+export function useSleepWakeNow(
+  hasAttention: boolean,
+  isWorking: boolean,
+  lastActivityAtMs: number,
+): number {
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
-    if (attention || working) return;
+    if (hasAttention || isWorking) return;
     if (lastActivityAtMs <= 0) return;
     const sleepDeadlineAtMs = lastActivityAtMs + AVATAR_SLEEP_MS;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -305,19 +318,135 @@ export function useResolvedAvatarState(): AvatarState {
         setNowMs(Date.now());
         return;
       }
-      timer = setTimeout(arm, Math.min(remaining, MAX_TIMER_DELAY_MS));
+      timer = setTimeout(arm, clampSleepWakeDelay(remaining));
     };
     arm();
     return () => {
       if (timer !== null) clearTimeout(timer);
     };
-  }, [attention, working, lastActivityAtMs]);
+  }, [hasAttention, isWorking, lastActivityAtMs]);
+  return nowMs;
+}
+
+// Resolves the sprite state from the shared signals for one identity surface.
+// The pure priority is re-evaluated on every relevant store change; the only
+// extra machinery is the shared sleep-wake clock above, so idle→sleeping
+// lands without any polling.
+export function useResolvedAvatarState(): AvatarState {
+  const { attention, working, lastActivityAtMs } = usePersonaSignals();
+  const nowMs = useSleepWakeNow(attention, working, lastActivityAtMs);
   return resolveAvatarState({
     hasAttention: attention,
     isWorking: working,
     lastActivityAtMs,
     nowMs,
   });
+}
+
+// Reads the reduced-motion preference once per render cycle and stays
+// subscribed to live toggles. The initial state is lazily computed (memoized
+// across renders) and the effect subscribes to the media-query change event,
+// so a mid-session toggle stills or resumes the blink while the CSS float
+// follows the same preference through its own media query.
+function readPrefersReducedMotion(): boolean {
+  const query = "(prefers-reduced-motion: reduce)";
+  try {
+    if (
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function"
+    ) {
+      return window.matchMedia(query).matches === true;
+    }
+    if (
+      typeof globalThis !== "undefined" &&
+      typeof (globalThis as { matchMedia?: unknown }).matchMedia ===
+        "function"
+    ) {
+      return (
+        (
+          globalThis as {
+            matchMedia: (q: string) => { matches: boolean };
+          }
+        ).matchMedia(query).matches === true
+      );
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+// Minimal structural shape for the reduced-motion query. The dashboard only
+// reads the initial `matches` flag and the change subscription, and the test
+// bundle stubs the global with that same subset, so the hook stays structural
+// instead of depending on the full DOM list type across browsers and jsdom.
+type ReducedMotionQuery = {
+  matches: boolean;
+  addEventListener?: (
+    type: string,
+    listener: (e: { matches: boolean }) => void,
+  ) => void;
+  removeEventListener?: (
+    type: string,
+    listener: (e: { matches: boolean }) => void,
+  ) => void;
+  addListener?: (listener: (e: { matches: boolean }) => void) => void;
+  removeListener?: (listener: (e: { matches: boolean }) => void) => void;
+};
+
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(() => readPrefersReducedMotion());
+  useEffect(() => {
+    const query = "(prefers-reduced-motion: reduce)";
+    // Typed explicitly rather than via `typeof mql`: a self-referential cast
+    // collapses the union to its null member, leaving every later member
+    // access narrowed to never.
+    let mql: ReducedMotionQuery | null = null;
+    try {
+      if (
+        typeof window !== "undefined" &&
+        typeof window.matchMedia === "function"
+      ) {
+        mql = window.matchMedia(query) as unknown as ReducedMotionQuery;
+      } else if (
+        typeof globalThis !== "undefined" &&
+        typeof (globalThis as { matchMedia?: unknown }).matchMedia ===
+          "function"
+      ) {
+        mql = (
+          globalThis as {
+            matchMedia: (q: string) => ReducedMotionQuery;
+          }
+        ).matchMedia(query);
+      }
+    } catch {
+      mql = null;
+    }
+    if (mql === null) return;
+    // Snapshot the non-null handle so later closures keep the narrowed shape
+    // instead of widening back to the nullable declaration.
+    const current = mql;
+    // Re-sync in case the preference flipped between the lazy initializer
+    // and this subscription.
+    setReduced(current.matches === true);
+    const onChange = (event: { matches: boolean }) => {
+      setReduced(event.matches === true);
+    };
+    if (typeof current.addEventListener === "function") {
+      current.addEventListener("change", onChange);
+      return () => {
+        current.removeEventListener?.("change", onChange);
+      };
+    }
+    if (typeof current.addListener === "function") {
+      current.addListener(onChange);
+      return () => {
+        current.removeListener?.(onChange);
+      };
+    }
+    return;
+  }, []);
+  return reduced;
 }
 
 interface PersonaAvatarProps {
@@ -344,9 +473,11 @@ interface PersonaAvatarProps {
 // idle frame (closed eyes without the sleeping frame's Z marks or dimmed core),
 // and the blink timer pauses while the tab is hidden: a background tab costs
 // nothing to animate, but keeping it ticking would wake a timer on a page nobody
-// is looking at, so visibility owns the interval entirely. Sleeping slow-floats
-// and working gently pulses via the stylesheet; attention stays static because
-// the amber ring is already the signal and motion would cheapen it.
+// is looking at, so visibility owns the interval entirely. Sleeping and working
+// both slow-float via a transform-only keyframe; attention stays static because
+// the amber ring is already the signal and motion would cheapen it. The blink
+// also stays still under reduced-motion: owners who ask for no animation get the
+// static idle frame rather than a lid flashing every few seconds.
 export function PersonaAvatar({
   color,
   state,
@@ -367,7 +498,15 @@ export function PersonaAvatar({
   }, [avatarColor, avatarState]);
 
   const [blinkClosed, setBlinkClosed] = useState(false);
-  const blinkActive = avatarState === "idle" && !imageFailed && blink;
+  // Reduced-motion owners get the static frame: the lid is animation by another
+  // name, so it shares the same opt-out as the float keyframes in the stylesheet.
+  // Both the window and the test-global spellings are probed so the jsdom suite
+  // (which stubs the global) and browsers (which own window) agree. Memoized
+  // through state and kept live via the media-query change listener, so a
+  // mid-session preference toggle stills or resumes the blink without a reload.
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const blinkActive =
+    avatarState === "idle" && !imageFailed && blink && !prefersReducedMotion;
   useEffect(() => {
     if (!blinkActive) {
       setBlinkClosed(false);

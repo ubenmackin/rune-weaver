@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   decideApproval,
+  goalNeedsInput,
   listApprovals,
   listGoals,
   type Goal,
@@ -49,8 +50,10 @@ export default function NeedsActionQueue({
       ]);
 
       setApprovals(approvalsRes.approvals || []);
-      const inputNeeded = (goalsRes.goals || []).filter(
-        (g) => g.status === "needs_input" || g.status === "needsInput",
+      // Single blocked-goal predicate shared with the greeting cluster so
+      // both surfaces agree on which statuses count as needing input.
+      const inputNeeded = (goalsRes.goals || []).filter((g) =>
+        goalNeedsInput(g.status),
       );
       setBlockedGoals(inputNeeded);
     } catch (err) {

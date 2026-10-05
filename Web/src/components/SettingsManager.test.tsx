@@ -1,16 +1,16 @@
 // Rune Weaver Dashboard — Component tests for SettingsManager.
 //
 // Beyond the pane routing, the persona describes pin the [persona] contract:
-// the Engine pane renders the loaded identity, a save issues exactly one
+// the Persona tab renders the loaded identity, a save issues exactly one
 // partial-patch request carrying only the persona delta, a server 400 lands
-// in the pane's own error banner, the accent picker round-trips all four
+// in the shared tab-form banner, the accent picker round-trips all four
 // colorways and degrades an unknown stored key to violet, and every settings
 // read republishes the persona so identity surfaces mirror the owner's edit.
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import SettingsManager, { SECRET_STATUS_CHUNK_SIZE, getToolCategory } from "./SettingsManager";
+import SettingsManager, { SECRET_STATUS_CHUNK_SIZE, getToolCategory, isSettingsTab } from "./SettingsManager";
 import { peekPersonaSignals } from "./PersonaAvatar";
 import {
   BASH_PERMISSION_ACTIONS,
@@ -4043,12 +4043,29 @@ describe("SettingsManager persona pane", () => {
     return putBodies;
   }
 
-  async function openEnginePane(user: ReturnType<typeof userEvent.setup>) {
+  // Opens the Persona tab and returns its pane. The identity block moved out
+  // of Engine, so every persona assertion starts here instead of the engine
+  // surface.
+  async function openPersonaPane(user: ReturnType<typeof userEvent.setup>) {
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /^Persona$/i }));
+    return screen.getByTestId("persona-pane");
+  }
+
+  async function openEngineTab(user: ReturnType<typeof userEvent.setup>) {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
     await user.click(screen.getByRole("tab", { name: /Engine and Logs/i }));
-    return screen.getByTestId("persona-pane");
+  }
+
+  // Resolves the tab-form footer Save for the currently visible pane. Every
+  // tab owns exactly this one submit, so the helper pins the double-save
+  // regression guard to a single control.
+  function tabSaveButton() {
+    return screen.getByRole("button", { name: "Save" });
   }
 
   beforeEach(() => {
@@ -4056,11 +4073,11 @@ describe("SettingsManager persona pane", () => {
     resetSharedRunsForTesting();
   });
 
-  it("renders the loaded persona values in the Engine pane", async () => {
+  it("renders the loaded persona values in the Persona tab", async () => {
     const user = userEvent.setup();
     stubPersonaFetch();
     render(<SettingsManager />);
-    const pane = await openEnginePane(user);
+    const pane = await openPersonaPane(user);
     expect(within(pane).getByDisplayValue("Zephyra")).toBeDefined();
     expect((within(pane).getByLabelText("Tone") as HTMLSelectElement).value).toBe(
       "concise",
@@ -4081,9 +4098,9 @@ describe("SettingsManager persona pane", () => {
         .querySelector("img")
         ?.getAttribute("src"),
     ).toBe("/avatars/wisp-rose-idle-64.png");
-    // An untouched pane has no delta to write, so Save stays disabled and a
-    // stray click can never PUT the whole identity back.
-    expect(within(pane).getByTestId("persona-save")).toBeDisabled();
+    // The per-card save is gone: the tab form footer owns the single submit.
+    expect(within(pane).queryByTestId("persona-save")).toBeNull();
+    expect(tabSaveButton()).toBeDefined();
     // Every settings read republishes the persona into the shared store so
     // the profile block and chat header mirror this pane without a reload.
     expect(peekPersonaSignals().persona?.assistant_name).toBe("Zephyra");
@@ -4093,11 +4110,11 @@ describe("SettingsManager persona pane", () => {
     const user = userEvent.setup();
     const putBodies = stubPersonaFetch();
     render(<SettingsManager />);
-    const pane = await openEnginePane(user);
+    const pane = await openPersonaPane(user);
     const nameInput = within(pane).getByLabelText("Assistant Name");
     await user.clear(nameInput);
     await user.type(nameInput, "Vex");
-    await user.click(within(pane).getByTestId("persona-save"));
+    await user.click(tabSaveButton());
     await waitFor(() => {
       expect(putBodies.length).toBe(1);
     });
@@ -4111,10 +4128,9 @@ describe("SettingsManager persona pane", () => {
     // The saved identity publishes live so the nav and chat header re-render
     // with the new name without waiting for an engine reload.
     expect(peekPersonaSignals().persona?.assistant_name).toBe("Vex");
-    expect(within(pane).getByTestId("persona-save")).toBeDisabled();
   });
 
-  it("maps a server 400 to the pane's field-level error banner", async () => {
+  it("maps a server 400 to the shared tab-form error banner", async () => {
     const user = userEvent.setup();
     stubPersonaFetch({
       putResponse: () =>
@@ -4124,14 +4140,14 @@ describe("SettingsManager persona pane", () => {
         ),
     });
     render(<SettingsManager />);
-    const pane = await openEnginePane(user);
+    const pane = await openPersonaPane(user);
     await user.selectOptions(within(pane).getByLabelText("Tone"), "formal");
-    await user.click(within(pane).getByTestId("persona-save"));
+    await user.click(tabSaveButton());
     await waitFor(() => {
-      expect(within(pane).getByTestId("persona-error").textContent).toContain(
-        "persona.tone",
-      );
+      expect(screen.getByText(/persona\.tone/)).toBeDefined();
     });
+    // The retired per-card slot is gone; the shared banner owns the message.
+    expect(within(pane).queryByTestId("persona-error")).toBeNull();
     expect(screen.queryByText(/Persona saved/)).toBeNull();
   });
 
@@ -4139,7 +4155,7 @@ describe("SettingsManager persona pane", () => {
     const user = userEvent.setup();
     const putBodies = stubPersonaFetch();
     render(<SettingsManager />);
-    const pane = await openEnginePane(user);
+    const pane = await openPersonaPane(user);
     for (const accent of ["violet", "cyan", "emerald", "rose"]) {
       await user.click(within(pane).getByTestId(`persona-avatar-${accent}`));
       expect(
@@ -4153,10 +4169,10 @@ describe("SettingsManager persona pane", () => {
         ).toHaveAttribute("aria-pressed", "false");
       }
     }
-    // The loop ended on the stored rose accent (not dirty); move to emerald
-    // and the save names only the avatar key in the delta.
+    // The loop ended on the stored rose accent; move to emerald and the save
+    // names only the avatar key in the delta.
     await user.click(within(pane).getByTestId("persona-avatar-emerald"));
-    await user.click(within(pane).getByTestId("persona-save"));
+    await user.click(tabSaveButton());
     await waitFor(() => {
       expect(putBodies.length).toBe(1);
     });
@@ -4165,14 +4181,14 @@ describe("SettingsManager persona pane", () => {
 
   it("falls back to the violet selection when the stored accent is unknown", async () => {
     const user = userEvent.setup();
-    stubPersonaFetch({
+    const putBodies = stubPersonaFetch({
       settings: {
         ...PERSONA_SETTINGS,
         persona: { ...PERSONA_SETTINGS.persona, avatar: "chartreuse" },
       },
     });
     render(<SettingsManager />);
-    const pane = await openEnginePane(user);
+    const pane = await openPersonaPane(user);
     // A drifted stored accent never blanks the picker: the ring lands on the
     // master colorway exactly the way the avatar renderer falls back.
     expect(
@@ -4181,15 +4197,22 @@ describe("SettingsManager persona pane", () => {
     expect(
       within(pane).getByTestId("persona-avatar-rose"),
     ).toHaveAttribute("aria-pressed", "false");
-    // And the untouched baseline is the fallback itself, so nothing is dirty.
-    expect(within(pane).getByTestId("persona-save")).toBeDisabled();
+    // An untouched tab never reaches the network even though the footer Save
+    // stays enabled for every pane. The pane stays mounted on Persona, so the
+    // settle wait targets the persona surface itself rather than a providers
+    // input that only exists on its own tab.
+    await user.click(tabSaveButton());
+    await waitFor(() => {
+      expect(screen.getByTestId("persona-pane")).toBeInTheDocument();
+    });
+    expect(putBodies.length).toBe(0);
   });
 
   it("updates the style character count live while typing", async () => {
     const user = userEvent.setup();
     stubPersonaFetch();
     render(<SettingsManager />);
-    const pane = await openEnginePane(user);
+    const pane = await openPersonaPane(user);
     await user.type(within(pane).getByLabelText("Style Guidance"), " please");
     const nextLength = STYLE_TEXT.length + " please".length;
     expect(
@@ -4200,11 +4223,11 @@ describe("SettingsManager persona pane", () => {
   it("renders the stock identity and stays clean when the engine predates [persona]", async () => {
     const user = userEvent.setup();
     const legacy = { ...mockSettings };
-    stubPersonaFetch({ settings: legacy });
+    const putBodies = stubPersonaFetch({ settings: legacy });
     render(<SettingsManager />);
-    const pane = await openEnginePane(user);
+    const pane = await openPersonaPane(user);
     // Absent persona seeds the stock form: blank assistant name (the engine
-    // keeps its default identity), warm tone, violet accent, nothing dirty.
+    // keeps its default identity), warm tone, violet accent.
     expect(within(pane).getByLabelText("Assistant Name")).toHaveValue("");
     expect((within(pane).getByLabelText("Tone") as HTMLSelectElement).value).toBe(
       "warm",
@@ -4212,8 +4235,178 @@ describe("SettingsManager persona pane", () => {
     expect(
       within(pane).getByTestId("persona-avatar-violet"),
     ).toHaveAttribute("aria-pressed", "true");
-    expect(within(pane).getByTestId("persona-save")).toBeDisabled();
     expect(peekPersonaSignals().persona).toBeNull();
+    // No delta means no PUT even through the shared footer. The pane stays
+    // mounted on Persona, so the settle wait targets the persona surface
+    // itself rather than a providers input from another tab.
+    await user.click(tabSaveButton());
+    await waitFor(() => {
+      expect(screen.getByTestId("persona-pane")).toBeInTheDocument();
+    });
+    expect(putBodies.length).toBe(0);
+  });
+
+  it("lists thirteen sidebar tabs in promotion order", async () => {
+    stubPersonaFetch();
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.length).toBe(13);
+    const labels = tabs.map((tab) => tab.textContent ?? "");
+    expect(labels[0]).toMatch(/LLM Providers/);
+    expect(labels[1]).toMatch(/Persona/);
+    expect(labels[2]).toMatch(/Goals/);
+    expect(labels[3]).toMatch(/Engine and Logs/);
+    expect(labels[4]).toMatch(/Tools and Runes/);
+    expect(labels[5]).toMatch(/^Security/);
+    expect(labels[6]).toMatch(/^Policy/);
+    expect(labels[7]).toMatch(/Memory and Storage/);
+    expect(labels[8]).toMatch(/^Voice/);
+    expect(labels[9]).toMatch(/^Web/);
+    expect(labels[10]).toMatch(/Email Accounts/);
+    expect(labels[11]).toMatch(/Network/);
+    expect(labels[12]).toMatch(/Indexing/);
+  });
+
+  it("renders moved blocks only in their own tabs and never in engine", async () => {
+    const user = userEvent.setup();
+    stubPersonaFetch({
+      settings: {
+        ...PERSONA_SETTINGS,
+        goals: {
+          enabled: true,
+          step_interval_minutes: 1440,
+          max_active_goals: 3,
+          max_steps_per_goal: 8,
+          plan_timeout_seconds: 120,
+          max_triggers_per_goal: 4,
+        },
+        ideas: { enabled: false, max_per_cycle: 3, timeout_seconds: 60 },
+        proactive: { mode: "all", judge_timeout_seconds: 20 },
+      },
+    });
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    // Persona tab owns the identity block.
+    await user.click(screen.getByRole("tab", { name: /^Persona$/i }));
+    expect(screen.getByTestId("persona-pane")).toBeDefined();
+    expect(screen.getByLabelText("Assistant Name")).toBeDefined();
+    expect(screen.queryByTestId("goals-pane")).toBeNull();
+    expect(screen.queryByLabelText("Default Cadence (minutes)")).toBeNull();
+
+    // Goals tab owns the pursuit block.
+    await user.click(screen.getByRole("tab", { name: /^Goals$/i }));
+    const goalsPane = screen.getByTestId("goals-pane");
+    expect(within(goalsPane).getByLabelText(/Enable goal pursuit/i)).toBeDefined();
+    expect(screen.getByLabelText("Default Cadence (minutes)")).toBeDefined();
+    expect(screen.queryByTestId("persona-pane")).toBeNull();
+    expect(screen.queryByLabelText("Assistant Name")).toBeNull();
+
+    // Engine keeps only knobs plus the interruption policy. The pane is
+    // already loaded from the providers wait above, so select the Engine tab
+    // directly: waiting for a providers input while on Goals would never
+    // settle because only the active tab renders.
+    await user.click(screen.getByRole("tab", { name: /Engine and Logs/i }));
+    expect(screen.getByDisplayValue("Test Engine")).toBeDefined();
+    expect(screen.getByLabelText("Proactivity Mode")).toBeDefined();
+    expect(screen.queryByTestId("persona-pane")).toBeNull();
+    expect(screen.queryByTestId("goals-pane")).toBeNull();
+    expect(screen.queryByLabelText("Assistant Name")).toBeNull();
+    expect(screen.queryByLabelText("Default Cadence (minutes)")).toBeNull();
+  });
+
+  it("keeps exactly one submit per tab as the double-save guard", async () => {
+    const user = userEvent.setup();
+    stubPersonaFetch();
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    for (const name of [/^Persona$/i, /^Goals$/i, /Engine and Logs/i]) {
+      await user.click(screen.getByRole("tab", { name }));
+      const form = document.querySelector("form.settings-form");
+      expect(form).not.toBeNull();
+      const submits = within(form as HTMLElement).getAllByRole("button", {
+        name: "Save",
+      });
+      // One footer submit only; the retired per-card persona save is gone.
+      expect(submits.length).toBe(1);
+      expect(
+        document.querySelector('[data-testid="persona-save"]'),
+      ).toBeNull();
+    }
+  });
+
+  it("keeps the engine save payload byte-equivalent with goals and proactive and no persona", async () => {
+    const user = userEvent.setup();
+    const settingsWithAutonomy = {
+      ...PERSONA_SETTINGS,
+      goals: {
+        enabled: true,
+        step_interval_minutes: 1440,
+        max_active_goals: 3,
+        max_steps_per_goal: 8,
+        plan_timeout_seconds: 120,
+        max_triggers_per_goal: 4,
+      },
+      ideas: { enabled: false, max_per_cycle: 3, timeout_seconds: 60 },
+      proactive: { mode: "all", judge_timeout_seconds: 20 },
+    };
+    let sentPayload: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === "PUT") {
+          sentPayload = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return jsonResponse({ ...settingsWithAutonomy, ...sentPayload });
+        }
+        return jsonResponse(settingsWithAutonomy);
+      }),
+    );
+    render(<SettingsManager />);
+    await openEngineTab(user);
+    const engineInput = screen.getByLabelText("Engine Name");
+    await user.clear(engineInput);
+    await user.type(engineInput, "Renamed Engine");
+    await user.click(tabSaveButton());
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    const body = sentPayload as unknown as Record<string, unknown>;
+    // The autonomous policy still rides the engine save exactly as before.
+    expect(body).toHaveProperty("goals");
+    expect(body).toHaveProperty("proactive");
+    expect(body).toHaveProperty("ideas");
+    expect((body["goals"] as Record<string, unknown>)["enabled"]).toBe(true);
+    // Persona never rides the shared full save; it owns its tab save.
+    expect(body).not.toHaveProperty("persona");
+    await waitFor(() => {
+      expect(screen.getByText("Settings saved.")).toBeDefined();
+    });
+  });
+
+  it("keeps an unknown tab id on the current tab", async () => {
+    stubPersonaFetch();
+    // Fail-closed predicate directly: an unknown id never narrows to the tab
+    // vocabulary, so selection keeps the current tab instead of blanking.
+    expect(isSettingsTab("bogus-tab")).toBe(false);
+    expect(isSettingsTab("providers")).toBe(true);
+    expect(isSettingsTab(null)).toBe(false);
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    // Drifted ids never strand the pane, so the default providers tab stays
+    // selected with its form.
+    expect(
+      screen.getByRole("tab", { name: /LLM Providers/i }).getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
   });
 });
 

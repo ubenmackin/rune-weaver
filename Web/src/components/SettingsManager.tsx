@@ -206,8 +206,13 @@ function TerminalIcon(props: { size?: number; className?: string }) {
 // The `policy` pane owns the declarative policy.toml editor outside the shared
 // config form, following the indexing panel precedent, so policy writes apply
 // live with no restart and never share the config save path.
+// Persona and goals sit beside providers because the owner reaches for identity
+// and durable pursuit as often as model routing; engine keeps only its own
+// knobs plus the background interruption policy so each surface stays scannable.
 type SettingsTab =
   | "providers"
+  | "persona"
+  | "goals"
   | "engine"
   | "tools"
   | "security"
@@ -224,6 +229,8 @@ type SettingsTab =
 // never strand the form without a visible section.
 const SETTINGS_TABS: readonly SettingsTab[] = [
   "providers",
+  "persona",
+  "goals",
   "engine",
   "tools",
   "security",
@@ -238,7 +245,7 @@ const SETTINGS_TABS: readonly SettingsTab[] = [
 
 // Narrows an unknown tab id to the known vocabulary without throwing, so
 // selection stays fail-closed on drifted or persisted values.
-function isSettingsTab(value: unknown): value is SettingsTab {
+export function isSettingsTab(value: unknown): value is SettingsTab {
   return (
     typeof value === "string" &&
     (SETTINGS_TABS as readonly string[]).includes(value)
@@ -1316,11 +1323,6 @@ export default function SettingsManager() {
   const [personaUserNameDraft, setPersonaUserNameDraft] = useState("");
   const [personaAvatarDraft, setPersonaAvatarDraft] = useState<string>(DEFAULT_PERSONA_AVATAR);
   const personaLoadedRef = useRef<PersonaData>({});
-  const [personaSaving, setPersonaSaving] = useState(false);
-  // Field-level error slot for this pane: the engine names the dotted field
-  // path on a 400, so the message belongs beside the persona fields rather
-  // than in the shared page banner that the full-form save uses.
-  const [personaError, setPersonaError] = useState<string | null>(null);
   // Files & Access lives in the Security pane as the single files editor:
   // the page Save owns persistence through executeSave with
   // validateFilesFields and buildFilesPayload, so guard shapes never fork.
@@ -2418,7 +2420,6 @@ export default function SettingsManager() {
       setPersonaStyleDraft(personaStyle(loaded));
       setPersonaUserNameDraft(personaUserName(loaded));
       setPersonaAvatarDraft(canonicalPersonaAvatarColor(loaded.avatar));
-      setPersonaError(null);
     },
     [],
   );
@@ -2715,41 +2716,6 @@ export default function SettingsManager() {
     setServerRestartRequired(Boolean(data.requiresRestart));
   }, [populateMediaSettings, populateDesktopSettings, populateBashSettings, populateGoalsSettings, populateIdeasSettings, populateProactiveSettings, populatePersonaSettings, populateFanoutSettings]);
 
-  // Persona saves through the shared settings PUT with only the persona delta,
-  // the same partial-patch posture as the modal category saves: the engine
-  // merge preserves every omitted key, and a server 400 (an unknown closed-set
-  // spelling that slipped a pasted value, for example) surfaces the engine's
-  // field-naming message in this pane's own error banner. A save with no delta
-  // never hits the network; the button stays disabled instead. Declared after
-  // `populateForm` because its repopulate dependency is created there first.
-  const handleSavePersona = useCallback(async () => {
-    const validationError = validatePersonaFields();
-    if (validationError) {
-      setPersonaError(validationError);
-      return;
-    }
-    const delta = buildPersonaDelta();
-    if (Object.keys(delta).length === 0) return;
-    setPersonaSaving(true);
-    setPersonaError(null);
-    try {
-      const updated = await updateSettings({ persona: delta });
-      // Repopulating reseeds every draft from the PUT response, re-arms the
-      // delta baseline, and publishes the persona into the shared store so the
-      // profile block and chat header adopt the new identity without a reload.
-      populateForm(updated);
-      pushSuccessToast(
-        "Persona saved. The agent adopts the new identity on engine reload.",
-      );
-    } catch (err) {
-      setPersonaError(
-        err instanceof ApiError ? err.message : "Failed to save persona",
-      );
-    } finally {
-      setPersonaSaving(false);
-    }
-  }, [buildPersonaDelta, populateForm, pushSuccessToast, validatePersonaFields]);
-
   // Reconciles the boot snapshot from /health when the engine advertises its
   // live bind. Older engines omit the keys, in which case the pre-save file
   // snapshot above stays as the live source of truth. Newer engines correct an
@@ -2947,6 +2913,40 @@ export default function SettingsManager() {
   const executeSave = async () => {
     setSaving(true);
     setError(null);
+
+    // The persona tab owns the identity drafts alone: its save folds the
+    // changed-only delta into this shared footer path so validation and server
+    // 400s surface through the same banner as every other pane. The engine
+    // merge preserves every omitted key, and an untouched tab never reaches
+    // the network.
+    if (activeTab === "persona") {
+      const personaValidationError = validatePersonaFields();
+      if (personaValidationError) {
+        setError(personaValidationError);
+        setSaving(false);
+        return;
+      }
+      const personaDelta = buildPersonaDelta();
+      if (Object.keys(personaDelta).length === 0) {
+        setSaving(false);
+        return;
+      }
+      try {
+        const updated = await updateSettings({ persona: personaDelta });
+        // Repopulating reseeds every draft from the PUT response, re-arms the
+        // delta baseline, and publishes the persona into the shared store so the
+        // profile block and chat header adopt the new identity without a reload.
+        populateForm(updated);
+        pushSuccessToast(
+          "Persona saved. The agent adopts the new identity on engine reload.",
+        );
+      } catch (failure) {
+        setError(failure instanceof ApiError ? failure.message : "Failed to save persona");
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
 
     // Provider names become TOML table keys, so rejects must surface here
     // rather than silently dropping or overwriting an entry on save.
@@ -4056,12 +4056,6 @@ export default function SettingsManager() {
     !areServerAllowedHostsEqual(serverFileHostsForBadge, serverBootHostsForBadge);
   const serverRestartVisible = serverRestartRequired || serverFileDiffersFromBootForBadge;
 
-  // Changed-only baseline for the persona Save: the delta is recomputed from
-  // the drafts against the last-loaded snapshot on every render, so the button
-  // disables exactly when there is nothing to write and an untouched pane can
-  // never issue a spurious PUT.
-  const personaDirty = Object.keys(buildPersonaDelta()).length > 0;
-
   if (loading && !settings) {
     return (
       <div className="section-loading">
@@ -4151,6 +4145,28 @@ export default function SettingsManager() {
           >
             <ChatIcon size={16} />
             <span>LLM Providers</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "persona"}
+            className={`settings-tab-btn ${activeTab === "persona" ? "active" : ""}`}
+            onClick={() => selectSettingsTab("persona")}
+          >
+            <UserIcon size={16} />
+            <span>Persona</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "goals"}
+            className={`settings-tab-btn ${activeTab === "goals" ? "active" : ""}`}
+            onClick={() => selectSettingsTab("goals")}
+          >
+            <TargetIcon size={16} />
+            <span>Goals</span>
           </button>
 
           <button
@@ -4700,100 +4716,167 @@ export default function SettingsManager() {
           </div>
         )}
 
-        {/* TAB 2: Engine & Logs */}
-        {activeTab === "engine" && (
-          <>
-          <div className="settings-section card">
+        {/* Persona: the owner-authored assistant identity ([persona]) gets direct
+            nav because identity edits are as frequent as model routing. The tab
+            form owns the save through the shared footer, folding the
+            changed-only delta into the same PUT posture as the modal saves so
+            untouched keys survive and validation plus 400s surface through the
+            shared banner. */}
+        {activeTab === "persona" && (
+          <div
+            className="settings-section card"
+            data-testid="persona-pane"
+          >
             <div className="settings-section-title-group">
-              <h3>Engine & Logging</h3>
+              <h3>Persona</h3>
               <p className="settings-section-hint">
-                Identity name and logging verbosity for the Rune Weaver daemon.
+                Assistant name, tone, style guidance, and avatar accent. Takes
+                effect on engine reload.
               </p>
             </div>
-            <div className="form-row">
+            <div className="form-row" style={{ marginTop: "1rem" }}>
               <div className="form-group flex-1">
-                <label htmlFor="engine-name">Engine Name</label>
+                <label htmlFor="persona-assistant-name">Assistant Name</label>
                 <input
-                  id="engine-name"
+                  id="persona-assistant-name"
                   type="text"
                   className="input-field"
-                  value={engineName}
-                  onChange={(e) => setEngineName(e.target.value)}
-                  required
+                  maxLength={MAX_PERSONA_ASSISTANT_NAME_LENGTH}
+                  placeholder="Rune Weaver"
+                  value={personaAssistantNameDraft}
+                  onChange={(e) => setPersonaAssistantNameDraft(e.target.value)}
                 />
-              </div>
-              <div className="form-group flex-1">
-                <label htmlFor="log-level">Log Level</label>
-                <select
-                  id="log-level"
-                  className="input-field"
-                  value={logLevel}
-                  onChange={(e) => setLogLevel(e.target.value)}
+                <p
+                  className="settings-field-hint"
+                  style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}
                 >
-                  <option value="trace">Trace (Verbose)</option>
-                  <option value="debug">Debug</option>
-                  <option value="info">Info</option>
-                  <option value="notice">Notice</option>
-                  <option value="warning">Warning</option>
-                  <option value="error">Error</option>
-                </select>
-              </div>
-            </div>
-            <div className="form-row" style={{ marginTop: "1rem" }}>
-              <div className="form-group flex-1">
-                <label htmlFor="compaction-threshold">
-                  Context Compaction Threshold: {compactionThresholdPercent}%
-                </label>
-                <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                  <input
-                    id="compaction-threshold"
-                    type="range"
-                    min={10}
-                    max={100}
-                    step={5}
-                    value={compactionThresholdPercent}
-                    onChange={(e) => setCompactionThresholdPercent(Number(e.target.value))}
-                    style={{ flex: 1 }}
-                  />
-                  <span style={{ minWidth: "3rem", fontWeight: "bold" }}>
-                    {compactionThresholdPercent}%
-                  </span>
-                </div>
-                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
-                  When session token usage reaches this percentage of the model&apos;s context limit, older tool outputs and turns are compacted to prevent overflow. Default is 80%.
+                  How the agent names itself. Blank falls back to the stock
+                  identity. Max {MAX_PERSONA_ASSISTANT_NAME_LENGTH} characters.
                 </p>
               </div>
-            </div>
-            <div className="form-row" style={{ marginTop: "1rem" }}>
               <div className="form-group flex-1">
-                <label htmlFor="max-tool-iterations">
-                  Max Tool Rounds per Turn
-                </label>
-                <input
-                  id="max-tool-iterations"
-                  type="number"
+                <label htmlFor="persona-tone">Tone</label>
+                <select
+                  id="persona-tone"
                   className="input-field"
-                  min={1}
-                  max={100}
-                  step={1}
-                  value={maxToolIterations}
-                  onChange={(e) => setMaxToolIterations(e.target.value)}
+                  value={personaToneDraft}
+                  onChange={(e) =>
+                    setPersonaToneDraft(
+                      normalizePersonaTone(e.target.value) || personaToneDraft,
+                    )
+                  }
+                >
+                  {PERSONA_TONE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <span className="form-group-hint">
+                  One preset posture sentence folded into the identity line.
+                </span>
+              </div>
+            </div>
+            <div className="form-row" style={{ marginTop: "1rem" }}>
+              <div className="form-group flex-1">
+                <label htmlFor="persona-user-name">Your Name</label>
+                <input
+                  id="persona-user-name"
+                  type="text"
+                  className="input-field"
+                  maxLength={MAX_PERSONA_USER_NAME_LENGTH}
+                  placeholder="(leave blank for no address clause)"
+                  value={personaUserNameDraft}
+                  onChange={(e) => setPersonaUserNameDraft(e.target.value)}
                 />
-                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
-                  Maximum number of consecutive tool rounds the agent may execute before pausing for user approval to continue. Range: 1–100. Default is 10.
+                <p
+                  className="settings-field-hint"
+                  style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}
+                >
+                  Preferred spelling for the address clause. Optional. Max{" "}
+                  {MAX_PERSONA_USER_NAME_LENGTH} characters.
                 </p>
+              </div>
+            </div>
+            <div className="form-group" style={{ marginTop: "1rem" }}>
+              <label htmlFor="persona-style">Style Guidance</label>
+              <textarea
+                id="persona-style"
+                className="input-field"
+                rows={4}
+                maxLength={MAX_PERSONA_STYLE_LENGTH}
+                placeholder="Free-form guidance the agent appends to its identity."
+                value={personaStyleDraft}
+                onChange={(e) => setPersonaStyleDraft(e.target.value)}
+              />
+              {/* Live count keeps the owner honest about the stored cap; the
+                  maxLength attribute already refuses overlong input, so this
+                  is visibility, not enforcement. */}
+              <p
+                className="settings-field-hint"
+                data-testid="persona-style-count"
+                style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}
+              >
+                {personaStyleDraft.length} / {MAX_PERSONA_STYLE_LENGTH} characters
+              </p>
+            </div>
+            <div className="form-group" style={{ marginTop: "1rem" }}>
+              <p
+                className="settings-field-hint"
+                style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)" }}
+              >
+                Avatar accent — a client-side colorway for the assistant sprite.
+                It never reaches the prompt.
+              </p>
+              <div
+                className="persona-avatar-grid"
+                role="group"
+                aria-label="Avatar accent"
+                data-testid="persona-avatar-grid"
+              >
+                {PERSONA_AVATAR_COLORS.map((accent) => (
+                  <button
+                    key={accent}
+                    type="button"
+                    data-testid={`persona-avatar-${accent}`}
+                    className={`persona-avatar-option${
+                      personaAvatarDraft === accent ? " selected" : ""
+                    }`}
+                    aria-pressed={personaAvatarDraft === accent}
+                    aria-label={`Avatar accent ${accent}`}
+                    onClick={() => setPersonaAvatarDraft(accent)}
+                  >
+                    {/* The picker swatch is the avatar component itself with
+                        the blink opted out: a live identity surface blinks
+                        because a resting assistant reads as alive, while a
+                        settings swatch that flickered would claim a state it
+                        cannot acknowledge. Same validation and glyph fallback
+                        as every other surface, so a missing frame never
+                        breaks the picker either. */}
+                    <PersonaAvatar
+                      color={accent}
+                      state="idle"
+                      size={64}
+                      blink={false}
+                      label=""
+                    />
+                  </button>
+                ))}
               </div>
             </div>
           </div>
-          {/* Goals plus Proactivity: steady pursuit policy ([goals]) beside the
-              background interruption policy ([proactive]) in one grouped block
-              because both govern autonomous behavior. Both persist through the
-              partial-patch save and take effect after restart. */}
-          <div className="settings-section card" style={{ marginTop: "16px" }}>
+        )}
+
+        {/* Goals: steady pursuit policy ([goals] plus ideas cadence) gets direct
+            nav because durable goals are a first-class surface beside chat. The
+            tab form owns the save through the shared footer, reusing the same
+            goals payload path as the full save so stored bounds stay single-shaped. */}
+        {activeTab === "goals" && (
+          <div className="settings-section card" data-testid="goals-pane">
             <div className="settings-section-title-group">
-              <h3>Goals & Proactivity</h3>
+              <h3>Goals</h3>
               <p className="settings-section-hint">
-                Steady long-horizon pursuit and background interruption policy.
+                Steady long-horizon pursuit and proactive suggestions.
                 Takes effect after restart.
               </p>
             </div>
@@ -4947,6 +5030,107 @@ export default function SettingsManager() {
                 </p>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* TAB 2: Engine & Logs */}
+        {activeTab === "engine" && (
+          <>
+          <div className="settings-section card">
+            <div className="settings-section-title-group">
+              <h3>Engine & Logging</h3>
+              <p className="settings-section-hint">
+                Identity name and logging verbosity for the Rune Weaver daemon.
+              </p>
+            </div>
+            <div className="form-row">
+              <div className="form-group flex-1">
+                <label htmlFor="engine-name">Engine Name</label>
+                <input
+                  id="engine-name"
+                  type="text"
+                  className="input-field"
+                  value={engineName}
+                  onChange={(e) => setEngineName(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="form-group flex-1">
+                <label htmlFor="log-level">Log Level</label>
+                <select
+                  id="log-level"
+                  className="input-field"
+                  value={logLevel}
+                  onChange={(e) => setLogLevel(e.target.value)}
+                >
+                  <option value="trace">Trace (Verbose)</option>
+                  <option value="debug">Debug</option>
+                  <option value="info">Info</option>
+                  <option value="notice">Notice</option>
+                  <option value="warning">Warning</option>
+                  <option value="error">Error</option>
+                </select>
+              </div>
+            </div>
+            <div className="form-row" style={{ marginTop: "1rem" }}>
+              <div className="form-group flex-1">
+                <label htmlFor="compaction-threshold">
+                  Context Compaction Threshold: {compactionThresholdPercent}%
+                </label>
+                <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                  <input
+                    id="compaction-threshold"
+                    type="range"
+                    min={10}
+                    max={100}
+                    step={5}
+                    value={compactionThresholdPercent}
+                    onChange={(e) => setCompactionThresholdPercent(Number(e.target.value))}
+                    style={{ flex: 1 }}
+                  />
+                  <span style={{ minWidth: "3rem", fontWeight: "bold" }}>
+                    {compactionThresholdPercent}%
+                  </span>
+                </div>
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  When session token usage reaches this percentage of the model&apos;s context limit, older tool outputs and turns are compacted to prevent overflow. Default is 80%.
+                </p>
+              </div>
+            </div>
+            <div className="form-row" style={{ marginTop: "1rem" }}>
+              <div className="form-group flex-1">
+                <label htmlFor="max-tool-iterations">
+                  Max Tool Rounds per Turn
+                </label>
+                <input
+                  id="max-tool-iterations"
+                  type="number"
+                  className="input-field"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={maxToolIterations}
+                  onChange={(e) => setMaxToolIterations(e.target.value)}
+                />
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  Maximum number of consecutive tool rounds the agent may execute before pausing for user approval to continue. Range: 1–100. Default is 10.
+                </p>
+              </div>
+            </div>
+          </div>
+          {/* Proactivity: the background interruption policy ([proactive]) stays
+              with the engine knobs because both govern autonomous runtime
+              behavior rather than durable pursuit. The save still carries the
+              goals and ideas deltas alongside so the stored autonomous policy
+              never forks across tabs. */}
+          <div className="settings-section card" style={{ marginTop: "16px" }} data-testid="proactive-pane">
+            <div className="settings-section-title-group">
+              <h3>Proactivity</h3>
+              <p className="settings-section-hint">
+                Background interruption policy.
+                Takes effect after restart.
+              </p>
+            </div>
             <div className="form-row" style={{ marginTop: "1rem" }}>
               <div className="form-group flex-1">
                 <label htmlFor="proactive-mode">Proactivity Mode</label>
@@ -4981,178 +5165,6 @@ export default function SettingsManager() {
                   Seconds the guarded judge may spend before the gate fails open. Range: {PROACTIVE_JUDGE_TIMEOUT_MIN_SECONDS}–{PROACTIVE_JUDGE_TIMEOUT_MAX_SECONDS}. Default is {DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS}.
                 </p>
               </div>
-            </div>
-          </div>
-          {/* Persona: the owner-authored assistant identity ([persona]) lives
-              with the Engine/Goals panes because the persona sentence rides the
-              same prompt identity the engine knobs shape. The block persists
-              through its own partial-patch save so a rename issues exactly one
-              request carrying only the persona delta — every other stored
-              section, and every untouched persona key, survives verbatim.
-              Saved values mirror into the profile block and chat header live;
-              the running engine adopts the new identity on reload. */}
-          <div
-            className="settings-section card"
-            style={{ marginTop: "16px" }}
-            data-testid="persona-pane"
-          >
-            <div className="settings-section-title-group">
-              <h3>Persona</h3>
-              <p className="settings-section-hint">
-                Assistant name, tone, style guidance, and avatar accent. Takes
-                effect on engine reload.
-              </p>
-            </div>
-            {personaError ? (
-              <div className="error-banner" data-testid="persona-error">
-                {personaError}
-              </div>
-            ) : null}
-            <div className="form-row" style={{ marginTop: "1rem" }}>
-              <div className="form-group flex-1">
-                <label htmlFor="persona-assistant-name">Assistant Name</label>
-                <input
-                  id="persona-assistant-name"
-                  type="text"
-                  className="input-field"
-                  maxLength={MAX_PERSONA_ASSISTANT_NAME_LENGTH}
-                  placeholder="Rune Weaver"
-                  value={personaAssistantNameDraft}
-                  onChange={(e) => setPersonaAssistantNameDraft(e.target.value)}
-                />
-                <p
-                  className="settings-field-hint"
-                  style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}
-                >
-                  How the agent names itself. Blank falls back to the stock
-                  identity. Max {MAX_PERSONA_ASSISTANT_NAME_LENGTH} characters.
-                </p>
-              </div>
-              <div className="form-group flex-1">
-                <label htmlFor="persona-tone">Tone</label>
-                <select
-                  id="persona-tone"
-                  className="input-field"
-                  value={personaToneDraft}
-                  onChange={(e) =>
-                    setPersonaToneDraft(
-                      normalizePersonaTone(e.target.value) || personaToneDraft,
-                    )
-                  }
-                >
-                  {PERSONA_TONE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <span className="form-group-hint">
-                  One preset posture sentence folded into the identity line.
-                </span>
-              </div>
-            </div>
-            <div className="form-row" style={{ marginTop: "1rem" }}>
-              <div className="form-group flex-1">
-                <label htmlFor="persona-user-name">Your Name</label>
-                <input
-                  id="persona-user-name"
-                  type="text"
-                  className="input-field"
-                  maxLength={MAX_PERSONA_USER_NAME_LENGTH}
-                  placeholder="(leave blank for no address clause)"
-                  value={personaUserNameDraft}
-                  onChange={(e) => setPersonaUserNameDraft(e.target.value)}
-                />
-                <p
-                  className="settings-field-hint"
-                  style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}
-                >
-                  Preferred spelling for the address clause. Optional. Max{" "}
-                  {MAX_PERSONA_USER_NAME_LENGTH} characters.
-                </p>
-              </div>
-            </div>
-            <div className="form-group" style={{ marginTop: "1rem" }}>
-              <label htmlFor="persona-style">Style Guidance</label>
-              <textarea
-                id="persona-style"
-                className="input-field"
-                rows={4}
-                maxLength={MAX_PERSONA_STYLE_LENGTH}
-                placeholder="Free-form guidance the agent appends to its identity."
-                value={personaStyleDraft}
-                onChange={(e) => setPersonaStyleDraft(e.target.value)}
-              />
-              {/* Live count keeps the owner honest about the stored cap; the
-                  maxLength attribute already refuses overlong input, so this
-                  is visibility, not enforcement. */}
-              <p
-                className="settings-field-hint"
-                data-testid="persona-style-count"
-                style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}
-              >
-                {personaStyleDraft.length} / {MAX_PERSONA_STYLE_LENGTH} characters
-              </p>
-            </div>
-            <div className="form-group" style={{ marginTop: "1rem" }}>
-              <p
-                className="settings-field-hint"
-                style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)" }}
-              >
-                Avatar accent — a client-side colorway for the assistant sprite.
-                It never reaches the prompt.
-              </p>
-              <div
-                className="persona-avatar-grid"
-                role="group"
-                aria-label="Avatar accent"
-                data-testid="persona-avatar-grid"
-              >
-                {PERSONA_AVATAR_COLORS.map((accent) => (
-                  <button
-                    key={accent}
-                    type="button"
-                    data-testid={`persona-avatar-${accent}`}
-                    className={`persona-avatar-option${
-                      personaAvatarDraft === accent ? " selected" : ""
-                    }`}
-                    aria-pressed={personaAvatarDraft === accent}
-                    aria-label={`Avatar accent ${accent}`}
-                    onClick={() => setPersonaAvatarDraft(accent)}
-                  >
-                    {/* The picker swatch is the avatar component itself with
-                        the blink opted out: a live identity surface blinks
-                        because a resting assistant reads as alive, while a
-                        settings swatch that flickered would claim a state it
-                        cannot acknowledge. Same validation and glyph fallback
-                        as every other surface, so a missing frame never
-                        breaks the picker either. */}
-                    <PersonaAvatar
-                      color={accent}
-                      state="idle"
-                      size={64}
-                      blink={false}
-                      label=""
-                    />
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div
-              style={{ marginTop: "1rem", display: "flex", alignItems: "center", gap: "12px" }}
-            >
-              <button
-                type="button"
-                className="primary"
-                data-testid="persona-save"
-                onClick={() => void handleSavePersona()}
-                disabled={personaSaving || !personaDirty}
-              >
-                {personaSaving ? "Saving…" : "Save Persona"}
-              </button>
-              {!personaDirty ? (
-                <span className="form-group-hint">No unsaved persona changes.</span>
-              ) : null}
             </div>
           </div>
           </>

@@ -6740,6 +6740,105 @@ button.ghost.staged-expand-all-btn {
   color: var(--text-muted);
 }
 
+/* Greeting-row identity cluster: the app's sole avatar image, right-aligned on
+ * the welcome headline. The row spreads headline and identity apart while the
+ * identity pairs the 112px Wisp with a right-aligned name-plus-caption stack,
+ * so the caption reads as the assistant's status line. No new color tokens:
+ * identity chrome reuses the muted text, border, and accent-purple tokens the
+ * nav badges and link pills already speak. */
+.dashboard-greeting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.dashboard-greeting-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.dashboard-greeting-identity {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.dashboard-greeting-identity-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  min-width: 0;
+  text-align: right;
+}
+
+.dashboard-greeting-assistant {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.dashboard-greeting-caption {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+/* Attention caption reuses the pill-button language from the dashboard chips:
+ * subtle panel background, bordered pill, accent hover — a button that reads
+ * as navigation without minting a new token. */
+.dashboard-greeting-caption-button {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-purple);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 3px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.dashboard-greeting-caption-button:hover {
+  border-color: var(--accent-purple);
+  background: var(--accent-purple-glow);
+}
+
+.dashboard-greeting-caption-button:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+/* Narrow viewports stack the identity below the headline so the 112px Wisp
+ * never squeezes the greeting title; the text stack left-aligns to match the
+ * headline it now sits under. */
+@media (max-width: 640px) {
+  .dashboard-greeting-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .dashboard-greeting-identity {
+    margin-left: 0;
+  }
+
+  .dashboard-greeting-identity-text {
+    align-items: flex-start;
+    text-align: left;
+  }
+}
+
 /* Dashboard Prompt Bar */
 .dashboard-prompt-bar-wrap {
   display: flex;
@@ -7948,25 +8047,43 @@ button.ghost.staged-expand-all-btn {
 
 /* The sprite sheets carry their own soft drop shadow from the generator, so
  * the avatar never needs a frame or border of its own; width/height attrs pin
- * the rendered size and the image simply shrinks inside picker cells, the chat
- * header row, and the 16px nav trigger. */
+ * the rendered size and the image renders in the sole identity surface (settings picker editor excluded):
+ * the dashboard greeting cluster. The sleeping dim lives in the prerendered
+ * asset itself, never in a CSS filter, so the stylesheet never darkens a
+ * frame it did not generate. */
 .persona-avatar {
   display: inline-block;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
-/* Sleeping slow-floats: one motion-only keyframe on the avatar layer, mirroring
- * the existing gentle-loop language (typingBounce/dashboardPulse) with no new
- * color token, so a dimmed Wisp still reads alive without demanding attention. */
-.persona-avatar--sleeping {
-  animation: personaFloat 5s ease-in-out infinite;
+/* Avatar motion is transform-only float with a static-frame fallback. Idle,
+ * working, and sleeping drift on translateY alone — never opacity or a fade —
+ * so a busy Wisp never reads as a loading shimmer and reduced-motion owners
+ * always see a still frame. Idle and working share the 4s cadence while
+ * sleeping breathes slower at 7s. Animations arm only under
+ * `prefers-reduced-motion: no-preference`; outside it the frames sit static. */
+.persona-avatar--idle,
+.persona-avatar--sleeping,
+.persona-avatar--working {
+  animation: none;
 }
 
-/* Working gently pulses through the existing shared pulse token so the busy
- * motion language stays one system between sprite states and run badges. */
-.persona-avatar--working {
-  animation: pulseTool 2s infinite ease-in-out;
+@media (prefers-reduced-motion: no-preference) {
+  .persona-avatar--idle {
+    animation: personaFloat 4s ease-in-out infinite;
+    will-change: transform;
+  }
+
+  .persona-avatar--sleeping {
+    animation: personaFloat 7s ease-in-out infinite;
+    will-change: transform;
+  }
+
+  .persona-avatar--working {
+    animation: personaFloat 4s ease-in-out infinite;
+    will-change: transform;
+  }
 }
 
 /* Attention is deliberately static: the amber ring is baked into the frame and
@@ -7977,7 +8094,7 @@ button.ghost.staged-expand-all-btn {
     transform: translateY(0);
   }
   50% {
-    transform: translateY(-3px);
+    transform: translateY(-6px);
   }
 }
 
@@ -8021,7 +8138,8 @@ button.ghost.staged-expand-all-btn {
 }
 
 /* Chat header identity row: small and muted so the session title stays primary
- * while the owner still sees who is answering. */
+ * while the owner still sees who is answering. Text identity only — the row
+ * carries the persona name span alone, never an avatar image. */
 .chat-persona-identity {
   display: inline-flex;
   align-items: center;
@@ -8039,7 +8157,11 @@ button.ghost.staged-expand-all-btn {
   max-width: 160px;
 }
 
+/* Reduced-motion fallback stays explicit even though the float animations
+ * above only arm under `no-preference`: an owner asking for no animation
+ * always sees static frames, never a mid-float freeze. */
 @media (prefers-reduced-motion: reduce) {
+  .persona-avatar--idle,
   .persona-avatar--sleeping,
   .persona-avatar--working {
     animation: none;
