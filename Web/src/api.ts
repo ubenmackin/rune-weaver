@@ -418,13 +418,6 @@ export interface Preference {
   confidence: number;
 }
 
-export interface FactsResponse {
-  facts: UserFact[];
-  preferences: Preference[];
-  semanticCount: number;
-  episodeCount: number;
-}
-
 export interface RunLogEntry {
   id: string;
   jobID?: string | null;
@@ -1439,16 +1432,114 @@ export function changeDurationGrant(
 export function searchMemory(
   query: string,
   limit = 10,
+  signal?: AbortSignal,
 ): Promise<MemorySearchResponse> {
   const params = new URLSearchParams({
     q: query,
     limit: String(limit),
   });
-  return fetchJson<MemorySearchResponse>(`/memory/search?${params.toString()}`);
+  // The abort signal stays optional so legacy callers keep working while the
+  // dashboard can cancel a stale recall when the owner submits a fresh query.
+  // An aborted fetch rejects and the caller decides whether silence is honest.
+  return fetchJson<MemorySearchResponse>(`/memory/search?${params.toString()}`, {
+    signal,
+  });
 }
 
-export function getFacts(): Promise<FactsResponse> {
-  return fetchJson<FactsResponse>("/memory/facts");
+// Paged facts view for search-first browsing. The engine serves filtered,
+// windowed rows plus live store tallies so the dashboard never pulls an
+// unbounded list to count or to preview. Preferences ride along only when the
+// engine still sends them, keeping older payloads renderable without a second
+// fetch.
+export interface FactsPageResponse {
+  facts: UserFact[];
+  total: number;
+  semanticCount: number;
+  episodeCount: number;
+  preferences?: Preference[];
+}
+
+// Normalizes a facts payload across engine generations: newer rows carry an
+// explicit total while older snapshots carry only the window, so a missing
+// total degrades to the window length instead of rendering as unknown.
+function normalizeFactsPage(value: FactsPageResponse): FactsPageResponse {
+  const facts = Array.isArray(value.facts) ? value.facts : [];
+  const total =
+    typeof value.total === "number" && Number.isFinite(value.total) && value.total >= 0
+      ? Math.floor(value.total)
+      : facts.length;
+  const semanticCount =
+    typeof value.semanticCount === "number" && Number.isFinite(value.semanticCount)
+      ? value.semanticCount
+      : 0;
+  const episodeCount =
+    typeof value.episodeCount === "number" && Number.isFinite(value.episodeCount)
+      ? value.episodeCount
+      : 0;
+  return {
+    facts,
+    total,
+    semanticCount,
+    episodeCount,
+    ...(Array.isArray(value.preferences) ? { preferences: value.preferences } : {}),
+  };
+}
+
+export function getFacts(
+  q = "",
+  limit = 20,
+  offset = 0,
+): Promise<FactsPageResponse> {
+  // Every facts read builds its query through one shared encoder so paging,
+  // search, and counts agree on parameter spelling. An empty query is omitted
+  // so the default call stays a plain recent-window read while filtered reads
+  // name their substring explicitly.
+  const params = new URLSearchParams();
+  const trimmed = q.trim();
+  if (trimmed) params.set("q", trimmed);
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  const query = params.toString();
+  const path = query ? `/memory/facts?${query}` : "/memory/facts";
+  return fetchJson<FactsPageResponse>(path).then(normalizeFactsPage);
+}
+
+// Canonical episodic listing row for the dashboard finder. Carries full stored
+// content plus identity, owning session, and role newest first, so previews
+// never need a second fetch. Timestamp rides as Unix seconds to match the
+// engine DTO without sharing a date strategy.
+export interface EpisodicEpisode {
+  id: string;
+  sessionID: string;
+  role: string;
+  content: string;
+  timestamp: number;
+}
+
+// Canonical recency receipt: windowed rows plus their length for tab counts.
+// Episodes cover the episodic tables only; semantic facts, profile, and index
+// state stay out of the shape.
+export interface EpisodicRecentResponse {
+  episodes: EpisodicEpisode[];
+  count: number;
+}
+
+// Lists recent episodic turns newest first through the shared JSON path so
+// malformed limits and unknown sessions surface as ApiError with the engine
+// reason instead of a partial list. An unknown session reads as empty.
+export function listRecentEpisodes(
+  limit = 20,
+  sessionID?: string,
+): Promise<EpisodicRecentResponse> {
+  // Single encoder keeps listing queries aligned with the facts pager: a blank
+  // session filter stays omitted so the default call remains a global window.
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  const trimmed = sessionID?.trim();
+  if (trimmed) params.set("sessionID", trimmed);
+  return fetchJson<EpisodicRecentResponse>(
+    `/memory/episodes/recent?${params.toString()}`,
+  );
 }
 
 export function storeFact(

@@ -41,6 +41,10 @@ public enum ServerPaths {
     /// Registered before `/:id` so the literal wins over the parameter,
     /// mirroring the goals summary precedent.
     public static let memoryEpisodeSession = "session"
+    /// Recent listing literal under `/memory/episodes`.
+    /// Registered before `/:id` so the literal wins over the parameter,
+    /// mirroring the goals summary precedent.
+    public static let memoryEpisodesRecent = "recent"
     /// Pending approvals group.
     public static let approvals = "approvals"
     /// Approval decision subpath under `/approvals/:id`.
@@ -895,6 +899,86 @@ public struct FactsResponse: Content, Equatable {
     }
 }
 
+/// Paged facts window for `GET /memory/facts` with optional `q`, `limit`, and `offset`.
+///
+/// Carries the windowed rows plus the pre-slice total and the live store
+/// tallies so the dashboard settles tab labels and the "More" cursor from one
+/// read. Preferences ride along so older snapshots decoding as `FactsResponse`
+/// keep parsing the same payload without a second fetch; the extra paging keys
+/// are ignored by that shape while newer clients page off them.
+public struct FactsPageResponse: Content, Equatable {
+    /// Windowed facts for this page, newest first.
+    public let facts: [UserFact]
+    /// Total matching facts before slicing, driving the "More" cursor.
+    public let total: Int
+    /// Stored semantic fact count.
+    public let semanticCount: Int
+    /// Stored episode count.
+    public let episodeCount: Int
+    /// Window size honored for this page.
+    public let limit: Int
+    /// Cursor honored for this page.
+    public let offset: Int
+    /// Key/value preferences at read time.
+    public let preferences: [Preference]
+
+    /// Creates a paged facts response.
+    public init(
+        facts: [UserFact],
+        total: Int,
+        semanticCount: Int,
+        episodeCount: Int,
+        limit: Int,
+        offset: Int,
+        preferences: [Preference] = []
+    ) {
+        self.facts = facts
+        self.total = total
+        self.semanticCount = semanticCount
+        self.episodeCount = episodeCount
+        self.limit = limit
+        self.offset = offset
+        self.preferences = preferences
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case facts
+        case total
+        case semanticCount
+        case episodeCount
+        case limit
+        case offset
+        case preferences
+    }
+
+    /// Decodes tolerantly so payloads from engines that predate paging still
+    /// parse with the window standing in for the missing tally.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let facts = try container.decodeIfPresent([UserFact].self, forKey: .facts) ?? []
+        self.facts = facts
+        self.total = try container.decodeIfPresent(Int.self, forKey: .total) ?? facts.count
+        self.semanticCount = try container.decodeIfPresent(Int.self, forKey: .semanticCount) ?? 0
+        self.episodeCount = try container.decodeIfPresent(Int.self, forKey: .episodeCount) ?? 0
+        self.limit = try container.decodeIfPresent(Int.self, forKey: .limit) ?? facts.count
+        self.offset = try container.decodeIfPresent(Int.self, forKey: .offset) ?? 0
+        self.preferences = try container.decodeIfPresent([Preference].self, forKey: .preferences) ?? []
+    }
+
+    /// Encodes every field so older dashboards decoding as `FactsResponse`
+    /// find the snapshot keys they expect alongside the paging keys.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(facts, forKey: .facts)
+        try container.encode(total, forKey: .total)
+        try container.encode(semanticCount, forKey: .semanticCount)
+        try container.encode(episodeCount, forKey: .episodeCount)
+        try container.encode(limit, forKey: .limit)
+        try container.encode(offset, forKey: .offset)
+        try container.encode(preferences, forKey: .preferences)
+    }
+}
+
 /// Episodic clear receipt for `DELETE /memory/episodes`.
 ///
 /// Both counts describe the episodic tables only: how many rows the clear
@@ -910,6 +994,52 @@ public struct EpisodicClearResponse: Content, Equatable {
     public init(deletedCount: Int, episodeCount: Int) {
         self.deletedCount = deletedCount
         self.episodeCount = episodeCount
+    }
+}
+
+/// One episodic turn for `GET /memory/episodes/recent`, newest first.
+///
+/// Carries the full stored content plus identity, owning session, and role so
+/// the dashboard can preview a session without a second fetch. Timestamp rides
+/// as Unix seconds so every client decodes it without sharing a date strategy.
+/// Rows order newest first so the listing reads as a recency preview.
+public struct EpisodicEpisodeDTO: Content, Equatable {
+    /// Stored episode identifier.
+    public let id: UUID
+    /// Owning conversation session.
+    public let sessionID: UUID
+    /// Author role raw value (for example `"user"`).
+    public let role: String
+    /// Full stored turn content.
+    public let content: String
+    /// Occurrence time as Unix seconds since 1970 (server clock).
+    public let timestamp: Double
+
+    /// Creates an episodic listing row.
+    public init(id: UUID, sessionID: UUID, role: String, content: String, timestamp: Double) {
+        self.id = id
+        self.sessionID = sessionID
+        self.role = role
+        self.content = content
+        self.timestamp = timestamp
+    }
+}
+
+/// Recent episodic listing for `GET /memory/episodes/recent`, newest first.
+///
+/// Episodes cover the episodic tables only and order newest first; semantic
+/// facts, profile, document index, and session ledgers stay out of the shape.
+/// An unknown session reads as an empty list with count zero rather than an error.
+public struct EpisodicRecentResponse: Content, Equatable {
+    /// Episodic rows, newest first.
+    public let episodes: [EpisodicEpisodeDTO]
+    /// Number of rows in `episodes`.
+    public let count: Int
+
+    /// Creates a recent listing response.
+    public init(episodes: [EpisodicEpisodeDTO]) {
+        self.episodes = episodes
+        self.count = episodes.count
     }
 }
 

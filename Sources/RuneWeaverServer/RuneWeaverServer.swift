@@ -375,16 +375,40 @@ private func registerMemoryRoutes(_ app: Application) {
         return MemorySearchResponse(query: query, memories: memories)
     }
 
-    app.get(PathComponent.constant(ServerPaths.memory), PathComponent.constant(ServerPaths.memoryFacts)) { req async throws -> FactsResponse in
+    app.get(PathComponent.constant(ServerPaths.memory), PathComponent.constant(ServerPaths.memoryFacts)) { req async throws -> FactsPageResponse in
+        // Query trimming plus limit plus offset parsing stay at the transport
+        // edge so the engine keeps its typed contract: a blank `q` reads the
+        // recent window instead of failing, while malformed paging rejects
+        // before any store read. The engine owns normalization plus clamping
+        // as the backstop, so this block only validates wire shape.
+        let rawQuery = req.query[String.self, at: "q"] ?? ""
+        let trimmedQuery = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let limit = try parseQueryLimit(req, default: 20, min: 1, max: 100)
+        let offset: Int
+        if let rawString = req.query[String.self, at: "offset"] {
+            let trimmed = rawString.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let raw = Int(trimmed), raw >= 0, raw <= 100_000 else {
+                throw Abort(.badRequest, reason: "offset must be an integer between 0 and 100000")
+            }
+            offset = raw
+        } else {
+            offset = 0
+        }
         let context = req.application.runeWeaver
+        // Delegate to the engine-owned paged reader so REST never reaches
+        // past the owner into the vector or episode stores directly. Reads
+        // open storage on demand with no cached snapshot, so a just-stored
+        // fact is visible on the next fetch with no restart.
+        let result = await context.memoryEngine.searchFactsPage(query: trimmedQuery, limit: limit, offset: offset)
         let profile = await context.memoryEngine.getUserProfile()
-        let semantic = await context.memoryEngine.allSemanticFacts()
-        let episodes = await context.memoryEngine.episodeCount()
-        return FactsResponse(
-            facts: profile.facts,
-            preferences: profile.preferences,
-            semanticCount: semantic.count,
-            episodeCount: episodes
+        return FactsPageResponse(
+            facts: result.page,
+            total: result.total,
+            semanticCount: result.semanticCount,
+            episodeCount: result.episodeCount,
+            limit: limit,
+            offset: offset,
+            preferences: profile.preferences
         )
     }
 
@@ -427,12 +451,54 @@ private func registerMemoryRoutes(_ app: Application) {
     registerEpisodicDeleteRoutes(app)
 }
 
-/// Registers episodic bulk, session, and single-row delete routes.
+/// Registers episodic recent listing plus bulk, session, and single-row delete routes.
 ///
 /// Split from `registerMemoryRoutes` so the parent stays within the function
-/// body budget; route order preserves the `session` literal winning over `:id`.
+/// body budget; route order preserves the `session` and `recent` literals
+/// winning over `:id`.
 /// - Parameter app: Application receiving the routes.
 private func registerEpisodicDeleteRoutes(_ app: Application) {
+    app.get(
+        PathComponent.constant(ServerPaths.memory),
+        PathComponent.constant(ServerPaths.memoryEpisodes),
+        PathComponent.constant(ServerPaths.memoryEpisodesRecent)
+    ) { req async throws -> EpisodicRecentResponse in
+        // Limit plus session filtering stay validated here so the engine keeps
+        // its typed contract: malformed limits reject through the shared range
+        // helper while a malformed session rejects before any store read.
+        let limit = try parseQueryLimit(req, default: 20, min: 1, max: 100)
+        let sessionID: UUID?
+        if let raw = req.query[String.self, at: "sessionID"] {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let parsed = UUID(uuidString: trimmed) else {
+                throw Abort(.badRequest, reason: "sessionID must be a UUID")
+            }
+            sessionID = parsed
+        } else {
+            sessionID = nil
+        }
+        let episodes: [Episode]
+        do {
+            episodes = try await req.application.runeWeaver.memoryEngine.listRecentEpisodes(limit: limit, sessionID: sessionID)
+        } catch {
+            throw Abort(.internalServerError, reason: error.localizedDescription)
+        }
+        // Ordering is engine-owned: listRecentEpisodes already returns newest
+        // first, so map directly with no re-sort. Reads open SQLite on demand
+        // with no cached snapshot, so a just-stored turn is visible immediately
+        // with no restart and no watcher.
+        let rows = episodes.map { episode in
+            EpisodicEpisodeDTO(
+                id: episode.id,
+                sessionID: episode.sessionID,
+                role: episode.role.rawValue,
+                content: episode.content,
+                timestamp: episode.timestamp.timeIntervalSince1970
+            )
+        }
+        return EpisodicRecentResponse(episodes: rows)
+    }
+
     app.delete(
         PathComponent.constant(ServerPaths.memory),
         PathComponent.constant(ServerPaths.memoryEpisodes)
