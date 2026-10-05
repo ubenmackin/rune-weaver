@@ -42,6 +42,7 @@ import {
   isSessionAuthenticated,
   listApprovals,
   listJobs,
+  listRecentEpisodes,
   listRuns,
   listTrustGrants,
   MAX_CONCURRENT_CHAT_TURNS,
@@ -177,12 +178,13 @@ describe("dashboard api client", () => {
       if (input.startsWith("/memory/search")) {
         return jsonResponse({ query: "dog", count: 1, memories: [] });
       }
-      if (input === "/memory/facts" && init?.method === "POST") {
+      if (input.startsWith("/memory/facts") && init?.method === "POST") {
         return jsonResponse({ id: "f1", content: "dog", source: "dashboard" });
       }
-      if (input === "/memory/facts") {
+      if (input.startsWith("/memory/facts")) {
         return jsonResponse({
           facts: [],
+          total: 0,
           preferences: [],
           semanticCount: 0,
           episodeCount: 0,
@@ -198,8 +200,122 @@ describe("dashboard api client", () => {
     expect(stored.id).toBe("f1");
     const facts = await getFacts();
     expect(facts.episodeCount).toBe(0);
+    // Paged shape carries the window total alongside live tallies so tab
+    // labels settle without a second fetch.
+    expect(facts.total).toBe(0);
     await deleteFact("f1");
     expect(seen).toContain("/memory/facts/f1");
+  });
+
+  it("pages facts with search plus limit plus offset through URLSearchParams", async () => {
+    // Windowed reads keep previews bounded: the query names its substring and
+    // window explicitly so the pane never pulls an unbounded list to count.
+    const seen: string[] = [];
+    const fetchMock = vi.fn(async (input: string) => {
+      seen.push(input);
+      return jsonResponse({
+        facts: [],
+        total: 42,
+        semanticCount: 7,
+        episodeCount: 9,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const page = await getFacts("  biscuit  ", 20, 20);
+    expect(page.total).toBe(42);
+    expect(page.semanticCount).toBe(7);
+    expect(page.episodeCount).toBe(9);
+    const url = new URL(seen[0], "http://localhost");
+    expect(url.pathname).toBe("/memory/facts");
+    expect(url.searchParams.get("q")).toBe("biscuit");
+    expect(url.searchParams.get("limit")).toBe("20");
+    expect(url.searchParams.get("offset")).toBe("20");
+    // Default paging stays a plain recent-window read with an omitted empty
+    // query so legacy callers keep working.
+    await getFacts();
+    const defaultUrl = new URL(seen[1], "http://localhost");
+    expect(defaultUrl.pathname).toBe("/memory/facts");
+    expect(defaultUrl.searchParams.get("q")).toBeNull();
+    expect(defaultUrl.searchParams.get("limit")).toBe("20");
+    expect(defaultUrl.searchParams.get("offset")).toBe("0");
+  });
+
+  it("degrades a legacy facts payload without a total to its window length", async () => {
+    // Older engines predate the paged total; the client falls back to the
+    // window length so counts render instead of blanking.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          facts: [
+            {
+              id: "f1",
+              content: "Dog named Biscuit",
+              confidence: 1,
+              source: "dashboard",
+              lastConfirmed: new Date(0).toISOString(),
+            },
+          ],
+          preferences: [],
+          semanticCount: 1,
+          episodeCount: 2,
+        }),
+      ),
+    );
+    const page = await getFacts();
+    expect(page.facts).toHaveLength(1);
+    expect(page.total).toBe(1);
+    expect(page.episodeCount).toBe(2);
+  });
+
+  it("lists episodic recency through the canonical finder entrypoint", async () => {
+    // The finder owns the same bounded listing shape under its canonical name,
+    // so dashboard previews never read the stores directly and stay on one
+    // transport with identical query spelling.
+    const seen: string[] = [];
+    const fetchMock = vi.fn(async (input: string) => {
+      seen.push(input);
+      return jsonResponse({
+        episodes: [
+          {
+            id: "11111111-1111-1111-1111-111111111111",
+            sessionID: "22222222-2222-2222-2222-222222222222",
+            role: "user",
+            content: "hello",
+            timestamp: 1700000000,
+          },
+        ],
+        count: 1,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const recent = await listRecentEpisodes();
+    expect(recent.count).toBe(1);
+    expect(recent.episodes[0].id).toBe("11111111-1111-1111-1111-111111111111");
+    const defaultUrl = new URL(seen[0], "http://localhost");
+    expect(defaultUrl.pathname).toBe("/memory/episodes/recent");
+    expect(defaultUrl.searchParams.get("limit")).toBe("20");
+    expect(defaultUrl.searchParams.get("sessionID")).toBeNull();
+    await listRecentEpisodes(20, "  22222222-2222-2222-2222-222222222222  ");
+    const scopedUrl = new URL(seen[1], "http://localhost");
+    expect(scopedUrl.searchParams.get("limit")).toBe("20");
+    expect(scopedUrl.searchParams.get("sessionID")).toBe(
+      "22222222-2222-2222-2222-222222222222",
+    );
+  });
+
+  it("passes an abort signal through mixed recall", async () => {
+    // The Search pane cancels stale recalls on fresh submits; the signal rides
+    // the same recall path so no second transport exists.
+    const seen: Array<{ path: string; signal?: AbortSignal | null }> = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      seen.push({ path: input, signal: init?.signal ?? null });
+      return jsonResponse({ query: "dog", count: 0, memories: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    await searchMemory("dog", 10, controller.signal);
+    expect(seen[0].signal).toBe(controller.signal);
   });
 
   it("clears episodic turns and parses deleted plus remaining counts", async () => {

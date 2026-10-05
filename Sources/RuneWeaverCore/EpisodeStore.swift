@@ -720,7 +720,6 @@ enum EpisodeStoreIO {
             }
             return try searchLike(handle: handle, query: query, limit: limit, since: since, until: until)
         }
-
     }
 
     // MARK: - SQLiteEpisodeStore Search

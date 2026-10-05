@@ -3686,10 +3686,10 @@ button:disabled {
   gap: 16px;
 }
 
-/* Full-width underline tab bar for the Memory section: two equal tabs share
- * one row with large touch targets and an active underline instead of pills.
- * The bar spans the panel width so Search and Index Status read as views of
- * one surface rather than small floating buttons. */
+/* Full-width underline tab bar for the Memory section: three equal inner tabs
+ * share one row with large touch targets and an active underline instead of
+ * pills. The bar spans the panel width so Search, Facts, and Episodes read as
+ * views of one surface rather than small floating buttons. */
 .memory-tabs {
   display: flex;
   width: 100%;
@@ -3848,6 +3848,12 @@ button:disabled {
   margin: 8px 0 16px;
 }
 
+/* Fetch timing line under the Search row: same muted tone as counts so the
+ * hit tally reads as metadata rather than a second heading. */
+.memory-timing {
+  margin: 8px 0 0;
+}
+
 .facts-list {
   display: flex;
   flex-direction: column;
@@ -3896,6 +3902,29 @@ button:disabled {
   border: 1px solid var(--border-color);
   border-radius: 8px;
   font-size: 13px;
+}
+
+/* Section cards keep finder and cleanup breathing room without collapsing
+ * into one dense column: each card owns its padding while the bottom margin
+ * separates stacked sections at a glance. */
+.memory-section-card {
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+/* Session row keeps its input plus actions on one line with room to breathe,
+ * so Preview and Clear session never crowd the UUID field at narrow widths. */
+.episodic-session-row {
+  gap: 12px;
+}
+
+/* Clear-all row sits apart from the session row behind a divider, so the
+ * whole-store destructive action reads as a separate decision rather than a
+ * sibling of the scoped session clear. */
+.episodic-clear-all-row {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
 }
 
 /* ==========================================================================

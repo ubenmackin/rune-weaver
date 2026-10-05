@@ -355,6 +355,43 @@ public actor MemoryEngine {
         }
     }
 
+    /// Lists recent episodic turns across all sessions or one session, newest first.
+    ///
+    /// Read-only listing over the episodic tables only: without a session it
+    /// returns the newest rows across every session, with a session it previews
+    /// that session's newest rows. Rows order newest first with a stable
+    /// tie-break on identifier so repeated reads order identically instead of
+    /// leaving equal timestamps to sort chance. Every read opens SQLite on
+    /// demand with no cached snapshot, so a just-stored turn is visible
+    /// immediately with no restart and no invalidation step. Semantic rows,
+    /// profile, document index, and session ledgers stay untouched on this path.
+    /// - Parameters:
+    ///   - limit: Maximum rows to return; clamped to the per-tier cap.
+    ///   - sessionID: Owning session to preview, or nil for all sessions.
+    /// - Returns: Stored episodes newest first; empty when the store or session has no rows.
+    public func listRecentEpisodes(limit: Int = 20, sessionID: UUID? = nil) async throws -> [Episode] {
+        guard limit > 0 else { return [] }
+        let clamped = min(limit, Self.maxPerTierResults)
+        let fetched: [Episode] = if let sessionID {
+            try await withEpisodic {
+                try await episodeStore.recentEpisodes(for: sessionID, limit: clamped)
+            }
+        } else {
+            try await withEpisodic {
+                try await episodeStore.recent(limit: clamped)
+            }
+        }
+        // The session-scoped store read returns oldest first while the global
+        // read returns newest first, so normalize here to one newest-first
+        // contract with a stable tie-break. Callers never sort this listing.
+        return fetched.sorted {
+            if $0.timestamp != $1.timestamp {
+                return $0.timestamp > $1.timestamp
+            }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+    }
+
     /// Deletes every episodic turn for a session. Unknown sessions are a no-op.
     public func deleteSession(_ sessionID: UUID) async throws {
         try await withEpisodic {
