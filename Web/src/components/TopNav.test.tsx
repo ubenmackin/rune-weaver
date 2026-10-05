@@ -8,19 +8,19 @@
 // navigation, health detail, and badge behavior even when the handheld
 // stylesheet collapses the trigger to its glyph.
 //
-// The persona describe pins the profile identity contract: a saved persona
-// name and Wisp accent replace the stock glyph live, an unknown accent key
-// falls back to violet, the attention badge drives the sprite state, and an
-// absent persona renders exactly today's UI.
+// The persona describe pins the text-only profile identity contract: a saved
+// persona name renders beside the stock glyph with zero avatar images (the
+// Wisp lives exactly once in the dashboard greeting cluster), an absent
+// persona renders exactly today's UI, and the shared store subscription stays
+// so attention signals still publish for the greeting row.
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import TopNav from "./TopNav";
 import { isGroupActive, rolledUpBadge } from "./navigationConfig";
 import {
-  publishAgentWorking,
   publishPersonaFromSettings,
   resetPersonaSignalsForTesting,
 } from "./PersonaAvatar";
@@ -919,7 +919,7 @@ describe("TopNav persona profile", () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
   });
 
-  it("renders the saved persona name and Wisp accent instead of the stock glyph", async () => {
+  it("renders the saved persona name beside the stock glyph with zero avatar images", async () => {
     const user = userEvent.setup();
     publishPersonaFromSettings({
       assistant_name: "Zephyra",
@@ -928,15 +928,21 @@ describe("TopNav persona profile", () => {
       user_name: "Kupan",
       avatar: "rose",
     });
-    publishAgentWorking(true);
     renderPersonaNav();
-    const triggerImg = document.querySelector(".profile-dropdown-btn img");
-    expect(triggerImg?.getAttribute("src")).toBe(
-      "/avatars/wisp-rose-working-64.png",
-    );
+    // Text identity only: the Wisp image lives in the dashboard greeting
+    // cluster, so the trigger keeps the stock glyph even for a saved persona.
+    expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
+    expect(document.querySelector(".profile-dropdown-btn .persona-avatar")).toBeNull();
+    expect(document.querySelector(".persona-avatar")).toBeNull();
     await openProfileMenu(user);
-    expect(screen.getByText("Zephyra")).toBeInTheDocument();
-    expect(screen.getByTestId("profile-persona-avatar")).toBeInTheDocument();
+    // The trigger label and the menu header carry the same text identity, so
+    // the saved name appears in both places with no avatar image on either.
+    expect(screen.getAllByText("Zephyra").length).toBeGreaterThanOrEqual(2);
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Zephyra",
+    );
+    expect(document.querySelector(".profile-avatar img")).toBeNull();
+    expect(document.querySelector(".persona-avatar")).toBeNull();
     // The health model line stays exactly where it was beside the new identity.
     expect(screen.getByText("gemma-4-9b")).toBeInTheDocument();
   });
@@ -947,50 +953,74 @@ describe("TopNav persona profile", () => {
     // An absent persona is a visual no-op: the pre-persona UI, glyph and
     // stock label both, with no avatar image anywhere in the profile block.
     expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
+    expect(document.querySelector(".persona-avatar")).toBeNull();
+    // The trigger already carries the stock label before the menu opens.
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Rune Weaver Agent",
+    );
     await openProfileMenu(user);
-    expect(screen.getByText("Rune Weaver Agent")).toBeInTheDocument();
+    // Trigger plus header share the stock identity, so both nodes read the
+    // same fallback with no avatar image on either.
+    expect(
+      screen.getAllByText("Rune Weaver Agent").length,
+    ).toBeGreaterThanOrEqual(2);
     expect(document.querySelector(".profile-avatar img")).toBeNull();
+    expect(document.querySelector(".persona-avatar")).toBeNull();
   });
 
-  it("degrades an unknown stored accent to the violet colorway", () => {
+  it("keeps text identity with zero avatar nodes for an unknown stored accent", () => {
+    // A drifted accent no longer names a file anywhere in this bar: the name
+    // still renders while the image count stays zero.
     publishPersonaFromSettings({ assistant_name: "Vex", avatar: "chartreuse" });
     renderPersonaNav();
-    expect(
-      document.querySelector(".profile-dropdown-btn img")?.getAttribute("src"),
-    ).toBe("/avatars/wisp-violet-idle-64.png");
+    expect(screen.getByText("Vex")).toBeInTheDocument();
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Vex",
+    );
+    expect(document.querySelector(".persona-avatar")).toBeNull();
+    expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
   });
 
-  it("flips the avatar to attention when the approvals badge counts pending filings", () => {
+  it("renders zero avatar nodes when the approvals badge counts pending filings", () => {
+    // The badge still publishes the shared attention signal for the greeting
+    // cluster, but this bar never renders the image itself.
     publishPersonaFromSettings({ assistant_name: "Vex", avatar: "cyan" });
     renderPersonaNav({ approvalsBadge: 2 });
-    expect(
-      document.querySelector(".profile-dropdown-btn img")?.getAttribute("src"),
-    ).toContain("wisp-cyan-attention-64");
+    expect(document.querySelector(".persona-avatar")).toBeNull();
+    expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
   });
 
-  it("flips the avatar to attention for an unread goal nudge alone", () => {
+  it("renders zero avatar nodes for an unread goal nudge alone", () => {
     publishPersonaFromSettings({ assistant_name: "Vex", avatar: "cyan" });
     renderPersonaNav({ goalsBadge: 1 });
-    expect(
-      document.querySelector(".profile-dropdown-btn img")?.getAttribute("src"),
-    ).toContain("wisp-cyan-attention-64");
+    expect(document.querySelector(".persona-avatar")).toBeNull();
+    expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
   });
 
   it("mirrors a persona saved elsewhere into the mounted profile block without a remount", async () => {
     const user = userEvent.setup();
     renderPersonaNav();
     expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
-    publishPersonaFromSettings({
-      assistant_name: "Zephyra",
-      avatar: "emerald",
+    // The shared store notifies outside the render cycle, so the publish runs
+    // inside act to keep the state update attached to this test's render.
+    act(() => {
+      publishPersonaFromSettings({
+        assistant_name: "Zephyra",
+        avatar: "emerald",
+      });
     });
     await waitFor(() => {
-      expect(
-        document.querySelector(".profile-dropdown-btn img")?.getAttribute("src"),
-      ).toBe("/avatars/wisp-emerald-idle-64.png");
+      expect(screen.getByText("Zephyra")).toBeInTheDocument();
     });
+    // The live rename mirrors the name only; no image mounts alongside it.
+    expect(document.querySelector(".persona-avatar")).toBeNull();
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Zephyra",
+    );
     await openProfileMenu(user);
-    expect(screen.getByText("Zephyra")).toBeInTheDocument();
+    // Trigger plus header share the mirrored identity once the menu opens.
+    expect(screen.getAllByText("Zephyra").length).toBeGreaterThanOrEqual(2);
+    expect(document.querySelector(".persona-avatar")).toBeNull();
   });
 
   it("keeps the stock identity when the settings read fails on mount", async () => {
@@ -1003,7 +1033,11 @@ describe("TopNav persona profile", () => {
     );
     renderPersonaNav();
     await openProfileMenu(user);
-    expect(screen.getByText("Rune Weaver Agent")).toBeInTheDocument();
+    // Trigger plus header share the stock fallback when the read fails.
+    expect(
+      screen.getAllByText("Rune Weaver Agent").length,
+    ).toBeGreaterThanOrEqual(2);
     expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
+    expect(document.querySelector(".persona-avatar")).toBeNull();
   });
 });

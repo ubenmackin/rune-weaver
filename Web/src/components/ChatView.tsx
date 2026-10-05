@@ -2,8 +2,10 @@
 // animated typing indicator, distinct tool activity display, and attached status bar.
 // This view is also the single writer of the persona avatar's liveness signals: it
 // sees every turn terminal, every run frame, and every REST completion, so the
-// activity clock and working flag published here are the values every identity
-// surface renders, with no extra transport.
+// activity clock and working flag published here combine with the greeting
+// cluster's REST snapshot to resolve its avatar state, with no extra transport.
+// Text identity only here: the header keeps the muted name span and never
+// renders the Wisp image, which lives exactly once in the greeting cluster.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -30,7 +32,6 @@ import {
   placeholderCallIDsInText,
   postChat,
   personaAssistantName,
-  personaAvatarColor,
   resolveMaxConcurrentChatTurns,
   sortToolActionsByRound,
   textContainsPlaceholderForCall,
@@ -68,11 +69,9 @@ import {
 } from "./icons";
 import GoalDrawer from "./GoalDrawer";
 import {
-  PersonaAvatar,
   publishAgentActivity,
   publishAgentWorking,
   usePersonaSignals,
-  useResolvedAvatarState,
 } from "./PersonaAvatar";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import { useFileReviewHydration } from "../hooks/useFileReviewHydration";
@@ -1563,14 +1562,16 @@ export default function ChatView({
   // drives rendering; both hold normalized lowercase identifiers.
   const [backgroundRunningIDs, setBackgroundRunningIDs] = useState<string[]>([]);
   const backgroundRunningRef = useRef<Set<string>>(new Set());
-  // Persona identity mirror for the chat header, plus avatar liveness. This
-  // view is the single writer of the activity clock and the working flag: it
-  // sees every turn-terminal frame, every run frame, and every REST completion,
-  // so no other surface publishes those signals and no new transport rides
-  // them. The persona field itself is published by Settings (and the nav's
-  // one-shot load); the header only renders what the store carries.
+  // Persona name mirror for the chat header. This view stays the single writer
+  // of the activity clock and the working flag: it sees every turn-terminal
+  // frame, every run frame, and every REST completion, so no other surface
+  // publishes those signals and no new transport rides them. The greeting
+  // cluster consumes both flags from the store combined with its REST
+  // snapshot to resolve one avatar state. The persona field itself is
+  // published by Settings (and the nav's one-shot load); the header only
+  // renders the muted name span, never an image — the Wisp renders exactly
+  // once in the dashboard greeting cluster.
   const { persona } = usePersonaSignals();
-  const headerAvatarState = useResolvedAvatarState();
   const personaDisplayName = personaAssistantName(persona);
   const agentWorking = pending || backgroundRunningIDs.length > 0;
   useEffect(() => {
@@ -4806,21 +4807,16 @@ export default function ChatView({
               </button>
             )}
             <h2>Chat</h2>
-            {/* Persona identity beside the session title: the title stays
-                primary, so the avatar and name read small and muted. An
-                absent persona (or a name that normalizes blank) renders
-                exactly today's header — no identity row at all. */}
+            {/* Persona name beside the session title: the title stays primary,
+                so the name reads small and muted. An absent persona (or a name
+                that normalizes blank) renders exactly today's header — no
+                identity row at all. Text identity only: the greeting cluster
+                owns the app's sole avatar image, so this row never renders one. */}
             {personaDisplayName ? (
               <span
                 className="chat-persona-identity"
                 data-testid="chat-persona-identity"
               >
-                <PersonaAvatar
-                  color={personaAvatarColor(persona)}
-                  state={headerAvatarState}
-                  size={32}
-                  label=""
-                />
                 <span className="chat-persona-name">{personaDisplayName}</span>
               </span>
             ) : null}

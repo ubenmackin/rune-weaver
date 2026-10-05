@@ -12,7 +12,7 @@ import {
   parseRunTimestamp,
   type RunLogEntry,
 } from "../../api";
-import { getSharedRecentRuns } from "./sharedRuns";
+import { getSharedRecentRuns, getSharedRunTitle } from "./sharedRuns";
 import { formatRelativeAgo } from "../../relativeTime";
 import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
 import {
@@ -145,11 +145,11 @@ export default function RecentReports({
 
   useSharedWebSocket(handleWSFrame);
 
+  // Single-sourced run title: reuses the shared fallback so Recent Reports,
+  // the Working Right Now stream, and the greeting caption never disagree on
+  // the same run. Intentional divergence would need its own pinned test.
   function getReportTitle(run: RunLogEntry): string {
-    if (run.message && run.message.trim()) return run.message;
-    if (run.jobID) return `Scheduled Job: ${run.jobID}`;
-    if (run.goalId) return `Goal Turn: ${run.goalId}`;
-    return `Completed Task ${run.id.slice(0, 8)}`;
+    return getSharedRunTitle(run);
   }
 
   return (

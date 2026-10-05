@@ -13,7 +13,7 @@ import {
   parseRunTimestamp,
   type RunLogEntry,
 } from "../../api";
-import { getSharedRecentRuns } from "./sharedRuns";
+import { getSharedRecentRuns, getSharedRunTitle } from "./sharedRuns";
 import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
 import { MessageSquareIcon, StopIcon, WrenchIcon } from "../icons";
 
@@ -103,13 +103,6 @@ export default function WorkingNowStream({
     }
   }
 
-  function getRunTitle(run: RunLogEntry): string {
-    if (run.message && run.message.trim()) return run.message;
-    if (run.goalId) return `Goal Execution: ${run.goalId}`;
-    if (run.jobID) return `Scheduled Job: ${run.jobID}`;
-    return `Interactive Task ${run.id.slice(0, 8)}`;
-  }
-
   function calculateElapsedSeconds(timestamp: string | number): number {
     const started = parseRunTimestamp(timestamp).getTime();
     const now = Date.now();
@@ -162,7 +155,7 @@ export default function WorkingNowStream({
                 <div className="working-task-header">
                   <div className="working-task-title-wrap">
                     <span className="spinner-small" aria-hidden="true" />
-                    <h3 className="working-task-title">{getRunTitle(run)}</h3>
+                    <h3 className="working-task-title">{getSharedRunTitle(run)}</h3>
                   </div>
                   <span className="elapsed-timer-badge">
                     {elapsedSec < 60 ? `${elapsedSec}s` : `${Math.floor(elapsedSec / 60)}m ${elapsedSec % 60}s`}

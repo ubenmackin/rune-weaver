@@ -1,4 +1,7 @@
 // Rune Weaver Dashboard — Unit and integration tests for DashboardView and dashboard components.
+// Covers the greeting-row identity cluster (the app's sole avatar image at
+// 112px with assistant name and per-state caption), the prompt bar, the radar
+// and workstream widgets, and the full dashboard mount.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -14,6 +17,12 @@ import SystemPulseCard from "./dashboard/SystemPulseCard";
 import RecentReports, { getReportRunKind } from "./dashboard/RecentReports";
 import { clearSharedRecentRunsForTesting } from "./dashboard/sharedRuns";
 import * as api from "../api";
+import {
+  AVATAR_SLEEP_MS,
+  publishAgentActivity,
+  publishPersonaFromSettings,
+  resetPersonaSignalsForTesting,
+} from "./PersonaAvatar";
 import {
   createMockWebSocket,
   createMockWebSocketCapture,
@@ -694,6 +703,172 @@ describe("DashboardView integration", () => {
 
     await waitFor(() => {
       expect(vi.mocked(api.listGoals).mock.calls.length).toBeGreaterThan(initialGoalCalls);
+    });
+  });
+});
+
+describe("DashboardGreetingIdentity", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // The persona store is a module singleton: each greeting test starts
+    // detached so the resolved colorway and state prove the current publish.
+    resetPersonaSignalsForTesting();
+    clearSharedRecentRunsForTesting();
+    vi.mocked(api.listIdeas).mockResolvedValue({ ideas: [], count: 0 });
+    vi.mocked(api.listApprovals).mockResolvedValue({ approvals: [], count: 0 });
+    vi.mocked(api.listGoals).mockResolvedValue({ goals: [], count: 0 });
+    vi.mocked(api.listRuns).mockResolvedValue({ runs: [], count: 0 });
+    vi.mocked(api.listJobs).mockResolvedValue({ jobs: [], count: 0 });
+  });
+
+  function renderDashboard(onSelectTab = vi.fn()) {
+    render(
+      <DashboardView
+        health={{ status: "ok", engine: "RuneWeaver", version: "1.0.0" }}
+        onSelectTab={onSelectTab}
+      />,
+    );
+    return onSelectTab;
+  }
+
+  it("renders the 112px avatar with resolved colorway, name, and working title truncated to 60 chars", async () => {
+    publishPersonaFromSettings({
+      assistant_name: "Zephyra",
+      tone: "warm",
+      style: "",
+      user_name: "Kupan",
+      avatar: "rose",
+    });
+    const longMessage = `Migrating the scheduler ledger to the new durable schema with ${"x".repeat(80)}`;
+    vi.mocked(api.listRuns).mockResolvedValue({
+      runs: [
+        {
+          id: "run-working-1",
+          kind: "goal",
+          status: "running",
+          message: longMessage,
+          timestamp: Date.now(),
+        } as any,
+      ],
+      count: 1,
+    });
+
+    renderDashboard();
+
+    const avatar = await screen.findByTestId("dashboard-persona-avatar");
+    expect(avatar.tagName).toBe("IMG");
+    // Resolved colorway plus working state drive the frame, and the rendered
+    // edge pins the greeting size.
+    expect(avatar.getAttribute("src")).toBe("/avatars/wisp-rose-working-64.png");
+    expect(avatar.getAttribute("width")).toBe("112");
+    expect(avatar.getAttribute("height")).toBe("112");
+    expect(screen.getByTestId("dashboard-persona-name")).toHaveTextContent("Zephyra");
+
+    const caption = await screen.findByTestId("dashboard-persona-caption");
+    const expectedTitle = longMessage.slice(0, 60);
+    expect(caption.textContent).toContain("Working on");
+    expect(caption.textContent).toContain(expectedTitle);
+    // The tail beyond the budget never reaches the one-line caption.
+    expect(caption.textContent).not.toContain(longMessage.slice(60));
+    // The avatar image exists exactly once in the dashboard mount.
+    expect(document.querySelectorAll(".persona-avatar").length).toBe(1);
+  });
+
+  it("routes the attention count button to approvals when approvals are pending", async () => {
+    const user = userEvent.setup();
+    const onSelectTab = vi.fn();
+    publishPersonaFromSettings({ assistant_name: "Vex", avatar: "cyan" });
+    vi.mocked(api.listApprovals).mockResolvedValue({
+      approvals: [
+        { id: "a1", toolName: "email.send" } as any,
+        { id: "a2", toolName: "files.write" } as any,
+      ],
+      count: 2,
+    });
+    vi.mocked(api.listGoals).mockResolvedValue({
+      goals: [{ id: "g1", status: "needs_input", title: "Blocked" } as any],
+      count: 1,
+    });
+
+    renderDashboard(onSelectTab);
+
+    const caption = await screen.findByTestId("dashboard-persona-caption");
+    expect(caption.tagName).toBe("BUTTON");
+    expect(caption.textContent).toContain("3");
+    await user.click(caption);
+    expect(onSelectTab).toHaveBeenCalledWith("approvals");
+  });
+
+  it("routes the attention count button to goals when only goals need input", async () => {
+    const user = userEvent.setup();
+    const onSelectTab = vi.fn();
+    publishPersonaFromSettings({ assistant_name: "Vex", avatar: "cyan" });
+    vi.mocked(api.listApprovals).mockResolvedValue({ approvals: [], count: 0 });
+    vi.mocked(api.listGoals).mockResolvedValue({
+      goals: [{ id: "g1", status: "needs_input", title: "Blocked" } as any],
+      count: 1,
+    });
+
+    renderDashboard(onSelectTab);
+
+    const caption = await screen.findByTestId("dashboard-persona-caption");
+    expect(caption.tagName).toBe("BUTTON");
+    expect(caption.textContent).toContain("1");
+    await user.click(caption);
+    expect(onSelectTab).toHaveBeenCalledWith("goals");
+  });
+
+  it("renders the sleeping copy after ten quiet minutes with the sleeping frame", async () => {
+    publishPersonaFromSettings({ assistant_name: "Zephyra", avatar: "violet" });
+    publishAgentActivity(Date.now() - AVATAR_SLEEP_MS - 1000);
+
+    renderDashboard();
+
+    const avatar = await screen.findByTestId("dashboard-persona-avatar");
+    expect(avatar.getAttribute("src")).toContain("-sleeping-64");
+    const caption = await screen.findByTestId("dashboard-persona-caption");
+    expect(caption.textContent).toMatch(/Resting/i);
+  });
+
+  it("renders the idle copy when history exists but nothing is live", async () => {
+    publishPersonaFromSettings({ assistant_name: "Zephyra", avatar: "emerald" });
+    vi.mocked(api.listRuns).mockResolvedValue({
+      runs: [
+        {
+          id: "run-done-1",
+          kind: "scheduler",
+          status: "ok",
+          message: "Morning triage",
+          timestamp: Date.now() - 60000,
+        } as any,
+      ],
+      count: 1,
+    });
+
+    renderDashboard();
+
+    const caption = await screen.findByTestId("dashboard-persona-caption");
+    expect(caption.textContent).toMatch(/All caught up/i);
+    const avatar = screen.getByTestId("dashboard-persona-avatar");
+    expect(avatar.getAttribute("src")).toContain("-idle-64");
+  });
+
+  it("renders no caption on empty data while keeping avatar and name", async () => {
+    // Fresh dashboard: no approvals, no goals, no runs, no activity clock.
+    // The cluster keeps identity (avatar plus stock name) but claims no mood.
+    renderDashboard();
+
+    const identity = await screen.findByTestId("dashboard-greeting-identity");
+    expect(identity).toBeInTheDocument();
+    expect(screen.getByTestId("dashboard-persona-avatar")).toBeInTheDocument();
+    expect(screen.getByTestId("dashboard-persona-name")).toHaveTextContent(
+      "Rune Weaver Agent",
+    );
+    await waitFor(() => {
+      expect(api.listRuns).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("dashboard-persona-caption")).toBeNull();
     });
   });
 });

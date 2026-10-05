@@ -1,7 +1,8 @@
 // Rune Weaver Dashboard — Tests for the persona avatar module: the pure
 // avatar-state priority, the idle→sleeping wake timer that feeds it, the
 // fail-closed image rendering contract, the idle blink's visibility pause,
-// and the generated bundle assets.
+// the transform-only float motion with its reduced-motion gate, and the
+// generated bundle assets.
 //
 // The priority matrix is the behavioral core of the persona layer, so the
 // attention > working > sleeping > idle ordering and the 10-minute sleeping
@@ -11,7 +12,9 @@
 // component suite pins the two fallback promises (unknown server keys and a
 // load failure must never produce a broken image), and the asset suite pins
 // that the bundle the dashboard's srcSet points at actually exists per
-// colorway-state pair.
+// colorway-state pair. The motion suite pins that avatar movement is
+// transform-only float gated behind `prefers-reduced-motion: no-preference`
+// with a static fallback, so reduced-motion owners always see still frames.
 
 import { act, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -342,6 +345,83 @@ describe("useResolvedAvatarState sleep-wake timer", () => {
     expect(
       (container.querySelector("img") as HTMLImageElement).getAttribute("src"),
     ).toContain("-sleeping-64");
+  });
+});
+
+describe("persona avatar motion", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("floats on transform only and freezes under reduced-motion", async () => {
+    // Motion is float-only by contract: the sleeping and working states drift
+    // on translateY alone with no opacity pulse, and every avatar animation
+    // arms only under `prefers-reduced-motion: no-preference` with a static
+    // fallback — so reduced-motion owners always see still frames and the
+    // sleeping dim can only come from the prerendered asset, never a filter.
+    //
+    // The stylesheet probe mirrors the bundle-asset probe below: Node builtins
+    // resolve via dynamic import because the suite carries no @types/node.
+    const { readFileSync } = (await import(
+      // @ts-expect-error node builtin without @types/node; test-only probe.
+      "node:fs"
+    )) as { readFileSync: (path: string, encoding: string) => string };
+    const { resolve } = (await import(
+      // @ts-expect-error node builtin without @types/node; test-only probe.
+      "node:path"
+    )) as { resolve: (...pathSegments: string[]) => string };
+    const cssPath = resolve(process.cwd(), "src/styles.css");
+    const css = readFileSync(cssPath, "utf8");
+    // All avatar animation arms behind the no-preference gate.
+    expect(css).toContain("prefers-reduced-motion: no-preference");
+    expect(css).toContain(".persona-avatar--sleeping");
+    expect(css).toContain(".persona-avatar--working");
+    // The float keyframe itself moves on transform alone.
+    expect(css).toContain("@keyframes personaFloat");
+    expect(css).toContain("translateY");
+    // Avatar states never borrow the opacity pulse token: working floats like
+    // sleeping instead of pulsing through a shared opacity keyframe.
+    const avatarMotionBlock = css.slice(
+      css.indexOf(".persona-avatar--sleeping"),
+      css.indexOf(".persona-avatar-grid"),
+    );
+    expect(avatarMotionBlock).not.toContain("pulseTool");
+    expect(avatarMotionBlock).not.toContain("opacity");
+    // The explicit reduced-motion fallback keeps static frames even where the
+    // no-preference gate already implies it.
+    expect(css).toContain("prefers-reduced-motion: reduce");
+  });
+
+  it("holds the blink lid still when reduced-motion is requested", () => {
+    // The blink is animation by another name: owners who ask for no animation
+    // get the static idle frame rather than a lid flashing every few seconds.
+    const matchMedia = vi.fn(() => ({
+      matches: true,
+      media: "(prefers-reduced-motion: reduce)",
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    vi.stubGlobal("matchMedia", matchMedia);
+    try {
+      vi.useFakeTimers();
+      const { container } = render(
+        <PersonaAvatar color="violet" state="idle" />,
+      );
+      act(() => {
+        vi.advanceTimersByTime(BLINK_INTERVAL_MS * 3);
+      });
+      expect(
+        container.querySelector(".persona-avatar-blink-lid"),
+      ).toBeNull();
+      expect(
+        (container.querySelector("img") as HTMLImageElement).getAttribute(
+          "src",
+        ),
+      ).toContain("-idle-64");
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 });
 

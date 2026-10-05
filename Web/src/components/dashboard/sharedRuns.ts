@@ -1,12 +1,14 @@
 // Rune Weaver Dashboard — Shared Recent Runs Fetcher.
 //
 // Purpose: collapse the Dashboard's duplicate `GET /runs` polling into a single
-// network request shared by the Working Right Now stream and the Recent Reports
-// cards, so a cold Dashboard mount issues one fetch instead of two.
+// network request shared by the Working Right Now stream, the Recent Reports
+// cards, and the greeting identity cluster, so a cold Dashboard mount issues
+// one fetch instead of three.
 //
 // Scope: read-only recent-run payloads fetched through the existing `listRuns`
-// API helper. Filtering stays in each widget (active versus terminal runs), and
-// this module never interprets run status itself.
+// API helper plus the one shared run-title fallback. Filtering stays in each
+// widget (active versus terminal runs), and this module never interprets run
+// status itself beyond the title fallback's ownership order.
 //
 // Architectural role: single-flight cache sitting between the run-log REST
 // endpoint and the dashboard widgets. The widgets keep their own filtered state
@@ -14,6 +16,18 @@
 // refetches agree on one payload instead of drifting per call site.
 
 import { listRuns, type RunLogEntry } from "../../api";
+
+// Single run-title fallback shared by the Working Right Now stream, the
+// Recent Reports cards, and the dashboard greeting caption: message first
+// (trimmed), then goal/job ownership, then a short id. One trim policy lives
+// here so the caption, the stream, and the reports never disagree on
+// leading/trailing whitespace.
+export function getSharedRunTitle(run: RunLogEntry): string {
+  if (run.message && run.message.trim()) return run.message.trim();
+  if (run.goalId) return `Goal Execution: ${run.goalId}`;
+  if (run.jobID) return `Scheduled Job: ${run.jobID}`;
+  return `Interactive Task ${run.id.slice(0, 8)}`;
+}
 
 // Freshness window for the shared payload. Five seconds keeps concurrent mounts
 // and WebSocket-driven refetches on one response while staying short enough

@@ -6,9 +6,10 @@
 // collapses to a glanceable line on mobile and expands to full metrics. Also
 // pins the transcript's batched write-review hydration: every rendered
 // files.write card hydrates through one review-status request per card set.
-// The persona describe pins the identity header contract (name and Wisp
-// rendered only when a persona exists, today's UI otherwise) and ChatView's
-// single-writer claim over the avatar activity clock and working flag.
+// The persona describe pins the text-only identity header contract (muted name
+// with no avatar image when a persona exists, today's UI otherwise) and
+// ChatView's single-writer claim over the avatar activity clock and working
+// flag.
 
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -4242,7 +4243,7 @@ describe("ChatView persona header", () => {
     );
   });
 
-  it("shows the persona name and Wisp avatar beside the session title", async () => {
+  it("shows the persona name as text identity with no avatar image", async () => {
     publishPersonaFromSettings({
       assistant_name: "Zephyra",
       tone: "concise",
@@ -4253,9 +4254,11 @@ describe("ChatView persona header", () => {
     render(<ChatView />);
     const identity = await screen.findByTestId("chat-persona-identity");
     expect(within(identity).getByText("Zephyra")).toBeInTheDocument();
-    const img = identity.querySelector("img");
-    expect(img?.getAttribute("src")).toBe("/avatars/wisp-cyan-idle-64.png");
-    expect(img?.getAttribute("width")).toBe("32");
+    // Text identity only: the greeting cluster owns the app's sole avatar
+    // image, so the chat header carries the muted name span alone.
+    expect(identity.querySelector("img")).toBeNull();
+    expect(identity.querySelector(".persona-avatar")).toBeNull();
+    expect(document.querySelector(".persona-avatar")).toBeNull();
     // The session title stays primary; the identity sits beside it, not over it.
     expect(screen.getByRole("heading", { name: "Chat" })).toBeInTheDocument();
   });
