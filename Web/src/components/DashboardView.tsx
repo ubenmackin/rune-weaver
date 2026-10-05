@@ -23,6 +23,7 @@ import {
   listGoals,
   personaAssistantName,
   personaAvatarColor,
+  personaUserName,
   type Goal,
   type HealthResponse,
   type PermissionRequest,
@@ -359,6 +360,14 @@ export default function DashboardView({
   const [inspectedRun, setInspectedRun] = useState<RunLogEntry | null>(null);
   const [goalsRefreshTrigger, setGoalsRefreshTrigger] = useState(0);
   const greeting = getGreeting();
+  // Greeting identity follows the same blank rule as the chat header: a stored
+  // owner name that trims to empty is indistinguishable from an absent persona,
+  // so both surfaces fall back to the stock address instead of greeting an
+  // empty string. Reading the shared store keeps the headline live when
+  // Settings publishes a rename without a reload.
+  const { persona: greetingPersona } = usePersonaSignals();
+  const greetingName = personaUserName(greetingPersona).trim();
+  const operatorName = greetingName.length > 0 ? greetingName : "Operator";
 
   function handlePromptSubmit(prompt: string) {
     if (onOpenChatWithPrompt) {
@@ -383,7 +392,7 @@ export default function DashboardView({
       <header className="dashboard-hero-header">
         <div className="dashboard-greeting-row">
           <div className="dashboard-greeting-text">
-            <h1 className="dashboard-greeting-title">{greeting}, Operator</h1>
+            <h1 className="dashboard-greeting-title">{greeting}, {operatorName}</h1>
             <p className="dashboard-greeting-subtitle">
               Here is your daily operations overview, proactive radar, and autonomous work progress.
             </p>

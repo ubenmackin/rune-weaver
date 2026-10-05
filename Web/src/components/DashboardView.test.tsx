@@ -619,6 +619,9 @@ describe("DashboardView integration", () => {
   });
 
   it("mounts full dashboard with welcome header and sections", async () => {
+    // Absent persona is the stock-address path: with nothing published the
+    // headline keeps greeting Operator exactly as before.
+    resetPersonaSignalsForTesting();
     const onSelectTab = vi.fn();
     const onPromptSubmit = vi.fn();
 
@@ -634,6 +637,59 @@ describe("DashboardView integration", () => {
       expect(screen.getByRole("region", { name: "Executive Operations Dashboard" })).toBeInTheDocument();
       expect(screen.getByText(/Operator/i)).toBeInTheDocument();
       expect(screen.getByPlaceholderText(/Ask RuneWeaver anything/i)).toBeInTheDocument();
+    });
+  });
+
+  it("greets the persona owner by name when user_name is set", async () => {
+    // A saved owner name personalizes the headline, proving the greeting reads
+    // the shared persona store instead of the stock address.
+    resetPersonaSignalsForTesting();
+    publishPersonaFromSettings({
+      assistant_name: "Zephyra",
+      tone: "warm",
+      style: "",
+      user_name: "Kupan",
+      avatar: "rose",
+    });
+
+    render(
+      <DashboardView
+        health={{ status: "ok", engine: "RuneWeaver", version: "1.0.0" }}
+        onSelectTab={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/Kupan/);
+    });
+    expect(
+      screen.getByRole("heading", { level: 1 }),
+    ).not.toHaveTextContent(/Operator/);
+  });
+
+  it("falls back to Operator when the persona user name is blank", async () => {
+    // Whitespace-only owner names carry no address, so the headline keeps the
+    // stock fallback rather than greeting an empty string.
+    resetPersonaSignalsForTesting();
+    publishPersonaFromSettings({
+      assistant_name: "Zephyra",
+      tone: "warm",
+      style: "",
+      user_name: "   ",
+      avatar: "rose",
+    });
+
+    render(
+      <DashboardView
+        health={{ status: "ok", engine: "RuneWeaver", version: "1.0.0" }}
+        onSelectTab={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+        /Operator/,
+      );
     });
   });
 
