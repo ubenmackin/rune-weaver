@@ -147,15 +147,11 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
         (managedPythonVenvDir as NSString).appendingPathComponent(managedPythonRelativeBin)
     }
 
-    /// Additional allowed homelab domains, hostnames, or IP patterns for browser/web navigation.
-    public var allowedOrigins: [String]
     /// Per-action/navigation timeout in seconds for Playwright browser automation.
     public var timeoutSeconds: Int
     /// Per-request HTTP timeout in seconds for web.fetch and api.request.
     public var fetchTimeoutSeconds: Int
 
-    /// Default allowed origins for fresh installs.
-    public static let defaultAllowedOrigins: [String] = []
     /// Default Playwright browser automation action timeout in seconds.
     public static let defaultTimeoutSeconds = 30
     /// Default HTTP request timeout in seconds for web.fetch and api.request.
@@ -166,14 +162,12 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
         searxngURL: String = defaultSearxngURL,
         searchTimeoutSeconds: Int = defaultSearchTimeoutSeconds,
         maxResults: Int = defaultMaxResults,
-        allowedOrigins: [String] = defaultAllowedOrigins,
         timeoutSeconds: Int = defaultTimeoutSeconds,
         fetchTimeoutSeconds: Int = defaultFetchTimeoutSeconds
     ) {
         self.searxngURL = searxngURL
         self.searchTimeoutSeconds = searchTimeoutSeconds
         self.maxResults = maxResults
-        self.allowedOrigins = allowedOrigins
         self.timeoutSeconds = timeoutSeconds
         self.fetchTimeoutSeconds = fetchTimeoutSeconds
     }
@@ -182,7 +176,6 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
         case searxngURL = "searxng_url"
         case searchTimeoutSeconds = "search_timeout_seconds"
         case maxResults = "max_results"
-        case allowedOrigins = "allowed_origins"
         case timeoutSeconds = "timeout_seconds"
         case fetchTimeoutSeconds = "fetch_timeout_seconds"
     }
@@ -192,7 +185,6 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
         searxngURL = try container.decodeIfPresent(String.self, forKey: .searxngURL) ?? Self.defaultSearxngURL
         searchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .searchTimeoutSeconds) ?? Self.defaultSearchTimeoutSeconds
         maxResults = try container.decodeIfPresent(Int.self, forKey: .maxResults) ?? Self.defaultMaxResults
-        allowedOrigins = try container.decodeIfPresent([String].self, forKey: .allowedOrigins) ?? Self.defaultAllowedOrigins
         timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds) ?? Self.defaultTimeoutSeconds
         fetchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .fetchTimeoutSeconds) ?? Self.defaultFetchTimeoutSeconds
     }

@@ -331,6 +331,7 @@ struct LiveReviewManagerTests {
             } catch {
                 // Any refusal shape is acceptable; the invariant is that the
                 // link's target survives and the review stays pending.
+                #expect(error is Error)
             }
         }
 

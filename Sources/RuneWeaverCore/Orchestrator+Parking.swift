@@ -93,6 +93,89 @@ extension Orchestrator {
                 onEvent: onEvent
             )
         }
+        if call.toolName == "desktop.resume" {
+            // Fail-closed fresh capture: automation must never resume on a
+            // stale display. A missing screenshot tool, a thrown capture, an
+            // error output, or empty pixels ends the turn here with an honest
+            // refusal instead of synthesizing follow-up desktop actions on
+            // old observation.
+            let captureContext = ToolContext(conversationID: sessionID, approved: true)
+            var freshSection: String?
+            if let screenshotTool = await toolBus.tool(named: "desktop.screenshot") {
+                do {
+                    let output = try await screenshotTool.execute(
+                        input: ToolInput(toolName: "desktop.screenshot", argumentsJSON: "{}"),
+                        context: captureContext
+                    )
+                    let pixels = output.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !output.isError, !pixels.isEmpty {
+                        freshSection = "\n\n[Fresh Display State]:\n\(output.content)\n\nInspect the updated screen layout before taking further action."
+                    }
+                } catch {
+                    freshSection = nil
+                }
+            }
+            guard let freshDisplay = freshSection else {
+                let refusal =
+                    "Desktop resume refused: fresh screenshot unavailable, so automation remains paused on a stale display. "
+                        + "No further desktop actions were taken. Capture a fresh screenshot, then re-approve resume."
+                let refusalResult = ToolResult.failure(toolCallID: call.callID, content: refusal)
+                await onEvent?(.toolCompleted(
+                    toolName: call.toolName,
+                    callID: call.callID,
+                    result: refusalResult,
+                    roundIndex: parked.roundIndex
+                ))
+                await OrchestratorToolLoop.appendLabeledResult(
+                    for: nil,
+                    result: refusalResult,
+                    to: conversations,
+                    sessionID: sessionID,
+                    labelingEnabled: labelingEnabled
+                )
+                return try await finishParkedBatch(
+                    parked: parked,
+                    baseText: refusal,
+                    baseCompletedAt: nil,
+                    newAction: nil,
+                    approved: false,
+                    onEvent: onEvent
+                )
+            }
+            let resumeContent =
+                "Continuation granted: Desktop automation resumed after operator takeover."
+                    + freshDisplay
+            let result = ToolResult.success(toolCallID: call.callID, content: resumeContent)
+            let action = ToolAction(
+                toolName: "desktop.resume",
+                callID: call.callID,
+                argumentsJSON: call.argumentsJSON,
+                result: result,
+                roundIndex: parked.roundIndex
+            )
+            await onEvent?(.toolCompleted(
+                toolName: call.toolName,
+                callID: call.callID,
+                result: result,
+                roundIndex: parked.roundIndex
+            ))
+            await OrchestratorToolLoop.appendLabeledResult(
+                for: nil,
+                result: result,
+                to: conversations,
+                sessionID: sessionID,
+                labelingEnabled: labelingEnabled
+            )
+            return try await finishParkedBatch(
+                parked: parked,
+                baseText: "",
+                baseCompletedAt: nil,
+                newAction: action,
+                approved: true,
+                resetToolRounds: true,
+                onEvent: onEvent
+            )
+        }
         guard let tool = await toolBus.tool(named: call.toolName) else {
             let missingNote = await recordParkedMissingTool(call.toolName, sessionID: sessionID, onEvent: onEvent)
             return try await finishParkedBatch(
@@ -264,6 +347,7 @@ extension Orchestrator {
         try Task.checkCancellation()
         await flushEpisodic(pendingEpisodic, sessionID: sessionID)
         let cumulative = accumulateSessionTokens(loopBilled, for: sessionID)
+        await admissionGate?.clearTaskGrants(for: sessionID)
         // A zero occupancy report carries no pressure signal, so the resumed
         // turn keeps the parked estimate instead of dropping the gauge to 0%.
         let resumedContextTokens: Int? =
@@ -458,6 +542,34 @@ extension Orchestrator {
         return action
     }
 
+    /// Parks a turn due to operator mouse takeover during desktop control.
+    func parkForOperatorTakeover(
+        context: ParkTurnContext,
+        request: TurnLoopRequest,
+        pendingEpisodic: inout [(content: String, role: Message.Role)]
+    ) async -> TurnLoopOutcome {
+        let resumeCall = ToolInput(
+            toolName: "desktop.resume",
+            argumentsJSON: "{}"
+        )
+        let text = context.narratedText.isEmpty
+            ? "Desktop automation paused: operator took over control."
+            : context.narratedText
+        return await parkTurn(
+            ParkTurnContext(
+                gated: [resumeCall],
+                narratedText: text,
+                toolActions: context.toolActions,
+                billedTokens: context.billedTokens,
+                toolRounds: context.toolRounds,
+                contextTokens: context.contextTokens,
+                narrationAlreadyPersisted: context.narrationAlreadyPersisted
+            ),
+            request: request,
+            pendingEpisodic: &pendingEpisodic
+        )
+    }
+
     /// Parks the turn when tool iterations exceed the allowed limit and an approval queue is present.
     ///
     /// A caller that already persisted the continuation call's placeholder (the
@@ -526,6 +638,68 @@ extension Orchestrator {
         return .parked(parked)
     }
 
+    /// Files one approval request for a gated call into the approval queue.
+    private func enqueueParkedRequest(
+        for call: ToolInput,
+        context: ParkGatedCallsContext,
+        toolsByName: [String: any Tool],
+        queue: ApprovalQueue,
+        parkOnEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+    ) async -> PermissionRequest? {
+        if call.toolName == "engine.continue" {
+            let continuationAssessment = ImpactAssessment(
+                severity: .moderate,
+                outcome: "Allows the agent to proceed with additional tool execution rounds.",
+                warnings: []
+            )
+            let continuationRequest = PermissionRequest(
+                toolName: "engine.continue",
+                description: "The agent has completed \(context.gatedRoundIndex) tool rounds and is requesting continuation.",
+                input: call,
+                suggestedDurations: [.thisTime],
+                sessionID: context.sessionID,
+                intent: context.narratedText.isEmpty ? nil : context.narratedText,
+                assessment: continuationAssessment
+            )
+            await queue.enqueue(continuationRequest)
+            return continuationRequest
+        } else if call.toolName == "desktop.resume" {
+            let resumeAssessment = ImpactAssessment(
+                severity: .moderate,
+                outcome: "Resumes desktop automation with a fresh display observation.",
+                warnings: []
+            )
+            // Mouse-only copy is honest about production sensing: automatic
+            // takeover is cursor displacement, with keyboard abort arriving
+            // only as an explicit monitor latch rather than a live sensor.
+            let resumeDesc = "Desktop automation paused because you moved the mouse. "
+                + "Resume agent control to capture a fresh screenshot and continue."
+            let resumeRequest = PermissionRequest(
+                toolName: "desktop.resume",
+                description: resumeDesc,
+                input: call,
+                suggestedDurations: [.thisTime],
+                sessionID: context.sessionID,
+                intent: context.narratedText.isEmpty ? nil : context.narratedText,
+                assessment: resumeAssessment
+            )
+            await queue.enqueue(resumeRequest)
+            return resumeRequest
+        } else if let tool = toolsByName[call.toolName] {
+            let intent = context.narratedText.isEmpty ? nil : context.narratedText
+            return await queue.fileRequest(
+                tool: tool,
+                call: call,
+                sessionID: context.sessionID,
+                intent: intent,
+                onEnriched: { updated in
+                    await parkOnEvent?(.approval(updated))
+                }
+            )
+        }
+        return nil
+    }
+
     /// Files gated narrations and ends the turn parked waiting on approval.
     private func parkGatedCalls(
         _ context: ParkGatedCallsContext,
@@ -547,46 +721,13 @@ extension Orchestrator {
         let parkOnEvent = context.onEvent
         if let queue = approvalQueue {
             for call in context.gated {
-                let request: PermissionRequest
-                if call.toolName == "engine.continue" {
-                    // Continuation approvals resume in the owning session, so they carry
-                    // the same session link as normal gated tools.
-                    // Limit continuation approval to thisTime so engine.continue cannot acquire forever grants.
-                    // Filed directly with a fixed moderate assessment: no model
-                    // enrichment spawns, so continuation never waits on safety.
-                    let continuationAssessment = ImpactAssessment(
-                        severity: .moderate,
-                        outcome: "Allows the agent to proceed with additional tool execution rounds.",
-                        warnings: []
-                    )
-                    let continuationRequest = PermissionRequest(
-                        toolName: "engine.continue",
-                        description: "The agent has completed \(context.gatedRoundIndex) tool rounds and is requesting continuation.",
-                        input: call,
-                        suggestedDurations: [.thisTime],
-                        sessionID: context.sessionID,
-                        intent: context.narratedText.isEmpty ? nil : context.narratedText,
-                        assessment: continuationAssessment
-                    )
-                    await queue.enqueue(continuationRequest)
-                    request = continuationRequest
-                } else if let tool = byName[call.toolName] {
-                    // Two-phase filing: intent threads the turn narration
-                    // (nil when empty), the pending request returns immediately
-                    // with a nil assessment so parking never waits on the
-                    // model, and the enrichment hook rebroadcasts the updated
-                    // request on the identical id without re-parking.
-                    let intent = context.narratedText.isEmpty ? nil : context.narratedText
-                    request = await queue.fileRequest(
-                        tool: tool,
-                        call: call,
-                        sessionID: context.sessionID,
-                        intent: intent,
-                        onEnriched: { updated in
-                            await parkOnEvent?(.approval(updated))
-                        }
-                    )
-                } else {
+                guard let request = await enqueueParkedRequest(
+                    for: call,
+                    context: context,
+                    toolsByName: byName,
+                    queue: queue,
+                    parkOnEvent: parkOnEvent
+                ) else {
                     continue
                 }
                 let parkedApproval = ParkedNarratedApproval(

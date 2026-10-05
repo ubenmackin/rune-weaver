@@ -869,8 +869,7 @@ extension ServerContext {
         // loaded here so the same instance feeds both the egress supervisor
         // and the settings policy routes.
         let resolvedPolicyStore = await PolicyStore.makeLoaded(
-            injected: policyStore,
-            legacyLocalOrigins: browserConfig.allowedOrigins
+            injected: policyStore
         )
         await permissionGate.updateBashConfig(bashConfig)
         let services = await bootstrapServices(

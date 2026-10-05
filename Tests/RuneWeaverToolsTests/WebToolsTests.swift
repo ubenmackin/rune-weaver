@@ -502,33 +502,6 @@ struct BrowserConfigTests {
             #expect(field == "browser.search_timeout_seconds")
         }
     }
-
-    @Test
-    func `Universal wildcard allowed origins fail closed`() throws {
-        var config = RuneWeaverConfig.default
-        config.browser.allowedOrigins = ["*"]
-        do {
-            try config.validate()
-            Issue.record("Expected validation error for universal wildcard")
-        } catch let error as ConfigError {
-            guard case let .validationError(field, _) = error else {
-                Issue.record("Expected validationError, got \(error)")
-                return
-            }
-            #expect(field == "browser.allowed_origins")
-        }
-        config.browser.allowedOrigins = ["http://nas:8080/api"]
-        do {
-            try config.validate()
-            Issue.record("Expected validation error for path-scoped origin")
-        } catch let error as ConfigError {
-            guard case let .validationError(field, _) = error else {
-                Issue.record("Expected validationError, got \(error)")
-                return
-            }
-            #expect(field == "browser.allowed_origins")
-        }
-    }
 }
 
 @Suite("SearXNG Runtime Search")
@@ -681,16 +654,12 @@ struct SearXNGEnsurerRuntimeTests {
     }
 
     @Test
-    func `Allowlisted origins extracts auto service origins and ignores retired browser allowed origins`() {
-        // `browser.allowed_origins` is retired migration input only: it must
-        // never feed the runtime exemption set, which carries the auto service
+    func `Allowlisted origins extracts auto service origins`() {
+        // The runtime exemption set carries the auto service
         // origins (`searxng_url`, enabled media LAN URLs, LLM server URLs).
         // Owner grants arrive via the snapshot's `local_exemptions`, unioned
         // by callers.
-        let browser = BrowserConfig(
-            searxngURL: "http://127.0.0.1:8888",
-            allowedOrigins: ["*.homelab.local", "192.168.1.*"]
-        )
+        let browser = BrowserConfig(searxngURL: "http://127.0.0.1:8888")
         let media = MediaConfig(
             sonarr: ArrInstanceConfig(url: "http://sonarr.local:8989"),
             radarr: ArrInstanceConfig(url: "http://10.0.0.2:7878")
@@ -706,29 +675,13 @@ struct SearXNGEnsurerRuntimeTests {
         #expect(origins.contains("sonarr.local"))
         #expect(origins.contains("10.0.0.2:7878"))
         #expect(origins.contains("10.0.0.2"))
-        #expect(!origins.contains("*.homelab.local"))
-        #expect(!origins.contains("192.168.1.*"))
-        // A private literal named only by the retired list stays denied; the
-        // same pattern unioned as an owner exemption still clears.
         #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.120:8080/status", browserConfig: browser, mediaConfig: media) != nil)
         #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.120:8080/status", allowlistedOrigins: origins.union(["192.168.1.*"])) == nil)
     }
 
     @Test
-    func `Retired browser allowed origins grant no dialing`() {
-        // The retired list must not exempt anything at dial time: the same
-        // patterns keep their matcher semantics only when carried as an
-        // explicit exemption set (the `local_exemptions` union path), never
-        // via the browser config.
-        let browser = BrowserConfig(
-            allowedOrigins: ["*.homelab.local", "192.168.1.*"]
-        )
-        let origins = ApiSSRFGuard.allowlistedOrigins(browserConfig: browser)
-        #expect(!origins.contains("*.homelab.local"))
-        #expect(!origins.contains("192.168.1.*"))
-        // Matcher semantics preserved at the explicit-set layer: an
-        // allowlisted name proves its private resolutions while rebinding to
-        // link-local stays denied, and literal wildcards match without DNS.
+    func `Explicit owner exemptions authorize matching hosts while link-local stays denied`() {
+        let browser = BrowserConfig()
         let explicit: Set = ["*.homelab.local", "192.168.1.*"]
         #expect(ApiSSRFGuard.vettedIPListDenial(
             host: "nas.homelab.local", addresses: ["192.168.1.10"], origins: explicit
@@ -737,8 +690,7 @@ struct SearXNGEnsurerRuntimeTests {
         #expect(ApiSSRFGuard.vettedIPListDenial(
             host: "nas.homelab.local", addresses: ["169.254.169.254"], origins: explicit
         ) != nil)
-        // The retired config path grants nothing: the private literal and the
-        // off-pattern address both refuse without an owner exemption.
+        // Without an owner exemption, private literal refuses.
         #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.120:8080/status", browserConfig: browser) != nil)
         // Different IP not matched
         #expect(ApiSSRFGuard.denyReason(for: "http://10.0.0.1/admin", browserConfig: browser) != nil)
@@ -748,7 +700,7 @@ struct SearXNGEnsurerRuntimeTests {
 
     @Test
     func `CGNAT metadata and special-purpose literals are refused so the runtime table matches the verifier`() {
-        let browser = BrowserConfig(allowedOrigins: [])
+        let browser = BrowserConfig()
         // Alibaba's metadata service answers in CGNAT shared space
         // (`100.100.100.200`), which the policy verifier already lists as a
         // forbidden credential target; the runtime guard must reach the same
@@ -805,32 +757,11 @@ struct SearXNGEnsurerRuntimeTests {
         #expect(AllowedOriginPattern.classifyWildcard("*.example.com:8080") == .invalidShape)
         #expect(ApiSSRFGuard.isHostAllowed("foo.example.com", origins: ["*.example.com:8080"]) == false)
         #expect(ApiSSRFGuard.isHostAllowed("foo.example.com", origins: ["*.example.com"]) == true)
-        var config = RuneWeaverConfig.default
-        config.browser.allowedOrigins = ["*.example.com:8080"]
-        do {
-            try config.validate()
-            Issue.record("Expected validation error for port-qualified wildcard")
-        } catch let error as ConfigError {
-            guard case let .validationError(field, _) = error else {
-                Issue.record("Expected validationError, got \(error)")
-                return
-            }
-            #expect(field == "browser.allowed_origins")
-        } catch {
-            Issue.record("Expected ConfigError, got \(error)")
-        }
-        // The port-less edge keeps authorizing its suffix after the fix.
-        config.browser.allowedOrigins = ["*.example.com"]
-        do {
-            try config.validate()
-        } catch {
-            Issue.record("Plain leading wildcard should validate: \(error)")
-        }
     }
 
     @Test
     func `Media servers are auto-allowed without double entry`() {
-        let browser = BrowserConfig(allowedOrigins: [])
+        let browser = BrowserConfig()
         let media = MediaConfig(
             sonarr: ArrInstanceConfig(url: "http://192.168.1.50:8989")
         )
@@ -849,7 +780,7 @@ struct SSRFEmbeddedIPv4SpellingTests {
 
     @Test
     func `NAT64 6to4 and IPv4-compatible hextet literals are refused`() {
-        let browser = BrowserConfig(allowedOrigins: [])
+        let browser = BrowserConfig()
         // Each hextet spelling embeds a metadata, link-local, private, or
         // loopback address, so none may pass as a plain public IPv6 literal.
         let deniedURLs = [
@@ -875,7 +806,7 @@ struct SSRFEmbeddedIPv4SpellingTests {
         // Metadata and link-local targets are never exempt, so those spellings
         // must refuse together, and like the direct dotted twin they decode to,
         // under any browser config.
-        let browser = BrowserConfig(allowedOrigins: [])
+        let browser = BrowserConfig()
         let neverExemptPairs = [
             ("http://[64:ff9b::169.254.169.254]/", "http://[64:ff9b::a9fe:a9fe]/", "http://169.254.169.254/"),
             ("http://[::169.254.169.254]/", "http://[::a9fe:a9fe]/", "http://169.254.169.254/")
@@ -898,7 +829,7 @@ struct SSRFEmbeddedIPv4SpellingTests {
         // With the search origin off loopback the same spellings refuse
         // together: neither embedded form launders a verdict its dotted twin
         // would not get.
-        let publicSearch = BrowserConfig(searxngURL: "https://search.example.com", allowedOrigins: [])
+        let publicSearch = BrowserConfig(searxngURL: "https://search.example.com")
         let refusedTwin = ApiSSRFGuard.denyReason(for: loopbackTwin, browserConfig: publicSearch)
         #expect(refusedTwin != nil, "expected \(loopbackTwin) to refuse without a loopback origin")
         for spelling in mappedLoopbackSpellings {
@@ -911,12 +842,12 @@ struct SSRFEmbeddedIPv4SpellingTests {
         // The literal fast path exists to skip DNS, not to authorize a
         // decoded address: the range verdict runs first.
         #expect(ApiSSRFGuard.isIPAddressLiteral("64:ff9b::a9fe:a9fe") == true)
-        #expect(ApiSSRFGuard.denyReason(for: "http://[64:ff9b::6464:64c8]/", browserConfig: BrowserConfig(allowedOrigins: [])) != nil)
+        #expect(ApiSSRFGuard.denyReason(for: "http://[64:ff9b::6464:64c8]/", browserConfig: BrowserConfig()) != nil)
     }
 
     @Test
     func `Public IPv6 destinations stay dialable`() {
-        let browser = BrowserConfig(allowedOrigins: [])
+        let browser = BrowserConfig()
         let allowedURLs = [
             "http://[2606:4700:4700::1111]/", // native public
             "http://[64:ff9b::5db8:d822]/", // NAT64 → 93.184.216.34

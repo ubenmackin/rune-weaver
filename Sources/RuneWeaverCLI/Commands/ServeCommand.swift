@@ -391,8 +391,7 @@ extension ServeCommand {
         // posture on a missing file and leaves corruption to fail the first
         // tool build closed below.
         let policyStore = await PolicyStore.makeLoaded(
-            injected: nil,
-            legacyLocalOrigins: loaded.config.browser.allowedOrigins
+            injected: nil
         )
         let goalStack = makeGoalStack(
             memoryConfig: loaded.config.memory,

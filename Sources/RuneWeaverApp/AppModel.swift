@@ -54,6 +54,11 @@ public final class AppModel {
     /// tool toggles stay out of the menu, so the section appears only while a
     /// batch runs and Emergency Stop is reachable exactly when it can act.
     public var isDesktopActive: Bool = false
+    /// Whether desktop automation is currently paused waiting for operator resume.
+    public var hasPausedDesktopAutomation: Bool {
+        pendingApprovals.contains { $0.toolName == "desktop.resume" }
+    }
+
     /// Set to true to signal an emergency abort of the current desktop batch.
     public var desktopEmergencyStop: Bool = false
     /// Whether an index run is in flight. Polled from the live coordinator on
@@ -943,6 +948,20 @@ extension AppModel {
                     await context.activeTurns.cancel(sessionID: sessionID)
                 }
             }
+        }
+    }
+
+    /// Resumes paused desktop automation after operator takeover.
+    public func resumeDesktopControl() {
+        if let req = pendingApprovals.first(where: { $0.toolName == "desktop.resume" }) {
+            approve(id: req.id)
+        }
+    }
+
+    /// Cancels paused desktop automation task after operator takeover.
+    public func cancelDesktopTask() {
+        if let req = pendingApprovals.first(where: { $0.toolName == "desktop.resume" }) {
+            deny(id: req.id)
         }
     }
 }

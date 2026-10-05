@@ -882,6 +882,45 @@ struct PermissionGatePersistenceTests {
         #expect(active.first?.actionDescriptor == descriptor)
         #expect(await gate.isTrusted(descriptor) == true)
     }
+
+    @Test
+    func `forTask and forSession scoped grants isolate to session and lifecycle`() async throws {
+        let store = InMemoryTrustStore()
+        let gate = PermissionGate(store: store)
+        let sessionA = UUID()
+        let sessionB = UUID()
+        let taskDesc = ActionDescriptor(toolName: "files.write", target: "/tmp/scoped.txt")
+        let sessionDesc = ActionDescriptor(toolName: "bash.exec", target: "")
+
+        // Initially untrusted
+        #expect(await gate.isTrusted(taskDesc, sessionID: sessionA) == false)
+        #expect(await gate.isTrusted(taskDesc, sessionID: sessionB) == false)
+
+        // Grant taskDesc for sessionA
+        await gate.grantTrust(for: taskDesc, duration: .forTask, sessionID: sessionA)
+        #expect(await gate.isTrusted(taskDesc, sessionID: sessionA) == true)
+        #expect(await gate.isTrusted(taskDesc, sessionID: sessionB) == false)
+        #expect(await gate.isTrusted(taskDesc) == false)
+
+        // Ephemeral grants do not persist to store
+        #expect(try await store.load().isEmpty == true)
+        #expect(await gate.activeGrants().isEmpty == true)
+
+        // Grant sessionDesc for sessionA
+        await gate.grantTrust(for: sessionDesc, duration: .forSession, sessionID: sessionA)
+        #expect(await gate.isTrusted(sessionDesc, sessionID: sessionA) == true)
+        #expect(await gate.isTrusted(ActionDescriptor(toolName: "bash.exec", target: "ls"), sessionID: sessionA) == true)
+        #expect(await gate.isTrusted(sessionDesc, sessionID: sessionB) == false)
+
+        // Clearing task grants drops taskDesc but preserves sessionDesc
+        await gate.clearTaskGrants(for: sessionA)
+        #expect(await gate.isTrusted(taskDesc, sessionID: sessionA) == false)
+        #expect(await gate.isTrusted(sessionDesc, sessionID: sessionA) == true)
+
+        // Clearing session grants drops sessionDesc
+        await gate.clearSessionGrants(for: sessionA)
+        #expect(await gate.isTrusted(sessionDesc, sessionID: sessionA) == false)
+    }
 }
 
 /// Smoke-test contract for the permission gate consulting shell rules before parking.

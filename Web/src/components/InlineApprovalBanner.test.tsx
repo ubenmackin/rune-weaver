@@ -89,6 +89,43 @@ describe("InlineApprovalBanner continuation approval", () => {
   });
 });
 
+describe("InlineApprovalBanner desktop resume approval", () => {
+  it("renders desktop paused banner with Resume Control and Cancel Task buttons", async () => {
+    const onDecide = vi.fn();
+    const request: PermissionRequest = {
+      id: "app-desk-1",
+      toolName: "desktop.resume",
+      description: "Desktop automation paused because you moved the mouse. Resume control?",
+      input: { toolName: "desktop.resume", argumentsJSON: "{}", callID: "c-desk" },
+      suggestedDurations: ["thisTime"],
+    };
+
+    const user = userEvent.setup();
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    expect(screen.getByText("Desktop Paused")).toBeInTheDocument();
+    expect(
+      screen.getByText("Desktop automation paused because you moved the mouse. Resume control?"),
+    ).toBeInTheDocument();
+    const resumeBtn = screen.getByRole("button", { name: "Resume Control" });
+    const cancelBtn = screen.getByRole("button", { name: "Cancel Task" });
+    expect(resumeBtn).toBeInTheDocument();
+    expect(cancelBtn).toBeInTheDocument();
+
+    await user.click(resumeBtn);
+    expect(onDecide).toHaveBeenCalledWith("app-desk-1", true, "thisTime", false);
+
+    await user.click(cancelBtn);
+    expect(onDecide).toHaveBeenCalledWith("app-desk-1", false, "thisTime", false);
+  });
+});
+
 describe("InlineApprovalBanner tool approval with intent and assessment", () => {
   it("renders severity badge, intent, outcome, and warnings without tool description", async () => {
     const onDecide = vi.fn();

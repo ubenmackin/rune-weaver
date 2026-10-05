@@ -256,6 +256,7 @@ extension MessagesContactNameResolver: MessagesContactSearching {
             } catch {
                 // A partially readable address book is still useful; rank what
                 // was gathered instead of discarding the whole search.
+                RuneWeaverLog.stores.debug("MessagesContactSearch: partial contact enumeration stopped: \(error.localizedDescription)")
             }
             return MessagesContactMatcher.match(name: name, records: records, limit: limit)
         #else

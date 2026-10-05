@@ -548,6 +548,8 @@ extension ServerSchedulerWorker {
                 await notifier.notify(title: title, body: short.isEmpty ? job.prompt : short)
             }
             await broadcastProactive(kind: eventKind, title: job.name, headline: decision.headline, sessionID: sessionID)
+        } else if eventKind == .schedulerOk {
+            await conversations.setSessionArchived(id: sessionID, isArchived: true)
         }
 
         return SchedulerRunResult(

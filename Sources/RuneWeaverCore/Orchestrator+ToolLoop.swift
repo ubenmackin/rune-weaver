@@ -20,6 +20,47 @@ struct StructuredCallPartition {
     var refused: [RefusedAdmission] = []
 }
 
+/// Minimal typed view of the desktop action envelope for takeover detection.
+///
+/// Decodes only the interruption flag so key order or whitespace reformatting
+/// never affects the verdict, and prose that merely mentions takeover never
+/// triggers it. Lives in Core (rather than reusing the Tools envelope type)
+/// so the orchestrator never imports the plugin layer it supervises.
+private struct DesktopTakeoverSignal: Decodable {
+    /// True when the desktop tool paused for operator takeover.
+    let operatorInterrupted: Bool?
+}
+
+extension Orchestrator {
+    /// Whether a tool result is a typed operator-takeover envelope.
+    ///
+    /// Typed decode only: the content must parse as JSON (or base64-wrapped
+    /// JSON) with `operatorInterrupted == true`. Substring matches on the key
+    /// name or the human-readable message are rejected — they miss reformatted
+    /// or transport-wrapped envelopes (fail-open) and false-positive on prose.
+    /// - Parameter result: Bus outcome to inspect.
+    /// - Returns: True only on a typed takeover envelope.
+    private static func isOperatorTakeoverResult(_ result: ToolResult) -> Bool {
+        let trimmed = result.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if let data = trimmed.data(using: .utf8),
+           let signal = try? JSONDecoder().decode(DesktopTakeoverSignal.self, from: data),
+           signal.operatorInterrupted == true
+        {
+            return true
+        }
+        // Transport-wrapped envelope: base64 outer layer carrying the same JSON
+        // document. Plain prose fails either the base64 or the inner JSON
+        // decode, so this fallback cannot false-positive on message text.
+        let compact = trimmed.filter { !$0.isWhitespace }
+        guard let wrapped = Data(base64Encoded: compact, options: .ignoreUnknownCharacters),
+              let signal = try? JSONDecoder().decode(DesktopTakeoverSignal.self, from: wrapped),
+              signal.operatorInterrupted == true
+        else { return false }
+        return true
+    }
+}
+
 // MARK: - Tool loop execution
 
 extension Orchestrator {
@@ -131,7 +172,7 @@ extension Orchestrator {
         request: TurnLoopRequest,
         pendingEpisodic: inout [(content: String, role: Message.Role)],
         noteCalls: [ToolInput]? = nil
-    ) async throws -> [ToolAction] {
+    ) async throws -> (actions: [ToolAction], operatorTakeover: Bool) {
         let noteInputs = noteCalls ?? calls
         let assistantNote = assistantNoteMessage(text: finalText, calls: noteInputs)
         await conversations.append(assistantNote, to: request.sessionID)
@@ -528,8 +569,8 @@ extension Orchestrator {
         toolRounds: Int,
         request: TurnLoopRequest,
         pendingEpisodic: inout [(content: String, role: Message.Role)]
-    ) async throws -> [ToolAction] {
-        let executed = try await recordAndExecuteCalls(
+    ) async throws -> (actions: [ToolAction], operatorTakeover: Bool) {
+        let (executed, operatorTakeover) = try await recordAndExecuteCalls(
             calls: admissions.allowed,
             finalText: finalText,
             toolRounds: toolRounds,
@@ -537,13 +578,64 @@ extension Orchestrator {
             pendingEpisodic: &pendingEpisodic,
             noteCalls: noteCalls
         )
+        if operatorTakeover {
+            return (executed, true)
+        }
         let recordedRefused = try await recordRefusedAdmissions(
             admissions.refusedCalls,
             roundIndex: toolRounds - 1,
             request: request,
             pendingEpisodic: &pendingEpisodic
         )
-        return executed + recordedRefused
+        return (executed + recordedRefused, false)
+    }
+
+    private struct RoundExecutionParams {
+        let admissions: RoundAdmissions
+        let calls: [ToolInput]
+        let finalText: String
+        let toolRounds: Int
+        let tokens: (billed: Int?, context: Int?)
+        let request: TurnLoopRequest
+    }
+
+    /// Executes round calls and checks whether operator takeover or sibling gated calls park the turn.
+    private func executeRoundAndCheckParking(
+        params: RoundExecutionParams,
+        toolActions: inout [ToolAction],
+        pendingEpisodic: inout [(content: String, role: Message.Role)]
+    ) async throws -> TurnLoopOutcome? {
+        let (roundActions, operatorTakeover) = try await executeAndRecordRoundCalls(
+            admissions: params.admissions,
+            noteCalls: params.calls,
+            finalText: params.finalText,
+            toolRounds: params.toolRounds,
+            request: params.request,
+            pendingEpisodic: &pendingEpisodic
+        )
+        toolActions.append(contentsOf: roundActions)
+        if operatorTakeover {
+            let takeoverContext = makeParkContext(
+                gated: [],
+                text: params.finalText,
+                actions: toolActions,
+                toolRounds: params.toolRounds,
+                tokens: params.tokens,
+                narrationAlreadyPersisted: true
+            )
+            return await parkForOperatorTakeover(
+                context: takeoverContext,
+                request: params.request,
+                pendingEpisodic: &pendingEpisodic
+            )
+        }
+        // The executed call already wrote this turn's narration note, so the
+        // sibling gated calls must park without persisting it a second time.
+        let updatedContext = makeParkContext(
+            gated: params.admissions.combinedGated, text: params.finalText, actions: toolActions, toolRounds: params.toolRounds, tokens: params.tokens,
+            narrationAlreadyPersisted: true
+        )
+        return await parkTurnIfGated(context: updatedContext, request: params.request, pendingEpisodic: &pendingEpisodic)
     }
 
     /// Runs the bounded tool loop for one turn until final text or parking.
@@ -623,23 +715,20 @@ extension Orchestrator {
             if shouldStop {
                 break
             }
-            let roundActions = try await executeAndRecordRoundCalls(
+            let executionParams = RoundExecutionParams(
                 admissions: admissions,
-                noteCalls: calls,
+                calls: calls,
                 finalText: finalText,
                 toolRounds: toolRounds,
-                request: request,
+                tokens: tokens,
+                request: request
+            )
+            if let parkedOutcome = try await executeRoundAndCheckParking(
+                params: executionParams,
+                toolActions: &toolActions,
                 pendingEpisodic: &pendingEpisodic
-            )
-            toolActions.append(contentsOf: roundActions)
-            // The executed call already wrote this turn's narration note, so the
-            // sibling gated calls must park without persisting it a second time.
-            let updatedContext = makeParkContext(
-                gated: admissions.combinedGated, text: finalText, actions: toolActions, toolRounds: toolRounds, tokens: tokens,
-                narrationAlreadyPersisted: true
-            )
-            if let parked = await parkTurnIfGated(context: updatedContext, request: request, pendingEpisodic: &pendingEpisodic) {
-                return parked
+            ) {
+                return parkedOutcome
             }
             workingMessages = await refreshedWorkingMessages(
                 sessionID: request.sessionID,
@@ -702,9 +791,10 @@ extension Orchestrator {
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)?,
         pendingEpisodic: inout [(content: String, role: Message.Role)],
         isDryRun: Bool = false
-    ) async throws -> [ToolAction] {
+    ) async throws -> (actions: [ToolAction], operatorTakeover: Bool) {
         var actions: [ToolAction] = []
         var executedCallIDs = Set<String>()
+        var operatorTakeover = false
         // Forward advisory progress as a session-tagged event so the dashboard can
         // show a slow tool still working. The bus stamps each report with the
         // authoritative call identity before it reaches this sink, so the closure
@@ -759,9 +849,42 @@ extension Orchestrator {
                 ) {
                     pendingEpisodic.append((record, .tool))
                 }
+                // Typed takeover verdict: only a decoded envelope with
+                // `operatorInterrupted == true` parks the turn. Substring
+                // sniffing is rejected — it misses reformatted or
+                // transport-wrapped envelopes and false-positives on prose.
+                if Self.isOperatorTakeoverResult(result) {
+                    operatorTakeover = true
+                    break
+                }
                 try Task.checkCancellation()
             }
-            return actions
+            if operatorTakeover {
+                for call in calls where !executedCallIDs.contains(call.callID) {
+                    let pausedResult = ToolResult(
+                        toolCallID: call.callID,
+                        content: "Execution paused due to operator takeover",
+                        isError: true
+                    )
+                    let pausedAction = ToolAction(
+                        toolName: call.toolName,
+                        callID: call.callID,
+                        argumentsJSON: call.argumentsJSON,
+                        result: pausedResult,
+                        roundIndex: roundIndex
+                    )
+                    actions.append(pausedAction)
+                    await OrchestratorToolLoop.appendLabeledResult(
+                        on: toolBus,
+                        to: conversations,
+                        toolName: call.toolName,
+                        result: pausedResult,
+                        sessionID: sessionID,
+                        labelingEnabled: labelingEnabled
+                    )
+                }
+            }
+            return (actions, operatorTakeover)
         } catch {
             // Synthesize cancelled tool results for any unexecuted calls in the batch
             // so an assistant message announcing multiple tool calls is never left with

@@ -6,6 +6,8 @@ import { sanitizeWarnings } from "./warnings";
 
 export type TrustDuration =
   | "thisTime"
+  | "forTask"
+  | "forSession"
   | "fiveMinutes"
   | "oneHour"
   | "oneDay"
@@ -13,6 +15,8 @@ export type TrustDuration =
 
 export const trustDurationOptions: Array<{ value: TrustDuration; label: string }> = [
   { value: "thisTime", label: "Only this time" },
+  { value: "forTask", label: "For rest of this task" },
+  { value: "forSession", label: "For rest of this session" },
   { value: "fiveMinutes", label: "Next 5 minutes" },
   { value: "oneHour", label: "Next hour" },
   { value: "oneDay", label: "Next day" },
@@ -47,7 +51,12 @@ export interface HealthResponse {
   maxConcurrentChatTurns?: number | null;
 }
 
-export type ToolErrorKind = "invalid_tool" | "invalid_syntax" | "execution_error";
+export type ToolErrorKind =
+  | "invalid_tool"
+  | "invalid_syntax"
+  | "execution_error"
+  | "uncertain_outcome"
+  | "idempotency_blocked";
 
 export interface ToolResult {
   toolCallID: string;
@@ -851,6 +860,7 @@ export interface SessionSummary {
   // payload so clients resolve a session-to-goal badge without querying run
   // history. Absent on unlinked sessions and older payloads.
   goalId?: string | null;
+  isArchived?: boolean;
 }
 
 export interface SessionsResponse {
@@ -1520,8 +1530,9 @@ export function cancelRun(id: string): Promise<CancelRunResponse> {
   );
 }
 
-export function listSessions(): Promise<SessionsResponse> {
-  return fetchJson<SessionsResponse>("/sessions");
+export function listSessions(includeArchived = false): Promise<SessionsResponse> {
+  const query = includeArchived ? "?include_archived=true" : "";
+  return fetchJson<SessionsResponse>(`/sessions${query}`);
 }
 
 export function getSession(id: string): Promise<ConversationSession> {
@@ -1540,6 +1551,18 @@ export function updateSessionTitle(id: string, title: string): Promise<void> {
   return fetchJson<void>(`/sessions/${encodeURIComponent(id)}`, {
     method: "PATCH",
     body: JSON.stringify({ title }),
+  });
+}
+
+export function archiveSession(id: string): Promise<void> {
+  return fetchJson<void>(`/sessions/${encodeURIComponent(id)}/archive`, {
+    method: "POST",
+  });
+}
+
+export function unarchiveSession(id: string): Promise<void> {
+  return fetchJson<void>(`/sessions/${encodeURIComponent(id)}/unarchive`, {
+    method: "POST",
   });
 }
 
@@ -3384,7 +3407,6 @@ export interface SettingsResponse {
   browserSearxngURL?: string;
   browserSearchTimeoutSeconds?: number;
   browserMaxResults?: number;
-  browserAllowedOrigins?: string[];
   browserTimeoutSeconds?: number;
   browserFetchTimeoutSeconds?: number;
   searchSearxngURL?: string;
@@ -3462,7 +3484,6 @@ export interface UpdateSettingsInput {
   browserSearxngURL?: string;
   browserSearchTimeoutSeconds?: number;
   browserMaxResults?: number;
-  browserAllowedOrigins?: string[];
   browserTimeoutSeconds?: number;
   browserFetchTimeoutSeconds?: number;
   searchSearxngURL?: string;

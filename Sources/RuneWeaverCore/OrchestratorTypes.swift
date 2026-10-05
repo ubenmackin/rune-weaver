@@ -154,6 +154,10 @@ public enum ToolErrorKind: String, Sendable, Codable, Equatable {
     case invalidSyntax = "invalid_syntax"
     /// Valid tool and arguments, but runtime execution failed.
     case executionError = "execution_error"
+    /// Action outcome could not be verified (e.g. timeout on a mutating call).
+    case uncertainOutcome = "uncertain_outcome"
+    /// Identical repeat call blocked until prior uncertain outcome is verified.
+    case idempotencyBlocked = "idempotency_blocked"
 }
 
 /// One tool invocation performed while answering.

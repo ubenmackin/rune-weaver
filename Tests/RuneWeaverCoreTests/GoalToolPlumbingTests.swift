@@ -458,9 +458,28 @@ struct GoalToolPlumbingTests {
             steps: [("Only task", .pending)]
         )
 
-        final class NotifierCapture: @unchecked Sendable {
-            var receivedGoal: Goal?
-            var receivedSteps: [GoalStep] = []
+        final class NotifierCapture: Sendable {
+            private struct State {
+                var receivedGoal: Goal?
+                var receivedSteps: [GoalStep] = []
+            }
+
+            private let state = OSAllocatedUnfairLock(initialState: State())
+
+            var receivedGoal: Goal? {
+                state.withLock { $0.receivedGoal }
+            }
+
+            var receivedSteps: [GoalStep] {
+                state.withLock { $0.receivedSteps }
+            }
+
+            func record(goal: Goal, steps: [GoalStep]) {
+                state.withLock {
+                    $0.receivedGoal = goal
+                    $0.receivedSteps = steps
+                }
+            }
         }
         let capture = NotifierCapture()
 
@@ -469,8 +488,7 @@ struct GoalToolPlumbingTests {
             store: store,
             goalsConfig: config,
             goalUpdatedNotifier: { updatedGoal, steps in
-                capture.receivedGoal = updatedGoal
-                capture.receivedSteps = steps
+                capture.record(goal: updatedGoal, steps: steps)
             }
         )
         let progress = try #require(tools.first { $0.name == "goal.progress" })

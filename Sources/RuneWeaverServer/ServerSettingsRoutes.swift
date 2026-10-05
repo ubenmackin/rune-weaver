@@ -420,9 +420,6 @@ func gatewayForLiveReload(
 /// rebuild path the settings save uses and pin the `api.request` supervisor
 /// identity against the triage/gate/browser instance.
 func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async throws {
-    // `browserAllowedOrigins` is retired and never triggers a reload: it is
-    // decoded for wire compatibility but ignored by `apply(to:)`, so a PUT
-    // carrying only that field leaves config and exemptions untouched.
     guard body.media != nil || body.browserSearxngURL != nil
         || body.searchSearxngURL != nil || body.providers != nil || body.defaultProvider != nil
         || body.fallbackProvider != nil || body.browserTimeoutSeconds != nil || body.browserFetchTimeoutSeconds != nil
@@ -755,10 +752,8 @@ private func probedIndexComponents(savedConfig: RuneWeaverConfig, context: Serve
 
 /// Merges config-derived origins with stored local exemptions.
 /// The config side is the auto service origins only (`searxng_url`, enabled
-/// media LAN URLs, configured LLM server URLs): the retired
-/// `browser.allowed_origins` never feeds an exemption directly, so the
-/// effective set is auto origins UNION the store snapshot's
-/// `local_exemptions`.
+/// media LAN URLs, configured LLM server URLs). The effective set is auto
+/// origins UNION the store snapshot's `local_exemptions`.
 private func mergedNetworkOrigins(browserConfig: BrowserConfig, mediaConfig: MediaConfig?, llmServerURLs: [String], store: PolicyStore) async -> Set<String> {
     let base = ApiSSRFGuard.allowlistedOrigins(browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs)
     let exemptions: Set<String> = await (try? store.snapshot().network.localExemptions) ?? []

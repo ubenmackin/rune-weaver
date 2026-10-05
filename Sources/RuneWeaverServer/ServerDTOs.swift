@@ -73,6 +73,10 @@ public enum ServerPaths {
     public static let sessions = "sessions"
     /// Structured tool actions subpath under `/sessions/:id`.
     public static let toolActions = "tool-actions"
+    /// Archive subpath under `/sessions/:id`.
+    public static let archive = "archive"
+    /// Unarchive subpath under `/sessions/:id`.
+    public static let unarchive = "unarchive"
     /// WebSocket endpoint for streamed chat plus live approval prompts.
     public static let websocket = "ws"
     /// Settings group.

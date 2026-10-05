@@ -235,6 +235,9 @@ public enum OrchestratorToolLoop {
         if calls.contains(where: { $0.toolName == "engine.continue" }) {
             return "The agent has completed its allocated tool rounds. Awaiting continuation approval."
         }
+        if calls.contains(where: { $0.toolName == "desktop.resume" }) {
+            return "Desktop automation paused because you moved the mouse. Resume agent control to capture a fresh screenshot and continue."
+        }
         let names = Array(Set(calls.map(\.toolName))).sorted()
         let joined = names.isEmpty ? "the requested tool" : names.joined(separator: ", ")
         return "Waiting for approval to run \(joined). Approve in the approvals inbox to continue."
@@ -257,6 +260,9 @@ public enum OrchestratorToolLoop {
     public static func isWaitingOnApprovalMessage(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed == "The agent has completed its allocated tool rounds. Awaiting continuation approval." {
+            return true
+        }
+        if trimmed == "Desktop automation paused because you moved the mouse. Resume agent control to capture a fresh screenshot and continue." {
             return true
         }
         if trimmed.hasPrefix("Waiting for approval to run "),
@@ -283,6 +289,9 @@ public enum OrchestratorToolLoop {
         let trimmed = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed == "engine.continue" {
             return "Continuation stopped by user."
+        }
+        if trimmed == "desktop.resume" {
+            return "Desktop automation stopped by operator."
         }
         let name = trimmed.isEmpty ? "the requested tool" : trimmed
         return "Approval denied for \(name); not running it."

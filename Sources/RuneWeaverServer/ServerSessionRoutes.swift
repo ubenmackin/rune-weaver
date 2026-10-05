@@ -27,8 +27,10 @@ func validatedSessionTitle(_ raw: String) throws -> String {
 func registerSessionRoutes(_ app: Application) {
     let sessions = app.grouped(PathComponent.constant(ServerPaths.sessions))
     sessions.get { req async throws -> SessionsResponse in
+        let includeArchived = req.query[Bool.self, at: "include_archived"] ?? false
         let list = await req.application.runeWeaver.conversations.listSessions()
-        return SessionsResponse(sessions: list)
+        let filtered = includeArchived ? list : list.filter { !$0.isArchived }
+        return SessionsResponse(sessions: filtered)
     }
     sessions.get(PathComponent.parameter("id")) { req async throws -> ConversationSession in
         guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
@@ -71,6 +73,26 @@ func registerSessionRoutes(_ app: Application) {
             throw Abort(.notFound, reason: "Unknown session \(raw)")
         }
         await req.application.runeWeaver.conversations.updateTitle(id: id, title: title)
+        return Response(status: .noContent)
+    }
+    sessions.post(PathComponent.parameter("id"), PathComponent.constant(ServerPaths.archive)) { req async throws -> Response in
+        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+            throw Abort(.badRequest, reason: "id must be a UUID")
+        }
+        guard await req.application.runeWeaver.conversations.session(id: id) != nil else {
+            throw Abort(.notFound, reason: "Unknown session \(raw)")
+        }
+        await req.application.runeWeaver.conversations.setSessionArchived(id: id, isArchived: true)
+        return Response(status: .noContent)
+    }
+    sessions.post(PathComponent.parameter("id"), PathComponent.constant(ServerPaths.unarchive)) { req async throws -> Response in
+        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+            throw Abort(.badRequest, reason: "id must be a UUID")
+        }
+        guard await req.application.runeWeaver.conversations.session(id: id) != nil else {
+            throw Abort(.notFound, reason: "Unknown session \(raw)")
+        }
+        await req.application.runeWeaver.conversations.setSessionArchived(id: id, isArchived: false)
         return Response(status: .noContent)
     }
     sessions.delete(PathComponent.parameter("id")) { req async throws -> Response in

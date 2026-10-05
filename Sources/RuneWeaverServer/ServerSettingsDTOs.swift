@@ -59,12 +59,6 @@ public struct SettingsResponse: Content, Equatable {
     public let browserSearxngURL: String
     public let browserSearchTimeoutSeconds: Int
     public let browserMaxResults: Int
-    /// Retired migration-display field: mirrors `config.browser.allowedOrigins`
-    /// for wire compatibility so older dashboards still decode, but it grants
-    /// nothing at runtime and `PUT /settings` ignores it. Local-network grants
-    /// flow only through `PUT /settings/policy` and
-    /// `POST /settings/policy/recheck-local/apply` into `local_exemptions`.
-    public let browserAllowedOrigins: [String]
     public let browserTimeoutSeconds: Int
     public let browserFetchTimeoutSeconds: Int
     public let searchSearxngURL: String
@@ -135,7 +129,6 @@ public struct SettingsResponse: Content, Equatable {
         self.browserSearxngURL = config.browser.searxngURL
         self.browserSearchTimeoutSeconds = config.browser.searchTimeoutSeconds
         self.browserMaxResults = config.browser.maxResults
-        self.browserAllowedOrigins = config.browser.allowedOrigins
         self.browserTimeoutSeconds = config.browser.timeoutSeconds
         self.browserFetchTimeoutSeconds = config.browser.fetchTimeoutSeconds
         self.searchSearxngURL = config.browser.searxngURL
@@ -192,7 +185,6 @@ public struct SettingsResponse: Content, Equatable {
         case browserSearxngURL
         case browserSearchTimeoutSeconds
         case browserMaxResults
-        case browserAllowedOrigins
         case browserTimeoutSeconds
         case browserFetchTimeoutSeconds
         case searchSearxngURL
@@ -257,7 +249,6 @@ public struct SettingsResponse: Content, Equatable {
         browserSearxngURL = try container.decodeIfPresent(String.self, forKey: .browserSearxngURL) ?? ""
         browserSearchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .browserSearchTimeoutSeconds) ?? 10
         browserMaxResults = try container.decodeIfPresent(Int.self, forKey: .browserMaxResults) ?? 10
-        browserAllowedOrigins = try container.decodeIfPresent([String].self, forKey: .browserAllowedOrigins) ?? []
         browserTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .browserTimeoutSeconds) ?? BrowserConfig.defaultTimeoutSeconds
         browserFetchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .browserFetchTimeoutSeconds) ?? BrowserConfig.defaultFetchTimeoutSeconds
         searchSearxngURL = try container.decodeIfPresent(String.self, forKey: .searchSearxngURL) ?? browserSearxngURL
@@ -317,7 +308,6 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(browserSearxngURL, forKey: .browserSearxngURL)
         try container.encode(browserSearchTimeoutSeconds, forKey: .browserSearchTimeoutSeconds)
         try container.encode(browserMaxResults, forKey: .browserMaxResults)
-        try container.encode(browserAllowedOrigins, forKey: .browserAllowedOrigins)
         try container.encode(browserTimeoutSeconds, forKey: .browserTimeoutSeconds)
         try container.encode(browserFetchTimeoutSeconds, forKey: .browserFetchTimeoutSeconds)
         try container.encode(searchSearxngURL, forKey: .searchSearxngURL)
@@ -386,11 +376,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let browserSearxngURL: String?
     public let browserSearchTimeoutSeconds: Int?
     public let browserMaxResults: Int?
-    /// Retired wire-compat field: still decodes so older dashboards sending a
-    /// full-form `PUT /settings` keep parsing, but `apply(to:)` ignores it and
-    /// it never grants dialing. Use `PUT /settings/policy` to manage
-    /// `local_exemptions`.
-    public let browserAllowedOrigins: [String]?
     public let browserTimeoutSeconds: Int?
     public let browserFetchTimeoutSeconds: Int?
     public let searchSearxngURL: String?
@@ -454,7 +439,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
         browserSearxngURL: String? = nil,
         browserSearchTimeoutSeconds: Int? = nil,
         browserMaxResults: Int? = nil,
-        browserAllowedOrigins: [String]? = nil,
         browserTimeoutSeconds: Int? = nil,
         browserFetchTimeoutSeconds: Int? = nil,
         searchSearxngURL: String? = nil,
@@ -507,7 +491,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.browserSearxngURL = browserSearxngURL
         self.browserSearchTimeoutSeconds = browserSearchTimeoutSeconds
         self.browserMaxResults = browserMaxResults
-        self.browserAllowedOrigins = browserAllowedOrigins
         self.browserTimeoutSeconds = browserTimeoutSeconds
         self.browserFetchTimeoutSeconds = browserFetchTimeoutSeconds
         self.searchSearxngURL = searchSearxngURL
@@ -711,15 +694,6 @@ extension UpdateSettingsRequest {
         if let browserFetchTimeoutSeconds {
             browser.fetchTimeoutSeconds = browserFetchTimeoutSeconds
         }
-        // `browserAllowedOrigins` is retired: decoded for wire compatibility
-        // but never written here, so `PUT /settings` cannot persist or grant
-        // a local-network exemption. The sole migration consumer is
-        // `PolicyStore.load(legacyLocalOrigins:)`; new grants flow only
-        // through `PUT /settings/policy` and
-        // `POST /settings/policy/recheck-local/apply`. The binding is
-        // intentionally read (`_ =`) so a future edit cannot silently
-        // reintroduce the write without touching this gate.
-        _ = browserAllowedOrigins
     }
 
     private func applyEmail(to email: inout EmailConfig) {

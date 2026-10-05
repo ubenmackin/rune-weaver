@@ -148,20 +148,23 @@ export default function NeedsActionQueue({
           {approvals.map((req) => {
             const isBusy = decidingId === req.id;
             const isContinuation = req.toolName === "engine.continue";
+            const isDesktopResume = req.toolName === "desktop.resume";
             const severity = req.assessment?.severity || "moderate";
-            const argSummary = isContinuation
+            const argSummary = (isContinuation || isDesktopResume)
               ? null
               : (req.input?.argumentsJSON || req.intent || null);
-            const toolBadgeText = isContinuation ? "Continuation" : req.toolName;
-            const severityBadgeText = isContinuation ? "CONTINUATION" : severity.toUpperCase();
+            const toolBadgeText = isContinuation ? "Continuation" : isDesktopResume ? "Desktop Paused" : req.toolName;
+            const severityBadgeText = isContinuation ? "CONTINUATION" : isDesktopResume ? "PAUSED" : severity.toUpperCase();
             const descriptionText =
               req.description ||
               (isContinuation
                 ? "The agent has completed its allocated tool rounds and is requesting continuation."
+                : isDesktopResume
+                ? "Desktop automation paused because you moved the mouse. Resume agent control to capture a fresh screenshot and continue."
                 : "Approval requested for tool execution.");
 
             return (
-              <article key={req.id} className={`action-card severity-${severity} ${isContinuation ? "action-card-continuation" : ""}`}>
+              <article key={req.id} className={`action-card severity-${severity} ${isContinuation ? "action-card-continuation" : ""} ${isDesktopResume ? "action-card-desktop-resume" : ""}`}>
                 <div className="action-card-header">
                   <div className="action-card-title-row">
                     <span className={`badge severity-badge severity-${severity}`}>
@@ -202,16 +205,20 @@ export default function NeedsActionQueue({
                     className="btn btn-primary approve-action-btn"
                     onClick={() => handleDecision(req, true)}
                     disabled={isBusy}
-                    aria-label={isContinuation ? "Continue execution" : `Approve ${req.toolName}`}
+                    aria-label={isContinuation ? "Continue execution" : isDesktopResume ? "Resume desktop control" : `Approve ${req.toolName}`}
                   >
                     <CheckIcon size={15} />
                     <span>
                       {isBusy
                         ? isContinuation
                           ? "Continuing…"
+                          : isDesktopResume
+                          ? "Resuming…"
                           : "Approving…"
                         : isContinuation
                         ? "Continue"
+                        : isDesktopResume
+                        ? "Resume Control"
                         : "Approve"}
                     </span>
                   </button>
@@ -221,16 +228,20 @@ export default function NeedsActionQueue({
                     className="btn reject-action-btn"
                     onClick={() => handleDecision(req, false)}
                     disabled={isBusy}
-                    aria-label={isContinuation ? "Stop execution" : `Reject ${req.toolName}`}
+                    aria-label={isContinuation ? "Stop execution" : isDesktopResume ? "Cancel task" : `Reject ${req.toolName}`}
                   >
                     <CloseIcon size={15} />
                     <span>
                       {isBusy
                         ? isContinuation
                           ? "Stopping…"
+                          : isDesktopResume
+                          ? "Cancelling…"
                           : "Rejecting…"
                         : isContinuation
                         ? "Stop"
+                        : isDesktopResume
+                        ? "Cancel Task"
                         : "Reject"}
                     </span>
                   </button>

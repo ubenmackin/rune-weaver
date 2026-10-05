@@ -300,6 +300,47 @@ export default function InlineApprovalBanner({
     );
   }
 
+  const isDesktopResume = request.toolName === "desktop.resume";
+  if (isDesktopResume) {
+    return (
+      <div
+        className="card inline-approval-banner"
+        data-testid={`inline-approval-${request.id}`}
+      >
+        <div className="inline-approval-header">
+          <span className="badge approval-tool-badge" style={{ backgroundColor: "#eab308", color: "#000" }}>Desktop Paused</span>
+          <span className="approval-desc">
+            {request.description || "Desktop automation paused because you moved the mouse. Resume agent control to capture a fresh screenshot and continue."}
+          </span>
+        </div>
+
+        <div className="inline-approval-actions">
+          <button
+            type="button"
+            className="primary"
+            disabled={deciding}
+            onClick={() => onDecide(request.id, true, "thisTime", false)}
+          >
+            Resume Control
+          </button>
+          <button
+            type="button"
+            className="danger"
+            disabled={deciding}
+            onClick={() => onDecide(request.id, false, "thisTime", false)}
+          >
+            Cancel Task
+          </button>
+          {deciding ? (
+            <span className="text-xs muted inline-approval-deciding">
+              Deciding…
+            </span>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       className="card inline-approval-banner"

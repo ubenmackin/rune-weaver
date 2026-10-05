@@ -187,6 +187,17 @@ public enum DesktopControlError: Error, Sendable, Equatable {
     case failSafeTriggered
     /// The operator requested an emergency stop mid-batch.
     case emergencyStopped
+    /// The operator moved the mouse mid-batch, displacing the cursor past the
+    /// displacement threshold, or an explicit takeover was latched on the
+    /// shared monitor. Production detects mouse displacement automatically;
+    /// there is no in-process HID key poll, so keyboard takeover arrives only
+    /// as an explicit `DesktopControlMonitor.requestOperatorTakeover()` latch
+    /// (Emergency Stop surface or host HID bridge), never as automatic sensing.
+    case operatorTakeover
+    /// The operator took over mid-batch after earlier steps already succeeded.
+    /// Carries the completed step results so the tool envelope can report
+    /// partial progress instead of discarding the audit trail.
+    case operatorTakeoverWithPartial(results: [DesktopActionStepResult])
     /// The platform does not support desktop control.
     case unsupportedPlatform
     /// An action in the batch failed.
@@ -195,6 +206,33 @@ public enum DesktopControlError: Error, Sendable, Equatable {
     case batchTooLarge(count: Int, max: Int)
     /// A typed or pasted URL target was blocked or unlisted by security policy.
     case blockedURL(host: String, url: String, reason: String)
+
+    /// Whether this error signals operator takeover in either shape.
+    ///
+    /// Both the pre-step signal (no partial progress) and the mid-batch
+    /// signal (with completed steps) park the turn identically; the envelope
+    /// layer reads `partialResults` to keep the audit trail.
+    public var isOperatorTakeover: Bool {
+        switch self {
+        case .operatorTakeover, .operatorTakeoverWithPartial:
+            true
+        default:
+            false
+        }
+    }
+
+    /// Completed step results preserved by a mid-batch takeover.
+    ///
+    /// Empty for the pre-step signal (nothing had succeeded yet) and for all
+    /// non-takeover errors, so callers can unconditionally report the count.
+    public var partialResults: [DesktopActionStepResult] {
+        switch self {
+        case let .operatorTakeoverWithPartial(results):
+            results
+        default:
+            []
+        }
+    }
 }
 
 // MARK: - Shared emergency state
@@ -213,6 +251,8 @@ public actor DesktopControlMonitor {
     private var activeCount = 0
     /// Latched stop request, cleared when the last batch settles.
     private var emergencyStop = false
+    /// Latched operator takeover signal (mouse displacement or explicit stop).
+    private var operatorTakeover = false
 
     /// Creates a monitor.
     public init() {}
@@ -227,6 +267,11 @@ public actor DesktopControlMonitor {
         emergencyStop
     }
 
+    /// Whether an operator takeover pause has been requested.
+    public var isOperatorTakeoverRequested: Bool {
+        operatorTakeover
+    }
+
     /// Marks one batch started.
     public func beginBatch() {
         activeCount += 1
@@ -237,6 +282,7 @@ public actor DesktopControlMonitor {
         activeCount = max(0, activeCount - 1)
         if activeCount == 0 {
             emergencyStop = false
+            operatorTakeover = false
         }
     }
 
@@ -248,6 +294,17 @@ public actor DesktopControlMonitor {
     /// Clears a latched stop without ending a batch.
     public func clearEmergencyStop() {
         emergencyStop = false
+        operatorTakeover = false
+    }
+
+    /// Latches an operator takeover pause.
+    public func requestOperatorTakeover() {
+        operatorTakeover = true
+    }
+
+    /// Clears an operator takeover pause.
+    public func clearOperatorTakeover() {
+        operatorTakeover = false
     }
 
     /// Whether the running batch should abort at the next checkpoint.
@@ -312,24 +369,41 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     static let maxCoordinateValue: Double = 20000.0
     /// Corner margin in points for the fail-safe check.
     static let failSafeCornerMargin: CGFloat = 5.0
+    /// Displacement threshold in points for detecting manual operator mouse movement.
+    public static let operatorDisplacementThreshold: CGFloat = 15.0
 
     /// Silent Accessibility gate injected for tests; live turns query TCC.
     private let accessibilityAccess: @Sendable () async -> Bool
     /// Outbound egress supervisor screening URLs typed into apps against policy.toml.
     public let egressSupervisor: OutboundEgressSupervisor?
+    /// Injected operator-takeover signal for tests and host HID bridges.
+    ///
+    /// Production factories leave this nil on purpose: no in-process HID key
+    /// poll ships, so automatic takeover is mouse displacement past
+    /// `operatorDisplacementThreshold` only. An explicit keyboard abort still
+    /// parks through the shared `DesktopControlMonitor.requestOperatorTakeover`
+    /// latch (Emergency Stop surface or host HID bridge wiring), which the
+    /// bridge polls on every checkpoint alongside this closure.
+    private let operatorTakeoverDetector: (@Sendable () async -> Bool)?
 
     /// Creates the live bridge.
     ///
     /// The injected gate exists so bridge-level tests can exercise the
     /// fail-closed denial without touching real TCC trust; live turns keep
-    /// the silent non-prompting query as the default.
+    /// the silent non-prompting query as the default. The takeover detector
+    /// stays nil in production for the same reason: tests and host HID
+    /// bridges inject it, while shipped batches rely on cursor displacement
+    /// plus the explicit monitor latch instead of claiming an automatic
+    /// keyboard sensor that is never wired.
     public init(
         accessibilityAccess: @escaping @Sendable () async -> Bool = {
             await MainActor.run { DesktopPermissionCheck.isAccessibilityTrusted() }
         },
+        operatorTakeoverDetector: (@Sendable () async -> Bool)? = nil,
         egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
         self.accessibilityAccess = accessibilityAccess
+        self.operatorTakeoverDetector = operatorTakeoverDetector
         self.egressSupervisor = egressSupervisor
     }
 
@@ -350,26 +424,29 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
         try await executeBatch(actions: actions, scaleX: scaleX, scaleY: scaleY, blockedApps: blockedApps, sessionID: nil)
     }
 
-    /// Executes a batch screened against one session's egress grants.
-    public func executeBatch(
-        actions: [DesktopAction],
-        scaleX: Double,
-        scaleY: Double,
-        blockedApps: [String],
-        sessionID: UUID?
-    ) async throws -> [DesktopActionStepResult] {
-        // Cancellation and operator stop win over the permission gate so a
-        // cancelled turn never pays a TCC syscall or masks cancellation
-        // behind a permission error. A stop requested before the first step
-        // aborts without dispatching.
-        try Task.checkCancellation()
+    /// Checks cooperative emergency stop and operator takeover signals.
+    private func checkEmergencyStopOrTakeover() async throws {
         if await DesktopControlMonitor.shared.shouldAbort() {
             throw DesktopControlError.emergencyStopped
         }
-        // Fail closed before validating the batch so an untrusted process
-        // never reaches CGEvent dispatch. The silent check avoids popping a
-        // system dialog mid-turn; the enable path requests trust
-        // explicitly on user intent instead.
+        if await DesktopControlMonitor.shared.isOperatorTakeoverRequested {
+            throw DesktopControlError.operatorTakeover
+        }
+        if let detector = operatorTakeoverDetector, await detector() {
+            await DesktopControlMonitor.shared.requestOperatorTakeover()
+            throw DesktopControlError.operatorTakeover
+        }
+    }
+
+    /// Validates batch parameters and preflight safety checks before dispatching.
+    private func validateBatchPreflight(
+        actions: [DesktopAction],
+        scaleX: Double,
+        scaleY: Double,
+        sessionID: UUID?
+    ) async throws {
+        try Task.checkCancellation()
+        try await checkEmergencyStopOrTakeover()
         guard await accessibilityAccess() else {
             throw DesktopControlError.accessibilityPermissionDenied
         }
@@ -385,72 +462,107 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
               scaleX > 0, scaleY > 0,
               scaleX <= Self.maxScaleFactor, scaleY <= Self.maxScaleFactor
         else {
-            throw DesktopControlError.actionFailed(
-                index: 0, reason: "Invalid scale factors (scale_x: \(scaleX), scale_y: \(scaleY)): must be finite, positive, and at most \(Self.maxScaleFactor)"
-            )
+            let reason = "Invalid scale factors (scale_x: \(scaleX), scale_y: \(scaleY)): "
+                + "must be finite, positive, and at most \(Self.maxScaleFactor)"
+            throw DesktopControlError.actionFailed(index: 0, reason: reason)
         }
-
         try await screenBatchURLs(actions: actions, sessionID: sessionID)
+    }
+
+    #if canImport(CoreGraphics) && canImport(AppKit)
+        /// Validates safety conditions before a single action executes.
+        private func checkActionSafety(
+            action: DesktopAction,
+            lastSyntheticPoint: CGPoint?,
+            blockedApps: [String]
+        ) async throws {
+            try await checkEmergencyStopOrTakeover()
+            try Task.checkCancellation()
+
+            if let last = lastSyntheticPoint, isDisplaced(from: last) {
+                await DesktopControlMonitor.shared.requestOperatorTakeover()
+                throw DesktopControlError.operatorTakeover
+            }
+
+            if isMouseInCorner() {
+                throw DesktopControlError.failSafeTriggered
+            }
+
+            if needsInputCheck(action) {
+                try checkBlockedApp(blockedApps: blockedApps)
+            }
+
+            if case let .switchApp(appName) = action {
+                try checkSwitchTarget(appName, blockedApps: blockedApps)
+            }
+        }
+    #endif
+
+    /// Executes a batch screened against one session's egress grants.
+    public func executeBatch(
+        actions: [DesktopAction],
+        scaleX: Double,
+        scaleY: Double,
+        blockedApps: [String],
+        sessionID: UUID?
+    ) async throws -> [DesktopActionStepResult] {
+        try await validateBatchPreflight(
+            actions: actions,
+            scaleX: scaleX,
+            scaleY: scaleY,
+            sessionID: sessionID
+        )
 
         #if canImport(CoreGraphics) && canImport(AppKit)
             var results: [DesktopActionStepResult] = []
+            var lastSyntheticPoint: CGPoint?
             for (index, action) in actions.enumerated() {
-                // Cooperative abort before every action so Emergency Stop
-                // preempts the next step instead of running the batch out.
-                if await DesktopControlMonitor.shared.shouldAbort() {
-                    throw DesktopControlError.emergencyStopped
-                }
-                try Task.checkCancellation()
-                // Fail-safe corner check before every action
-                if isMouseInCorner() {
-                    throw DesktopControlError.failSafeTriggered
-                }
-
-                // Blocked app check before input actions
-                if needsInputCheck(action) {
-                    try checkBlockedApp(blockedApps: blockedApps)
-                }
-
-                // Switch-target guard: focusing a blocked app is itself a
-                // state change, so check the target before activating.
-                if case let .switchApp(appName) = action {
-                    try checkSwitchTarget(appName, blockedApps: blockedApps)
+                // A takeover raised by the pre-step safety check discards
+                // nothing silently: the steps that already succeeded travel on
+                // the error so the envelope keeps its audit trail.
+                do {
+                    try await checkActionSafety(
+                        action: action,
+                        lastSyntheticPoint: lastSyntheticPoint,
+                        blockedApps: blockedApps
+                    )
+                } catch let takeover as DesktopControlError where takeover.isOperatorTakeover {
+                    throw DesktopControlError.operatorTakeoverWithPartial(results: results)
                 }
 
                 do {
-                    let message = try await executeOne(
+                    let (message, dispatchedPoint) = try await executeOne(
                         action: action, scaleX: scaleX, scaleY: scaleY,
                         blockedApps: blockedApps
                     )
+                    if let dispatchedPoint {
+                        lastSyntheticPoint = dispatchedPoint
+                    }
                     results.append(DesktopActionStepResult(
                         index: index, action: action, success: true, message: message
                     ))
                 } catch is CancellationError {
                     throw DesktopControlError.emergencyStopped
                 } catch let controlError as DesktopControlError {
-                    // Preserve safety signals verbatim so the tool surfaces
-                    // the blocked-app and emergency-stop messages instead of
-                    // wrapping them as generic step failures.
-                    if controlError == .emergencyStopped {
+                    switch controlError {
+                    case .emergencyStopped, .failSafeTriggered, .blockedApp:
                         throw controlError
-                    }
-                    if case .blockedApp = controlError {
-                        throw controlError
-                    }
-                    if case let .actionFailed(_, reason) = controlError {
+                    case .operatorTakeover, .operatorTakeoverWithPartial:
+                        // Mid-batch takeover preserves whatever succeeded
+                        // before the abort instead of reporting zero steps.
+                        throw DesktopControlError.operatorTakeoverWithPartial(results: results)
+                    case let .actionFailed(_, reason):
                         results.append(DesktopActionStepResult(
-                            index: index, action: action, success: false,
-                            message: reason
+                            index: index, action: action, success: false, message: reason
                         ))
                         throw DesktopControlError.actionFailed(index: index, reason: reason)
+                    default:
+                        let desc = controlError.localizedDescription
+                        results.append(DesktopActionStepResult(
+                            index: index, action: action, success: false, message: desc
+                        ))
+                        throw DesktopControlError.actionFailed(index: index, reason: desc)
                     }
-                    results.append(DesktopActionStepResult(
-                        index: index, action: action, success: false,
-                        message: controlError.localizedDescription
-                    ))
-                    throw DesktopControlError.actionFailed(
-                        index: index, reason: controlError.localizedDescription
-                    )
                 } catch {
                     results.append(DesktopActionStepResult(
                         index: index, action: action, success: false,
@@ -591,33 +703,47 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
             return false
         }
 
-        /// Executes a single action, returning a human-readable result message.
+        /// Checks if an actual cursor location has moved beyond the displacement threshold from the expected position.
+        public static func isDisplaced(actual: CGPoint, from expected: CGPoint) -> Bool {
+            let deltaX = actual.x - expected.x
+            let deltaY = actual.y - expected.y
+            return hypot(deltaX, deltaY) > operatorDisplacementThreshold
+        }
+
+        /// Checks if the mouse cursor has moved beyond the displacement threshold from the expected position.
+        func isDisplaced(from expected: CGPoint) -> Bool {
+            guard let current = CGEvent(source: nil)?.location else { return false }
+            return Self.isDisplaced(actual: current, from: expected)
+        }
+
+        /// Executes a single action, returning a human-readable result message and optional cursor position.
         private func executeOne(
             action: DesktopAction,
             scaleX: Double,
             scaleY: Double,
             blockedApps: [String]
-        ) async throws -> String {
+        ) async throws -> (message: String, dispatchedPoint: CGPoint?) {
             switch action {
             case let .switchApp(appName):
-                return try switchToApp(appName, blockedApps: blockedApps)
+                let msg = try switchToApp(appName, blockedApps: blockedApps)
+                return (msg, nil)
             case let .mouseMove(x, y):
                 let native = try validatedNativePoint(x: x, y: y, scaleX: scaleX, scaleY: scaleY)
                 moveMouse(to: native)
-                return "Moved cursor to (\(Int(native.x)), \(Int(native.y)))"
+                return ("Moved cursor to (\(Int(native.x)), \(Int(native.y)))", native)
             case let .click(x, y, button, modifiers):
                 let native = try validatedNativePoint(x: x, y: y, scaleX: scaleX, scaleY: scaleY)
                 performClick(at: native, button: button, modifiers: modifiers)
-                return "Clicked \(button.rawValue) at (\(Int(native.x)), \(Int(native.y)))"
+                return ("Clicked \(button.rawValue) at (\(Int(native.x)), \(Int(native.y)))", native)
             case let .doubleClick(x, y, modifiers):
                 let native = try validatedNativePoint(x: x, y: y, scaleX: scaleX, scaleY: scaleY)
                 performDoubleClick(at: native, modifiers: modifiers)
-                return "Double-clicked at (\(Int(native.x)), \(Int(native.y)))"
+                return ("Double-clicked at (\(Int(native.x)), \(Int(native.y)))", native)
             case let .drag(fromX, fromY, toX, toY):
                 let from = try validatedNativePoint(x: fromX, y: fromY, scaleX: scaleX, scaleY: scaleY)
                 let to = try validatedNativePoint(x: toX, y: toY, scaleX: scaleX, scaleY: scaleY)
                 performDrag(from: from, to: to)
-                return "Dragged from (\(Int(from.x)), \(Int(from.y))) to (\(Int(to.x)), \(Int(to.y)))"
+                return ("Dragged from (\(Int(from.x)), \(Int(from.y))) to (\(Int(to.x)), \(Int(to.y)))", to)
             case let .typeText(text):
                 guard text.count <= Self.maxTypeTextLength else {
                     throw NSError(
@@ -627,14 +753,14 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
                 }
                 try await typeString(text)
                 let preview = text.count > 40 ? String(text.prefix(40)) + "…" : text
-                return "Typed \(text.count) characters: \"\(preview)\""
+                return ("Typed \(text.count) characters: \"\(preview)\"", nil)
             case let .keyPress(key, modifiers):
                 try pressKey(key, modifiers: modifiers)
                 let modStr = modifiers.isEmpty ? "" : " with \(modifiers.map(\.rawValue).joined(separator: "+"))"
-                return "Pressed \(key)\(modStr)"
+                return ("Pressed \(key)\(modStr)", nil)
             case let .scroll(deltaX, deltaY):
                 performScroll(deltaX: Int32(deltaX), deltaY: Int32(deltaY))
-                return "Scrolled (dx: \(deltaX), dy: \(deltaY))"
+                return ("Scrolled (dx: \(deltaX), dy: \(deltaY))", nil)
             case let .delay(delayMs):
                 let clamped = min(max(0, delayMs), Self.maxDelayMs)
                 // Sleep honors Task cancellation; the abort flag covers the
@@ -644,7 +770,10 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
                 if await DesktopControlMonitor.shared.shouldAbort() {
                     throw DesktopControlError.emergencyStopped
                 }
-                return "Waited \(clamped) ms"
+                if await DesktopControlMonitor.shared.isOperatorTakeoverRequested {
+                    throw DesktopControlError.operatorTakeover
+                }
+                return ("Waited \(clamped) ms", nil)
             }
         }
 
