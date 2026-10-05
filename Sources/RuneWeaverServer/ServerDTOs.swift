@@ -33,6 +33,14 @@ public enum ServerPaths {
     public static let memorySearch = "search"
     /// Memory facts subpath under `/memory`.
     public static let memoryFacts = "facts"
+    /// Episodic turns subpath under `/memory`.
+    /// Clearing here drops only the episodic tables; semantic facts, profile,
+    /// and session ledgers stay untouched by the engine owner.
+    public static let memoryEpisodes = "episodes"
+    /// Session literal under `/memory/episodes`.
+    /// Registered before `/:id` so the literal wins over the parameter,
+    /// mirroring the goals summary precedent.
+    public static let memoryEpisodeSession = "session"
     /// Pending approvals group.
     public static let approvals = "approvals"
     /// Approval decision subpath under `/approvals/:id`.
@@ -883,6 +891,24 @@ public struct FactsResponse: Content, Equatable {
         self.facts = facts
         self.preferences = preferences
         self.semanticCount = semanticCount
+        self.episodeCount = episodeCount
+    }
+}
+
+/// Episodic clear receipt for `DELETE /memory/episodes`.
+///
+/// Both counts describe the episodic tables only: how many rows the clear
+/// removed and how many remain, so the dashboard can confirm the wipe without
+/// a second read while semantic facts stay out of the shape entirely.
+public struct EpisodicClearResponse: Content, Equatable {
+    /// Rows removed by the clear, measured immediately before deleting.
+    public let deletedCount: Int
+    /// Rows remaining after the clear, measured immediately after deleting.
+    public let episodeCount: Int
+
+    /// Creates a clear receipt carrying both episodic measurements.
+    public init(deletedCount: Int, episodeCount: Int) {
+        self.deletedCount = deletedCount
         self.episodeCount = episodeCount
     }
 }

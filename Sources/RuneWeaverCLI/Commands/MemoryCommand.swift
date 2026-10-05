@@ -13,7 +13,14 @@ struct MemoryCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "memory",
         abstract: "Search semantic memory and show what the agent knows.",
-        subcommands: [MemorySearchCommand.self, MemoryFactsCommand.self, MemoryReindexCommand.self]
+        subcommands: [
+            MemorySearchCommand.self,
+            MemoryFactsCommand.self,
+            MemoryReindexCommand.self,
+            MemoryClearEpisodesCommand.self,
+            MemoryDeleteEpisodeCommand.self,
+            MemoryClearSessionEpisodesCommand.self
+        ]
     )
 }
 
@@ -197,5 +204,101 @@ struct MemoryReindexCommand: AsyncParsableCommand {
         let dimension = await engine.semanticDimension()
         let dimensionText = dimension.map(String.init) ?? "unknown"
         print("Reindexed semantic store: \(count) facts (dimension \(dimensionText)).")
+    }
+}
+
+/// Clears every episodic turn across all sessions.
+///
+/// Scope stays episodic only: semantic facts, the profile, the document index,
+/// and session ledgers outside the episodes tables are untouched. Clearing
+/// applies immediately with no restart and no confirmation, matching the
+/// immediacy of reindex --reset.
+struct MemoryClearEpisodesCommand: AsyncParsableCommand {
+    /// Top-level command configuration.
+    static let configuration = CommandConfiguration(
+        commandName: "clear-episodes",
+        abstract: "Clear all episodic turns."
+    )
+
+    /// Config file path override.
+    @Option(name: .long, help: "Path to config.toml (defaults to ~/.runeweaver/config.toml).")
+    var config: String?
+
+    /// Clears the episodes tables and prints the measured and remaining counts.
+    mutating func run() async throws {
+        let loaded = try CLIConfigLoader.loadConfig(path: config)
+        // Delegate to the engine owner so the CLI never touches the episode
+        // store directly; the returned count is measured before the delete.
+        let engine = CLIShared.memoryEngine(for: loaded.config.memory)
+        let deleted = try await engine.clearEpisodic()
+        let remaining = await engine.episodeCount()
+        print("Cleared \(deleted) episodic turns (\(remaining) remaining).")
+    }
+}
+
+/// Deletes one episodic turn by identifier.
+///
+/// A missing identifier completes as a no-op so retries and double-deletes
+/// never surface as failures. UUID shape is validated here at the boundary;
+/// the engine takes the typed identifier as-is.
+struct MemoryDeleteEpisodeCommand: AsyncParsableCommand {
+    /// Top-level command configuration.
+    static let configuration = CommandConfiguration(
+        commandName: "delete-episode",
+        abstract: "Delete one episodic turn by id."
+    )
+
+    /// Episode identifier to remove.
+    @Argument(help: ArgumentHelp("Episode identifier (UUID).", valueName: "id"))
+    var id: String
+
+    /// Config file path override.
+    @Option(name: .long, help: "Path to config.toml (defaults to ~/.runeweaver/config.toml).")
+    var config: String?
+
+    /// Validates the identifier, deletes the row, and prints what was removed.
+    mutating func run() async throws {
+        guard let episodeID = UUID(uuidString: id) else {
+            throw ValidationError("id must be a UUID")
+        }
+        let loaded = try CLIConfigLoader.loadConfig(path: config)
+        // Delegate to the engine owner so the CLI never touches the episode
+        // store directly.
+        let engine = CLIShared.memoryEngine(for: loaded.config.memory)
+        try await engine.deleteEpisode(id: episodeID)
+        print("Deleted episode \(episodeID.uuidString).")
+    }
+}
+
+/// Clears every episodic turn for one session.
+///
+/// Only rows for the given session are removed; sibling sessions stay
+/// searchable. An unknown session completes as a no-op with no failure.
+struct MemoryClearSessionEpisodesCommand: AsyncParsableCommand {
+    /// Top-level command configuration.
+    static let configuration = CommandConfiguration(
+        commandName: "clear-session-episodes",
+        abstract: "Clear episodic turns for one session."
+    )
+
+    /// Session identifier whose episodes should be removed.
+    @Argument(help: ArgumentHelp("Session identifier (UUID).", valueName: "session-id"))
+    var sessionID: String
+
+    /// Config file path override.
+    @Option(name: .long, help: "Path to config.toml (defaults to ~/.runeweaver/config.toml).")
+    var config: String?
+
+    /// Validates the session identifier, deletes its rows, and prints the session.
+    mutating func run() async throws {
+        guard let sessionUUID = UUID(uuidString: sessionID) else {
+            throw ValidationError("sessionID must be a UUID")
+        }
+        let loaded = try CLIConfigLoader.loadConfig(path: config)
+        // Delegate to the engine owner so the CLI never touches the episode
+        // store directly.
+        let engine = CLIShared.memoryEngine(for: loaded.config.memory)
+        try await engine.deleteSession(sessionUUID)
+        print("Cleared episodes for session \(sessionUUID.uuidString).")
     }
 }

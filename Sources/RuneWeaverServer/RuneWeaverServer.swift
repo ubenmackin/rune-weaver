@@ -423,6 +423,71 @@ private func registerMemoryRoutes(_ app: Application) {
         await req.application.runeWeaver.memoryEngine.removeFact(id: id)
         return .noContent
     }
+
+    registerEpisodicDeleteRoutes(app)
+}
+
+/// Registers episodic bulk, session, and single-row delete routes.
+///
+/// Split from `registerMemoryRoutes` so the parent stays within the function
+/// body budget; route order preserves the `session` literal winning over `:id`.
+/// - Parameter app: Application receiving the routes.
+private func registerEpisodicDeleteRoutes(_ app: Application) {
+    app.delete(
+        PathComponent.constant(ServerPaths.memory),
+        PathComponent.constant(ServerPaths.memoryEpisodes)
+    ) { req async throws -> EpisodicClearResponse in
+        // Clearing is episodic-only by engine ownership: both receipt numbers
+        // come from the single atomic engine clear (measured in the same
+        // transaction, remaining as its immediate post-condition), so no second
+        // fetch can interleave a mirrored turn between them, while semantic rows,
+        // profile, index, sessions, runs, goals, ideas, and grants stay out of
+        // the write path entirely.
+        do {
+            let result = try await req.application.runeWeaver.memoryEngine.clearEpisodicWithRemaining()
+            return EpisodicClearResponse(deletedCount: result.deleted, episodeCount: result.remaining)
+        } catch {
+            throw Abort(.internalServerError, reason: error.localizedDescription)
+        }
+    }
+
+    // The `session` literal registers before the `:id` parameter so the exact
+    // path wins without relying on route length alone, mirroring the goals
+    // summary precedent; a session-shaped delete must never read as one id.
+    app.delete(
+        PathComponent.constant(ServerPaths.memory),
+        PathComponent.constant(ServerPaths.memoryEpisodes),
+        PathComponent.constant(ServerPaths.memoryEpisodeSession),
+        PathComponent.parameter("sessionID")
+    ) { req async throws -> HTTPStatus in
+        guard let raw = req.parameters.get("sessionID"), let sessionID = UUID(uuidString: raw) else {
+            throw Abort(.badRequest, reason: "sessionID must be a UUID")
+        }
+        do {
+            try await req.application.runeWeaver.memoryEngine.deleteSession(sessionID)
+        } catch {
+            throw Abort(.internalServerError, reason: error.localizedDescription)
+        }
+        return .noContent
+    }
+
+    app.delete(
+        PathComponent.constant(ServerPaths.memory),
+        PathComponent.constant(ServerPaths.memoryEpisodes),
+        PathComponent.parameter("id")
+    ) { req async throws -> HTTPStatus in
+        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+            throw Abort(.badRequest, reason: "id must be a UUID")
+        }
+        do {
+            try await req.application.runeWeaver.memoryEngine.deleteEpisode(id: id)
+        } catch {
+            throw Abort(.internalServerError, reason: error.localizedDescription)
+        }
+        // A missing row is a successful no-op: deletes stay idempotent so
+        // retries and stale dashboard rows converge without a 404.
+        return .noContent
+    }
 }
 
 /// Applies network egress decision side effects to the supervisor and policy store.

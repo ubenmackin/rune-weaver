@@ -254,3 +254,269 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
         }
     }
 #endif
+
+// MARK: - JSON Fallback Store
+
+#if !canImport(SQLite3)
+    /// JSON-file fallback used where the SQLite3 module is unavailable.
+    enum JSONEpisodeStore {
+        /// Directory holding one JSON file per episode.
+        /// - Parameter dbPath: Configured database path used as anchor.
+        /// - Returns: Sidecar directory URL.
+        private static func directory(dbPath: String) -> URL {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            return URL(fileURLWithPath: expanded + ".episodes", isDirectory: true)
+        }
+
+        /// Reads every stored episode, oldest first.
+        private static func readAll(dbPath: String) throws -> [Episode] {
+            try readEntries(dbPath: dbPath).sorted {
+                if $0.episode.timestamp != $1.episode.timestamp {
+                    return $0.episode.timestamp < $1.episode.timestamp
+                }
+                switch ($0.created, $1.created) {
+                case let (lhs?, rhs?):
+                    if lhs != rhs {
+                        return lhs < rhs
+                    }
+                case (nil, _?):
+                    return true
+                case (_?, nil):
+                    return false
+                case (nil, nil):
+                    break
+                }
+                return $0.episode.id.uuidString < $1.episode.id.uuidString
+            }.map(\.episode)
+        }
+
+        /// Maximum JSON episode files retained or decoded simultaneously.
+        static let maxJSONFiles = 2000
+
+        /// Reads every stored episode with its file creation date.
+        private static func readEntries(dbPath: String) throws -> [(episode: Episode, created: Date?)] {
+            let directoryURL = directory(dbPath: dbPath)
+            guard FileManager.default.fileExists(atPath: directoryURL.path) else { return [] }
+            do {
+                let files = try FileManager.default.contentsOfDirectory(
+                    at: directoryURL,
+                    includingPropertiesForKeys: [.creationDateKey],
+                    options: []
+                )
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .secondsSince1970
+                let jsonFiles = files.filter { $0.pathExtension == "json" }
+                let candidateFiles = if jsonFiles.count > maxJSONFiles {
+                    jsonFiles.sorted {
+                        let creationDate1 = (try? $0.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
+                        let creationDate2 = (try? $1.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
+                        return creationDate1 > creationDate2
+                    }.prefix(maxJSONFiles).reversed()
+                } else {
+                    jsonFiles
+                }
+                var entries: [(episode: Episode, created: Date?)] = []
+                entries.reserveCapacity(candidateFiles.count)
+                for file in candidateFiles {
+                    let episode = try decoder.decode(Episode.self, from: Data(contentsOf: file))
+                    let created = (try? file.resourceValues(forKeys: [.creationDateKey]))?.creationDate
+                    entries.append((episode: episode, created: created))
+                }
+                return entries
+            } catch let error as EpisodeStoreError {
+                throw error
+            } catch {
+                throw EpisodeStoreError.persistenceFailed("Could not read episodes: \(error.localizedDescription)")
+            }
+        }
+
+        /// Writes episodes as JSON files (upsert by `id`).
+        static func write(episodes: [Episode], dbPath: String, merge: Bool) throws {
+            let directoryURL = directory(dbPath: dbPath)
+            do {
+                try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+                if !merge {
+                    for file in (try? FileManager.default.contentsOfDirectory(at: directoryURL, includingPropertiesForKeys: nil)) ?? [] {
+                        try? FileManager.default.removeItem(at: file)
+                    }
+                }
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .secondsSince1970
+                for episode in episodes {
+                    let data = try encoder.encode(episode)
+                    try data.write(to: directoryURL.appendingPathComponent("\(episode.id.uuidString).json"), options: .atomic)
+                }
+                let allFiles = (try? FileManager.default.contentsOfDirectory(
+                    at: directoryURL,
+                    includingPropertiesForKeys: [.creationDateKey]
+                ))?.filter { $0.pathExtension == "json" } ?? []
+                if allFiles.count > maxJSONFiles {
+                    let sorted = allFiles.sorted {
+                        let creationDate1 = (try? $0.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
+                        let creationDate2 = (try? $1.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
+                        return creationDate1 < creationDate2
+                    }
+                    let excess = sorted.prefix(allFiles.count - maxJSONFiles)
+                    for file in excess {
+                        try? FileManager.default.removeItem(at: file)
+                    }
+                }
+            } catch let error as EpisodeStoreError {
+                throw error
+            } catch {
+                throw EpisodeStoreError.persistenceFailed("Could not write episodes: \(error.localizedDescription)")
+            }
+        }
+
+        /// Reads one session's episodes, oldest first.
+        static func episodes(sessionID: UUID, dbPath: String, limit: Int?) throws -> [Episode] {
+            if let limit, limit <= 0 {
+                return []
+            }
+            let matching = try readAll(dbPath: dbPath).filter { $0.sessionID == sessionID }
+            guard let limit else { return matching }
+            return Array(matching.prefix(limit))
+        }
+
+        /// Reads one session's newest episodes, oldest first.
+        static func recentEpisodes(sessionID: UUID, dbPath: String, limit: Int) throws -> [Episode] {
+            guard limit > 0 else { return [] }
+            let matching = try readAll(dbPath: dbPath).filter { $0.sessionID == sessionID }
+            return Array(matching.suffix(limit))
+        }
+
+        /// Reads episodes at or before a cutoff, oldest first.
+        static func episodes(olderThan: Date, dbPath: String) throws -> [Episode] {
+            try readAll(dbPath: dbPath).filter { $0.timestamp <= olderThan }
+        }
+
+        /// Reads the newest episodes across all sessions.
+        static func recent(dbPath: String, limit: Int) throws -> [Episode] {
+            guard limit > 0 else { return [] }
+            let sorted = try readEntries(dbPath: dbPath).sorted {
+                if $0.episode.timestamp != $1.episode.timestamp {
+                    return $0.episode.timestamp > $1.episode.timestamp
+                }
+                switch ($0.created, $1.created) {
+                case let (lhs?, rhs?):
+                    if lhs != rhs {
+                        return lhs > rhs
+                    }
+                case (nil, _?):
+                    return false
+                case (_?, nil):
+                    return true
+                case (nil, nil):
+                    break
+                }
+                return $0.episode.id.uuidString > $1.episode.id.uuidString
+            }.map(\.episode)
+            return Array(sorted.prefix(limit))
+        }
+
+        /// Token-overlap search over episode content.
+        static func search(query: String, dbPath: String, limit: Int, since: Date? = nil, until: Date? = nil) throws -> [Episode] {
+            guard limit > 0 else { return [] }
+            let all = try readAll(dbPath: dbPath)
+            let queryTokens = Tokenization.tokenize(query)
+            guard !queryTokens.isEmpty else { return [] }
+            // The dated window filters before scoring so the JSON fallback
+            // matches the SQLite predicates (`since` inclusive, `until` exclusive).
+            let windowed = all.filter { episode in
+                if let since, episode.timestamp < since {
+                    return false
+                }
+                if let until, episode.timestamp >= until {
+                    return false
+                }
+                return true
+            }
+            let scored = windowed.compactMap { episode -> (Episode, Int)? in
+                let contentTokens = Tokenization.tokenize(episode.content)
+                guard let raw = Tokenization.keywordScore(
+                    queryTokens: queryTokens,
+                    contentTokens: contentTokens,
+                    content: episode.content,
+                    query: query
+                ) else { return nil }
+                return (episode, raw)
+            }
+            return scored
+                .sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0.timestamp > $1.0.timestamp }
+                .prefix(limit)
+                .map(\.0)
+        }
+
+        /// All session identifiers with stored episodes.
+        /// - Parameter dbPath: Anchor path for the sidecar directory.
+        /// - Returns: Session identifiers.
+        static func sessionIDs(dbPath: String) throws -> [UUID] {
+            try Array(Set(readAll(dbPath: dbPath).map(\.sessionID)))
+        }
+
+        /// Total stored episode count.
+        /// - Parameter dbPath: Anchor path for the sidecar directory.
+        /// - Returns: Episode count.
+        static func count(dbPath: String) throws -> Int {
+            try readAll(dbPath: dbPath).count
+        }
+
+        /// Deletes one episode file. Missing files are a no-op.
+        static func delete(id: UUID, dbPath: String) throws {
+            let fileURL = directory(dbPath: dbPath).appendingPathComponent("\(id.uuidString).json")
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+            do {
+                try FileManager.default.removeItem(at: fileURL)
+            } catch {
+                throw EpisodeStoreError.persistenceFailed("Could not delete episode: \(error.localizedDescription)")
+            }
+        }
+
+        /// Deletes every episode file for a session.
+        static func deleteSession(_ sessionID: UUID, dbPath: String) throws {
+            for episode in try readAll(dbPath: dbPath) where episode.sessionID == sessionID {
+                try delete(id: episode.id, dbPath: dbPath)
+            }
+        }
+
+        /// Deletes one session's episodes at or before a cutoff.
+        static func deleteSession(beforeOrAt: Date, sessionID: UUID, dbPath: String) throws {
+            for episode in try readAll(dbPath: dbPath)
+                where episode.sessionID == sessionID && episode.timestamp <= beforeOrAt
+            {
+                try delete(id: episode.id, dbPath: dbPath)
+            }
+        }
+
+        /// Replaces one session's old episodes with a summary episode.
+        static func compact(sessionID: UUID, beforeOrAt: Date, replacement: Episode, dbPath: String) throws {
+            try write(episodes: [replacement], dbPath: dbPath, merge: true)
+            for episode in try readAll(dbPath: dbPath)
+                where episode.sessionID == sessionID && episode.timestamp <= beforeOrAt && episode.id != replacement.id
+            {
+                try delete(id: episode.id, dbPath: dbPath)
+            }
+        }
+
+        /// Deletes all episode files.
+        /// - Parameter dbPath: Anchor path for the sidecar directory.
+        static func clear(dbPath: String) throws {
+            let directoryURL = directory(dbPath: dbPath)
+            guard FileManager.default.fileExists(atPath: directoryURL.path) else { return }
+            do {
+                try FileManager.default.removeItem(at: directoryURL)
+            } catch {
+                throw EpisodeStoreError.persistenceFailed("Could not clear episodes: \(error.localizedDescription)")
+            }
+        }
+
+        /// Counts then deletes all episode files.
+        /// - Parameter dbPath: Anchor path for the sidecar directory.
+        /// - Returns: Episode count measured immediately before clearing; zero when empty.
+        static func clearReturningCount(dbPath: String) throws -> Int {
+            let measured = try count(dbPath: dbPath)
+            try clear(dbPath: dbPath)
+            return measured
+        }
+    }
+#endif

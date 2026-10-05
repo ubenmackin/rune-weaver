@@ -1467,6 +1467,46 @@ export function deleteFact(id: string): Promise<void> {
   });
 }
 
+// Episodic clear receipt: how many rows the store removed plus how many remain.
+// The clear is scoped to the episodic tables only, so the dashboard refreshes
+// its counts from this payload while semantic facts and profile stay intact.
+export interface EpisodicClearResponse {
+  deletedCount: number;
+  episodeCount: number;
+}
+
+// Clears every episodic turn while leaving semantic facts, profile, and index
+// state untouched. An empty store clears to zero without failure, so the panel
+// resolves normally instead of surfacing an error for nothing stored.
+export function clearEpisodes(): Promise<EpisodicClearResponse> {
+  return fetchJson<EpisodicClearResponse>("/memory/episodes", {
+    method: "DELETE",
+  });
+}
+
+// Deletes one episodic turn by id. A missing id completes as a no-op on the
+// engine, so the dashboard drops the row only after the call resolves.
+// Identifiers travel encoded so reserved characters never split the route.
+export function deleteEpisode(id: string): Promise<void> {
+  return fetchJson<void>(`/memory/episodes/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+// Deletes every episodic turn for one session. An unknown session completes as
+// a no-op on the engine, so the dashboard clears stale hits only after the
+// call resolves. The literal session segment keeps this route distinct from
+// the id route server-side; the client keeps the same shape so the two never
+// collide.
+export function deleteSessionEpisodes(sessionID: string): Promise<void> {
+  return fetchJson<void>(
+    `/memory/episodes/session/${encodeURIComponent(sessionID)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
 export function listRuns(
   limit = RUN_LOG_POLL_LIMIT,
   jobID?: string,

@@ -362,6 +362,51 @@ public actor MemoryEngine {
         }
     }
 
+    /// Clears every episodic turn across all sessions, returning the removed count.
+    ///
+    /// Scope is episodic only: the count is measured in the same atomic store
+    /// transaction as the delete (via `EpisodeStore.clearReturningCount`) so a
+    /// concurrent `storeEpisodic`/`deleteEpisode`/`deleteSession` cannot interleave
+    /// between the measure and the delete, while semantic facts, the profile file,
+    /// the document index, and session ledgers outside the episodes tables stay
+    /// untouched. Every read opens SQLite on demand with no cached snapshot, so the
+    /// next recall observes the clear immediately with no restart and no
+    /// invalidation step.
+    /// - Returns: Episode count measured in the same transaction before clearing; zero when empty.
+    public func clearEpisodic() async throws -> Int {
+        try await withEpisodic {
+            try await episodeStore.clearReturningCount()
+        }
+    }
+
+    /// Clears every episodic turn, returning both the removed and remaining counts.
+    ///
+    /// Both numbers come from the single atomic store operation: `deleted` is
+    /// measured in the same `BEGIN IMMEDIATE`/`COMMIT` transaction as the delete,
+    /// and `remaining` is `0` as the immediate post-condition of that successful
+    /// atomic clear, so callers never need a second `episodeCount()` fetch with its
+    /// race window. Scope stays episodic only.
+    /// - Returns: Removed count plus remaining count (`0` after a successful clear).
+    public func clearEpisodicWithRemaining() async throws -> (deleted: Int, remaining: Int) {
+        try await withEpisodic {
+            let deleted = try await episodeStore.clearReturningCount()
+            return (deleted: deleted, remaining: 0)
+        }
+    }
+
+    /// Deletes one episodic turn by identifier. Missing rows are a no-op.
+    ///
+    /// The engine takes the already-typed identifier as-is: UUID shape is validated at
+    /// the REST and CLI boundaries, never here, so this path stays a thin owner over the
+    /// persisted store. Ordering with concurrent clears comes from the shared serial
+    /// store queue inside the episode store, so no added lock is needed.
+    /// - Parameter id: Episode identifier to remove.
+    public func deleteEpisode(id: UUID) async throws {
+        try await withEpisodic {
+            try await episodeStore.delete(id: id)
+        }
+    }
+
     // MARK: - Semantic
 
     /// Stores a fact in semantic memory and in the user profile.

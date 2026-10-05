@@ -62,119 +62,10 @@ extension Orchestrator {
         let sessionID = parked.sessionID
         let call = parked.toolCall
         if call.toolName == "engine.continue" {
-            let result = ToolResult.success(toolCallID: call.callID, content: "Continuation granted by user.")
-            let action = ToolAction(
-                toolName: "engine.continue",
-                callID: call.callID,
-                argumentsJSON: call.argumentsJSON,
-                result: result,
-                roundIndex: parked.roundIndex
-            )
-            await onEvent?(.toolCompleted(
-                toolName: call.toolName,
-                callID: call.callID,
-                result: result,
-                roundIndex: parked.roundIndex
-            ))
-            await OrchestratorToolLoop.appendLabeledResult(
-                for: nil,
-                result: result,
-                to: conversations,
-                sessionID: sessionID,
-                labelingEnabled: labelingEnabled
-            )
-            return try await finishParkedBatch(
-                parked: parked,
-                baseText: "",
-                baseCompletedAt: nil,
-                newAction: action,
-                approved: true,
-                resetToolRounds: true,
-                onEvent: onEvent
-            )
+            return try await resumeAllowedContinue(parked, call: call, sessionID: sessionID, onEvent: onEvent)
         }
         if call.toolName == "desktop.resume" {
-            // Fail-closed fresh capture: automation must never resume on a
-            // stale display. A missing screenshot tool, a thrown capture, an
-            // error output, or empty pixels ends the turn here with an honest
-            // refusal instead of synthesizing follow-up desktop actions on
-            // old observation.
-            let captureContext = ToolContext(conversationID: sessionID, approved: true)
-            var freshSection: String?
-            if let screenshotTool = await toolBus.tool(named: "desktop.screenshot") {
-                do {
-                    let output = try await screenshotTool.execute(
-                        input: ToolInput(toolName: "desktop.screenshot", argumentsJSON: "{}"),
-                        context: captureContext
-                    )
-                    let pixels = output.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !output.isError, !pixels.isEmpty {
-                        freshSection = "\n\n[Fresh Display State]:\n\(output.content)\n\nInspect the updated screen layout before taking further action."
-                    }
-                } catch {
-                    freshSection = nil
-                }
-            }
-            guard let freshDisplay = freshSection else {
-                let refusal =
-                    "Desktop resume refused: fresh screenshot unavailable, so automation remains paused on a stale display. "
-                        + "No further desktop actions were taken. Capture a fresh screenshot, then re-approve resume."
-                let refusalResult = ToolResult.failure(toolCallID: call.callID, content: refusal)
-                await onEvent?(.toolCompleted(
-                    toolName: call.toolName,
-                    callID: call.callID,
-                    result: refusalResult,
-                    roundIndex: parked.roundIndex
-                ))
-                await OrchestratorToolLoop.appendLabeledResult(
-                    for: nil,
-                    result: refusalResult,
-                    to: conversations,
-                    sessionID: sessionID,
-                    labelingEnabled: labelingEnabled
-                )
-                return try await finishParkedBatch(
-                    parked: parked,
-                    baseText: refusal,
-                    baseCompletedAt: nil,
-                    newAction: nil,
-                    approved: false,
-                    onEvent: onEvent
-                )
-            }
-            let resumeContent =
-                "Continuation granted: Desktop automation resumed after operator takeover."
-                    + freshDisplay
-            let result = ToolResult.success(toolCallID: call.callID, content: resumeContent)
-            let action = ToolAction(
-                toolName: "desktop.resume",
-                callID: call.callID,
-                argumentsJSON: call.argumentsJSON,
-                result: result,
-                roundIndex: parked.roundIndex
-            )
-            await onEvent?(.toolCompleted(
-                toolName: call.toolName,
-                callID: call.callID,
-                result: result,
-                roundIndex: parked.roundIndex
-            ))
-            await OrchestratorToolLoop.appendLabeledResult(
-                for: nil,
-                result: result,
-                to: conversations,
-                sessionID: sessionID,
-                labelingEnabled: labelingEnabled
-            )
-            return try await finishParkedBatch(
-                parked: parked,
-                baseText: "",
-                baseCompletedAt: nil,
-                newAction: action,
-                approved: true,
-                resetToolRounds: true,
-                onEvent: onEvent
-            )
+            return try await resumeAllowedDesktopResume(parked, call: call, sessionID: sessionID, onEvent: onEvent)
         }
         guard let tool = await toolBus.tool(named: call.toolName) else {
             let missingNote = await recordParkedMissingTool(call.toolName, sessionID: sessionID, onEvent: onEvent)
@@ -194,6 +85,151 @@ extension Orchestrator {
             baseCompletedAt: nil,
             newAction: action,
             approved: true,
+            onEvent: onEvent
+        )
+    }
+
+    /// Resumes an allowed `engine.continue` parked approval with a granted continuation.
+    private func resumeAllowedContinue(
+        _ parked: ParkedNarratedApproval,
+        call: ToolInput,
+        sessionID: UUID,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)? = nil
+    ) async throws -> OrchestratorResponse {
+        let result = ToolResult.success(toolCallID: call.callID, content: "Continuation granted by user.")
+        let action = ToolAction(
+            toolName: "engine.continue",
+            callID: call.callID,
+            argumentsJSON: call.argumentsJSON,
+            result: result,
+            roundIndex: parked.roundIndex
+        )
+        await onEvent?(.toolCompleted(
+            toolName: call.toolName,
+            callID: call.callID,
+            result: result,
+            roundIndex: parked.roundIndex
+        ))
+        await OrchestratorToolLoop.appendLabeledResult(
+            for: nil,
+            result: result,
+            to: conversations,
+            sessionID: sessionID,
+            labelingEnabled: labelingEnabled
+        )
+        return try await finishParkedBatch(
+            parked: parked,
+            baseText: "",
+            baseCompletedAt: nil,
+            newAction: action,
+            approved: true,
+            resetToolRounds: true,
+            onEvent: onEvent
+        )
+    }
+
+    /// Resumes an allowed `desktop.resume` parked approval with a fresh capture.
+    ///
+    /// Fail-closed fresh capture: automation never resumes on a stale display.
+    /// A missing screenshot tool, a thrown capture, an error output, or empty
+    /// pixels ends the turn here with an honest refusal instead of synthesizing
+    /// follow-up desktop actions on old observation.
+    private func resumeAllowedDesktopResume(
+        _ parked: ParkedNarratedApproval,
+        call: ToolInput,
+        sessionID: UUID,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)? = nil
+    ) async throws -> OrchestratorResponse {
+        let freshDisplay = await freshDesktopDisplaySection(sessionID: sessionID)
+        guard let freshSection = freshDisplay else {
+            return try await resumeDeniedDesktopResume(parked, call: call, sessionID: sessionID, onEvent: onEvent)
+        }
+        let resumeContent =
+            "Continuation granted: Desktop automation resumed after operator takeover."
+                + freshSection
+        let result = ToolResult.success(toolCallID: call.callID, content: resumeContent)
+        let action = ToolAction(
+            toolName: "desktop.resume",
+            callID: call.callID,
+            argumentsJSON: call.argumentsJSON,
+            result: result,
+            roundIndex: parked.roundIndex
+        )
+        await onEvent?(.toolCompleted(
+            toolName: call.toolName,
+            callID: call.callID,
+            result: result,
+            roundIndex: parked.roundIndex
+        ))
+        await OrchestratorToolLoop.appendLabeledResult(
+            for: nil,
+            result: result,
+            to: conversations,
+            sessionID: sessionID,
+            labelingEnabled: labelingEnabled
+        )
+        return try await finishParkedBatch(
+            parked: parked,
+            baseText: "",
+            baseCompletedAt: nil,
+            newAction: action,
+            approved: true,
+            resetToolRounds: true,
+            onEvent: onEvent
+        )
+    }
+
+    /// Captures a fresh display section for desktop resume, or nil when unavailable.
+    private func freshDesktopDisplaySection(sessionID: UUID) async -> String? {
+        let captureContext = ToolContext(conversationID: sessionID, approved: true)
+        guard let screenshotTool = await toolBus.tool(named: "desktop.screenshot") else {
+            return nil
+        }
+        do {
+            let output = try await screenshotTool.execute(
+                input: ToolInput(toolName: "desktop.screenshot", argumentsJSON: "{}"),
+                context: captureContext
+            )
+            let pixels = output.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !output.isError, !pixels.isEmpty else {
+                return nil
+            }
+            return "\n\n[Fresh Display State]:\n\(output.content)\n\nInspect the updated screen layout before taking further action."
+        } catch {
+            return nil
+        }
+    }
+
+    /// Finishes a desktop resume refused for lack of a fresh screenshot.
+    private func resumeDeniedDesktopResume(
+        _ parked: ParkedNarratedApproval,
+        call: ToolInput,
+        sessionID: UUID,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)? = nil
+    ) async throws -> OrchestratorResponse {
+        let refusal =
+            "Desktop resume refused: fresh screenshot unavailable, so automation remains paused on a stale display. "
+                + "No further desktop actions were taken. Capture a fresh screenshot, then re-approve resume."
+        let refusalResult = ToolResult.failure(toolCallID: call.callID, content: refusal)
+        await onEvent?(.toolCompleted(
+            toolName: call.toolName,
+            callID: call.callID,
+            result: refusalResult,
+            roundIndex: parked.roundIndex
+        ))
+        await OrchestratorToolLoop.appendLabeledResult(
+            for: nil,
+            result: refusalResult,
+            to: conversations,
+            sessionID: sessionID,
+            labelingEnabled: labelingEnabled
+        )
+        return try await finishParkedBatch(
+            parked: parked,
+            baseText: refusal,
+            baseCompletedAt: nil,
+            newAction: nil,
+            approved: false,
             onEvent: onEvent
         )
     }
