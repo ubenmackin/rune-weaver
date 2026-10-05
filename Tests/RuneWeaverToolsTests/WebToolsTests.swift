@@ -100,6 +100,9 @@ private enum WebTestSupport {
 
     /// Publishes canned public proof so fetch guards stay hermetic without touching the network.
     /// Production still fails closed on real DNS; the stub clears after each test so proof never leaks.
+    /// Task-scoped binding keeps parallel suites isolated: the process-global
+    /// holder is shared, so publishing here could redirect another suite's
+    /// lookups while a concurrent clear could drop this suite's proof mid-test.
     static func stubPublicDNS() {
         ApiSSRFGuard.testDNSResolver = { _ in ["93.184.216.34"] }
     }
@@ -107,6 +110,17 @@ private enum WebTestSupport {
     /// Restores system resolution after a stubbed test.
     static func clearDNS() {
         ApiSSRFGuard.testDNSResolver = nil
+    }
+
+    /// Runs `body` with canned public proof bound to the current task.
+    /// Task-scoped so parallel suites can neither replace nor clear this
+    /// suite's proof mid-chain; matches `OutboundEgressSupervisorTests`
+    /// and `ApiRequestPinnedDialTests` which bind per-task for the same reason.
+    static func withPublicDNS<T>(_ body: () async throws -> T) async throws -> T {
+        let proof: @Sendable (String) -> [String] = { _ in ["93.184.216.34"] }
+        return try await ApiSSRFGuard.$taskTestDNSResolver.withValue(proof) {
+            try await body()
+        }
     }
 }
 
@@ -230,8 +244,9 @@ struct WebSearchTaxonomyTests {
     }
 }
 
-/// Serialized plus per-test DNS stub: `testDNSResolver` is process-global canned proof, so parallel
-/// fetch tests would publish and clear under each other mid-chain and fail closed on real DNS.
+/// Serialized plus per-test task-scoped DNS stub: each fetch test binds its
+/// canned public proof to its own task, so parallel suites can neither replace
+/// nor clear the proof mid-chain and fail closed on real DNS.
 @Suite("Web Fetch Safety and Outcomes", .serialized)
 struct WebFetchSafetyTests {
     @Test
@@ -253,119 +268,119 @@ struct WebFetchSafetyTests {
     @Test
     func `Redirect to unsafe target denies with finalUrl`() async throws {
         // Canned public proof keeps the stubbed redirect hermetic without a production bypass.
-        WebTestSupport.stubPublicDNS()
-        defer { WebTestSupport.clearDNS() }
-        let start = try #require(URL(string: "https://example.com/start"))
-        let transport = WebTestSupport.RoutingFetchTransport { request in
-            if request.url?.absoluteString == start.absoluteString {
-                return (Data(), WebTestSupport.redirectResponse(for: start, location: "javascript:alert(1)"))
+        try await WebTestSupport.withPublicDNS {
+            let start = try #require(URL(string: "https://example.com/start"))
+            let transport = WebTestSupport.RoutingFetchTransport { request in
+                if request.url?.absoluteString == start.absoluteString {
+                    return (Data(), WebTestSupport.redirectResponse(for: start, location: "javascript:alert(1)"))
+                }
+                throw NSError(domain: "test", code: 0)
             }
-            throw NSError(domain: "test", code: 0)
+            let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://example.com/start"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError)
+            let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.status == "unsupported")
+            #expect(!envelope.finalUrl.isEmpty)
         }
-        let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
-        let output = try await tool.execute(
-            input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://example.com/start"}"#),
-            context: ToolContext(conversationID: UUID())
-        )
-        #expect(output.isError)
-        let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
-        #expect(envelope.status == "unsupported")
-        #expect(!envelope.finalUrl.isEmpty)
     }
 
     @Test
     func `Redirect chain resolves relative locations and reports finalUrl`() async throws {
         // Canned public proof keeps the stubbed chain hermetic without a production bypass.
-        WebTestSupport.stubPublicDNS()
-        defer { WebTestSupport.clearDNS() }
-        let first = try #require(URL(string: "https://example.com/a"))
-        let second = try #require(URL(string: "https://example.com/b"))
-        let transport = WebTestSupport.RoutingFetchTransport { request in
-            switch request.url?.absoluteString {
-            case first.absoluteString:
-                return (Data(), WebTestSupport.redirectResponse(for: first, location: "/b"))
-            case second.absoluteString:
-                let body = Data("<html><body><p>Hello world</p></body></html>".utf8)
-                return (body, WebTestSupport.okResponse(for: second))
-            default:
-                throw NSError(domain: "test", code: 0)
+        try await WebTestSupport.withPublicDNS {
+            let first = try #require(URL(string: "https://example.com/a"))
+            let second = try #require(URL(string: "https://example.com/b"))
+            let transport = WebTestSupport.RoutingFetchTransport { request in
+                switch request.url?.absoluteString {
+                case first.absoluteString:
+                    return (Data(), WebTestSupport.redirectResponse(for: first, location: "/b"))
+                case second.absoluteString:
+                    let body = Data("<html><body><p>Hello world</p></body></html>".utf8)
+                    return (body, WebTestSupport.okResponse(for: second))
+                default:
+                    throw NSError(domain: "test", code: 0)
+                }
             }
+            let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://example.com/a"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(!output.isError)
+            let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.status == "ok")
+            #expect(envelope.finalUrl == "https://example.com/b")
+            #expect((envelope.content ?? "").contains("Hello world"))
         }
-        let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
-        let output = try await tool.execute(
-            input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://example.com/a"}"#),
-            context: ToolContext(conversationID: UUID())
-        )
-        #expect(!output.isError)
-        let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
-        #expect(envelope.status == "ok")
-        #expect(envelope.finalUrl == "https://example.com/b")
-        #expect((envelope.content ?? "").contains("Hello world"))
     }
 
     @Test
     func `Auth statuses return auth_required with browser hint`() async throws {
         // Canned public proof keeps stubbed auth responses hermetic without a production bypass.
-        WebTestSupport.stubPublicDNS()
-        defer { WebTestSupport.clearDNS() }
-        for code in [401, 403] {
-            let page = try #require(URL(string: "https://example.com/private"))
-            let transport = WebTestSupport.RoutingFetchTransport { _ in
-                (Data(), WebTestSupport.statusResponse(for: page, statusCode: code))
+        try await WebTestSupport.withPublicDNS {
+            for code in [401, 403] {
+                let page = try #require(URL(string: "https://example.com/private"))
+                let transport = WebTestSupport.RoutingFetchTransport { _ in
+                    (Data(), WebTestSupport.statusResponse(for: page, statusCode: code))
+                }
+                let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
+                let output = try await tool.execute(
+                    input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://example.com/private"}"#),
+                    context: ToolContext(conversationID: UUID())
+                )
+                #expect(!output.isError)
+                let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
+                #expect(envelope.status == "auth_required", "Expected auth_required for HTTP \(code)")
+                #expect(envelope.suggestedNext == "browser.navigate")
+                #expect(envelope.finalUrl == "https://example.com/private")
             }
-            let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
-            let output = try await tool.execute(
-                input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://example.com/private"}"#),
-                context: ToolContext(conversationID: UUID())
-            )
-            #expect(!output.isError)
-            let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
-            #expect(envelope.status == "auth_required", "Expected auth_required for HTTP \(code)")
-            #expect(envelope.suggestedNext == "browser.navigate")
-            #expect(envelope.finalUrl == "https://example.com/private")
         }
     }
 
     @Test
     func `Non-text payloads are unsupported with finalUrl`() async throws {
         // Canned public proof keeps the stubbed payload hermetic without a production bypass.
-        WebTestSupport.stubPublicDNS()
-        defer { WebTestSupport.clearDNS() }
-        let page = try #require(URL(string: "https://example.com/photo.png"))
-        let transport = WebTestSupport.RoutingFetchTransport { _ in
-            (Data(repeating: 0x89, count: 16), WebTestSupport.okResponse(for: page, contentType: "image/png"))
+        try await WebTestSupport.withPublicDNS {
+            let page = try #require(URL(string: "https://example.com/photo.png"))
+            let transport = WebTestSupport.RoutingFetchTransport { _ in
+                (Data(repeating: 0x89, count: 16), WebTestSupport.okResponse(for: page, contentType: "image/png"))
+            }
+            let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://example.com/photo.png"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(!output.isError)
+            let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.status == "unsupported")
+            #expect(envelope.finalUrl == "https://example.com/photo.png")
         }
-        let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
-        let output = try await tool.execute(
-            input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://example.com/photo.png"}"#),
-            context: ToolContext(conversationID: UUID())
-        )
-        #expect(!output.isError)
-        let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
-        #expect(envelope.status == "unsupported")
-        #expect(envelope.finalUrl == "https://example.com/photo.png")
     }
 
     @Test
     func `Too many redirects fail as unsupported`() async throws {
         // Canned public proof keeps the looping chain hermetic without a production bypass.
-        WebTestSupport.stubPublicDNS()
-        defer { WebTestSupport.clearDNS() }
-        let transport = WebTestSupport.RoutingFetchTransport { request in
-            let fallback = try #require(URL(string: "https://example.com/0"))
-            let url = request.url ?? fallback
-            // Every hop redirects forward so the chain never terminates.
-            let next = try #require(URL(string: "https://example.com/next"))
-            return (Data(), WebTestSupport.redirectResponse(for: url, location: next.absoluteString))
+        try await WebTestSupport.withPublicDNS {
+            let transport = WebTestSupport.RoutingFetchTransport { request in
+                let fallback = try #require(URL(string: "https://example.com/0"))
+                let url = request.url ?? fallback
+                // Every hop redirects forward so the chain never terminates.
+                let next = try #require(URL(string: "https://example.com/next"))
+                return (Data(), WebTestSupport.redirectResponse(for: url, location: next.absoluteString))
+            }
+            let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://example.com/0"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.status == "unsupported")
+            #expect(!envelope.finalUrl.isEmpty)
         }
-        let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
-        let output = try await tool.execute(
-            input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://example.com/0"}"#),
-            context: ToolContext(conversationID: UUID())
-        )
-        let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
-        #expect(envelope.status == "unsupported")
-        #expect(!envelope.finalUrl.isEmpty)
     }
 
     @Test

@@ -6,7 +6,7 @@
 // Architectural role: guards the thin dashboard client so future edits cannot
 // widen reads, lose timing, or collapse per-tab isolated state.
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import MemoryBrowser, { getInitialMemoryTab } from "./MemoryBrowser";
@@ -1125,13 +1125,17 @@ describe("MemoryBrowser", () => {
     await waitFor(() => {
       expect(screen.getByRole("tab", { name: "Search" })).toBeInTheDocument();
     });
-    window.location.hash = "#memory/facts";
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    await act(async () => {
+      window.location.hash = "#memory/facts";
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "Facts" })).toBeInTheDocument();
     });
-    window.location.hash = "#memory/episodes";
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    await act(async () => {
+      window.location.hash = "#memory/episodes";
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
     await waitFor(() => {
       expect(
         screen.getByRole("heading", { name: "Episodes" }),
@@ -1150,8 +1154,10 @@ describe("MemoryBrowser", () => {
     });
     expect(screen.getByRole("heading", { name: "Index Status" })).toBeInTheDocument();
     rerender(<MemoryBrowser />);
-    window.location.hash = "#indexing";
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    await act(async () => {
+      window.location.hash = "#indexing";
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
     await waitFor(() => {
       expect(
         screen.getByText("Monitor the local file, mail, and Messages index."),

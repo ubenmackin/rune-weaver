@@ -12,6 +12,7 @@ import WorkingNowStream from "./dashboard/WorkingNowStream";
 import UpcomingSchedules from "./dashboard/UpcomingSchedules";
 import SystemPulseCard from "./dashboard/SystemPulseCard";
 import RecentReports, { getReportRunKind } from "./dashboard/RecentReports";
+import { clearSharedRecentRunsForTesting } from "./dashboard/sharedRuns";
 import * as api from "../api";
 import {
   createMockWebSocket,
@@ -36,6 +37,13 @@ vi.mock("../api", async (importOriginal) => {
     listJobs: vi.fn(),
     runJobNow: vi.fn(),
   };
+});
+
+// The shared runs fetcher caches across widgets in module state, so every
+// dashboard test starts from an empty cache; otherwise one test's payload
+// would leak into the next through the fresh-cache fast path.
+beforeEach(() => {
+  clearSharedRecentRunsForTesting();
 });
 
 describe("DashboardPromptBar", () => {

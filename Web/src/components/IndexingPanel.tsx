@@ -1099,45 +1099,14 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(
     () => new Set<string>(),
   );
-  // Brief accent flash for committed-growth updates. Each flag marks one stat
-  // value whose committed total changed on the latest snapshot, so Size /
-  // Documents / Chunks flash once per change while Last-indexed, the pills,
-  // and the last-run strip never carry the class.
-  const [flashedStats, setFlashedStats] = useState({
-    size: false,
-    documents: false,
-    chunks: false,
-  });
-  // Previous committed totals for the flash comparison. Null until the first
-  // snapshot so the initial mount never flashes; every later snapshot diffs
-  // against this ref before it is replaced. Size tracks the honest on-disk
-  // total (database file plus write-ahead log) so the accent follows the
-  // primary figure instead of the secondary content bytes.
-  const prevTotalsRef = useRef<{
-    bytes: number;
-    documents: number;
-    chunks: number;
-  } | null>(null);
-  // Pending flash-clear timers. Tracked so unmount clears them instead of
-  // setting state on a detached panel after the brief flash window.
-  const flashTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
-  // Per-stat flash generations so overlapping committed-growth polls extend
-  // the accent window instead of truncating it: each growth bumps its stat's
-  // generation, and a timer only clears when no newer growth arrived first
-  // (broadcast plus poll can land within one 1200ms window).
-  const flashGenerationRef = useRef({ size: 0, documents: 0, chunks: 0 });
+  // Freeze-then-jump: committed stat cards hold the last settled snapshot
+  // mid-run and jump atomically at completion, so there is no committed-growth
+  // flash. Only the live block stays live via the polled liveTotals snapshot.
   // Generation counter for two-phase loads so overlapping polls keep only the
   // newest storage merge. Phase 1 paints fast unconditionally while phase 2
   // checks this before merging, so a slow storage answer never overwrites a
   // newer fast snapshot.
   const loadGenerationRef = useRef(0);
-  useEffect(() => {
-    const pending = flashTimersRef.current;
-    return () => {
-      for (const timer of pending) clearTimeout(timer);
-      pending.length = 0;
-    };
-  }, []);
 
   // True whenever the engine reports a run in flight or this panel started one,
   // so the in-run poll stays active and Run stays disabled during a real run.
@@ -1286,16 +1255,42 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     return fast;
   }, []);
 
+  // Live-only poll while a run is in flight: fetches status but adopts only
+  // the live snapshot plus the running flag, holding every committed card
+  // frozen on the last settled snapshot. The cards jump atomically on the
+  // run_completed reload below, never mid-run.
+  const loadLiveOnly = useCallback(async () => {
+    try {
+      const fresh = await getIndexStatus();
+      setStatus((prev) => {
+        if (prev == null) {
+          cachedIndexStatus = fresh;
+          return fresh;
+        }
+        const merged: IndexStatusResponse & IndexStorageResponse = {
+          ...prev,
+          running: fresh.running,
+          live: fresh.live,
+        };
+        cachedIndexStatus = merged;
+        return merged;
+      });
+    } catch {
+      // Live-only failure leaves the frozen cards plus the existing error
+      // slot untouched and never nulls status.
+    }
+  }, []);
+
   useEffect(() => {
     void loadStatus();
   }, [loadStatus]);
 
-  // Live broadcast consumer: run broadcasts reload status so the cards stay
-  // fresh without a manual Refresh control, while `tool_progress` frames only
-  // trigger a poll-now reload — numbers always come from the polled status
-  // live snapshot, never from frame parsing. A launch-triggered nightly or
-  // catch-up pass this panel did not start also raises an auto-start notice
-  // naming the trigger display label explicitly.
+  // Live broadcast consumer: run_completed jumps the frozen cards atomically
+  // via a full reload with no manual Refresh control, while `tool_progress`
+  // and run_started only refresh the live snapshot — numbers always come from
+  // the polled status live snapshot, never from frame parsing. A
+  // launch-triggered nightly or catch-up pass this panel did not start also
+  // raises an auto-start notice naming the trigger display label explicitly.
   const handleIndexBroadcast = useCallback(
     (frame: WSIncomingFrame) => {
       const frameType = (frame as WSGenericFrame).type;
@@ -1342,11 +1337,11 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
           void loadStatus();
           return;
         }
-        // A completed index pass started elsewhere still refreshes the
-        // last-run strip through the status reload; the strip itself carries
-        // the trigger label via the shared run formatter.
+        // Freeze-then-jump: a run_started frame only refreshes the live
+        // snapshot so the committed cards stay frozen; the atomic jump lands
+        // on run_completed below.
         if (isIndexKind) {
-          void loadStatus();
+          void loadLiveOnly();
         }
         return;
       }
@@ -1359,11 +1354,12 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         )
       )
         return;
-      // Poll-now trigger only: the live numbers render from status live, so a
-      // frame simply re-reads status instead of distilling counters locally.
-      void loadStatus();
+      // Poll-now trigger only for the live block: the live numbers render from
+      // status live, so a frame refreshes only live while committed cards stay
+      // frozen instead of distilling counters locally.
+      void loadLiveOnly();
     },
-    [loadStatus],
+    [loadStatus, loadLiveOnly],
   );
 
   useSharedWebSocket(handleIndexBroadcast);
@@ -1400,74 +1396,21 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     setCancelling(false);
   }, [status?.running, status?.lastRun]);
 
-  // Committed-growth poll while a run is in flight: polls status about every
-  // two seconds while progress is active or the cancelling window is open, so
-  // the cards track committed batches and the live block tracks the polled
-  // live snapshot with no idle polling. Pauses while the tab is hidden and
-  // clears on settle through the effect deps. Mount, broadcast, and
-  // after-action loads stay untouched, and a missed broadcast still settles
-  // promptly.
+  // Freeze-then-jump live poll while a run is in flight: polls only the live
+  // snapshot about every two seconds while progress is active or the
+  // cancelling window is open, so the live block stays live while the
+  // committed cards hold the last settled snapshot frozen with no reload and
+  // no flash. Pauses while the tab is hidden and clears on settle through the
+  // effect deps. Mount, broadcast run_completed, and after-action loads perform
+  // the atomic jump, and a missed broadcast still settles promptly.
   useEffect(() => {
     if (!progressActive && !cancelling) return;
     const timer = setInterval(() => {
       if (typeof document !== "undefined" && document.hidden) return;
-      void loadStatus();
+      void loadLiveOnly();
     }, 2000);
     return () => clearInterval(timer);
-  }, [progressActive, cancelling, loadStatus]);
-
-  // Flags Size/Documents/Chunks values whose committed totals grew on the
-  // latest mid-run snapshot, then clears the accent after a brief window. The
-  // first snapshot seeds the baseline with no flash. Only committed growth
-  // while a run is in flight flashes: idle reloads update the baseline
-  // silently, and decreases (prune/reset/reclaim shrinkage) never flash, so
-  // the accent stays a committed-growth signal instead of firing on any delta.
-  // Size follows the honest on-disk total so the accent tracks the primary
-  // figure.
-  useEffect(() => {
-    if (!status) return;
-    const next = {
-      bytes: resolveIndexOnDiskBytes(status),
-      documents: status.documents,
-      chunks: status.chunks,
-    };
-    const previous = prevTotalsRef.current;
-    prevTotalsRef.current = next;
-    if (!previous) return;
-    if (!progressActive && !cancelling) return;
-    const changed = {
-      size: next.bytes > previous.bytes,
-      documents: next.documents > previous.documents,
-      chunks: next.chunks > previous.chunks,
-    };
-    if (!changed.size && !changed.documents && !changed.chunks) return;
-    const generations = flashGenerationRef.current;
-    if (changed.size) generations.size += 1;
-    if (changed.documents) generations.documents += 1;
-    if (changed.chunks) generations.chunks += 1;
-    const captured = { ...generations };
-    setFlashedStats((current) => ({
-      size: current.size || changed.size,
-      documents: current.documents || changed.documents,
-      chunks: current.chunks || changed.chunks,
-    }));
-    const timer: ReturnType<typeof setTimeout> = setTimeout(() => {
-      const latest = flashGenerationRef.current;
-      setFlashedStats((current) => ({
-        size: latest.size === captured.size ? false : current.size,
-        documents: latest.documents === captured.documents ? false : current.documents,
-        chunks: latest.chunks === captured.chunks ? false : current.chunks,
-      }));
-      // Drop the fired timer so every committed-growth poll does not leak one
-      // entry in the pending list; unmount still clears any timer in flight.
-      const pending = flashTimersRef.current;
-      const finished = pending.indexOf(timer);
-      if (finished >= 0) {
-        pending.splice(finished, 1);
-      }
-    }, 1200);
-    flashTimersRef.current.push(timer);
-  }, [status, progressActive, cancelling]);
+  }, [progressActive, cancelling, loadLiveOnly]);
 
   // Starts an on-demand run and awaits its terminal summary. The polled live
   // snapshot keeps the live block honest while the request is in flight; the
@@ -1839,9 +1782,11 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         </div>
       )}
 
-      {/* Stat cards middle: size, counts with the vector/keyword split,
-          prominent watermark age, per-source pills, last-run strip, and recent
-          failures. */}
+      {/* Stat cards middle: frozen committed size, counts with the
+          vector/keyword split, prominent watermark age, per-source pills,
+          last-run strip, and recent failures. Freeze-then-jump: cards hold the
+          last settled snapshot mid-run and jump atomically at completion while
+          only the live block above stays live. */}
       <div className="index-status-section">
         <h3>Status</h3>
         <div className="index-status-line">
@@ -1915,8 +1860,10 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
             >
               <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
                 <div className="muted text-xs">Size on disk</div>
+                {/* Freeze-then-jump: committed cards hold the last settled snapshot
+                    mid-run with no flash; only the live block above stays live. */}
                 <div
-                  className={flashedStats.size ? "index-stat-value index-stat-value-flash" : "index-stat-value"}
+                  className="index-stat-value"
                   data-testid="index-stat-size-value"
                   style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
                 >
@@ -1991,7 +1938,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
               <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
                 <div className="muted text-xs">Documents</div>
                 <div
-                  className={flashedStats.documents ? "index-stat-value index-stat-value-flash" : "index-stat-value"}
+                  className="index-stat-value"
                   data-testid="index-stat-documents-value"
                   style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
                 >
@@ -2001,7 +1948,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
               <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
                 <div className="muted text-xs">Chunks</div>
                 <div
-                  className={flashedStats.chunks ? "index-stat-value index-stat-value-flash" : "index-stat-value"}
+                  className="index-stat-value"
                   data-testid="index-stat-chunks-value"
                   style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
                 >

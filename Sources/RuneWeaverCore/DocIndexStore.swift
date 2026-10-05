@@ -34,14 +34,15 @@ public actor DocIndexStore {
     /// Maximum results returned when vector scans are bounded by a temporal window.
     public static let maxVectorWindowResults = 10000
 
-    /// How long a status snapshot stays reusable before the next poll recomputes it.
+    /// How long a status snapshot stays reusable before the next poll re-reads the persisted row.
     ///
     /// The snapshot is reused for 60 seconds of idle reads, so repeated
     /// dashboard polls within the window issue no SQLite work; any content
-    /// write invalidates the cache, so a status poll after a write
-    /// recomputes on the next read while keeping staleness predictable.
-    /// `markSeen` stamps are excluded because no snapshot field
-    /// projects `last_seen_run`.
+    /// write invalidates the memory cache, so the next poll re-reads the
+    /// frozen persisted row with zero aggregate passes while keeping staleness
+    /// predictable. The TTL never gates correctness — a cold poll still serves
+    /// single-row reads forever. `markSeen` stamps are excluded because no
+    /// snapshot field projects `last_seen_run`.
     public static let statsCacheTTLSeconds: TimeInterval = 60
 
     /// Cached aggregate snapshot plus when it was taken, in clock time.
@@ -54,6 +55,15 @@ public actor DocIndexStore {
     /// changed, so a concurrent write's invalidation is never overwritten
     /// by a pre-write aggregate.
     private var statusGeneration: UInt64 = 0
+
+    /// Tracks whether the persisted aggregate tables lag behind content writes.
+    ///
+    /// Set on every cache invalidation (content writes without an inline
+    /// refresh) and cleared by the single writer once it persists fresh rows.
+    /// Freeze-then-jump readers serve the persisted row frozen regardless of
+    /// this flag and repair only when absent, so warm and mid-run polls never
+    /// pay for a content scan; in-run freshness rides `liveTotals` only.
+    private var aggregatesDirty = false
 
     /// Wall-clock seam for the status cache, injectable so expiry is deterministic under test.
     private let clock: @Sendable () -> Date
@@ -131,10 +141,28 @@ public actor DocIndexStore {
     ///
     /// Every mutating method except `markSeen` funnels through here so a
     /// snapshot pass suspended across the write detects the invalidation
-    /// and discards its pre-write aggregates instead of caching them.
+    /// and discards its pre-write aggregates instead of caching them. The
+    /// persisted tables lag until the next terminal or route-driven refresh,
+    /// so mid-run readers stay frozen on the last persisted row and only an
+    /// absent row repairs with one pass.
     private func invalidateStatusCache() {
         cachedStatus = nil
         statusGeneration &+= 1
+        aggregatesDirty = true
+    }
+
+    /// Reads the persisted aggregate snapshot without running any content scan.
+    ///
+    /// Runs on the interactive lane so warm polls never queue behind indexing
+    /// work. A missing row or table returns nil rather than failing so the
+    /// caller can repair once through the single writer; only a genuine open
+    /// failure throws. Never touches the aggregate-pass counter.
+    /// - Returns: The persisted snapshot, or nil when no refresh has run.
+    private func readPersistedSnapshot() async throws -> DocIndexStatusSnapshot? {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run(lane: .interactive) {
+            try DocIndexStoreIO.readAggregateSnapshot(dbPath: dbPath)
+        }
     }
 
     /// Inserts or updates a document, skipping the write when the content hash
@@ -318,44 +346,111 @@ public actor DocIndexStore {
         }
     }
 
-    /// Current document, chunk, vector, and byte counts.
+    /// Serves a frozen aggregate projection from the persisted single row, repairing only when absent.
     ///
-    /// Projects from the cached status snapshot, so a poll inside the TTL
-    /// shares one aggregate pass with the storage breakdown instead of
-    /// issuing a second round of COUNTs and SUMs.
-    /// - Returns: An index statistics snapshot.
-    public func stats() async throws -> IndexStats {
-        let snapshot = try await cachedStatusSnapshot()
-        return snapshot.makeStats()
+    /// Freeze-then-jump: a memory hit inside the TTL returns with no I/O, a
+    /// persisted row projects frozen with zero aggregate passes on the
+    /// interactive lane regardless of `aggregatesDirty`, and only an absent
+    /// row pays for one repairing refresh that also warms the cache and
+    /// persists. In-run freshness rides `liveTotals` only, never a mid-run
+    /// content scan, so 2s status/storage polls stay single-row reads forever
+    /// and the write-path aggregate refreshed on the `.indexing` lane at run
+    /// end is the single jump. File sizes ride live probes while content and
+    /// full-text legs ride the stored rows, so the shape matches a live pass
+    /// field-for-field. A write racing this read never resurrects pre-write
+    /// aggregates: on a generation mismatch a concurrent refill that landed
+    /// after the write wins first, and only when no refill exists is the
+    /// frozen persisted row served, so concurrent readers never pay for a
+    /// full content scan.
+    /// - Parameter make: Projection from the shared snapshot to the caller's view.
+    /// - Returns: The projected view.
+    private func persistedSnapshotOrRefresh<T>(make: (DocIndexStatusSnapshot) -> T) async throws -> T {
+        if let cached = cachedStatus, clock().timeIntervalSince(cached.at) < Self.statsCacheTTLSeconds {
+            return make(cached.snapshot)
+        }
+        let generationBefore = statusGeneration
+        if let stored = try await readPersistedSnapshot() {
+            if generationBefore != statusGeneration {
+                let now = clock()
+                if let refilled = cachedStatus, now.timeIntervalSince(refilled.at) < Self.statsCacheTTLSeconds {
+                    return make(refilled.snapshot)
+                }
+            }
+            let now = clock()
+            if let refilled = cachedStatus, now.timeIntervalSince(refilled.at) < Self.statsCacheTTLSeconds {
+                return make(refilled.snapshot)
+            }
+            cachedStatus = (stored, now)
+            return make(stored)
+        }
+        return try await make(refreshAggregates())
     }
 
-    /// Reads fast index counts without measuring content bytes.
+    /// Refreshes the persisted aggregates, keeping the prior row on failure.
     ///
-    /// Owned by `DocIndexStore`: runs the static fast aggregate on the
-    /// interactive lane with zero cache interaction, so a cold status poll
-    /// returns true counts and the watermark without touching the slow-pass
-    /// counter, `dbstat`, or `LENGTH`. Never reads or writes `cachedStatus`,
-    /// so repeated fast polls issue only cheap COUNT work and never extend or
-    /// invalidate the slow snapshot TTL.
-    /// - Returns: An index statistics snapshot with true counts, true file sizes, and pending slow size fields.
-    public func fastStats() async throws -> IndexStats {
-        let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run(lane: .interactive) {
-            try DocIndexStoreIO.fastStats(dbPath: dbPath)
+    /// Route-driven mutations have no run-end refresh to follow, so they persist
+    /// fresh aggregates inline; a failed refresh keeps the previous row (logged
+    /// inside `refreshAggregates`) instead of failing the mutation.
+    private func refreshAggregatesIgnoringFailure() async {
+        do {
+            _ = try await refreshAggregates()
+        } catch {
+            // Already logged inside refreshAggregates; the previous row stays.
         }
     }
 
-    /// Returns the cached storage breakdown when the slow snapshot is still fresh.
+    /// Current document, chunk, vector, and byte counts.
     ///
-    /// Owned by `DocIndexStore`: inspects `cachedStatus` against
-    /// `statsCacheTTLSeconds` with zero SQLite work, so a warm status poll
-    /// can attach true sizes opportunistically while a cold poll degrades to
-    /// nil and leaves slow size fields pending. A TTL miss returns nil rather
-    /// than recomputing, so callers never trigger a slow pass from this path.
-    /// - Returns: The cached storage breakdown, or nil when cold or expired.
+    /// Freeze-then-jump: a memory hit inside the TTL returns with no I/O, a
+    /// persisted row projects frozen with zero aggregate passes on the
+    /// interactive lane regardless of `aggregatesDirty`, and only an absent
+    /// row pays for one repairing refresh that also warms the cache and
+    /// persists. File sizes ride live probes while content and full-text legs
+    /// ride the stored rows, so the shape matches a live pass field-for-field.
+    /// In-run freshness rides `liveTotals` only; mid-run polls never trigger
+    /// a content scan here.
+    /// - Returns: An index statistics snapshot.
+    public func stats() async throws -> IndexStats {
+        try await persistedSnapshotOrRefresh { $0.makeStats() }
+    }
+
+    /// Reads fast index counts with true sizes from the persisted single row.
+    ///
+    /// Freeze-then-jump: a persisted row projects frozen with true counts,
+    /// the watermark, and true sizes with zero aggregate passes on the
+    /// interactive lane regardless of `aggregatesDirty`; in-run freshness
+    /// rides `liveTotals` only, never a mid-run COUNT here. Only an absent
+    /// row pays for one repairing refresh that also persists. Never reads or
+    /// writes `cachedStatus`, so fast polls never extend or invalidate the
+    /// slow snapshot TTL.
+    /// - Returns: An index statistics snapshot with true counts and true sizes from the persisted row.
+    public func fastStats() async throws -> IndexStats {
+        if let stored = try await readPersistedSnapshot() {
+            // Freeze-then-jump: serve the persisted row frozen even when dirty
+            // mid-run, projecting true sizes via the shared snapshot so one
+            // row carries every leg and no second storage fetch is needed.
+            return stored.makeStats()
+        }
+        let snapshot = try await refreshAggregates()
+        return snapshot.makeStats()
+    }
+
+    /// Returns the persisted storage breakdown, serving single-row reads forever.
+    ///
+    /// Owned by `DocIndexStore`: a memory hit inside the TTL returns with
+    /// zero SQLite work, otherwise projects the persisted single row frozen
+    /// with zero aggregate passes on the interactive lane regardless of
+    /// `aggregatesDirty`. The TTL never gates correctness — a cold poll still
+    /// serves true sizes from the persisted row — and only an absent row
+    /// returns nil so the caller falls back to fail-closed zeros. Callers
+    /// never trigger a slow pass from this path.
+    /// - Returns: The persisted storage breakdown, or nil when no refresh has run.
     public func cachedStorageIfFresh() async -> IndexStorageBreakdown? {
         if let cached = cachedStatus, clock().timeIntervalSince(cached.at) < Self.statsCacheTTLSeconds {
             return cached.snapshot.makeBreakdown()
+        }
+        if let stored = try? await readPersistedSnapshot() {
+            return stored.makeBreakdown()
         }
         return nil
     }
@@ -370,6 +465,10 @@ public actor DocIndexStore {
             try DocIndexStoreIO.prune(before: cutoff, dbPath: dbPath)
         }
         invalidateStatusCache()
+        // Route-driven deletes leave no run to refresh the persisted rows, so
+        // refresh here to keep dashboard reads fresh without waiting for the
+        // next indexing pass. A failed refresh keeps the previous row.
+        await refreshAggregatesIgnoringFailure()
         return result
     }
 
@@ -389,6 +488,9 @@ public actor DocIndexStore {
             try DocIndexStoreIO.retireUnseenFiles(runID: runID, dbPath: dbPath)
         }
         invalidateStatusCache()
+        // Retired files change the persisted counts with no run-end refresh to
+        // follow, so persist fresh aggregates now. A failure keeps prior rows.
+        await refreshAggregatesIgnoringFailure()
         return result
     }
 
@@ -409,6 +511,9 @@ public actor DocIndexStore {
             try DocIndexStoreIO.retireMailboxes(mailboxes: mailboxes, dbPath: dbPath)
         }
         invalidateStatusCache()
+        // Retired mailboxes change the persisted counts with no run-end refresh
+        // to follow, so persist fresh aggregates now. A failure keeps prior rows.
+        await refreshAggregatesIgnoringFailure()
         return result
     }
 
@@ -455,6 +560,9 @@ public actor DocIndexStore {
             RuneWeaverLog.stores.error("DocIndexStore: failed to reset MessagesIndexer watermark: \(error.localizedDescription)")
         }
         invalidateStatusCache()
+        // A full clear leaves no run to refresh the persisted rows, so persist
+        // the emptied aggregates now. A failure keeps the previous row.
+        await refreshAggregatesIgnoringFailure()
     }
 
     /// Clears documents and chunks for a specific source (e.g. `.mail`),
@@ -491,21 +599,60 @@ public actor DocIndexStore {
             }
         }
         invalidateStatusCache()
+        // A source clear changes the persisted counts with no run-end refresh to
+        // follow, so persist fresh aggregates now. A failure keeps prior rows.
+        await refreshAggregatesIgnoringFailure()
         return removed
     }
 
     /// Current on-disk and logical size breakdown.
     ///
-    /// Projects from the same cached snapshot as stats, so one status poll
-    /// performs at most one aggregate pass no matter which projection runs
-    /// first. File sizes are read from the filesystem so the caller reports what the
-    /// disk holds; logical bytes are aggregated from the content tables. A
-    /// missing database reports zeros rather than throwing so status probes
-    /// render an honest empty state.
+    /// Freeze-then-jump like `stats()`: a memory hit returns with no I/O, a
+    /// persisted row projects the full breakdown including the stored
+    /// full-text leg frozen with zero aggregate passes regardless of
+    /// `aggregatesDirty`, and only an absent row pays for one repairing
+    /// refresh. A missing database repairs to an honest empty state rather
+    /// than throwing; mid-run polls never trigger a content scan here.
     /// - Returns: The storage breakdown.
     public func storageBreakdown() async throws -> IndexStorageBreakdown {
-        let snapshot = try await cachedStatusSnapshot()
-        return snapshot.makeBreakdown()
+        try await persistedSnapshotOrRefresh { $0.makeBreakdown() }
+    }
+
+    /// Recomputes the persisted aggregate tables from a fresh snapshot.
+    ///
+    /// The single writer for the three aggregate tables: runs the shared
+    /// single-pass compute plus the single-transaction replace on the
+    /// indexing lane, then warms the status cache from the computed value so
+    /// the next poll is a memory hit instead of a second aggregate pass. A
+    /// failure logs and preserves both the previous database row (via
+    /// transaction rollback) and the previous cached snapshot. Runs ignoring
+    /// outer cancellation so a cancelled run still persists its partial
+    /// aggregates instead of surfacing `CancellationError` with no row.
+    /// - Parameter producingRunID: Opaque run identity recorded alongside the row, or nil for route-driven refreshes.
+    /// - Returns: The snapshot that was persisted.
+    func refreshAggregates(producingRunID: String? = nil) async throws -> DocIndexStatusSnapshot {
+        let dbPath = self.dbPath
+        let updatedAt = clock()
+        let snapshot: DocIndexStatusSnapshot
+        do {
+            snapshot = try await SQLiteSerialIO.runIgnoringCancellation(lane: .indexing) {
+                try DocIndexStoreIO.refreshAggregates(dbPath: dbPath, producingRunID: producingRunID, updatedAt: updatedAt)
+            }
+        } catch {
+            RuneWeaverLog.stores.error("DocIndexStore: failed to refresh aggregates: \(error.localizedDescription)")
+            throw error
+        }
+        // Warm the cache from the persisted value rather than invalidating:
+        // the snapshot is already post-write, so the next poll must not pay
+        // for another aggregate pass. The generation still advances so a
+        // status pass suspended across this write discards its pre-write
+        // aggregates instead of resurrecting them over the fresh row. The
+        // persisted tables are fresh again, so later readers serve them with
+        // zero passes until the next content write dirties them.
+        cachedStatus = (snapshot, clock())
+        statusGeneration &+= 1
+        aggregatesDirty = false
+        return snapshot
     }
 
     /// Reclaims index file space with `VACUUM`.
@@ -520,6 +667,10 @@ public actor DocIndexStore {
             try DocIndexStoreIO.reclaim(dbPath: dbPath)
         }
         invalidateStatusCache()
+        // VACUUM rewrites page layout so the persisted full-text size shifts
+        // even when document counts do not; persist fresh aggregates now.
+        // A failure keeps the previous row.
+        await refreshAggregatesIgnoringFailure()
         return result
     }
 }
@@ -680,6 +831,35 @@ enum DocIndexStoreIO {
     static func statusSnapshot(dbPath: String) throws -> DocIndexStatusSnapshot {
         #if canImport(SQLite3)
             return try SQLiteDocIndexStore.statusSnapshot(dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Reads the persisted aggregate snapshot without running any content scan.
+    ///
+    /// Thin passthrough so the actor stays off blocking SQLite work while the
+    /// static layer owns the aggregate-table reads plus live file-size probes.
+    /// A missing row reads as nil so the caller can repair once through the
+    /// single writer; never touches the aggregate-pass counter.
+    /// - Parameter dbPath: SQLite file path.
+    /// - Returns: The persisted snapshot, or nil when no refresh has run.
+    static func readAggregateSnapshot(dbPath: String) throws -> DocIndexStatusSnapshot? {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.readAggregateSnapshot(dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Recomputes the persisted aggregate tables from a fresh snapshot.
+    ///
+    /// Thin passthrough so the actor stays off blocking SQLite work while the
+    /// static layer owns the single-pass compute plus the single-transaction
+    /// replace. Callers observe the persisted snapshot for cache warming.
+    static func refreshAggregates(dbPath: String, producingRunID: String? = nil, updatedAt: Date = Date()) throws -> DocIndexStatusSnapshot {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.refreshAggregates(dbPath: dbPath, producingRunID: producingRunID, updatedAt: updatedAt)
         #else
             throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
         #endif
@@ -848,6 +1028,42 @@ enum DocIndexStoreIO {
         CREATE INDEX IF NOT EXISTS idx_indexed_chunks_vector ON indexed_chunks(is_vector);
         """
 
+        /// Precomputed aggregate tables backing the index status cache.
+        ///
+        /// The single-row `index_aggregates` table pins its row to `id = 0` so
+        /// every refresh overwrites the same row instead of appending history;
+        /// per-source and per-status tables fan out by their string keys so
+        /// readers can serve the dashboard without scanning content tables.
+        /// `fts_bytes` stays nullable to preserve the unavailable-`dbstat`
+        /// distinction instead of collapsing it to zero, while
+        /// `producing_run_id` stays nullable because route-driven refreshes
+        /// carry no run identity. Created beside the indexes so legacy files
+        /// gain the tables on their first ensured open.
+        private static let aggregatesSQL = """
+        CREATE TABLE IF NOT EXISTS index_aggregates(
+            id INTEGER PRIMARY KEY CHECK (id = 0),
+            documents INTEGER NOT NULL,
+            chunks INTEGER NOT NULL,
+            vector_chunks INTEGER NOT NULL,
+            text_bytes INTEGER NOT NULL,
+            vector_bytes INTEGER NOT NULL,
+            fts_bytes INTEGER,
+            index_as_of REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            producing_run_id TEXT
+        );
+        CREATE TABLE IF NOT EXISTS index_aggregate_by_source(
+            source TEXT PRIMARY KEY,
+            documents INTEGER NOT NULL,
+            chunks INTEGER NOT NULL,
+            bytes INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS index_aggregate_by_extract_status(
+            status TEXT PRIMARY KEY,
+            documents INTEGER NOT NULL
+        );
+        """
+
         /// Additive `indexed_documents` columns introduced after the first schema revision.
         private static let documentAdditions: [(name: String, sql: String)] = [
             ("metadata", "ALTER TABLE indexed_documents ADD COLUMN metadata TEXT;"),
@@ -970,7 +1186,7 @@ enum DocIndexStoreIO {
         ///
         /// Ensure gate owned by `SQLiteDocIndexStore.open`: the first open per
         /// canonical path in this process runs `tablesSQL`, `indexesSQL`,
-        /// `ensureColumns`, `ensureSchemaVersion`, and `migrateFTSTriggers`;
+        /// `aggregatesSQL`, `ensureColumns`, `ensureSchemaVersion`, and `migrateFTSTriggers`;
         /// later opens perform `sqlite3_open` plus `PRAGMA foreign_keys` plus a
         /// read-only `sqlite_master` table-exists probe.
         /// The shared busy-timeout and WAL policy stays in
@@ -1014,6 +1230,7 @@ enum DocIndexStoreIO {
                 try exec(handle: handle, sql: tablesSQL)
                 try ensureColumns(handle: handle)
                 try exec(handle: handle, sql: indexesSQL)
+                try exec(handle: handle, sql: aggregatesSQL)
                 try migrateFTSTriggers(handle: handle)
                 try ensureSchemaVersion(handle: handle)
                 try SQLiteHelpers.exec(

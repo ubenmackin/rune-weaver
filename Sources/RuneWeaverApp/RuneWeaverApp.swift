@@ -59,21 +59,102 @@ struct AppMenuLabel: View {
     /// sheet while the posture flag keeps the Server-section guidance.
     @State private var showOnboarding = false
 
+    /// Menu-bar indicator priority, highest first.
+    ///
+    /// Ordering keeps a refused bind visible in the bar while the dropdown
+    /// carries the actionable copy, keeps a parked approval visible above all
+    /// liveness, surfaces boot and restart progress above activity, and lets
+    /// desktop outrank indexing so Emergency Stop is never hidden behind a
+    /// sync mark. Stays internal (not private) so MenuLabelStateTests can pin
+    /// the priority table directly; `View` is a struct, never actor-isolated,
+    /// so no `nonisolated` is needed.
+    enum LabelState {
+        case failed
+        case approvals
+        case starting
+        case restarting
+        case desktop
+        case indexing
+        case idle
+    }
+
+    /// Selects the single menu-bar indicator for a snapshot of model flags.
+    ///
+    /// Failure outranks everything, approvals outrank progress and activity,
+    /// and boot progress outranks activity so a cold launch never reads as
+    /// idle. A restart names the in-flight hop even after the running flag
+    /// flips, which is why it ignores `isRunning`. Stays internal alongside
+    /// `LabelState` for the priority-table tests.
+    static func labelState(
+        isRunning: Bool,
+        isServerFailed: Bool,
+        isRestarting: Bool,
+        hasApprovals: Bool,
+        isDesktopActive: Bool,
+        isIndexing: Bool
+    ) -> LabelState {
+        if isServerFailed {
+            return .failed
+        }
+        if hasApprovals {
+            return .approvals
+        }
+        if isRestarting {
+            return .restarting
+        }
+        if !isRunning {
+            return .starting
+        }
+        if isDesktopActive {
+            return .desktop
+        }
+        if isIndexing {
+            return .indexing
+        }
+        return .idle
+    }
+
     var body: some View {
         HStack(spacing: 4) {
-            if !model.pendingApprovals.isEmpty {
+            switch Self.labelState(
+                isRunning: model.isRunning,
+                isServerFailed: model.isServerFailed,
+                isRestarting: model.isRestarting,
+                hasApprovals: !model.pendingApprovals.isEmpty,
+                isDesktopActive: model.isDesktopActive,
+                isIndexing: model.isIndexing
+            ) {
+            case .failed:
+                // Failure shows a distinct octagon in the bar so a refused bind
+                // never reads as healthy idle; the dropdown still owns the
+                // actionable copy plus recovery, so the bar stays a mark
+                // without duplicating text.
+                Image(systemName: "exclamationmark.octagon.fill")
+            case .approvals:
                 // Approvals outrank every activity indicator so a parked write
                 // is never hidden behind desktop or indexing liveness.
                 Image(systemName: "exclamationmark.triangle.fill")
                 Text("\(model.pendingApprovals.count)")
-            } else if model.isDesktopActive {
+            case .starting:
+                // Cold boot holds the running flag down, so the bar names the
+                // wait instead of reading as idle before the bind resolves.
+                ProgressView()
+                    .controlSize(.small)
+                Text("Starting...")
+            case .restarting:
+                // A token-adopt restart holds the boot flag across the hop, so
+                // the bar names the in-flight state regardless of the flag.
+                ProgressView()
+                    .controlSize(.small)
+                Text("Restarting...")
+            case .desktop:
                 Image(systemName: "eye.fill")
-            } else if model.isIndexing {
+            case .indexing:
                 // A run in flight shows the sync indicator plus text; idle
                 // falls through to the default mark.
                 Image(systemName: "arrow.triangle.2.circlepath")
                 Text("Indexing")
-            } else {
+            case .idle:
                 Image(systemName: "sparkles")
             }
         }

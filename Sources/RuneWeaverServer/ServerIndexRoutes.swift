@@ -39,11 +39,10 @@ func registerIndexRoutes(_ app: Application) {
 
 /// Registers the fast status probe behind `GET /index/status`.
 ///
-/// Owned by the index routes: serves true counts, watermark, running, sources,
-/// last run, live, and effort from the cheap fast aggregate in well under the
-/// dashboard budget, attaching cached slow sizes opportunistically when the
-/// TTL snapshot is still fresh. A cold poll reports pending zeros for slow
-/// legs while keeping fast counts visible; a missing store reports zeroed
+/// Owned by the index routes: serves true counts, true sizes, watermark,
+/// running, sources, last run, live, and effort from the persisted single
+/// row in well under the dashboard budget, serving single-row reads forever
+/// with the TTL never gating correctness. A missing store reports zeroed
 /// counts and a stopped run instead of failing.
 /// - Parameter app: Application receiving the route.
 private func registerIndexStatusRoute(_ app: Application) {
@@ -65,15 +64,19 @@ private func registerIndexStatusRoute(_ app: Application) {
         // shared fetch feeds both the latest strip and the failure list so
         // they agree on the same snapshot.
         async let kindRunsTask = context.runs.list(limit: 50, kind: ServerIndexRunReporter.kind)
-        // Opportunistic slow sizes: zero I/O TTL hit when warm, nil when cold,
-        // so the fast poll never triggers a slow aggregate pass.
+        // Slow sizes ride the persisted single row directly with no TTL gate:
+        // a memory hit returns with zero I/O, otherwise the persisted row
+        // projects frozen with zero aggregate passes, so the fast poll never
+        // triggers a slow aggregate pass and a cold poll still serves true
+        // sizes. Nil only when no refresh has ever run.
         async let cachedStorageTask = context.indexStore?.cachedStorageIfFresh()
 
-        // Fast counts never touch the slow-pass counter, `dbstat`, or `LENGTH`.
+        // Fast counts and sizes ride the persisted row with no `dbstat` or
+        // `LENGTH` pass; in-run freshness rides `liveTotals` only.
         let fastStats = try await fastStatsTask
         // Flatten the double optional from chaining an optional store over an
-        // optional cached breakdown: nil store and cold cache both degrade to
-        // nil storage, which renders as pending slow legs.
+        // optional persisted breakdown: nil store and an absent row both
+        // degrade to nil storage, which renders as fail-closed zeros.
         let cachedDouble: IndexStorageBreakdown?? = await cachedStorageTask
         let storage: IndexStorageBreakdown? = cachedDouble ?? nil
         let running = await runningTask
@@ -116,10 +119,11 @@ private func registerIndexStatusRoute(_ app: Application) {
 /// Registers the slow storage probe behind `GET /index/storage`.
 ///
 /// Owned by the index routes: serves byte-exact totals plus per-source bytes
-/// from a single slow snapshot fetch, so a cold storage poll performs exactly
-/// one aggregate pass with both views projected locally. Per-source bytes ride
-/// the slow `stats().bySource` rows; a missing store reports a zeroed payload
-/// rather than failing so older dashboards keep rendering.
+/// from the persisted single row frozen, so mid-run polls never trigger a
+/// repairing scan and only an absent row pays for one repairing refresh that
+/// also persists. Per-source bytes ride the frozen `stats().bySource` rows;
+/// a missing store reports a zeroed payload rather than failing so older
+/// dashboards keep rendering.
 /// - Parameter app: Application receiving the route.
 private func registerIndexStorageRoute(_ app: Application) {
     let index = app.grouped(PathComponent.constant(ServerPaths.index))
@@ -131,13 +135,14 @@ private func registerIndexStorageRoute(_ app: Application) {
             // status probe's missing-store posture.
             return IndexStorageResponse()
         }
-        // Single slow snapshot fetch projecting both views locally: one
-        // `stats()` pass carries every size leg, so one cold poll increments
-        // the aggregate-pass counter exactly once even when a concurrent
-        // write lands between awaits.
+        // Single frozen snapshot fetch projecting both views locally: the
+        // persisted row carries every size leg with zero aggregate passes
+        // when present, so a mid-run poll never pays for a content scan and
+        // only an absent row pays for one repairing refresh that also
+        // persists.
         let stats = try await store.stats()
-        // Per-source bytes come from the slow stats rows, which carry true
-        // logical totals rather than the fast pending zeros.
+        // Per-source bytes come from the frozen stats rows, which carry true
+        // logical totals from the persisted single row.
         let bySource = stats.bySource.map { row in
             IndexSourceCounts(kind: row.source.rawValue, documents: row.documents, chunks: row.chunks, bytes: row.bytes)
         }

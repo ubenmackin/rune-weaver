@@ -929,8 +929,27 @@ public actor IndexCoordinator {
             liveStage = nil
             await emit(phase: .committing, totals: resolved, startedAt: startedAt, force: true)
         }
-        let stats = try? await store?.stats()
-        let recordedAsOf = stats?.indexAsOf ?? finishedAt
+        let recordedAsOf: Date
+        // Terminal aggregates stay searchable for every mutating run because cancelled
+        // passes keep their committed documents; a failed refresh keeps the prior row
+        // rather than failing the run, and the single refresh pass replaces the old
+        // stats warm read so run end performs exactly one aggregate pass. The refresh
+        // runs first so the durable watermark below rides the persisted snapshot's
+        // content watermark (MAX(indexed_at)) rather than the wall-clock finish;
+        // the value comes from the same single pass, so no extra scan is added.
+        // `IndexRunStateStore.recordCompleted` persists whatever instant it is given,
+        // so it tolerates either leg; when there is no store or the refresh fails,
+        // the wall-clock finish stands in.
+        do {
+            if let snapshot = try await store?.refreshAggregates(producingRunID: sessionID.uuidString) {
+                recordedAsOf = snapshot.indexAsOf
+            } else {
+                recordedAsOf = finishedAt
+            }
+        } catch {
+            RuneWeaverLog.stores.error("IndexCoordinator: failed to refresh aggregates: \(error.localizedDescription)")
+            recordedAsOf = finishedAt
+        }
         if status == .ok {
             do {
                 try await stateStore.recordCompleted(at: recordedAsOf)
@@ -1371,6 +1390,7 @@ extension IndexCoordinator {
     ///   - reason: Why the run did not execute.
     /// - Returns: A summary carrying the skip state.
     private func reportSkipped(trigger: IndexRunTrigger, reason: String) async -> IndexRunSummary {
+        // Skipped runs mutate no data, so aggregates stay untouched.
         let summary = skippedSummary(trigger: trigger, reason: reason)
         let eventID = UUID()
         await reporter.runStarted(IndexRunEvent(
