@@ -215,6 +215,51 @@ public enum TemporalFilter: Sendable {
         return formatter.string(from: date)
     }
 
+    // MARK: - Default search window
+
+    /// Days behind now covered when a search supplies neither bound.
+    ///
+    /// A week of history keeps an unbounded calendar or reminder search
+    /// answering recent context without scanning the whole store.
+    public static let defaultPastDays = 7
+
+    /// Days ahead of now covered when a search supplies neither bound.
+    ///
+    /// Two months of look-ahead keeps upcoming events and due tasks visible
+    /// while still bounding the EventKit predicate to a concrete window.
+    public static let defaultFutureDays = 60
+
+    /// Resolves the shared effective window for bounded EventKit searches.
+    ///
+    /// Both bounds present means the caller chose the window, so order is
+    /// verified fail-closed. Neither bound means the default recent-plus-soon
+    /// window around `now`. A single bound stays logically unbounded on the
+    /// missing side while returning a concrete distant date so callers can
+    /// still build a predicate without a nil branch.
+    /// - Parameters:
+    ///   - since: Inclusive lower bound, or nil for unbounded below.
+    ///   - until: Exclusive upper bound, or nil for unbounded above.
+    ///   - now: Reference instant for the default window, injectable for tests.
+    /// - Returns: Concrete start and end dates for the fetch predicate.
+    /// - Throws: `TemporalFilterError.invertedRange` when `since` falls after `until`.
+    public static func effectiveWindow(since: Date?, until: Date?, now: Date = Date()) throws -> (Date, Date) {
+        if let since, let until {
+            guard since <= until else {
+                throw TemporalFilterError.invertedRange(since: since, until: until)
+            }
+            return (since, until)
+        }
+        if since == nil, until == nil {
+            let start = Calendar.current.date(byAdding: .day, value: -defaultPastDays, to: now)
+                ?? now.addingTimeInterval(TimeInterval(-defaultPastDays * 24 * 3600))
+            let end = Calendar.current.date(byAdding: .day, value: defaultFutureDays, to: now)
+                ?? now.addingTimeInterval(TimeInterval(defaultFutureDays * 24 * 3600))
+            return (start, end)
+        }
+        // A nil side stays unbounded logically; distant dates keep the predicate concrete.
+        return (since ?? .distantPast, until ?? .distantFuture)
+    }
+
     // MARK: - Unix-timestamp bound helpers
 
     /// Lower bound as a Unix timestamp for SQLite comparisons.

@@ -18,6 +18,7 @@
 import AppKit
 import ApplicationServices
 import Contacts
+import EventKit
 import Foundation
 import RuneWeaverCore
 import RuneWeaverTools
@@ -64,7 +65,8 @@ public struct LivePermissionSystemActions: PermissionSystemActing {
 
 /// Live TCC reads honoring the no-prompt-on-status invariant.
 ///
-/// Contacts reads the cached authorization; Accessibility and Screen Recording
+/// Contacts reads the cached authorization; Calendars and Reminders read the
+/// silent EventKit authorization; Accessibility and Screen Recording
 /// use their silent preflights; Full Disk Access snapshots the Messages
 /// database in an isolated probe; Automation queries Messages without asking.
 /// Request paths switch to the prompting variants, except Full Disk Access
@@ -79,6 +81,14 @@ public struct LivePermissionProbes: PermissionProbing {
             // and on activation refresh.
             let current = CNContactStore.authorizationStatus(for: .contacts)
             return PermissionStatusMapping.contacts(current)
+        case .calendars:
+            // Silent EventKit read; never prompts, so safe on appear
+            // and on activation refresh.
+            return eventKitStatus(for: .event)
+        case .reminders:
+            // Silent EventKit read; never prompts, so safe on appear
+            // and on activation refresh.
+            return eventKitStatus(for: .reminder)
         case .accessibility:
             // Silent trust query on the main actor because the underlying
             // TCC call expects main-thread execution.
@@ -105,6 +115,14 @@ public struct LivePermissionProbes: PermissionProbing {
             // what the system recorded rather than the transient Bool.
             _ = try? await CNContactStore().requestAccess(for: .contacts)
             return await status(.contacts)
+        case .calendars:
+            // Prompting full-access variant reserved for the explicit Enable
+            // press, then re-read so the row reflects the recorded grant.
+            return await requestEventKitAccess(for: .event)
+        case .reminders:
+            // Prompting full-access variant reserved for the explicit Enable
+            // press, then re-read so the row reflects the recorded grant.
+            return await requestEventKitAccess(for: .reminder)
         case .accessibility:
             // Prompting variant reserved for the explicit Enable press; the
             // return reflects trust at call time, so map it directly.
@@ -130,6 +148,33 @@ public struct LivePermissionProbes: PermissionProbing {
                 Self.automationStatus(askUserIfNeeded: true)
             }
         }
+    }
+
+    /// Reads one EventKit capability without prompting.
+    ///
+    /// Calendars and reminders differ only by entity type, so both status
+    /// branches funnel through this silent read; the shared mapper keeps the
+    /// interpretation identical when the system adds new authorization cases.
+    private func eventKitStatus(for entity: EKEntityType) -> PermissionStatus {
+        let current = EKEventStore.authorizationStatus(for: entity)
+        return PermissionStatusMapping.eventKit(current)
+    }
+
+    /// Requests one EventKit capability from the explicit Enable press.
+    ///
+    /// The prompting variant is reserved for user intent, so status reads stay
+    /// silent; re-reading through the shared status helper keeps the row
+    /// reflecting what the system recorded rather than the transient Bool.
+    private func requestEventKitAccess(for entity: EKEntityType) async -> PermissionStatus {
+        switch entity {
+        case .event:
+            _ = try? await EKEventStore().requestFullAccessToEvents()
+        case .reminder:
+            _ = try? await EKEventStore().requestFullAccessToReminders()
+        @unknown default:
+            return .unavailable
+        }
+        return eventKitStatus(for: entity)
     }
 
     /// Snapshots the Messages database to prove Full Disk Access readability.

@@ -16,6 +16,7 @@
 // production reads and in tests.
 
 import Contacts
+import EventKit
 import Foundation
 import RuneWeaverCore
 
@@ -27,6 +28,8 @@ import RuneWeaverCore
 public enum PermissionKind: String, CaseIterable, Sendable {
     case fullDiskAccess
     case contacts
+    case calendars
+    case reminders
     case accessibility
     case screenRecording
     case messagesAutomation
@@ -65,6 +68,8 @@ public enum PermissionAction: Sendable, Equatable {
 public enum PermissionPane: String, Sendable {
     case allFiles
     case contacts
+    case calendars
+    case reminders
     case accessibility
     case screenCapture
     case automation
@@ -80,6 +85,10 @@ public enum PermissionPane: String, Sendable {
             URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
         case .contacts:
             URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Contacts")
+        case .calendars:
+            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")
+        case .reminders:
+            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders")
         case .accessibility:
             URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         case .screenCapture:
@@ -98,6 +107,10 @@ extension PermissionKind {
             "Messages History"
         case .contacts:
             "Contacts"
+        case .calendars:
+            "Calendars"
+        case .reminders:
+            "Reminders"
         case .accessibility:
             "Desktop Control"
         case .screenRecording:
@@ -119,6 +132,10 @@ extension PermissionKind {
                 + "confirmation. macOS has no prompt for this permission, so add Rune Weaver in System Settings."
         case .contacts:
             "Lets Rune Weaver resolve names like \"Rebecca Mackin\" to phone numbers and email addresses."
+        case .calendars:
+            "Lets Rune Weaver search your calendars and create events when you ask it to."
+        case .reminders:
+            "Lets Rune Weaver search your reminders and create tasks when you ask it to."
         case .accessibility:
             "Lets Rune Weaver move the mouse, click, and type during approved desktop tasks."
         case .screenRecording:
@@ -135,6 +152,10 @@ extension PermissionKind {
             "externaldrive.fill"
         case .contacts:
             "person.crop.circle"
+        case .calendars:
+            "calendar"
+        case .reminders:
+            "checklist"
         case .accessibility:
             "cursorarrow.motionlines"
         case .screenRecording:
@@ -151,6 +172,10 @@ extension PermissionKind {
             .allFiles
         case .contacts:
             .contacts
+        case .calendars:
+            .calendars
+        case .reminders:
+            .reminders
         case .accessibility:
             .accessibility
         case .screenRecording:
@@ -183,14 +208,14 @@ extension PermissionStatus {
 ///
 /// Kept free of side effects so both the live probes and the test suite share
 /// one interpretation: a TCC denial always reads denied, an untouched prompt
-/// always reads notDetermined, and anything unrecognized reads unavailable
+/// always reads notDetermined, and anything unrecognized fails closed
 /// rather than guessing granted.
 public enum PermissionStatusMapping {
     /// Interprets the Contacts authorization state.
     ///
     /// Limited access still withholds arbitrary lookups the send path needs,
     /// so it reads denied rather than granted; an unknown future case reads
-    /// unavailable so the window never claims access it has not verified.
+    /// denied so the window never claims access it has not verified.
     public static func contacts(_ status: CNAuthorizationStatus) -> PermissionStatus {
         switch status {
         case .authorized:
@@ -200,8 +225,45 @@ public enum PermissionStatusMapping {
         case .notDetermined:
             .notDetermined
         @unknown default:
-            .unavailable
+            // Unknown future cases fail closed to denied so no layer claims access it has not verified.
+            .denied
         }
+    }
+
+    /// Interprets any EventKit authorization state.
+    ///
+    /// Calendars and reminders share one authorization shape: only full access
+    /// unlocks the search the event and task paths need, so write-only still
+    /// reads denied rather than granted; an unknown future case reads
+    /// denied so the window never claims access it has not verified.
+    public static func eventKit(_ status: EKAuthorizationStatus) -> PermissionStatus {
+        switch status {
+        case .fullAccess:
+            .granted
+        case .denied, .restricted, .writeOnly:
+            .denied
+        case .notDetermined:
+            .notDetermined
+        @unknown default:
+            // Unknown future cases fail closed to denied so no layer claims access it has not verified.
+            .denied
+        }
+    }
+
+    /// Interprets the Calendars authorization state.
+    ///
+    /// Thin alias over the shared EventKit reading so the call site names the
+    /// capability while the interpretation stays in one place.
+    public static func calendars(_ status: EKAuthorizationStatus) -> PermissionStatus {
+        eventKit(status)
+    }
+
+    /// Interprets the Reminders authorization state.
+    ///
+    /// Thin alias over the shared EventKit reading so the call site names the
+    /// capability while the interpretation stays in one place.
+    public static func reminders(_ status: EKAuthorizationStatus) -> PermissionStatus {
+        eventKit(status)
     }
 
     /// Interprets the Accessibility trust flag.

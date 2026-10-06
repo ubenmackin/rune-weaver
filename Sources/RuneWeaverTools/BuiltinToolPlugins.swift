@@ -1,6 +1,6 @@
 // Rune Weaver Tools — Built-in tool plugin registration surface.
 //
-// Single-sources the full built-in suite (Email, Messages, Files, Bash, Memory,
+// Single-sources the full built-in suite (Email, Messages, Calendar, Reminders, Files, Bash, Memory,
 // Goals, Agent scripts, Fan-out, Web, Browser, API, Media, Desktop) shared by CLI, the menu-bar app, and serve. `CLIShared.makeToolBus`,
 // `AppModel`, and `ServerContext.make` all build through this helper so the
 // registry cannot drift between entry points. Web, browser, and API tools run
@@ -125,7 +125,7 @@ public enum BuiltinToolPlugins {
             )
     }
 
-    /// Builds the full built-in tool suite (Email, Messages, Files, Bash, Memory, Goals, Agent scripts, Web, Browser, API, Media, Desktop, Fan-out)
+    /// Builds the full built-in tool suite (Email, Messages, Calendar, Reminders, Files, Bash, Memory, Goals, Agent scripts, Web, Browser, API, Media, Desktop, Fan-out)
     /// from component configurations.
     ///
     /// Goal tools join only when both the engine and store arrive; nil keeps them
@@ -183,6 +183,8 @@ public enum BuiltinToolPlugins {
         goalsConfig: GoalsConfig = GoalsConfig(),
         goalUpdatedNotifier: (@Sendable (Goal, [GoalStep]) async -> Void)? = nil,
         messagesGateway: (any MessagesGateway)? = nil,
+        calendarGateway: (any CalendarGateway)? = nil,
+        remindersGateway: (any RemindersGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         recipientAliasStore: (any MessageAliasStoring)? = nil,
         stagedFilesStore: StagedFilesStore? = nil,
@@ -228,6 +230,25 @@ public enum BuiltinToolPlugins {
             gateway: messagesGateway,
             recipientAliasStore: recipientAliasStore
         )
+        // Calendar and reminders resolve nil to the shared production default:
+        // a single live EventKit store on EventKit platforms, fail-closed
+        // unavailable elsewhere. Sharing one instance keeps calendar and
+        // reminders on one EKEventStore object; callers inject a gateway to
+        // override (for example hermetic tests).
+        #if canImport(EventKit)
+            // One shared instance backs both gateways so calendar and reminders
+            // never mint separate system stores. Creating it unconditionally is
+            // cheap (no prompt; authorization stays observed fail-closed) and
+            // keeps the two nil-defaults on the same object.
+            let sharedLiveStore = LiveEventKitStore()
+            let effectiveCalendarGateway = calendarGateway ?? ProductionCalendarGateway(store: sharedLiveStore)
+            let effectiveRemindersGateway = remindersGateway ?? ProductionRemindersGateway(store: sharedLiveStore)
+        #else
+            let effectiveCalendarGateway = calendarGateway ?? ProductionCalendarGateway(store: UnavailableEventKitStore())
+            let effectiveRemindersGateway = remindersGateway ?? ProductionRemindersGateway(store: UnavailableEventKitStore())
+        #endif
+        tools += CalendarTools.makeTools(gateway: effectiveCalendarGateway)
+        tools += RemindersTools.makeTools(gateway: effectiveRemindersGateway)
         tools += FilesTools.makeTools(
             filesConfig: filesConfig ?? FilesConfig(),
             stagedFilesStore: stagedFilesStore,
@@ -329,7 +350,9 @@ public enum BuiltinToolPlugins {
         egressSupervisor: OutboundEgressSupervisor? = nil,
         recipientAliasStore: (any MessageAliasStoring)? = nil,
         workspaceStore: WorkspaceStore? = nil,
-        agentToolStore: AgentToolStore? = nil
+        agentToolStore: AgentToolStore? = nil,
+        calendarGateway: (any CalendarGateway)? = nil,
+        remindersGateway: (any RemindersGateway)? = nil
     ) async throws -> [any Tool] {
         let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
         return try await makeAllTools(
@@ -356,6 +379,8 @@ public enum BuiltinToolPlugins {
             goalStore: goalStore,
             goalConversations: goalConversations,
             goalsConfig: config.goals,
+            calendarGateway: calendarGateway,
+            remindersGateway: remindersGateway,
             recipientAliasStore: recipientAliasStore,
             fanOutEngine: fanOutEngine,
             policyStore: policyStore,
@@ -418,6 +443,8 @@ public enum BuiltinToolPlugins {
         goalsConfig: GoalsConfig = GoalsConfig(),
         goalUpdatedNotifier: (@Sendable (Goal, [GoalStep]) async -> Void)? = nil,
         messagesGateway: (any MessagesGateway)? = nil,
+        calendarGateway: (any CalendarGateway)? = nil,
+        remindersGateway: (any RemindersGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         recipientAliasStore: (any MessageAliasStoring)? = nil,
         stagedFilesStore: StagedFilesStore? = nil,
@@ -458,6 +485,8 @@ public enum BuiltinToolPlugins {
             goalsConfig: goalsConfig,
             goalUpdatedNotifier: goalUpdatedNotifier,
             messagesGateway: messagesGateway,
+            calendarGateway: calendarGateway,
+            remindersGateway: remindersGateway,
             chatDatabasePath: chatDatabasePath,
             recipientAliasStore: recipientAliasStore,
             stagedFilesStore: stagedFilesStore,
@@ -485,10 +514,12 @@ extension BuiltinToolPlugins {
     }
 
     /// All built-in tool names across every suite in registration order
-    /// (email, messages, files, bash, memory, goals, agent scripts, web, browser, api, media, desktop, fanout).
+    /// (email, messages, calendar, reminders, files, bash, memory, goals, agent scripts, web, browser, api, media, desktop, fanout).
     public static var allToolNames: [String] {
         EmailTools.toolNames
             + MessagesTools.toolNames
+            + CalendarTools.toolNames
+            + RemindersTools.toolNames
             + FilesTools.toolNames
             + ["bash.exec"]
             + MemoryTools.toolNames

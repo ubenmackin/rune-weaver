@@ -12,7 +12,7 @@
 // Automation, or Full Disk Access on the machine running it.
 // Shared Contract:
 // - status(for:) is unavailable before the first refresh.
-// - refresh() fills all five rows from status reads and never calls request.
+// - refresh() fills all seven rows from status reads and never calls request.
 // - request(_:) stores the prompt result then re-reads every row.
 // - perform(.enable) runs the request path and re-reads all rows.
 // - perform(.openSettings, for: .fullDiskAccess) opens the allFiles pane and prompts nothing.
@@ -82,6 +82,8 @@ struct PermissionsViewModelTests {
         [
             .fullDiskAccess: .denied,
             .contacts: .granted,
+            .calendars: .granted,
+            .reminders: .denied,
             .accessibility: .notDetermined,
             .screenRecording: .deferred,
             .messagesAutomation: .unavailable
@@ -114,7 +116,7 @@ struct PermissionsViewModelTests {
     }
 
     @Test
-    func `refresh populates all five rows without prompting`() async {
+    func `refresh populates all seven rows without prompting`() async {
         let seed = fullSeed()
         let probes = StubPermissionProbes(seededStatuses: seed)
         let actions = StubPermissionActions()

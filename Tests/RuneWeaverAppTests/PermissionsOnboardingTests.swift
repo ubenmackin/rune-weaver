@@ -17,6 +17,7 @@
 // Owner: Sources/RuneWeaverApp/AppModel.swift onboarding seam plus
 // Sources/RuneWeaverApp/PermissionsOnboardingStore.swift persistence.
 
+import EventKit
 import Foundation
 @testable import RuneWeaverApp
 import Testing
@@ -107,5 +108,118 @@ struct PermissionsOnboardingTests {
 
         let reloaded = PermissionsOnboardingStore(defaults: defaults)
         #expect(reloaded.isCompleted == true)
+    }
+}
+
+/// Probe stub isolating the Calendars plus Reminders rows from real TCC.
+///
+/// Seeded statuses answer `status(_:)` reads while `requestResults` answer
+/// `request(_:)` prompts, so the suite proves silent reads never take the
+/// prompting path. A distinct name avoids colliding with the view-model stub
+/// in the same test target.
+@MainActor
+final class CalendarsRemindersProbeStub: PermissionProbing {
+    var seededStatuses: [PermissionKind: PermissionStatus]
+    var requestResults: [PermissionKind: PermissionStatus]
+    var statusCalls: [PermissionKind] = []
+    var requestCalls: [PermissionKind] = []
+
+    init(
+        seededStatuses: [PermissionKind: PermissionStatus],
+        requestResults: [PermissionKind: PermissionStatus] = [:]
+    ) {
+        self.seededStatuses = seededStatuses
+        self.requestResults = requestResults
+    }
+
+    func status(_ kind: PermissionKind) async -> PermissionStatus {
+        statusCalls.append(kind)
+        return seededStatuses[kind] ?? .unavailable
+    }
+
+    func request(_ kind: PermissionKind) async -> PermissionStatus {
+        requestCalls.append(kind)
+        return requestResults[kind] ?? seededStatuses[kind] ?? .unavailable
+    }
+}
+
+@Suite("Calendars plus Reminders onboarding rows")
+@MainActor
+struct CalendarsRemindersOnboardingTests {
+    @Test
+    func `kinds keep calendars then reminders after contacts`() {
+        // Declaration order is the presentation order; the two EventKit rows
+        // sit directly after Contacts so first-run owners meet them together.
+        let kinds = PermissionKind.allCases.map(\.rawValue)
+        #expect(
+            kinds == [
+                "fullDiskAccess", "contacts", "calendars", "reminders", "accessibility",
+                "screenRecording", "messagesAutomation"
+            ]
+        )
+    }
+
+    @Test
+    func `titles rationales images and panes map`() {
+        #expect(PermissionKind.calendars.title == "Calendars")
+        #expect(PermissionKind.reminders.title == "Reminders")
+
+        // Each rationale names its search plus creation pair so the owner
+        // knows why the row matters before pressing Enable.
+        let calendarsRationale = PermissionKind.calendars.rationale.lowercased()
+        #expect(calendarsRationale.contains("calendar"))
+        #expect(calendarsRationale.contains("search"))
+        #expect(calendarsRationale.contains("event"))
+        #expect(calendarsRationale.contains("creat"))
+        let remindersRationale = PermissionKind.reminders.rationale.lowercased()
+        #expect(remindersRationale.contains("reminder"))
+        #expect(remindersRationale.contains("search"))
+        #expect(remindersRationale.contains("task"))
+        #expect(remindersRationale.contains("creat"))
+
+        #expect(PermissionKind.calendars.systemImage == "calendar")
+        #expect(PermissionKind.reminders.systemImage == "checklist")
+
+        #expect(PermissionKind.calendars.pane == .calendars)
+        #expect(PermissionKind.reminders.pane == .reminders)
+        #expect(PermissionPane.calendars.url?.absoluteString.contains("Privacy_Calendars") == true)
+        #expect(PermissionPane.reminders.url?.absoluteString.contains("Privacy_Reminders") == true)
+    }
+
+    @Test
+    func `calendars mapping covers all five states`() {
+        #expect(PermissionStatusMapping.calendars(.fullAccess) == .granted)
+        #expect(PermissionStatusMapping.calendars(.denied) == .denied)
+        // Restricted and write-only withhold the search the event path needs,
+        // so both fail closed to denied rather than claiming a usable grant.
+        #expect(PermissionStatusMapping.calendars(.restricted) == .denied)
+        #expect(PermissionStatusMapping.calendars(.writeOnly) == .denied)
+        #expect(PermissionStatusMapping.calendars(.notDetermined) == .notDetermined)
+    }
+
+    @Test
+    func `reminders mapping covers all five states`() {
+        #expect(PermissionStatusMapping.reminders(.fullAccess) == .granted)
+        #expect(PermissionStatusMapping.reminders(.denied) == .denied)
+        // Restricted and write-only withhold the search the task path needs,
+        // so both fail closed to denied rather than claiming a usable grant.
+        #expect(PermissionStatusMapping.reminders(.restricted) == .denied)
+        #expect(PermissionStatusMapping.reminders(.writeOnly) == .denied)
+        #expect(PermissionStatusMapping.reminders(.notDetermined) == .notDetermined)
+    }
+
+    @Test
+    func `probe seam returns mapped statuses without prompting on status`() async {
+        let probes = CalendarsRemindersProbeStub(
+            seededStatuses: [.calendars: .granted, .reminders: .denied]
+        )
+
+        // Silent reads resolve from the seeded map, matching what the live
+        // EventKit authorizationStatus read would return through the mapping.
+        #expect(await probes.status(.calendars) == .granted)
+        #expect(await probes.status(.reminders) == .denied)
+        // No status read takes the prompting requestAccess path.
+        #expect(probes.requestCalls.isEmpty)
+        #expect(probes.statusCalls == [.calendars, .reminders])
     }
 }
