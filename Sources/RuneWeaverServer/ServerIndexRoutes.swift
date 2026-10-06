@@ -23,7 +23,15 @@
 
 import Foundation
 import RuneWeaverCore
+import RuneWeaverTools
 import Vapor
+#if canImport(EventKit)
+    import EventKit
+#endif
+
+extension ServerPaths {
+    public static let indexRequestAccess = "request-access"
+}
 
 /// Registers the local document index routes.
 /// - Parameter app: Application receiving the routes.
@@ -35,15 +43,16 @@ func registerIndexRoutes(_ app: Application) {
     registerIndexPruneRoute(app)
     registerIndexResetRoute(app)
     registerIndexReclaimRoute(app)
+    registerIndexRequestAccessRoute(app)
 }
 
 /// Registers the fast status probe behind `GET /index/status`.
 ///
 /// Owned by the index routes: serves true counts, true sizes, watermark,
-/// running, sources, last run, live, and effort from the persisted single
-/// row in well under the dashboard budget, serving single-row reads forever
-/// with the TTL never gating correctness. A missing store reports zeroed
-/// counts and a stopped run instead of failing.
+/// running, sources with silent access posture, last run, live, and effort
+/// from the persisted single row in well under the dashboard budget, serving
+/// single-row reads forever with the TTL never gating correctness. A missing
+/// store reports zeroed counts and a stopped run instead of failing.
 /// - Parameter app: Application receiving the route.
 private func registerIndexStatusRoute(_ app: Application) {
     let index = app.grouped(PathComponent.constant(ServerPaths.index))
@@ -91,7 +100,8 @@ private func registerIndexStatusRoute(_ app: Application) {
         // every status poll the dashboard performs. It checks the same path
         // the next run will copy so a custom-path run never disagrees with a
         // default-path probe.
-        if config.messages, !MessagesIndexer.hasMessagesDatabaseAccess(chatDatabasePath: messagesDatabasePathForProbe()) {
+        let messagesAccessBool = MessagesIndexer.hasMessagesDatabaseAccess(chatDatabasePath: messagesDatabasePathForProbe())
+        if config.messages, !messagesAccessBool {
             let alreadyWarned = lastErrors.contains {
                 $0.range(of: "Full Disk Access", options: .caseInsensitive) != nil
             }
@@ -104,6 +114,18 @@ private func registerIndexStatusRoute(_ app: Application) {
             }
         }
         let lastRun = latestIndexRun(from: latestEntry)
+        // Silent per-source access posture, re-read on every poll so the
+        // dashboard pills flip green with no save when the owner grants
+        // access elsewhere. The EventKit reads never prompt and the Messages
+        // probe is the same read-only open the next run performs.
+        #if canImport(EventKit)
+            let calendarAccess = indexEventKitSourceAccess(for: .event)
+            let remindersAccess = indexEventKitSourceAccess(for: .reminder)
+        #else
+            let calendarAccess = "unavailable"
+            let remindersAccess = "unavailable"
+        #endif
+        let messagesAccess = messagesAccessBool ? "granted" : "denied"
         return makeIndexStatusResponse(
             config: config,
             stats: fastStats,
@@ -111,7 +133,10 @@ private func registerIndexStatusRoute(_ app: Application) {
             lastErrors: lastErrors,
             lastRun: lastRun,
             live: live,
-            storage: storage
+            storage: storage,
+            calendarAccess: calendarAccess,
+            remindersAccess: remindersAccess,
+            messagesAccess: messagesAccess
         )
     }
 }
@@ -305,6 +330,132 @@ private func registerIndexReclaimRoute(_ app: Application) {
     }
 }
 
+struct IndexRequestAccessRequest: Content {
+    var kind: String?
+    var source: String?
+}
+
+struct IndexRequestAccessResponse: Content {
+    var kind: String
+    var granted: Bool
+    var access: String
+
+    /// Creates a request-access response from the full access token.
+    ///
+    /// Carries the truth read from the store (`"granted"`, `"denied"`,
+    /// `"notDetermined"`, or `"unavailable"`) instead of deriving posture
+    /// from the prompt Bool, so a thrown prompt keeps `notDetermined` and a
+    /// non-EventKit platform reports `unavailable` rather than `denied`.
+    /// - Parameters:
+    ///   - kind: Source kind token (`"calendars"` or `"reminders"`).
+    ///   - access: Truth access token observed from the store.
+    init(kind: String, access: String) {
+        self.kind = kind
+        self.access = access
+        self.granted = (access == "granted")
+    }
+}
+
+private func normalizeIndexRequestAccessKind(_ raw: String?) -> String? {
+    guard let raw else { return nil }
+    let token = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard token == "calendars" || token == "reminders" else { return nil }
+    return token
+}
+
+private func shouldPromptCalendarRequestAccess(status: CalendarAuthorizationStatus) -> Bool {
+    status == .notDetermined
+}
+
+private func shouldPromptReminderRequestAccess(status: EventKitReminderAuthorization) -> Bool {
+    status == .notDetermined
+}
+
+/// Maps a live calendar authorization read onto the request-access token.
+///
+/// Mirrors the silent status probe: authorized reads granted, notDetermined
+/// stays promptable, and denied plus restricted both read denied; there is no
+/// restricted token on the wire.
+/// - Parameter status: Live calendar authorization observed from the store.
+/// - Returns: `"granted"`, `"notDetermined"`, or `"denied"`.
+private func indexRequestAccessToken(_ status: CalendarAuthorizationStatus) -> String {
+    switch status {
+    case .authorized:
+        "granted"
+    case .notDetermined:
+        "notDetermined"
+    case .denied, .restricted:
+        "denied"
+    }
+}
+
+/// Maps a live reminders authorization read onto the request-access token.
+///
+/// Mirrors the calendar mapping so both EventKit sources share one token
+/// contract on the wire.
+/// - Parameter status: Live reminders authorization observed from the store.
+/// - Returns: `"granted"`, `"notDetermined"`, or `"denied"`.
+private func indexRequestAccessToken(_ status: EventKitReminderAuthorization) -> String {
+    switch status {
+    case .authorized:
+        "granted"
+    case .notDetermined:
+        "notDetermined"
+    case .denied, .restricted:
+        "denied"
+    }
+}
+
+private func registerIndexRequestAccessRoute(_ app: Application) {
+    let index = app.grouped(PathComponent.constant(ServerPaths.index))
+
+    index.post(PathComponent.constant(ServerPaths.indexRequestAccess)) { req async throws -> IndexRequestAccessResponse in
+        let decoded = try? req.content.decode(IndexRequestAccessRequest.self)
+        let queryKind: String? = req.query[String.self, at: "kind"] ?? req.query[String.self, at: "source"]
+        let rawKind = decoded?.kind ?? decoded?.source ?? queryKind
+        guard let kind = normalizeIndexRequestAccessKind(rawKind) else {
+            let received = (rawKind ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if received.isEmpty {
+                throw Abort(.badRequest, reason: "Missing required source kind: provide `kind` as `calendars` or `reminders`.")
+            }
+            throw Abort(.badRequest, reason: "Unknown index source '\(received)'. Supported sources: calendars, reminders.")
+        }
+        #if canImport(EventKit)
+            let liveStore = LiveEventKitStore()
+            if kind == "calendars" {
+                let current = liveStore.authorizationStatus()
+                if current == .authorized {
+                    return IndexRequestAccessResponse(kind: kind, access: "granted")
+                }
+                guard shouldPromptCalendarRequestAccess(status: current) else {
+                    return IndexRequestAccessResponse(kind: kind, access: indexRequestAccessToken(current))
+                }
+                // Re-read truth after prompting instead of trusting the Bool:
+                // a thrown prompt leaves the store at notDetermined, which
+                // must not masquerade as denied.
+                _ = await (try? liveStore.requestAccess())
+                let updated = liveStore.authorizationStatus()
+                return IndexRequestAccessResponse(kind: kind, access: indexRequestAccessToken(updated))
+            } else {
+                let current = liveStore.reminderAuthorizationStatus()
+                if current == .authorized {
+                    return IndexRequestAccessResponse(kind: kind, access: "granted")
+                }
+                guard shouldPromptReminderRequestAccess(status: current) else {
+                    return IndexRequestAccessResponse(kind: kind, access: indexRequestAccessToken(current))
+                }
+                // Re-read truth after prompting instead of trusting the Bool,
+                // matching the calendars path above.
+                _ = await (try? liveStore.requestReminderAccess())
+                let updated = liveStore.reminderAuthorizationStatus()
+                return IndexRequestAccessResponse(kind: kind, access: indexRequestAccessToken(updated))
+            }
+        #else
+            return IndexRequestAccessResponse(kind: kind, access: "unavailable")
+        #endif
+    }
+}
+
 /// Loads the active index policy, translating config failures into HTTP shapes.
 /// - Returns: The `[index]` section of the stored configuration.
 /// - Throws: `Abort(.badRequest)` for a rejected config and
@@ -351,6 +502,29 @@ private let messagesFullDiskAccessWarning =
 private func messagesDatabasePathForProbe() -> String {
     MessagesIndexer.defaultChatDatabasePath
 }
+
+#if canImport(EventKit)
+    /// Maps one silent EventKit authorization read onto the status access token.
+    ///
+    /// The class-level `authorizationStatus(for:)` read never prompts, so
+    /// status polls stay silent; prompting stays behind the explicit
+    /// owner-driven enable path. Write-only still reads denied because
+    /// indexing needs full access, matching the gateway seam.
+    /// - Parameter entity: EventKit entity (`.event` for calendars, `.reminder` for reminders).
+    /// - Returns: `"granted"`, `"denied"`, or `"notDetermined"`.
+    private func indexEventKitSourceAccess(for entity: EKEntityType) -> String {
+        switch EKEventStore.authorizationStatus(for: entity) {
+        case .fullAccess:
+            return "granted"
+        case .notDetermined:
+            return "notDetermined"
+        case .denied, .writeOnly, .restricted:
+            return "denied"
+        @unknown default:
+            return "denied"
+        }
+    }
+#endif
 
 /// Cached count patterns for the durable run summary line.
 ///
@@ -446,6 +620,9 @@ private func indexWarningDetailLines(from response: String) -> [String] {
 /// response carries a `Skipped: <reason>` line (written by
 /// `IndexCoordinator.detailLine`), parsed like the trigger line and validated
 /// non-empty so the strip renders the same reason the run notice shows.
+/// Per-source outcomes follow the `Source:` detail lines so every source
+/// reports did-run plus reason; a response without such lines degrades to nil
+/// so older engines still render.
 /// - Parameter entry: Newest `index`-kind row from the store lookup, or nil.
 /// - Returns: The latest run outcome, or nil when no run has been recorded.
 private func latestIndexRun(from entry: RunLogEntry?) -> IndexLastRunStatus? {
@@ -461,6 +638,7 @@ private func latestIndexRun(from entry: RunLogEntry?) -> IndexLastRunStatus? {
     let truncated: Int? = entry.response.flatMap { firstCountDetailToken(prefix: "Truncated:", in: $0) }
         ?? firstRunCount(keyword: "truncated", in: message)
         ?? firstRunCount(keyword: "truncated", in: fallback)
+    let sources: [IndexSourceRunOutcome]? = entry.response.flatMap { parseIndexSourceOutcomes(from: $0) }
     return IndexLastRunStatus(
         status: entry.status,
         indexed: firstRunCount(keyword: "indexed", in: message) ?? firstRunCount(keyword: "indexed", in: fallback),
@@ -470,7 +648,8 @@ private func latestIndexRun(from entry: RunLogEntry?) -> IndexLastRunStatus? {
         trigger: indexRunTriggerToken(from: entry),
         skippedReason: skippedReason,
         retiredCount: retired,
-        truncatedCount: truncated
+        truncatedCount: truncated,
+        sources: sources
     )
 }
 
@@ -553,6 +732,56 @@ private func firstSkippedDetailToken(in response: String) -> String? {
         return after
     }
     return nil
+}
+
+/// Extracts per-source outcomes from completion detail lines.
+///
+/// Scans lines for a `Source <kind>:` prefix (case-insensitive) carrying
+/// `didRun` plus counts, mirroring the coordinator's detail contract. A
+/// response without such lines yields nil so older engines degrade to no
+/// per-source notes instead of failing.
+/// - Parameter response: Completion detail text.
+/// - Returns: Outcomes in file order, or nil when absent.
+private func parseIndexSourceOutcomes(from response: String) -> [IndexSourceRunOutcome]? {
+    var outcomes: [IndexSourceRunOutcome] = []
+    for line in response.components(separatedBy: .newlines) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.lowercased().hasPrefix("source ") else { continue }
+        let afterSource = trimmed.dropFirst("Source ".count)
+        guard let colon = afterSource.firstIndex(of: ":") else { continue }
+        let kind = afterSource[..<colon].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !kind.isEmpty else { continue }
+        let remainder = String(afterSource[afterSource.index(after: colon)...])
+        let scanned = firstRunCount(keyword: "scanned", in: remainder) ?? 0
+        let indexed = firstRunCount(keyword: "indexed", in: remainder) ?? 0
+        let lowerRemainder = remainder.lowercased()
+        let didRun: Bool? = if lowerRemainder.contains("didrun true") {
+            true
+        } else if lowerRemainder.contains("didrun false") {
+            false
+        } else {
+            nil
+        }
+        var skippedReason: String?
+        if let skippedRange = remainder.range(of: "skipped", options: .caseInsensitive) {
+            var after = String(remainder[skippedRange.upperBound...])
+            after = after.trimmingCharacters(in: .whitespacesAndNewlines)
+            if after.hasPrefix(":") {
+                after = String(after.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if !after.isEmpty {
+                skippedReason = after
+            }
+        }
+        outcomes.append(IndexSourceRunOutcome(
+            kind: String(kind),
+            didRun: didRun ?? (skippedReason == nil),
+            scanned: scanned,
+            indexed: indexed,
+            skippedReason: skippedReason
+        ))
+    }
+    return outcomes.isEmpty ? nil : outcomes
 }
 
 /// Extracts the first `<n> <keyword>` count from a run summary line.

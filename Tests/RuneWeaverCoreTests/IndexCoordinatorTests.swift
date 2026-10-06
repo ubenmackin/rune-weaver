@@ -969,10 +969,12 @@ struct IndexCoordinatorTests {
     }
 
     @Test
-    func `Disabled source skips while enabled source needs rebuilt stages`() async {
-        // Disabling after boot reports skipped through the per-run policy
-        // guard, while enabling after boot stays parked because selection was
-        // frozen at boot and only a rebuild introduces the new stage.
+    func `Disabled source skips while enabled source runs without rebuilt stages`() async {
+        // Live selection re-derives every run from the saved policy snapshot:
+        // post-boot enable selects the next run with no rebuilt stages, while
+        // post-boot disable skips via selection plus the synthesized gap. The
+        // per-run policy guard inside each body stays as defense for direct
+        // indexer use; the coordinator filters before it.
         let recorder = IndexPolicyRecorder()
         let calls = IndexStageCallRecorder()
         let filesStage = IndexClosureStage(kind: .files, isEnabled: true) { policy, _, _ in
@@ -986,8 +988,8 @@ struct IndexCoordinatorTests {
             }
             return IndexSourceRunReport(kind: .files, scanned: 1, indexed: 1)
         }
-        // Boot-disabled: simulates a source turned on after boot without a
-        // rebuild, so the coordinator never executes it.
+        // Boot-disabled then live-enabled: runs because live selection ignores
+        // the boot flag and re-derives from the run policy snapshot.
         let mailStage = IndexClosureStage(kind: .mail, isEnabled: false) { _, _, _ in
             await calls.record(.mail)
             return IndexSourceRunReport(kind: .mail, scanned: 1, indexed: 1)
@@ -1001,15 +1003,23 @@ struct IndexCoordinatorTests {
         let summary = await coordinator.run()
 
         #expect(summary.status == .ok)
-        // The files body ran but honored the live disable as a skip.
+        // Files disabled after boot never executes; selection filters it and
+        // the summary synthesizes the disabled gap.
         let flags = await recorder.filesFlagSnapshot()
-        #expect(flags == [false])
-        #expect(summary.scanned == 0)
-        #expect(summary.documentsIndexed == 0)
-        // The mail body never ran despite the live enable: rebuilt stages
-        // are still required to introduce a newly enabled source.
+        #expect(flags.isEmpty)
+        #expect(summary.scanned == 1)
+        #expect(summary.documentsIndexed == 1)
+        // Mail enabled after boot runs with no rebuilt stages.
         let observed = await calls.snapshot()
-        #expect(observed.isEmpty)
+        #expect(observed == [.mail])
+        // Per-source attribution stays honest: disabled synthesizes didRun
+        // false while the newly enabled source reports didRun true.
+        let filesReport = summary.sources.first { $0.kind == .files }
+        #expect(filesReport?.didRun == false)
+        let mailReport = summary.sources.first { $0.kind == .mail }
+        #expect(mailReport?.didRun == true)
+        #expect(mailReport?.scanned == 1)
+        #expect(mailReport?.indexed == 1)
     }
 
     @Test

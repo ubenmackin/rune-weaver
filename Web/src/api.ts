@@ -3122,9 +3122,48 @@ export const DEFAULT_FANOUT_CONFIG: FanoutConfigData = {
 // One source's enablement row on `GET /index/status`. Global enablement gates
 // every row server-side, so a source reads as live only when the indexer as a
 // whole is on.
+export type IndexSourceAccess =
+  | "granted"
+  | "denied"
+  | "notDetermined"
+  | "unavailable";
+
 export interface IndexSourceStatus {
   kind: string;
   enabled: boolean;
+  // Access posture observed server-side with silent reads at status build
+  // time. Optional because older engines predate access reporting; absent
+  // degrades to granted so older payloads keep today's pill colors.
+  access?: IndexSourceAccess | null;
+}
+
+// Normalizes any wire access token to the known set: exact known tokens pass
+// through, while absent or drifted shapes degrade to granted so older engines
+// keep today's green instead of failing the status row.
+export function normalizeIndexSourceAccess(value: unknown): IndexSourceAccess {
+  if (typeof value !== "string") return "granted";
+  const token = value.trim();
+  if (
+    token === "granted" ||
+    token === "denied" ||
+    token === "notDetermined" ||
+    token === "unavailable"
+  ) {
+    return token;
+  }
+  return "granted";
+}
+
+// Resolves the effective access posture for one source row: the normalized
+// wire token, defaulting to granted when the row or the field is absent so
+// payloads built against an older engine stay green.
+export function resolveIndexSourceAccess(
+  source: Pick<IndexSourceStatus, "access"> | null | undefined,
+): IndexSourceAccess {
+  if (!source || typeof source !== "object") return "granted";
+  return normalizeIndexSourceAccess(
+    (source as { access?: unknown }).access,
+  );
 }
 
 // Per-source content counts on `GET /index/status`: real document, chunk, and
@@ -3212,6 +3251,119 @@ export function indexRunLabelForRun(
   return indexRunTriggerLabel(parseIndexRunTrigger(run));
 }
 
+// Per-source outcome on run-status payloads, mirroring the engine
+// `IndexSourceRunOutcome`. Counts degrade to zero and `didRun` degrades to
+// the absence of a skip reason so drifted rows never fail the strip.
+// The canonical wire keys are `didRun` and `skippedReason`; the `did_run`
+// and `skipped_reason` spellings are decode-only back-compat read via
+// `resolveIndexSourceOutcomes` and never emitted.
+export interface IndexSourceRunOutcome {
+  kind: string;
+  didRun?: boolean | null;
+  scanned?: number | null;
+  indexed?: number | null;
+  skippedReason?: string | null;
+}
+
+// Resolves the per-source outcome list from any run shape. The canonical wire
+// key is `sources`; `sourceOutcomes` and `outcomes` are decode-only
+// back-compat with the first present winning. Absent or malformed lists
+// degrade to empty so older engines still render with no per-source notes.
+export function resolveIndexSourceOutcomes(
+  run:
+    | Pick<IndexLastRunStatus, "sources">
+    | Pick<IndexRunResponse, "sources">
+    | { sources?: unknown; sourceOutcomes?: unknown; outcomes?: unknown }
+    | null
+    | undefined,
+): IndexSourceRunOutcome[] {
+  if (!run || typeof run !== "object") return [];
+  const record = run as {
+    sources?: unknown;
+    sourceOutcomes?: unknown;
+    outcomes?: unknown;
+  };
+  const candidate = Array.isArray(record.sources)
+    ? record.sources
+    : Array.isArray(record.sourceOutcomes)
+      ? record.sourceOutcomes
+      : Array.isArray(record.outcomes)
+        ? record.outcomes
+        : null;
+  if (!candidate) return [];
+  const cleaned: IndexSourceRunOutcome[] = [];
+  for (const entry of candidate) {
+    if (!entry || typeof entry !== "object") continue;
+    const row = entry as Record<string, unknown>;
+    const kind = typeof row.kind === "string" ? row.kind.trim() : "";
+    if (!kind) continue;
+    const rawDidRun =
+      typeof row.didRun === "boolean"
+        ? row.didRun
+        : typeof row.did_run === "boolean"
+          ? row.did_run
+          : undefined;
+    const rawSkipped =
+      typeof row.skippedReason === "string"
+        ? row.skippedReason
+        : typeof row.skipped_reason === "string"
+          ? row.skipped_reason
+          : null;
+    const skippedReason =
+      typeof rawSkipped === "string" && rawSkipped.trim()
+        ? rawSkipped.trim()
+        : null;
+    const didRun = rawDidRun ?? (skippedReason == null);
+    const scanned =
+      typeof row.scanned === "number" && Number.isFinite(row.scanned) && row.scanned >= 0
+        ? Math.floor(row.scanned)
+        : 0;
+    const indexed =
+      typeof row.indexed === "number" && Number.isFinite(row.indexed) && row.indexed >= 0
+        ? Math.floor(row.indexed)
+        : 0;
+    cleaned.push({ kind, didRun, scanned, indexed, skippedReason });
+  }
+  return cleaned;
+}
+
+// Finds one source outcome by kind, or null when the run carried none.
+export function indexSourceOutcomeForKind(
+  run:
+    | Pick<IndexLastRunStatus, "sources">
+    | Pick<IndexRunResponse, "sources">
+    | { sources?: unknown; sourceOutcomes?: unknown; outcomes?: unknown }
+    | null
+    | undefined,
+  kind: string,
+): IndexSourceRunOutcome | null {
+  if (typeof kind !== "string" || !kind.trim()) return null;
+  const wanted = kind.trim().toLowerCase();
+  for (const outcome of resolveIndexSourceOutcomes(run)) {
+    if (outcome.kind.trim().toLowerCase() === wanted) return outcome;
+  }
+  return null;
+}
+
+// Resolves the muted note for one source bar: the verbatim skip reason when
+// its last run did not run, otherwise null so all-run passes show no notes.
+export function resolveIndexSourceSkippedReason(
+  run:
+    | Pick<IndexLastRunStatus, "sources">
+    | Pick<IndexRunResponse, "sources">
+    | { sources?: unknown; sourceOutcomes?: unknown; outcomes?: unknown }
+    | null
+    | undefined,
+  kind: string,
+): string | null {
+  const outcome = indexSourceOutcomeForKind(run, kind);
+  if (!outcome) return null;
+  if (outcome.didRun !== false) return null;
+  const reason = outcome.skippedReason;
+  if (typeof reason !== "string" || !reason.trim()) return null;
+  return reason.trim();
+}
+
 // Latest index run outcome on `GET /index/status`, distilled server-side from
 // the newest `index`-kind run log row. Counts are nullable because a drifted
 // summary line still reports status and finish time; finishedAt keeps the dual
@@ -3244,6 +3396,11 @@ export interface IndexLastRunStatus {
   // Alias some engines emit for the same count. Read via
   // `resolveIndexTruncatedCount` so either spelling renders honestly.
   truncated?: number | null;
+  // Per-source outcomes on the canonical `sources` key. Optional for
+  // back-compat; absent degrades to no per-source notes instead of failing.
+  // The `sourceOutcomes` and `outcomes` spellings are decode-only back-compat
+  // read via `resolveIndexSourceOutcomes` and never emitted.
+  sources?: IndexSourceRunOutcome[] | null;
 }
 
 // Live snapshot of an in-flight index run on `GET /index/status`, mirroring
@@ -3365,6 +3522,11 @@ export interface IndexRunResponse {
   // of failing.
   truncatedCount?: number | null;
   truncated?: number | null;
+  // Per-source outcomes on the canonical `sources` key. Optional for
+  // back-compat; absent degrades to no per-source notes instead of failing.
+  // The `sourceOutcomes` and `outcomes` spellings are decode-only back-compat
+  // read via `resolveIndexSourceOutcomes` and never emitted.
+  sources?: IndexSourceRunOutcome[] | null;
 }
 
 // Outcome of `POST /index/cancel`.
@@ -4582,6 +4744,36 @@ export function reclaimIndex(): Promise<IndexReclaimResponse> {
   return fetchJson<IndexReclaimResponse>("/index/reclaim", {
     method: "POST",
     body: JSON.stringify({}),
+  });
+}
+
+// Outcome of `POST /index/request-access`: whether the owner granted EventKit
+// access for one source. Carries the boolean plus the single `access` token.
+export interface IndexRequestAccessResponse {
+  kind: string;
+  granted?: boolean | null;
+  access?: string | null;
+}
+
+// Resolves the granted bit from the single-token shape: the boolean wins
+// when present, otherwise the `access` token decides, defaulting to denied
+// so a drifted payload never claims access it did not verify.
+export function resolveIndexRequestAccessGranted(
+  response: IndexRequestAccessResponse | null | undefined,
+): boolean {
+  if (!response || typeof response !== "object") return false;
+  if (typeof response.granted === "boolean") return response.granted;
+  const accessToken =
+    typeof response.access === "string" ? response.access.trim().toLowerCase() : "";
+  return accessToken === "granted";
+}
+
+// Requests EventKit access for one source. Prompts only from explicit intent
+// (post-save enable, Grant button); status reads never call this.
+export function requestIndexAccess(kind: string): Promise<IndexRequestAccessResponse> {
+  return fetchJson<IndexRequestAccessResponse>("/index/request-access", {
+    method: "POST",
+    body: JSON.stringify({ kind }),
   });
 }
 

@@ -1,7 +1,7 @@
 // Rune Weaver Core — Coordinator owning nightly and on-demand index runs.
 //
-// One actor sequences the per-source indexers (files, mail, Messages, and the
-// opt-in vision describe pass) into a single run, exposes the single live
+// One actor sequences the per-source indexers (files, mail, messages, calendars,
+// reminders, and the opt-in vision describe pass) into a single run, exposes the single live
 // source as the `liveTotals` poll snapshot (nil when idle) that the menu and
 // page read via `GET /index/status` `live` on about a 2s in-run poll, reports
 // run lifecycle through an injected seam so the server can broadcast
@@ -20,485 +20,8 @@
 import Foundation
 import os
 
-// MARK: - Phases and sources
-
-/// Ordered phases an index run moves through, surfaced on progress frames.
-public enum IndexPhase: String, Sendable, Equatable, CaseIterable {
-    /// Enumerating candidate items before any body work.
-    case discovering
-    /// Reading and extracting candidate bodies.
-    case extracting
-    /// Producing embeddings for vector-eligible chunks.
-    case embedding
-    /// Writing documents, chunks, and watermarks durably.
-    case committing
-}
-
-/// Indexable corpora the coordinator sequences, in canonical run order.
-///
-/// Declared separately from ``IndexSource`` because the vision describe pass is
-/// not a document origin — it enriches documents already written by another
-/// source — yet it still needs a stable position in the run order.
-public enum IndexSourceKind: String, Sendable, Hashable, CaseIterable {
-    /// Local filesystem documents.
-    case files
-    /// Mail messages read from a configured mailbox.
-    case mail
-    /// Apple Messages transcripts.
-    case messages
-    /// Calendar event occurrences.
-    case calendars
-    /// Reminder rows.
-    case reminders
-    /// Opt-in LLM descriptions for bodyless documents.
-    case vision
-
-    /// Canonical order sources run in, so every pass is deterministic.
-    public static let runOrder: [IndexSourceKind] = [.files, .mail, .messages, .calendars, .reminders, .vision]
-}
-
-/// What caused an index run.
-public enum IndexRunTrigger: String, Sendable, Equatable {
-    /// The nightly scheduler trigger, fired at the configured nightly hour.
-    case nightly
-    /// A late launch after the nightly hour catching up a missed nightly window.
-    case catchUp
-    /// A caller-requested run.
-    case onDemand
-}
-
-/// Terminal (or in-flight) state of an index run.
-public enum IndexRunStatus: String, Sendable, Equatable {
-    /// The run is in progress.
-    case running
-    /// The run finished with no fatal failure.
-    case ok
-    /// The run failed before any source produced work.
-    case error
-    /// The run stopped cooperatively between batches.
-    case cancelled
-    /// The run did not execute, with a reason.
-    case skipped
-}
-
-// MARK: - Reports
-
-/// Counts one source stage contributed to a run.
-public struct IndexSourceRunReport: Sendable, Equatable {
-    /// Source the counts belong to.
-    public let kind: IndexSourceKind
-    /// Items examined, including those later skipped.
-    public var scanned: Int
-    /// Documents written during the stage.
-    public var indexed: Int
-    /// Chunks written carrying an embedding.
-    public var vectorChunks: Int
-    /// Chunks written without an embedding (keyword-only).
-    public var keywordChunks: Int
-    /// Items deliberately skipped (excluded, denied, unchanged, deduplicated).
-    public var skipped: Int
-    /// Items that could not be processed.
-    public var errors: Int
-    /// Documents retired (deleted as unseen) by the stage.
-    public var retired: Int
-    /// Documents where chunks beyond the vector cap stayed keyword-only.
-    public var truncated: Int
-    /// Whether the stage actually ran.
-    public var didRun: Bool
-    /// Set when the stage did not execute because its source is disabled.
-    public var skippedReason: String?
-    /// Non-fatal problems, without any content or secret.
-    public var warnings: [String]
-    /// Last relative item processed, for the display `current` field.
-    public var lastItem: String?
-
-    /// Creates a source run report.
-    /// - Parameters:
-    ///   - kind: Source the counts belong to.
-    ///   - scanned: Items examined.
-    ///   - indexed: Documents written.
-    ///   - vectorChunks: Chunks written with an embedding.
-    ///   - keywordChunks: Chunks written without an embedding.
-    ///   - skipped: Items deliberately skipped.
-    ///   - errors: Items that could not be processed.
-    ///   - retired: Documents retired by the stage.
-    ///   - truncated: Documents where the vector cap left tail chunks keyword-only.
-    ///   - didRun: Whether the stage ran.
-    ///   - skippedReason: Why a stage did not run.
-    ///   - warnings: Non-fatal problems.
-    ///   - lastItem: Last relative item processed.
-    public init(
-        kind: IndexSourceKind,
-        scanned: Int = 0,
-        indexed: Int = 0,
-        vectorChunks: Int = 0,
-        keywordChunks: Int = 0,
-        skipped: Int = 0,
-        errors: Int = 0,
-        retired: Int = 0,
-        truncated: Int = 0,
-        didRun: Bool = true,
-        skippedReason: String? = nil,
-        warnings: [String] = [],
-        lastItem: String? = nil
-    ) {
-        self.kind = kind
-        self.scanned = scanned
-        self.indexed = indexed
-        self.vectorChunks = vectorChunks
-        self.keywordChunks = keywordChunks
-        self.skipped = skipped
-        self.errors = errors
-        self.retired = retired
-        self.truncated = truncated
-        self.didRun = didRun
-        self.skippedReason = skippedReason
-        self.warnings = warnings
-        self.lastItem = lastItem
-    }
-}
-
-/// Aggregate outcome of one index run.
-public struct IndexRunSummary: Sendable, Equatable {
-    /// Per-run session identifier used to tag the run log row.
-    public let sessionID: UUID
-    /// What caused the run.
-    public let trigger: IndexRunTrigger
-    /// Final run state.
-    public let status: IndexRunStatus
-    /// Documents written across every source.
-    public let documentsIndexed: Int
-    /// Chunks written carrying an embedding.
-    public let vectorChunks: Int
-    /// Chunks written without an embedding.
-    public let keywordChunks: Int
-    /// Items examined.
-    public let scanned: Int
-    /// Items deliberately skipped.
-    public let skipped: Int
-    /// Items that could not be processed.
-    public let errors: Int
-    /// Documents retired (deleted as unseen) across every source.
-    public let retired: Int
-    /// Documents where chunks beyond the vector cap stayed keyword-only.
-    public let truncated: Int
-    /// Non-fatal problems, without any content or secret.
-    public let warnings: [String]
-    /// Instant the run began.
-    public let startedAt: Date
-    /// Instant the run finished.
-    public let finishedAt: Date
-    /// Recorded watermark on success, or nil when the run did not succeed.
-    public let indexAsOf: Date?
-    /// Why the run did not execute, when it was skipped.
-    public let skippedReason: String?
-
-    /// Creates a run summary.
-    /// - Parameters:
-    ///   - sessionID: Per-run session identifier.
-    ///   - trigger: What caused the run.
-    ///   - status: Final run state.
-    ///   - documentsIndexed: Documents written.
-    ///   - vectorChunks: Chunks written with an embedding.
-    ///   - keywordChunks: Chunks written without an embedding.
-    ///   - scanned: Items examined.
-    ///   - skipped: Items deliberately skipped.
-    ///   - errors: Items that could not be processed.
-    ///   - retired: Documents retired across every source.
-    ///   - truncated: Documents where the vector cap left tail chunks keyword-only.
-    ///   - warnings: Non-fatal problems.
-    ///   - startedAt: Instant the run began.
-    ///   - finishedAt: Instant the run finished.
-    ///   - indexAsOf: Recorded watermark on success.
-    ///   - skippedReason: Why the run did not execute.
-    public init(
-        sessionID: UUID,
-        trigger: IndexRunTrigger,
-        status: IndexRunStatus,
-        documentsIndexed: Int,
-        vectorChunks: Int,
-        keywordChunks: Int,
-        scanned: Int,
-        skipped: Int,
-        errors: Int,
-        retired: Int = 0,
-        truncated: Int = 0,
-        warnings: [String],
-        startedAt: Date,
-        finishedAt: Date,
-        indexAsOf: Date?,
-        skippedReason: String?
-    ) {
-        self.sessionID = sessionID
-        self.trigger = trigger
-        self.status = status
-        self.documentsIndexed = documentsIndexed
-        self.vectorChunks = vectorChunks
-        self.keywordChunks = keywordChunks
-        self.scanned = scanned
-        self.skipped = skipped
-        self.errors = errors
-        self.retired = retired
-        self.truncated = truncated
-        self.warnings = warnings
-        self.startedAt = startedAt
-        self.finishedAt = finishedAt
-        self.indexAsOf = indexAsOf
-        self.skippedReason = skippedReason
-    }
-}
-
-/// Lightweight snapshot of an in-flight index run for polling surfaces.
-///
-/// Returned by ``IndexCoordinator/liveTotals``; nil when no run is in flight.
-/// Carries cumulative counts plus the active phase and stage tokens so a
-/// menu-bar or dashboard poll can render liveness without touching run state.
-public struct IndexLiveTotals: Sendable, Equatable {
-    /// What caused the run.
-    public let trigger: IndexRunTrigger
-    /// Active phase.
-    public let phase: IndexPhase
-    /// Active source stage, or nil for discovering and committing frames.
-    public let stage: IndexSourceKind?
-    /// Items examined across completed work plus observed in-flight progress.
-    public let scanned: Int
-    /// Documents written across completed stages plus observed in-flight progress.
-    public let indexed: Int
-    /// Items deliberately skipped across completed stages.
-    public let skipped: Int
-    /// Items that could not be processed across completed stages.
-    public let errors: Int
-    /// Documents per second derived from indexed over elapsed time.
-    public let rate: Double
-    /// Milliseconds elapsed since the run began.
-    public let elapsedMs: Int
-    /// Last relative item reported, for the display `current` field.
-    public let current: String?
-    /// Instant the run began.
-    public let startedAt: Date
-
-    /// Creates a live snapshot.
-    /// - Parameters:
-    ///   - trigger: What caused the run.
-    ///   - phase: Active phase.
-    ///   - stage: Active source stage, or nil.
-    ///   - scanned: Items examined.
-    ///   - indexed: Documents written.
-    ///   - skipped: Items deliberately skipped.
-    ///   - errors: Items that could not be processed.
-    ///   - rate: Documents per second.
-    ///   - elapsedMs: Milliseconds elapsed since the run began.
-    ///   - current: Last relative item reported.
-    ///   - startedAt: Instant the run began.
-    public init(
-        trigger: IndexRunTrigger,
-        phase: IndexPhase,
-        stage: IndexSourceKind?,
-        scanned: Int,
-        indexed: Int,
-        skipped: Int = 0,
-        errors: Int = 0,
-        rate: Double = 0,
-        elapsedMs: Int,
-        current: String?,
-        startedAt: Date
-    ) {
-        self.trigger = trigger
-        self.phase = phase
-        self.stage = stage
-        self.scanned = scanned
-        self.indexed = indexed
-        self.skipped = skipped
-        self.errors = errors
-        self.rate = rate
-        self.elapsedMs = elapsedMs
-        self.current = current
-        self.startedAt = startedAt
-    }
-}
-
-/// One run lifecycle event delivered to the reporting seam.
-///
-/// Carries the per-run session identifier and stable event identifier so an
-/// adapter can append a `run_logs` row on start and update the same row on
-/// completion, then broadcast the matching `run_started`/`run_completed` frame.
-public struct IndexRunEvent: Sendable, Equatable {
-    /// Stable event identifier, reused for the start and completion events.
-    public let id: UUID
-    /// Per-run session identifier linking the run to its log row.
-    public let sessionID: UUID
-    /// What caused the run.
-    public let trigger: IndexRunTrigger
-    /// Event state (`running` at start, terminal at completion).
-    public let status: IndexRunStatus
-    /// Human-readable summary, safe to display verbatim.
-    public let message: String
-    /// Instant the event was produced.
-    public let timestamp: Date
-    /// Detailed outcome text, when this is a completion event.
-    public let response: String?
-    /// Execution duration in milliseconds, when this is a completion event.
-    public let durationMs: Int?
-
-    /// Creates a run event.
-    /// - Parameters:
-    ///   - id: Stable event identifier.
-    ///   - sessionID: Per-run session identifier.
-    ///   - trigger: What caused the run.
-    ///   - status: Event state.
-    ///   - message: Human-readable summary.
-    ///   - timestamp: Instant the event was produced.
-    ///   - response: Detailed outcome text.
-    ///   - durationMs: Execution duration in milliseconds.
-    public init(
-        id: UUID,
-        sessionID: UUID,
-        trigger: IndexRunTrigger,
-        status: IndexRunStatus,
-        message: String,
-        timestamp: Date,
-        response: String? = nil,
-        durationMs: Int? = nil
-    ) {
-        self.id = id
-        self.sessionID = sessionID
-        self.trigger = trigger
-        self.status = status
-        self.message = message
-        self.timestamp = timestamp
-        self.response = response
-        self.durationMs = durationMs
-    }
-}
-
-/// Seam the coordinator reports run lifecycle through.
-///
-/// The server adapts this to `RunLogStore` plus `WSHub`; a test or a
-/// transport-free caller can leave every method as a no-op.
-public protocol IndexRunReporting: Sendable {
-    /// Reports that a run started.
-    /// - Parameter event: The start event, carrying the per-run session id.
-    func runStarted(_ event: IndexRunEvent) async
-
-    /// Reports that a run reached a terminal state.
-    /// - Parameter event: The completion event.
-    func runCompleted(_ event: IndexRunEvent) async
-}
-
-extension IndexRunReporting {
-    /// Default no-op start report.
-    /// - Parameter event: The start event.
-    public func runStarted(_: IndexRunEvent) async {}
-
-    /// Default no-op completion report.
-    /// - Parameter event: The completion event.
-    public func runCompleted(_: IndexRunEvent) async {}
-}
-
-/// Reporter that discards every event, used when no transport is wired.
-public struct NullIndexRunReporter: IndexRunReporting {
-    /// Creates a null reporter.
-    public init() {}
-}
-
-// MARK: - Stage seam
-
-/// One sequenced source stage the coordinator runs.
-///
-/// Implementations wrap a concrete indexer and translate its report into an
-/// ``IndexSourceRunReport``. The coordinator passes its progress sink, a
-/// cooperative cancellation probe, and the per-run policy snapshot so a stage
-/// can report liveness and stop between batches without the core target
-/// reaching into the server. The snapshot is the single source for effort,
-/// workers, caps, excludes, roots, and windows; selection still consults the
-/// boot-time `isEnabled` flag.
-public protocol IndexSourceStage: Sendable {
-    /// Source this stage indexes.
-    var kind: IndexSourceKind { get }
-
-    /// Whether the stage was selected at boot for the active configuration.
-    ///
-    /// Captured when stages are built, so enabling a source later needs
-    /// rebuilt stages while disabling is honored through the per-run policy.
-    var isEnabled: Bool { get }
-
-    /// Runs the stage against one per-run policy snapshot.
-    /// - Parameters:
-    ///   - reporter: Sink for liveness frames.
-    ///   - isCancelled: Probe that reports whether the run was cancelled.
-    ///   - policy: Live index policy snapshot for this run; the only source
-    ///     for effort, workers, caps, excludes, roots, and windows.
-    /// - Returns: The stage's contribution to the run.
-    func run(
-        reporter: @escaping ToolProgressReporter,
-        isCancelled: @escaping @Sendable () -> Bool,
-        policy: IndexConfig
-    ) async throws -> IndexSourceRunReport
-
-    /// Requests that a run in flight stop at its next safe point.
-    func cancel() async
-}
-
-extension IndexSourceStage {
-    /// Default no-op cancellation for stages that own no cancellable handle.
-    public func cancel() async {}
-}
-
-/// Closure-backed source stage, used to adapt the concrete indexers and to
-/// drive the coordinator against deterministic stubs in tests.
-///
-/// The body receives the coordinator's per-run policy snapshot as its leading
-/// argument so every value it builds from (effort, workers, caps, excludes,
-/// roots, windows) tracks the saved policy without a restart. An in-flight
-/// body keeps the snapshot it was invoked with, ignoring saves that land
-/// mid-run.
-public struct IndexClosureStage: IndexSourceStage {
-    /// Source this stage indexes.
-    public let kind: IndexSourceKind
-    /// Whether the stage was selected at boot for the active configuration.
-    public let isEnabled: Bool
-    /// Body performing the work against one per-run policy snapshot.
-    private let body: @Sendable (IndexConfig, @escaping ToolProgressReporter, @Sendable () -> Bool) async throws -> IndexSourceRunReport
-    /// Hook invoked when the coordinator cancels a run.
-    private let onCancel: @Sendable () async -> Void
-
-    /// Creates a closure-backed stage.
-    /// - Parameters:
-    ///   - kind: Source this stage indexes.
-    ///   - isEnabled: Whether the stage was selected at boot.
-    ///   - onCancel: Cancellation hook; defaults to a no-op.
-    ///   - body: Work performed by the stage against the per-run policy.
-    public init(
-        kind: IndexSourceKind,
-        isEnabled: Bool = true,
-        onCancel: @escaping @Sendable () async -> Void = {},
-        body: @escaping @Sendable (IndexConfig, @escaping ToolProgressReporter, @Sendable () -> Bool) async throws -> IndexSourceRunReport
-    ) {
-        self.kind = kind
-        self.isEnabled = isEnabled
-        self.onCancel = onCancel
-        self.body = body
-    }
-
-    /// Runs the closure-backed body against one per-run policy snapshot.
-    /// - Parameters:
-    ///   - reporter: Sink for liveness frames.
-    ///   - isCancelled: Cooperative cancellation probe.
-    ///   - policy: Live index policy snapshot for this run.
-    /// - Returns: The stage's contribution to the run.
-    public func run(
-        reporter: @escaping ToolProgressReporter,
-        isCancelled: @escaping @Sendable () -> Bool,
-        policy: IndexConfig
-    ) async throws -> IndexSourceRunReport {
-        try await body(policy, reporter, isCancelled)
-    }
-
-    /// Invokes the cancellation hook.
-    public func cancel() async {
-        await onCancel()
-    }
-}
+// Shared models live in IndexCoordinatorModels.swift; run totals, reporting
+// helpers, and the cancellation flag live in IndexCoordinatorSupport.swift.
 
 // MARK: - Coordinator
 
@@ -608,6 +131,8 @@ public actor IndexCoordinator {
     private var liveKeywordChunks = 0
     /// Last relative item reported, for the display `current` field.
     private var liveCurrent: String?
+    /// Per-source reports completed in the run in flight, in completion order.
+    private var currentSourceReports: [IndexSourceRunReport] = []
 
     /// Creates an index coordinator.
     /// - Parameters:
@@ -682,13 +207,10 @@ public actor IndexCoordinator {
 
     /// Updates the live index policy so saved `[index]` values take effect without a restart.
     ///
-    /// The next run builds every indexer from the saved snapshot, so effort,
-    /// workers, caps, excludes, roots, and windows apply with no rebuilt
-    /// stages; a run already in flight keeps the snapshot it started with. A
-    /// source turned off after boot reports skipped on the next pass through
-    /// its policy guard, while a source turned on after boot stays parked
-    /// until stages are rebuilt because selection still consults the boot-time
-    /// flag.
+    /// The next run re-derives selection from the saved snapshot via the
+    /// single kind-to-flag mapping and builds every indexer from that
+    /// snapshot with no rebuilt stages; a run already in flight keeps the
+    /// snapshot it started with.
     /// - Parameter newConfig: Persisted policy from the settings save.
     public func updateConfig(_ newConfig: IndexConfig) {
         config = newConfig
@@ -829,6 +351,7 @@ public actor IndexCoordinator {
         // split stages across policies; the next run picks it up instead.
         let runPolicy = config
         resetLiveState(trigger: trigger, startedAt: startedAt)
+        currentSourceReports = []
         await reporter.runStarted(IndexRunEvent(
             id: eventID,
             sessionID: sessionID,
@@ -849,10 +372,13 @@ public actor IndexCoordinator {
         heartbeat.cancel()
         await heartbeat.value
         return await finishRun(
-            trigger: trigger,
-            sessionID: sessionID,
-            eventID: eventID,
-            startedAt: startedAt,
+            context: FinishRunContext(
+                trigger: trigger,
+                sessionID: sessionID,
+                eventID: eventID,
+                startedAt: startedAt,
+                policy: runPolicy
+            ),
             totals: totals,
             ranAny: ranAny
         )
@@ -887,19 +413,15 @@ public actor IndexCoordinator {
     ///
     /// Committing progress, the durable watermark, and the terminal frame all
     /// derive here so the stage loop stays focused on sequencing alone.
+    /// Per-source gaps synthesize from the same run policy snapshot that
+    /// selected stages, so saved toggles stay honest in the summary.
     /// - Parameters:
-    ///   - trigger: What caused the run.
-    ///   - sessionID: Per-run session identifier for the log row.
-    ///   - eventID: Stable event identifier for start and completion events.
-    ///   - startedAt: Instant the run began.
+    ///   - context: Run identity plus per-run policy snapshot fixed at entry.
     ///   - totals: Accumulated counts across stages.
     ///   - ranAny: Whether any stage produced work or a counted failure.
     /// - Returns: A summary describing the pass.
     private func finishRun(
-        trigger: IndexRunTrigger,
-        sessionID: UUID,
-        eventID: UUID,
-        startedAt: Date,
+        context: FinishRunContext,
         totals: Totals,
         ranAny: Bool
     ) async -> IndexRunSummary {
@@ -931,7 +453,7 @@ public actor IndexCoordinator {
         if !cancelled {
             livePhase = .committing
             liveStage = nil
-            await emit(phase: .committing, totals: resolved, startedAt: startedAt, force: true)
+            await emit(phase: .committing, totals: resolved, startedAt: context.startedAt, force: true)
         }
         let recordedAsOf: Date
         // Terminal aggregates stay searchable for every mutating run because cancelled
@@ -945,7 +467,7 @@ public actor IndexCoordinator {
         // so it tolerates either leg; when there is no store or the refresh fails,
         // the wall-clock finish stands in.
         do {
-            if let snapshot = try await store?.refreshAggregates(producingRunID: sessionID.uuidString) {
+            if let snapshot = try await store?.refreshAggregates(producingRunID: context.sessionID.uuidString) {
                 recordedAsOf = snapshot.indexAsOf
             } else {
                 recordedAsOf = finishedAt
@@ -961,10 +483,11 @@ public actor IndexCoordinator {
                 RuneWeaverLog.stores.error("IndexCoordinator: failed to record completion state: \(error.localizedDescription)")
             }
         }
-        let durationMs = max(0, Int(finishedAt.timeIntervalSince(startedAt) * 1000))
+        let durationMs = max(0, Int(finishedAt.timeIntervalSince(context.startedAt) * 1000))
+        let orderedSources = Self.orderedSourceReports(currentSourceReports, cancelled: cancelled, policy: context.policy)
         let summary = IndexRunSummary(
-            sessionID: sessionID,
-            trigger: trigger,
+            sessionID: context.sessionID,
+            trigger: context.trigger,
             status: status,
             documentsIndexed: resolved.indexed,
             vectorChunks: resolved.vectorChunks,
@@ -975,16 +498,17 @@ public actor IndexCoordinator {
             retired: resolved.retired,
             truncated: resolved.truncated,
             warnings: resolved.warnings,
-            startedAt: startedAt,
+            startedAt: context.startedAt,
             finishedAt: finishedAt,
             indexAsOf: status == .ok ? recordedAsOf : nil,
-            skippedReason: nil
+            skippedReason: nil,
+            sources: orderedSources
         )
-        await emitFinal(summary: summary, startedAt: startedAt)
+        await emitFinal(summary: summary, startedAt: context.startedAt)
         await reporter.runCompleted(IndexRunEvent(
-            id: eventID,
-            sessionID: sessionID,
-            trigger: trigger,
+            id: context.eventID,
+            sessionID: context.sessionID,
+            trigger: context.trigger,
             status: status,
             message: Self.summaryLine(summary),
             timestamp: finishedAt,
@@ -1080,7 +604,11 @@ extension IndexCoordinator {
     ///     one run across policies.
     /// - Returns: Whether any stage produced work or a counted failure.
     private func runEnabledStages(totals: inout Totals, startedAt: Date, policy: IndexConfig) async -> Bool {
-        let enabled = orderedStages.filter(\.isEnabled)
+        // Selection re-derives every run from the live `policy` snapshot via
+        // the single kind-to-flag mapping, so a save applied via
+        // `updateConfig` takes effect on the next run with no rebuild; the
+        // in-flight snapshot stays fixed for the whole run.
+        let enabled = orderedStages.filter { $0.kind.isEnabled(in: policy) }
         let overlapStages = enabled.filter { $0.kind == .files || $0.kind == .mail || $0.kind == .messages }
         let remainder = enabled.filter { $0.kind != .files && $0.kind != .mail && $0.kind != .messages }
         guard overlapStages.count >= 2 else {
@@ -1229,6 +757,7 @@ extension IndexCoordinator {
                 isCancelled: cancellationProbe,
                 policy: policy
             )
+            currentSourceReports.append(report)
             totals.add(report)
             liveScanned = max(liveScanned, totals.scanned)
             liveIndexed = max(liveIndexed, totals.indexed)
@@ -1247,6 +776,14 @@ extension IndexCoordinator {
             totals.errors += 1
             totals.warnings.append("\(stage.kind.rawValue): \(error.localizedDescription)")
             liveErrors = totals.errors
+            currentSourceReports.append(IndexSourceRunReport(
+                kind: stage.kind,
+                scanned: 0,
+                indexed: 0,
+                errors: 1,
+                didRun: true,
+                warnings: ["\(stage.kind.rawValue): \(error.localizedDescription)"]
+            ))
             return true
         }
     }
@@ -1287,6 +824,7 @@ extension IndexCoordinator {
             )
             stageTotals.add(report)
             await self.finalizeConcurrentProgress(index: index, report: report)
+            self.recordSourceReport(report)
             return (true, stageTotals)
         } catch is CancellationError {
             flag.set()
@@ -1294,6 +832,14 @@ extension IndexCoordinator {
         } catch {
             stageTotals.errors += 1
             stageTotals.warnings.append("\(stage.kind.rawValue): \(error.localizedDescription)")
+            self.recordSourceReport(IndexSourceRunReport(
+                kind: stage.kind,
+                scanned: 0,
+                indexed: 0,
+                errors: 1,
+                didRun: true,
+                warnings: ["\(stage.kind.rawValue): \(error.localizedDescription)"]
+            ))
             return (true, stageTotals)
         }
     }
@@ -1350,6 +896,12 @@ extension IndexCoordinator {
         if summedIndexed > liveIndexed {
             liveIndexed = summedIndexed
         }
+    }
+
+    /// Records one completed source report for the run in flight.
+    /// - Parameter report: Stage contribution to retain for the summary.
+    private func recordSourceReport(_ report: IndexSourceRunReport) {
+        currentSourceReports.append(report)
     }
 
     /// Builds a skipped summary for reporting through `reportSkipped`.
@@ -1422,88 +974,6 @@ extension IndexCoordinator {
 // MARK: - Progress
 
 extension IndexCoordinator {
-    /// Running totals accumulated across source stages.
-    fileprivate struct Totals: Sendable {
-        /// Items examined.
-        var scanned = 0
-        /// Documents written.
-        var indexed = 0
-        /// Chunks written with an embedding.
-        var vectorChunks = 0
-        /// Chunks written without an embedding.
-        var keywordChunks = 0
-        /// Items deliberately skipped.
-        var skipped = 0
-        /// Items that could not be processed.
-        var errors = 0
-        /// Documents retired (deleted as unseen).
-        var retired = 0
-        /// Documents where the vector cap left tail chunks keyword-only.
-        var truncated = 0
-        /// Non-fatal problems.
-        var warnings: [String] = []
-        /// Last relative item reported by a stage.
-        var lastItem: String?
-
-        /// Adds one stage report into the running totals.
-        /// - Parameter report: Stage contribution to fold in.
-        mutating func add(_ report: IndexSourceRunReport) {
-            merge(Totals(
-                scanned: report.scanned,
-                indexed: report.indexed,
-                vectorChunks: report.vectorChunks,
-                keywordChunks: report.keywordChunks,
-                skipped: report.skipped,
-                errors: report.errors,
-                retired: report.retired,
-                truncated: report.truncated,
-                warnings: report.warnings,
-                lastItem: report.lastItem
-            ))
-        }
-
-        /// Merges one stage's accumulated totals into the running totals.
-        /// - Parameter other: Per-stage totals to fold in.
-        mutating func add(_ other: Totals) {
-            merge(other)
-        }
-
-        /// Folds counted fields shared by reports and accumulated totals.
-        ///
-        /// Keeps warning attribution intact by appending in canonical order, so
-        /// a files warning never masks a mail warning and the watermark math
-        /// matches the serial pass exactly.
-        /// - Parameter other: Counted contribution to fold in.
-        private mutating func merge(_ other: Totals) {
-            scanned += other.scanned
-            indexed += other.indexed
-            vectorChunks += other.vectorChunks
-            keywordChunks += other.keywordChunks
-            skipped += other.skipped
-            errors += other.errors
-            retired += other.retired
-            truncated += other.truncated
-            warnings.append(contentsOf: other.warnings)
-            if let item = other.lastItem {
-                lastItem = item
-            }
-        }
-    }
-
-    /// One overlapped peer's outcome for the task-group join.
-    ///
-    /// Carries the peer's overlap-batch index so the join folds peers in
-    /// canonical order no matter which finishes first, keeping watermarks
-    /// identical to serial even when two stages share one kind.
-    fileprivate struct OverlapStageOutcome: Sendable {
-        /// Overlap-batch position owning the high-water slot.
-        let index: Int
-        /// Whether the peer contributed work or a counted failure.
-        let didRun: Bool
-        /// Per-stage totals owned by `executeStage`.
-        let stageTotals: Totals
-    }
-
     /// Builds the live totals snapshot from the cached counters.
     ///
     /// Single owner for the snapshot shape so the concurrent observer and
@@ -1626,64 +1096,7 @@ extension IndexCoordinator {
             current: nil
         ))
     }
-
-    /// Single-line summary for the run event message.
-    ///
-    /// Carries retired and truncated counts inline so the durable message alone
-    /// lights the dashboard badges even when the detail response is pruned.
-    /// - Parameter summary: Completed run summary.
-    /// - Returns: A display-safe one-liner.
-    fileprivate static func summaryLine(_ summary: IndexRunSummary) -> String {
-        "Index run \(summary.status.rawValue): \(summary.documentsIndexed) indexed, "
-            + "\(summary.vectorChunks) vectors, \(summary.keywordChunks) keyword-only, "
-            + "\(summary.scanned) scanned, \(summary.errors) errors, "
-            + "\(summary.retired) retired, \(summary.truncated) truncated"
-    }
-
-    /// Detailed outcome text for the completion event response.
-    ///
-    /// Repeats retired and truncated as `Retired:`/`Truncated:` detail lines so
-    /// the status probe parses them like the trigger and skip lines without
-    /// depending on summary wording.
-    /// - Parameter summary: Completed run summary.
-    /// - Returns: A multi-line, content-free summary.
-    fileprivate static func detailLine(_ summary: IndexRunSummary) -> String {
-        var lines = [summaryLine(summary)]
-        lines.append("Trigger: \(summary.trigger.rawValue)")
-        lines.append("Retired: \(summary.retired)")
-        lines.append("Truncated: \(summary.truncated)")
-        if let indexAsOf = summary.indexAsOf {
-            lines.append("Index as of: \(ISO8601DateFormatter().string(from: indexAsOf))")
-        }
-        if let reason = summary.skippedReason {
-            lines.append("Skipped: \(reason)")
-        }
-        lines.append(contentsOf: summary.warnings.map { "Warning: \($0)" })
-        return lines.joined(separator: "\n")
-    }
 }
 
-// MARK: - Cancellation flag
-
-/// Lock-guarded cancellation flag shared with non-isolated stage closures.
-final class IndexCancellationFlag: Sendable {
-    /// Thread-safe flag state.
-    private let state = OSAllocatedUnfairLock(initialState: false)
-
-    /// Whether cancellation has been requested.
-    var isSet: Bool {
-        state.withLock { $0 }
-    }
-
-    /// Requests cancellation.
-    func set() {
-        state.withLock { $0 = true }
-    }
-
-    /// Clears the flag for a fresh run.
-    func reset() {
-        state.withLock { $0 = false }
-    }
-}
-
+// Run totals, reporting helpers, and the cancellation flag live in IndexCoordinatorSupport.swift.
 // Stage factories live in IndexCoordinatorStages.swift.

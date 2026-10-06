@@ -10,14 +10,16 @@ import Foundation
 extension IndexClosureStage {
     /// Builds the files stage over the shared document store.
     ///
-    /// Selection is frozen at boot from `config`, while every per-run value
-    /// (roots, excludes, caps, effort, workers, windows) comes from the
-    /// policy snapshot the coordinator hands the body. A fresh indexer is
-    /// built per run against that snapshot and kept in a small actor box so
+    /// Live selection re-derives every run via `IndexSourceKind.isEnabled(in:)`
+    /// from the run-policy snapshot, so both selection and every per-run value
+    /// (roots, excludes, caps, effort, workers, windows) track saves with no
+    /// rebuild. The `isEnabled` flag captured at build time is diagnostics
+    /// only and never gates a run. A fresh indexer is built per run against
+    /// that snapshot and kept in a small actor box so
     /// cancellation can reach it; the boot-time config never leaks into the
     /// run.
     /// - Parameters:
-    ///   - config: Index policy snapshot used only for boot-time selection.
+    ///   - config: Index policy snapshot used only for the build-time diagnostics flag.
     ///   - store: Document store the run writes into.
     ///   - extractor: Text extractor for candidate files.
     ///   - embedder: Embeddings backend, or nil for keyword-only.
@@ -160,12 +162,13 @@ extension IndexClosureStage {
     /// Builds the Apple Messages stage over the shared document store.
     ///
     /// The reader itself carries no policy knobs, so the body honors the
-    /// per-run snapshot as an enablement gate: a source turned off after boot
-    /// reports skipped on the next pass, while a source turned on after boot
-    /// stays parked until stages are rebuilt because selection was frozen at
-    /// boot.
+    /// per-run snapshot as an enablement gate: live selection re-derives every
+    /// run via `IndexSourceKind.isEnabled(in:)`, so a source turned on after
+    /// boot runs on the next pass and a source turned off after boot is
+    /// filtered before the body runs. The body guard below remains only as
+    /// defense for direct indexer use outside the coordinator.
     /// - Parameters:
-    ///   - config: Index policy snapshot used only for boot-time selection.
+    ///   - config: Index policy snapshot used only for the build-time diagnostics flag.
     ///   - store: Document store the run writes into.
     ///   - chatDatabasePath: Live chat database path.
     ///   - extractor: Text extractor for attachment bodies.
@@ -184,9 +187,10 @@ extension IndexClosureStage {
         batchLimit: Int = MessagesIndexer.defaultBatchLimit
     ) -> IndexClosureStage {
         IndexClosureStage(kind: .messages, isEnabled: config.enabled && config.messages) { policy, reporter, _ in
-            // Live disable is honored here so the next run skips without
-            // rebuilt stages; live enable still needs rebuilt stages because
-            // the coordinator never executes a boot-disabled stage.
+            // Live selection is filtered by the coordinator before the body
+            // runs, so a live enable runs on the next pass and a live disable
+            // never reaches here; the guard below remains only as defense for
+            // direct indexer use outside the coordinator.
             guard policy.enabled, policy.messages else {
                 return IndexSourceRunReport(
                     kind: .messages,
@@ -234,11 +238,13 @@ extension IndexClosureStage {
     /// The document store exposes no "pending" listing, so the caller supplies
     /// the candidate documents and their image bytes; the stage runs each through
     /// ``VisionDescribeIndexer`` built per run from the coordinator-supplied
-    /// snapshot. Boot-time selection is frozen from `config`; per-run caps and
-    /// the opt-in flag track saves, so a disable reports skipped on the next
-    /// pass without rebuilt stages.
+    /// snapshot. Live selection re-derives every run via
+    /// `IndexSourceKind.isEnabled(in:)`, so both selection and per-run caps
+    /// track saves with no rebuild; the build-time flag is diagnostics only.
+    /// A disable is filtered before the body runs and reports skipped on the
+    /// next pass, while an enable runs on the next pass.
     /// - Parameters:
-    ///   - config: Index policy snapshot used only for boot-time selection.
+    ///   - config: Index policy snapshot used only for the build-time diagnostics flag.
     ///   - store: Document store the descriptions are written to.
     ///   - provider: Multimodal provider that answers description requests.
     ///   - maxImageBytes: Per-file byte cap; defaults to the configured file cap.
@@ -256,9 +262,11 @@ extension IndexClosureStage {
         imageData: @escaping @Sendable (IndexedDocument) async -> Data?
     ) -> IndexClosureStage {
         IndexClosureStage(kind: .vision, isEnabled: config.enabled && config.describeImagesWithLLM) { policy, reporter, isCancelled in
-            // Live disable short-circuits before any image bytes are read, so
-            // the next run after a settings save skips honestly; the indexer
-            // below is still built from the same snapshot for caps and budget.
+            // Live selection is filtered by the coordinator before the body
+            // runs, so a live enable runs on the next pass and a live disable
+            // never reaches here; the guard below remains only as defense for
+            // direct indexer use. The indexer below is still built from the
+            // same snapshot for caps and budget.
             guard policy.enabled, policy.describeImagesWithLLM else {
                 return IndexSourceRunReport(
                     kind: .vision,
