@@ -143,6 +143,88 @@ struct ConfigIndexTests {
     }
 
     @Test
+    func `Calendars and reminders round-trip through TOML`() throws {
+        // Regression coverage for the hand-rolled [index] renderer: a field
+        // without a render line never survives refresh, so this pins both
+        // the rendered bytes and the render-plus-parse round-trip.
+        var config = RuneWeaverConfig.default
+        config.index = IndexConfig(
+            enabled: true,
+            files: true,
+            mail: false,
+            messages: true,
+            calendars: true,
+            reminders: true,
+            roots: ["~"],
+            exclude: [".git"],
+            maxFileMB: 20,
+            mailVectorWindow: "2y",
+            iCloudEvicted: "skip",
+            describeImagesWithLLM: false,
+            nightlyBudget: 0,
+            dbPath: "~/.runeweaver/index.db",
+            effort: "balanced",
+            workers: 0,
+            thermalBackoff: true,
+            pauseOnBattery: false,
+            maxVectorChunksPerDocument: 128,
+            mailboxDeny: ["Trash"]
+        )
+        try config.validate()
+
+        let rendered = config.renderTOML()
+        #expect(rendered.contains("calendars = true"))
+        #expect(rendered.contains("reminders = true"))
+        // Run-order position: calendars plus reminders render directly after
+        // messages, matching IndexSourceKind.runOrder. Searches anchor on the
+        // leading newline so `roots` never matches `allow_roots` in [files].
+        guard let messagesRange = rendered.range(of: "\nmessages = true"),
+              let calendarsRange = rendered.range(of: "\ncalendars = true"),
+              let remindersRange = rendered.range(of: "\nreminders = true"),
+              let rootsRange = rendered.range(of: "\nroots = ")
+        else {
+            Issue.record("Expected index toggles to render")
+            return
+        }
+        #expect(messagesRange.lowerBound < calendarsRange.lowerBound)
+        #expect(calendarsRange.lowerBound < remindersRange.lowerBound)
+        #expect(remindersRange.lowerBound < rootsRange.lowerBound)
+        // Full-field coverage: every persisted IndexConfig field renders.
+        for key in [
+            "enabled", "files", "mail", "messages", "calendars", "reminders",
+            "roots", "exclude", "max_file_mb", "mail_vector_window",
+            "icloud_evicted", "describe_images_with_llm", "nightly_budget",
+            "db_path", "effort", "workers", "thermal_backoff",
+            "pause_on_battery", "max_vector_chunks_per_document",
+            "mailbox_deny"
+        ] {
+            #expect(rendered.contains(key + " = "), "Expected rendered TOML to contain \(key)")
+        }
+
+        let reparsed = try RuneWeaverConfig(decoding: TOMLParser.parse(rendered))
+        #expect(reparsed.index == config.index)
+        #expect(reparsed.index.calendars == true)
+        #expect(reparsed.index.reminders == true)
+        try reparsed.validate()
+
+        // The false spelling must also survive the round-trip rather than
+        // falling back to a default on reparse.
+        config.index.calendars = false
+        config.index.reminders = false
+        try config.validate()
+
+        let renderedOff = config.renderTOML()
+        #expect(renderedOff.contains("calendars = false"))
+        #expect(renderedOff.contains("reminders = false"))
+
+        let reparsedOff = try RuneWeaverConfig(decoding: TOMLParser.parse(renderedOff))
+        #expect(reparsedOff.index == config.index)
+        #expect(reparsedOff.index.calendars == false)
+        #expect(reparsedOff.index.reminders == false)
+        try reparsedOff.validate()
+    }
+
+    @Test
     func `Unknown mail_vector_window fails validation`() {
         expectIndexValidationFailure({ $0.mailVectorWindow = "carrier-pigeon" }, field: "index.mail_vector_window")
     }
