@@ -16,6 +16,10 @@ public enum IndexSource: String, Sendable, Codable, CaseIterable, Equatable {
     case mail
     /// Chat/message transcripts.
     case messages
+    /// Calendar event occurrences.
+    case calendars
+    /// Reminder rows.
+    case reminders
 }
 
 /// How completely a document's body was extracted at index time.

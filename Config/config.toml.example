@@ -200,6 +200,8 @@ enabled = false
 files = true
 mail = false
 messages = false
+calendars = false  # Calendar events stay off until you set this true.
+reminders = false  # Reminders stay off until you set this true.
 # Root directories scanned for files (`~` expands to home).
 roots = ["~"]
 # Glob patterns skipped during a file scan (build output, machine-output files,

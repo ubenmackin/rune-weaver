@@ -17,7 +17,7 @@ import Vapor
 
 /// One source's enablement row on `GET /index/status`.
 public struct IndexSourceStatus: Content, Equatable {
-    /// Source kind (`"files"`, `"mail"`, or `"messages"`).
+    /// Source kind (`"files"`, `"mail"`, `"messages"`, `"calendars"`, or `"reminders"`).
     public let kind: String
     /// Whether the source is enabled under the active policy. Global
     /// enablement gates every source, matching the coordinator's stage
@@ -37,7 +37,7 @@ public struct IndexSourceStatus: Content, Equatable {
 
 /// Per-source content counts on `GET /index/status`.
 public struct IndexSourceCounts: Content, Equatable {
-    /// Source kind (`"files"`, `"mail"`, or `"messages"`).
+    /// Source kind (`"files"`, `"mail"`, `"messages"`, `"calendars"`, or `"reminders"`).
     public let kind: String
     /// Number of indexed documents from this source.
     public let documents: Int
@@ -204,7 +204,7 @@ public struct IndexLiveStatus: Content, Equatable {
     public let trigger: String
     /// Active phase (`"discovering"`, `"extracting"`, `"embedding"`, `"committing"`).
     public let phase: String
-    /// Active source stage (`"files"`, `"mail"`, `"messages"`, `"vision"`), or nil.
+    /// Active source stage (`"files"`, `"mail"`, `"messages"`, `"calendars"`, `"reminders"`, `"vision"`), or nil.
     public let stage: String?
     /// Items examined across completed work plus observed in-flight progress.
     public let scanned: Int
@@ -644,7 +644,9 @@ func makeIndexStatusResponse(
     let sources = [
         IndexSourceStatus(kind: IndexSourceKind.files.rawValue, enabled: config.enabled && config.files),
         IndexSourceStatus(kind: IndexSourceKind.mail.rawValue, enabled: config.enabled && config.mail),
-        IndexSourceStatus(kind: IndexSourceKind.messages.rawValue, enabled: config.enabled && config.messages)
+        IndexSourceStatus(kind: IndexSourceKind.messages.rawValue, enabled: config.enabled && config.messages),
+        IndexSourceStatus(kind: IndexSourceKind.calendars.rawValue, enabled: config.enabled && config.calendars),
+        IndexSourceStatus(kind: IndexSourceKind.reminders.rawValue, enabled: config.enabled && config.reminders)
     ]
     let bySource = (stats?.bySource ?? []).map { row in
         IndexSourceCounts(kind: row.source.rawValue, documents: row.documents, chunks: row.chunks, bytes: row.bytes)
@@ -920,6 +922,10 @@ public struct IndexSettingsUpdate: Content, Equatable {
     public var mail: Bool?
     /// Whether Apple Messages are indexed.
     public var messages: Bool?
+    /// Whether calendar events are indexed.
+    public var calendars: Bool?
+    /// Whether reminders are indexed.
+    public var reminders: Bool?
     /// Root directories scanned for files.
     public var roots: [String]?
     /// Glob patterns skipped during a file scan.
@@ -962,6 +968,8 @@ public struct IndexSettingsUpdate: Content, Equatable {
     ///   - files: Files source toggle.
     ///   - mail: Mail source toggle.
     ///   - messages: Messages source toggle.
+    ///   - calendars: Calendars source toggle.
+    ///   - reminders: Reminders source toggle.
     ///   - roots: File roots.
     ///   - exclude: File exclude patterns.
     ///   - maxFileMB: Per-file size cap in megabytes.
@@ -982,6 +990,8 @@ public struct IndexSettingsUpdate: Content, Equatable {
         files: Bool? = nil,
         mail: Bool? = nil,
         messages: Bool? = nil,
+        calendars: Bool? = nil,
+        reminders: Bool? = nil,
         roots: [String]? = nil,
         exclude: [String]? = nil,
         maxFileMB: Int? = nil,
@@ -1002,6 +1012,8 @@ public struct IndexSettingsUpdate: Content, Equatable {
         self.files = files
         self.mail = mail
         self.messages = messages
+        self.calendars = calendars
+        self.reminders = reminders
         self.roots = roots
         self.exclude = exclude
         self.maxFileMB = maxFileMB
@@ -1027,6 +1039,8 @@ public struct IndexSettingsUpdate: Content, Equatable {
         self.files = config.files
         self.mail = config.mail
         self.messages = config.messages
+        self.calendars = config.calendars
+        self.reminders = config.reminders
         self.roots = config.roots
         self.exclude = config.exclude
         self.maxFileMB = config.maxFileMB
@@ -1049,6 +1063,8 @@ public struct IndexSettingsUpdate: Content, Equatable {
         case files
         case mail
         case messages
+        case calendars
+        case reminders
         case roots
         case exclude
         case maxFileMB = "max_file_mb"
@@ -1074,6 +1090,8 @@ public struct IndexSettingsUpdate: Content, Equatable {
         files = try container.decodeIfPresent(Bool.self, forKey: .files)
         mail = try container.decodeIfPresent(Bool.self, forKey: .mail)
         messages = try container.decodeIfPresent(Bool.self, forKey: .messages)
+        calendars = try container.decodeIfPresent(Bool.self, forKey: .calendars)
+        reminders = try container.decodeIfPresent(Bool.self, forKey: .reminders)
         roots = try container.decodeIfPresent([String].self, forKey: .roots)
         exclude = try container.decodeIfPresent([String].self, forKey: .exclude)
         maxFileMB = try container.decodeIfPresent(Int.self, forKey: .maxFileMB)
@@ -1099,6 +1117,8 @@ public struct IndexSettingsUpdate: Content, Equatable {
         try container.encodeIfPresent(files, forKey: .files)
         try container.encodeIfPresent(mail, forKey: .mail)
         try container.encodeIfPresent(messages, forKey: .messages)
+        try container.encodeIfPresent(calendars, forKey: .calendars)
+        try container.encodeIfPresent(reminders, forKey: .reminders)
         try container.encodeIfPresent(roots, forKey: .roots)
         try container.encodeIfPresent(exclude, forKey: .exclude)
         try container.encodeIfPresent(maxFileMB, forKey: .maxFileMB)
@@ -1160,6 +1180,15 @@ extension UpdateSettingsRequest {
     /// the index-specific logic lives beside its DTOs.
     func applyIndex(to index: inout IndexConfig) {
         guard let update = self.index else { return }
+        applyIndexSources(update, to: &index)
+        applyIndexFileScope(update, to: &index)
+        applyIndexRuntime(update, to: &index)
+        // Read-only: `always_skipped` is never merged so a client echo cannot
+        // drift the stored policy; the walker list stays single-sourced.
+    }
+
+    /// Merges the global plus per-source enablement toggles.
+    private func applyIndexSources(_ update: IndexSettingsUpdate, to index: inout IndexConfig) {
         if let enabled = update.enabled {
             index.enabled = enabled
         }
@@ -1172,6 +1201,16 @@ extension UpdateSettingsRequest {
         if let messages = update.messages {
             index.messages = messages
         }
+        if let calendars = update.calendars {
+            index.calendars = calendars
+        }
+        if let reminders = update.reminders {
+            index.reminders = reminders
+        }
+    }
+
+    /// Merges file-scan scope plus content policy knobs.
+    private func applyIndexFileScope(_ update: IndexSettingsUpdate, to index: inout IndexConfig) {
         if let roots = update.roots {
             index.roots = roots
         }
@@ -1193,6 +1232,10 @@ extension UpdateSettingsRequest {
         if let nightlyBudget = update.nightlyBudget {
             index.nightlyBudget = nightlyBudget
         }
+    }
+
+    /// Merges storage, effort, and runtime behavior knobs.
+    private func applyIndexRuntime(_ update: IndexSettingsUpdate, to index: inout IndexConfig) {
         if let dbPath = update.dbPath {
             index.dbPath = dbPath
         }
@@ -1214,7 +1257,5 @@ extension UpdateSettingsRequest {
         if let mailboxDeny = update.mailboxDeny {
             index.mailboxDeny = mailboxDeny
         }
-        // Read-only: `always_skipped` is never merged so a client echo cannot
-        // drift the stored policy; the walker list stays single-sourced.
     }
 }

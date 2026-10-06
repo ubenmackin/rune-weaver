@@ -807,7 +807,7 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
             <h2>{renderTab === "indexing" ? "Index Status" : "Memory"}</h2>
             <p className="muted text-sm">
               {renderTab === "indexing"
-                ? "Monitor the local file, mail, and Messages index."
+                ? "Monitor the local file, mail, Messages, calendar, and reminder index."
                 : "Search episodic recall and semantic memory, manage stored user facts."}
             </p>
           </div>

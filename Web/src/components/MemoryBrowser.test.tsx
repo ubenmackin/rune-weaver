@@ -1149,7 +1149,7 @@ describe("MemoryBrowser", () => {
     const { rerender } = render(<MemoryBrowser view="indexing" />);
     await waitFor(() => {
       expect(
-        screen.getByText("Monitor the local file, mail, and Messages index."),
+        screen.getByText("Monitor the local file, mail, Messages, calendar, and reminder index."),
       ).toBeInTheDocument();
     });
     expect(screen.getByRole("heading", { name: "Index Status" })).toBeInTheDocument();
@@ -1160,7 +1160,7 @@ describe("MemoryBrowser", () => {
     });
     await waitFor(() => {
       expect(
-        screen.getByText("Monitor the local file, mail, and Messages index."),
+        screen.getByText("Monitor the local file, mail, Messages, calendar, and reminder index."),
       ).toBeInTheDocument();
     });
     window.location.hash = "";

@@ -85,6 +85,8 @@ const INDEX_SOURCES: Array<{ kind: string; label: string; hint?: string }> = [
     label: "Messages",
     hint: "Requires Full Disk Access — RuneWeaver.app, or your terminal emulator when running rune-weaver serve — then press Run.",
   },
+  { kind: "calendars", label: "Calendars" },
+  { kind: "reminders", label: "Reminders" },
 ];
 
 // Display label for a status source kind, falling back to the engine's wire
@@ -839,7 +841,7 @@ export function formatIndexReclaimResult(
 // from the status sources list while documents/chunks/bytes come from the
 // additive bySource aggregates. A source missing from either side degrades to
 // disabled or zero rather than disappearing, so older engines without the
-// aggregates still render the canonical Files/Mail/Messages rows.
+// aggregates still render the canonical Files/Mail/Messages/Calendars/Reminders rows.
 export interface IndexSourceContentRow {
   kind: string;
   enabled: boolean;
@@ -848,7 +850,7 @@ export interface IndexSourceContentRow {
   bytes: number;
 }
 
-// Resolves the canonical Files/Mail/Messages rows with real totals, so the
+// Resolves the canonical Files/Mail/Messages/Calendars/Reminders rows with real totals, so the
 // bars scale by content instead of rendering binary on/off widths.
 export function resolveIndexSourceContent(
   status: Pick<IndexStatusResponse, "sources" | "bySource"> | null | undefined,
@@ -939,6 +941,8 @@ export function resolveIndexLiveTitle(
     if (stage === "files") return "Reading files…";
     if (stage === "mail") return "Reading mail…";
     if (stage === "messages") return "Reading messages…";
+    if (stage === "calendars") return "Reading calendars…";
+    if (stage === "reminders") return "Reading reminders…";
     return "Reading…";
   }
   if (phase === "discovering") return "Discovering…";
@@ -946,6 +950,8 @@ export function resolveIndexLiveTitle(
   if (stage === "files") return "Reading files…";
   if (stage === "mail") return "Reading mail…";
   if (stage === "messages") return "Reading messages…";
+  if (stage === "calendars") return "Reading calendars…";
+  if (stage === "reminders") return "Reading reminders…";
   return "Running…";
 }
 
@@ -1132,7 +1138,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   const vectorChunks = status?.vectorChunks ?? 0;
   const keywordChunks = status?.keywordChunks ?? 0;
   const donut = indexDonutArcs(vectorChunks, keywordChunks, DONUT_RADIUS);
-  // Real per-source totals for the bars, in canonical Files/Mail/Messages
+  // Real per-source totals for the bars, in canonical Files/Mail/Messages/Calendars/Reminders
   // order; older engines without the aggregates degrade to zeroed rows.
   const sourceContent = resolveIndexSourceContent(status);
   // Displayed-total denominator for the source chart: every visible row shares
@@ -2765,6 +2771,8 @@ export function IndexPolicyPanel() {
         files: config.files,
         mail: config.mail,
         messages: config.messages,
+        calendars: config.calendars,
+        reminders: config.reminders,
         roots,
         exclude,
         max_file_mb: config.max_file_mb,
@@ -3039,18 +3047,22 @@ export function IndexPolicyPanel() {
         <fieldset className="index-sources-fieldset">
           <legend>Sources</legend>
           {INDEX_SOURCES.map((source) => {
-            const checked =
-              source.kind === "files"
-                ? config.files
-                : source.kind === "mail"
-                  ? config.mail
-                  : config.messages;
-            const key =
-              source.kind === "files"
-                ? "files"
-                : source.kind === "mail"
-                  ? "mail"
-                  : "messages";
+            const checkedByKind: Record<string, boolean> = {
+              files: config.files,
+              mail: config.mail,
+              messages: config.messages,
+              calendars: config.calendars,
+              reminders: config.reminders,
+            };
+            const checked = checkedByKind[source.kind] ?? false;
+            const keyByKind: Record<string, string> = {
+              files: "files",
+              mail: "mail",
+              messages: "messages",
+              calendars: "calendars",
+              reminders: "reminders",
+            };
+            const key = keyByKind[source.kind] ?? source.kind;
             return (
               <div key={source.kind} className="index-source-row">
                 <label className="toggle-label">

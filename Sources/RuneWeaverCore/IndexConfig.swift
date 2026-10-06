@@ -21,6 +21,10 @@ public struct IndexConfig: Sendable, Codable, Equatable {
     public var mail: Bool
     /// Whether Apple Messages are indexed. Off by default.
     public var messages: Bool
+    /// Whether calendar events are indexed. Off by default.
+    public var calendars: Bool
+    /// Whether reminders are indexed. Off by default.
+    public var reminders: Bool
     /// Root directories scanned for files (`~` expands to home).
     public var roots: [String]
     /// Glob patterns skipped during a file scan (VCS directories, build output,
@@ -78,6 +82,10 @@ public struct IndexConfig: Sendable, Codable, Equatable {
     public static let defaultMailEnabled = false
     /// Default Messages source toggle.
     public static let defaultMessagesEnabled = false
+    /// Default Calendars source toggle.
+    public static let defaultCalendarsEnabled = false
+    /// Default Reminders source toggle.
+    public static let defaultRemindersEnabled = false
     /// Default file roots (home directory).
     public static let defaultRoots = ["~"]
     /// Default exclude patterns skipped during a file scan.
@@ -179,6 +187,8 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         files: Bool = defaultFilesEnabled,
         mail: Bool = defaultMailEnabled,
         messages: Bool = defaultMessagesEnabled,
+        calendars: Bool = defaultCalendarsEnabled,
+        reminders: Bool = defaultRemindersEnabled,
         roots: [String] = defaultRoots,
         exclude: [String] = defaultExcludePatterns,
         maxFileMB: Int = defaultMaxFileMB,
@@ -198,6 +208,8 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         self.files = files
         self.mail = mail
         self.messages = messages
+        self.calendars = calendars
+        self.reminders = reminders
         self.roots = roots
         self.exclude = exclude
         self.maxFileMB = maxFileMB
@@ -220,6 +232,8 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         case files
         case mail
         case messages
+        case calendars
+        case reminders
         case roots
         case exclude
         case maxFileMB = "max_file_mb"
@@ -245,6 +259,8 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         files = try container.decodeIfPresent(Bool.self, forKey: .files) ?? Self.defaultFilesEnabled
         mail = try container.decodeIfPresent(Bool.self, forKey: .mail) ?? Self.defaultMailEnabled
         messages = try container.decodeIfPresent(Bool.self, forKey: .messages) ?? Self.defaultMessagesEnabled
+        calendars = try container.decodeIfPresent(Bool.self, forKey: .calendars) ?? Self.defaultCalendarsEnabled
+        reminders = try container.decodeIfPresent(Bool.self, forKey: .reminders) ?? Self.defaultRemindersEnabled
         roots = try container.decodeIfPresent([String].self, forKey: .roots) ?? Self.defaultRoots
         exclude = try container.decodeIfPresent([String].self, forKey: .exclude) ?? Self.defaultExcludePatterns
         maxFileMB = try container.decodeIfPresent(Int.self, forKey: .maxFileMB) ?? Self.defaultMaxFileMB
@@ -273,6 +289,8 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         try container.encode(files, forKey: .files)
         try container.encode(mail, forKey: .mail)
         try container.encode(messages, forKey: .messages)
+        try container.encode(calendars, forKey: .calendars)
+        try container.encode(reminders, forKey: .reminders)
         try container.encode(roots, forKey: .roots)
         try container.encode(exclude, forKey: .exclude)
         try container.encode(maxFileMB, forKey: .maxFileMB)

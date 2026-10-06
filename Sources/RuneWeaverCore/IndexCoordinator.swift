@@ -46,11 +46,15 @@ public enum IndexSourceKind: String, Sendable, Hashable, CaseIterable {
     case mail
     /// Apple Messages transcripts.
     case messages
+    /// Calendar event occurrences.
+    case calendars
+    /// Reminder rows.
+    case reminders
     /// Opt-in LLM descriptions for bodyless documents.
     case vision
 
     /// Canonical order sources run in, so every pass is deterministic.
-    public static let runOrder: [IndexSourceKind] = [.files, .mail, .messages, .vision]
+    public static let runOrder: [IndexSourceKind] = [.files, .mail, .messages, .calendars, .reminders, .vision]
 }
 
 /// What caused an index run.
