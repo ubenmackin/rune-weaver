@@ -302,7 +302,11 @@ public enum ContainerMachineManager {
         )
     }
 
-    /// Creates a new container machine with an internal virtual disk.
+    /// Creates a new container machine with home-mount none enforced and no ssh-agent forwarding.
+    ///
+    /// Home isolation rides `--home-mount none`; agent isolation rides never
+    /// passing `--ssh` plus stripping `SSH_AUTH_SOCK` from the spawn
+    /// environment, so untrusted detonation never forwards the agent.
     public static func createMachine(
         name: String,
         image: String = "alpine:latest",
@@ -311,7 +315,16 @@ public enum ContainerMachineManager {
         guard let runtimeURL = resolveRuntimeURL(runtime: runtime) else {
             throw ContainerMachineError.runtimeNotFound(runtime)
         }
-        let args = ["machine", "create", image, "--name", name]
+        // Fail closed when the runtime predates home isolation: no fallback
+        // without the flag, so an unsupported runtime never spawns a machine.
+        let probe = try await runProcess(executableURL: runtimeURL, arguments: ["machine", "create", "--help"])
+        let probeOutput = probe.stdoutString + "\n" + probe.stderrString
+        guard probeOutput.contains("--home-mount") else {
+            throw ContainerMachineError.operationFailed(
+                "Container runtime does not support '--home-mount'; refusing to create machine '\(name)' without home isolation."
+            )
+        }
+        let args = ["machine", "create", image, "--name", name, "--home-mount", "none"]
         let result = try await runProcess(executableURL: runtimeURL, arguments: args)
         guard result.exitCode == 0 else {
             throw ContainerMachineError.operationFailed(

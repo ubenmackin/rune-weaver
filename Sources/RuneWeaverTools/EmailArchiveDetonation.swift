@@ -23,7 +23,9 @@ public struct EmailArchiveDetonationResult: Sendable, Equatable {
     }
 }
 
-/// Isolates archive inspection inside a zero-host-mounts microVM.
+/// Isolates archive inspection inside an ephemeral microVM with home-mount none enforced
+/// and no ssh-agent forwarding (no HOME mount; stdin in, stdout out; never passes --ssh
+/// and strips SSH_AUTH_SOCK).
 public protocol EmailArchiveDetonator: Sendable {
     /// Detonates archive bytes and optionally extracts one entry.
     func detonate(filename: String, contentType: String, data: Data, subpath: String?) async throws -> EmailArchiveDetonationResult

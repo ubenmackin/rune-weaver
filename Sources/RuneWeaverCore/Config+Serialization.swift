@@ -454,6 +454,8 @@ extension RuneWeaverConfig {
             "allow_network = \(bash.allowNetwork ? "true" : "false")",
             "cpu_seconds = \(bash.cpuSeconds)",
             "memory_mb = \(bash.memoryMB)",
+            "sandbox_mode = \(Self.tomlQuoted(bash.sandboxMode.rawValue))",
+            "host_allow_patterns = \(Self.tomlStringArray(bash.hostAllowPatterns))",
             ""
         ]
         for rule in bash.rules {

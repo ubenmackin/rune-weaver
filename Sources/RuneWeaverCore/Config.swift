@@ -725,6 +725,19 @@ public struct BashRule: Sendable, Codable, Equatable {
     }
 }
 
+/// Sandbox execution tier for `bash.exec`.
+///
+/// Baseline is macOS 26 with no version branches; tiers describe mount scope only.
+/// - `strictContainer` mounts only workspace `tmp`.
+/// - `machineScoped` mounts only the workspace root.
+/// - `hostSeatbelt` runs only on fnmatch/prefix match via `BashSecurity.matches`.
+/// No tier mounts HOME.
+public enum BashSandboxMode: String, Sendable, Codable, Equatable, CaseIterable {
+    case strictContainer
+    case machineScoped
+    case hostSeatbelt
+}
+
 /// `[bash]` — granular shell execution policy.
 ///
 /// CPU and memory bounds ride `ulimit` inside the shell so every spawned
@@ -748,6 +761,10 @@ public struct BashConfig: Sendable, Codable, Equatable {
     public var cpuSeconds: Int
     /// Address-space budget in megabytes applied via `ulimit -v` before each command.
     public var memoryMB: Int
+    /// Sandbox execution tier. Defaults to `strictContainer`.
+    public var sandboxMode: BashSandboxMode
+    /// Fnmatch/prefix allow patterns gating `hostSeatbelt` execution via `BashSecurity.matches`.
+    public var hostAllowPatterns: [String]
 
     /// Default rules: all commands require approval (`*` -> `ask`).
     public static let defaultRules: [BashRule] = [
@@ -758,6 +775,14 @@ public struct BashConfig: Sendable, Codable, Equatable {
     public static let defaultCPUSeconds: Int = 120
     /// Default address-space budget fits compilers and scripts without inviting OOM swaps.
     public static let defaultMemoryMB: Int = 1024
+    /// Default tier keeps execution in the strict container.
+    public static let defaultSandboxMode: BashSandboxMode = .strictContainer
+    /// Default host allows cover the Xcode toolchain.
+    public static let defaultHostAllowPatterns: [String] = ["xcodebuild*", "codesign*"]
+    /// Upper bound on `hostAllowPatterns` entries, keeping the allowlist auditable.
+    public static let maxHostAllowPatterns = 50
+    /// Longest single `hostAllowPatterns` entry.
+    public static let maxHostAllowPatternLength = 256
 
     public init(
         enabled: Bool = true,
@@ -766,7 +791,9 @@ public struct BashConfig: Sendable, Codable, Equatable {
         timeoutSeconds: Int = defaultTimeoutSeconds,
         allowNetwork: Bool = false,
         cpuSeconds: Int = defaultCPUSeconds,
-        memoryMB: Int = defaultMemoryMB
+        memoryMB: Int = defaultMemoryMB,
+        sandboxMode: BashSandboxMode = defaultSandboxMode,
+        hostAllowPatterns: [String] = defaultHostAllowPatterns
     ) {
         self.enabled = enabled
         self.defaultAction = defaultAction
@@ -775,6 +802,8 @@ public struct BashConfig: Sendable, Codable, Equatable {
         self.allowNetwork = allowNetwork
         self.cpuSeconds = cpuSeconds
         self.memoryMB = memoryMB
+        self.sandboxMode = sandboxMode
+        self.hostAllowPatterns = hostAllowPatterns
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -785,6 +814,8 @@ public struct BashConfig: Sendable, Codable, Equatable {
         case allowNetwork = "allow_network"
         case cpuSeconds = "cpu_seconds"
         case memoryMB = "memory_mb"
+        case sandboxMode = "sandbox_mode"
+        case hostAllowPatterns = "host_allow_patterns"
     }
 
     public init(from decoder: Decoder) throws {
@@ -796,6 +827,8 @@ public struct BashConfig: Sendable, Codable, Equatable {
         self.allowNetwork = try container.decodeIfPresent(Bool.self, forKey: .allowNetwork) ?? false
         self.cpuSeconds = try container.decodeIfPresent(Int.self, forKey: .cpuSeconds) ?? Self.defaultCPUSeconds
         self.memoryMB = try container.decodeIfPresent(Int.self, forKey: .memoryMB) ?? Self.defaultMemoryMB
+        self.sandboxMode = try container.decodeIfPresent(BashSandboxMode.self, forKey: .sandboxMode) ?? Self.defaultSandboxMode
+        self.hostAllowPatterns = try container.decodeIfPresent([String].self, forKey: .hostAllowPatterns) ?? Self.defaultHostAllowPatterns
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -807,6 +840,8 @@ public struct BashConfig: Sendable, Codable, Equatable {
         try container.encode(allowNetwork, forKey: .allowNetwork)
         try container.encode(cpuSeconds, forKey: .cpuSeconds)
         try container.encode(memoryMB, forKey: .memoryMB)
+        try container.encode(sandboxMode, forKey: .sandboxMode)
+        try container.encode(hostAllowPatterns, forKey: .hostAllowPatterns)
     }
 }
 

@@ -607,7 +607,11 @@ extension ApiSSRFGuard {
                             late?.cancel()
                         }
                     }
-                    DispatchQueue.global().async {
+                    // Hermetic stubs run at user-initiated priority so an instant
+                    // dict lookup never queues behind background work under
+                    // parallel suites; the fail-closed timeout below still
+                    // bounds a wedged lookup without consuming pool permits.
+                    DispatchQueue.global(qos: .userInitiated).async {
                         let result = operation()
                         let held = sleeper.withLock { current -> Task<Void, Never>? in
                             let task = current
@@ -826,20 +830,14 @@ extension ApiSSRFGuard {
             // above, so what remains is a public address.
             return .publicDestination
         }
-        // Capture the task-scoped proof in this task before hopping: the
-        // stub runs on a global queue without task-local inheritance, so a
-        // concurrent suite publishing globally must never steer this lookup.
-        // Reading once here keeps hostname answers pinned to the caller's binding.
-        #if DEBUG
-            let capturedStub = activeTestDNSResolver
-            let addresses: [String] = if let stub = capturedStub {
-                await stubResultWithTimeoutAsync(failure: []) { stub(cleaned) }
-            } else {
-                await resolveAddressesAsync(host: cleaned)
-            }
-        #else
-            let addresses = await resolveAddressesAsync(host: cleaned)
-        #endif
+        // Prove hostnames through the single bounded resolver the dial path
+        // uses, so the save-time verdict and the dial-time pin cannot observe
+        // different answers for the same host. The helper already prefers the
+        // task-scoped stub over the process-global holder before hopping off
+        // the cooperative pool, keeping lookup-counting suites isolated from
+        // concurrent global publishers while saturation, timeout,
+        // cancellation, and empty answers all stay fail closed below.
+        let addresses = await resolveAddressesAsync(host: cleaned)
         guard !addresses.isEmpty else {
             return .unresolved(reason: unverifiedDenial(for: cleaned))
         }

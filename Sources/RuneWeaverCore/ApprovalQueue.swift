@@ -463,3 +463,80 @@ public actor ApprovalQueue {
         }
     }
 }
+
+// MARK: - Bash Sandbox Copy Wiring
+
+extension ApprovalQueue {
+    /// Single shared call site so triage badges, approval cards, and the dashboard DTO read identical bytes.
+    public static func bashSandboxSummary(sandboxMode: BashSandboxMode, networkAllowed: Bool) -> String {
+        BashSandboxCopy.approvalSummary(sandboxMode: sandboxMode, networkAllowed: networkAllowed)
+    }
+
+    /// Canonical triage badge for bash requests, single-sourced on the copy owner.
+    ///
+    /// Nil for non-bash tools so badges stay bash-scoped. The summary carries
+    /// only the resolved tier plus network flag with no command, path, or host
+    /// interpolation, so inbox and dashboard render identical bytes.
+    /// - Parameters:
+    ///   - toolName: Tool name gating badge scope.
+    ///   - sandboxMode: Resolved sandbox tier for the command.
+    ///   - networkAllowed: Whether network egress is allowed for the tier.
+    /// - Returns: Shared summary for bash tools, or nil otherwise.
+    public static func bashSandboxBadge(
+        toolName: String,
+        sandboxMode: BashSandboxMode,
+        networkAllowed: Bool
+    ) -> String? {
+        guard toolName == "bash.exec" else { return nil }
+        return bashSandboxSummary(sandboxMode: sandboxMode, networkAllowed: networkAllowed)
+    }
+
+    /// Approval-card plus dashboard summary for one filed bash request.
+    ///
+    /// Resolves the tier from the request command against the live bash policy
+    /// and derives the network flag from the policy plus the request flag, then
+    /// routes through the canonical badge so cards, inbox, and the
+    /// dashboard DTO cannot drift. Nil for non-bash tools or missing commands.
+    /// - Parameters:
+    ///   - request: Filed approval request carrying bash arguments.
+    ///   - bashConfig: Live bash policy owning tier plus network defaults.
+    /// - Returns: Shared summary for bash requests, or nil otherwise.
+    public static func bashSandboxSummary(
+        for request: PermissionRequest,
+        bashConfig: BashConfig
+    ) -> String? {
+        guard request.toolName == "bash.exec" else { return nil }
+        guard let command = bashCommand(from: request.input.argumentsJSON) else { return nil }
+        let tier = BashSandboxRouter.resolveTier(command: command, config: bashConfig)
+        let requestedNetwork = bashRequestNetwork(from: request.input.argumentsJSON)
+        return bashSandboxBadge(toolName: request.toolName, sandboxMode: tier, networkAllowed: bashConfig.allowNetwork || requestedNetwork)
+    }
+
+    /// Extracts the shell command from bash arguments without a Tools dependency.
+    ///
+    /// JSONSerialization keeps Core free of the Tools Codable so tier resolution
+    /// cannot drift from the gate decode while staying dependency-free.
+    /// - Parameter argumentsJSON: Raw tool arguments document.
+    /// - Returns: Trimmed non-empty command, or nil when absent.
+    private static func bashCommand(from argumentsJSON: String) -> String? {
+        guard let data = argumentsJSON.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let raw = dict["command"] as? String
+        else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Reads the network request flag from bash arguments.
+    ///
+    /// Missing or malformed flags fail closed to false so the summary never
+    /// advertises internet access the policy did not grant.
+    /// - Parameter argumentsJSON: Raw tool arguments document.
+    /// - Returns: True when the caller requested network access.
+    private static func bashRequestNetwork(from argumentsJSON: String) -> Bool {
+        guard let data = argumentsJSON.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return (dict["request_network"] as? Bool) ?? false
+    }
+}

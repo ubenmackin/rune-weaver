@@ -619,6 +619,9 @@ public struct ApiRequestTool: Tool, Sendable {
                     injectedSecrets
                 )
             }
+            if let refusal = Self.crossOriginForwardingRefusal(statusCode: statusCode, current: hop, nextURL: next) {
+                throw refusal
+            }
             try validateHopURL(next.absoluteString)
             let advanced = try await validatedRedirectHop(statusCode: statusCode, current: hop, nextURL: next)
             hop = advanced.hop
@@ -639,6 +642,31 @@ public struct ApiRequestTool: Tool, Sendable {
                 "Unsafe redirect target: refusing to dereference \(urlString)."
             )
         }
+    }
+
+    /// Cross-origin method-plus-body refusal for one redirect, without vetting.
+    ///
+    /// Pure origin plus method check so the chain surfaces the approval-scope
+    /// refusal before any next-hop safety, policy, DNS, or Keychain work: a
+    /// denied hop never causes a resolver query or a secret read. A bodyless
+    /// GET stays allowed since it carries nothing a 302-to-GET would not.
+    fileprivate static func crossOriginForwardingRefusal(
+        statusCode: Int,
+        current: ApiRequestHop,
+        nextURL: URL
+    ) -> ApiRequestError? {
+        let preservesMethodAndBody = statusCode == 307 || statusCode == 308
+        let method: ApiMethod = preservesMethodAndBody ? current.method : .GET
+        let body: String? = preservesMethodAndBody ? current.body : nil
+        let originChanged = Self.credentialOrigin(for: nextURL) != Self.credentialOrigin(for: current.url)
+        if originChanged, preservesMethodAndBody, method != .GET || body != nil {
+            return .unsafeURL(
+                "Refusing to forward \(method.rawValue) with its body across origins "
+                    + "(\(current.url.absoluteString) -> \(nextURL.absoluteString)) on status \(statusCode): "
+                    + "the approval covered only the original URL. Re-issue the request against the redirect target."
+            )
+        }
+        return nil
     }
 
     // MARK: - Pure helpers (covered by unit tests)
@@ -752,16 +780,10 @@ extension ApiRequestTool {
             // redirect once the body is dropped.
             surrogateHeaders = surrogateHeaders.filter { $0.key.lowercased() != "content-type" }
         }
-        // Cross-origin method-plus-body forwarding is refused before any
-        // supervised vetting, so a denied hop never causes a resolver query or
-        // a Keychain read: the approval covered the original origin only, and a
-        // bodyless GET is the one shape a 302-to-GET would already produce.
-        if originChanged, preservesMethodAndBody, method != .GET || body != nil {
-            throw ApiRequestError.unsafeURL(
-                "Refusing to forward \(method.rawValue) with its body across origins "
-                    + "(\(current.url.absoluteString) -> \(nextURL.absoluteString)) on status \(statusCode): "
-                    + "the approval covered only the original URL. Re-issue the request against the redirect target."
-            )
+        // Single-sourced with the chain's pre-vetting check so the refusal
+        // stays deterministic before any resolver or Keychain work.
+        if let refusal = Self.crossOriginForwardingRefusal(statusCode: statusCode, current: current, nextURL: nextURL) {
+            throw refusal
         }
         let resolved = try await resolveOutboundHeaders(
             headers: surrogateHeaders,

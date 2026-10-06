@@ -169,20 +169,20 @@ private func makeTemporaryPolicyDirectory() -> URL {
 }
 
 /// Runs `body` with the debug DNS resolver bound to `resolver` for this test's
-/// task and its children, keeping the process-global holder as fallback.
+/// task and its children, keeping parallel suites isolated.
 ///
-/// The process-global `ApiSSRFGuard.testDNSResolver` is shared by every suite,
-/// so lookup-counting tests bind the task-scoped override for exact
-/// observation while also publishing to the global holder for readers that
-/// still consult it. The task binding wins where both exist, and the global
-/// value restores afterwards so one suite cannot leak proof into another.
+/// The binding rides `ApiSSRFGuard.$taskTestDNSResolver` only, never the
+/// process-global holder: suites run in parallel and share that holder, so
+/// publishing here could redirect another suite's lookups while a concurrent
+/// clear (for example a global-only suite resetting to nil) could drop this
+/// suite's proof mid-test and surface as DNS-unavailable fail-closed. The
+/// production resolver prefers the task-scoped binding over the global holder
+/// before hopping off the cooperative pool, so hermetic suites observe only
+/// their own canned proof.
 private func withTaskScopedDNS(
     _ resolver: @escaping @Sendable (String) -> [String],
     _ body: () async throws -> Void
 ) async throws {
-    let previous = ApiSSRFGuard.testDNSResolver
-    ApiSSRFGuard.testDNSResolver = resolver
-    defer { ApiSSRFGuard.testDNSResolver = previous }
     try await ApiSSRFGuard.$taskTestDNSResolver.withValue(resolver) {
         try await body()
     }
