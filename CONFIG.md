@@ -26,7 +26,7 @@ Identity, logging, compaction, and execution loop controls.
 | `name` | string | `"Rune Weaver"` | Engine display name shown in clients. Must not be empty. |
 | `log_level` | string | `"info"` | One of `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical` (case-insensitive). |
 | `compaction_threshold_percent` | integer | `80` | Context compaction threshold in percent (`10`–`100`). Oldest turns fold into a rolling summary past this budget. |
-| `max_tool_iterations` | integer | `10` | Maximum consecutive tool execution rounds per turn before continuation approval is requested (`1`–`100`). |
+| `max_tool_iterations` | integer | `10` | Maximum consecutive tool execution rounds per interactive chat turn before continuation approval is requested (1-100). Chats only; scheduled runs use [scheduler] max_tool_iterations (default 25) and goal runs use [goals] max_tool_iterations (default 35). |
 
 ### `[server]`
 
@@ -379,6 +379,9 @@ Persistent cron and email-arrival scheduled jobs. Config `[[scheduler.jobs]]` en
 | `poll_mailbox` | string \| unset | unset | Mailbox to search (omitted means all). |
 | `poll_interval_seconds` | integer \| unset | `300` | Seconds between poll checks. |
 | `poll_limit` | integer \| unset | `10` | Maximum hits per poll (`1`–`50`). |
+| `max_tool_iterations` | integer | `25` | Default consecutive tool rounds per scheduled run before the limit policy triggers (1-100). Per-job `max_tool_iterations` overrides this default. Default policy synthesizes plus budget_exceeded; a job with `on_tool_limit = "park"` parks instead. |
+| `jobs.max_tool_iterations` | integer \| unset | unset (section default) | Per-job consecutive tool rounds override for this job (1-100). Omit to inherit `[scheduler] max_tool_iterations` (default 25). |
+| `jobs.on_tool_limit` | string \| unset | unset (inherit, synthesizes) | Per-job limit policy when the budget is reached: `"fail"` synthesizes plus `budget_exceeded`, `"park"` parks for approval instead. Omit (or `""`/nil) to inherit — unset behaves like `"fail"` (synthesize). |
 
 ### `[plugins]`
 
@@ -402,6 +405,7 @@ Steady pursuit of long-horizon autonomous goals. Off by default so stock install
 | `max_steps_per_goal` | integer | `12` | Maximum steps in one decomposed goal plan (`1`–`24`). |
 | `plan_timeout_seconds` | integer | `60` | Timeout in seconds for the planning model call before fallback. |
 | `max_triggers_per_goal` | integer | `8` | Maximum event triggers armed on one goal (`0`–`32`). |
+| `max_tool_iterations` | integer | `35` | Maximum tool loop iterations per goal turn before force-synthesis plus budget_exceeded (1-100). Always synthesizes; never parks. |
 
 ```toml
 [goals]

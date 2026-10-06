@@ -32,6 +32,8 @@ public struct SettingsResponse: Content, Equatable {
     public let logLevel: String
     public let compactionThresholdPercent: Int
     public let maxToolIterations: Int
+    /// Default tool iterations for scheduled runs (`[scheduler] max_tool_iterations`).
+    public let schedulerMaxToolIterations: Int
     public let defaultProvider: String
     public let fallbackProvider: String?
     public let providers: [String: ProviderConfig]
@@ -117,6 +119,7 @@ public struct SettingsResponse: Content, Equatable {
         self.logLevel = config.engine.logLevel
         self.compactionThresholdPercent = config.engine.compactionThresholdPercent
         self.maxToolIterations = config.engine.maxToolIterations
+        self.schedulerMaxToolIterations = config.scheduler.defaultMaxToolIterations
         self.defaultProvider = config.llm.defaultProvider
         self.fallbackProvider = config.llm.fallbackProvider
         self.providers = config.llm.providers
@@ -175,6 +178,7 @@ public struct SettingsResponse: Content, Equatable {
         case logLevel
         case compactionThresholdPercent
         case maxToolIterations
+        case schedulerMaxToolIterations
         case defaultProvider
         case fallbackProvider
         case providers
@@ -243,6 +247,7 @@ public struct SettingsResponse: Content, Equatable {
         logLevel = try container.decodeIfPresent(String.self, forKey: .logLevel) ?? "info"
         compactionThresholdPercent = try container.decodeIfPresent(Int.self, forKey: .compactionThresholdPercent) ?? 80
         maxToolIterations = try container.decodeIfPresent(Int.self, forKey: .maxToolIterations) ?? 10
+        schedulerMaxToolIterations = try container.decodeIfPresent(Int.self, forKey: .schedulerMaxToolIterations) ?? 25
         defaultProvider = try container.decode(String.self, forKey: .defaultProvider)
         fallbackProvider = try container.decodeIfPresent(String.self, forKey: .fallbackProvider)
         providers = try container.decodeIfPresent([String: ProviderConfig].self, forKey: .providers) ?? [:]
@@ -313,6 +318,7 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(logLevel, forKey: .logLevel)
         try container.encode(compactionThresholdPercent, forKey: .compactionThresholdPercent)
         try container.encode(maxToolIterations, forKey: .maxToolIterations)
+        try container.encode(schedulerMaxToolIterations, forKey: .schedulerMaxToolIterations)
         try container.encode(defaultProvider, forKey: .defaultProvider)
         try container.encodeIfPresent(fallbackProvider, forKey: .fallbackProvider)
         try container.encode(providers, forKey: .providers)

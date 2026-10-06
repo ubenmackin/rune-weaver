@@ -615,6 +615,23 @@ struct ServerDTOTests {
     }
 
     @Test
+    func `Settings response carries live scheduler default`() throws {
+        var config = RuneWeaverConfig.default
+        config.scheduler.defaultMaxToolIterations = 25
+        let response = SettingsResponse(config: config, configPath: "/test/config.toml")
+        #expect(response.schedulerMaxToolIterations == config.scheduler.defaultMaxToolIterations)
+        #expect(response.schedulerMaxToolIterations == 25)
+        let decoded = try JSONDecoder().decode(SettingsResponse.self, from: JSONEncoder().encode(response))
+        #expect(decoded.schedulerMaxToolIterations == 25)
+        // Payloads written before the scheduler key still decode at the scheduler default.
+        let legacy = try JSONDecoder().decode(
+            SettingsResponse.self,
+            from: Data(#"{"engineName":"Rune Weaver","defaultProvider":"mlx"}"#.utf8)
+        )
+        #expect(legacy.schedulerMaxToolIterations == 25)
+    }
+
+    @Test
     func `WebSocket inbound classification`() throws {
         let chatText = try String(data: JSONEncoder().encode(WSChatMessage(text: "hello")), encoding: .utf8) ?? ""
         guard case .chat = WSInboundKind.classify(chatText) else {
@@ -1998,14 +2015,20 @@ private actor DetachmentRecordingSocket: WSConnectionSocket {
     func close(code _: WebSocketErrorCode) async throws {}
 }
 
-/// Provider holding the turn open with a synchronous pause so the test can seal
+/// Provider holding the turn open with a pause so the test can seal
 /// the socket while inference is still in flight.
+///
+/// The pause lives inside the stream producer as an async sleep so the
+/// orchestrator suspends instead of blocking its cooperative-pool thread;
+/// a synchronous sleep here would pin that thread while every WebSocket
+/// suite runs in parallel and starve the continuations the turn needs to
+/// settle.
 private struct DetachmentDelayedProvider: LLMProvider, Sendable {
     /// Canned model metadata.
     let modelInfo = ModelInfo(name: "detachment-delayed", provider: "stub", contextLength: 2048)
     /// Answer served after the pause.
     let answer: String
-    /// Synchronous pause before serving, holding the turn open.
+    /// Cooperative pause before serving, holding the turn open.
     let delaySeconds: TimeInterval
 
     /// Creates a delayed stub.
@@ -2018,13 +2041,15 @@ private struct DetachmentDelayedProvider: LLMProvider, Sendable {
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
         let text = answer
         let delay = delaySeconds
-        if delay > 0 {
-            Thread.sleep(forTimeInterval: delay)
-        }
         return AsyncStream { continuation in
-            continuation.yield(LLMResponse(delta: text))
-            continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: 7))
-            continuation.finish()
+            Task {
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+                continuation.yield(LLMResponse(delta: text))
+                continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: 7))
+                continuation.finish()
+            }
         }
     }
 
@@ -2036,6 +2061,11 @@ private struct DetachmentDelayedProvider: LLMProvider, Sendable {
 
 /// Provider delaying only turns carrying a marker so one session can hold a slow
 /// turn while its replacement answers immediately.
+///
+/// The slow pause lives inside the stream producer as an async sleep so the
+/// orchestrator suspends instead of blocking its cooperative-pool thread;
+/// a synchronous sleep would pin that thread while the replacement turn
+/// waits behind the same actor and starve the settlement the test polls for.
 private struct DetachmentBranchingProvider: LLMProvider, Sendable {
     /// Canned model metadata.
     let modelInfo = ModelInfo(name: "detachment-branching", provider: "stub", contextLength: 2048)
@@ -2051,14 +2081,17 @@ private struct DetachmentBranchingProvider: LLMProvider, Sendable {
     /// Serves the slow answer after a pause when the marker is present, else fast.
     func chat(messages: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
         let isSlow = messages.contains { $0.content.contains(slowMarker) }
-        if isSlow {
-            Thread.sleep(forTimeInterval: slowDelaySeconds)
-        }
+        let delay = isSlow ? slowDelaySeconds : 0
         let text = isSlow ? slowAnswer : fastAnswer
         return AsyncStream { continuation in
-            continuation.yield(LLMResponse(delta: text))
-            continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: 7))
-            continuation.finish()
+            Task {
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+                continuation.yield(LLMResponse(delta: text))
+                continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: 7))
+                continuation.finish()
+            }
         }
     }
 

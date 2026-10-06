@@ -68,6 +68,9 @@ describe("SchedulerManager", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({});
+        }
         if (input === "/scheduler/jobs" && !init?.method) {
           return jsonResponse({ jobs: [], count: 0 });
         }
@@ -111,6 +114,9 @@ describe("SchedulerManager", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({});
+        }
         if (input === "/scheduler/jobs" && !init?.method) {
           return jsonResponse({ jobs: [], count: 0 });
         }
@@ -164,6 +170,9 @@ describe("SchedulerManager", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({});
+        }
         if (input === "/scheduler/jobs" && !init?.method) {
           return jsonResponse({ jobs: [job()], count: 1 });
         }
@@ -196,6 +205,9 @@ describe("SchedulerManager", () => {
       vi.fn(async (input: string, init?: RequestInit) => {
         if (input.startsWith("/runs") && !init?.method) {
           return jsonResponse({ runs: [], count: 0 });
+        }
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({});
         }
         calls.push(`${init?.method ?? "GET"} ${input}`);
         if (input === "/scheduler/jobs" && !init?.method) {
@@ -293,5 +305,101 @@ describe("SchedulerManager", () => {
       expect(runBtn).toHaveTextContent("Running…");
       expect(runBtn).toBeDisabled();
     });
+  });
+
+  it("shows the live scheduler default in the header from GET /settings", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({ scheduler: { max_tool_iterations: 40 } });
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (input === "/scheduler/jobs" && !init?.method) {
+          return jsonResponse({ jobs: [job()], count: 1 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Each run uses 40 consecutive tool rounds by default (per-job override below, range 1-100). Budget-exceeded runs synthesize a summary; only jobs with on_tool_limit set to park request continuation.",
+        ),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText("Default (40)")).toBeInTheDocument();
+  });
+
+  it("shows per-job override versus inherited budget badges", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({ scheduler: { max_tool_iterations: 33 } });
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (input === "/scheduler/jobs" && !init?.method) {
+          return jsonResponse({
+            jobs: [
+              job({
+                id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                name: "override job",
+                maxToolIterations: 50,
+              }),
+              job({
+                id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                name: "inherited job",
+                maxToolIterations: null,
+              }),
+            ],
+            count: 2,
+          });
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(screen.getByText("override job")).toBeInTheDocument();
+    });
+    expect(screen.getByText("inherited job")).toBeInTheDocument();
+    expect(screen.getByText("50 rounds")).toBeInTheDocument();
+    expect(screen.getByText("Default (33)")).toBeInTheDocument();
+  });
+
+  it("still renders the job list when the settings read fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          throw new Error("settings unreachable");
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (input === "/scheduler/jobs" && !init?.method) {
+          return jsonResponse({ jobs: [job()], count: 1 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(screen.getByText("morning digest")).toBeInTheDocument();
+    });
+    // Settings failure falls back to the engine default so the header and the
+    // inherited badge stay consistent instead of hiding one side.
+    expect(
+      screen.getByText(
+        "Each run uses 25 consecutive tool rounds by default (per-job override below, range 1-100). Budget-exceeded runs synthesize a summary; only jobs with on_tool_limit set to park request continuation.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Default (25)")).toBeInTheDocument();
   });
 });

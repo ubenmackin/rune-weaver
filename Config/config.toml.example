@@ -7,7 +7,7 @@
 name = "Rune Weaver"
 log_level = "info"  # trace | debug | info | notice | warning | error | critical
 # compaction_threshold_percent = 80  # Context compaction threshold in percent (10-100); oldest turns fold into a rolling summary past this budget.
-# max_tool_iterations = 10  # Max consecutive tool rounds per turn before continuation approval (1-100).
+# max_tool_iterations = 10  # Max consecutive tool rounds per interactive chat turn before continuation approval (1-100). Chats only; scheduled runs use [scheduler] max_tool_iterations (default 25) and goal runs use [goals] max_tool_iterations (default 35).
 
 # [persona]
 # # Assistant persona woven into the prompt identity line. Every key is optional
@@ -368,6 +368,16 @@ token_env = "HA_TOKEN"  # Reads from env or Keychain
 # Known v1 limitation: single-flight is per-process only (CLI foreground
 # loop vs. engine API manual runs share no lock), so the same job name can
 # still run concurrently via API plus CLI — do not run both for one job.
+# Tool budget: [scheduler] max_tool_iterations (default 25) bounds consecutive
+# tool rounds per scheduled run before the limit policy triggers (1-100).
+# Per-job max_tool_iterations overrides this section default; omit to inherit it.
+# Default policy synthesizes plus budget_exceeded; a job with on_tool_limit = "park"
+# parks for approval instead ("fail" synthesizes plus budget_exceeded).
+# No active budget values are set here; uncomment to override the defaults.
+# max_tool_iterations = 25
+# Per-job overrides live inside [[scheduler.jobs]]:
+# max_tool_iterations = 25  # Per-job override (1-100).
+# on_tool_limit = "fail"  # "fail" synthesizes plus budget_exceeded; "park" parks instead.
 
 [[scheduler.jobs]]
 name = "morning digest"
@@ -440,6 +450,8 @@ max_steps_per_goal = 12
 plan_timeout_seconds = 60
 # Maximum event triggers armed on one goal (0-32, 0 disables event wake-ups).
 max_triggers_per_goal = 8
+# Maximum tool loop iterations per goal turn before force-synthesis plus budget_exceeded (1-100). Always synthesizes; never parks.
+# max_tool_iterations = 35
 
 [proactive]
 # Interruption policy for background scheduler and goal turns. `all` surfaces

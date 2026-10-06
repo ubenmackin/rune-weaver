@@ -453,7 +453,11 @@ extension ServerSchedulerWorker {
         let registration = await activeTurns?.register(sessionID: sessionID, onCancel: { taskBox.cancel() })
         let result: SchedulerRunResult
         do {
-            let maxIterations = job.maxToolIterations ?? schedulerConfig.defaultMaxToolIterations
+            // Persisted rows may predate REST validation, so bound the budget at
+            // use: only exact "park" parks, every other stored value synthesizes
+            // as a budget-exceeded turn rather than branching on open-ended input.
+            let requestedIterations = job.maxToolIterations ?? schedulerConfig.defaultMaxToolIterations
+            let maxIterations = min(max(requestedIterations, 1), 100)
             let policy: ToolLimitPolicy = job.onToolLimit == "park" ? .park : .forceSynthesis
             let runTask: Task<OrchestratorResponse, any Error> = Task {
                 try await orchestrator.process(

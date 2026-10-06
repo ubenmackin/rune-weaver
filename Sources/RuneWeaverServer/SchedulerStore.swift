@@ -171,10 +171,16 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
     /// When true, clears the whole poll trigger to nil before applying
     /// any non-nil poll fields in the same payload.
     public var clearPoll: Bool?
-    /// New maximum tool iterations, if changed.
+    /// New maximum tool iterations, if changed. Omitted (nil) leaves the
+    /// budget alone; use `clearToolBudget: true` to clear it to inherit (nil).
     public var maxToolIterations: Int?
-    /// New action on tool limit ("fail" or "park"), if changed.
+    /// New action on tool limit ("fail" or "park"), if changed. Omitted (nil)
+    /// leaves the policy alone; `""` clears to nil, or use
+    /// `clearToolBudget: true` to clear it to inherit (nil).
     public var onToolLimit: String?
+    /// When true, clears the whole tool budget to nil (inherit) before applying
+    /// any non-nil budget fields in the same payload.
+    public var clearToolBudget: Bool?
 
     /// Creates an update payload.
     public init(
@@ -189,7 +195,8 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         pollLimit: Int? = nil,
         clearPoll: Bool? = nil,
         maxToolIterations: Int? = nil,
-        onToolLimit: String? = nil
+        onToolLimit: String? = nil,
+        clearToolBudget: Bool? = nil
     ) {
         self.name = name
         self.schedule = schedule
@@ -203,6 +210,7 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         self.clearPoll = clearPoll
         self.maxToolIterations = maxToolIterations
         self.onToolLimit = onToolLimit
+        self.clearToolBudget = clearToolBudget
     }
 }
 
@@ -239,6 +247,7 @@ public actor SchedulerStore {
         let normalizedAccount = Self.normalizedOptional(input.pollAccount)
         let normalizedQuery = Self.normalizedOptional(input.pollQuery)
         let normalizedMailbox = Self.normalizedOptional(input.pollMailbox)
+        let normalizedOnToolLimit = Self.normalizedOptional(input.onToolLimit)
         try Self.validated(
             name: input.name,
             schedule: input.schedule,
@@ -247,7 +256,9 @@ public actor SchedulerStore {
             pollQuery: normalizedQuery,
             pollMailbox: normalizedMailbox,
             pollIntervalSeconds: input.pollIntervalSeconds,
-            pollLimit: input.pollLimit
+            pollLimit: input.pollLimit,
+            maxToolIterations: input.maxToolIterations,
+            onToolLimit: normalizedOnToolLimit
         )
         let trimmedName = normalizedSchedulerJobName(input.name)
         if jobs.values.contains(where: { $0.name == trimmedName }) {
@@ -265,7 +276,7 @@ public actor SchedulerStore {
             pollIntervalSeconds: input.pollIntervalSeconds,
             pollLimit: input.pollLimit.map(EmailPollRule.clampedLimit),
             maxToolIterations: input.maxToolIterations,
-            onToolLimit: input.onToolLimit,
+            onToolLimit: normalizedOnToolLimit,
             createdAt: now,
             updatedAt: now
         )
@@ -342,11 +353,15 @@ public actor SchedulerStore {
         if let limit = input.pollLimit {
             existing.pollLimit = EmailPollRule.clampedLimit(limit)
         }
+        if input.clearToolBudget == true {
+            existing.maxToolIterations = nil
+            existing.onToolLimit = nil
+        }
         if let maxToolIterations = input.maxToolIterations {
             existing.maxToolIterations = maxToolIterations
         }
         if let onToolLimit = input.onToolLimit {
-            existing.onToolLimit = onToolLimit
+            existing.onToolLimit = Self.normalizedOptional(onToolLimit)
         }
         try Self.validated(
             name: existing.name,
@@ -356,7 +371,9 @@ public actor SchedulerStore {
             pollQuery: existing.pollQuery,
             pollMailbox: existing.pollMailbox,
             pollIntervalSeconds: existing.pollIntervalSeconds,
-            pollLimit: existing.pollLimit
+            pollLimit: existing.pollLimit,
+            maxToolIterations: existing.maxToolIterations,
+            onToolLimit: existing.onToolLimit
         )
         existing.updatedAt = Date()
         let updatedJob = existing
@@ -413,8 +430,11 @@ public actor SchedulerStore {
         pollQuery: String? = nil,
         pollMailbox: String? = nil,
         pollIntervalSeconds: Int? = nil,
-        pollLimit: Int? = nil
+        pollLimit: Int? = nil,
+        maxToolIterations: Int? = nil,
+        onToolLimit: String? = nil
     ) throws {
+        try validateToolBudget(maxToolIterations: maxToolIterations, onToolLimit: onToolLimit)
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SchedulerStoreError.invalidField("name must not be empty")
         }
@@ -455,6 +475,20 @@ public actor SchedulerStore {
             try synthetic.validate()
         } catch let error as SchedulerConfigError {
             throw Self.mapSchedulerConfigError(error)
+        }
+    }
+
+    /// Validates the per-job tool budget carried on the REST path.
+    ///
+    /// The dashboard clamps these fields client-side, but direct REST callers
+    /// bypass it, so the store rejects out-of-range budgets here before they
+    /// persist or reach the worker. Nil inherits the section default.
+    private static func validateToolBudget(maxToolIterations: Int?, onToolLimit: String?) throws {
+        if let maxToolIterations, !(1 ... 100).contains(maxToolIterations) {
+            throw SchedulerStoreError.invalidField("max_tool_iterations must be between 1 and 100 (got \(maxToolIterations))")
+        }
+        if let onToolLimit, !["fail", "park"].contains(onToolLimit) {
+            throw SchedulerStoreError.invalidField("on_tool_limit must be 'fail' or 'park' (got '\(onToolLimit)')")
         }
     }
 

@@ -64,6 +64,12 @@ import {
   DEFAULT_GOALS_MAX_STEPS_PER_GOAL,
   DEFAULT_GOALS_PLAN_TIMEOUT_SECONDS,
   DEFAULT_GOALS_MAX_TRIGGERS_PER_GOAL,
+  DEFAULT_ENGINE_MAX_TOOL_ITERATIONS,
+  TOOL_ROUNDS_MIN,
+  TOOL_ROUNDS_MAX,
+  engineMaxToolIterations,
+  schedulerMaxToolIterations,
+  goalsMaxToolIterations,
   DEFAULT_IDEAS_ENABLED,
   DEFAULT_IDEAS_MAX_PER_CYCLE,
   DEFAULT_IDEAS_TIMEOUT_SECONDS,
@@ -926,7 +932,7 @@ export default function SettingsManager() {
   const [engineName, setEngineName] = useState("");
   const [logLevel, setLogLevel] = useState("info");
   const [compactionThresholdPercent, setCompactionThresholdPercent] = useState(80);
-  const [maxToolIterations, setMaxToolIterations] = useState<number | string>(10);
+  const [maxToolIterations, setMaxToolIterations] = useState<number | string>(DEFAULT_ENGINE_MAX_TOOL_ITERATIONS);
   const [defaultProvider, setDefaultProvider] = useState("");
   const [fallbackProvider, setFallbackProvider] = useState("");
   const [providersList, setProvidersList] = useState<ProviderEntry[]>([]);
@@ -2872,7 +2878,7 @@ export default function SettingsManager() {
     setEngineName(data.engineName);
     setLogLevel(data.logLevel);
     setCompactionThresholdPercent(data.compactionThresholdPercent ?? 80);
-    setMaxToolIterations(data.maxToolIterations ?? 10);
+    setMaxToolIterations(engineMaxToolIterations(data));
     setDefaultProvider(data.defaultProvider);
     setFallbackProvider(data.fallbackProvider ?? "");
 
@@ -3685,10 +3691,10 @@ export default function SettingsManager() {
       // Blank means default; explicit values clamp into range.
       const rawMaxToolIterations = String(maxToolIterations ?? "").trim();
       const maxToolIterationsValue =
-        rawMaxToolIterations === "" ? 10 : Number(rawMaxToolIterations);
+        rawMaxToolIterations === "" ? DEFAULT_ENGINE_MAX_TOOL_ITERATIONS : Number(rawMaxToolIterations);
       const clampedMaxToolIterations = Number.isFinite(maxToolIterationsValue)
-        ? Math.max(1, Math.min(100, Math.floor(maxToolIterationsValue)))
-        : 10;
+        ? Math.max(TOOL_ROUNDS_MIN, Math.min(TOOL_ROUNDS_MAX, Math.floor(maxToolIterationsValue)))
+        : DEFAULT_ENGINE_MAX_TOOL_ITERATIONS;
       // Only send [server] keys when the form differs from the loaded file.
       // Resending unchanged bind keys would trip carriesServerPatch on every
       // save and return requiresRestart true for non-network edits; the route
@@ -5346,6 +5352,9 @@ export default function SettingsManager() {
                 </p>
               </div>
             </div>
+            <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+              Goal runs use {goalsMaxToolIterations(settings?.goals)} consecutive tool rounds per turn (range {TOOL_ROUNDS_MIN}–{TOOL_ROUNDS_MAX}, set via [goals] max_tool_iterations in config.toml). When a goal run reaches its budget it synthesizes a summary and records budget_exceeded instead of parking for approval.
+            </p>
             <div className="form-row" style={{ marginTop: "1rem" }}>
               <div className="form-group flex-1">
                 <label htmlFor="ideas-max-per-cycle">Max Ideas Per Cycle</label>
@@ -5450,20 +5459,23 @@ export default function SettingsManager() {
             <div className="form-row" style={{ marginTop: "1rem" }}>
               <div className="form-group flex-1">
                 <label htmlFor="max-tool-iterations">
-                  Max Tool Rounds per Turn
+                  Max Tool Rounds per Turn (Chats)
                 </label>
                 <input
                   id="max-tool-iterations"
                   type="number"
                   className="input-field"
-                  min={1}
-                  max={100}
+                  min={TOOL_ROUNDS_MIN}
+                  max={TOOL_ROUNDS_MAX}
                   step={1}
                   value={maxToolIterations}
                   onChange={(e) => setMaxToolIterations(e.target.value)}
                 />
                 <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
-                  Maximum number of consecutive tool rounds the agent may execute before pausing for user approval to continue. Range: 1–100. Default is 10.
+                  Applies to interactive chats only. When a chat reaches this many consecutive tool rounds it parks for your approval to continue. Range: {TOOL_ROUNDS_MIN}–{TOOL_ROUNDS_MAX}. Default is {DEFAULT_ENGINE_MAX_TOOL_ITERATIONS}.
+                </p>
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  Chats use {engineMaxToolIterations(settings)} rounds per turn (parks for approval). Scheduled runs use {schedulerMaxToolIterations(settings)} rounds by default with per-job override (synthesizes plus budget_exceeded, or parks when the job sets on_tool_limit to park). Goal runs use {goalsMaxToolIterations(settings?.goals)} rounds (always synthesizes plus budget_exceeded).
                 </p>
               </div>
             </div>

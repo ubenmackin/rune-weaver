@@ -4,6 +4,9 @@
 import { useState } from "react";
 import {
   DEFAULT_POLL_INTERVAL_SECONDS,
+  TOOL_ROUNDS_MAX,
+  TOOL_ROUNDS_MIN,
+  schedulerJobEffectiveMaxToolIterations,
   type NewSchedulerJobInput,
   type SchedulerJob,
   type UpdateSchedulerJobInput,
@@ -12,6 +15,7 @@ import { ClockIcon, CloseIcon, MailIcon } from "./icons";
 
 interface ScheduleWizardModalProps {
   jobToEdit?: SchedulerJob | null;
+  sectionDefault: number;
   onSave: (
     input: NewSchedulerJobInput | UpdateSchedulerJobInput,
     id?: string,
@@ -88,6 +92,7 @@ const PROMPT_TEMPLATES = [  {
 
 export default function ScheduleWizardModal({
   jobToEdit,
+  sectionDefault,
   onSave,
   onClose,
 }: ScheduleWizardModalProps) {
@@ -127,6 +132,14 @@ export default function ScheduleWizardModal({
     String(jobToEdit?.pollIntervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS),
   );
   const [pollLimit, setPollLimit] = useState<number>(jobToEdit?.pollLimit ?? 10);
+  const [maxToolRoundsText, setMaxToolRoundsText] = useState<string>(
+    jobToEdit?.maxToolIterations != null
+      ? String(jobToEdit.maxToolIterations)
+      : "",
+  );
+  const [onToolLimit, setOnToolLimit] = useState<string>(
+    jobToEdit?.onToolLimit ?? "",
+  );
 
   // Strict decimal whole seconds; null means the input is not submittable.
   function parsedPollIntervalSeconds(): number | null {
@@ -184,6 +197,39 @@ export default function ScheduleWizardModal({
     setError(null);
     setSaving(true);
     try {
+      const trimmedBudget = maxToolRoundsText.trim();
+      let maxToolIterations: number | null;
+      if (trimmedBudget === "") {
+        maxToolIterations = null;
+      } else {
+        if (!/^\d+$/.test(trimmedBudget)) {
+          setError(
+            `Max tool rounds must be between ${TOOL_ROUNDS_MIN} and ${TOOL_ROUNDS_MAX}.`,
+          );
+          setSaving(false);
+          return;
+        }
+        const parsed = Number(trimmedBudget);
+        if (
+          !Number.isSafeInteger(parsed) ||
+          parsed < TOOL_ROUNDS_MIN ||
+          parsed > TOOL_ROUNDS_MAX
+        ) {
+          setError(
+            `Max tool rounds must be between ${TOOL_ROUNDS_MIN} and ${TOOL_ROUNDS_MAX}.`,
+          );
+          setSaving(false);
+          return;
+        }
+        maxToolIterations = parsed;
+      }
+      const onToolLimitValue = onToolLimit === "" ? null : onToolLimit;
+      // Edit clear-vs-omit contract (mirrors UpdateSchedulerJob on the engine): omitted (null)
+      // leaves the budget alone, so an edit that blanks a previously set budget must send
+      // clearToolBudget:true to return to inherit (nil) before re-applying any non-nil fields.
+      const isEdit = jobToEdit != null;
+      const shouldClearToolBudget =
+        isEdit && (trimmedBudget === "" || onToolLimit === "");
       if (triggerType === "cron") {
         const payload = {
           name: name.trim(),
@@ -191,6 +237,9 @@ export default function ScheduleWizardModal({
           prompt: prompt.trim(),
           enabled,
           clearPoll: true,
+          maxToolIterations,
+          onToolLimit: onToolLimitValue,
+          ...(shouldClearToolBudget ? { clearToolBudget: true } : {}),
         };
         await onSave(payload, jobToEdit?.id);
       } else {
@@ -210,6 +259,9 @@ export default function ScheduleWizardModal({
           pollQuery: pollQuery.trim() || null,
           pollIntervalSeconds,
           pollLimit,
+          maxToolIterations,
+          onToolLimit: onToolLimitValue,
+          ...(shouldClearToolBudget ? { clearToolBudget: true } : {}),
         };
         await onSave(payload, jobToEdit?.id);
       }
@@ -220,6 +272,34 @@ export default function ScheduleWizardModal({
       setSaving(false);
     }
   }
+
+  const budgetTrimmed = maxToolRoundsText.trim();
+  // Blank inherits the live section default through the same clamped resolver
+  // the list uses, so the review never shows an unclamped raw default.
+  const budgetBlankEffective = schedulerJobEffectiveMaxToolIterations(
+    null,
+    sectionDefault,
+  );
+  // Non-numeric input can never submit (Number would be NaN and fall back to
+  // the section default), so surface the validation state instead of a
+  // misleading effective budget.
+  const budgetIsNonNumeric =
+    budgetTrimmed !== "" && !/^\d+$/.test(budgetTrimmed);
+  const budgetEffective = schedulerJobEffectiveMaxToolIterations(
+    {
+      maxToolIterations:
+        budgetTrimmed === "" || budgetIsNonNumeric
+          ? null
+          : Number(budgetTrimmed),
+    } as SchedulerJob,
+    sectionDefault,
+  );
+  const budgetReviewText =
+    budgetTrimmed === ""
+      ? `Uses schedule default (${budgetBlankEffective})`
+      : budgetIsNonNumeric
+        ? `Max tool rounds must be between ${TOOL_ROUNDS_MIN} and ${TOOL_ROUNDS_MAX}.`
+        : `${budgetEffective} rounds — ${onToolLimit === "park" ? "parks" : "synthesizes"}`;
 
   return (
     <div className="modal-backdrop" onClick={onClose} role="dialog" aria-modal="true">
@@ -453,6 +533,34 @@ export default function ScheduleWizardModal({
                 />
               </label>
 
+              <details>
+                <summary>Advanced: tool budget</summary>
+                <label className="form-label">
+                  Max tool rounds
+                  <input
+                    type="number"
+                    aria-label="Max tool rounds (blank uses schedule default)"
+                    min={TOOL_ROUNDS_MIN}
+                    max={TOOL_ROUNDS_MAX}
+                    step={1}
+                    value={maxToolRoundsText}
+                    onChange={(e) => setMaxToolRoundsText(e.target.value)}
+                  />
+                </label>
+                <label className="form-label">
+                  On tool limit
+                  <select
+                    aria-label="On tool limit"
+                    value={onToolLimit}
+                    onChange={(e) => setOnToolLimit(e.target.value)}
+                  >
+                    <option value="">Use default (synthesize)</option>
+                    <option value="fail">Synthesize summary (fail)</option>
+                    <option value="park">Park for approval (park)</option>
+                  </select>
+                </label>
+              </details>
+
               <div className="prompt-template-section">
                 <span className="muted text-xs">Suggested templates:</span>
                 <div className="template-pill-group">
@@ -506,6 +614,10 @@ export default function ScheduleWizardModal({
                 <div className="review-row">
                   <span className="review-label">Status:</span>
                   <span>{enabled ? "Active (Enabled)" : "Paused (Disabled)"}</span>
+                </div>
+                <div className="review-row">
+                  <span className="review-label">Tool budget:</span>
+                  <span>{budgetReviewText}</span>
                 </div>
                 <div className="review-section mt-3">
                   <span className="review-label">Agent Prompt:</span>

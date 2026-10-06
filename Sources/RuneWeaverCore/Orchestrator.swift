@@ -548,7 +548,11 @@ extension Orchestrator {
             await onEvent?(.warning(warning))
         }
         let effectivePolicy = input.toolLimitPolicy ?? (input.source == "scheduler" || input.source == "goal" ? .forceSynthesis : .park)
-        let effectiveMaxIterations = input.maxToolIterations ?? self.maxToolIterations
+        // Turn-level overrides arrive over the service boundary, so bound them
+        // at use: the stored default is already clamped, but a direct caller
+        // could otherwise stretch one turn into an unbounded tool loop.
+        let requestedIterations = input.maxToolIterations ?? self.maxToolIterations
+        let effectiveMaxIterations = max(1, min(100, requestedIterations))
         let request = TurnLoopRequest(
             workingMessages: workingMessages,
             tools: tools,

@@ -78,6 +78,13 @@ import {
   isIdeaProposedProactive,
   listIdeas,
   parseIdea,
+  DEFAULT_GOALS_MAX_TOOL_ITERATIONS,
+  DEFAULT_SCHEDULER_MAX_TOOL_ITERATIONS,
+  TOOL_ROUNDS_MIN,
+  TOOL_ROUNDS_MAX,
+  goalsMaxToolIterations,
+  schedulerMaxToolIterations,
+  schedulerJobEffectiveMaxToolIterations,
 } from "./api";
 import { jsonResponse } from "./test-utils/http";
 
@@ -1789,5 +1796,133 @@ describe("goal client and helpers", () => {
     ]);
     expect(seen[2].method).toBe("POST");
     expect(seen[3].method).toBe("POST");
+  });
+});
+
+describe("tool-round budget readers", () => {
+  const goalsBase = {
+    enabled: true,
+    step_interval_minutes: 1440,
+    max_active_goals: 10,
+  };
+
+  const settingsBase = {
+    engineName: "Rune Weaver",
+    logLevel: "info",
+    defaultProvider: "mlx",
+    providers: {},
+    memoryVectorDBPath: "memory/vectors",
+    memoryEpisodesDBPath: "memory/episodes.db",
+    memoryEmbeddingModel: "bge-small-en-v1.5",
+    memoryEmbeddingBackend: "apple",
+    voiceSTTProvider: "whisper",
+    voiceWhisperModel: "base.en",
+    voiceTTSProvider: "system",
+    emailAccounts: [],
+    pluginsDir: "~/.runeweaver/plugins",
+    pluginsMarketplaceIndexURL: "https://example.com/index.json",
+    pluginsAutoRescan: true,
+    configPath: "/Users/test/.runeweaver/config.toml",
+  };
+
+  const jobBase = {
+    id: "33333333-3333-3333-3333-333333333333",
+    name: "morning digest",
+    schedule: "0 8 * * *",
+    prompt: "Summarize mail",
+    enabled: true,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  };
+
+  it("keeps budget defaults and bounds pinned to the engine contract", () => {
+    expect(DEFAULT_GOALS_MAX_TOOL_ITERATIONS).toBe(35);
+    expect(DEFAULT_SCHEDULER_MAX_TOOL_ITERATIONS).toBe(25);
+    expect(TOOL_ROUNDS_MIN).toBe(1);
+    expect(TOOL_ROUNDS_MAX).toBe(100);
+  });
+
+  it("prefers snake_case over camelCase with fallback to the goals default", () => {
+    expect(
+      goalsMaxToolIterations({
+        ...goalsBase,
+        max_tool_iterations: 40,
+        maxToolIterations: 50,
+      }),
+    ).toBe(40);
+    expect(goalsMaxToolIterations({ ...goalsBase, maxToolIterations: 50 })).toBe(
+      50,
+    );
+    expect(goalsMaxToolIterations(undefined)).toBe(35);
+    expect(goalsMaxToolIterations(null)).toBe(35);
+    expect(goalsMaxToolIterations({ ...goalsBase })).toBe(35);
+  });
+
+  it("clamps goal budgets into 1-100 with floor", () => {
+    expect(goalsMaxToolIterations({ ...goalsBase, max_tool_iterations: 0 })).toBe(
+      1,
+    );
+    expect(
+      goalsMaxToolIterations({ ...goalsBase, max_tool_iterations: 200 }),
+    ).toBe(100);
+    expect(
+      goalsMaxToolIterations({ ...goalsBase, max_tool_iterations: 10.9 }),
+    ).toBe(10);
+    expect(
+      goalsMaxToolIterations({ ...goalsBase, max_tool_iterations: Number.NaN }),
+    ).toBe(35);
+  });
+
+  it("reads the scheduler section default with fallback and clamp", () => {
+    expect(schedulerMaxToolIterations(undefined)).toBe(25);
+    expect(schedulerMaxToolIterations(null)).toBe(25);
+    expect(schedulerMaxToolIterations({ ...settingsBase })).toBe(25);
+    expect(
+      schedulerMaxToolIterations({ ...settingsBase, schedulerMaxToolIterations: 30 }),
+    ).toBe(30);
+    expect(
+      schedulerMaxToolIterations({ ...settingsBase, schedulerMaxToolIterations: 0 }),
+    ).toBe(1);
+    expect(
+      schedulerMaxToolIterations({
+        ...settingsBase,
+        schedulerMaxToolIterations: 200,
+      }),
+    ).toBe(100);
+    expect(
+      schedulerMaxToolIterations({
+        ...settingsBase,
+        schedulerMaxToolIterations: 12.9,
+      }),
+    ).toBe(12);
+  });
+
+  it("resolves per-job override with section-default inheritance and clamp", () => {
+    expect(schedulerJobEffectiveMaxToolIterations(null, 30)).toBe(30);
+    expect(schedulerJobEffectiveMaxToolIterations(undefined, 30)).toBe(30);
+    expect(
+      schedulerJobEffectiveMaxToolIterations(
+        { ...jobBase, maxToolIterations: null },
+        30,
+      ),
+    ).toBe(30);
+    expect(
+      schedulerJobEffectiveMaxToolIterations(
+        { ...jobBase, maxToolIterations: 40 },
+        30,
+      ),
+    ).toBe(40);
+    expect(
+      schedulerJobEffectiveMaxToolIterations(
+        { ...jobBase, maxToolIterations: 0 },
+        30,
+      ),
+    ).toBe(1);
+    expect(
+      schedulerJobEffectiveMaxToolIterations(
+        { ...jobBase, maxToolIterations: 200 },
+        30,
+      ),
+    ).toBe(100);
   });
 });
