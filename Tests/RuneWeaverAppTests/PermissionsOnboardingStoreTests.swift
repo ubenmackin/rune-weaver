@@ -165,7 +165,7 @@ struct PermissionsOnboardingStoreTests {
         // Declaration order is the presentation order; a reorder here would
         // silently reshuffle the window, so the suite pins it.
         let kinds = PermissionKind.allCases.map(\.rawValue)
-        #expect(kinds == ["fullDiskAccess", "contacts", "accessibility", "screenRecording", "messagesAutomation"])
+        #expect(kinds == ["fullDiskAccess", "contacts", "calendars", "reminders", "accessibility", "screenRecording", "messagesAutomation"])
     }
 
     @Test

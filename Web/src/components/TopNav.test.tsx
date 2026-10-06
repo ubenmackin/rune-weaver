@@ -24,6 +24,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import TopNav from "./TopNav";
 import { isGroupActive, rolledUpBadge } from "./navigationConfig";
 import {
+  peekPersonaSignals,
   publishPersonaFromSettings,
   resetPersonaSignalsForTesting,
 } from "./PersonaAvatar";
@@ -1056,6 +1057,12 @@ describe("TopNav operator profile", () => {
     // falls back to the operator stock label.
     resetPersonaSignalsForTesting();
     renderPersonaNav();
+    // The second mount starts the one-shot settings probe (personaLoaded is
+    // false after the reset). Await its publish so the store-driven re-render
+    // settles inside act instead of after the test.
+    await waitFor(() => {
+      expect(peekPersonaSignals().personaLoaded).toBe(true);
+    });
     expect(screen.queryByText("Weaver")).toBeNull();
     expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
       "Profile",
