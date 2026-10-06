@@ -150,7 +150,6 @@ import {
   type WorkspaceConfigData,
   type WorkspaceSettingsUpdate,
   checkSecretStatus,
-  storeSecret,
   formatWorkspaceBytes,
   getWorkspaceUsage,
   isPromotableScriptPath,
@@ -172,8 +171,6 @@ import {
   ChatIcon,
   CheckIcon,
   CloseIcon,
-  EyeIcon,
-  EyeOffIcon,
   FolderIcon,
   GlobeIcon,
   KeyIcon,
@@ -194,6 +191,7 @@ import {
   WrenchIcon,
 } from "./icons";
 import Modal from "./Modal";
+import { StoreSecretModal } from "./StoreSecretModal";
 import RuneMarketplaceModal from "./RuneMarketplaceModal";
 import { IndexPolicyPanel } from "./IndexingPanel";
 import { PolicyPane } from "./PolicyPane";
@@ -676,160 +674,6 @@ export const browserElapsedSeconds = startElapsedSeconds;
 // null so callers never render whitespace as detail.
 function trimBrowserText(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-interface StoreSecretModalProps {
-  isOpen: boolean;
-  secretKey: string;
-  title: string;
-  isUpdate: boolean;
-  onClose: () => void;
-  onSuccess: (key: string) => void;
-}
-
-function StoreSecretModal({
-  isOpen,
-  secretKey,
-  title,
-  isUpdate,
-  onClose,
-  onSuccess,
-}: StoreSecretModalProps) {
-  const [secretValue, setSecretValue] = useState("");
-  const [showPlaintext, setShowPlaintext] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (isOpen) {
-      setSecretValue("");
-      setShowPlaintext(false);
-      setError(null);
-      const timer = setTimeout(() => inputRef.current?.focus(), 50);
-      return () => clearTimeout(timer);
-    }
-  }, [isOpen]);
-
-  if (!isOpen) return null;
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (secretValue.trim().length === 0) {
-      setError("Please enter a secret value.");
-      return;
-    }
-    setSubmitting(true);
-    setError(null);
-    try {
-      await storeSecret(secretKey, secretValue);
-      onSuccess(secretKey);
-      onClose();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to store secret in Keychain.");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <Modal label={title} onClose={submitting ? () => {} : onClose} containerClassName="modal-container store-secret-modal">
-      <form onSubmit={handleSubmit}>
-        <div className="modal-header">
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <KeyIcon size={18} style={{ color: "#38bdf8" }} />
-            <h3>{title}</h3>
-          </div>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={onClose}
-            disabled={submitting}
-            aria-label="Close"
-          >
-            <CloseIcon size={16} />
-          </button>
-        </div>
-
-        <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)", lineHeight: 1.5 }}>
-            This secret will be stored directly into your macOS Keychain under service <code>com.runeweaver.secrets</code>. It is never written to disk files, database, or browser storage.
-          </p>
-
-          <div className="form-group">
-            <label style={{ fontSize: "12px", color: "var(--text-muted)", marginBottom: "4px", display: "block" }}>
-              Keychain Key / Account
-            </label>
-            <div style={{ padding: "8px 12px", background: "var(--bg-main, #0f0f13)", borderRadius: "6px", fontFamily: "monospace", fontSize: "13px", border: "1px solid var(--border-color, #272733)" }}>
-              {secretKey}
-            </div>
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="secret-value-input" style={{ fontSize: "12px", fontWeight: 600, marginBottom: "4px", display: "block" }}>
-              {isUpdate ? "New Secret / Password" : "Secret / Password"}
-            </label>
-            <div style={{ display: "flex", gap: "8px", position: "relative", alignItems: "center" }}>
-              <input
-                ref={inputRef}
-                id="secret-value-input"
-                type={showPlaintext ? "text" : "password"}
-                className="input-field"
-                value={secretValue}
-                onChange={(e) => setSecretValue(e.target.value)}
-                placeholder="Enter secret..."
-                disabled={submitting}
-                required
-                style={{ flex: 1, paddingRight: "40px" }}
-              />
-              <button
-                type="button"
-                className="icon-button"
-                onClick={() => setShowPlaintext((prev) => !prev)}
-                title={showPlaintext ? "Hide secret" : "Show secret"}
-                style={{ position: "absolute", right: "6px", background: "transparent", border: "none" }}
-              >
-                {showPlaintext ? <EyeOffIcon size={16} /> : <EyeIcon size={16} />}
-              </button>
-            </div>
-          </div>
-
-          {error && (
-            <div
-              style={{
-                padding: "8px 12px",
-                background: "rgba(239, 68, 68, 0.12)",
-                border: "1px solid rgba(239, 68, 68, 0.35)",
-                borderRadius: "6px",
-                color: "#ef4444",
-                fontSize: "13px",
-              }}
-            >
-              {error}
-            </div>
-          )}
-        </div>
-
-        <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
-          <button
-            type="button"
-            className="ghost"
-            onClick={onClose}
-            disabled={submitting}
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            className="primary"
-            disabled={submitting || secretValue.trim().length === 0}
-          >
-            {submitting ? "Saving…" : isUpdate ? "Update in Keychain" : "Save to Keychain"}
-          </button>
-        </div>
-      </form>
-    </Modal>
-  );
 }
 
 // Badge-probe chunk size pinned to the server status cap (`maxSecretStatusKeys`

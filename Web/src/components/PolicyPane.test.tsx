@@ -5,9 +5,10 @@
 // into inline editors, persisting the DTO without raw text, and keeping the
 // saved banner honest across edits with no restart promise ever shown.
 // Scope: Pane fetch and save shapes, network editors, the searchable
-// credentials list, the add/edit modal with its live probe preview, and
-// delete confirmation. Engine invariant math and TOML serialization stay with
-// their owner suites.
+// credentials list, the add/edit modal with its live probe preview, delete
+// confirmation, and the per-row Keychain secrets entry (Set, Update, guarded
+// Delete) with its prefix-tolerant keys. Engine invariant math and TOML
+// serialization stay with their owner suites.
 // Architectural role: Guards the single dashboard surface whose writes steer
 // the mandatory egress choke-point, so a pane edit cannot persist unvalidated
 // text or claim a write that never landed.
@@ -17,6 +18,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PolicyPane, canonicalPolicySnapshot, isValidDomainLine } from "./PolicyPane";
 import { validateBindingHostEntry } from "./PolicyBindingModal";
+import { normalizeSecretKey } from "./StoreSecretModal";
 import { clearAuthToken, setAuthToken } from "../api";
 import { jsonResponse } from "../test-utils/http";
 
@@ -43,6 +45,28 @@ const panePolicyPayload = {
   violations: [],
 };
 
+// Two-binding snapshot so one render proves both presence postures: the
+// missing key offers Set while the stored key offers Update plus a guarded
+// Delete, with no row offering both shapes at once.
+const twoKeyPolicyPayload = {
+  ...panePolicyPayload,
+  policy: {
+    ...panePolicyPayload.policy,
+    credentials: {
+      MISSING_KEY: {
+        allowed_hosts: ["api.github.com"],
+        allowed_methods: ["GET"],
+        allowed_path_prefixes: ["/repos"],
+      },
+      STORED_KEY: {
+        allowed_hosts: ["api.github.com"],
+        allowed_methods: ["GET"],
+        allowed_path_prefixes: ["/repos"],
+      },
+    },
+  },
+};
+
 describe("PolicyPane", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
@@ -51,17 +75,61 @@ describe("PolicyPane", () => {
 
   // Routes the pane fetch plus the Keychain presence probe so each case
   // overrides only the response it exercises.
+  // Secrets side of the stub: store and delete answer the bodyless 204 from
+  // the engine contract while status answers only the existence map. Status
+  // accepts a fixed map or a probe function so store and delete flows can
+  // flip presence mid-test; posted bodies and deleted keys ride out through
+  // callbacks instead of globals.
+  interface PaneSecretsStub {
+    secretStatus?: Record<string, boolean> | ((keys: string[]) => Record<string, boolean>);
+    onSecretPosted?: (body: Record<string, unknown>) => void;
+    onSecretDeleted?: (key: string) => void;
+  }
+
   function stubPaneFetch(
-    policyResponse: (init?: RequestInit) => Response | Promise<Response>
+    policyResponse: (init?: RequestInit) => Response | Promise<Response>,
+    secrets?: PaneSecretsStub
   ) {
+    const configuredStatus = secrets?.secretStatus ?? { GITHUB_TOKEN: true };
     const fetchMock = vi.fn(
       async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
         const urlStr = String(url);
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (urlStr === "/settings/secrets" && method === "POST") {
+          let body: Record<string, unknown> = {};
+          try {
+            body = JSON.parse(init?.body as string) as Record<string, unknown>;
+          } catch {
+            body = {};
+          }
+          secrets?.onSecretPosted?.(body);
+          return new Response(null, { status: 204 });
+        }
+        if (urlStr.startsWith("/settings/secrets/") && method === "DELETE") {
+          secrets?.onSecretDeleted?.(
+            decodeURIComponent(urlStr.slice("/settings/secrets/".length))
+          );
+          return new Response(null, { status: 204 });
+        }
         if (urlStr === "/settings/policy") {
           return policyResponse(init);
         }
         if (urlStr.includes("/settings/secrets/status")) {
-          return jsonResponse({ status: { GITHUB_TOKEN: true } });
+          if (typeof configuredStatus === "function") {
+            let keys: string[] = [];
+            try {
+              const parsed = JSON.parse(init?.body as string) as { keys?: unknown };
+              if (Array.isArray(parsed.keys)) {
+                keys = parsed.keys.filter(
+                  (entry): entry is string => typeof entry === "string"
+                );
+              }
+            } catch {
+              keys = [];
+            }
+            return jsonResponse({ status: configuredStatus(keys) });
+          }
+          return jsonResponse({ status: configuredStatus });
         }
         return jsonResponse({});
       }
@@ -71,13 +139,14 @@ describe("PolicyPane", () => {
   }
 
   // Waits for the snapshot to land in the editors: the mode select proves the
-  // DTO arrived and the credential row proves the bindings rendered.
+  // DTO arrived and the credential rows prove the bindings rendered. Counts
+  // rows with getAllBy so one- and two-binding snapshots share the same gate.
   async function waitForPaneLoaded() {
     await waitFor(() => {
       expect((screen.getByLabelText("Mode") as HTMLSelectElement).value).toBe(
         "allowlist_only"
       );
-      expect(screen.getByTestId("credential-row")).toBeDefined();
+      expect(screen.getAllByTestId("credential-row").length).toBeGreaterThan(0);
     });
   }
 
@@ -1001,5 +1070,191 @@ describe("PolicyPane", () => {
       expect(screen.getByTestId("allowed-domains-error")).toBeDefined();
     });
     expect(screen.getByTestId("allowed-domains-error").textContent).toContain("foo bar");
+  });
+
+  it("offers Set for a missing secret and Update plus guarded Delete for a stored one", async () => {
+    stubPaneFetch(() => jsonResponse(twoKeyPolicyPayload), {
+      secretStatus: { MISSING_KEY: false, STORED_KEY: true },
+    });
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    // The stored row settles after the presence probe lands; the missing row
+    // never leaves the Set posture.
+    await waitFor(() => {
+      expect(screen.getByTestId("update-secret-STORED_KEY")).toBeDefined();
+    });
+    expect(screen.getByTestId("delete-secret-STORED_KEY")).toBeDefined();
+    expect(screen.queryByTestId("set-secret-STORED_KEY")).toBeNull();
+    expect(screen.getByTestId("set-secret-MISSING_KEY")).toBeDefined();
+    expect(screen.queryByTestId("update-secret-MISSING_KEY")).toBeNull();
+    expect(screen.queryByTestId("delete-secret-MISSING_KEY")).toBeNull();
+    expect(screen.getAllByTestId("credential-row")).toHaveLength(2);
+  });
+
+  it("stores a missing secret in-pane and flips its badge to Stored", async () => {
+    let stored = false;
+    const postedKeys: string[] = [];
+    const fetchMock = stubPaneFetch(() => jsonResponse(panePolicyPayload), {
+      secretStatus: () => ({ GITHUB_TOKEN: stored }),
+      onSecretPosted: (body) => {
+        if (typeof body.key === "string") postedKeys.push(body.key);
+        stored = true;
+      },
+    });
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    expect(await screen.findByText("Keychain Missing")).toBeDefined();
+    expect(screen.getByTestId("set-secret-GITHUB_TOKEN")).toBeDefined();
+
+    await user.click(screen.getByTestId("set-secret-GITHUB_TOKEN"));
+    // The store dialog aria-label plus the row Set button both contain
+    // "secret", so the input is pinned by test id to target the field only.
+    const secretInput = await screen.findByTestId("secret-value-input");
+    const storeDialog = secretInput.closest('[role="dialog"]');
+    expect(storeDialog).not.toBeNull();
+    // The typed value is write-only: only the routed key is ever asserted.
+    await user.type(secretInput, "pane-store-value");
+    await user.click(
+      within(storeDialog as HTMLElement).getByRole("button", { name: /keychain/i })
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Keychain Stored")).toBeDefined();
+    });
+    expect(postedKeys).toEqual(["GITHUB_TOKEN"]);
+    const posts = fetchMock.mock.calls.filter(
+      ([url, init]) =>
+        String(url) === "/settings/secrets" && (init as RequestInit | undefined)?.method === "POST"
+    );
+    expect(posts).toHaveLength(1);
+    // The row leaves the Set posture once the secret lands.
+    expect(screen.queryByTestId("set-secret-GITHUB_TOKEN")).toBeNull();
+    expect(screen.getByTestId("update-secret-GITHUB_TOKEN")).toBeDefined();
+    expect(screen.getByTestId("delete-secret-GITHUB_TOKEN")).toBeDefined();
+  });
+
+  it("deletes a stored secret only after confirm and keeps the binding", async () => {
+    let stored = true;
+    const deletedKeys: string[] = [];
+    const fetchMock = stubPaneFetch(() => jsonResponse(panePolicyPayload), {
+      secretStatus: () => ({ GITHUB_TOKEN: stored }),
+      onSecretDeleted: (key) => {
+        deletedKeys.push(key);
+        stored = false;
+      },
+    });
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    expect(await screen.findByText("Keychain Stored")).toBeDefined();
+
+    await user.click(screen.getByTestId("delete-secret-GITHUB_TOKEN"));
+    const confirmDialog = await screen.findByRole("dialog");
+    // Guarded: the row click opens the confirm without firing the DELETE.
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url, init]) =>
+          String(url).startsWith("/settings/secrets/") &&
+          (init as RequestInit | undefined)?.method === "DELETE"
+      )
+    ).toHaveLength(0);
+    await user.click(within(confirmDialog).getByRole("button", { name: /delete|remove/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Keychain Missing")).toBeDefined();
+    });
+    expect(deletedKeys).toEqual(["GITHUB_TOKEN"]);
+    // The secret is gone but the binding survives: row, edit affordance, and
+    // the Set offer all remain for the next store.
+    expect(screen.getByTestId("credential-row")).toBeDefined();
+    expect(screen.getByText("GITHUB_TOKEN")).toBeDefined();
+    expect(screen.getByTestId("edit-binding-GITHUB_TOKEN")).toBeDefined();
+    expect(screen.getByTestId("set-secret-GITHUB_TOKEN")).toBeDefined();
+    expect(screen.queryByTestId("update-secret-GITHUB_TOKEN")).toBeNull();
+  });
+
+  it("stacks the Keychain store over the binding modal from its shortcut", async () => {
+    let stored = false;
+    stubPaneFetch(() => jsonResponse(panePolicyPayload), {
+      secretStatus: () => ({ GITHUB_TOKEN: stored }),
+      onSecretPosted: () => {
+        stored = true;
+      },
+    });
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    expect(await screen.findByText("Keychain Missing")).toBeDefined();
+    await user.click(screen.getByTestId("edit-binding-GITHUB_TOKEN"));
+    const bindingModal = await screen.findByTestId("policy-binding-modal");
+    // The shortcut only offers while the secret is missing.
+    await user.click(within(bindingModal).getByRole("button", { name: "Store in Keychain" }));
+
+    // Stacked: the store dialog opens above the still-mounted binding modal.
+    // The binding modal plus the store dialog plus row buttons all contain
+    // "secret", so the input is pinned by test id to target the field only.
+    const secretInput = await screen.findByTestId("secret-value-input");
+    expect(screen.getByTestId("policy-binding-modal")).toBeDefined();
+    const storeDialog = secretInput.closest('[role="dialog"]');
+    expect(storeDialog).not.toBeNull();
+    await user.type(secretInput, "stacked-store-value");
+    await user.click(
+      within(storeDialog as HTMLElement).getByRole("button", { name: /keychain/i })
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Keychain Stored")).toBeDefined();
+    });
+    expect(screen.getByTestId("policy-binding-modal")).toBeDefined();
+  });
+
+  it("normalizes a pasted rwsecret: prefix to the bare key", async () => {
+    // Unit pin on the shared owner: trim, strip exactly one prefix, keep the rest.
+    expect(normalizeSecretKey("rwsecret:MY_KEY")).toBe("MY_KEY");
+    expect(normalizeSecretKey("  rwsecret:MY_KEY  ")).toBe("MY_KEY");
+    expect(normalizeSecretKey("rwsecret:rwsecret:MY_KEY")).toBe("rwsecret:MY_KEY");
+    expect(normalizeSecretKey("MY_KEY")).toBe("MY_KEY");
+
+    // Pane flow: pasting the surrogate spelling into the binding Key field
+    // lands a binding under the bare key instead of an invalid row.
+    stubPaneFetch(() => jsonResponse(panePolicyPayload));
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    await user.click(screen.getByTestId("credentials-add"));
+    const modal = await screen.findByTestId("policy-binding-modal");
+    await user.type(within(modal).getByLabelText("Key"), "rwsecret:MY_KEY");
+    await user.type(within(modal).getByLabelText("Hosts"), "api.example.com");
+    await user.click(within(modal).getByRole("button", { name: "Save binding" }));
+    await waitFor(() => {
+      expect(screen.queryByTestId("policy-binding-modal")).toBeNull();
+    });
+    expect(screen.getByText("MY_KEY")).toBeDefined();
+    expect(screen.queryByText("rwsecret:MY_KEY")).toBeNull();
+  });
+
+  it("invites in-pane secret setup instead of manual creation when no bindings exist", async () => {
+    const emptyPayload = {
+      ...panePolicyPayload,
+      policy: { ...panePolicyPayload.policy, credentials: {} },
+    };
+    stubPaneFetch(() => jsonResponse(emptyPayload), { secretStatus: {} });
+    render(<PolicyPane />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("credentials-empty")).toBeDefined();
+    });
+    const empty = screen.getByTestId("credentials-empty");
+    // Manual creation is gone: the empty state never sends the owner off to
+    // create the Keychain entry by hand.
+    expect(empty.textContent).not.toContain("Store the secret value in Keychain as");
+    // The in-pane path stays offered from the empty state itself.
+    expect(within(empty).getByTestId("credentials-empty-add")).toBeDefined();
   });
 });

@@ -25,6 +25,7 @@ import {
   isBindingHostCoveredByNetwork,
   isValidBindingKey,
 } from "../policyBindingValidation";
+import { normalizeSecretKey } from "./StoreSecretModal";
 
 export type BindingMethod = (typeof BINDING_METHODS)[number];
 
@@ -83,6 +84,10 @@ export interface PolicyBindingModalProps {
   onFixNetworkCoverage?: (domains: string[]) => void;
   onStoreInKeychain?: (key: string) => void | Promise<void>;
   onStoreSecret?: (key: string) => void | Promise<void>;
+  // Explicit stacked-store state from the owning pane. When true a Keychain
+  // store dialog sits above this modal, so Escape yields to the topmost
+  // dialog instead of dismissing the binding underneath.
+  isStoreOpen?: boolean;
   returnFocusRef?: { current: HTMLElement | null } | null;
   invokingRowRef?: { current: HTMLElement | null } | null;
   triggerRef?: { current: HTMLElement | null } | null;
@@ -411,20 +416,30 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
   }, []);
 
   // Escape closes and returns focus, matching the grouped navigation dropdowns.
+  // When a Keychain store dialog is stacked above (the pane opens the store
+  // without closing this modal), Escape belongs to the topmost dialog, so this
+  // handler yields instead of dismissing the binding underneath. Stacking
+  // arrives as an explicit isStoreOpen prop from the owning pane.
+  const isStoreOpen = props.isStoreOpen ?? false;
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        if (isStoreOpen) {
+          return;
+        }
         event.stopPropagation();
         requestClose();
       }
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [requestClose]);
+  }, [requestClose, isStoreOpen]);
 
   // Click-outside closes through the same containment probe as the dropdowns:
   // a mousedown outside the dialog container dismisses while clicks inside are
-  // ignored, with no hover-open path.
+  // ignored, with no hover-open path. Clicks landing inside another stacked
+  // dialog (the Keychain store portaled above this modal) are ignored so the
+  // binding stays mounted while the store is edited.
   useEffect(() => {
     function handleMouseDown(event: MouseEvent) {
       const target = event.target;
@@ -433,6 +448,14 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
         containerRef.current &&
         !containerRef.current.contains(target)
       ) {
+        const element = target as HTMLElement | null;
+        if (
+          element &&
+          typeof element.closest === "function" &&
+          element.closest('[role="dialog"]')
+        ) {
+          return;
+        }
         requestClose();
       }
     }
@@ -440,7 +463,9 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
     return () => document.removeEventListener("mousedown", handleMouseDown);
   }, [requestClose]);
 
-  const keyTrimmed = keyInput.trim();
+  // Pasted surrogate spellings resolve to the bare slot so typing
+  // rwsecret:MY_KEY binds MY_KEY instead of refusing on the colon.
+  const keyTrimmed = normalizeSecretKey(keyInput);
   const hostsList = useMemo(() => parseHostsText(hostsText), [hostsText]);
   const prefixesList = useMemo(() => parsePrefixesText(prefixesText), [prefixesText]);
   const methodsForSave = useMemo(
@@ -450,7 +475,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
 
   // The key this modal opened for, so an unchanged edit can be told apart from
   // a rename onto another binding's key when checking for duplicates.
-  const originalKey = (props.editingKey ?? props.initialKey ?? props.initialBinding?.key ?? "").trim();
+  const originalKey = normalizeSecretKey(props.editingKey ?? props.initialKey ?? props.initialBinding?.key ?? "");
   const existingBindingKeys = props.existingBindingKeys ?? [];
 
   // Key shape gates resolution; an existing binding key is refused unless it is
