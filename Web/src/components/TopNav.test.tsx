@@ -8,11 +8,14 @@
 // navigation, health detail, and badge behavior even when the handheld
 // stylesheet collapses the trigger to its glyph.
 //
-// The persona describe pins the text-only profile identity contract: a saved
-// persona name renders beside the stock glyph with zero avatar images (the
-// Wisp lives exactly once in the dashboard greeting cluster), an absent
-// persona renders exactly today's UI, and the shared store subscription stays
-// so attention signals still publish for the greeting row.
+// The operator describe pins the operator-only profile identity contract: the
+// trigger keeps a static "Profile" label in every persona state, the menu
+// header shows the stored owner name (or "Operator" when absent or blank),
+// and the assistant name never renders in this bar — it lives in the greeting
+// row plus the chat header plus settings only. Zero avatar images render here
+// (the Wisp lives exactly once in the dashboard greeting cluster), and the
+// shared store subscription stays so attention signals still publish for the
+// greeting row.
 
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -881,7 +884,7 @@ describe("TopNav staged drawer trigger", () => {
   });
 });
 
-describe("TopNav persona profile", () => {
+describe("TopNav operator profile", () => {
   const HEALTH = {
     status: "ok",
     engine: "Rune Weaver",
@@ -919,111 +922,235 @@ describe("TopNav persona profile", () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
   });
 
-  it("renders the saved persona name beside the stock glyph with zero avatar images", async () => {
+  it("keeps the trigger label static Profile with a persona set", async () => {
     const user = userEvent.setup();
     publishPersonaFromSettings({
-      assistant_name: "Zephyra",
+      assistant_name: "Weaver",
       tone: "warm",
       style: "",
       user_name: "Kupan",
       avatar: "rose",
     });
     renderPersonaNav();
-    // Text identity only: the Wisp image lives in the dashboard greeting
-    // cluster, so the trigger keeps the stock glyph even for a saved persona.
+    // The trigger never shows the assistant name: it stays a static label
+    // even when a persona is saved.
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Profile",
+    );
+    expect(screen.queryByText("Weaver")).toBeNull();
     expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
-    expect(document.querySelector(".profile-dropdown-btn .persona-avatar")).toBeNull();
     expect(document.querySelector(".persona-avatar")).toBeNull();
     await openProfileMenu(user);
-    // The trigger label and the menu header carry the same text identity, so
-    // the saved name appears in both places with no avatar image on either.
-    expect(screen.getAllByText("Zephyra").length).toBeGreaterThanOrEqual(2);
     expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
-      "Zephyra",
+      "Profile",
     );
+    expect(screen.queryByText("Weaver")).toBeNull();
+    // The menu header carries operator identity, so the owner name renders
+    // there while the assistant name stays absent.
+    expect(document.querySelector(".profile-name")?.textContent).toBe("Kupan");
     expect(document.querySelector(".profile-avatar img")).toBeNull();
-    expect(document.querySelector(".persona-avatar")).toBeNull();
     // The health model line stays exactly where it was beside the new identity.
     expect(screen.getByText("gemma-4-9b")).toBeInTheDocument();
   });
 
-  it("falls back to the stock UserIcon and label when no persona exists", async () => {
+  it("keeps the trigger label static Profile without a persona", async () => {
     const user = userEvent.setup();
     renderPersonaNav();
-    // An absent persona is a visual no-op: the pre-persona UI, glyph and
-    // stock label both, with no avatar image anywhere in the profile block.
+    // An absent persona leaves the trigger on its static label with no
+    // avatar image anywhere in the profile block.
     expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
     expect(document.querySelector(".persona-avatar")).toBeNull();
-    // The trigger already carries the stock label before the menu opens.
     expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
-      "Rune Weaver Agent",
+      "Profile",
     );
+    expect(screen.queryByText("Weaver")).toBeNull();
     await openProfileMenu(user);
-    // Trigger plus header share the stock identity, so both nodes read the
-    // same fallback with no avatar image on either.
-    expect(
-      screen.getAllByText("Rune Weaver Agent").length,
-    ).toBeGreaterThanOrEqual(2);
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Profile",
+    );
+    expect(document.querySelector(".profile-name")?.textContent).toBe(
+      "Operator",
+    );
+    expect(screen.queryByText("Weaver")).toBeNull();
     expect(document.querySelector(".profile-avatar img")).toBeNull();
     expect(document.querySelector(".persona-avatar")).toBeNull();
   });
 
-  it("keeps text identity with zero avatar nodes for an unknown stored accent", () => {
-    // A drifted accent no longer names a file anywhere in this bar: the name
-    // still renders while the image count stays zero.
-    publishPersonaFromSettings({ assistant_name: "Vex", avatar: "chartreuse" });
+  it("shows the stored owner name in the menu header", async () => {
+    const user = userEvent.setup();
+    publishPersonaFromSettings({
+      assistant_name: "Weaver",
+      tone: "warm",
+      style: "",
+      user_name: "Kupan",
+      avatar: "rose",
+    });
     renderPersonaNav();
-    expect(screen.getByText("Vex")).toBeInTheDocument();
+    await openProfileMenu(user);
+    // Operator space shows operator identity only: the owner name renders in
+    // the header while the assistant name appears nowhere in this bar.
+    expect(document.querySelector(".profile-name")?.textContent).toBe("Kupan");
+    expect(screen.getByText("Kupan")).toBeInTheDocument();
+    expect(screen.queryByText("Weaver")).toBeNull();
     expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
-      "Vex",
+      "Profile",
     );
+  });
+
+  it("falls back to Operator when no owner name exists", async () => {
+    const user = userEvent.setup();
+    renderPersonaNav();
+    await openProfileMenu(user);
+    // Absent persona is an operator fallback, not an empty string: the header
+    // reads "Operator" while the trigger keeps its static label.
+    expect(document.querySelector(".profile-name")?.textContent).toBe(
+      "Operator",
+    );
+    expect(screen.getByText("Operator")).toBeInTheDocument();
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Profile",
+    );
+    expect(screen.queryByText("Weaver")).toBeNull();
+  });
+
+  it("falls back to Operator when the owner name is blank", async () => {
+    const user = userEvent.setup();
+    // Blank normalizes like absent (same trim rule as the greeting row), so a
+    // whitespace-only owner name never renders an empty header.
+    publishPersonaFromSettings({
+      assistant_name: "Weaver",
+      user_name: "   ",
+      avatar: "rose",
+    });
+    renderPersonaNav();
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Profile",
+    );
+    expect(screen.queryByText("Weaver")).toBeNull();
+    await openProfileMenu(user);
+    expect(document.querySelector(".profile-name")?.textContent).toBe(
+      "Operator",
+    );
+    expect(screen.queryByText("Weaver")).toBeNull();
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Profile",
+    );
+  });
+
+  it("never renders the assistant name in any TopNav state", async () => {
+    const user = userEvent.setup();
+    // With a persona set: the owner name shows, the assistant name does not —
+    // neither on the trigger nor in the open menu.
+    publishPersonaFromSettings({
+      assistant_name: "Weaver",
+      user_name: "Kupan",
+      avatar: "rose",
+    });
+    const { unmount } = renderPersonaNav();
+    expect(screen.queryByText("Weaver")).toBeNull();
+    await openProfileMenu(user);
+    expect(screen.queryByText("Weaver")).toBeNull();
+    expect(document.querySelector(".profile-name")?.textContent).toBe("Kupan");
+    unmount();
+    // Without a persona: the assistant name is still absent and the header
+    // falls back to the operator stock label.
+    resetPersonaSignalsForTesting();
+    renderPersonaNav();
+    expect(screen.queryByText("Weaver")).toBeNull();
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Profile",
+    );
+  });
+
+  it("keeps text identity with zero avatar nodes for an assistant-only persona", async () => {
+    const user = userEvent.setup();
+    // An assistant-only save still shows operator fallback here: the owner
+    // slot has no value, so the header reads "Operator" and the assistant
+    // name never leaks into either surface.
+    publishPersonaFromSettings({ assistant_name: "Weaver", avatar: "chartreuse" });
+    renderPersonaNav();
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Profile",
+    );
+    expect(screen.queryByText("Weaver")).toBeNull();
     expect(document.querySelector(".persona-avatar")).toBeNull();
     expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
+    await openProfileMenu(user);
+    expect(document.querySelector(".profile-name")?.textContent).toBe(
+      "Operator",
+    );
+    expect(screen.queryByText("Weaver")).toBeNull();
   });
 
   it("renders zero avatar nodes when the approvals badge counts pending filings", () => {
     // The badge still publishes the shared attention signal for the greeting
     // cluster, but this bar never renders the image itself.
-    publishPersonaFromSettings({ assistant_name: "Vex", avatar: "cyan" });
+    publishPersonaFromSettings({
+      assistant_name: "Weaver",
+      user_name: "Kupan",
+      avatar: "cyan",
+    });
     renderPersonaNav({ approvalsBadge: 2 });
     expect(document.querySelector(".persona-avatar")).toBeNull();
     expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Profile",
+    );
+    expect(screen.queryByText("Weaver")).toBeNull();
   });
 
   it("renders zero avatar nodes for an unread goal nudge alone", () => {
-    publishPersonaFromSettings({ assistant_name: "Vex", avatar: "cyan" });
+    publishPersonaFromSettings({
+      assistant_name: "Weaver",
+      user_name: "Kupan",
+      avatar: "cyan",
+    });
     renderPersonaNav({ goalsBadge: 1 });
     expect(document.querySelector(".persona-avatar")).toBeNull();
     expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Profile",
+    );
+    expect(screen.queryByText("Weaver")).toBeNull();
   });
 
-  it("mirrors a persona saved elsewhere into the mounted profile block without a remount", async () => {
+  it("mirrors an owner rename saved elsewhere into the mounted profile block without a remount", async () => {
     const user = userEvent.setup();
     renderPersonaNav();
     expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Profile",
+    );
+    await openProfileMenu(user);
+    // The open menu starts on the operator fallback before any owner name is
+    // stored.
+    expect(document.querySelector(".profile-name")?.textContent).toBe(
+      "Operator",
+    );
     // The shared store notifies outside the render cycle, so the publish runs
     // inside act to keep the state update attached to this test's render.
     act(() => {
       publishPersonaFromSettings({
-        assistant_name: "Zephyra",
+        assistant_name: "Weaver",
+        user_name: "Kupan",
         avatar: "emerald",
       });
     });
+    // The live rename mirrors the owner name only; the assistant name never
+    // mounts alongside it and no image mounts either.
     await waitFor(() => {
-      expect(screen.getByText("Zephyra")).toBeInTheDocument();
+      expect(document.querySelector(".profile-name")?.textContent).toBe(
+        "Kupan",
+      );
     });
-    // The live rename mirrors the name only; no image mounts alongside it.
-    expect(document.querySelector(".persona-avatar")).toBeNull();
+    expect(screen.queryByText("Weaver")).toBeNull();
     expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
-      "Zephyra",
+      "Profile",
     );
-    await openProfileMenu(user);
-    // Trigger plus header share the mirrored identity once the menu opens.
-    expect(screen.getAllByText("Zephyra").length).toBeGreaterThanOrEqual(2);
     expect(document.querySelector(".persona-avatar")).toBeNull();
   });
 
-  it("keeps the stock identity when the settings read fails on mount", async () => {
+  it("keeps the Operator identity when the settings read fails on mount", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
@@ -1032,11 +1159,16 @@ describe("TopNav persona profile", () => {
       }),
     );
     renderPersonaNav();
+    expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
+      "Profile",
+    );
     await openProfileMenu(user);
-    // Trigger plus header share the stock fallback when the read fails.
-    expect(
-      screen.getAllByText("Rune Weaver Agent").length,
-    ).toBeGreaterThanOrEqual(2);
+    // Trigger plus header share the operator fallback when the read fails.
+    expect(document.querySelector(".profile-name")?.textContent).toBe(
+      "Operator",
+    );
+    expect(screen.getByText("Operator")).toBeInTheDocument();
+    expect(screen.queryByText("Weaver")).toBeNull();
     expect(document.querySelector(".profile-dropdown-btn img")).toBeNull();
     expect(document.querySelector(".persona-avatar")).toBeNull();
   });

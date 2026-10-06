@@ -4,11 +4,13 @@
 // engine health, so configuration and pursuit stay reachable without crowding
 // chat. Group and profile menus share the same click/keyboard mechanics with no
 // hover-open path, keeping pointer and keyboard orderings deterministic.
-// The profile block mirrors the saved persona name from the shared persona
-// store as text identity only, falling back to the stock label when no persona
-// exists so an absent persona is a visual no-op. The avatar image itself lives
-// in the sole identity surface (settings picker editor excluded); this bar
-// never renders it, keeping one identity image for the whole app.
+// The operator space shows operator identity only: the trigger keeps a static
+// "Profile" label in every persona state and the menu header shows the stored
+// owner name, falling back to "Operator" when absent or blank. The assistant
+// name lives in the greeting row plus the chat header plus settings only, so a
+// rename never ripples into this bar. The avatar image itself lives in the
+// sole identity surface (settings picker editor excluded); this bar never
+// renders it, keeping one identity image for the whole app.
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { HealthResponse } from "../api";
 import {
@@ -16,7 +18,7 @@ import {
   ensureSearch,
   getSearchHealth,
   getSettings,
-  personaAssistantName,
+  personaUserName,
   stopSearch,
   resolveSearchMessage,
   resolveSearchURL,
@@ -157,7 +159,7 @@ export default function TopNav({
   // already renders `No staged changes`. Never auto-opens on tool_end.
   const normalizedStagedCount = normalizeBadgeCount(stagedFilesCount);
 
-  // Persona name for the profile block. The shared persona store owns the
+  // Operator name for the profile block. The shared persona store owns the
   // data flow: Settings publishes on every load and save, so a rename lands
   // here live. The one-shot mount fetch only runs when nobody has loaded
   // settings yet this session, so a dashboard opened on a saved persona still
@@ -201,11 +203,17 @@ export default function TopNav({
     publishAgentAttention(approvalsBadge > 0 || goalsBadge > 0);
   }, [approvalsBadge, goalsBadge]);
 
-  // The fallback label matches the stock string exactly, so an absent or blank
-  // persona keeps the profile block word-for-word as today. The bar renders
-  // text identity only: the Wisp image lives in the sole identity surface (settings picker editor excluded),
-  // so this block never branches on avatar presence.
-  const personaDisplayName = personaAssistantName(persona) ?? "Rune Weaver Agent";
+  // Operator identity with the same blank normalization as the greeting row
+  // plus the chat header: a stored owner name that trims to empty is
+  // indistinguishable from an absent persona, so both fall back to "Operator"
+  // instead of rendering an empty string. The bar renders text identity only:
+  // the Wisp image lives in the sole identity surface (settings picker editor excluded),
+  // so this block never branches on avatar presence. The assistant name never
+  // appears here; it lives in the greeting row plus the chat header plus
+  // settings only.
+  const operatorNameRaw = personaUserName(persona).trim();
+  const operatorDisplayName =
+    operatorNameRaw.length > 0 ? operatorNameRaw : "Operator";
 
   // Local transient feedback for the bell: the shared stack owns timers plus
   // the dismiss surface, so this nav never invents a second toast system and
@@ -753,11 +761,13 @@ export default function TopNav({
             aria-controls="profile-menu"
             aria-label="Profile and Settings menu"
           >
-            {/* Text identity only: the stock glyph names the menu alongside the persona label,
+            {/* Static trigger label: the operator space never shows the assistant
+                name, which lives in the greeting row plus the chat header plus
+                settings. The stock glyph names the menu alongside the fixed label,
                 while the Wisp image itself renders in the sole identity surface (settings picker editor excluded). */}
             <UserIcon size={16} className="profile-user-icon" />
             <span className="status-dot" />
-            <span className="profile-btn-label">{personaDisplayName}</span>
+            <span className="profile-btn-label">Profile</span>
             <ChevronDownIcon
               size={13}
               className={`dropdown-chevron ${profileOpen ? "rotate-180" : ""}`}
@@ -774,12 +784,15 @@ export default function TopNav({
               <div className="profile-menu-header">
                 <div className="profile-header-user">
                   <div className="profile-avatar">
-                    {/* Text identity only in the menu header as well: the name below carries the persona
-                        while the glyph stays stock, keeping the sole identity surface (settings picker editor excluded). */}
+                    {/* Operator identity only in the menu header as well: the name below
+                        carries the stored owner name (or "Operator" when absent or blank)
+                        while the glyph stays stock, keeping the sole identity surface (settings picker editor excluded).
+                        The assistant name never renders here; it lives in the greeting
+                        row plus the chat header plus settings only. */}
                     <UserIcon size={16} />
                   </div>
                   <div className="profile-header-details">
-                    <span className="profile-name">{personaDisplayName}</span>
+                    <span className="profile-name">{operatorDisplayName}</span>
                     <span className="profile-status-text">
                       <span className="status-dot-sm" /> Connected
                     </span>
