@@ -10,240 +10,6 @@ import Foundation
 import os
 import RuneWeaverCore
 
-/// Arguments for `bash.exec`.
-public struct BashArgs: Codable, Sendable, Equatable {
-    /// Shared command carrier so gate and tool decode the same field once.
-    public var commandArgs: BashCommandArgs
-    /// Shell command string to execute.
-    public var command: String {
-        commandArgs.command
-    }
-
-    /// Working directory for execution (optional).
-    public let cwd: String?
-    /// Execution timeout in seconds (optional).
-    public let timeoutSeconds: Int?
-    /// Optional flag to request network access in Seatbelt sandbox.
-    public let requestNetwork: Bool
-    /// Declared egress hosts constraining this call's network dials (max 10).
-    ///
-    /// Empty means no host claim; a non-empty set must cover every host the
-    /// command dials, and the supervisor denies undeclared dials even when
-    /// the policy would otherwise allow them.
-    public let networkHosts: [String]
-
-    public init(
-        command: String,
-        cwd: String? = nil,
-        timeoutSeconds: Int? = nil,
-        requestNetwork: Bool = false,
-        networkHosts: [String] = []
-    ) {
-        self.commandArgs = BashCommandArgs(command: command)
-        self.cwd = cwd
-        self.timeoutSeconds = timeoutSeconds
-        self.requestNetwork = requestNetwork
-        self.networkHosts = networkHosts
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case command
-        case cwd
-        case timeoutSeconds
-        case requestNetworkSnake = "request_network"
-        case networkHostsSnake = "network_hosts"
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let command = try container.decode(String.self, forKey: .command)
-        // Flat wire shape stays `{"command": ...}`; the value lands in the
-        // shared carrier so trimming rules cannot drift from the gate.
-        self.commandArgs = BashCommandArgs(command: command)
-        self.cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
-        self.timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
-        // Strict wire carries only snake `request_network`; the provider
-        // rejects the camel spelling via additionalProperties false while the
-        // decoder ignores unknown keys and defaults fail-closed to `false`,
-        // so a camel `true` never enables network.
-        let snakeNet = try container.decodeIfPresent(Bool.self, forKey: .requestNetworkSnake)
-        self.requestNetwork = snakeNet ?? false
-        // Strict wire carries only snake `network_hosts` for the same reason:
-        // a camel spelling never declares destinations, so undeclared dials
-        // still deny instead of slipping through on a misspelled key.
-        self.networkHosts = try container.decodeIfPresent([String].self, forKey: .networkHostsSnake) ?? []
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(commandArgs.command, forKey: .command)
-        try container.encodeIfPresent(cwd, forKey: .cwd)
-        try container.encodeIfPresent(timeoutSeconds, forKey: .timeoutSeconds)
-        if requestNetwork {
-            try container.encode(requestNetwork, forKey: .requestNetworkSnake)
-        }
-        if !networkHosts.isEmpty {
-            try container.encode(networkHosts, forKey: .networkHostsSnake)
-        }
-    }
-}
-
-/// How a shell run ended, distinguishing policy refusal from process fate.
-///
-/// `clean` means the process exited on its own (any exit code) without a
-/// timeout or resource kill; `wall_timeout` means the wall-clock watchdog
-/// terminated it; `resource_limit` is CPU-only — it means the CPU `ulimit`
-/// killed it: a SIGXCPU signal death (24), or its `128 + signal` wrapper
-/// spelling (152) with the shell's `cpu time limit` diagnostic on stderr
-/// proving the limiter fired rather than a voluntary `exit 152`. A bare
-/// diagnostic without a limiter-implying status stays `clean` so a voluntary
-/// phrase on stderr (for example echoing `cpu time limit` then `exit 1`)
-/// never reads as a resource bound; `denied` means policy refused to spawn
-/// it at all. Memory-limit deaths stay `clean`: SIGKILL (9 / 137) shares its
-/// status across OOM, manual, and sandbox kills, and `ulimit -v` malloc
-/// failures surface as ordinary non-zero exits, so neither reads as a
-/// resource bound without CPU-limit corroboration.
-public enum BashKillReason: String, Sendable, Codable, Equatable {
-    /// The process exited on its own without a timeout or resource kill.
-    case clean
-    /// The wall-clock watchdog terminated the run.
-    case wallTimeout = "wall_timeout"
-    /// The CPU limit killed the run (CPU-only; memory kills stay `clean`).
-    case resourceLimit = "resource_limit"
-    /// Policy refused to spawn the command.
-    case denied
-}
-
-/// JSON payload returned in `ToolOutput.content` for `bash.exec`.
-public struct BashResultEnvelope: Codable, Sendable, Equatable {
-    public let command: String
-    public let stdout: String
-    public let stderr: String
-    public let exitCode: Int32
-    public let approvalRequired: Bool
-    public let isChained: Bool
-    public let denied: Bool
-    public let error: String?
-    public let reason: String?
-    /// How the run ended; `denied` mirrors a refused spawn while the other
-    /// cases distinguish wall-clock kills from CPU-only resource-limit kills
-    /// (memory-limit deaths stay `clean`).
-    public let killReason: BashKillReason
-
-    private enum CodingKeys: String, CodingKey {
-        case command
-        case stdout
-        case stderr
-        case exitCode
-        case approvalRequired
-        case isChained
-        case denied
-        case error
-        case reason
-        case killReason = "kill_reason"
-    }
-
-    public init(
-        command: String,
-        stdout: String = "",
-        stderr: String = "",
-        exitCode: Int32 = 0,
-        approvalRequired: Bool = false,
-        isChained: Bool = false,
-        denied: Bool = false,
-        error: String? = nil,
-        reason: String? = nil,
-        killReason: BashKillReason? = nil
-    ) {
-        self.command = command
-        self.stdout = stdout
-        self.stderr = stderr
-        self.exitCode = exitCode
-        self.approvalRequired = approvalRequired
-        self.isChained = isChained
-        self.denied = denied
-        self.error = error
-        self.reason = reason
-        // An omitted reason stays honest: refused spawns read as denied,
-        // everything else reads as a clean exit until the runner proves otherwise.
-        if let killReason {
-            self.killReason = killReason
-        } else if denied {
-            self.killReason = .denied
-        } else {
-            self.killReason = .clean
-        }
-    }
-
-    /// Decodes an envelope, defaulting absent reasons for payloads written
-    /// before the kill-reason contract so old success JSON still reads clean
-    /// and old refusals still read denied.
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        command = try container.decode(String.self, forKey: .command)
-        stdout = try container.decodeIfPresent(String.self, forKey: .stdout) ?? ""
-        stderr = try container.decodeIfPresent(String.self, forKey: .stderr) ?? ""
-        exitCode = try container.decodeIfPresent(Int32.self, forKey: .exitCode) ?? 0
-        approvalRequired = try container.decodeIfPresent(Bool.self, forKey: .approvalRequired) ?? false
-        isChained = try container.decodeIfPresent(Bool.self, forKey: .isChained) ?? false
-        denied = try container.decodeIfPresent(Bool.self, forKey: .denied) ?? false
-        error = try container.decodeIfPresent(String.self, forKey: .error)
-        reason = try container.decodeIfPresent(String.self, forKey: .reason)
-        if let decoded = try container.decodeIfPresent(BashKillReason.self, forKey: .killReason) {
-            killReason = decoded
-        } else if denied {
-            killReason = .denied
-        } else {
-            killReason = .clean
-        }
-    }
-
-    /// Encodes an envelope with the snake-case kill reason beside the
-    /// existing camel-case keys.
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(command, forKey: .command)
-        try container.encode(stdout, forKey: .stdout)
-        try container.encode(stderr, forKey: .stderr)
-        try container.encode(exitCode, forKey: .exitCode)
-        try container.encode(approvalRequired, forKey: .approvalRequired)
-        try container.encode(isChained, forKey: .isChained)
-        try container.encode(denied, forKey: .denied)
-        try container.encodeIfPresent(error, forKey: .error)
-        try container.encodeIfPresent(reason, forKey: .reason)
-        try container.encode(killReason, forKey: .killReason)
-    }
-}
-
-/// Thread-safe capped output buffer for process stdout/stderr streams.
-final class BashOutputBuffer: Sendable {
-    private struct State: Sendable {
-        var data = Data()
-        let maxBytes: Int
-    }
-
-    private let state: OSAllocatedUnfairLock<State>
-
-    init(maxBytes: Int = 1024 * 1024) {
-        self.state = OSAllocatedUnfairLock(initialState: State(data: Data(), maxBytes: maxBytes))
-    }
-
-    func append(_ chunk: Data) {
-        guard !chunk.isEmpty else { return }
-        state.withLock { buffer in
-            if buffer.data.count < buffer.maxBytes {
-                buffer.data.append(chunk.prefix(buffer.maxBytes - buffer.data.count))
-            }
-        }
-    }
-
-    var stringValue: String {
-        state.withLock { buffer in
-            String(data: buffer.data, encoding: .utf8) ?? ""
-        }
-    }
-}
-
 /// Sendable box holding the timeout cancellation task.
 /// The caller thread stores the handle while the process termination handler
 /// cancels it on an arbitrary queue, so the handle stays behind an unfair lock.
@@ -390,14 +156,36 @@ public struct BashTool: Tool {
         guard !trimmedCommand.isEmpty else {
             return .failure("Invalid argument 'command': command must not be empty.", callID: input.callID)
         }
-        // Dry-run preview mode
+        // Dry-run preview mode takes the same policy plus network gates the
+        // live call would, without spawning, so a preview never advertises a
+        // target the live call would refuse (mirrors api.request dry runs
+        // taking the policy gate without resolving credentials).
         if context.dryRun {
             let decision = BashSecurity.evaluate(command: trimmedCommand, config: bashConfig)
+            if decision.isDenied || (decision.requiresApproval && !context.approved) {
+                let envelope = BashResultEnvelope(
+                    command: trimmedCommand,
+                    approvalRequired: decision.requiresApproval,
+                    isChained: decision.isChained,
+                    denied: decision.isDenied,
+                    reason: "Dry run preview: \(decision.reason)"
+                )
+                return .success(encodeEnvelope(envelope), callID: input.callID)
+            }
+            if let screeningFailure = await dryRunNetworkFailure(
+                command: trimmedCommand,
+                args: args,
+                decision: decision,
+                context: context,
+                callID: input.callID
+            ) {
+                return screeningFailure
+            }
             let envelope = BashResultEnvelope(
                 command: trimmedCommand,
-                approvalRequired: decision.requiresApproval,
+                approvalRequired: false,
                 isChained: decision.isChained,
-                denied: decision.isDenied,
+                denied: false,
                 reason: "Dry run preview: \(decision.reason)"
             )
             return .success(encodeEnvelope(envelope), callID: input.callID)
@@ -448,15 +236,19 @@ public struct BashTool: Tool {
         ) {
             return .failure(encodeEnvelope(networkEnvelope), callID: input.callID)
         }
+        let tier = BashSandboxRouter.resolveTier(command: trimmedCommand, config: bashConfig)
         return try await executeValidated(
             command: trimmedCommand,
             args: args,
             declaredHosts: declaredHosts,
             context: context,
-            callID: input.callID
+            callID: input.callID,
+            tier: tier
         )
     }
+}
 
+extension BashTool {
     /// Runs a validated command through quota, workspace, and sandbox spawn.
     ///
     /// Callers complete decode plus policy gates first; this helper owns the
@@ -474,19 +266,40 @@ public struct BashTool: Tool {
         args: BashArgs,
         declaredHosts: [String],
         context: ToolContext,
-        callID: String
+        callID: String,
+        tier: BashSandboxMode? = nil
     ) async throws -> ToolOutput {
+        let tier = tier ?? BashSandboxRouter.resolveTier(command: command, config: bashConfig)
         let decision = BashSecurity.evaluate(command: command, config: bashConfig)
         let effectiveAllowNetwork = bashConfig.allowNetwork || (args.requestNetwork && context.approved)
-        // Screen explicit URLs if network is allowed
-        if effectiveAllowNetwork,
-           let envelope = await screenExplicitURLs(
-               command: command,
-               declaredHosts: declaredHosts,
-               sessionID: context.sessionID
-           )
-        {
+        let screenHosts = collectedScreenHosts(in: command)
+        let isNetworkCapable = BashNetworkGuard.requiresNetworkAccess(command) || !screenHosts.isEmpty
+        if tier != .hostSeatbelt, BashNetworkGuard.requiresNetworkAccess(command), declaredHosts.isEmpty {
+            let diagnostic = "Command requires network access but declares no network_hosts;"
+                + " declare every dial in network_hosts for isolated tiers."
+            let envelope = BashResultEnvelope(
+                command: command,
+                approvalRequired: false,
+                isChained: false,
+                denied: true,
+                error: "Command dials undeclared host(s) with no declared hosts (\(diagnostic))",
+                reason: diagnostic
+            )
             return .failure(encodeEnvelope(envelope), callID: callID)
+        }
+        let shouldScreen = BashSandboxRouter.shouldScreenNetwork(
+            effectiveAllowNetwork: effectiveAllowNetwork,
+            tier: tier,
+            isNetworkCapable: isNetworkCapable
+        )
+        if shouldScreen {
+            if let envelope = await screenExplicitURLs(
+                command: command,
+                declaredHosts: declaredHosts,
+                sessionID: context.sessionID
+            ) {
+                return .failure(encodeEnvelope(envelope), callID: callID)
+            }
         }
         let workspace = effectiveWorkspaceStore
         if let quotaFailure = await checkedQuotaFailure(
@@ -519,7 +332,8 @@ public struct BashTool: Tool {
         // scratch directory for reads so confined shells can map the
         // immutable copy in production (where the workspace sits under home
         // outside the system-temp defaults) without widening writes.
-        let workspaceTmpPath = await workspace.root().appendingPathComponent(WorkspaceStore.tmpDirectoryName).path
+        let workspaceRoot = await workspace.root()
+        let workspaceTmpPath = workspaceRoot.appendingPathComponent(WorkspaceStore.tmpDirectoryName).path
         return try await runProcess(
             command: command,
             workingDirURL: cwdResult.url,
@@ -527,8 +341,68 @@ public struct BashTool: Tool {
             allowNetwork: effectiveAllowNetwork,
             allowedEgressHosts: declaredHosts,
             additionalReadPaths: [workspaceTmpPath],
-            callID: callID
+            callID: callID,
+            tier: tier,
+            workspaceRoot: workspaceRoot
         )
+    }
+
+    /// Resolves the working directory for a spawned run.
+    ///
+    /// Isolated tiers never inherit HOME: without an explicit cwd they stay
+    /// inside workspace scratch (strict keeps `tmp`, machine keeps the root),
+    /// so a missing directory cannot widen the mount. The home fallback only
+    /// serves direct callers outside the validated execute path, never masking
+    /// a workspace failure in normal turns.
+    private func resolveRunWorkingDir(
+        workingDirURL: URL?,
+        tier: BashSandboxMode,
+        workspaceRoot: URL?
+    ) -> URL {
+        if let workingDirURL {
+            return workingDirURL
+        }
+        if tier != .hostSeatbelt, let workspaceRoot {
+            return tier == .strictContainer
+                ? BashSandboxRouter.workspaceTmpURL(for: workspaceRoot)
+                : workspaceRoot
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    /// Wraps a model command with clamped resource bounds.
+    ///
+    /// Clamping at use keeps a hand-built config from trapping the shell or
+    /// inviting OOM swaps; load-time validation already rejects those values
+    /// fail-closed, so this is the degrade-to-sane backstop.
+    private func boundedRunCommand(_ command: String) -> String {
+        let clamped = bashConfig.clamped()
+        return Self.resourceLimitedCommand(
+            command,
+            cpuSeconds: clamped.cpuSeconds,
+            memoryMB: clamped.memoryMB
+        )
+    }
+
+    /// Applies sandbox target plus directory and pipes to a fresh process.
+    ///
+    /// Centralizes executable, arguments, directory, environment, and output
+    /// pipes so `runProcess` stays within the body-length budget without
+    /// splitting spawn from collection.
+    private func configureRunProcess(
+        _ process: Process,
+        sandboxTarget: BashSandboxTarget,
+        workingDir: URL,
+        tier: BashSandboxMode,
+        stdoutPipe: Pipe,
+        stderrPipe: Pipe
+    ) {
+        process.executableURL = sandboxTarget.executableURL
+        process.arguments = sandboxTarget.arguments
+        process.currentDirectoryURL = workingDir
+        process.environment = filteredEnvironment(for: workingDir, tier: tier)
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
     }
 
     private func runProcess(
@@ -538,25 +412,16 @@ public struct BashTool: Tool {
         allowNetwork: Bool,
         allowedEgressHosts: [String] = [],
         additionalReadPaths: [String] = [],
-        callID: String
+        callID: String,
+        tier: BashSandboxMode = .strictContainer,
+        workspaceRoot: URL? = nil
     ) async throws -> ToolOutput {
-        let process = Process()
-        // The execute path always resolves a working directory (explicit cwd
-        // or the ensured workspace root, failing closed otherwise), so the
-        // home fallback below only serves direct `runProcess` callers and never
-        // masks a workspace failure in normal turns.
-        let effectiveWorkingDir = workingDirURL ?? FileManager.default.homeDirectoryForCurrentUser
-
-        // Bounds clamp at use so a hand-built config degrades to the nearest
-        // sane limit instead of trapping the shell or inviting OOM swaps;
-        // load-time validation already rejects those values fail-closed.
-        let clamped = bashConfig.clamped()
-        let boundedCommand = Self.resourceLimitedCommand(
-            command,
-            cpuSeconds: clamped.cpuSeconds,
-            memoryMB: clamped.memoryMB
+        let effectiveWorkingDir = resolveRunWorkingDir(
+            workingDirURL: workingDirURL,
+            tier: tier,
+            workspaceRoot: workspaceRoot
         )
-
+        let boundedCommand = boundedRunCommand(command)
         let sandboxTarget = configuredSandboxTarget(
             workingDirURL: workingDirURL,
             effectiveWorkingDir: effectiveWorkingDir,
@@ -564,21 +429,24 @@ public struct BashTool: Tool {
             allowNetwork: allowNetwork,
             allowedEgressHosts: allowedEgressHosts,
             additionalReadPaths: additionalReadPaths,
-            callID: callID
+            callID: callID,
+            tier: tier,
+            workspaceRoot: workspaceRoot
         )
         if let sandboxFailure = sandboxTarget.failure {
             return sandboxFailure
         }
-        process.executableURL = sandboxTarget.executableURL
-        process.arguments = sandboxTarget.arguments
-
-        process.currentDirectoryURL = effectiveWorkingDir
-        process.environment = filteredEnvironment(for: effectiveWorkingDir)
-
+        let process = Process()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
+        configureRunProcess(
+            process,
+            sandboxTarget: sandboxTarget,
+            workingDir: effectiveWorkingDir,
+            tier: tier,
+            stdoutPipe: stdoutPipe,
+            stderrPipe: stderrPipe
+        )
 
         // Buffer limit (1 MB max output)
         let maxBytes = 1024 * 1024
@@ -686,6 +554,73 @@ extension BashTool {
         } catch {
             return (nil, .failure(error.localizedDescription, callID: callID))
         }
+    }
+
+    /// Screens one dry-run preview through declared-hosts plus network access
+    /// plus supervisor screening without spawning.
+    ///
+    /// Mirrors the live gates in `execute` plus `executeValidated` up to (but
+    /// not including) quota, workspace, and spawn, so a preview never
+    /// advertises a blocked target the live call would refuse. Declared
+    /// coverage runs first with the supervisor as the second opinion, and a
+    /// missing supervisor denies fail-closed when screening is required;
+    /// credential resolution never runs here because bash screening carries
+    /// no Keychain values.
+    /// - Returns: Failure output to return directly, or nil when the preview
+    ///   may proceed.
+    private func dryRunNetworkFailure(
+        command: String,
+        args: BashArgs,
+        decision: BashDecision,
+        context: ToolContext,
+        callID: String
+    ) async -> ToolOutput? {
+        let hostsResult = checkedDeclaredHosts(args, callID: callID)
+        if let hostsFailure = hostsResult.failure {
+            return hostsFailure
+        }
+        let declaredHosts = hostsResult.hosts ?? []
+        if let networkEnvelope = validateNetworkAccess(
+            command: command,
+            args: args,
+            declaredHosts: declaredHosts,
+            decision: decision,
+            context: context
+        ) {
+            return .failure(encodeEnvelope(networkEnvelope), callID: callID)
+        }
+        let tier = BashSandboxRouter.resolveTier(command: command, config: bashConfig)
+        let effectiveAllowNetwork = bashConfig.allowNetwork || (args.requestNetwork && context.approved)
+        let screenHosts = collectedScreenHosts(in: command)
+        let isNetworkCapable = BashNetworkGuard.requiresNetworkAccess(command) || !screenHosts.isEmpty
+        if tier != .hostSeatbelt, BashNetworkGuard.requiresNetworkAccess(command), declaredHosts.isEmpty {
+            let diagnostic = "Command requires network access but declares no network_hosts;"
+                + " declare every dial in network_hosts for isolated tiers."
+            let envelope = BashResultEnvelope(
+                command: command,
+                approvalRequired: false,
+                isChained: false,
+                denied: true,
+                error: "Command dials undeclared host(s) with no declared hosts (\(diagnostic))",
+                reason: diagnostic
+            )
+            return .failure(encodeEnvelope(envelope), callID: callID)
+        }
+        let shouldScreen = BashSandboxRouter.shouldScreenNetwork(
+            effectiveAllowNetwork: effectiveAllowNetwork,
+            tier: tier,
+            isNetworkCapable: isNetworkCapable
+        )
+        if shouldScreen {
+            if let envelope = await screenExplicitURLs(
+                command: command,
+                declaredHosts: declaredHosts,
+                sessionID: context.sessionID
+            ) {
+                return .failure(encodeEnvelope(envelope), callID: callID)
+            }
+        }
+        return nil
     }
 
     /// Runs the pre-exec quota gate before spawning.
@@ -937,26 +872,47 @@ extension BashTool {
         allowNetwork: Bool,
         allowedEgressHosts: [String],
         additionalReadPaths: [String] = [],
-        callID: String
+        callID: String,
+        tier: BashSandboxMode = .strictContainer,
+        workspaceRoot: URL? = nil
     ) -> BashSandboxTarget {
         let sandboxExecPath = "/usr/bin/sandbox-exec"
         let isSandboxAvailable = FileManager.default.isExecutableFile(atPath: sandboxExecPath)
         if isSandboxAvailable {
-            let allowedWrites: [String] = if let workingDirURL {
-                SeatbeltProfileBuilder.defaultSystemWritePaths + [workingDirURL.path]
+            let profile: String
+            if let workspaceRoot {
+                // Single seatbelt contract for every tier: isolated tiers scope
+                // to their mounts while the host tier scopes to the working
+                // directory, so routing, mounts, and confinement cannot drift.
+                // The router already covers workspace scratch, so the extra
+                // read paths stay redundant here rather than widening writes.
+                // Declared hosts stay blanket-allow in the profile while the
+                // supervisor remains the per-host gate, preserving the
+                // declared-hosts plus fail-closed posture.
+                profile = BashSandboxRouter.seatbeltProfile(
+                    for: tier,
+                    workspaceRoot: workspaceRoot,
+                    workingDir: workingDirURL ?? effectiveWorkingDir,
+                    allowNetwork: allowNetwork,
+                    declaredHosts: allowedEgressHosts
+                )
             } else {
-                SeatbeltProfileBuilder.defaultSystemWritePaths
+                let allowedWrites: [String] = if let workingDirURL {
+                    SeatbeltProfileBuilder.defaultSystemWritePaths + [workingDirURL.path]
+                } else {
+                    SeatbeltProfileBuilder.defaultSystemWritePaths
+                }
+                let builder = SeatbeltProfileBuilder(
+                    allowedReadPaths: SeatbeltProfileBuilder.defaultSystemReadPaths
+                        + [effectiveWorkingDir.path]
+                        + additionalReadPaths,
+                    allowedWritePaths: allowedWrites,
+                    deniedPaths: SeatbeltProfileBuilder.defaultDeniedPaths,
+                    allowNetwork: allowNetwork,
+                    allowedEgressHosts: allowedEgressHosts
+                )
+                profile = builder.buildProfile()
             }
-            let builder = SeatbeltProfileBuilder(
-                allowedReadPaths: SeatbeltProfileBuilder.defaultSystemReadPaths
-                    + [effectiveWorkingDir.path]
-                    + additionalReadPaths,
-                allowedWritePaths: allowedWrites,
-                deniedPaths: SeatbeltProfileBuilder.defaultDeniedPaths,
-                allowNetwork: allowNetwork,
-                allowedEgressHosts: allowedEgressHosts
-            )
-            let profile = builder.buildProfile()
             return BashSandboxTarget(
                 executableURL: URL(fileURLWithPath: sandboxExecPath),
                 arguments: ["-p", profile, "/bin/bash", "-c", boundedCommand],
@@ -981,13 +937,8 @@ extension BashTool {
     /// kernel's physical `/private/var` spelling.
     /// - Parameter workingDir: Sanctioned directory for this turn.
     /// - Returns: Filtered environment with `PWD` plus the bash marker.
-    private func filteredEnvironment(for workingDir: URL) -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
-        let allowedKeys = ["PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM"]
-        env = env.filter { allowedKeys.contains($0.key) }
-        env["PWD"] = workingDir.path
-        env["RUNEWEAVER_BASH"] = "1"
-        return env
+    private func filteredEnvironment(for workingDir: URL, tier: BashSandboxMode = .strictContainer) -> [String: String] {
+        BashSandboxRouter.scopedEnvironment(for: tier, workingDir: workingDir)
     }
 
     private func validateNetworkAccess(
@@ -1017,14 +968,23 @@ extension BashTool {
             // the owner authorizes the declared hosts, not open egress.
             let hostList = declaredHosts.sorted().joined(separator: ", ")
             let hostClause = hostList.isEmpty ? "no declared hosts" : "hosts: \(hostList)"
+            // Sandbox copy stays single-sourced so the card, inbox, and
+            // dashboard read identical bytes with no command, path, or host
+            // interpolation in the summary itself.
+            let tier = BashSandboxRouter.resolveTier(command: command, config: bashConfig)
+            let sandboxSummary = ApprovalQueue.bashSandboxSummary(
+                sandboxMode: tier,
+                networkAllowed: bashConfig.allowNetwork || args.requestNetwork
+            )
             let diagnostic = "Command requests network access (\(hostClause)) and requires operator approval."
+                + " \(sandboxSummary)"
             return BashResultEnvelope(
                 command: command,
                 approvalRequired: true,
                 isChained: decision.isChained,
                 denied: false,
                 error: diagnostic,
-                reason: "request_network enabled (\(hostClause))"
+                reason: "request_network enabled (\(hostClause)). \(sandboxSummary)"
             )
         }
         return nil
@@ -1084,8 +1044,14 @@ extension BashTool {
         }
         // Commands mixing explicit links and bare hosts screen every bare
         // host so a second schemeless host cannot run unscreened after
-        // the first is approved.
+        // the first is approved. Path-embedded names (staged agent copies
+        // like `/tmp/.../runeweaver-tool-UUID.sh`) are local file artifacts,
+        // never dials, so the router excludes them before screening while a
+        // real dial (`curl example.com`) still screens.
         for bareHost in Self.schemelessHosts(in: command) {
+            if BashSandboxRouter.isPathEmbeddedHost(bareHost, in: command) {
+                continue
+            }
             guard let assumed = URL(string: "https://" + bareHost),
                   let assumedHost = assumed.host,
                   !hosts.contains(where: {

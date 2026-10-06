@@ -65,6 +65,21 @@ public enum BoundedProcessRunner: Sendable {
     /// Default stderr cap keeping diagnostics bounded.
     public static let defaultMaxErrorBytes = 64 * 1024
 
+    /// Spawn environment without ssh-agent forwarding.
+    ///
+    /// No untrusted tier forwards the agent: the container CLI only forwards
+    /// when explicitly passed `--ssh`, which isolated and detonation paths
+    /// never pass, and stripping the socket keys here keeps an inherited
+    /// `SSH_AUTH_SOCK` from reaching any child even when the parent shell
+    /// carries one.
+    /// - Returns: Parent environment minus agent socket keys.
+    static func sanitizedSpawnEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env.removeValue(forKey: "SSH_AUTH_SOCK")
+        env.removeValue(forKey: "SSH_AGENT_PID")
+        return env
+    }
+
     /// Outcome of one incremental capped pipe read.
     struct CappedRead: Sendable {
         /// Bytes retained up to the cap.
@@ -155,6 +170,7 @@ public enum BoundedProcessRunner: Sendable {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
+        process.environment = sanitizedSpawnEnvironment()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
@@ -340,6 +356,7 @@ extension BoundedProcessRunner {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
+        process.environment = sanitizedSpawnEnvironment()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe

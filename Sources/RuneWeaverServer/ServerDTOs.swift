@@ -1126,6 +1126,25 @@ public struct ApprovalsResponse: Content, Equatable {
     }
 }
 
+extension ApprovalsResponse {
+    /// Dashboard sandbox summary for one approval, single-sourced on the copy owner.
+    ///
+    /// Routes through the single shared call site so the dashboard DTO reads
+    /// identical bytes to triage badges plus approval cards with no duplicate
+    /// copy and no command, path, or host interpolation. Nil for non-bash
+    /// tools or missing commands.
+    /// - Parameters:
+    ///   - request: Approval request carrying bash arguments.
+    ///   - bashConfig: Live bash policy owning tier plus network defaults.
+    /// - Returns: Shared summary for bash requests, or nil otherwise.
+    public static func bashSandboxSummary(
+        for request: PermissionRequest,
+        bashConfig: BashConfig
+    ) -> String? {
+        ApprovalQueue.bashSandboxSummary(for: request, bashConfig: bashConfig)
+    }
+}
+
 /// Tiers for network egress interactive decisions.
 public enum EgressDecisionTier: String, Codable, Sendable, Equatable {
     /// Allow this single tool call invocation.

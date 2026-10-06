@@ -1054,6 +1054,20 @@ extension RuneWeaverConfig {
         if let memoryMB = try bash.strictInt("memory_mb", field: "bash.memory_mb") {
             config.bash.memoryMB = memoryMB
         }
+        if let rawMode = try bash.strictString("sandbox_mode", field: "bash.sandbox_mode") {
+            let trimmed = rawMode.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let mode = BashSandboxMode(rawValue: trimmed) else {
+                throw ConfigError.validationError(
+                    field: "bash.sandbox_mode",
+                    message: "must be one of \(BashSandboxMode.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(rawMode)')"
+                )
+            }
+            config.bash.sandboxMode = mode
+        }
+        if let patterns = try bash.strictStringArray("host_allow_patterns", field: "bash.host_allow_patterns") {
+            try BashConfig.validateHostAllowPatterns(patterns)
+            config.bash.hostAllowPatterns = patterns
+        }
         if let ruleTables = root.arrays["bash.rules"] ?? root.tables["bash"]?.arrays["rules"] {
             var rules: [BashRule] = []
             for (idx, node) in ruleTables.enumerated() {

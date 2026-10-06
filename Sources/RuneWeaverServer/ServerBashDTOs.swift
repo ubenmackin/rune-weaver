@@ -34,6 +34,10 @@ public struct BashSettingsUpdate: Content, Equatable {
     public var memoryMb: Int?
     /// Whether network access is permitted in the sandbox. Nil preserves the stored value.
     public var allowNetwork: Bool?
+    /// Sandbox execution tier (`strictContainer|machineScoped|hostSeatbelt`). Nil preserves the stored value.
+    public var sandboxMode: String?
+    /// Fnmatch/prefix allow patterns gating `hostSeatbelt` execution. Nil preserves the stored value.
+    public var hostAllowPatterns: [String]?
 
     /// Creates a partial bash patch.
     /// - Parameters:
@@ -44,6 +48,8 @@ public struct BashSettingsUpdate: Content, Equatable {
     ///   - cpuSeconds: CPU time budget in seconds.
     ///   - memoryMb: Address-space budget in megabytes.
     ///   - allowNetwork: Whether network access is permitted.
+    ///   - sandboxMode: Sandbox execution tier.
+    ///   - hostAllowPatterns: Fnmatch/prefix allow patterns gating `hostSeatbelt` execution.
     public init(
         enabled: Bool? = nil,
         defaultAction: String? = nil,
@@ -51,7 +57,9 @@ public struct BashSettingsUpdate: Content, Equatable {
         timeoutSeconds: Int? = nil,
         cpuSeconds: Int? = nil,
         memoryMb: Int? = nil,
-        allowNetwork: Bool? = nil
+        allowNetwork: Bool? = nil,
+        sandboxMode: String? = nil,
+        hostAllowPatterns: [String]? = nil
     ) {
         self.enabled = enabled
         self.defaultAction = defaultAction
@@ -60,6 +68,8 @@ public struct BashSettingsUpdate: Content, Equatable {
         self.cpuSeconds = cpuSeconds
         self.memoryMb = memoryMb
         self.allowNetwork = allowNetwork
+        self.sandboxMode = sandboxMode
+        self.hostAllowPatterns = hostAllowPatterns
     }
 
     /// Populates a patch from a full snapshot so programmatic callers holding
@@ -73,6 +83,8 @@ public struct BashSettingsUpdate: Content, Equatable {
         self.cpuSeconds = bash.cpuSeconds
         self.memoryMb = bash.memoryMB
         self.allowNetwork = bash.allowNetwork
+        self.sandboxMode = bash.sandboxMode.rawValue
+        self.hostAllowPatterns = bash.hostAllowPatterns
     }
 
     /// Whether the patch carries no keys, so the save path can skip live
@@ -85,6 +97,8 @@ public struct BashSettingsUpdate: Content, Equatable {
             && cpuSeconds == nil
             && memoryMb == nil
             && allowNetwork == nil
+            && sandboxMode == nil
+            && hostAllowPatterns == nil
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -100,6 +114,10 @@ public struct BashSettingsUpdate: Content, Equatable {
         case memoryMbCamel = "memoryMb"
         case allowNetwork = "allow_network"
         case allowNetworkCamel = "allowNetwork"
+        case sandboxMode = "sandbox_mode"
+        case sandboxModeCamel = "sandboxMode"
+        case hostAllowPatterns = "host_allow_patterns"
+        case hostAllowPatternsCamel = "hostAllowPatterns"
     }
 
     /// Decodes a partial bash patch accepting snake_case and camelCase aliases.
@@ -128,6 +146,12 @@ public struct BashSettingsUpdate: Content, Equatable {
         let snakeAllowNetwork = try container.decodeIfPresent(Bool.self, forKey: .allowNetwork)
         let camelAllowNetwork = try container.decodeIfPresent(Bool.self, forKey: .allowNetworkCamel)
         allowNetwork = snakeAllowNetwork ?? camelAllowNetwork
+        let snakeSandboxMode = try container.decodeIfPresent(String.self, forKey: .sandboxMode)
+        let camelSandboxMode = try container.decodeIfPresent(String.self, forKey: .sandboxModeCamel)
+        sandboxMode = snakeSandboxMode ?? camelSandboxMode
+        let snakeHostAllowPatterns = try container.decodeIfPresent([String].self, forKey: .hostAllowPatterns)
+        let camelHostAllowPatterns = try container.decodeIfPresent([String].self, forKey: .hostAllowPatternsCamel)
+        hostAllowPatterns = snakeHostAllowPatterns ?? camelHostAllowPatterns
     }
 
     /// Encodes a partial bash patch using canonical snake_case keys.
@@ -144,6 +168,8 @@ public struct BashSettingsUpdate: Content, Equatable {
         try container.encodeIfPresent(cpuSeconds, forKey: .cpuSeconds)
         try container.encodeIfPresent(memoryMb, forKey: .memoryMb)
         try container.encodeIfPresent(allowNetwork, forKey: .allowNetwork)
+        try container.encodeIfPresent(sandboxMode, forKey: .sandboxMode)
+        try container.encodeIfPresent(hostAllowPatterns, forKey: .hostAllowPatterns)
     }
 
     /// Merges this patch onto the stored policy, preserving every field the
@@ -151,7 +177,8 @@ public struct BashSettingsUpdate: Content, Equatable {
     /// never resets the rest of the `[bash]` section.
     /// - Parameter bash: Stored bash policy to mutate in place.
     /// - Throws: `ConfigError.validationError` when the rule list is empty,
-    ///   a rule pattern is blank, the default action is unknown, or the
+    ///   a rule pattern is blank, the default action is unknown, the sandbox
+    ///   mode is unknown, the host allowlist is over-limit or malformed, or the
     ///   timeout, CPU, or memory bound falls outside its documented range.
     ///   Range checks reuse the `BashConfig` validators the TOML load path
     ///   enforces, so the PUT and file-load paths refuse the same values with
@@ -170,6 +197,17 @@ public struct BashSettingsUpdate: Content, Equatable {
             }
             validatedAction = action
         }
+        var validatedSandboxMode: BashSandboxMode?
+        if let sandboxMode {
+            let trimmed = sandboxMode.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let mode = BashSandboxMode(rawValue: trimmed) else {
+                throw ConfigError.validationError(
+                    field: "bash.sandbox_mode",
+                    message: "must be one of \(BashSandboxMode.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(sandboxMode)')"
+                )
+            }
+            validatedSandboxMode = mode
+        }
         if let rules {
             try BashConfig.validateRules(rules)
         }
@@ -181,6 +219,9 @@ public struct BashSettingsUpdate: Content, Equatable {
         }
         if let memoryMb {
             try BashConfig.validateMemoryMB(memoryMb)
+        }
+        if let hostAllowPatterns {
+            try BashConfig.validateHostAllowPatterns(hostAllowPatterns)
         }
         if let enabled {
             bash.enabled = enabled
@@ -202,6 +243,12 @@ public struct BashSettingsUpdate: Content, Equatable {
         }
         if let allowNetwork {
             bash.allowNetwork = allowNetwork
+        }
+        if let validatedSandboxMode {
+            bash.sandboxMode = validatedSandboxMode
+        }
+        if let hostAllowPatterns {
+            bash.hostAllowPatterns = hostAllowPatterns
         }
     }
 }

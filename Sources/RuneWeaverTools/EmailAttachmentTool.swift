@@ -13,7 +13,9 @@ public struct EmailAttachmentTool: Tool, Sendable {
             + "Use when the user asks to save or open an attachment listed by email.read. "
             + "Pass the mailbox labeled on the email.search hit (omitted means INBOX). "
             + "Documents and images stage under isolated temp with inline extracted text or vision payloads; "
-            + "archives detonate in a zero-host-mounts ephemeral microVM returning only a manifest. "
+            + "archives detonate in an ephemeral microVM with home-mount none enforced "
+            + "(no HOME mount; stdin in, stdout out; no ssh-agent forwarding) "
+            + "returning only a manifest. "
             + "Pass preview true to inline the first 2000 chars for small text parts (binaries are never inlined); "
             + "pass subpath to inspect one file inside a detonated archive, or saveToPath for an approval-gated workspace export."
     /// Function-calling contract for `account`, `id`, `index`, `mailbox`, `preview`, `subpath`, and `saveToPath`.

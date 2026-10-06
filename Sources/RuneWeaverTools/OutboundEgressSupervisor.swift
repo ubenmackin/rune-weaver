@@ -23,12 +23,23 @@
 //   3. SSRF Guard — prevent metadata, link-local, and RFC 1918 dials; an
 //      allowed verdict returns the vetted numeric addresses as a dial pin.
 //      Exemptions are the config origins unioned with the policy's
-//      `local_exemptions`, read fresh on every call.
-//   4. Just-In-Time Wire Injection — swap surrogates for live Keychain secrets.
+//      `local_exemptions`, read fresh on every call. The literal stage runs
+//      with no DNS and no Keychain read so obfuscated literals still refuse
+//      without touching secrets; the full DNS vetting that produces the pin
+//      runs next within this gate, so a literal-plus-DNS-denied destination
+//      causes no secret read.
+//   4. Credential Preflight plus Just-In-Time Wire Injection — a live-only
+//      resolvability preflight surfaces unknown or malformed surrogates with
+//      deterministic ordering after SSRF vetting, then swaps surrogates for
+//      live Keychain secrets.
 //
-// Network and binding checks run before the SSRF guard resolves any hostname,
-// so a denied destination causes no DNS query, no socket, and no Keychain read:
-// the raw secret never enters memory. The pin returned by step 3 is what the
+// Network, binding, and SSRF checks run before any Keychain access, and
+// policy-denied plus SSRF-denied destinations cause no Keychain read
+// either: the raw secret never enters memory for a destination the earlier
+// gates already refused. Only a destination that clears SSRF vetting
+// reaches the resolvability preflight, so an SSRF denial wins over a
+// missing-key error by design. The
+// pin returned by step 3 is what the
 // transport dials, so the hostname is never resolved again after vetting and a
 // rebinding answer cannot steer the connection. Production builds the
 // supervisor through `make(policyStore:)`, which refuses to construct from a
@@ -189,98 +200,6 @@ public actor OutboundEgressSupervisor {
         oneShotIssuedAt.removeValue(forKey: sessionID)
     }
 
-    /// Drops session grants older than the grant TTL.
-    ///
-    /// Expired sessions clear through `clearSession` so session and one-shot
-    /// grants for the same conversation evict together instead of leaving a
-    /// stale one-shot spendable after its session grant aged out. One-shot
-    /// keys without a session grant (including the nil key) evict on their
-    /// own TTL below, so no key lingers spendable without a session anchor.
-    private func evictStaleSessionGrants(now: Date = Date()) {
-        let expired = sessionAllowedDomains.compactMap { id, grant in
-            now.timeIntervalSince(grant.issuedAt) < Self.sessionGrantTTL ? nil : id
-        }
-        for id in expired {
-            clearSession(sessionID: id)
-        }
-        evictStaleOneShotGrants(now: now)
-    }
-
-    /// Drops one-shot grants older than the one-shot TTL, including the nil key.
-    ///
-    /// Runs inside `evictStaleSessionGrants` so every validation pass that
-    /// ages session grants also ages session-less one-shots; an unconsumed
-    /// grant never stays spendable past its day-scale window.
-    private func evictStaleOneShotGrants(now: Date = Date()) {
-        let expired = oneShotIssuedAt.compactMap { id, issuedAt in
-            now.timeIntervalSince(issuedAt) < Self.oneShotGrantTTL ? nil : id
-        }
-        for id in expired {
-            oneShotAllowedDomains.removeValue(forKey: id)
-            oneShotIssuedAt.removeValue(forKey: id)
-        }
-        // Drop empty sets whose hosts were all consumed, so consumed keys
-        // do not pin an issued-at entry that would otherwise evict by TTL.
-        for id in Array(oneShotAllowedDomains.keys) where oneShotAllowedDomains[id]?.isEmpty == true {
-            oneShotAllowedDomains.removeValue(forKey: id)
-            oneShotIssuedAt.removeValue(forKey: id)
-        }
-    }
-
-    /// Evicts the oldest session grants when the table exceeds its bound.
-    private func enforceSessionGrantBound() {
-        guard sessionAllowedDomains.count > Self.maxTrackedSessions else { return }
-        let ordered = sessionAllowedDomains.sorted { $0.value.issuedAt < $1.value.issuedAt }
-        for (id, _) in ordered.prefix(sessionAllowedDomains.count - Self.maxTrackedSessions) {
-            clearSession(sessionID: id)
-        }
-    }
-
-    /// Evicts the oldest one-shot keys when the table exceeds its bound.
-    ///
-    /// Fail-closed bound on the session-less path: the nil key participates
-    /// like any session key, so a process that files session-less grants
-    /// without teardown still cannot grow this state without limit.
-    private func enforceOneShotBound() {
-        guard oneShotAllowedDomains.count > Self.maxTrackedSessions else { return }
-        let ordered = oneShotIssuedAt.sorted { $0.value < $1.value }
-        for (id, _) in ordered.prefix(oneShotAllowedDomains.count - Self.maxTrackedSessions) {
-            oneShotAllowedDomains.removeValue(forKey: id)
-            oneShotIssuedAt.removeValue(forKey: id)
-        }
-    }
-
-    /// Whether a one-shot grant covers this host for this session, consuming it.
-    ///
-    /// A grant filed under a concrete session is spendable only by that
-    /// session; a session-less grant is spendable once by any caller. Either
-    /// way the first validation consumes it, so callers must validate once
-    /// per tool call rather than pre-checking before the real gate. Emptied
-    /// keys drop their issue time so consumed entries do not linger for TTL.
-    private func consumeOneShot(host: String, sessionID: UUID?) -> Bool {
-        if let sessionID, var scoped = oneShotAllowedDomains[sessionID], scoped.contains(host) {
-            scoped.remove(host)
-            if scoped.isEmpty {
-                oneShotAllowedDomains.removeValue(forKey: sessionID)
-                oneShotIssuedAt.removeValue(forKey: sessionID)
-            } else {
-                oneShotAllowedDomains[sessionID] = scoped
-            }
-            return true
-        }
-        if var open = oneShotAllowedDomains[nil], open.contains(host) {
-            open.remove(host)
-            if open.isEmpty {
-                oneShotAllowedDomains.removeValue(forKey: nil)
-                oneShotIssuedAt.removeValue(forKey: nil)
-            } else {
-                oneShotAllowedDomains[nil] = open
-            }
-            return true
-        }
-        return false
-    }
-
     /// Result of a successful egress verification. Contains wire-ready headers
     /// with secrets injected, plus the list of injected secrets for response sweeping.
     public struct EgressResult: Sendable {
@@ -319,12 +238,21 @@ public actor OutboundEgressSupervisor {
     /// 3. **SSRF Guard**: Blocks metadata IPs, link-local, RFC 1918 (via ApiSSRFGuard)
     ///    and returns the proven numeric addresses as a dial pin. Exemptions are
     ///    the config-derived origins unioned with the snapshot's `local_exemptions`.
-    /// 4. **Wire Injection**: Swaps surrogates for live Keychain secrets.
+    ///    The pure literal stage runs first with no DNS and no Keychain read;
+    ///    the DNS vetting that produces the pin runs next within this gate,
+    ///    so a literal-plus-DNS-denied destination causes no secret read.
+    /// 4. **Credential Preflight plus Wire Injection**: A live-only
+    ///    resolvability preflight surfaces unknown or malformed surrogates
+    ///    with deterministic ordering after SSRF vetting, then wire
+    ///    injection swaps surrogates for live Keychain secrets.
     ///
     /// If any step fails, the method returns a `.denied` with a human-readable reason.
-    /// On binding failure, the Keychain is **never accessed**. Network and binding
-    /// checks run before the SSRF guard resolves any hostname, so a denied
-    /// destination causes no DNS query, no socket, and no Keychain read. An allowed
+    /// On policy, binding, or SSRF failure, the Keychain is **never accessed**.
+    /// Network, binding, and SSRF checks run before any Keychain read, so
+    /// those denied destinations cause no secret read. Only a destination
+    /// clearing SSRF vetting reaches the live resolvability preflight, so
+    /// an SSRF denial wins over a missing-key error by design while a
+    /// vetted destination still reports a missing key deterministically. An allowed
     /// verdict carries the SSRF gate's pin, and callers must dial those addresses
     /// with the pin's host identity rather than resolving the hostname again.
     ///
@@ -354,116 +282,51 @@ public actor OutboundEgressSupervisor {
         sessionID: UUID? = nil,
         resolvesCredentials: Bool = true
     ) async -> EgressVerdict {
-        // Every hop reads the verified snapshot rather than the displayable
-        // fallback, so a store that never accepted a policy fails closed here
-        // instead of authorizing from a posture that was never verified.
         let policy: SecurityPolicy
         do {
             policy = try await policyStore.snapshot()
         } catch {
             return .denied(error.localizedDescription)
         }
-
-        // --- Step 1: Network Policy Gate ---
         guard let host = url.host, !host.isEmpty else {
             return .denied("Invalid URL: missing host component.")
         }
         let canonicalHost = SensitiveAddressNormalization.normalizedHost(host)
-
-        switch policy.network.hostStatus(for: host) {
-        case let .explicitlyBlocked(reason):
-            return .denied(reason)
-        case .allowed:
-            break
-        case let .unlisted(reason):
-            // Unlisted hosts always park for interactive triage: even
-            // operator-configured infrastructure origins need an explicit
-            // allowlist entry or a triage grant, never an auto-allow.
-            evictStaleSessionGrants()
-            if consumeOneShot(host: canonicalHost, sessionID: sessionID) {
-                break
-            }
-            if let sessionID, sessionAllowedDomains[sessionID]?.domains.contains(canonicalHost) == true {
-                break
-            }
-            return .unlistedDomain(host: host, reason: reason)
+        if let verdict = networkGateVerdict(policy: policy, host: host, canonicalHost: canonicalHost, sessionID: sessionID) {
+            return verdict
         }
-
-        // --- Step 2: Target-Binding Gate ---
-        // Extract all surrogate keys from headers and verify each one is authorized
-        // for this destination BEFORE touching the Keychain or querying DNS.
-        let surrogateKeys = extractSurrogateKeys(from: headers)
-        // Bindings authorize a path prefix, so the comparison must run against
-        // the effective path the origin server routes to: the shared resolver
-        // percent-decodes the raw path, removes dot segments per RFC 3986, and
-        // refuses encoded separators or encoded dot segments whose destination
-        // depends on how a proxy decodes them. An ambiguous destination refuses
-        // outright — credentials or not — because the routed resource itself is
-        // undecidable, and redirect hops re-enter this same gate, so a Location
-        // header cannot walk a bound credential off its authorized prefix.
-        let path: String
-        switch EffectiveRequestPath.resolve(for: url) {
-        case let .effective(effectivePath):
-            path = effectivePath
-        case let .rejected(reason):
-            return .denied("Security Policy Violation: \(reason)")
+        let binding = bindingGateContext(policy: policy, headers: headers, url: url, method: method, host: host)
+        if let verdict = binding.verdict {
+            return verdict
         }
-        let upperedMethod = method.uppercased()
-
-        for key in surrogateKeys {
-            guard let binding = policy.credentials[key] else {
-                return .denied(
-                    "Security Policy Violation: credential '\(key)' has no binding in policy.toml. "
-                        + "Add a [credentials.\(key)] section with allowed_hosts to authorize this credential."
-                )
-            }
-            if let bindingDeny = binding.denyReason(key: key, host: host, method: upperedMethod, path: path) {
-                return .denied("Security Policy Violation: \(bindingDeny)")
-            }
-        }
-
-        // --- Step 3: SSRF Guard (delegates to existing ApiSSRFGuard) ---
-        // The SSRF guard checks independently of the policy allowlist because it
-        // protects against IP-level attacks (metadata endpoints, link-local, etc.)
-        // that domain names might resolve to. The same pass returns the dial pin:
-        // the numeric addresses it proved, so the caller dials the proof instead
-        // of re-resolving the hostname after this check (DNS rebinding).
-        // Effective exemptions union the config-derived auto origins
-        // (`searxng_url`, enabled media LAN URLs, LLM server URLs) with the
-        // owner-declared `local_exemptions` from this hop's snapshot, so a
-        // policy write applies live with no restart while never-exempt targets
-        // (metadata, link-local, embedded translations) stay refused.
-        let ssrfOrigins = ApiSSRFGuard.allowlistedOrigins(
-            browserConfig: browserConfig,
-            mediaConfig: mediaConfig,
-            llmServerURLs: llmServerURLs
-        ).union(policy.network.localExemptions)
-        let dialPin: SSRFDialPin
-        switch await ApiSSRFGuard.vetAsync(
-            for: url.absoluteString,
-            allowlistedOrigins: ssrfOrigins,
-            hasLLMOrigins: !llmServerURLs.isEmpty
+        let exemptions = ssrfExemptions(policy: policy)
+        if let verdict = literalGateVerdict(
+            urlString: url.absoluteString,
+            origins: exemptions.origins,
+            hasLLMOrigins: exemptions.hasLLMOrigins
         ) {
-        case let .refused(ssrfReason):
-            return .denied(ssrfReason)
+            return verdict
+        }
+        let pinResult = await vettedPin(
+            urlString: url.absoluteString,
+            origins: exemptions.origins,
+            hasLLMOrigins: exemptions.hasLLMOrigins
+        )
+        let dialPin: SSRFDialPin
+        switch pinResult {
         case let .dialable(pin):
             dialPin = pin
+        case let .refused(reason):
+            return .denied(reason)
         }
-
-        // --- Step 4: Wire Injection ---
-        // A credential-free verdict keeps dry-run previews clear of live secret bytes.
-        guard resolvesCredentials else {
-            return .allowed(EgressResult(resolvedHeaders: headers, resolvedSecrets: [], dialPin: dialPin))
+        if let verdict = await credentialPreflightVerdict(
+            headers: headers,
+            surrogateKeys: binding.surrogateKeys,
+            resolvesCredentials: resolvesCredentials
+        ) {
+            return verdict
         }
-        // All binding checks passed. Now resolve surrogates to live secrets.
-        do {
-            let result = try await resolveSurrogateHeaders(headers, dialPin: dialPin)
-            return .allowed(result)
-        } catch let error as SecretsError {
-            return .denied(secretsErrorMessage(error))
-        } catch {
-            return .denied("Credential resolution failed: \(error.localizedDescription)")
-        }
+        return await wireVerdict(headers: headers, dialPin: dialPin, resolvesCredentials: resolvesCredentials)
     }
 
     /// Validates a URL for credential-free read-only checks.
@@ -569,9 +432,11 @@ public actor OutboundEgressSupervisor {
     public nonisolated func sweepResponse(_ content: String, secrets: [String]) -> String {
         self.secrets.redactResolved(content, secrets: secrets)
     }
+}
 
-    // MARK: - Private Helpers
+// MARK: - Grant maintenance plus per-hop gates
 
+extension OutboundEgressSupervisor {
     /// Extracts all surrogate key names from header values without resolving them.
     ///
     /// This runs before any Keychain access so a binding violation is caught
@@ -585,6 +450,196 @@ public actor OutboundEgressSupervisor {
             }
         }
         return keys
+    }
+
+    /// Network policy gate for one hop, honoring interactive grants.
+    ///
+    /// Unlisted hosts park for triage even when infrastructure origins would
+    /// otherwise suggest an auto-allow; a covering one-shot grant is consumed
+    /// once, otherwise a session grant covers the hop. Fail-closed callers
+    /// treat any returned verdict as terminal and continue only on nil.
+    private func networkGateVerdict(
+        policy: SecurityPolicy,
+        host: String,
+        canonicalHost: String,
+        sessionID: UUID?
+    ) -> EgressVerdict? {
+        switch policy.network.hostStatus(for: host) {
+        case let .explicitlyBlocked(reason):
+            return .denied(reason)
+        case .allowed:
+            return nil
+        case let .unlisted(reason):
+            evictStaleSessionGrants()
+            if consumeOneShot(host: canonicalHost, sessionID: sessionID) {
+                return nil
+            }
+            if let sessionID, sessionAllowedDomains[sessionID]?.domains.contains(canonicalHost) == true {
+                return nil
+            }
+            return .unlistedDomain(host: host, reason: reason)
+        }
+    }
+
+    /// Target-binding gate context for one hop.
+    ///
+    /// Bindings authorize a path prefix, so the comparison runs against the
+    /// effective path the origin server routes to: the shared resolver
+    /// percent-decodes the raw path, removes dot segments per RFC 3986, and
+    /// refuses encoded separators or encoded dot segments whose destination
+    /// depends on proxy decoding. An ambiguous destination refuses outright
+    /// because the routed resource itself is undecidable, and redirect hops
+    /// re-enter the same gate so a Location header cannot walk a bound
+    /// credential off its authorized prefix. Runs before any Keychain read or
+    /// DNS query so a binding violation never causes a side effect.
+    private func bindingGateContext(
+        policy: SecurityPolicy,
+        headers: [String: String],
+        url: URL,
+        method: String,
+        host: String
+    ) -> (surrogateKeys: Set<String>, verdict: EgressVerdict?) {
+        let surrogateKeys = extractSurrogateKeys(from: headers)
+        let path: String
+        switch EffectiveRequestPath.resolve(for: url) {
+        case let .effective(effectivePath):
+            path = effectivePath
+        case let .rejected(reason):
+            return (surrogateKeys, .denied("Security Policy Violation: \(reason)"))
+        }
+        let upperedMethod = method.uppercased()
+        for key in surrogateKeys {
+            guard let binding = policy.credentials[key] else {
+                return (
+                    surrogateKeys,
+                    .denied(
+                        "Security Policy Violation: credential '\(key)' has no binding in policy.toml. "
+                            + "Add a [credentials.\(key)] section with allowed_hosts to authorize this credential."
+                    )
+                )
+            }
+            if let bindingDeny = binding.denyReason(key: key, host: host, method: upperedMethod, path: path) {
+                return (surrogateKeys, .denied("Security Policy Violation: \(bindingDeny)"))
+            }
+        }
+        return (surrogateKeys, nil)
+    }
+
+    /// Effective SSRF exemptions for one hop.
+    ///
+    /// Unions the config-derived auto origins with the owner-declared local
+    /// exemptions from this hop's snapshot, so a policy write applies live
+    /// with no restart while never-exempt targets stay refused inside the
+    /// guard. Computed once so the literal pre-check and the full DNS vetting
+    /// observe identical exemptions.
+    private func ssrfExemptions(policy: SecurityPolicy) -> (origins: Set<String>, hasLLMOrigins: Bool) {
+        let origins = ApiSSRFGuard.allowlistedOrigins(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs
+        ).union(policy.network.localExemptions)
+        return (origins, !llmServerURLs.isEmpty)
+    }
+
+    /// Literal-only SSRF pre-check with no DNS and no Keychain read.
+    ///
+    /// Reuses the guard's single-source literal stage so the refusal shape
+    /// cannot drift from the full vetting that follows; only hostnames
+    /// needing proof continue to DNS vetting, then to the credential
+    /// preflight once a dial pin exists.
+    private func literalGateVerdict(urlString: String, origins: Set<String>, hasLLMOrigins: Bool) -> EgressVerdict? {
+        switch ApiSSRFGuard.preDNSOutcome(
+            for: urlString,
+            allowlistedOrigins: origins,
+            hasLLMOrigins: hasLLMOrigins
+        ) {
+        case let .denied(reason):
+            .denied(reason)
+        case .allowed, .needsDNS:
+            nil
+        }
+    }
+
+    /// Live-only credential resolvability preflight after DNS vetting.
+    ///
+    /// Runs only after the SSRF gate produces its dial pin, so an
+    /// SSRF-denied destination never pulls live Keychain secrets into
+    /// memory. Surfaces an unknown or malformed surrogate with its typed
+    /// name for vetted destinations. Dry runs skip entirely
+    /// and never touch the Keychain, preserving the preview contract, while
+    /// credential-free calls fall through with no read. A passing preflight
+    /// still re-resolves at injection time, so a rotation between the two
+    /// reads observes the fresher value while a deletion still fails closed.
+    /// Sorted traversal keeps concurrent failures deterministic instead of
+    /// following dictionary order.
+    private func credentialPreflightVerdict(
+        headers: [String: String],
+        surrogateKeys: Set<String>,
+        resolvesCredentials: Bool
+    ) async -> EgressVerdict? {
+        guard resolvesCredentials else { return nil }
+        for (name, value) in headers.sorted(by: { $0.key < $1.key }) {
+            if SecretsManager.surrogates(in: value).isEmpty,
+               SecretsManager.containsSurrogatePrefix(value)
+            {
+                return .denied(
+                    "header '\(name)' contains a malformed secret surrogate (expected rwsecret:<key>)"
+                )
+            }
+        }
+        for key in surrogateKeys.sorted() {
+            do {
+                let existing = try await secrets.retrieve(key: key)
+                guard let existing, !existing.isEmpty else {
+                    return .denied(secretsErrorMessage(.unknownSurrogate(key: key)))
+                }
+            } catch let error as SecretsError {
+                return .denied(secretsErrorMessage(error))
+            } catch {
+                return .denied("Credential resolution failed: \(error.localizedDescription)")
+            }
+        }
+        return nil
+    }
+
+    /// Full DNS vetting producing the dial pin for one hop.
+    ///
+    /// Returns the proven numeric addresses the transport must dial with the
+    /// original host identity; the hostname is never resolved again after
+    /// vetting so a rebinding answer cannot steer the connection.
+    private func vettedPin(
+        urlString: String,
+        origins: Set<String>,
+        hasLLMOrigins: Bool
+    ) async -> ApiSSRFVetting {
+        await ApiSSRFGuard.vetAsync(
+            for: urlString,
+            allowlistedOrigins: origins,
+            hasLLMOrigins: hasLLMOrigins
+        )
+    }
+
+    /// Final wire-injection verdict for one hop.
+    ///
+    /// A credential-free verdict keeps dry-run previews clear of live secret
+    /// bytes; otherwise surrogates resolve to live Keychain values at the
+    /// transport boundary so earlier stages only ever see the reference.
+    private func wireVerdict(
+        headers: [String: String],
+        dialPin: SSRFDialPin,
+        resolvesCredentials: Bool
+    ) async -> EgressVerdict {
+        guard resolvesCredentials else {
+            return .allowed(EgressResult(resolvedHeaders: headers, resolvedSecrets: [], dialPin: dialPin))
+        }
+        do {
+            let result = try await resolveSurrogateHeaders(headers, dialPin: dialPin)
+            return .allowed(result)
+        } catch let error as SecretsError {
+            return .denied(secretsErrorMessage(error))
+        } catch {
+            return .denied("Credential resolution failed: \(error.localizedDescription)")
+        }
     }
 
     /// Resolves surrogate references in validated header values.
@@ -629,6 +684,84 @@ public actor OutboundEgressSupervisor {
         case .encodingError:
             "Credential resolution failed (encoding error)."
         }
+    }
+}
+
+// MARK: - Grant maintenance
+
+extension OutboundEgressSupervisor {
+    /// Drops session grants older than the grant TTL.
+    ///
+    /// Expired sessions clear through `clearSession` so session and one-shot
+    /// grants for the same conversation evict together instead of leaving a
+    /// stale one-shot spendable after its session grant aged out.
+    private func evictStaleSessionGrants(now: Date = Date()) {
+        let expired = sessionAllowedDomains.compactMap { id, grant in
+            now.timeIntervalSince(grant.issuedAt) < Self.sessionGrantTTL ? nil : id
+        }
+        for id in expired {
+            clearSession(sessionID: id)
+        }
+        evictStaleOneShotGrants(now: now)
+    }
+
+    /// Drops one-shot grants older than the one-shot TTL, including the nil key.
+    private func evictStaleOneShotGrants(now: Date = Date()) {
+        let expired = oneShotIssuedAt.compactMap { id, issuedAt in
+            now.timeIntervalSince(issuedAt) < Self.oneShotGrantTTL ? nil : id
+        }
+        for id in expired {
+            oneShotAllowedDomains.removeValue(forKey: id)
+            oneShotIssuedAt.removeValue(forKey: id)
+        }
+        for id in Array(oneShotAllowedDomains.keys) where oneShotAllowedDomains[id]?.isEmpty == true {
+            oneShotAllowedDomains.removeValue(forKey: id)
+            oneShotIssuedAt.removeValue(forKey: id)
+        }
+    }
+
+    /// Evicts the oldest session grants when the table exceeds its bound.
+    private func enforceSessionGrantBound() {
+        guard sessionAllowedDomains.count > Self.maxTrackedSessions else { return }
+        let ordered = sessionAllowedDomains.sorted { $0.value.issuedAt < $1.value.issuedAt }
+        for (id, _) in ordered.prefix(sessionAllowedDomains.count - Self.maxTrackedSessions) {
+            clearSession(sessionID: id)
+        }
+    }
+
+    /// Evicts the oldest one-shot keys when the table exceeds its bound.
+    private func enforceOneShotBound() {
+        guard oneShotAllowedDomains.count > Self.maxTrackedSessions else { return }
+        let ordered = oneShotIssuedAt.sorted { $0.value < $1.value }
+        for (id, _) in ordered.prefix(oneShotAllowedDomains.count - Self.maxTrackedSessions) {
+            oneShotAllowedDomains.removeValue(forKey: id)
+            oneShotIssuedAt.removeValue(forKey: id)
+        }
+    }
+
+    /// Whether a one-shot grant covers this host for this session, consuming it.
+    private func consumeOneShot(host: String, sessionID: UUID?) -> Bool {
+        if let sessionID, var scoped = oneShotAllowedDomains[sessionID], scoped.contains(host) {
+            scoped.remove(host)
+            if scoped.isEmpty {
+                oneShotAllowedDomains.removeValue(forKey: sessionID)
+                oneShotIssuedAt.removeValue(forKey: sessionID)
+            } else {
+                oneShotAllowedDomains[sessionID] = scoped
+            }
+            return true
+        }
+        if var open = oneShotAllowedDomains[nil], open.contains(host) {
+            open.remove(host)
+            if open.isEmpty {
+                oneShotAllowedDomains.removeValue(forKey: nil)
+                oneShotIssuedAt.removeValue(forKey: nil)
+            } else {
+                oneShotAllowedDomains[nil] = open
+            }
+            return true
+        }
+        return false
     }
 }
 

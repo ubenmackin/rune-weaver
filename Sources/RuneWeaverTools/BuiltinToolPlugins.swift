@@ -259,13 +259,19 @@ public enum BuiltinToolPlugins {
         // The workspace scratch quotas travel with the shell so the default
         // cwd and the pre-exec quota gate observe file config. The instance
         // is retained so the agent script runner can delegate to the same
-        // shell instead of minting a second policy.
+        // shell instead of minting a second policy. One shared workspace backs
+        // both so staged-copy reads, cwd pinning, quota gating, plus tier
+        // mount scoping agree on the same root. The supervisor is mandatory
+        // here, so every screened dial honors declared hosts plus policy plus
+        // the SSRF guard with no unsupervised fallback path.
+        let sharedWorkspace = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
         let bashTool = BashTool(
             bashConfig: bashConfig,
             filesConfig: filesConfig ?? FilesConfig(),
+            allowUnsandboxedFallback: false,
             egressSupervisor: supervisor,
             workspaceConfig: workspaceConfig,
-            workspaceStore: workspaceStore
+            workspaceStore: sharedWorkspace
         )
         tools.append(bashTool)
         if let memoryEngine {
@@ -282,11 +288,9 @@ public enum BuiltinToolPlugins {
         }
         if let agentToolStore {
             // The agent runner shares the live shell plus workspace with
-            // `bash.exec` so verification, cwd pinning, and quota gating stay
-            // single-sourced; a derived store keeps hermetic callers working
-            // when no explicit workspace was injected.
-            let effectiveWorkspace = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
-            tools += AgentTools.makeTools(store: agentToolStore, bash: bashTool, workspace: effectiveWorkspace)
+            // `bash.exec` so verification, cwd pinning, quota gating, plus
+            // tier mount scoping stay single-sourced on the shared workspace.
+            tools += AgentTools.makeTools(store: agentToolStore, bash: bashTool, workspace: sharedWorkspace)
         }
         tools += try await makeTools(
             browserConfig: browserConfig,
