@@ -3064,7 +3064,11 @@ export function IndexPolicyPanel() {
             };
             const key = keyByKind[source.kind] ?? source.kind;
             return (
-              <div key={source.kind} className="index-source-row">
+              <div
+                key={source.kind}
+                className="index-source-row"
+                style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}
+              >
                 <label className="toggle-label">
                   <input
                     type="checkbox"
@@ -3078,7 +3082,10 @@ export function IndexPolicyPanel() {
                   <span>{source.label}</span>
                 </label>
                 {source.hint ? (
-                  <span className="muted text-xs index-source-hint">
+                  <span
+                    className="muted text-xs index-source-hint"
+                    style={{ marginLeft: 4 }}
+                  >
                     <AlertTriangleIcon size={12} /> {source.hint}
                   </span>
                 ) : null}

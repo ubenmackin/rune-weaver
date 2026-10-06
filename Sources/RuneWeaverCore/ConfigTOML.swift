@@ -679,17 +679,14 @@ extension RuneWeaverConfig {
         // Absent keys keep the disabled-by-default policy; present-but-wrong-typed
         // values throw via the strict accessors instead of silently defaulting,
         // and range checks land in validation so decode stays type-only.
-        if let enabled = try index.strictBool("enabled", field: "index.enabled") {
-            config.index.enabled = enabled
-        }
-        if let files = try index.strictBool("files", field: "index.files") {
-            config.index.files = files
-        }
-        if let mail = try index.strictBool("mail", field: "index.mail") {
-            config.index.mail = mail
-        }
-        if let messages = try index.strictBool("messages", field: "index.messages") {
-            config.index.messages = messages
+        let sourceToggles: [(String, WritableKeyPath<IndexConfig, Bool>)] = [
+            ("enabled", \.enabled), ("files", \.files), ("mail", \.mail),
+            ("messages", \.messages), ("calendars", \.calendars), ("reminders", \.reminders)
+        ]
+        for (key, path) in sourceToggles {
+            if let value = try index.strictBool(key, field: "index.\(key)") {
+                config.index[keyPath: path] = value
+            }
         }
         if let roots = try index.strictStringArray("roots", field: "index.roots") {
             config.index.roots = roots

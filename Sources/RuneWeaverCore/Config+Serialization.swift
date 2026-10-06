@@ -200,6 +200,8 @@ extension RuneWeaverConfig {
             "files = \(index.files ? "true" : "false")",
             "mail = \(index.mail ? "true" : "false")",
             "messages = \(index.messages ? "true" : "false")",
+            "calendars = \(index.calendars ? "true" : "false")",
+            "reminders = \(index.reminders ? "true" : "false")",
             "roots = \(Self.tomlStringArray(index.roots))",
             "exclude = \(Self.tomlStringArray(index.exclude))",
             "max_file_mb = \(index.maxFileMB)",
