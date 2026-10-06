@@ -421,9 +421,10 @@ private struct BroadcastImmediateProvider: LLMProvider, Sendable {
 
 /// Delayed provider holding the turn open so cancellation can land mid-flight.
 ///
-/// The synchronous pause mirrors the existing detachment fixtures: the turn stays
-/// in `running` long enough for the test to cancel through the tracker, proving
-/// the terminal cancelled frame broadcasts instead of answering one socket.
+/// The pause lives inside the stream producer as an async sleep so the
+/// orchestrator suspends instead of blocking its cooperative-pool thread;
+/// a synchronous sleep would pin that thread while every broadcast suite
+/// runs in parallel and starve the continuations the turn needs to settle.
 private struct BroadcastDelayedProvider: LLMProvider, Sendable {
     /// Stable test model metadata.
     let modelInfo = ModelInfo(name: "broadcast-delayed", provider: "test", contextLength: 2048)
@@ -437,12 +438,15 @@ private struct BroadcastDelayedProvider: LLMProvider, Sendable {
 
     /// Serves a canned answer after the pause.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
-        if delaySeconds > 0 {
-            Thread.sleep(forTimeInterval: delaySeconds)
-        }
+        let delay = delaySeconds
         return AsyncStream { continuation in
-            continuation.yield(LLMResponse(delta: "slow answer", isFinished: true, totalTokens: 5))
-            continuation.finish()
+            Task {
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+                continuation.yield(LLMResponse(delta: "slow answer", isFinished: true, totalTokens: 5))
+                continuation.finish()
+            }
         }
     }
 

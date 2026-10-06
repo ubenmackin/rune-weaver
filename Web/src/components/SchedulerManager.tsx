@@ -5,14 +5,20 @@ import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
   createJob,
+  DEFAULT_SCHEDULER_MAX_TOOL_ITERATIONS,
   deleteJob,
   formatRunDuration,
+  getSettings,
   isActiveRunStatus,
   listJobs,
   listRuns,
   RUN_LOG_POLL_LIMIT,
   RUN_POLL_INTERVAL_MS,
   runJobNow,
+  schedulerJobEffectiveMaxToolIterations,
+  schedulerMaxToolIterations,
+  TOOL_ROUNDS_MAX,
+  TOOL_ROUNDS_MIN,
   updateJob,
   type NewSchedulerJobInput,
   type RunLogEntry,
@@ -37,6 +43,8 @@ export default function SchedulerManager() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [schedulerDefault, setSchedulerDefault] = useState<number | null>(null);
+  const [schedulerBudgetsLoading, setSchedulerBudgetsLoading] = useState(true);
 
   // Wizard state
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -96,6 +104,19 @@ export default function SchedulerManager() {
         }
       })
       .catch(() => {});
+
+    // Live scheduler budget rides GET /settings so the header and row badges
+    // track the stored section default without a restart.
+    getSettings()
+      .then((settings) => {
+        if (!cancelled) setSchedulerDefault(schedulerMaxToolIterations(settings));
+      })
+      .catch(() => {
+        if (!cancelled) setSchedulerDefault(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSchedulerBudgetsLoading(false);
+      });
 
     return () => {
       cancelled = true;
@@ -232,6 +253,8 @@ export default function SchedulerManager() {
     id?: string,
   ) {
     if (id) {
+      // Tool-budget clear flows through untouched: an edit-to-blank wizard payload carries
+      // clearToolBudget:true alongside null budget keys so the engine returns to inherit.
       const updated = await updateJob(id, input as UpdateSchedulerJobInput);
       setJobs((prev) => prev.map((j) => (j.id === id ? updated : j)));
     } else {
@@ -278,6 +301,12 @@ export default function SchedulerManager() {
         </div>
       </div>
 
+      {schedulerBudgetsLoading ? (
+        <p className="settings-field-hint">Loading run budgets.</p>
+      ) : (
+        <p className="settings-field-hint">{`Each run uses ${schedulerDefault ?? DEFAULT_SCHEDULER_MAX_TOOL_ITERATIONS} consecutive tool rounds by default (per-job override below, range ${TOOL_ROUNDS_MIN}-${TOOL_ROUNDS_MAX}). Budget-exceeded runs synthesize a summary; only jobs with on_tool_limit set to park request continuation.`}</p>
+      )}
+
       {error ? <p className="error">{error}</p> : null}
       {notice ? <div className="notice-banner">{notice}</div> : null}
 
@@ -305,6 +334,20 @@ export default function SchedulerManager() {
           const isPollJob = Boolean(job.pollAccount);
           const isExpanded = expandedRunsJobId === job.id;
           const runsForThisJob = jobRuns[job.id] || [];
+          const effectiveBudget = schedulerJobEffectiveMaxToolIterations(
+            job,
+            schedulerDefault,
+          );
+          const hasBudgetOverride =
+            job.maxToolIterations != null || job.onToolLimit != null;
+          // Surface the interruption policy alongside the rounds so a park override
+          // reads distinctly from an inherited synthesize default.
+          const budgetPolicySuffix =
+            job.onToolLimit === "park"
+              ? " · park"
+              : job.onToolLimit
+                ? ` · ${job.onToolLimit}`
+                : "";
 
           return (
             <div
@@ -336,6 +379,13 @@ export default function SchedulerManager() {
                         <span>{job.schedule || "Cron"}</span>
                       </span>
                     )}
+                    <span className="trigger-badge budget">
+                      {hasBudgetOverride
+                        ? job.maxToolIterations != null
+                          ? `${effectiveBudget} rounds${budgetPolicySuffix}`
+                          : `Default (${effectiveBudget})${budgetPolicySuffix}`
+                        : `Default (${effectiveBudget})`}
+                    </span>
                   </div>
 
                   <div className="schedule-card-details muted text-xs">
@@ -489,6 +539,9 @@ export default function SchedulerManager() {
       {wizardOpen && (
         <ScheduleWizardModal
           jobToEdit={editingJob}
+          sectionDefault={
+            schedulerDefault ?? DEFAULT_SCHEDULER_MAX_TOOL_ITERATIONS
+          }
           onSave={handleSaveWizard}
           onClose={() => {
             setWizardOpen(false);

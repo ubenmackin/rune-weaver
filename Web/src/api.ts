@@ -927,8 +927,16 @@ export interface UpdateSchedulerJobInput {
   pollIntervalSeconds?: number | null;
   pollLimit?: number | null;
   clearPoll?: boolean;
+  // Tool-budget clear-vs-omit contract (mirrors UpdateSchedulerJob on the engine): omitted (undefined)
+  // leaves the budget alone; use clearToolBudget:true to clear it to inherit (nil) before applying
+  // any non-nil budget fields in the same payload.
   maxToolIterations?: number | null;
+  // New action on tool limit ("fail" or "park"), if changed. Omitted (undefined) leaves the policy
+  // alone; "" clears to nil, or use clearToolBudget:true to clear it to inherit (nil).
   onToolLimit?: string | null;
+  // When true, clears the whole tool budget to nil (inherit) before applying any non-nil budget
+  // fields in the same payload.
+  clearToolBudget?: boolean;
 }
 
 export class ApiError extends Error {
@@ -2455,6 +2463,8 @@ export interface GoalsConfigData {
   planTimeoutSeconds?: number;
   max_triggers_per_goal?: number;
   maxTriggersPerGoal?: number;
+  max_tool_iterations?: number;
+  maxToolIterations?: number;
 }
 
 // Partial goals patch for `PUT /settings`, mirroring the engine
@@ -2474,6 +2484,73 @@ export interface GoalsSettingsUpdate {
   planTimeoutSeconds?: number;
   max_triggers_per_goal?: number;
   maxTriggersPerGoal?: number;
+}
+
+// Scheduled-run tool budget mirroring the engine `SchedulerConfig`
+// (Sources/RuneWeaverCore/Scheduler.swift). The section default bounds
+// consecutive tool rounds per scheduled run; a per-job override wins.
+export interface SchedulerConfigData {
+  max_tool_iterations?: number | null;
+  maxToolIterations?: number | null;
+}
+
+// Default scheduled-run tool rounds mirroring SchedulerConfig.
+export const DEFAULT_SCHEDULER_MAX_TOOL_ITERATIONS = 25;
+
+// Default interactive-chat tool rounds mirroring EngineConfig
+// (Sources/RuneWeaverCore/Config.swift).
+export const DEFAULT_ENGINE_MAX_TOOL_ITERATIONS = 10;
+
+// Shared tool-round bounds for every max_tool_iterations budget; the engine owns the 1-100 range.
+export const TOOL_ROUNDS_MIN = 1;
+export const TOOL_ROUNDS_MAX = 100;
+
+// Shared tool-round clamp for every max_tool_iterations budget: a finite number floors to an
+// integer and clamps into the engine-owned 1-100 range, while absent or drifted shapes degrade
+// to the caller-supplied fallback. Single source for the scheduler, per-job, chat, and goal
+// readers so the bounds cannot drift per call site.
+export function clampToolRounds(raw: unknown, fallback: number): number {
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    const floored = Math.floor(raw);
+    if (floored < TOOL_ROUNDS_MIN) return TOOL_ROUNDS_MIN;
+    if (floored > TOOL_ROUNDS_MAX) return TOOL_ROUNDS_MAX;
+    return floored;
+  }
+  return fallback;
+}
+
+// Reads the live scheduler section default from GET /settings, falling back
+// to the engine default when the section predates the key.
+export function schedulerMaxToolIterations(
+  settings: SettingsResponse | undefined | null,
+): number {
+  const raw =
+    settings?.schedulerMaxToolIterations ??
+    settings?.scheduler?.max_tool_iterations ??
+    settings?.scheduler?.maxToolIterations;
+  return clampToolRounds(raw, DEFAULT_SCHEDULER_MAX_TOOL_ITERATIONS);
+}
+
+// Resolves the live per-job effective budget: a finite per-job override wins,
+// otherwise the live section default applies.
+export function schedulerJobEffectiveMaxToolIterations(
+  job: SchedulerJob | undefined | null,
+  sectionDefault: number | null | undefined,
+): number {
+  return clampToolRounds(
+    job?.maxToolIterations,
+    clampToolRounds(sectionDefault, DEFAULT_SCHEDULER_MAX_TOOL_ITERATIONS),
+  );
+}
+
+// Reads the live interactive-chat tool budget from GET /settings, falling back
+// to the engine default when the flat key is absent or drifted so the summary
+// never renders an unsaved draft value.
+export function engineMaxToolIterations(
+  settings: SettingsResponse | undefined | null,
+): number {
+  const raw = settings?.maxToolIterations;
+  return clampToolRounds(raw, DEFAULT_ENGINE_MAX_TOOL_ITERATIONS);
 }
 
 // Interruption policy for background scheduler and goal turns, mirroring the
@@ -2524,6 +2601,21 @@ export const DEFAULT_IDEAS_ENABLED = false;
 export const DEFAULT_GOALS_ENABLED = false;
 export const DEFAULT_GOALS_STEP_INTERVAL_MINUTES = 1440;
 export const DEFAULT_GOALS_MAX_ACTIVE_GOALS = 10;
+
+// Default goal-run tool rounds mirroring GoalsConfig.
+export const DEFAULT_GOALS_MAX_TOOL_ITERATIONS = 35;
+
+// Reads the live goal tool budget from GET /settings, preferring snake_case
+// then camelCase and falling back to the engine default on absent or drifted shapes.
+export function goalsMaxToolIterations(
+  goals: GoalsConfigData | undefined | null,
+): number {
+  const raw =
+    goals?.max_tool_iterations ??
+    goals?.maxToolIterations ??
+    DEFAULT_GOALS_MAX_TOOL_ITERATIONS;
+  return clampToolRounds(raw, DEFAULT_GOALS_MAX_TOOL_ITERATIONS);
+}
 
 // Cadence choices offered by the New Goal form. Every value sits inside the
 // engine's 5..20160 bound (GOALS_STEP_INTERVAL_MIN_MINUTES..MAX) so the select
@@ -3648,6 +3740,8 @@ export interface SettingsResponse {
   logLevel: string;
   compactionThresholdPercent?: number;
   maxToolIterations?: number;
+  // Flat scheduler section default; optional for back-compat with older engines.
+  schedulerMaxToolIterations?: number;
   defaultProvider: string;
   fallbackProvider?: string;
   providers: Record<string, ProviderConfigData>;
@@ -3702,6 +3796,9 @@ export interface SettingsResponse {
   // Steady goal pursuit policy under [goals]; optional for back-compat with
   // older engines that predate the section.
   goals?: GoalsConfigData;
+  // Scheduled-run tool budget under [scheduler]; optional for back-compat
+  // with older engines that predate the section.
+  scheduler?: SchedulerConfigData;
   // Interruption policy under [proactive]; optional for back-compat with
   // older engines that predate the section.
   proactive?: ProactiveConfigData;

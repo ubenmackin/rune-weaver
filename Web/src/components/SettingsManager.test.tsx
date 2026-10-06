@@ -1214,6 +1214,10 @@ describe("SettingsManager", () => {
           return jsonResponse({
             ...mockSettings,
             maxToolIterations: 12,
+            schedulerMaxToolIterations: 30,
+            goals: {
+              max_tool_iterations: 40,
+            },
           });
         }
         return jsonResponse({});
@@ -1231,9 +1235,24 @@ describe("SettingsManager", () => {
     const engineTabBtn = screen.getByRole("tab", { name: /Engine and Logs/i });
     await user.click(engineTabBtn);
 
-    // Verify loaded value
-    const input = await screen.findByLabelText(/Max Tool Rounds per Turn/i);
+    // Verify loaded value under the chats-scoped label
+    const input = await screen.findByLabelText(/Max Tool Rounds per Turn \(Chats\)/i);
     expect(input).toHaveValue(12);
+
+    // Engine control governs chats only
+    expect(screen.getByText(/Applies to interactive chats only/i)).toBeDefined();
+    expect(screen.getByText(/parks for your approval to continue/i)).toBeDefined();
+
+    // Live three-budget summary tracks GET values rather than hardcoded defaults
+    const summary = screen.getByText(/Chats use/i);
+    expect(summary.textContent).toContain("12");
+    expect(summary.textContent).toContain("30");
+    expect(summary.textContent).toContain("40");
+    expect(summary.textContent).toMatch(/Chats use 12 rounds per turn \(parks for approval\)/);
+    expect(summary.textContent).toMatch(/Scheduled runs use 30 rounds by default with per-job override/);
+    expect(summary.textContent).toMatch(/synthesizes plus budget_exceeded/);
+    expect(summary.textContent).toMatch(/parks when the job sets on_tool_limit to park/);
+    expect(summary.textContent).toMatch(/Goal runs use 40 rounds \(always synthesizes plus budget_exceeded\)/);
 
     // Edit value
     await user.clear(input);
@@ -1247,6 +1266,55 @@ describe("SettingsManager", () => {
       expect(savedBody).not.toBeNull();
     });
     expect((savedBody as unknown as Record<string, unknown>)?.maxToolIterations).toBe(15);
+  });
+
+  it("renders the live goal-runs budget note in the Goals tab with no editable tool-rounds input", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        return jsonResponse({
+          ...mockSettings,
+          goals: {
+            enabled: true,
+            step_interval_minutes: 1440,
+            max_active_goals: 10,
+            max_steps_per_goal: 8,
+            plan_timeout_seconds: 120,
+            max_triggers_per_goal: 4,
+            max_tool_iterations: 47,
+          },
+        });
+      }),
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    await user.click(screen.getByRole("tab", { name: /^Goals$/i }));
+    const goalsPane = screen.getByTestId("goals-pane");
+
+    const note = within(goalsPane).getByText(/Goal runs use/i);
+    expect(note.tagName.toLowerCase()).toBe("p");
+    expect(note.className).toContain("settings-field-hint");
+    expect(note.textContent).toMatch(/Goal runs use 47 consecutive tool rounds per turn/);
+    expect(note.textContent).toContain("range 1–100");
+    expect(note.textContent).toContain("[goals] max_tool_iterations");
+    expect(note.textContent).toContain("budget_exceeded");
+    expect(note.textContent).toMatch(/instead of parking for approval/);
+
+    expect(within(goalsPane).queryByLabelText(/tool rounds/i)).toBeNull();
+    expect(goalsPane.querySelector('input[id*="tool"]')).toBeNull();
   });
 
   it("opens browser and web configuration modal from the combined Browser & Web header without fallback error", async () => {
