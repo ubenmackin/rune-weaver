@@ -12,7 +12,7 @@
 // the shared store with no restart and no filesystem watcher.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { authHeaders, checkSecretStatus } from "../api";
+import { authHeaders, checkSecretStatus, deleteSecret } from "../api";
 import {
   classifyWildcard,
   containsTOMLBreakingScalar,
@@ -27,6 +27,7 @@ import {
 } from "../policyBindingValidation";
 import Modal from "./Modal";
 import { PolicyBindingModal, validateBindingHostEntry } from "./PolicyBindingModal";
+import { StoreSecretModal, normalizeSecretKey } from "./StoreSecretModal";
 import { CloseIcon, TrashIcon } from "./icons";
 
 // Postures the egress supervisor enforces. Only these two persist; older files
@@ -752,6 +753,8 @@ export interface CredentialsListProps {
   onAdd?: () => void;
   onEdit?: (key: string) => void;
   onDeleteRequest?: (key: string) => void;
+  onSetSecret?: (key: string) => void;
+  onDeleteSecretRequest?: (key: string) => void;
 }
 
 // Searchable credentials list. Rows stay compact so dozens scan without
@@ -767,9 +770,13 @@ export function CredentialsList({
   onAdd,
   onEdit,
   onDeleteRequest,
+  onSetSecret,
+  onDeleteSecretRequest,
 }: CredentialsListProps) {
   const [query, setQuery] = useState<string>("");
   const [attentionOnly, setAttentionOnly] = useState<boolean>(false);
+  const handleOpenSecret = onSetSecret;
+  const handleDeleteSecret = onDeleteSecretRequest;
 
   // Sorted entries keep the list deterministic across saves; attention and
   // summaries derive per render so a network edit immediately re-badges every
@@ -845,8 +852,7 @@ export function CredentialsList({
             No credential bindings yet.
           </p>
           <p className="muted" style={{ margin: "0 0 8px 0" }}>
-            Store the secret value in Keychain as <code>rwsecret:&lt;key&gt;</code>, then bind
-            that key to the hosts it may reach.
+            Add a binding, then set its secret value here. Type MY_KEY to store Keychain account MY_KEY used as rwsecret:MY_KEY; pasting rwsecret:MY_KEY stores the same slot. Values take effect on the next request with no restart.
           </p>
           <button
             type="button"
@@ -983,6 +989,50 @@ export function CredentialsList({
                   {row.scopeSummary}
                 </span>
               </button>
+              {row.stored ? (
+                <>
+                  <button
+                    type="button"
+                    className="ghost btn-sm"
+                    data-testid={`update-secret-${row.key}`}
+                    aria-label={`Update secret for ${row.key}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleOpenSecret?.(row.key);
+                    }}
+                    title={`Update secret for ${row.key}`}
+                  >
+                    Update
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost btn-sm"
+                    data-testid={`delete-secret-${row.key}`}
+                    aria-label={`Delete secret for ${row.key}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleDeleteSecret?.(row.key);
+                    }}
+                    title={`Delete secret for ${row.key}`}
+                  >
+                    Delete secret
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="ghost btn-sm"
+                  data-testid={`set-secret-${row.key}`}
+                  aria-label={`Set secret for ${row.key}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    handleOpenSecret?.(row.key);
+                  }}
+                  title={`Set secret for ${row.key}`}
+                >
+                  Set secret
+                </button>
+              )}
               <button
                 type="button"
                 className="icon-button"
@@ -1026,6 +1076,13 @@ export function PolicyPane() {
   // a binding is never removed by an accidental click, mirroring the plugin
   // uninstall confirmation.
   const [pendingDeleteKey, setPendingDeleteKey] = useState<string | null>(null);
+  // In-place Keychain value entry: null stays closed, otherwise the normalized
+  // key plus whether a value is already stored drives Store versus Update copy.
+  const [secretModal, setSecretModal] = useState<{ key: string; isUpdate: boolean } | null>(null);
+  // Pending Keychain value deletion: the key renders a dedicated confirm modal
+  // so a stored value is never removed by an accidental click. The binding
+  // itself stays; only the secret slot is deleted.
+  const [pendingDeleteSecretKey, setPendingDeleteSecretKey] = useState<string | null>(null);
   // Last accepted snapshot for dirty tracking. Changed is a canonical deep
   // compare of the live draft against this snapshot, so an edit that returns
   // to the loaded shape or only reorders sets reads clean instead of staying
@@ -1151,6 +1208,83 @@ export function PolicyPane() {
     setPendingDeleteKey(null);
   }
 
+  // Opens the in-place Keychain entry for one binding key. The raw key is
+  // normalized so a pasted surrogate resolves to the same slot as the bare
+  // account name; isUpdate reads the live presence map so Set and Update copy
+  // stay honest without a second probe.
+  function openSecretModal(rawKey: string) {
+    const normalized = normalizeSecretKey(rawKey ?? "");
+    if (!normalized) return;
+    setSecretModal({
+      key: normalized,
+      isUpdate: secretStatus[normalized] === true,
+    });
+  }
+
+  function handleCloseSecretModal() {
+    setSecretModal(null);
+  }
+
+  // Merges one probed key into the presence map intersected with live keys so
+  // a deleted binding cannot persist as a stale Stored pill. A binding-modal
+  // shortcut for a not-yet-saved key keeps its probe so the modal badge flips
+  // immediately; the next key-set probe reconciles.
+  function mergeSingleKeyStatus(
+    probeKey: string,
+    status: Record<string, boolean> | null | undefined,
+  ) {
+    if (!probeKey || !status) return;
+    const live = new Set(Object.keys(draft?.credentials ?? {}));
+    live.add(probeKey);
+    setSecretStatus((prev) => {
+      const next = { ...prev, ...status };
+      for (const entry of Object.keys(next)) {
+        if (!live.has(entry)) delete next[entry];
+      }
+      return next;
+    });
+  }
+
+  // Refreshes the badge after a store without closing the binding modal: the
+  // single-key probe merges into the map intersected with live keys so a
+  // deleted binding cannot persist as a stale Stored pill.
+  async function handleSecretModalSuccess(key: string) {
+    const normalized = normalizeSecretKey(key ?? "");
+    const probeKey = normalized || key;
+    if (!probeKey) return;
+    try {
+      const status = await checkSecretStatus([probeKey]);
+      mergeSingleKeyStatus(probeKey, status);
+    } catch {
+      // Presence probes stay silent so rows fall back to Missing.
+    }
+  }
+
+  function handleRequestDeleteSecret(key: string) {
+    const normalized = normalizeSecretKey(key ?? "");
+    if (!normalized) return;
+    setPendingDeleteSecretKey(normalized);
+  }
+
+  function handleCancelDeleteSecret() {
+    setPendingDeleteSecretKey(null);
+  }
+
+  // Deletes only the Keychain value; the binding stays. The single-key probe
+  // flips the badge back to Missing.
+  async function handleConfirmDeleteSecret() {
+    const key = pendingDeleteSecretKey;
+    if (!key) return;
+    setPendingDeleteSecretKey(null);
+    try {
+      await deleteSecret(key);
+      const status = await checkSecretStatus([key]);
+      mergeSingleKeyStatus(key, status);
+    } catch {
+      // Deletion failures stay silent; the badge keeps its Stored reading.
+    }
+  }
+
   // Modal save writes into the live draft only; the pane Save button owns
   // persistence through savePolicy so network writes stay single-pathed. A
   // renamed key moves the binding instead of forking it.
@@ -1166,7 +1300,9 @@ export function PolicyPane() {
     allowedPathPrefixes?: string[];
     allowed_path_prefixes?: string[];
   }) {
-    const nextKey = (modalDraft?.key ?? "").trim();
+    // Pasted surrogate spellings resolve to the bare slot so the draft never
+    // stores a colon-bearing key the gate would refuse.
+    const nextKey = normalizeSecretKey(modalDraft?.key ?? "");
     if (!nextKey) return;
     const hosts =
       modalDraft.hosts ?? modalDraft.allowedHosts ?? modalDraft.allowed_hosts ?? [];
@@ -1533,6 +1669,8 @@ export function PolicyPane() {
               onAdd={() => setBindingModal({ mode: "add", editingKey: null })}
               onEdit={(key) => setBindingModal({ mode: "edit", editingKey: key })}
               onDeleteRequest={handleRequestDeleteBinding}
+              onSetSecret={openSecretModal}
+              onDeleteSecretRequest={handleRequestDeleteSecret}
             />
           </section>
 
@@ -1547,6 +1685,23 @@ export function PolicyPane() {
               onSave={handleBindingModalSave}
               onClose={() => setBindingModal(null)}
               onAddAllowedDomains={handleAddAllowedDomains}
+              onStoreInKeychain={openSecretModal}
+              isStoreOpen={Boolean(secretModal)}
+            />
+          ) : null}
+
+          {secretModal ? (
+            <StoreSecretModal
+              isOpen={Boolean(secretModal)}
+              secretKey={secretModal.key}
+              title={
+                secretModal.isUpdate
+                  ? `Update Secret for ${secretModal.key} in Keychain`
+                  : `Store Secret for ${secretModal.key} to Keychain`
+              }
+              isUpdate={secretModal.isUpdate}
+              onClose={handleCloseSecretModal}
+              onSuccess={(key) => void handleSecretModalSuccess(key)}
             />
           ) : null}
 
@@ -1584,6 +1739,47 @@ export function PolicyPane() {
                   aria-label={`Confirm delete ${pendingDeleteKey}`}
                 >
                   Delete
+                </button>
+              </div>
+            </Modal>
+          ) : null}
+
+          {pendingDeleteSecretKey ? (
+            <Modal
+              label="Confirm delete secret"
+              onClose={handleCancelDeleteSecret}
+              containerClassName="modal-container session-delete-modal"
+              testId="confirm-delete-secret-modal"
+            >
+              <div className="modal-header">
+                <h3>Are you sure?</h3>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={handleCancelDeleteSecret}
+                  aria-label="Close"
+                >
+                  <CloseIcon size={16} />
+                </button>
+              </div>
+              <div className="modal-body">
+                <p className="muted" style={{ margin: 0 }}>
+                  This will delete the Keychain secret for &lsquo;{pendingDeleteSecretKey}&rsquo;.
+                  The policy binding stays; only the stored value is removed. This cannot be undone.
+                </p>
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="ghost" onClick={handleCancelDeleteSecret}>
+                  Keep
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  data-testid="confirm-delete-secret"
+                  onClick={() => void handleConfirmDeleteSecret()}
+                  aria-label={`Confirm delete secret ${pendingDeleteSecretKey}`}
+                >
+                  Delete secret
                 </button>
               </div>
             </Modal>
