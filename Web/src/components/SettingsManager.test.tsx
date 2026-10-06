@@ -20,9 +20,12 @@ import { peekPersonaSignals } from "./PersonaAvatar";
 import {
   BASH_CPU_MAX_SECONDS,
   BASH_CPU_MIN_SECONDS,
+  BASH_HOST_ALLOW_PATTERNS_MAX,
+  BASH_HOST_ALLOW_PATTERN_MAX_LENGTH,
   BASH_MEMORY_MAX_MB,
   BASH_MEMORY_MIN_MB,
   BASH_PERMISSION_ACTIONS,
+  BASH_SANDBOX_MODES,
   BASH_TIMEOUT_MAX_SECONDS,
   BASH_TIMEOUT_MIN_SECONDS,
   clearAuthToken,
@@ -31,8 +34,10 @@ import {
   DEFAULT_BASH_CPU_SECONDS,
   DEFAULT_BASH_DEFAULT_ACTION,
   DEFAULT_BASH_ENABLED,
+  DEFAULT_BASH_HOST_ALLOW_PATTERNS,
   DEFAULT_BASH_MEMORY_MB,
   DEFAULT_BASH_RULES,
+  DEFAULT_BASH_SANDBOX_MODE,
   DEFAULT_BASH_TIMEOUT_SECONDS,
   DEFAULT_PERSONA_AVATAR,
   DEFAULT_PERSONA_TONE,
@@ -2687,6 +2692,8 @@ describe("SettingsManager", () => {
         rules: [{ pattern: "*", action: "ask" }],
         timeout_seconds: 30,
         allow_network: false,
+        sandbox_mode: "strictContainer",
+        host_allow_patterns: ["xcodebuild*", "codesign*"],
       },
     };
     let sentPayload: Record<string, unknown> | null = null;
@@ -2725,13 +2732,27 @@ describe("SettingsManager", () => {
     expect(configureButtons.length).toBe(1);
     await user.click(configureButtons[0]);
 
-    // The Bash modal carries the full shell policy: enable, default action,
-    // ordered rules, timeout, and network isolation.
+    // The Bash modal carries the shell policy plus the confinement editors:
+    // execution tier dropdown with three tiers and the host allowlist.
     expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
     expect(screen.getByLabelText(/Default action/i)).toBeDefined();
     expect(screen.getByLabelText(/Timeout \(seconds\)/i)).toBeDefined();
+    expect(screen.getByLabelText(/Execution tier/i)).toBeDefined();
+    expect(screen.getByLabelText(/Host allow patterns/i)).toBeDefined();
     expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
 
+    // Fresh snapshot matches the stored confinement: tier plus allowlist seed
+    // from the engine defaults.
+    expect(
+      (screen.getByLabelText(/Execution tier/i) as HTMLSelectElement).value,
+    ).toBe("strictContainer");
+    expect(
+      (screen.getByLabelText(/Host allow patterns/i) as HTMLTextAreaElement)
+        .value,
+    ).toContain("xcodebuild*");
+    expect(screen.getByText(/Empty list blocks host execution entirely/i)).toBeDefined();
+
+    // Unedited save sends a changed-only empty patch so stored values survive.
     await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
 
     await waitFor(() => {
@@ -2742,11 +2763,7 @@ describe("SettingsManager", () => {
       unknown
     >;
     expect(bash).toBeDefined();
-    expect(bash["enabled"]).toBe(true);
-    expect(bash["default_action"]).toBe("ask");
-    expect(bash["rules"]).toEqual([{ pattern: "*", action: "ask" }]);
-    expect(bash["timeout_seconds"]).toBe(30);
-    expect(bash["allow_network"]).toBe(false);
+    expect(bash).toEqual({});
   });
 
   it("pins the bash textarea contract with ordered last-match rules", async () => {
@@ -2776,6 +2793,8 @@ describe("SettingsManager", () => {
         ],
         timeout_seconds: 30,
         allow_network: false,
+        sandbox_mode: "strictContainer",
+        host_allow_patterns: ["xcodebuild*", "codesign*"],
       },
     };
     let sentPayload: Record<string, unknown> | null = null;
@@ -2877,10 +2896,10 @@ describe("SettingsManager", () => {
     ).toBeDefined();
     expect(putCount).toBe(0);
 
-    // Ordered save runs last so the modal auto-close timer never strands a
-    // follow-up step: blanks collapse and order is preserved top-to-bottom.
+    // Ordered save runs last: blanks collapse and order is preserved
+    // top-to-bottom as a changed-only patch carrying only the edited rules.
     await user.clear(editedTextarea);
-    await user.type(editedTextarea, "  * = deny  \n\nswiftformat * = allow\n   \n");
+    await user.type(editedTextarea, "  * = allow  \n\nswiftformat * = allow\n   \n");
     expect(screen.getByText(/2 rules/i)).toBeDefined();
     await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
 
@@ -2892,9 +2911,11 @@ describe("SettingsManager", () => {
       unknown
     >;
     expect(bash["rules"]).toEqual([
-      { pattern: "*", action: "deny" },
+      { pattern: "*", action: "allow" },
       { pattern: "swiftformat *", action: "allow" },
     ]);
+    expect(bash["sandbox_mode"]).toBeUndefined();
+    expect(bash["host_allow_patterns"]).toBeUndefined();
   });
 
   it("keeps Files & Access in the Security pane", async () => {
@@ -3164,6 +3185,8 @@ describe("SettingsManager", () => {
         rules: [{ pattern: "git *", action: "allow" }],
         timeoutSeconds: 45,
         allowNetwork: true,
+        sandboxMode: "machineScoped",
+        hostAllowPatterns: ["xcodebuild*"],
       },
     };
     let sentPayload: Record<string, unknown> | null = null;
@@ -3204,12 +3227,25 @@ describe("SettingsManager", () => {
     expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
 
     // Camel aliases populate the same fields as the snake keys, with rules
-    // serialized as `pattern = action` lines preserving order.
+    // serialized as `pattern = action` lines preserving order. Confinement
+    // reads the camel aliases too.
     const defaultSelect = screen.getByLabelText(/Default action/i) as HTMLSelectElement;
     expect(defaultSelect.value).toBe("deny");
     expect(screen.getByDisplayValue("45")).toBeDefined();
     expect(screen.getByDisplayValue("git * = allow")).toBeDefined();
+    expect(
+      (screen.getByLabelText(/Execution tier/i) as HTMLSelectElement).value,
+    ).toBe("machineScoped");
+    expect(
+      (screen.getByLabelText(/Host allow patterns/i) as HTMLTextAreaElement)
+        .value,
+    ).toContain("xcodebuild*");
 
+    // Editing one knob sends a changed-only snake_case patch: only the edited
+    // timeout travels while untouched camel-populated values stay omitted.
+    const timeoutInput = screen.getByLabelText(/Timeout \(seconds\)/i) as HTMLInputElement;
+    await user.clear(timeoutInput);
+    await user.type(timeoutInput, "46");
     await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
 
     await waitFor(() => {
@@ -3220,10 +3256,13 @@ describe("SettingsManager", () => {
       unknown
     >;
     expect(bash).toBeDefined();
-    expect(bash["default_action"]).toBe("deny");
-    expect(bash["timeout_seconds"]).toBe(45);
-    expect(bash["allow_network"]).toBe(true);
-    expect(bash["rules"]).toEqual([{ pattern: "git *", action: "allow" }]);
+    expect(bash["timeout_seconds"]).toBe(46);
+    expect(bash["timeoutSeconds"]).toBeUndefined();
+    expect(bash["default_action"]).toBeUndefined();
+    expect(bash["allow_network"]).toBeUndefined();
+    expect(bash["rules"]).toBeUndefined();
+    expect(bash["sandbox_mode"]).toBeUndefined();
+    expect(bash["host_allow_patterns"]).toBeUndefined();
   });
 
   it("edits allowed roots via the Security textarea with live count, reset, and array payload", async () => {
@@ -4086,6 +4125,22 @@ describe("bash defaults and bounds contract", () => {
     expect(DEFAULT_BASH_CONFIG.memory_mb).toBe(DEFAULT_BASH_MEMORY_MB);
     expect(DEFAULT_BASH_CONFIG.allow_network).toBe(DEFAULT_BASH_ALLOW_NETWORK);
     expect(DEFAULT_BASH_CONFIG.rules).toEqual(DEFAULT_BASH_RULES);
+    expect(DEFAULT_BASH_SANDBOX_MODE).toBe("strictContainer");
+    expect(DEFAULT_BASH_HOST_ALLOW_PATTERNS).toEqual([
+      "xcodebuild*",
+      "codesign*",
+    ]);
+    expect(DEFAULT_BASH_CONFIG.sandbox_mode).toBe(DEFAULT_BASH_SANDBOX_MODE);
+    expect(DEFAULT_BASH_CONFIG.host_allow_patterns).toEqual(
+      DEFAULT_BASH_HOST_ALLOW_PATTERNS
+    );
+    expect([...BASH_SANDBOX_MODES]).toEqual([
+      "strictContainer",
+      "machineScoped",
+      "hostSeatbelt",
+    ]);
+    expect(BASH_HOST_ALLOW_PATTERNS_MAX).toBe(50);
+    expect(BASH_HOST_ALLOW_PATTERN_MAX_LENGTH).toBe(256);
     expect([...BASH_PERMISSION_ACTIONS]).toEqual(["allow", "ask", "deny"]);
     expect(BASH_TIMEOUT_MIN_SECONDS).toBe(1);
     expect(BASH_TIMEOUT_MAX_SECONDS).toBe(3600);
@@ -4867,12 +4922,15 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
       expect(getPutCount()).toBe(1);
     });
     // The modal save travels alone: only the bash section rides the PUT, and
-    // the edited budgets arrive on the snake_case keys the file persists.
+    // the edited budgets arrive on the snake_case keys the file persists as a
+    // changed-only patch with untouched values omitted.
     expect(Object.keys(puts[0])).toEqual(["bash"]);
     const bash = puts[0]["bash"] as Record<string, unknown>;
     expect(bash["cpu_seconds"]).toBe(90);
     expect(bash["memory_mb"]).toBe(2048);
-    expect(bash["timeout_seconds"]).toBe(30);
+    expect(bash["timeout_seconds"]).toBeUndefined();
+    expect(bash["sandbox_mode"]).toBeUndefined();
+    expect(bash["host_allow_patterns"]).toBeUndefined();
     await waitFor(() => {
       expect(screen.getByText(/Bash settings saved/i)).toBeDefined();
     });

@@ -183,16 +183,17 @@ public struct BashSettingsUpdate: Content, Equatable {
     ///   Range checks reuse the `BashConfig` validators the TOML load path
     ///   enforces, so the PUT and file-load paths refuse the same values with
     ///   the same dotted field.
-    public func applyBash(to bash: inout BashConfig) throws {
+    public func apply(to bash: inout BashConfig) throws {
         // Every present field validates before anything mutates, so a
         // multi-field patch with one bad value leaves the stored policy
         // untouched instead of half-applying the valid prefix.
         var validatedAction: BashPermissionAction?
         if let defaultAction {
-            guard let action = BashPermissionAction(rawValue: defaultAction.lowercased()) else {
+            let trimmedAction = defaultAction.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let action = BashPermissionAction(rawValue: trimmedAction.lowercased()) else {
                 throw ConfigError.validationError(
                     field: "bash.default_action",
-                    message: "must be allow, ask, or deny (got '\(defaultAction)')"
+                    message: "must be allow, ask, or deny (got '\(trimmedAction)')"
                 )
             }
             validatedAction = action
@@ -203,7 +204,7 @@ public struct BashSettingsUpdate: Content, Equatable {
             guard let mode = BashSandboxMode(rawValue: trimmed) else {
                 throw ConfigError.validationError(
                     field: "bash.sandbox_mode",
-                    message: "must be one of \(BashSandboxMode.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(sandboxMode)')"
+                    message: "must be one of \(BashSandboxMode.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(trimmed)')"
                 )
             }
             validatedSandboxMode = mode
@@ -220,8 +221,11 @@ public struct BashSettingsUpdate: Content, Equatable {
         if let memoryMb {
             try BashConfig.validateMemoryMB(memoryMb)
         }
+        var validatedHostAllowPatterns: [String]?
         if let hostAllowPatterns {
-            try BashConfig.validateHostAllowPatterns(hostAllowPatterns)
+            let trimmed = hostAllowPatterns.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            try BashConfig.validateHostAllowPatterns(trimmed)
+            validatedHostAllowPatterns = trimmed
         }
         if let enabled {
             bash.enabled = enabled
@@ -247,8 +251,8 @@ public struct BashSettingsUpdate: Content, Equatable {
         if let validatedSandboxMode {
             bash.sandboxMode = validatedSandboxMode
         }
-        if let hostAllowPatterns {
-            bash.hostAllowPatterns = hostAllowPatterns
+        if let validatedHostAllowPatterns {
+            bash.hostAllowPatterns = validatedHostAllowPatterns
         }
     }
 }
@@ -268,13 +272,13 @@ extension UpdateSettingsRequest {
     /// Merges a partial bash patch onto the stored policy, preserving every
     /// field the request omits. A nil patch is a no-op, so a dashboard edit
     /// elsewhere never resets the `[bash]` section. Validation stays
-    /// single-sourced in `BashSettingsUpdate.applyBash(to:)` so the PUT and
+    /// single-sourced in `BashSettingsUpdate.apply(to:)` so the PUT and
     /// direct-merge paths agree with a clear 400 instead of persisting bad values.
     ///
     /// Internal so the shared settings `apply(to:)` keeps one merge path while
     /// the bash-specific logic lives beside its DTOs.
     func applyBash(to bash: inout BashConfig) throws {
         guard let update = self.bash else { return }
-        try update.applyBash(to: &bash)
+        try update.apply(to: &bash)
     }
 }

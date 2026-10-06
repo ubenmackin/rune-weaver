@@ -295,8 +295,12 @@ blocked_apps = ["Terminal", "iTerm2", "Keychain Access", "System Settings", "Sys
 
 [bash]
 # Commands run in ~/.runeweaver/workspace by default, with an optional
-# per-call `cwd` override inside allowed roots, confined by the Seatbelt
-# sandbox (sandbox-exec, deny-default; not Apple Container).
+# per-call `cwd` override inside allowed roots, confined by the execution
+# tier below. Tiers: strictContainer (default, isolated virtual machine
+# mounting only workspace tmp) | machineScoped (isolated virtual machine
+# mounting only the workspace root) | hostSeatbelt (Seatbelt sandbox-exec,
+# deny-default on your Mac as you, fnmatch/prefix-gated by
+# host_allow_patterns below; not Apple Container).
 # Granular shell execution policy. Rules evaluate top-to-bottom and the
 # last matching rule decides (last-match-wins): put the catch-all first
 # and specifics after, otherwise a leading specific is shadowed by the
@@ -317,6 +321,14 @@ cpu_seconds = 120
 # Address-space budget in megabytes applied via `ulimit -v` before each command (64-8192).
 # Best-effort: over-reports on macOS where shared libraries inflate the count.
 memory_mb = 1024
+# Execution tier: strictContainer (default) | machineScoped | hostSeatbelt.
+# strictContainer and machineScoped run in an isolated virtual machine;
+# hostSeatbelt runs on your Mac as you with full access to your files,
+# gated by host_allow_patterns below.
+sandbox_mode = "strictContainer"
+# Fnmatch/prefix allow patterns gating hostSeatbelt execution (max 50 entries,
+# each 1 to 256 chars). Empty list blocks host execution entirely.
+host_allow_patterns = ["xcodebuild*", "codesign*"]
 
 [[bash.rules]]
 pattern = "*"

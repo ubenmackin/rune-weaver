@@ -77,8 +77,12 @@ private func handlePutSettings(req: Request) async throws -> Response {
     let oldServerPort = config.server.port
     let oldServerAllowedHosts = config.server.allowedHosts
     let oldLLMConfig = config.llm
+    // Snapshot the stored bash policy before the single merge so the changed
+    // flag reflects a real move, not merely a non-empty patch.
+    let bashBefore = BashSettingsUpdate(bash: config.bash)
     do {
         try body.apply(to: &config)
+        let bashChanged = BashSettingsUpdate(bash: config.bash) != bashBefore
         // Validate the merged config before persisting so a single bad
         // field cannot corrupt the stored file or live engine state.
         try config.validate()
@@ -117,6 +121,8 @@ private func handlePutSettings(req: Request) async throws -> Response {
         // a restart instead of silently claiming live.
         let bootHeldSectionPatchPresent =
             body.goals != nil || body.proactive != nil || body.ideas != nil || body.persona != nil
+        // Bash sandbox keys apply live through the shared context and never
+        // join the restart set, so a tier or allowlist save returns false.
         let needsRestart = serverChanged || llmChanged || providersChanged || bootHeldSectionPatchPresent
         let liveContext = req.application.runeWeaver
         // Fail-closed bind guard: a changed non-loopback hostname persists
@@ -142,13 +148,30 @@ private func handlePutSettings(req: Request) async throws -> Response {
         // The probed components ride along into the reconcile below so an
         // enable or `db_path` change builds and probes the new store once.
         let prebuiltIndexComponents = try await preflightLiveIndexPolicy(savedConfig: config, context: liveContext, patchPresent: body.index != nil)
+        if bashChanged {
+            // Prove the rendered bytes reparse to the merged bash before touching
+            // the durable file, so a serialization gap never leaves the file
+            // holding a policy the live tools refuse to adopt.
+            let proofURL = FileManager.default.temporaryDirectory.appendingPathComponent("runeweaver-bash-proof-\(UUID().uuidString).toml")
+            defer { try? FileManager.default.removeItem(at: proofURL) }
+            let reparsed: RuneWeaverConfig
+            do {
+                try config.save(to: proofURL)
+                reparsed = try RuneWeaverConfig.load(from: proofURL)
+            } catch {
+                throw Abort(.internalServerError, reason: "Saved bash policy did not round-trip; refusing to update live tools: \(error)")
+            }
+            guard reparsed.bash == config.bash else {
+                throw Abort(.internalServerError, reason: "Saved bash policy did not round-trip; refusing to update live tools.")
+            }
+        }
         try config.save(to: url)
         await applyLiveOrchestratorTuning(body: body, context: liveContext)
         await applyLiveRecallBudgets(body: body, config: config, context: liveContext)
         await reloadLiveMediaTools(body: body, config: config, context: liveContext)
         try await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
         await reloadLiveDesktopTools(body: body, config: config, context: liveContext)
-        await reloadLiveBashFilesTools(body: body, config: config, context: liveContext)
+        await reloadLiveBashFilesTools(body: body, config: config, context: liveContext, bashChanged: bashChanged)
         await reloadLiveFanOut(body: body, config: config, context: liveContext)
         try await reloadLiveIndexPolicy(body: body, config: config, context: liveContext, prebuilt: prebuiltIndexComponents)
         // Configured services seed the allowlist through the shared derivation
@@ -532,8 +555,10 @@ private func reloadLiveDesktopTools(body: UpdateSettingsRequest, config: RuneWea
 ///   - body: Decoded settings patch selecting which policies move.
 ///   - config: Persisted config carrying the fresh policies.
 ///   - context: Live server context receiving the swap.
-private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
-    let hasBashPatch = body.bash.map { !$0.isEmpty } ?? false
+///   - bashChanged: Deep-compared bash movement around the single merge, so
+///     resending identical values skips the rebuild instead of churning tools.
+private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext, bashChanged: Bool) async {
+    let hasBashPatch = bashChanged
     let hasFilesPatch = body.filesDenyPatterns != nil || body.filesAllowRoots != nil || body.filesRequireApprovalOnDeny != nil || body.filesWriteMode != nil
     let hasWorkspacePatch = body.workspace.map { !$0.isEmpty } ?? false
     guard hasBashPatch || hasFilesPatch || hasWorkspacePatch else { return }
