@@ -106,15 +106,26 @@ import {
   parseBlockedAppsText,
   BASH_CPU_MAX_SECONDS,
   BASH_CPU_MIN_SECONDS,
+  BASH_HOST_ALLOW_PATTERNS_MAX,
   BASH_MEMORY_MAX_MB,
   BASH_MEMORY_MIN_MB,
   BASH_PERMISSION_ACTIONS,
+  BASH_SANDBOX_MODES,
   BASH_TIMEOUT_MAX_SECONDS,
   BASH_TIMEOUT_MIN_SECONDS,
   DEFAULT_BASH_CONFIG,
   DEFAULT_BASH_CPU_SECONDS,
+  DEFAULT_BASH_HOST_ALLOW_PATTERNS,
+  DEFAULT_BASH_HOST_ALLOW_PATTERNS_TEXT,
   DEFAULT_BASH_MEMORY_MB,
   DEFAULT_BASH_RULES_TEXT,
+  DEFAULT_BASH_SANDBOX_MODE,
+  bashSandboxSummary,
+  formatHostAllowPatternsText,
+  parseHostAllowPatternsText,
+  parseHostAllowPatternsUncapped,
+  validateBashSandboxMode,
+  validateHostAllowPatterns,
   DEFAULT_FANOUT_FULL_TOOLS,
   DEFAULT_FANOUT_MAX_WORKERS,
   DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS,
@@ -146,7 +157,6 @@ import {
   type SettingsResponse,
   type PluginSummary,
   type ToolInfo,
-  type UpdateSettingsInput,
   type WorkspaceConfigData,
   type WorkspaceSettingsUpdate,
   checkSecretStatus,
@@ -1125,6 +1135,33 @@ export default function SettingsManager() {
   const [bashAllowNetwork, setBashAllowNetwork] = useState<boolean>(
     DEFAULT_BASH_CONFIG.allow_network
   );
+  const [bashSandboxMode, setBashSandboxMode] = useState<string>(
+    DEFAULT_BASH_SANDBOX_MODE
+  );
+  const [bashHostAllowPatternsText, setBashHostAllowPatternsText] =
+    useState<string>(DEFAULT_BASH_HOST_ALLOW_PATTERNS_TEXT);
+  const [bashSaved, setBashSaved] = useState(false);
+  const bashLoadedRef = useRef<{
+    enabled: boolean;
+    default_action: string;
+    rulesText: string;
+    timeout_seconds: number;
+    cpu_seconds: number;
+    memory_mb: number;
+    allow_network: boolean;
+    sandbox_mode: string;
+    host_allow_patterns: string[];
+  }>({
+    enabled: DEFAULT_BASH_CONFIG.enabled,
+    default_action: DEFAULT_BASH_CONFIG.default_action,
+    rulesText: DEFAULT_BASH_RULES_TEXT,
+    timeout_seconds: DEFAULT_BASH_CONFIG.timeout_seconds,
+    cpu_seconds: DEFAULT_BASH_CPU_SECONDS,
+    memory_mb: DEFAULT_BASH_MEMORY_MB,
+    allow_network: DEFAULT_BASH_CONFIG.allow_network,
+    sandbox_mode: DEFAULT_BASH_SANDBOX_MODE,
+    host_allow_patterns: [...DEFAULT_BASH_HOST_ALLOW_PATTERNS],
+  });
   const [bashSaveLoading, setBashSaveLoading] = useState(false);
   const [bashModalError, setBashModalError] = useState<string | null>(null);
   // Short-lived success-then-close timer for the bash modal: held in a ref
@@ -2113,11 +2150,16 @@ export default function SettingsManager() {
   // codec so line order survives the round trip. Resource bounds follow the
   // same dual spelling as the timeout so file-configured CPU and memory values
   // survive a dashboard PUT instead of resetting to the fresh-form defaults.
+  // Confinement follows the same dual spelling: the tier reads either key and
+  // the allowlist reads either list, seeding the snapshot that drives the
+  // changed-only modal patch.
   const populateBashSettings = useCallback(
     (bash: BashConfigData | undefined | null) => {
       if (!bash) return;
+      const next = { ...bashLoadedRef.current };
       if (typeof bash.enabled === "boolean") {
         setBashEnabled(bash.enabled);
+        next.enabled = bash.enabled;
       }
       const defaultAction =
         (typeof bash.default_action === "string" && bash.default_action.trim()
@@ -2128,6 +2170,7 @@ export default function SettingsManager() {
           : "");
       if (defaultAction) {
         setBashDefaultAction(defaultAction);
+        next.default_action = defaultAction;
       }
       if (Array.isArray(bash.rules)) {
         const normalized: BashRuleData[] = bash.rules.map((rule) => ({
@@ -2137,7 +2180,9 @@ export default function SettingsManager() {
               ? rule.action.trim().toLowerCase()
               : "ask",
         }));
-        setBashRulesText(formatBashRulesText(normalized));
+        const text = formatBashRulesText(normalized);
+        setBashRulesText(text);
+        next.rulesText = text;
       }
       const timeout =
         typeof bash.timeout_seconds === "number"
@@ -2147,6 +2192,7 @@ export default function SettingsManager() {
             : null;
       if (timeout !== null) {
         setBashTimeoutSeconds(timeout);
+        next.timeout_seconds = timeout;
       }
       const cpu =
         typeof bash.cpu_seconds === "number"
@@ -2156,6 +2202,7 @@ export default function SettingsManager() {
             : null;
       if (cpu !== null) {
         setBashCpuSeconds(cpu);
+        next.cpu_seconds = cpu;
       }
       const memory =
         typeof bash.memory_mb === "number"
@@ -2165,46 +2212,126 @@ export default function SettingsManager() {
             : null;
       if (memory !== null) {
         setBashMemoryMB(memory);
+        next.memory_mb = memory;
       }
       if (typeof bash.allow_network === "boolean") {
         setBashAllowNetwork(bash.allow_network);
+        next.allow_network = bash.allow_network;
       } else if (typeof bash.allowNetwork === "boolean") {
         setBashAllowNetwork(bash.allowNetwork);
+        next.allow_network = bash.allowNetwork;
       }
+      const rawMode =
+        (typeof bash.sandbox_mode === "string" && bash.sandbox_mode.trim()
+          ? bash.sandbox_mode.trim()
+          : "") ||
+        (typeof bash.sandboxMode === "string" && bash.sandboxMode.trim()
+          ? bash.sandboxMode.trim()
+          : "");
+      if (
+        rawMode &&
+        (BASH_SANDBOX_MODES as readonly string[]).includes(rawMode)
+      ) {
+        setBashSandboxMode(rawMode);
+        next.sandbox_mode = rawMode;
+      }
+      const rawPatterns = Array.isArray(bash.host_allow_patterns)
+        ? bash.host_allow_patterns
+        : Array.isArray(bash.hostAllowPatterns)
+          ? bash.hostAllowPatterns
+          : null;
+      if (rawPatterns !== null) {
+        const filtered = rawPatterns.filter(
+          (entry): entry is string => typeof entry === "string",
+        );
+        const normalized = parseHostAllowPatternsText(
+          formatHostAllowPatternsText(filtered),
+        );
+        setBashHostAllowPatternsText(
+          formatHostAllowPatternsText(normalized),
+        );
+        next.host_allow_patterns = [...normalized];
+      }
+      bashLoadedRef.current = next;
+      setBashSaved(false);
     },
     []
   );
 
-  // Builds the [bash] delta from the shell policy form fields so the
-  // full-settings save and the modal-only save share one shape. Rules preserve
-  // textarea order top-to-bottom last-match-wins through the shared
-  // parseBashRulesText codec; blank lines collapse on save. Sends the
-  // snake_case keys the engine persists; the engine also accepts the camelCase
-  // aliases, so either spelling writes while reads accept both. Resource
-  // budgets travel beside the timeout so one modal save carries the whole
-  // execution bound set with no second save path.
-  const buildBashPayload = useCallback(
-    (): BashSettingsUpdate => {
-      return {
-        enabled: bashEnabled,
-        default_action: bashDefaultAction.trim().toLowerCase(),
-        rules: parseBashRulesText(bashRulesText),
-        timeout_seconds: Number(bashTimeoutSeconds),
-        cpu_seconds: Number(bashCpuSeconds),
-        memory_mb: Number(bashMemoryMB),
-        allow_network: bashAllowNetwork,
-      };
-    },
-    [
-      bashEnabled,
-      bashDefaultAction,
-      bashRulesText,
-      bashTimeoutSeconds,
-      bashCpuSeconds,
-      bashMemoryMB,
-      bashAllowNetwork,
-    ]
-  );
+  // Builds the changed-only [bash] patch shared by the Configure modal and
+  // the full-settings save: a field matching its last-loaded value stays
+  // omitted so the stored value survives, while an emptied allowlist sends
+  // an explicit empty list. Only snake_case keys travel; camelCase aliases
+  // decode but never encode.
+  const buildBashPatch = useCallback((): BashSettingsUpdate => {
+    const patch: BashSettingsUpdate = {};
+    const loaded = bashLoadedRef.current;
+    if (bashEnabled !== loaded.enabled) {
+      patch.enabled = bashEnabled;
+    }
+    const nextAction = bashDefaultAction.trim().toLowerCase();
+    if (nextAction !== loaded.default_action) {
+      patch.default_action = nextAction;
+    }
+    try {
+      const currentRules = parseBashRulesText(bashRulesText);
+      const loadedRules = parseBashRulesText(loaded.rulesText);
+      const rulesChanged =
+        currentRules.length !== loadedRules.length ||
+        currentRules.some(
+          (rule, index) =>
+            rule.pattern !== loadedRules[index]?.pattern ||
+            rule.action !== loadedRules[index]?.action,
+        );
+      if (rulesChanged) {
+        patch.rules = currentRules;
+      }
+    } catch {
+      // Malformed rules never reach the patch: validation reports the line
+      // number before any network write.
+    }
+    const timeoutNum = Number(bashTimeoutSeconds);
+    if (timeoutNum !== loaded.timeout_seconds) {
+      patch.timeout_seconds = timeoutNum;
+    }
+    const cpuNum = Number(bashCpuSeconds);
+    if (cpuNum !== loaded.cpu_seconds) {
+      patch.cpu_seconds = cpuNum;
+    }
+    const memoryNum = Number(bashMemoryMB);
+    if (memoryNum !== loaded.memory_mb) {
+      patch.memory_mb = memoryNum;
+    }
+    if (bashAllowNetwork !== loaded.allow_network) {
+      patch.allow_network = bashAllowNetwork;
+    }
+    const nextMode = bashSandboxMode.trim();
+    if (nextMode !== loaded.sandbox_mode) {
+      patch.sandbox_mode = nextMode;
+    }
+    const currentPatterns = parseHostAllowPatternsText(
+      bashHostAllowPatternsText,
+    );
+    if (
+      currentPatterns.length !== loaded.host_allow_patterns.length ||
+      currentPatterns.some(
+        (entry, index) => entry !== loaded.host_allow_patterns[index],
+      )
+    ) {
+      patch.host_allow_patterns = [...currentPatterns];
+    }
+    return patch;
+  }, [
+    bashEnabled,
+    bashDefaultAction,
+    bashRulesText,
+    bashTimeoutSeconds,
+    bashCpuSeconds,
+    bashMemoryMB,
+    bashAllowNetwork,
+    bashSandboxMode,
+    bashHostAllowPatternsText,
+  ]);
 
   // Shared bash validation for the full-save and modal-save paths so both
   // reject a bad default action, a malformed rule line, an empty rule list,
@@ -2214,7 +2341,10 @@ export default function SettingsManager() {
   // list is rejected because an absent key would reload as the default
   // catch-all instead of the saved empty. Resource bounds mirror the engine
   // clamps so a zero CPU budget or a tiny memory budget fails in the form
-  // instead of returning a server 400 from load validation.
+  // instead of returning a server 400 from load validation. Confinement
+  // mirrors BashConfig.validateHostAllowPatterns plus the closed tier set so
+  // an over-limit, blank, overlong, control-char, or TOML-breaking pattern
+  // fails in the form with the same field the server 400 names.
   const validateBashFields = useCallback((): string | null => {
     const normalizedAction = bashDefaultAction.trim().toLowerCase();
     if (!(BASH_PERMISSION_ACTIONS as readonly string[]).includes(normalizedAction)) {
@@ -2241,8 +2371,20 @@ export default function SettingsManager() {
     if (!Number.isInteger(memoryNum) || memoryNum < BASH_MEMORY_MIN_MB || memoryNum > BASH_MEMORY_MAX_MB) {
       return `Invalid bash memory budget: memory must be between ${BASH_MEMORY_MIN_MB} and ${BASH_MEMORY_MAX_MB} MB.`;
     }
+    const tierError = validateBashSandboxMode(bashSandboxMode);
+    if (tierError) {
+      return tierError;
+    }
+    const uncapped = parseHostAllowPatternsUncapped(bashHostAllowPatternsText);
+    if (uncapped.length > BASH_HOST_ALLOW_PATTERNS_MAX) {
+      return `Invalid bash host allow patterns: must contain at most ${BASH_HOST_ALLOW_PATTERNS_MAX} entries (got ${uncapped.length}).`;
+    }
+    const patternsError = validateHostAllowPatterns(uncapped);
+    if (patternsError) {
+      return patternsError;
+    }
     return null;
-  }, [bashDefaultAction, bashRulesText, bashTimeoutSeconds, bashCpuSeconds, bashMemoryMB]);
+  }, [bashDefaultAction, bashRulesText, bashTimeoutSeconds, bashCpuSeconds, bashMemoryMB, bashSandboxMode, bashHostAllowPatternsText]);
 
   // Copies one settings fetch into the fan-out knob fields, tolerating an
   // absent [fanout] section from older engines by keeping the modal defaults.
@@ -3296,7 +3438,7 @@ export default function SettingsManager() {
     }
     // Bash policy shares its validation helper so the full-save and the Tools
     // Bash modal reject the same shapes before any network write. Mirrors
-    // BashSettingsUpdate.applyBash bounds (allow|ask|deny, at least one rule,
+    // BashSettingsUpdate.apply(to:) bounds (allow|ask|deny, at least one rule,
     // 1-3600 timeout, 1-3600 CPU, 64-8192 memory).
     const bashValidationError = validateBashFields();
     if (bashValidationError) {
@@ -3604,7 +3746,7 @@ export default function SettingsManager() {
         pluginsAutoRescan,
         media: buildMediaPayload(),
         desktop: buildDesktopPayload(),
-        bash: buildBashPayload(),
+        bash: buildBashPatch(),
         workspace: buildWorkspacePayload(),
         goals: buildGoalsPayload(),
         proactive: buildProactivePayload(),
@@ -3692,51 +3834,6 @@ export default function SettingsManager() {
   const handleCancelGuard = () => {
     setShowActiveGuard(false);
   };
-
-  // Shared modal save for validated category editors: runs the category
-  // validator, toggles the category loading flag, PUTs the built delta,
-  // repopulates the form, toasts, and re-arms the 1s close tick through the
-  // category timer ref so a repeat save replaces the pending tick and unmount
-  // clears it instead of leaking.
-  const saveCategoryConfig = useCallback(
-    async (options: {
-      validate: () => string | null;
-      buildPayload: () => UpdateSettingsInput;
-      successToast: string;
-      errorMessage: string;
-      setLoading: (value: boolean) => void;
-      setError: (value: string | null) => void;
-      timerRef: React.MutableRefObject<ReturnType<typeof setTimeout> | null>;
-    }): Promise<void> => {
-      const validationError = options.validate();
-      if (validationError) {
-        options.setError(validationError);
-        return;
-      }
-      options.setLoading(true);
-      options.setError(null);
-      try {
-        const updated = await updateSettings(options.buildPayload());
-        populateForm(updated);
-        pushSuccessToast(options.successToast);
-        // Re-arm the close tick through the ref so a repeat save replaces the
-        // pending tick and unmount clears it instead of leaking.
-        if (options.timerRef.current !== null) {
-          clearTimeout(options.timerRef.current);
-          options.timerRef.current = null;
-        }
-        options.timerRef.current = setTimeout(() => {
-          options.timerRef.current = null;
-          setConfiguringToolName(null);
-        }, 1000);
-      } catch (err) {
-        options.setError(err instanceof ApiError ? err.message : options.errorMessage);
-      } finally {
-        options.setLoading(false);
-      }
-    },
-    [populateForm, pushSuccessToast]
-  );
 
   const handleSaveMediaConfig = async () => {
     const mediaTimeoutError = validateMediaTimeoutSeconds(mediaTimeoutSeconds);
@@ -3851,21 +3948,40 @@ export default function SettingsManager() {
     }
   };
 
-  // Saves the [bash] delta for the Bash & Shell modal through PUT /settings,
-  // mirroring the media-only save shape so unsaved edits in other tabs
-  // survive. Validates through the shared bash helper so the modal and the
-  // full-save reject the same shapes; rules preserve textarea order
-  // top-to-bottom last-match-wins.
-  const handleSaveBashConfig = async () => {
-    await saveCategoryConfig({
-      validate: validateBashFields,
-      buildPayload: () => ({ bash: buildBashPayload() }),
-      successToast: "Bash settings saved!",
-      errorMessage: "Failed to save bash settings",
-      setLoading: setBashSaveLoading,
-      setError: setBashModalError,
-      timerRef: bashSaveTimerRef,
-    });
+  // Saves the changed-only [bash] patch for the Bash & Shell modal through
+  // PUT /settings, mirroring the fan-out save shape so unsaved edits in other
+  // tabs survive. Only edited keys travel as snake_case so stored values
+  // survive; an emptied allowlist sends an explicit empty list. Client
+  // validation reports inline without closing while a server 400 lands in the
+  // modal error path without closing. Confinement applies live, so success
+  // shows the saved banner with no restart banner.
+  const handleSaveBashConfig = async (): Promise<void> => {
+    const validationError = validateBashFields();
+    if (validationError) {
+      setBashModalError(validationError);
+      return;
+    }
+    setBashSaveLoading(true);
+    setBashModalError(null);
+    try {
+      const updated = await updateSettings({ bash: buildBashPatch() });
+      populateForm(updated);
+      setBashSaved(true);
+      if (bashSaveTimerRef.current !== null) {
+        clearTimeout(bashSaveTimerRef.current);
+        bashSaveTimerRef.current = null;
+      }
+      bashSaveTimerRef.current = setTimeout(() => {
+        bashSaveTimerRef.current = null;
+        setConfiguringToolName(null);
+      }, 1000);
+    } catch (err) {
+      setBashModalError(
+        err instanceof ApiError ? err.message : "Failed to save bash settings",
+      );
+    } finally {
+      setBashSaveLoading(false);
+    }
   };
 
   // Saves the changed-only [fanout] delta for the fan-out modal through PUT
@@ -5981,6 +6097,7 @@ export default function SettingsManager() {
                                   setBrowserModalError(null);
                                   setDesktopModalError(null);
                                   setBashModalError(null);
+                                  setBashSaved(false);
                                   setFanoutModalError(null);
                                   setFilesModalError(null);
                                   // Re-seed the draft from the last loaded settings so a
@@ -8507,6 +8624,21 @@ export default function SettingsManager() {
                 <span>{bashModalError}</span>
               </div>
             )}
+            {bashSaved && (
+              <div
+                data-testid="bash-saved"
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: "6px",
+                  backgroundColor: "rgba(16, 185, 129, 0.15)",
+                  color: "#10b981",
+                  fontSize: "0.85rem",
+                  marginBottom: "12px",
+                }}
+              >
+                Bash settings saved. Changes apply immediately with no restart.
+              </div>
+            )}
 
             <p className="muted text-sm" style={{ marginBottom: "16px" }}>
               Sandboxed shell execution with per-command approval policy. Rules evaluate
@@ -8514,7 +8646,7 @@ export default function SettingsManager() {
             </p>
 
             <p className="muted text-sm" style={{ marginBottom: "16px" }}>
-              Default working directory is the engine home with an optional per-call override inside allowed roots, confined by the Seatbelt sandbox.
+              Default working directory is the engine home with an optional per-call override inside allowed roots, confined by the execution tier below.
             </p>
 
             <div className="form-group checkbox-group" style={{ marginBottom: "12px" }}>
@@ -8523,7 +8655,10 @@ export default function SettingsManager() {
                   id="bash-enabled"
                   type="checkbox"
                   checked={bashEnabled}
-                  onChange={(e) => setBashEnabled(e.target.checked)}
+                  onChange={(e) => {
+                    setBashEnabled(e.target.checked);
+                    setBashSaved(false);
+                  }}
                 />
                 <span>Enabled</span>
               </label>
@@ -8538,7 +8673,10 @@ export default function SettingsManager() {
                 id="bash-default-action"
                 className="input-field"
                 value={bashDefaultAction}
-                onChange={(e) => setBashDefaultAction(e.target.value)}
+                onChange={(e) => {
+                  setBashDefaultAction(e.target.value);
+                  setBashSaved(false);
+                }}
               >
                 {BASH_PERMISSION_ACTIONS.map((action) => (
                   <option key={action} value={action}>
@@ -8548,6 +8686,54 @@ export default function SettingsManager() {
               </select>
               <span className="form-group-hint">
                 Action when no rule matches, top-to-bottom last-match-wins otherwise.
+              </span>
+            </div>
+
+            <div className="form-group" style={{ marginBottom: "12px" }}>
+              <label htmlFor="bash-sandbox-mode" style={{ fontSize: "0.82rem" }}>Execution tier</label>
+              <select
+                id="bash-sandbox-mode"
+                className="input-field"
+                aria-label="Execution tier"
+                value={bashSandboxMode}
+                onChange={(e) => {
+                  setBashSandboxMode(e.target.value);
+                  setBashSaved(false);
+                }}
+              >
+                {BASH_SANDBOX_MODES.map((mode) => (
+                  <option key={mode} value={mode}>
+                    {mode}
+                  </option>
+                ))}
+              </select>
+              <span className="form-group-hint" data-testid="bash-sandbox-help">
+                {bashSandboxSummary(bashSandboxMode, bashAllowNetwork)}
+              </span>
+              <span className="form-group-hint">
+                Tiers: {BASH_SANDBOX_MODES[0]} and {BASH_SANDBOX_MODES[1]} stay isolated —{" "}
+                {bashSandboxSummary(BASH_SANDBOX_MODES[0], false)} without network,{" "}
+                {bashSandboxSummary(BASH_SANDBOX_MODES[0], true)} with network;
+                {BASH_SANDBOX_MODES[2]} {bashSandboxSummary(BASH_SANDBOX_MODES[2], false)}
+              </span>
+            </div>
+
+            <div className="form-group" style={{ marginBottom: "12px" }}>
+              <label htmlFor="bash-host-allow-patterns" style={{ fontSize: "0.82rem" }}>Host allow patterns</label>
+              <textarea
+                id="bash-host-allow-patterns"
+                className="input-field"
+                aria-label="Host allow patterns"
+                value={bashHostAllowPatternsText}
+                onChange={(e) => {
+                  setBashHostAllowPatternsText(e.target.value);
+                  setBashSaved(false);
+                }}
+                placeholder={"xcodebuild*\ncodesign*"}
+                rows={4}
+              />
+              <span className="form-group-hint">
+                One pattern per line gating {BASH_SANDBOX_MODES[2]} execution. Empty list blocks host execution entirely.
               </span>
             </div>
 
@@ -8582,7 +8768,10 @@ export default function SettingsManager() {
                 className="input-field bash-rules-textarea"
                 aria-label="Rules, one per line"
                 value={bashRulesText}
-                onChange={(e) => setBashRulesText(e.target.value)}
+                onChange={(e) => {
+                  setBashRulesText(e.target.value);
+                  setBashSaved(false);
+                }}
                 placeholder={"* = deny\ngit status = allow\nnpm test = allow"}
                 rows={8}
               />
@@ -8603,11 +8792,12 @@ export default function SettingsManager() {
                 step={1}
                 className="input-field"
                 value={bashTimeoutSeconds}
-                onChange={(e) =>
+                onChange={(e) => {
                   setBashTimeoutSeconds(
                     e.target.value === "" ? "" : Number(e.target.value)
-                  )
-                }
+                  );
+                  setBashSaved(false);
+                }}
                 placeholder="30"
               />
               <span className="form-group-hint">
@@ -8625,11 +8815,12 @@ export default function SettingsManager() {
                 step={1}
                 className="input-field"
                 value={bashCpuSeconds}
-                onChange={(e) =>
+                onChange={(e) => {
                   setBashCpuSeconds(
                     e.target.value === "" ? "" : Number(e.target.value)
-                  )
-                }
+                  );
+                  setBashSaved(false);
+                }}
                 placeholder="120"
               />
               <span className="form-group-hint">
@@ -8647,11 +8838,12 @@ export default function SettingsManager() {
                 step={1}
                 className="input-field"
                 value={bashMemoryMB}
-                onChange={(e) =>
+                onChange={(e) => {
                   setBashMemoryMB(
                     e.target.value === "" ? "" : Number(e.target.value)
-                  )
-                }
+                  );
+                  setBashSaved(false);
+                }}
                 placeholder="1024"
               />
               <span className="form-group-hint">
@@ -8665,7 +8857,10 @@ export default function SettingsManager() {
                   id="bash-allow-network"
                   type="checkbox"
                   checked={bashAllowNetwork}
-                  onChange={(e) => setBashAllowNetwork(e.target.checked)}
+                  onChange={(e) => {
+                    setBashAllowNetwork(e.target.checked);
+                    setBashSaved(false);
+                  }}
                 />
                 <span>Allow network access</span>
               </label>

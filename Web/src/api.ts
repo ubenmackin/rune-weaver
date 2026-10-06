@@ -3,6 +3,10 @@
 import { isRecord } from "./typeGuards";
 import { formatRelativeAgo, formatRelativeIn } from "./relativeTime";
 import { sanitizeWarnings } from "./warnings";
+import {
+  containsTOMLBreakingScalar,
+  parseTrimmedLines,
+} from "./policyHostNormalize";
 
 export type TrustDuration =
   | "thisTime"
@@ -2709,8 +2713,8 @@ export interface BashRuleData {
 // being stripped to nil. Resource bounds ride the same dual spelling: the
 // CPU budget maps `ulimit -t` while the memory budget maps `ulimit -v`, so
 // both read either key and send the snake form the file persists. The bounds
-// stay optional because older engines omit them, and the form keeps its
-// defaults until a numeric value arrives.
+// plus the sandbox tier and host allowlist stay optional because older
+// engines omit them, and the form keeps its defaults until a value arrives.
 export interface BashConfigData {
   enabled: boolean;
   default_action: string;
@@ -2724,31 +2728,33 @@ export interface BashConfigData {
   memoryMb?: number;
   allow_network: boolean;
   allowNetwork?: boolean;
+  sandbox_mode?: string;
+  sandboxMode?: string;
+  host_allow_patterns?: string[];
+  hostAllowPatterns?: string[];
 }
 
 // Partial bash patch for `PUT /settings`, mirroring the engine
 // `BashSettingsUpdate`. Every field is optional so a request carrying one
 // key leaves the rest of the stored `[bash]` section untouched. The dashboard
-// sends the snake_case keys the engine persists; the engine also accepts the
-// camelCase aliases through the dual-alias decode, so either spelling writes.
+// encodes snake_case exclusively; the engine decodes either spelling, so
+// camelCase aliases live on the read interface only and never encode.
 export interface BashSettingsUpdate {
   enabled?: boolean;
   default_action?: string;
-  defaultAction?: string;
   rules?: BashRuleData[];
   timeout_seconds?: number;
-  timeoutSeconds?: number;
   cpu_seconds?: number;
-  cpuSeconds?: number;
   memory_mb?: number;
-  memoryMb?: number;
   allow_network?: boolean;
-  allowNetwork?: boolean;
+  sandbox_mode?: string;
+  host_allow_patterns?: string[];
 }
 
 // Bash defaults mirror BashConfig in Sources/RuneWeaverCore/Config.swift
 // (enabled, defaultAction, defaultRules, defaultTimeoutSeconds,
-// cpuSeconds, memoryMB, allowNetwork). The server owns the values; this mirror seeds the fresh form
+// cpuSeconds, memoryMB, allowNetwork, sandboxMode, hostAllowPatterns).
+// The server owns the values; this mirror seeds the fresh form
 // before the first GET /settings fetch and the contract test pins it so drift
 // fails loudly. DEFAULT_BASH_CONFIG stays derived from the pieces below so
 // the pieces remain the single source.
@@ -2758,6 +2764,11 @@ export const DEFAULT_BASH_TIMEOUT_SECONDS = 30;
 export const DEFAULT_BASH_CPU_SECONDS = 120;
 export const DEFAULT_BASH_MEMORY_MB = 1024;
 export const DEFAULT_BASH_ALLOW_NETWORK = false;
+export const DEFAULT_BASH_SANDBOX_MODE = "strictContainer";
+export const DEFAULT_BASH_HOST_ALLOW_PATTERNS: string[] = [
+  "xcodebuild*",
+  "codesign*",
+];
 
 // Bash timeout bounds mirror BashConfig.minTimeoutSeconds/maxTimeoutSeconds
 // in Sources/RuneWeaverCore/Config+Validation.swift and the PUT merge in
@@ -2791,7 +2802,8 @@ export const DEFAULT_BASH_RULES: BashRuleData[] = [
 // Combined bash default mirroring BashConfig. The fresh form seeds from this
 // object so the editor matches the boundary the engine enforces before the
 // first settings fetch. Resource budgets join the timeout here so a fresh
-// modal shows the same CPU and memory bounds the engine clamps at use.
+// modal shows the same CPU and memory bounds the engine clamps at use,
+// while the sandbox tier plus host allowlist seed the confinement editors.
 export const DEFAULT_BASH_CONFIG: BashConfigData = {
   enabled: DEFAULT_BASH_ENABLED,
   default_action: DEFAULT_BASH_DEFAULT_ACTION,
@@ -2800,6 +2812,8 @@ export const DEFAULT_BASH_CONFIG: BashConfigData = {
   cpu_seconds: DEFAULT_BASH_CPU_SECONDS,
   memory_mb: DEFAULT_BASH_MEMORY_MB,
   allow_network: DEFAULT_BASH_ALLOW_NETWORK,
+  sandbox_mode: DEFAULT_BASH_SANDBOX_MODE,
+  host_allow_patterns: [...DEFAULT_BASH_HOST_ALLOW_PATTERNS],
 };
 
 // Closed set of valid bash permission actions, mirroring BashPermissionAction
@@ -2858,6 +2872,144 @@ export function formatBashRulesText(
 // from the same guard boundary without joining inline in every caller.
 export const DEFAULT_BASH_RULES_TEXT: string =
   formatBashRulesText(DEFAULT_BASH_RULES);
+
+// Closed sandbox tier vocabulary mirroring BashSandboxMode on the engine.
+// Single source for the client validator and the Bash modal dropdown so the
+// two cannot drift from the server 400.
+export const BASH_SANDBOX_MODES = [
+  "strictContainer",
+  "machineScoped",
+  "hostSeatbelt",
+] as const;
+
+// Host allowlist bounds mirroring BashConfig.maxHostAllowPatterns plus
+// maxHostAllowPatternLength. Single source for the codec cap and the client
+// validator so the form agrees with the server 400.
+export const BASH_HOST_ALLOW_PATTERNS_MAX = 50;
+export const BASH_HOST_ALLOW_PATTERN_MAX_LENGTH = 256;
+
+// Host allowlist textarea codec: one pattern per line. Trims lines, drops
+// blanks, preserves first-seen order, and caps at the auditable bound so
+// copy and paste of pattern sets works. Owner for parsing is
+// parseHostAllowPatternsText here; owner for saving is handleSaveBashConfig
+// in SettingsManager.tsx.
+export function parseHostAllowPatternsUncapped(
+  text: string | undefined | null,
+): string[] {
+  if (typeof text !== "string") return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const trimmed of parseTrimmedLines(text)) {
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+export function parseHostAllowPatternsText(
+  text: string | undefined | null,
+): string[] {
+  return parseHostAllowPatternsUncapped(text).slice(
+    0,
+    BASH_HOST_ALLOW_PATTERNS_MAX,
+  );
+}
+
+// Preserves stored order so the editor round-trips without reshuffling the
+// auditable allowlist; a non-list from an older engine omitting the key shows empty.
+export function formatHostAllowPatternsText(
+  patterns: string[] | undefined | null,
+): string {
+  if (!Array.isArray(patterns)) return "";
+  return patterns.join("\n");
+}
+
+// Textarea mirror of the host allowlist defaults so the confinement editor
+// starts from the Xcode toolchain boundary without joining inline.
+export const DEFAULT_BASH_HOST_ALLOW_PATTERNS_TEXT: string =
+  formatHostAllowPatternsText(DEFAULT_BASH_HOST_ALLOW_PATTERNS);
+
+// Plain-language tier copy mirroring BashSandboxCopy.approvalSummary.
+// Host execution stays user-scoped regardless of the network flag while
+// container tiers describe VM isolation plus the network flag.
+export const BASH_SANDBOX_COPY = {
+  host: "Runs on your Mac as you with full access to your files.",
+  isolatedWithNetwork:
+    "Runs in an isolated virtual machine with internet access to approved destinations only.",
+  isolatedWithoutNetwork:
+    "Runs in an isolated virtual machine with no internet access.",
+} as const;
+
+export function bashSandboxSummary(
+  sandboxMode: string,
+  allowNetwork: boolean,
+): string {
+  if (sandboxMode === "hostSeatbelt") {
+    return BASH_SANDBOX_COPY.host;
+  }
+  if (allowNetwork) {
+    return BASH_SANDBOX_COPY.isolatedWithNetwork;
+  }
+  return BASH_SANDBOX_COPY.isolatedWithoutNetwork;
+}
+
+// Closed-tier check mirroring the engine raw-value decode with surrounding
+// whitespace tolerated but casing exact.
+export function validateBashSandboxMode(
+  mode: string | undefined | null,
+): string | null {
+  const trimmed = (mode ?? "").trim();
+  if (!(BASH_SANDBOX_MODES as readonly string[]).includes(trimmed)) {
+    return `Invalid bash sandbox mode: must be one of ${(BASH_SANDBOX_MODES as readonly string[]).join(", ")}.`;
+  }
+  return null;
+}
+
+// Allowlist check mirroring BashConfig.validateHostAllowPatterns: at most 50
+// entries, each 1 to 256 chars, rejecting newline, null, C0 controls, DEL,
+// and TOML-breaking scalars.
+export function validateHostAllowPatterns(
+  patterns: string[] | undefined | null,
+): string | null {
+  if (!Array.isArray(patterns)) {
+    return "Invalid bash host allow patterns: expected a list.";
+  }
+  if (patterns.length > BASH_HOST_ALLOW_PATTERNS_MAX) {
+    return `Invalid bash host allow patterns: must contain at most ${BASH_HOST_ALLOW_PATTERNS_MAX} entries (got ${patterns.length}).`;
+  }
+  for (let index = 0; index < patterns.length; index += 1) {
+    const pattern = patterns[index];
+    if (typeof pattern !== "string") {
+      return `Invalid bash host allow patterns: entry ${index + 1} must be a string.`;
+    }
+    const trimmed = pattern.trim();
+    if (!trimmed) {
+      return `Invalid bash host allow patterns: entry ${index + 1} must not be blank.`;
+    }
+    // Trimmed UTF-16 length stands in for Swift String.count; allowlist
+    // entries are fnmatch text where the two agree and the server stays
+    // authoritative for exotic graphemes.
+    if (trimmed.length > BASH_HOST_ALLOW_PATTERN_MAX_LENGTH) {
+      return `Invalid bash host allow patterns: entry ${index + 1} must be between 1 and ${BASH_HOST_ALLOW_PATTERN_MAX_LENGTH} characters.`;
+    }
+    if (
+      pattern.includes("\n") ||
+      pattern.includes("\r") ||
+      pattern.includes("\0")
+    ) {
+      return `Invalid bash host allow patterns: entry ${index + 1} must not contain newline or null characters.`;
+    }
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u001F\u007F]/.test(pattern)) {
+      return `Invalid bash host allow patterns: entry ${index + 1} must not contain control characters.`;
+    }
+    if (containsTOMLBreakingScalar(pattern)) {
+      return `Invalid bash host allow patterns: entry ${index + 1} carries TOML-breaking characters.`;
+    }
+  }
+  return null;
+}
 
 // Manual mirrors of DesktopConfig defaults in Sources/RuneWeaverCore/Config.swift.
 export const DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION = 1280;
