@@ -433,7 +433,7 @@ struct IndexControlRouteTests {
 struct IndexStatusDTOTests {
     @Test
     func `Status maps counts sources and failures`() {
-        let config = IndexConfig(enabled: true, files: true, mail: false, messages: true)
+        let config = IndexConfig(enabled: true, files: true, mail: false, messages: true, calendars: false, reminders: false)
         let snapshot = Date(timeIntervalSince1970: 1000)
         let stats = IndexStats(
             documents: 7,
@@ -479,7 +479,9 @@ struct IndexStatusDTOTests {
         #expect(response.sources == [
             IndexSourceStatus(kind: "files", enabled: true),
             IndexSourceStatus(kind: "mail", enabled: false),
-            IndexSourceStatus(kind: "messages", enabled: true)
+            IndexSourceStatus(kind: "messages", enabled: true),
+            IndexSourceStatus(kind: "calendars", enabled: false),
+            IndexSourceStatus(kind: "reminders", enabled: false)
         ])
         #expect(response.lastErrors == ["mail: gateway timeout"])
         // Effort resolves from the stored preset on this machine.

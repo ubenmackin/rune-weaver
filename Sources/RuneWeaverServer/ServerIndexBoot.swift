@@ -2,12 +2,12 @@
 //
 // Builds the `[index]` pipeline once per boot so serve and the menu-bar app share
 // one construction path: a `DocIndexStore` over the configured `db_path`, one
-// source stage per corpus (files, mail, messages, plus the opt-in vision describe
-// stage), and the `IndexCoordinator` sequencing them. A disabled `[index]` section
-// returns nil so boot keeps the previous no-index posture and the index routes
-// keep failing closed. Credentials are never resolved here; the mail stage reads
-// through the shared IMAP gateway seam and resolves account passwords at
-// execution time through `SecretsManager`.
+// source stage per corpus (files, mail, messages, calendars, reminders, plus the
+// opt-in vision describe stage), and the `IndexCoordinator` sequencing them. A
+// disabled `[index]` section returns nil so boot keeps the previous no-index
+// posture and the index routes keep failing closed. Credentials are never
+// resolved here; the mail stage reads through the shared IMAP gateway seam and
+// resolves account passwords at execution time through `SecretsManager`.
 
 import Foundation
 import RuneWeaverCore
@@ -39,7 +39,8 @@ public enum ServerIndexBoot {
     /// Builds the document store plus the coordinator for an enabled `[index]`.
     ///
     /// Files walk through the shared `[files]` policy adapter, mail reads through
-    /// the shared IMAP gateway adapter, messages use their bundled defaults, and
+    /// the shared IMAP gateway adapter, messages use their bundled defaults,
+    /// calendars and reminders read through the shared live EventKit store, and
     /// the vision stage describes only when the opt-in flag is set and an active
     /// provider is available. Each stage still gates on its own toggle, so an
     /// enabled indexer with every source off runs an honest empty pass. The run
@@ -81,7 +82,20 @@ public enum ServerIndexBoot {
             embedder: embedder
         )
         let messagesStage = IndexClosureStage.messages(config: indexConfig, store: store, embedder: embedder)
-        var stages: [any IndexSourceStage] = [filesStage, mailStage, messagesStage]
+        let liveStore = LiveEventKitStore()
+        let calendarsStage = CalendarIndexer.makeCalendarStage(
+            config: indexConfig,
+            store: store,
+            calendarStore: liveStore,
+            embedder: embedder
+        )
+        let remindersStage = RemindersIndexer.makeRemindersStage(
+            config: indexConfig,
+            store: store,
+            reminderStore: liveStore,
+            embedder: embedder
+        )
+        var stages: [any IndexSourceStage] = [filesStage, mailStage, messagesStage, calendarsStage, remindersStage]
         if indexConfig.describeImagesWithLLM, let visionLLM {
             // The store exposes no pending-image listing, so boot wires an empty
             // backlog: the stage stays toggle-gated and reports an honest empty

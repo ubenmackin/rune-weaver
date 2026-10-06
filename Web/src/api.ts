@@ -2364,6 +2364,8 @@ export interface IndexConfigData {
   files: boolean;
   mail: boolean;
   messages: boolean;
+  calendars: boolean;
+  reminders: boolean;
   roots: string[];
   exclude: string[];
   max_file_mb: number;
@@ -2409,6 +2411,8 @@ export interface IndexSettingsUpdate {
   files?: boolean;
   mail?: boolean;
   messages?: boolean;
+  calendars?: boolean;
+  reminders?: boolean;
   roots?: string[];
   exclude?: string[];
   max_file_mb?: number;
@@ -3609,6 +3613,8 @@ export const DEFAULT_INDEX_CONFIG: IndexConfigData = {
   files: true,
   mail: false,
   messages: false,
+  calendars: false,
+  reminders: false,
   roots: ["~"],
   exclude: [...DEFAULT_INDEX_EXCLUDE_PATTERNS],
   max_file_mb: 20,

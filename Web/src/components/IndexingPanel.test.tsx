@@ -321,10 +321,10 @@ describe("IndexingPanel helpers", () => {
       ],
       bySource: [{ kind: "files", documents: 30, chunks: 70, bytes: 1500 }],
     });
-    expect(rows.map((row) => row.kind)).toEqual(["files", "mail", "messages"]);
+    expect(rows.map((row) => row.kind)).toEqual(["files", "mail", "messages", "calendars", "reminders"]);
     expect(rows[0]).toMatchObject({ documents: 30, chunks: 70, bytes: 1500 });
     // A source missing from the aggregates degrades to zero instead of
-    // disappearing, so older engines still render all three rows.
+    // disappearing, so older engines still render all five rows.
     expect(rows[1]).toMatchObject({ documents: 0, chunks: 0, bytes: 0 });
   });
 

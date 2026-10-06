@@ -320,24 +320,25 @@ struct WebFetchSafetyTests {
 
     @Test
     func `Auth statuses return auth_required with browser hint`() async throws {
-        // Canned public proof keeps stubbed auth responses hermetic without a production bypass.
-        try await WebTestSupport.withPublicDNS {
-            for code in [401, 403] {
-                let page = try #require(URL(string: "https://example.com/private"))
-                let transport = WebTestSupport.RoutingFetchTransport { _ in
-                    (Data(), WebTestSupport.statusResponse(for: page, statusCode: code))
-                }
-                let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
-                let output = try await tool.execute(
-                    input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://example.com/private"}"#),
-                    context: ToolContext(conversationID: UUID())
-                )
-                #expect(!output.isError)
-                let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
-                #expect(envelope.status == "auth_required", "Expected auth_required for HTTP \(code)")
-                #expect(envelope.suggestedNext == "browser.navigate")
-                #expect(envelope.finalUrl == "https://example.com/private")
+        // Public literals need no DNS proof, so no stub is required: the
+        // literal stage alone decides while unverified hostnames still fail
+        // closed elsewhere, keeping the auth classification hermetic without
+        // a bypass in DNS-less environments.
+        for code in [401, 403] {
+            let page = try #require(URL(string: "https://93.184.216.34/private"))
+            let transport = WebTestSupport.RoutingFetchTransport { _ in
+                (Data(), WebTestSupport.statusResponse(for: page, statusCode: code))
             }
+            let tool = WebFetchTool(browserConfig: BrowserConfig(), transport: transport)
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "web.fetch", argumentsJSON: #"{"url":"https://93.184.216.34/private"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(!output.isError)
+            let envelope = try JSONDecoder().decode(WebTestSupport.FetchEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.status == "auth_required", "Expected auth_required for HTTP \(code)")
+            #expect(envelope.suggestedNext == "browser.navigate")
+            #expect(envelope.finalUrl == "https://93.184.216.34/private")
         }
     }
 
