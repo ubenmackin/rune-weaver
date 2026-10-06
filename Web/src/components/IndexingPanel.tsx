@@ -44,8 +44,11 @@ import {
   pruneIndex,
   reclaimIndex,
   relativeProgressCurrent,
+  requestIndexAccess,
   resetIndex,
   resolveIndexRetiredCount,
+  resolveIndexSourceAccess,
+  resolveIndexSourceSkippedReason,
   resolveIndexTruncatedCount,
   runIndex,
   updateSettings,
@@ -55,6 +58,7 @@ import {
   type IndexLiveStatus,
   type IndexReclaimResponse,
   type IndexSourceCounts,
+  type IndexSourceStatus,
   type IndexStatusResponse,
 } from "../api";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
@@ -93,6 +97,85 @@ const INDEX_SOURCES: Array<{ kind: string; label: string; hint?: string }> = [
 // token so an unknown future source still renders honestly.
 function sourceLabel(kind: string): string {
   return INDEX_SOURCES.find((source) => source.kind === kind)?.label ?? kind;
+}
+
+// Pill tone for one index source as a pure function of enablement plus
+// access: disabled reads grey, enabled plus granted reads green, enabled
+// plus anything else reads amber. Recomputed from the status row on every
+// render so color tracks poll truth, never cached UI state.
+export type IndexSourcePillTone = "ok" | "skipped" | "awaiting_approval";
+
+export function indexSourcePillTone(
+  source: Pick<IndexSourceStatus, "enabled" | "access"> | null | undefined,
+): IndexSourcePillTone {
+  if (!source || !source.enabled) return "skipped";
+  return resolveIndexSourceAccess(source) === "granted"
+    ? "ok"
+    : "awaiting_approval";
+}
+
+// Explanatory title for one index source pill: null when the pill reads green
+// or grey, otherwise the access reason naming the grant that unblocks it, so
+// an amber pill always explains itself on hover.
+export function indexSourcePillTitle(
+  source: Pick<IndexSourceStatus, "kind" | "enabled" | "access"> | null | undefined,
+): string | null {
+  if (!source || !source.enabled) return null;
+  const access = resolveIndexSourceAccess(source);
+  if (access === "granted") return null;
+  const kind = typeof source.kind === "string" ? source.kind : "";
+  const label = sourceLabel(kind);
+  if (access === "unavailable") {
+    return `${label} is on but access is unavailable on this device.`;
+  }
+  if (kind === "messages") {
+    if (access === "denied") {
+      return `${label} is on but the chat database cannot be read. Grant Full Disk Access in System Settings > Privacy & Security > Full Disk Access, then press Run — the pill turns green on the next poll.`;
+    }
+    return `${label} is on but Messages access has not been granted yet. Grant Full Disk Access in System Settings > Privacy & Security > Full Disk Access.`;
+  }
+  if (kind === "calendars" || kind === "reminders") {
+    const pane = kind === "calendars" ? "Calendars" : "Reminders";
+    if (access === "denied") {
+      return `${label} is on but ${pane} access was denied. Grant access in System Settings > Privacy & Security > ${pane} — the pill turns green on the next poll, no save needed.`;
+    }
+    return `${label} is on but ${pane} access has not been granted yet. Allow access when prompted, or grant it in System Settings > Privacy & Security > ${pane}.`;
+  }
+  return `${label} is on but access is ${access}. Grant access — the pill turns green on the next poll.`;
+}
+
+// Whether one source kind supports the explicit access prompt.
+export function isPromptableIndexSourceKind(kind: unknown): boolean {
+  return kind === "calendars" || kind === "reminders";
+}
+
+// Inline Grant affordance shows only for an enabled, amber, undetermined
+// calendars/reminders row; denied renders guidance instead so a denial never
+// prompts again.
+export function shouldShowIndexGrantButton(
+  source: Pick<IndexSourceStatus, "kind" | "enabled" | "access"> | null | undefined,
+): boolean {
+  if (!source || !source.enabled) return false;
+  const kind = typeof source.kind === "string" ? source.kind : "";
+  if (!isPromptableIndexSourceKind(kind)) return false;
+  return resolveIndexSourceAccess(source) === "notDetermined";
+}
+
+// Denied guidance replaces the Grant button when the polled status reports
+// denied, derived from status truth on every render with no pill-state cache.
+export function shouldShowIndexAccessDeniedGuidance(
+  source: Pick<IndexSourceStatus, "kind" | "enabled" | "access"> | null | undefined,
+): boolean {
+  if (!source || !source.enabled) return false;
+  const kind = typeof source.kind === "string" ? source.kind : "";
+  if (!isPromptableIndexSourceKind(kind)) return false;
+  return resolveIndexSourceAccess(source) === "denied";
+}
+
+// Settings copy shown in place of the Grant button after a denial.
+export function indexAccessDeniedGuidance(kind: string): string {
+  const pane = kind === "reminders" ? "Reminders" : "Calendars";
+  return `Access denied — open System Settings > Privacy & Security > ${pane} to grant access.`;
 }
 
 // Deep link into the Full Disk Access pane. There is no prompt API for this
@@ -1113,6 +1196,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // checks this before merging, so a slow storage answer never overwrites a
   // newer fast snapshot.
   const loadGenerationRef = useRef(0);
+  const [accessBusy, setAccessBusy] = useState<Record<string, boolean>>({});
 
   // True whenever the engine reports a run in flight or this panel started one,
   // so the in-run poll stays active and Run stays disabled during a real run.
@@ -1487,6 +1571,19 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // figures so the reclaimed delta reads without reopening the size card.
   // Blocked while a run is in flight like prune and reset, since compaction
   // races the writer.
+  const handleGrantAccess = async (kind: string) => {
+    if (accessBusy[kind]) return;
+    setAccessBusy((prev) => ({ ...prev, [kind]: true }));
+    try {
+      await requestIndexAccess(kind);
+      await loadStatus();
+    } catch {
+      // Keep the Grant affordance so the owner can retry explicitly.
+    } finally {
+      setAccessBusy((prev) => ({ ...prev, [kind]: false }));
+    }
+  };
+
   const handleReclaim = async () => {
     if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) return;
     setAction("reclaim");
@@ -1989,14 +2086,41 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                 className="index-source-pills"
                 style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}
               >
-                {status.sources.map((source) => (
-                  <span
-                    key={source.kind}
-                    className={`status-pill ${source.enabled ? "ok" : "skipped"}`}
-                  >
-                    {sourceLabel(source.kind)} · {source.enabled ? "On" : "Off"}
-                  </span>
-                ))}
+                {status.sources.map((source) => {
+                  const tone = indexSourcePillTone(source);
+                  const title = indexSourcePillTitle(source);
+                  const showGrant = shouldShowIndexGrantButton(source);
+                  const showDenied = shouldShowIndexAccessDeniedGuidance(source);
+                  return (
+                    <span
+                      key={source.kind}
+                      className={`status-pill ${tone}`}
+                      title={title ?? undefined}
+                    >
+                      {sourceLabel(source.kind)} · {source.enabled ? "On" : "Off"}
+                      {showGrant ? (
+                        <button
+                          type="button"
+                          className="ghost"
+                          aria-label={`Grant ${sourceLabel(source.kind)} access`}
+                          disabled={!!accessBusy[source.kind]}
+                          onClick={() => void handleGrantAccess(source.kind)}
+                          style={{ marginLeft: 8 }}
+                        >
+                          {accessBusy[source.kind] ? "Requesting…" : "Grant"}
+                        </button>
+                      ) : null}
+                      {showDenied ? (
+                        <span
+                          className="muted text-xs"
+                          style={{ marginLeft: 8 }}
+                        >
+                          {indexAccessDeniedGuidance(source.kind)}
+                        </span>
+                      ) : null}
+                    </span>
+                  );
+                })}
               </div>
             ) : null}
           </>
@@ -2169,6 +2293,12 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                 // label length and trailing counts can never shift the bar
                 // origin: line one pairs the name with its share, line two
                 // paints the full-width track, line three carries the totals.
+                // A skipped source adds a muted fourth line with its verbatim
+                // reason so it never renders as healthy silence.
+                const skippedReason = resolveIndexSourceSkippedReason(
+                  status?.lastRun ?? null,
+                  source.kind,
+                );
                 return (
                   <div
                     key={source.kind}
@@ -2227,6 +2357,14 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                     <span className="text-xs muted">
                       {formatIndexCount(source.documents)} docs · {formatIndexCount(source.chunks)} chunks · {formatIndexBytes(source.bytes)}
                     </span>
+                    {skippedReason ? (
+                      <span
+                        className="muted text-xs"
+                        data-testid={`index-source-note-${source.kind}`}
+                      >
+                        {skippedReason}
+                      </span>
+                    ) : null}
                   </div>
                 );
               })}
@@ -2628,6 +2766,7 @@ export function IndexPolicyPanel() {
       mountedRef.current = false;
     };
   }, []);
+  const lastSavedSourcesRef = useRef<{ calendars: boolean; reminders: boolean } | null>(null);
 
   // Fresh status read shared by the boot load and the save-and-restart flow:
   // the saved policy stays enabled-aware while the running flag settles, so
@@ -2721,6 +2860,10 @@ export function IndexPolicyPanel() {
         // Seed the roots textarea from the loaded `config.roots` so edits
         // start from stored truth and reload without TOML hand-edits.
         setRootsText(formatIndexRootsText(merged.roots));
+        lastSavedSourcesRef.current = {
+          calendars: !!merged.calendars,
+          reminders: !!merged.reminders,
+        };
       }
     } catch {
       // A settings read failure leaves the local defaults; the save path
@@ -2856,8 +2999,41 @@ export function IndexPolicyPanel() {
       }
       const savedEnabled = await persistConfig();
       if (!mountedRef.current) return;
+      const editedCalendars = config.calendars;
+      const editedReminders = config.reminders;
+      const prevSources = lastSavedSourcesRef.current;
+      lastSavedSourcesRef.current = {
+        calendars: !!editedCalendars,
+        reminders: !!editedReminders,
+      };
       const fresh = await loadStatus();
       if (!mountedRef.current) return;
+      {
+        const newlyEnabled: string[] = [];
+        if (savedEnabled) {
+          // A save before the first loadConfig settles leaves prev null; treat
+          // it as disabled so a newly-enabled toggle still prompts once.
+          const prevCalendars = prevSources?.calendars ?? false;
+          const prevReminders = prevSources?.reminders ?? false;
+          if (!prevCalendars && editedCalendars) newlyEnabled.push("calendars");
+          if (!prevReminders && editedReminders) newlyEnabled.push("reminders");
+        }
+        for (const kind of newlyEnabled) {
+          const row = fresh?.sources?.find((entry) => entry.kind === kind);
+          if (!row || resolveIndexSourceAccess(row) !== "notDetermined") continue;
+          if (!mountedRef.current) return;
+          try {
+            await requestIndexAccess(kind);
+          } catch {
+            // Save stays successful; pills surface the current posture on poll.
+          }
+          if (!mountedRef.current) return;
+        }
+        if (newlyEnabled.length > 0) {
+          await loadStatus();
+          if (!mountedRef.current) return;
+        }
+      }
       const wasRunning = fresh?.running === true;
       if (wasRunning && savedEnabled) {
         try {

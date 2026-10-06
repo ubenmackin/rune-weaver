@@ -24,14 +24,49 @@ public struct IndexSourceStatus: Content, Equatable {
     /// eligibility so the dashboard never shows a source as live while the
     /// indexer as a whole is off.
     public let enabled: Bool
+    /// Access posture observed with silent reads at status build time
+    /// (`"granted"`, `"denied"`, `"notDetermined"`, or `"unavailable"`).
+    /// Files and mail always report `"granted"`; messages maps the read-only
+    /// chat-database probe to `"granted"` or `"denied"`; calendars and
+    /// reminders mirror the silent EventKit authorization read.
+    public let access: String
 
     /// Creates a source enablement row.
     /// - Parameters:
     ///   - kind: Source kind token.
     ///   - enabled: Whether the source is effectively enabled.
-    public init(kind: String, enabled: Bool) {
+    ///   - access: Access posture token; defaults to granted so rows built
+    ///     without an access read keep today's colors.
+    public init(kind: String, enabled: Bool, access: String = "granted") {
         self.kind = kind
         self.enabled = enabled
+        self.access = access
+    }
+
+    /// Coding keys for the version-tolerant source contract.
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case enabled
+        case access
+    }
+
+    /// Decodes a source row, defaulting absent access to granted so payloads
+    /// built against an older engine still decode.
+    /// - Parameter decoder: Decoder carrying the row.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decode(String.self, forKey: .kind)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        access = try container.decodeIfPresent(String.self, forKey: .access) ?? "granted"
+    }
+
+    /// Encodes a source row including its access posture.
+    /// - Parameter encoder: Encoder receiving the row.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(access, forKey: .access)
     }
 }
 
@@ -79,6 +114,92 @@ public struct IndexExtractStatusCounts: Content, Equatable {
     }
 }
 
+/// Per-source outcome on run-status payloads.
+public struct IndexSourceRunOutcome: Content, Equatable {
+    /// Source kind (`"files"`, `"mail"`, `"messages"`, `"calendars"`, or `"reminders"`).
+    public let kind: String
+    /// Whether the source stage ran.
+    public let didRun: Bool
+    /// Items examined by the source.
+    public let scanned: Int
+    /// Documents written by the source.
+    public let indexed: Int
+    /// Why the source did not run, when it was skipped.
+    public let skippedReason: String?
+
+    /// Creates a per-source outcome row.
+    /// - Parameters:
+    ///   - kind: Source kind token.
+    ///   - didRun: Whether the stage ran.
+    ///   - scanned: Items examined.
+    ///   - indexed: Documents written.
+    ///   - skippedReason: Why the source did not run, when known.
+    public init(
+        kind: String,
+        didRun: Bool = true,
+        scanned: Int = 0,
+        indexed: Int = 0,
+        skippedReason: String? = nil
+    ) {
+        self.kind = kind
+        self.didRun = didRun
+        self.scanned = scanned
+        self.indexed = indexed
+        self.skippedReason = skippedReason
+    }
+
+    /// Maps a coordinator report onto the wire shape.
+    /// - Parameter report: Stage contribution to expose.
+    public init(_ report: IndexSourceRunReport) {
+        self.kind = report.kind.rawValue
+        self.didRun = report.didRun
+        self.scanned = report.scanned
+        self.indexed = report.indexed
+        self.skippedReason = report.skippedReason
+    }
+
+    /// Coding keys for the version-tolerant outcome contract.
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case didRun
+        case didRunSnake = "did_run"
+        case scanned
+        case indexed
+        case skippedReason
+        case skippedReasonSnake = "skipped_reason"
+    }
+
+    /// Decodes an outcome row, defaulting absent counts so older engines still decode.
+    /// - Parameter decoder: Decoder carrying the row.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decode(String.self, forKey: .kind)
+        let canonicalSkipped = try container.decodeIfPresent(String.self, forKey: .skippedReason)
+        let aliasSkipped = try container.decodeIfPresent(String.self, forKey: .skippedReasonSnake)
+        skippedReason = canonicalSkipped ?? aliasSkipped
+        let canonicalDidRun = try container.decodeIfPresent(Bool.self, forKey: .didRun)
+        let aliasDidRun = try container.decodeIfPresent(Bool.self, forKey: .didRunSnake)
+        if let resolved = canonicalDidRun ?? aliasDidRun {
+            didRun = resolved
+        } else {
+            didRun = skippedReason == nil
+        }
+        scanned = try container.decodeIfPresent(Int.self, forKey: .scanned) ?? 0
+        indexed = try container.decodeIfPresent(Int.self, forKey: .indexed) ?? 0
+    }
+
+    /// Encodes an outcome row on the canonical keys.
+    /// - Parameter encoder: Encoder receiving the row.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(didRun, forKey: .didRun)
+        try container.encode(scanned, forKey: .scanned)
+        try container.encode(indexed, forKey: .indexed)
+        try container.encodeIfPresent(skippedReason, forKey: .skippedReason)
+    }
+}
+
 /// Latest index run outcome on `GET /index/status`, distilled from the newest
 /// `index`-kind `run_logs` row.
 public struct IndexLastRunStatus: Content, Equatable {
@@ -107,6 +228,9 @@ public struct IndexLastRunStatus: Content, Equatable {
     /// for back-compat; absent degrades to no truncated count instead of
     /// failing.
     public let truncatedCount: Int?
+    /// Per-source outcomes in canonical run order. Optional for back-compat;
+    /// absent degrades to no per-source notes instead of failing.
+    public let sources: [IndexSourceRunOutcome]?
 
     /// Creates a last-run row.
     /// - Parameters:
@@ -119,6 +243,7 @@ public struct IndexLastRunStatus: Content, Equatable {
     ///   - skippedReason: Why the run did not execute, when known.
     ///   - retiredCount: Documents retired, when known.
     ///   - truncatedCount: Documents truncated by the vector cap, when known.
+    ///   - sources: Per-source outcomes, or nil for payloads predating them.
     public init(
         status: String,
         indexed: Int? = nil,
@@ -128,7 +253,8 @@ public struct IndexLastRunStatus: Content, Equatable {
         trigger: String? = nil,
         skippedReason: String? = nil,
         retiredCount: Int? = nil,
-        truncatedCount: Int? = nil
+        truncatedCount: Int? = nil,
+        sources: [IndexSourceRunOutcome]? = nil
     ) {
         self.status = status
         self.indexed = indexed
@@ -139,6 +265,7 @@ public struct IndexLastRunStatus: Content, Equatable {
         self.skippedReason = skippedReason
         self.retiredCount = retiredCount
         self.truncatedCount = truncatedCount
+        self.sources = sources
     }
 
     /// Coding keys for the version-tolerant last-run contract.
@@ -154,12 +281,18 @@ public struct IndexLastRunStatus: Content, Equatable {
         case retired
         case truncatedCount
         case truncated
+        case sources
+        case sourceOutcomes
+        case outcomes
     }
 
     /// Decodes a last-run row, defaulting absent counts and the skip reason to
     /// nil so payloads built against an older engine still decode. Accepts the
     /// `retired`/`truncated` aliases some engines emit; the canonical
-    /// `retiredCount`/`truncatedCount` keys win when both are present.
+    /// `retiredCount`/`truncatedCount` keys win when both are present. The
+    /// per-source list accepts `sources`, `sourceOutcomes`, or `outcomes`
+    /// with the first present winning, so older payloads without the list
+    /// degrade to nil instead of failing.
     /// - Parameter decoder: Decoder carrying the row.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -176,6 +309,10 @@ public struct IndexLastRunStatus: Content, Equatable {
         let canonicalTruncated = try container.decodeIfPresent(Int.self, forKey: .truncatedCount)
         let aliasTruncated = try container.decodeIfPresent(Int.self, forKey: .truncated)
         truncatedCount = canonicalTruncated ?? aliasTruncated
+        let canonicalSources = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .sources)
+        let aliasOutcomes = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .sourceOutcomes)
+        let legacyOutcomes = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .outcomes)
+        sources = canonicalSources ?? aliasOutcomes ?? legacyOutcomes
     }
 
     /// Encodes a last-run row, omitting absent counts and the skip reason.
@@ -193,6 +330,7 @@ public struct IndexLastRunStatus: Content, Equatable {
         try container.encodeIfPresent(skippedReason, forKey: .skippedReason)
         try container.encodeIfPresent(retiredCount, forKey: .retiredCount)
         try container.encodeIfPresent(truncatedCount, forKey: .truncatedCount)
+        try container.encodeIfPresent(sources, forKey: .sources)
     }
 }
 
@@ -631,6 +769,12 @@ public struct IndexStorageResponse: Content, Equatable {
 ///   - lastRun: Latest run outcome, or nil when no run has been recorded.
 ///   - live: Live in-flight snapshot, or nil when idle.
 ///   - storage: Persisted slow breakdown, or nil for fail-closed zeros when absent.
+///   - calendarAccess: Silent EventKit calendars posture; defaults to granted
+///     so callers without an access read keep today's colors.
+///   - remindersAccess: Silent EventKit reminders posture; defaults to granted
+///     so callers without an access read keep today's colors.
+///   - messagesAccess: Read-only Messages database posture; defaults to granted
+///     so callers without an access read keep today's colors.
 /// - Returns: The status snapshot.
 func makeIndexStatusResponse(
     config: IndexConfig,
@@ -639,14 +783,17 @@ func makeIndexStatusResponse(
     lastErrors: [String],
     lastRun: IndexLastRunStatus? = nil,
     live: IndexLiveStatus? = nil,
-    storage: IndexStorageBreakdown? = nil
+    storage: IndexStorageBreakdown? = nil,
+    calendarAccess: String = "granted",
+    remindersAccess: String = "granted",
+    messagesAccess: String = "granted"
 ) -> IndexStatusResponse {
     let sources = [
-        IndexSourceStatus(kind: IndexSourceKind.files.rawValue, enabled: config.enabled && config.files),
-        IndexSourceStatus(kind: IndexSourceKind.mail.rawValue, enabled: config.enabled && config.mail),
-        IndexSourceStatus(kind: IndexSourceKind.messages.rawValue, enabled: config.enabled && config.messages),
-        IndexSourceStatus(kind: IndexSourceKind.calendars.rawValue, enabled: config.enabled && config.calendars),
-        IndexSourceStatus(kind: IndexSourceKind.reminders.rawValue, enabled: config.enabled && config.reminders)
+        IndexSourceStatus(kind: IndexSourceKind.files.rawValue, enabled: IndexSourceKind.files.isEnabled(in: config), access: "granted"),
+        IndexSourceStatus(kind: IndexSourceKind.mail.rawValue, enabled: IndexSourceKind.mail.isEnabled(in: config), access: "granted"),
+        IndexSourceStatus(kind: IndexSourceKind.messages.rawValue, enabled: IndexSourceKind.messages.isEnabled(in: config), access: messagesAccess),
+        IndexSourceStatus(kind: IndexSourceKind.calendars.rawValue, enabled: IndexSourceKind.calendars.isEnabled(in: config), access: calendarAccess),
+        IndexSourceStatus(kind: IndexSourceKind.reminders.rawValue, enabled: IndexSourceKind.reminders.isEnabled(in: config), access: remindersAccess)
     ]
     let bySource = (stats?.bySource ?? []).map { row in
         IndexSourceCounts(kind: row.source.rawValue, documents: row.documents, chunks: row.chunks, bytes: row.bytes)
@@ -723,6 +870,9 @@ public struct IndexRunResponse: Content, Equatable {
     public let indexAsOf: Date?
     /// Why the run did not execute, when it was skipped.
     public let skippedReason: String?
+    /// Per-source outcomes in canonical run order. Optional for back-compat;
+    /// absent degrades to no per-source notes instead of failing.
+    public let sources: [IndexSourceRunOutcome]?
 
     /// Coding keys for the version-tolerant run contract.
     private enum CodingKeys: String, CodingKey {
@@ -744,6 +894,9 @@ public struct IndexRunResponse: Content, Equatable {
         case finishedAt
         case indexAsOf
         case skippedReason
+        case sources
+        case sourceOutcomes
+        case outcomes
     }
 
     /// Maps a coordinator summary onto the wire shape.
@@ -765,12 +918,40 @@ public struct IndexRunResponse: Content, Equatable {
         self.finishedAt = summary.finishedAt
         self.indexAsOf = summary.indexAsOf
         self.skippedReason = summary.skippedReason
+        let mapped = summary.sources.map(IndexSourceRunOutcome.init)
+        self.sources = mapped.isEmpty ? nil : mapped
+    }
+
+    /// Maps a coordinator summary onto the wire shape with explicit outcomes.
+    /// - Parameters:
+    ///   - summary: Completed run summary.
+    ///   - sources: Per-source outcomes to expose, or nil to derive from the summary.
+    public init(_ summary: IndexRunSummary, sources: [IndexSourceRunOutcome]?) {
+        self.sessionID = summary.sessionID
+        self.trigger = summary.trigger.rawValue
+        self.status = summary.status.rawValue
+        self.documentsIndexed = summary.documentsIndexed
+        self.vectorChunks = summary.vectorChunks
+        self.keywordChunks = summary.keywordChunks
+        self.scanned = summary.scanned
+        self.skipped = summary.skipped
+        self.errors = summary.errors
+        self.retiredCount = summary.retired
+        self.truncatedCount = summary.truncated
+        self.warnings = summary.warnings
+        self.startedAt = summary.startedAt
+        self.finishedAt = summary.finishedAt
+        self.indexAsOf = summary.indexAsOf
+        self.skippedReason = summary.skippedReason
+        self.sources = sources
     }
 
     /// Decodes a run response, defaulting retired and truncated counts to zero
     /// so payloads built against an older engine still decode. Accepts the
     /// `retired`/`truncated` aliases; the canonical keys win when both are
-    /// present.
+    /// present. The per-source list accepts `sources`, `sourceOutcomes`, or
+    /// `outcomes` with the first present winning, so older payloads without
+    /// the list degrade to nil instead of failing.
     /// - Parameter decoder: Decoder carrying the response.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -794,6 +975,10 @@ public struct IndexRunResponse: Content, Equatable {
         finishedAt = try container.decode(Date.self, forKey: .finishedAt)
         indexAsOf = try container.decodeIfPresent(Date.self, forKey: .indexAsOf)
         skippedReason = try container.decodeIfPresent(String.self, forKey: .skippedReason)
+        let canonicalSources = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .sources)
+        let aliasOutcomes = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .sourceOutcomes)
+        let legacyOutcomes = try container.decodeIfPresent([IndexSourceRunOutcome].self, forKey: .outcomes)
+        sources = canonicalSources ?? aliasOutcomes ?? legacyOutcomes
     }
 
     /// Encodes a run response on the canonical keys so current dashboards
@@ -817,6 +1002,7 @@ public struct IndexRunResponse: Content, Equatable {
         try container.encode(finishedAt, forKey: .finishedAt)
         try container.encodeIfPresent(indexAsOf, forKey: .indexAsOf)
         try container.encodeIfPresent(skippedReason, forKey: .skippedReason)
+        try container.encodeIfPresent(sources, forKey: .sources)
     }
 }
 
