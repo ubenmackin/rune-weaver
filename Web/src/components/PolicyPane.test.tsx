@@ -295,6 +295,8 @@ describe("PolicyPane", () => {
     expect(within(modal).getByTestId("binding-pairing-sentence").textContent).toContain(
       "prefixes apply to every host"
     );
+    await user.click(within(modal).getByTestId("wizard-next"));
+    await user.click(within(modal).getByTestId("wizard-next"));
     // Default probe routes outside the /repos prefix, so it refuses with the
     // path gate named.
     await waitFor(() => {
@@ -343,7 +345,9 @@ describe("PolicyPane", () => {
     // The fresh modal probes clean: Any method plus Any path on a listed host
     // authorizes, so the preview starts affirmative.
     await user.type(within(modal).getByLabelText("Key"), "NEW_KEY");
+    await user.click(within(modal).getByTestId("wizard-next"));
     await user.type(within(modal).getByLabelText("Hosts"), "api.example.com");
+    await user.click(within(modal).getByTestId("wizard-next"));
     await waitFor(() => {
       expect(within(modal).getByTestId("probe-result").textContent).toContain(
         "Yes — the secret would be sent."
@@ -391,7 +395,9 @@ describe("PolicyPane", () => {
     await user.click(screen.getByTestId("credentials-add"));
     const modal = await screen.findByTestId("policy-binding-modal");
     await user.type(within(modal).getByLabelText("Key"), "NEW_KEY");
+    await user.click(within(modal).getByTestId("wizard-next"));
     await user.type(within(modal).getByLabelText("Hosts"), "api.example.com");
+    await user.click(within(modal).getByTestId("wizard-next"));
     await user.click(within(modal).getByRole("button", { name: "Save binding" }));
     await waitFor(() => {
       expect(secretProbes()).toBe(2);
@@ -424,9 +430,11 @@ describe("PolicyPane", () => {
 
     await user.click(screen.getByTestId("edit-binding-IPV6_KEY"));
     const modal = await screen.findByTestId("policy-binding-modal");
+    await user.click(within(modal).getByTestId("wizard-next"));
     // The bracket branch is reachable: the host line reads clean and the modal
     // still offers Save changes for the existing binding.
     expect(within(modal).queryByTestId("hosts-errors")).toBeNull();
+    await user.click(within(modal).getByTestId("wizard-next"));
     expect(
       (within(modal).getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled
     ).toBe(false);
@@ -490,14 +498,14 @@ describe("PolicyPane", () => {
     await user.click(screen.getByTestId("credentials-add"));
     let modal = await screen.findByTestId("policy-binding-modal");
     await user.type(within(modal).getByLabelText("Key"), "GITHUB_TOKEN");
-    await user.type(within(modal).getByLabelText("Hosts"), "api.example.com");
     await waitFor(() => {
       expect(within(modal).getByTestId("key-error").textContent).toContain("already exists");
     });
     expect(
-      (within(modal).getByRole("button", { name: "Save binding" }) as HTMLButtonElement).disabled
+      (within(modal).getByTestId("wizard-next") as HTMLButtonElement).disabled
     ).toBe(true);
-    await user.click(within(modal).getByRole("button", { name: "Cancel" }));
+    // The wizard footer carries no Cancel; dismissal rides the header control.
+    await user.click(within(modal).getByRole("button", { name: "Close modal" }));
     await waitFor(() => {
       expect(screen.queryByTestId("policy-binding-modal")).toBeNull();
     });
@@ -507,6 +515,8 @@ describe("PolicyPane", () => {
     await user.click(screen.getByTestId("edit-binding-GITHUB_TOKEN"));
     modal = await screen.findByTestId("policy-binding-modal");
     expect(within(modal).queryByTestId("key-error")).toBeNull();
+    await user.click(within(modal).getByTestId("wizard-next"));
+    await user.click(within(modal).getByTestId("wizard-next"));
     expect(
       (within(modal).getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled
     ).toBe(false);
@@ -1230,7 +1240,9 @@ describe("PolicyPane", () => {
     await user.click(screen.getByTestId("credentials-add"));
     const modal = await screen.findByTestId("policy-binding-modal");
     await user.type(within(modal).getByLabelText("Key"), "rwsecret:MY_KEY");
+    await user.click(within(modal).getByTestId("wizard-next"));
     await user.type(within(modal).getByLabelText("Hosts"), "api.example.com");
+    await user.click(within(modal).getByTestId("wizard-next"));
     await user.click(within(modal).getByRole("button", { name: "Save binding" }));
     await waitFor(() => {
       expect(screen.queryByTestId("policy-binding-modal")).toBeNull();

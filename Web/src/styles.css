@@ -8200,3 +8200,36 @@ button.ghost.staged-expand-all-btn {
   }
 }
 
+/* ==========================================================================
+   Policy Binding Modal Step Layout
+   ========================================================================== */
+
+/* Separates hint text from its error block on every step. */
+.policy-binding-modal .error-banner {
+  margin-top: 8px;
+  margin-bottom: 12px;
+}
+
+/* Method scope radios stack so the two options never share one line. */
+.policy-binding-modal [data-testid="methods-section"] [role="radiogroup"] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Adjacent container holds the seven method boxes; sibling keeps scope radios untouched. */
+.policy-binding-modal [data-testid="methods-section"] [role="radiogroup"] + div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  column-gap: 8px;
+  row-gap: 4px;
+}
+
+/* Narrow probe grid stacks to one column so the three inputs never crush. */
+@media (max-width: 560px) {
+  .policy-binding-modal [data-testid="binding-review"] > div {
+    grid-template-columns: 1fr;
+  }
+}
+

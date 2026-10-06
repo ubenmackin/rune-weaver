@@ -368,6 +368,10 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const keyInputRef = useRef<HTMLInputElement | null>(null);
+  const hostsInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const methodsFirstInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [step, setStep] = useState<1 | 2 | 3>(1);
 
   // Add starts empty with Any defaults; edit prefills every section from the
   // stored binding so the conjunction preview matches the row that opened it.
@@ -394,11 +398,17 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // Move keyboard focus into the dialog on open so screen-reader and keyboard
-  // users land on the key field instead of the page behind the backdrop.
+  // Keyboard focus follows the visible step so screen-reader and keyboard
+  // users land on the first field of the new step.
   useEffect(() => {
-    keyInputRef.current?.focus();
-  }, []);
+    if (step === 1) {
+      keyInputRef.current?.focus();
+    } else if (step === 2) {
+      hostsInputRef.current?.focus();
+    } else {
+      methodsFirstInputRef.current?.focus();
+    }
+  }, [step]);
 
   // Memoized close so the Escape and click-outside effects always observe
   // the latest close handler and focus target without a stale closure.
@@ -600,6 +610,38 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
     );
   }
 
+  // Compact read-only verdict for the hosts step: same preview owner with the
+  // default GET probe against the first host and `/`, so the step needs no inputs.
+  const hostsMiniDecision = useMemo(
+    () =>
+      previewBindingDecision(
+        {
+          allowedHosts: hostsList,
+          allowedMethods: methodsForSave,
+          allowedPathPrefixes: prefixesList,
+        },
+        hostsList[0] || "",
+        "GET",
+        "/",
+        keyTrimmed || "KEY",
+      ),
+    [hostsList, methodsForSave, prefixesList, keyTrimmed],
+  );
+
+  function handleNext() {
+    if (step === 1) {
+      if (keyError) return;
+      setStep(2);
+    } else if (step === 2) {
+      if (hostsError) return;
+      setStep(3);
+    }
+  }
+
+  function handleBack() {
+    setStep((previous) => (previous > 1 ? ((previous - 1) as 1 | 2 | 3) : previous));
+  }
+
   async function handleSave() {
     if (hasErrors || saving) return;
     setSaveError(null);
@@ -635,7 +677,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
         aria-modal="true"
         aria-label={mode === "edit" ? "Edit credential binding" : "Add credential binding"}
         data-testid="policy-binding-modal"
-        className="modal-container policy-binding-modal"
+        className="modal-container policy-binding-modal wizard-modal"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="modal-header">
@@ -643,6 +685,9 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
             <h3>{mode === "edit" ? "Edit credential binding" : "Add credential binding"}</h3>
             <span className="muted text-sm">
               {mode === "edit" ? "Update hosts, methods, and paths for this key." : "Pair one key with the hosts, methods, and paths it may reach."}
+            </span>
+            <span className="wizard-step-indicator" data-testid="wizard-step-indicator">
+              Step {step} of 3 — {step === 1 ? "Key" : step === 2 ? "Hosts" : "Scope + Review"}
             </span>
           </div>
           <button
@@ -653,6 +698,13 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
           >
             <span aria-hidden="true">×</span>
           </button>
+        </div>
+
+        <div className="wizard-progress-track" data-testid="wizard-progress">
+          <div
+            className="wizard-progress-bar"
+            style={{ width: `${(step / 3) * 100}%` }}
+          />
         </div>
 
         <div className="modal-body">
@@ -666,7 +718,9 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
               prefixes apply to every host in this binding.
             </p>
 
-            <section data-testid="key-section">
+            {step === 1 ? (
+              <div className="wizard-step" data-testid="wizard-step-1">
+                <section data-testid="key-section">
               <h4>Key</h4>
               <div className="form-group">
                 <label htmlFor="binding-key-input">Key</label>
@@ -734,13 +788,18 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                   </button>
                 ) : null}
               </div>
-            </section>
+                </section>
+              </div>
+            ) : null}
 
-            <section data-testid="hosts-section">
+            {step === 2 ? (
+              <div className="wizard-step" data-testid="wizard-step-2">
+                <section data-testid="hosts-section">
               <h4>Hosts</h4>
               <div className="form-group">
                 <label htmlFor="binding-hosts-input">Hosts, one per line</label>
                 <textarea
+                  ref={hostsInputRef}
                   id="binding-hosts-input"
                   className="input-field"
                   aria-label="Hosts"
@@ -771,13 +830,37 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                   {hostsError}
                 </div>
               ) : null}
-            </section>
+                </section>
+                <div data-testid="network-coverage" className="muted text-sm" style={{ marginTop: "8px" }}>
+                  {hostsList.length === 0 ? (
+                    <span>Add hosts to check network coverage.</span>
+                  ) : uncoveredHosts.length === 0 ? (
+                    <span>All binding hosts are covered by Allowed Domains.</span>
+                  ) : (
+                    <span>
+                      {uncoveredHosts.length} of {hostsList.length} {hostsList.length === 1 ? "host is" : "hosts are"} not in
+                      Allowed Domains: {uncoveredHosts.join(", ")}.
+                    </span>
+                  )}
+                </div>
+                <div data-testid="hosts-probe-mini" aria-live="polite" className="muted text-sm">
+                  {hostsMiniDecision === null ? (
+                    <span>Yes — the secret would be sent.</span>
+                  ) : (
+                    <span>No — {hostsMiniDecision}</span>
+                  )}
+                </div>
+              </div>
+            ) : null}
 
-            <section aria-label="Methods" data-testid="methods-section">
+            {step === 3 ? (
+              <div className="wizard-step" data-testid="wizard-step-3">
+                <section aria-label="Methods" data-testid="methods-section">
               <h4>Methods</h4>
               <div role="radiogroup" aria-label="Method scope">
                 <label className="checkbox-row">
                   <input
+                    ref={methodsFirstInputRef}
                     type="radio"
                     name="binding-methods-mode"
                     checked={methodsMode === "any"}
@@ -873,7 +956,6 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                 creates a cross-product: each prefix is checked on every host.
               </div>
             ) : null}
-          </div>
 
           <div data-testid="binding-review" style={{ marginTop: "16px" }}>
             <h4>Review</h4>
@@ -957,20 +1039,45 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
               )}
             </div>
           </div>
+              </div>
+            ) : null}
+          </div>
         </div>
 
-        <div className="modal-footer">
-          <button type="button" className="ghost" onClick={requestClose}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="primary"
-            onClick={() => void handleSave()}
-            disabled={hasErrors || saving}
-          >
-            {saving ? "Saving…" : mode === "edit" ? "Save changes" : "Save binding"}
-          </button>
+        <div className="modal-footer wizard-footer">
+          {step > 1 ? (
+            <button
+              type="button"
+              className="ghost"
+              data-testid="wizard-back"
+              onClick={handleBack}
+              disabled={saving}
+            >
+              Back
+            </button>
+          ) : (
+            <div />
+          )}
+          {step < 3 ? (
+            <button
+              type="button"
+              className="primary"
+              data-testid="wizard-next"
+              onClick={handleNext}
+              disabled={step === 1 ? Boolean(keyError) || saving : Boolean(hostsError) || saving}
+            >
+              Continue
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void handleSave()}
+              disabled={hasErrors || saving}
+            >
+              {saving ? "Saving…" : mode === "edit" ? "Save changes" : "Save binding"}
+            </button>
+          )}
         </div>
       </div>
     </div>
