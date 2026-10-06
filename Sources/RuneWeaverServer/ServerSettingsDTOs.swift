@@ -3,13 +3,21 @@
 // Purpose: carries the full settings snapshot for `GET /settings` plus the
 // partial update for `PUT /settings` so dashboard edits preserve every field
 // the request omits while engine, server bind, media, index, desktop, goals,
-// proactive, ideas, fanout, browser, bash, and files patches merge in one place.
+// proactive, ideas, fanout, browser, bash, workspace, and files patches merge
+// in one place.
 // Scope: REST bodies and merge policy only; range and shape checks stay with
 // the config validation layer and live-reload decisions stay with the
 // settings routes.
 // Architectural role: keeps the Vapor settings adapters decoupled from the
 // engine core in version-tolerant Codable contracts, so a dashboard built
 // against an older engine still decodes.
+//
+// Live-apply note: `WorkspaceStore` derives limits per call (`usage`,
+// `pruneTmp`, and `checkQuota` all read `config.clamped()`), so a save pushes
+// the merged quotas into the live context store in place and the next usage,
+// prune, and `bash.exec` checks enforce them with no restart. The rebuilt
+// `BashTool` carries a fresh store with the same hermetic overrides, so
+// isolated roots keep enforcing against the same tree.
 
 import Foundation
 import RuneWeaverCore
@@ -75,6 +83,8 @@ public struct SettingsResponse: Content, Equatable {
     public let desktop: DesktopConfig
     /// Granular shell execution policy.
     public let bash: BashConfig
+    /// Scratch workspace quotas and temp retention bounding shell turns.
+    public let workspace: WorkspaceConfig
     /// Steady long-horizon pursuit policy.
     public let goals: GoalsConfig
     /// Interruption policy for background scheduler and goal turns.
@@ -147,6 +157,7 @@ public struct SettingsResponse: Content, Equatable {
         self.index = config.index
         self.desktop = config.desktop
         self.bash = config.bash
+        self.workspace = config.workspace
         self.goals = config.goals
         self.proactive = config.proactive
         self.ideas = config.ideas
@@ -204,6 +215,7 @@ public struct SettingsResponse: Content, Equatable {
         case index
         case desktop
         case bash
+        case workspace
         case goals
         case proactive
         case ideas
@@ -274,6 +286,10 @@ public struct SettingsResponse: Content, Equatable {
         index = try container.decodeIfPresent(IndexConfig.self, forKey: .index) ?? IndexConfig()
         desktop = try container.decodeIfPresent(DesktopConfig.self, forKey: .desktop) ?? DesktopConfig()
         bash = try container.decodeIfPresent(BashConfig.self, forKey: .bash) ?? BashConfig()
+        // Absent workspace keeps the stock scratch quotas so payloads written
+        // before the `[workspace]` surface existed still decode instead of
+        // failing the settings fetch, mirroring the persona tolerance below.
+        workspace = try container.decodeIfPresent(WorkspaceConfig.self, forKey: .workspace) ?? WorkspaceConfig()
         goals = try container.decodeIfPresent(GoalsConfig.self, forKey: .goals) ?? GoalsConfig()
         proactive = try container.decodeIfPresent(ProactiveConfig.self, forKey: .proactive) ?? ProactiveConfig()
         ideas = try container.decodeIfPresent(IdeasConfig.self, forKey: .ideas) ?? IdeasConfig()
@@ -337,6 +353,7 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(index, forKey: .index)
         try container.encode(desktop, forKey: .desktop)
         try container.encode(bash, forKey: .bash)
+        try container.encode(workspace, forKey: .workspace)
         try container.encode(goals, forKey: .goals)
         try container.encode(proactive, forKey: .proactive)
         try container.encode(ideas, forKey: .ideas)
@@ -409,6 +426,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let desktop: DesktopSettingsUpdate?
     /// Partial bash patch; a nil patch preserves the stored `[bash]` section.
     public let bash: BashSettingsUpdate?
+    /// Partial workspace patch; a nil patch preserves the stored `[workspace]` section.
+    public let workspace: WorkspaceUpdate?
     /// Partial goals patch; a nil patch preserves the stored `[goals]` section.
     public let goals: GoalsUpdate?
     /// Partial proactive patch; a nil patch preserves the stored `[proactive]` section.
@@ -471,6 +490,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         index: IndexSettingsUpdate? = nil,
         desktop: DesktopSettingsUpdate? = nil,
         bash: BashSettingsUpdate? = nil,
+        workspace: WorkspaceUpdate? = nil,
         goals: GoalsUpdate? = nil,
         proactive: ProactiveUpdate? = nil,
         ideas: IdeasUpdate? = nil,
@@ -524,6 +544,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.index = index
         self.desktop = desktop
         self.bash = bash
+        self.workspace = workspace
         self.goals = goals
         self.proactive = proactive
         self.ideas = ideas
@@ -557,6 +578,7 @@ extension UpdateSettingsRequest {
         applyIndex(to: &config.index)
         applyDesktop(to: &config.desktop)
         try applyBash(to: &config.bash)
+        try applyWorkspace(to: &config.workspace)
         applyGoals(to: &config.goals)
         try applyProactive(to: &config.proactive)
         applyIdeas(to: &config.ideas)

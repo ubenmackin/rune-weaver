@@ -2,8 +2,8 @@
 //
 // Owns `GET`/`PUT /settings`: load, merge, validate, and persist the engine
 // config, then push the saved values into the live engine so orchestrator
-// budgets, media/browser/web/API tools, desktop, bash/files policies, fan-out
-// policy, and index policy take effect without a restart. `[goals]`,
+// budgets, media/browser/web/API tools, desktop, bash/files/workspace policies,
+// fan-out policy, and index policy take effect without a restart. `[goals]`,
 // `[proactive]`, `[ideas]`, and `[persona]` persist to the file through the
 // same partial-patch merge but take effect on restart: the pursuit engine,
 // the scheduler worker, the ideas engine, and the prompt composer's identity
@@ -513,24 +513,36 @@ private func reloadLiveDesktopTools(body: UpdateSettingsRequest, config: RuneWea
 }
 
 /// Reconciles the live bash and files tools with the persisted policies so saved values take effect without a restart.
-/// Follows the desktop reload pattern: a save without any bash or files key
-/// is a no-op, and each re-registered tool keeps its live enabled state. Both
-/// policies swap into the context atomically so concurrent turns never see a
-/// fresh shell beside a stale workspace guard, then the file tools refresh
-/// first and the bash tool registers exactly once against the fresh pair for
-/// its working-directory guard. Email tools follow only on a files patch when
+/// Follows the desktop reload pattern: a save without any bash, files, or
+/// workspace key is a no-op, and each re-registered tool keeps its live enabled
+/// state. All three policies swap into the context atomically so concurrent turns
+/// never see a fresh shell beside a stale workspace guard, then the file tools
+/// refresh first and the bash tool registers exactly once against the fresh pair
+/// for its working-directory guard. Email tools follow only on a files patch when
 /// mail accounts are configured and already on the bus.
+///
+/// Workspace quotas apply live to every consumer: the save pushes the merged
+/// quotas into the context store in place (usage, prune, and quota checks all
+/// derive limits per call), so the next `GET /workspace/usage`, manual prune,
+/// and `bash.exec` enforce the new bounds with no restart. The rebuilt
+/// `BashTool` carries a fresh store with the same hermetic overrides, so an
+/// isolated root keeps enforcing against the same tree. An all-nil bash or
+/// workspace object is a no-op patch, so an empty object never rebuilds tools.
 /// - Parameters:
 ///   - body: Decoded settings patch selecting which policies move.
 ///   - config: Persisted config carrying the fresh policies.
 ///   - context: Live server context receiving the swap.
 private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
-    let hasBashPatch = body.bash != nil
+    let hasBashPatch = body.bash.map { !$0.isEmpty } ?? false
     let hasFilesPatch = body.filesDenyPatterns != nil || body.filesAllowRoots != nil || body.filesRequireApprovalOnDeny != nil || body.filesWriteMode != nil
-    guard hasBashPatch || hasFilesPatch else { return }
+    let hasWorkspacePatch = body.workspace.map { !$0.isEmpty } ?? false
+    guard hasBashPatch || hasFilesPatch || hasWorkspacePatch else { return }
     context.setBashFiles(bash: config.bash, files: config.files)
     if hasBashPatch {
         await context.permissionGate.updateBashConfig(config.bash)
+    }
+    if hasWorkspacePatch {
+        await context.workspaceStore.updateConfig(config.workspace)
     }
     let live = context.bashFilesSnapshot()
     if hasFilesPatch {
@@ -546,10 +558,20 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
             await reregisterPreservingToggle(tool, on: context)
         }
     }
+    // The fresh shell keeps the live store's hermetic overrides so an
+    // isolated test root enforces against the same tree instead of falling
+    // back to the real home.
+    let overrides = await context.workspaceStore.overrides()
     let bashTool = BashTool(
         bashConfig: live.bash,
         filesConfig: live.files,
-        egressSupervisor: context.egressSupervisor
+        egressSupervisor: context.egressSupervisor,
+        workspaceConfig: config.workspace,
+        workspaceStore: WorkspaceStore(
+            config: config.workspace,
+            homeDirectoryURL: overrides.homeDirectoryURL,
+            rootURL: overrides.rootURL
+        )
     )
     await reregisterPreservingToggle(bashTool, on: context)
     if hasFilesPatch, !config.email.accounts.isEmpty {

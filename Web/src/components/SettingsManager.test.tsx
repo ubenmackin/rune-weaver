@@ -18,18 +18,28 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsManager, { SECRET_STATUS_CHUNK_SIZE, getToolCategory, isSettingsTab } from "./SettingsManager";
 import { peekPersonaSignals } from "./PersonaAvatar";
 import {
+  BASH_CPU_MAX_SECONDS,
+  BASH_CPU_MIN_SECONDS,
+  BASH_MEMORY_MAX_MB,
+  BASH_MEMORY_MIN_MB,
   BASH_PERMISSION_ACTIONS,
   BASH_TIMEOUT_MAX_SECONDS,
   BASH_TIMEOUT_MIN_SECONDS,
   clearAuthToken,
   DEFAULT_BASH_ALLOW_NETWORK,
   DEFAULT_BASH_CONFIG,
+  DEFAULT_BASH_CPU_SECONDS,
   DEFAULT_BASH_DEFAULT_ACTION,
   DEFAULT_BASH_ENABLED,
+  DEFAULT_BASH_MEMORY_MB,
   DEFAULT_BASH_RULES,
   DEFAULT_BASH_TIMEOUT_SECONDS,
   DEFAULT_PERSONA_AVATAR,
   DEFAULT_PERSONA_TONE,
+  DEFAULT_WORKSPACE_CONFIG,
+  DEFAULT_WORKSPACE_QUOTA_FILES,
+  DEFAULT_WORKSPACE_QUOTA_MB,
+  DEFAULT_WORKSPACE_TMP_TTL_DAYS,
   formatWorkspaceBytes,
   isPromotableScriptPath,
   MAX_PERSONA_ASSISTANT_NAME_LENGTH,
@@ -39,6 +49,12 @@ import {
   PERSONA_TONES,
   shortAgentToolHash,
   validateAgentToolPromote,
+  WORKSPACE_QUOTA_FILES_MAX,
+  WORKSPACE_QUOTA_FILES_MIN,
+  WORKSPACE_QUOTA_MB_MAX,
+  WORKSPACE_QUOTA_MB_MIN,
+  WORKSPACE_TMP_TTL_MAX_DAYS,
+  WORKSPACE_TMP_TTL_MIN_DAYS,
   workspaceQuotaPercent,
   WORKSPACE_TOOLS_PREFIX,
 } from "../api";
@@ -3998,11 +4014,38 @@ describe("bash defaults and bounds contract", () => {
     expect(DEFAULT_BASH_CONFIG.enabled).toBe(DEFAULT_BASH_ENABLED);
     expect(DEFAULT_BASH_CONFIG.default_action).toBe(DEFAULT_BASH_DEFAULT_ACTION);
     expect(DEFAULT_BASH_CONFIG.timeout_seconds).toBe(DEFAULT_BASH_TIMEOUT_SECONDS);
+    expect(DEFAULT_BASH_CONFIG.cpu_seconds).toBe(DEFAULT_BASH_CPU_SECONDS);
+    expect(DEFAULT_BASH_CONFIG.memory_mb).toBe(DEFAULT_BASH_MEMORY_MB);
     expect(DEFAULT_BASH_CONFIG.allow_network).toBe(DEFAULT_BASH_ALLOW_NETWORK);
     expect(DEFAULT_BASH_CONFIG.rules).toEqual(DEFAULT_BASH_RULES);
     expect([...BASH_PERMISSION_ACTIONS]).toEqual(["allow", "ask", "deny"]);
     expect(BASH_TIMEOUT_MIN_SECONDS).toBe(1);
     expect(BASH_TIMEOUT_MAX_SECONDS).toBe(3600);
+    expect(DEFAULT_BASH_CPU_SECONDS).toBe(120);
+    expect(DEFAULT_BASH_MEMORY_MB).toBe(1024);
+    expect(BASH_CPU_MIN_SECONDS).toBe(1);
+    expect(BASH_CPU_MAX_SECONDS).toBe(3600);
+    expect(BASH_MEMORY_MIN_MB).toBe(64);
+    expect(BASH_MEMORY_MAX_MB).toBe(8192);
+  });
+
+  it("pins the workspace mirrors to the engine WorkspaceConfig", () => {
+    // Single cross-language contract: the server owns the defaults and clamps
+    // in `Sources/RuneWeaverCore/Config.swift`; these mirrors must stay equal
+    // so the Tools-tab editors and the client validator never drift from the
+    // engine. Update both together.
+    expect(DEFAULT_WORKSPACE_QUOTA_MB).toBe(500);
+    expect(DEFAULT_WORKSPACE_QUOTA_FILES).toBe(10000);
+    expect(DEFAULT_WORKSPACE_TMP_TTL_DAYS).toBe(7);
+    expect(DEFAULT_WORKSPACE_CONFIG.quota_mb).toBe(DEFAULT_WORKSPACE_QUOTA_MB);
+    expect(DEFAULT_WORKSPACE_CONFIG.quota_files).toBe(DEFAULT_WORKSPACE_QUOTA_FILES);
+    expect(DEFAULT_WORKSPACE_CONFIG.tmp_ttl_days).toBe(DEFAULT_WORKSPACE_TMP_TTL_DAYS);
+    expect(WORKSPACE_QUOTA_MB_MIN).toBe(10);
+    expect(WORKSPACE_QUOTA_MB_MAX).toBe(10240);
+    expect(WORKSPACE_QUOTA_FILES_MIN).toBe(100);
+    expect(WORKSPACE_QUOTA_FILES_MAX).toBe(100000);
+    expect(WORKSPACE_TMP_TTL_MIN_DAYS).toBe(0);
+    expect(WORKSPACE_TMP_TTL_MAX_DAYS).toBe(90);
   });
 });
 
@@ -4618,6 +4661,363 @@ describe("SettingsManager workspace and promoted tools", () => {
     expect(formatWorkspaceBytes(12 * 1024 * 1024)).toBe("12.0 MB");
     expect(workspaceQuotaPercent(12 * 1024 * 1024, 500 * 1024 * 1024)).toBe(2);
     expect(workspaceQuotaPercent(1, 0)).toBe(0);
+  });
+});
+
+describe("SettingsManager bash bounds and workspace quotas", () => {
+  const bashToolRow = {
+    name: "bash.exec",
+    description: "Run shell commands",
+    permissionLevel: "requiresApproval",
+    inputSchema: "{}",
+    isEnabled: true,
+    isBuiltIn: true,
+    pluginID: null,
+    source: "builtin",
+    integrityStatus: "valid",
+    hasConfig: true,
+  };
+  const usagePayload = {
+    bytes: 12 * 1024 * 1024,
+    files: 120,
+    truncated: false,
+    quotaMB: 500,
+    quotaFiles: 10000,
+  };
+
+  // Opens the Tools tab with one stubbed fetch so settings, tools, plugins,
+  // usage, and agent-tools all answer without a second stub. PUT bodies are
+  // captured for the delta assertions while the response echoes the merged
+  // request the way the engine partial merge does.
+  function stubBoundFetch(settings: Record<string, unknown>, onPut?: (body: Record<string, unknown>) => Response) {
+    const puts: Record<string, unknown>[] = [];
+    let putCount = 0;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        putCount += 1;
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        puts.push(body);
+        if (onPut) return onPut(body);
+        return jsonResponse({ ...settings, ...body });
+      }
+      if (urlStr === "/workspace/usage") return jsonResponse(usagePayload);
+      if (urlStr === "/agent-tools") return jsonResponse({ tools: [], count: 0 });
+      if (urlStr.includes("/tools") && !urlStr.includes("agent-tools")) {
+        return jsonResponse({ tools: [bashToolRow] });
+      }
+      if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });
+      return jsonResponse(settings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return { puts, getPutCount: () => putCount };
+  }
+
+  async function openBashModal(user: ReturnType<typeof userEvent.setup>) {
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /Tools and Runes/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Bash & Shell")).toBeDefined();
+    });
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    await user.click(configureButtons[0]);
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
+    });
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedRunsForTesting();
+  });
+
+  it("renders current cpu and memory values with server-clamped inputs", async () => {
+    const user = userEvent.setup();
+    const settingsWithBounds = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        default_action: "ask",
+        rules: [{ pattern: "*", action: "ask" }],
+        timeout_seconds: 30,
+        cpu_seconds: 60,
+        memory_mb: 512,
+        allow_network: false,
+      },
+    };
+    stubBoundFetch(settingsWithBounds);
+    render(<SettingsManager />);
+    await openBashModal(user);
+
+    // Stored bounds round-trip into the form directly under the timeout.
+    const cpuInput = screen.getByLabelText(/CPU seconds/i) as HTMLInputElement;
+    const memoryInput = screen.getByLabelText(/Memory \(MB\)/i) as HTMLInputElement;
+    expect(cpuInput.value).toBe("60");
+    expect(memoryInput.value).toBe("512");
+    // Inputs clamp to the engine bounds so the form agrees with the server 400.
+    expect(cpuInput.min).toBe(String(BASH_CPU_MIN_SECONDS));
+    expect(cpuInput.max).toBe(String(BASH_CPU_MAX_SECONDS));
+    expect(cpuInput.step).toBe("1");
+    expect(memoryInput.min).toBe(String(BASH_MEMORY_MIN_MB));
+    expect(memoryInput.max).toBe(String(BASH_MEMORY_MAX_MB));
+    expect(memoryInput.step).toBe("1");
+    // One-line hints name the non-obvious bound semantics.
+    expect(screen.getByText(/wall-clock may exceed CPU time for sleeping processes/i)).toBeDefined();
+    expect(screen.getByText(/best-effort ulimit bound/i)).toBeDefined();
+  });
+
+  it("saves edited bounds through one modal PATCH carrying the bash delta", async () => {
+    const user = userEvent.setup();
+    const settingsWithBounds = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        default_action: "ask",
+        rules: [{ pattern: "*", action: "ask" }],
+        timeout_seconds: 30,
+        cpu_seconds: 60,
+        memory_mb: 512,
+        allow_network: false,
+      },
+    };
+    const { puts, getPutCount } = stubBoundFetch(settingsWithBounds);
+    render(<SettingsManager />);
+    await openBashModal(user);
+
+    // Editing only the resource budgets keeps the save to one modal request.
+    const cpuInput = screen.getByLabelText(/CPU seconds/i) as HTMLInputElement;
+    await user.clear(cpuInput);
+    await user.type(cpuInput, "90");
+    const memoryInput = screen.getByLabelText(/Memory \(MB\)/i) as HTMLInputElement;
+    await user.clear(memoryInput);
+    await user.type(memoryInput, "2048");
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(getPutCount()).toBe(1);
+    });
+    // The modal save travels alone: only the bash section rides the PUT, and
+    // the edited budgets arrive on the snake_case keys the file persists.
+    expect(Object.keys(puts[0])).toEqual(["bash"]);
+    const bash = puts[0]["bash"] as Record<string, unknown>;
+    expect(bash["cpu_seconds"]).toBe(90);
+    expect(bash["memory_mb"]).toBe(2048);
+    expect(bash["timeout_seconds"]).toBe(30);
+    await waitFor(() => {
+      expect(screen.getByText(/Bash settings saved/i)).toBeDefined();
+    });
+  });
+
+  it("maps a server 400 to the bash modal error path without closing", async () => {
+    const user = userEvent.setup();
+    const settingsWithBounds = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        default_action: "ask",
+        rules: [{ pattern: "*", action: "ask" }],
+        timeout_seconds: 30,
+        cpu_seconds: 60,
+        memory_mb: 512,
+        allow_network: false,
+      },
+    };
+    const serverReason = "bash.cpu_seconds must be between 1 and 3600 (got 9999)";
+    stubBoundFetch(settingsWithBounds, () => jsonResponse({ reason: serverReason }, 400));
+    render(<SettingsManager />);
+    await openBashModal(user);
+
+    const cpuInput = screen.getByLabelText(/CPU seconds/i) as HTMLInputElement;
+    await user.clear(cpuInput);
+    await user.type(cpuInput, "3600");
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    // The honest server message surfaces in the modal while the editor stays
+    // open for repair instead of closing on a generic failure.
+    await waitFor(() => {
+      expect(screen.getByText(serverReason)).toBeDefined();
+    });
+    expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
+    expect(screen.queryByText(/Bash settings saved/i)).toBeNull();
+  });
+
+  it("rejects an out-of-range cpu budget before any network write", async () => {
+    const user = userEvent.setup();
+    const settingsWithBounds = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        default_action: "ask",
+        rules: [{ pattern: "*", action: "ask" }],
+        timeout_seconds: 30,
+        cpu_seconds: 60,
+        memory_mb: 512,
+        allow_network: false,
+      },
+    };
+    const { getPutCount } = stubBoundFetch(settingsWithBounds);
+    render(<SettingsManager />);
+    await openBashModal(user);
+
+    // A zero CPU budget would kill every command instantly, so the form fails
+    // closed with the bound instead of returning a server 400.
+    const cpuInput = screen.getByLabelText(/CPU seconds/i) as HTMLInputElement;
+    await user.clear(cpuInput);
+    await user.type(cpuInput, "0");
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Invalid bash CPU budget/i)).toBeDefined();
+    });
+    expect(getPutCount()).toBe(0);
+  });
+
+  it("renders editable workspace quotas beside read-only usage bars", async () => {
+    const user = userEvent.setup();
+    const settingsWithWorkspace = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        default_action: "ask",
+        rules: [{ pattern: "*", action: "ask" }],
+        timeout_seconds: 30,
+        cpu_seconds: 60,
+        memory_mb: 512,
+        allow_network: false,
+      },
+      workspace: { quota_mb: 500, quota_files: 10000, tmp_ttl_days: 7 },
+    };
+    stubBoundFetch(settingsWithWorkspace);
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /Tools and Runes/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Workspace Storage")).toBeDefined();
+    });
+
+    // Bars still read the live tree from GET /workspace/usage.
+    await waitFor(() => {
+      expect(screen.getByText(/12\.0 MB of 500 MB/)).toBeDefined();
+    });
+    expect(screen.getByText(/120 of 10,000 files/)).toBeDefined();
+    // Quota editors seed from GET /settings [workspace] beside the bars.
+    expect((screen.getByLabelText(/Quota \(MB\)/i) as HTMLInputElement).value).toBe("500");
+    expect((screen.getByLabelText(/Max files/i) as HTMLInputElement).value).toBe("10000");
+    expect((screen.getByLabelText(/Tmp TTL \(days\)/i) as HTMLInputElement).value).toBe("7");
+    // The config-file-only pointer is gone; retention now notes its prune timing.
+    expect(screen.queryByText(/edit \[workspace\] quota_mb \/ quota_files in the config file/i)).toBeNull();
+    expect(screen.getByText(/TTL applies on next prune/i)).toBeDefined();
+  });
+
+  it("saves edited quotas through the tab save with a workspace delta", async () => {
+    const user = userEvent.setup();
+    const settingsWithWorkspace = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        default_action: "ask",
+        rules: [{ pattern: "*", action: "ask" }],
+        timeout_seconds: 30,
+        cpu_seconds: 60,
+        memory_mb: 512,
+        allow_network: false,
+      },
+      workspace: { quota_mb: 500, quota_files: 10000, tmp_ttl_days: 7 },
+    };
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return jsonResponse({ ...settingsWithWorkspace, ...body });
+      }
+      if (urlStr === "/workspace/usage") return jsonResponse(usagePayload);
+      if (urlStr === "/agent-tools") return jsonResponse({ tools: [], count: 0 });
+      if (urlStr.includes("/tools") && !urlStr.includes("agent-tools")) {
+        return jsonResponse({ tools: [bashToolRow] });
+      }
+      if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });
+      return jsonResponse(settingsWithWorkspace);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /Tools and Runes/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Workspace Storage")).toBeDefined();
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/12\.0 MB of 500 MB/)).toBeDefined();
+    });
+
+    // Quota edits flow through the tab's single Save as a workspace delta.
+    const quotaInput = screen.getByLabelText(/Quota \(MB\)/i) as HTMLInputElement;
+    await user.clear(quotaInput);
+    await user.type(quotaInput, "600");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      const puts = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit)?.method === "PUT");
+      expect(puts.length).toBe(1);
+    });
+    const putCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit)?.method === "PUT");
+    const sent = JSON.parse(String((putCall?.[1] as RequestInit)?.body)) as Record<string, unknown>;
+    const workspace = sent["workspace"] as Record<string, unknown>;
+    expect(workspace).toEqual({ quota_mb: 600, quota_files: 10000, tmp_ttl_days: 7 });
+    await waitFor(() => {
+      expect(screen.getByText("Settings saved.")).toBeDefined();
+    });
+  });
+
+  it("rejects an out-of-range workspace quota before any network write", async () => {
+    const user = userEvent.setup();
+    const settingsWithWorkspace = {
+      ...mockSettings,
+      workspace: { quota_mb: 500, quota_files: 10000, tmp_ttl_days: 7 },
+    };
+    let putCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const urlStr = String(url);
+        if (init?.method === "PUT") {
+          putCount += 1;
+          return jsonResponse({ ...settingsWithWorkspace });
+        }
+        if (urlStr === "/workspace/usage") return jsonResponse(usagePayload);
+        if (urlStr === "/agent-tools") return jsonResponse({ tools: [], count: 0 });
+        if (urlStr.includes("/tools") && !urlStr.includes("agent-tools")) {
+          return jsonResponse({ tools: [bashToolRow] });
+        }
+        if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });
+        return jsonResponse(settingsWithWorkspace);
+      }),
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /Tools and Runes/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Workspace Storage")).toBeDefined();
+    });
+
+    // A single-digit quota would not fit a working checkout, so the form fails
+    // closed with the bound instead of returning a server 400.
+    const quotaInput = screen.getByLabelText(/Quota \(MB\)/i) as HTMLInputElement;
+    await user.clear(quotaInput);
+    await user.type(quotaInput, "5");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Invalid workspace quota/i)).toBeDefined();
+    });
+    expect(putCount).toBe(0);
   });
 });
 

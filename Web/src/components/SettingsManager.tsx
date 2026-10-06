@@ -98,14 +98,27 @@ import {
   type PersonaSettingsUpdate,
   formatBlockedAppsText,
   parseBlockedAppsText,
+  BASH_CPU_MAX_SECONDS,
+  BASH_CPU_MIN_SECONDS,
+  BASH_MEMORY_MAX_MB,
+  BASH_MEMORY_MIN_MB,
   BASH_PERMISSION_ACTIONS,
   BASH_TIMEOUT_MAX_SECONDS,
   BASH_TIMEOUT_MIN_SECONDS,
   DEFAULT_BASH_CONFIG,
+  DEFAULT_BASH_CPU_SECONDS,
+  DEFAULT_BASH_MEMORY_MB,
   DEFAULT_BASH_RULES_TEXT,
   DEFAULT_FANOUT_FULL_TOOLS,
   DEFAULT_FANOUT_MAX_WORKERS,
   DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS,
+  DEFAULT_WORKSPACE_CONFIG,
+  WORKSPACE_QUOTA_FILES_MAX,
+  WORKSPACE_QUOTA_FILES_MIN,
+  WORKSPACE_QUOTA_MB_MAX,
+  WORKSPACE_QUOTA_MB_MIN,
+  WORKSPACE_TMP_TTL_MAX_DAYS,
+  WORKSPACE_TMP_TTL_MIN_DAYS,
   formatBashRulesText,
   parseBashRulesText,
   type BashConfigData,
@@ -128,6 +141,8 @@ import {
   type PluginSummary,
   type ToolInfo,
   type UpdateSettingsInput,
+  type WorkspaceConfigData,
+  type WorkspaceSettingsUpdate,
   checkSecretStatus,
   storeSecret,
   formatWorkspaceBytes,
@@ -1245,6 +1260,18 @@ export default function SettingsManager() {
   const [bashTimeoutSeconds, setBashTimeoutSeconds] = useState<number | string>(
     DEFAULT_BASH_CONFIG.timeout_seconds
   );
+  // Resource budgets bound each shell turn beside the wall-clock timeout: CPU
+  // seconds cap compute via `ulimit -t` while memory megabytes cap address
+  // space via `ulimit -v`. Numeric inputs hold raw text (including empty) so a
+  // cleared field surfaces a range error instead of silently keeping stale.
+  // The fresh form seeds from the combined bash default so the editor matches
+  // the engine boundary before the first settings fetch.
+  const [bashCpuSeconds, setBashCpuSeconds] = useState<number | string>(
+    DEFAULT_BASH_CPU_SECONDS
+  );
+  const [bashMemoryMB, setBashMemoryMB] = useState<number | string>(
+    DEFAULT_BASH_MEMORY_MB
+  );
   const [bashAllowNetwork, setBashAllowNetwork] = useState<boolean>(
     DEFAULT_BASH_CONFIG.allow_network
   );
@@ -1384,15 +1411,29 @@ export default function SettingsManager() {
   // rows stay interactive while one request is pending.
   const [togglingToolName, setTogglingToolName] = useState<string | null>(null);
   // Agent scratch workspace usage plus the hash-pinned script registry live on
-  // the Tools tab beside the builtin switches. Usage quotas arrive from
-  // GET /workspace/usage rather than GET /settings because the settings patch
-  // carries no workspace section; quotas render read-only with a config-file
-  // hint instead of an editor that would 400. The registry stays separate
-  // from plugin runes so a promoted shell script never shares fate with an
-  // external package.
+  // the Tools tab beside the builtin switches. Usage bars read the live tree
+  // from GET /workspace/usage while the quota editors below seed from
+  // GET /settings [workspace] and persist through the tab save, so the bars
+  // stay honest about the tree even while an edit is in flight. The registry
+  // stays separate from plugin runes so a promoted shell script never shares
+  // fate with an external package.
   const [workspaceUsage, setWorkspaceUsage] = useState<WorkspaceUsageResponse | null>(null);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  // Editable scratch quotas bounding the workspace tree. Numeric inputs hold
+  // raw text (including empty) so a cleared field surfaces a range error
+  // instead of silently keeping the stored quota. The fresh form seeds from
+  // the combined workspace default so the editors match the engine boundary
+  // before the first settings fetch.
+  const [workspaceQuotaMB, setWorkspaceQuotaMB] = useState<number | string>(
+    DEFAULT_WORKSPACE_CONFIG.quota_mb
+  );
+  const [workspaceQuotaFiles, setWorkspaceQuotaFiles] = useState<number | string>(
+    DEFAULT_WORKSPACE_CONFIG.quota_files
+  );
+  const [workspaceTmpTTLDays, setWorkspaceTmpTTLDays] = useState<number | string>(
+    DEFAULT_WORKSPACE_CONFIG.tmp_ttl_days
+  );
   const [pruningWorkspace, setPruningWorkspace] = useState(false);
   const [pendingPruneWorkspace, setPendingPruneWorkspace] = useState(false);
   const [agentTools, setAgentTools] = useState<AgentTool[]>([]);
@@ -2219,7 +2260,9 @@ export default function SettingsManager() {
   // older engines by keeping the form defaults. Only overwrites sections the
   // engine returns so older engines without bash leave the form untouched.
   // Rules arrive as an ordered array and render through the shared textarea
-  // codec so line order survives the round trip.
+  // codec so line order survives the round trip. Resource bounds follow the
+  // same dual spelling as the timeout so file-configured CPU and memory values
+  // survive a dashboard PUT instead of resetting to the fresh-form defaults.
   const populateBashSettings = useCallback(
     (bash: BashConfigData | undefined | null) => {
       if (!bash) return;
@@ -2255,6 +2298,24 @@ export default function SettingsManager() {
       if (timeout !== null) {
         setBashTimeoutSeconds(timeout);
       }
+      const cpu =
+        typeof bash.cpu_seconds === "number"
+          ? bash.cpu_seconds
+          : typeof bash.cpuSeconds === "number"
+            ? bash.cpuSeconds
+            : null;
+      if (cpu !== null) {
+        setBashCpuSeconds(cpu);
+      }
+      const memory =
+        typeof bash.memory_mb === "number"
+          ? bash.memory_mb
+          : typeof bash.memoryMb === "number"
+            ? bash.memoryMb
+            : null;
+      if (memory !== null) {
+        setBashMemoryMB(memory);
+      }
       if (typeof bash.allow_network === "boolean") {
         setBashAllowNetwork(bash.allow_network);
       } else if (typeof bash.allowNetwork === "boolean") {
@@ -2269,7 +2330,9 @@ export default function SettingsManager() {
   // textarea order top-to-bottom last-match-wins through the shared
   // parseBashRulesText codec; blank lines collapse on save. Sends the
   // snake_case keys the engine persists; the engine also accepts the camelCase
-  // aliases, so either spelling writes while reads accept both.
+  // aliases, so either spelling writes while reads accept both. Resource
+  // budgets travel beside the timeout so one modal save carries the whole
+  // execution bound set with no second save path.
   const buildBashPayload = useCallback(
     (): BashSettingsUpdate => {
       return {
@@ -2277,6 +2340,8 @@ export default function SettingsManager() {
         default_action: bashDefaultAction.trim().toLowerCase(),
         rules: parseBashRulesText(bashRulesText),
         timeout_seconds: Number(bashTimeoutSeconds),
+        cpu_seconds: Number(bashCpuSeconds),
+        memory_mb: Number(bashMemoryMB),
         allow_network: bashAllowNetwork,
       };
     },
@@ -2285,6 +2350,8 @@ export default function SettingsManager() {
       bashDefaultAction,
       bashRulesText,
       bashTimeoutSeconds,
+      bashCpuSeconds,
+      bashMemoryMB,
       bashAllowNetwork,
     ]
   );
@@ -2295,7 +2362,9 @@ export default function SettingsManager() {
   // Rules parse through the shared parseBashRulesText codec so the modal and
   // the full-save reject the same shapes with textarea line numbers. An empty
   // list is rejected because an absent key would reload as the default
-  // catch-all instead of the saved empty.
+  // catch-all instead of the saved empty. Resource bounds mirror the engine
+  // clamps so a zero CPU budget or a tiny memory budget fails in the form
+  // instead of returning a server 400 from load validation.
   const validateBashFields = useCallback((): string | null => {
     const normalizedAction = bashDefaultAction.trim().toLowerCase();
     if (!(BASH_PERMISSION_ACTIONS as readonly string[]).includes(normalizedAction)) {
@@ -2314,8 +2383,16 @@ export default function SettingsManager() {
     if (!Number.isInteger(timeoutNum) || timeoutNum < BASH_TIMEOUT_MIN_SECONDS || timeoutNum > BASH_TIMEOUT_MAX_SECONDS) {
       return `Invalid bash timeout: timeout must be between ${BASH_TIMEOUT_MIN_SECONDS} and ${BASH_TIMEOUT_MAX_SECONDS} seconds.`;
     }
+    const cpuNum = Number(bashCpuSeconds);
+    if (!Number.isInteger(cpuNum) || cpuNum < BASH_CPU_MIN_SECONDS || cpuNum > BASH_CPU_MAX_SECONDS) {
+      return `Invalid bash CPU budget: CPU time must be between ${BASH_CPU_MIN_SECONDS} and ${BASH_CPU_MAX_SECONDS} seconds.`;
+    }
+    const memoryNum = Number(bashMemoryMB);
+    if (!Number.isInteger(memoryNum) || memoryNum < BASH_MEMORY_MIN_MB || memoryNum > BASH_MEMORY_MAX_MB) {
+      return `Invalid bash memory budget: memory must be between ${BASH_MEMORY_MIN_MB} and ${BASH_MEMORY_MAX_MB} MB.`;
+    }
     return null;
-  }, [bashDefaultAction, bashRulesText, bashTimeoutSeconds]);
+  }, [bashDefaultAction, bashRulesText, bashTimeoutSeconds, bashCpuSeconds, bashMemoryMB]);
 
   // Copies one settings fetch into the fan-out knob fields, tolerating an
   // absent [fanout] section from older engines by keeping the modal defaults.
@@ -2714,6 +2791,82 @@ export default function SettingsManager() {
     return null;
   }, [filesDenyText, filesAllowRootsText]);
 
+  // Copies one settings fetch into the workspace quota editors, tolerating
+  // both snake_case and camelCase DTO aliases and an absent [workspace]
+  // section from older engines by keeping the form defaults. Only overwrites
+  // keys the engine returns so a stored quota always wins over the fresh-form
+  // fallback, keeping the bars and the editors on the same stored truth.
+  const populateWorkspaceSettings = useCallback(
+    (workspace: WorkspaceConfigData | undefined | null) => {
+      if (!workspace) return;
+      const quotaMB =
+        typeof workspace.quota_mb === "number"
+          ? workspace.quota_mb
+          : typeof workspace.quotaMB === "number"
+            ? workspace.quotaMB
+            : null;
+      if (quotaMB !== null) {
+        setWorkspaceQuotaMB(quotaMB);
+      }
+      const quotaFiles =
+        typeof workspace.quota_files === "number"
+          ? workspace.quota_files
+          : typeof workspace.quotaFiles === "number"
+            ? workspace.quotaFiles
+            : null;
+      if (quotaFiles !== null) {
+        setWorkspaceQuotaFiles(quotaFiles);
+      }
+      const tmpTTL =
+        typeof workspace.tmp_ttl_days === "number"
+          ? workspace.tmp_ttl_days
+          : typeof workspace.tmpTTLDays === "number"
+            ? workspace.tmpTTLDays
+            : null;
+      if (tmpTTL !== null) {
+        setWorkspaceTmpTTLDays(tmpTTL);
+      }
+    },
+    []
+  );
+
+  // Builds the [workspace] delta from the Tools-tab quota editors so the tab
+  // save persists quotas beside the usage bars through one PUT. Sends the
+  // snake_case keys the engine persists; reads accept both spellings so a
+  // file-configured quota survives the round trip. Numeric fields preserve the
+  // raw input so validation surfaces range errors instead of silently
+  // coercing back to defaults.
+  const buildWorkspacePayload = useCallback(
+    (): WorkspaceSettingsUpdate => {
+      return {
+        quota_mb: Number(workspaceQuotaMB),
+        quota_files: Number(workspaceQuotaFiles),
+        tmp_ttl_days: Number(workspaceTmpTTLDays),
+      };
+    },
+    [workspaceQuotaMB, workspaceQuotaFiles, workspaceTmpTTLDays]
+  );
+
+  // Shared workspace validation for the tab save so an out-of-range quota or
+  // retention fails in the form before any network write with one message.
+  // Bounds mirror WorkspaceConfig clamps so the form agrees with the server
+  // 400 instead of persisting a quota the loader rejects.
+  const validateWorkspaceFields = useCallback((): string | null => {
+    const quotaMBNum = Number(workspaceQuotaMB);
+    if (!Number.isInteger(quotaMBNum) || quotaMBNum < WORKSPACE_QUOTA_MB_MIN || quotaMBNum > WORKSPACE_QUOTA_MB_MAX) {
+      return `Invalid workspace quota: quota must be between ${WORKSPACE_QUOTA_MB_MIN} and ${WORKSPACE_QUOTA_MB_MAX} MB.`;
+    }
+    const quotaFilesNum = Number(workspaceQuotaFiles);
+    if (!Number.isInteger(quotaFilesNum) || quotaFilesNum < WORKSPACE_QUOTA_FILES_MIN || quotaFilesNum > WORKSPACE_QUOTA_FILES_MAX) {
+      return `Invalid workspace file quota: max files must be between ${WORKSPACE_QUOTA_FILES_MIN} and ${WORKSPACE_QUOTA_FILES_MAX}.`;
+    }
+    const tmpTTLNum = Number(workspaceTmpTTLDays);
+    if (!Number.isInteger(tmpTTLNum) || tmpTTLNum < WORKSPACE_TMP_TTL_MIN_DAYS || tmpTTLNum > WORKSPACE_TMP_TTL_MAX_DAYS) {
+      return `Invalid workspace tmp retention: tmp TTL must be between ${WORKSPACE_TMP_TTL_MIN_DAYS} and ${WORKSPACE_TMP_TTL_MAX_DAYS} days.`;
+    }
+    return null;
+  }, [workspaceQuotaMB, workspaceQuotaFiles, workspaceTmpTTLDays]);
+
   const populateForm = useCallback((data: SettingsResponse) => {
     setSettings(data);
     setEngineName(data.engineName);
@@ -2839,6 +2992,10 @@ export default function SettingsManager() {
     // Fan-out knobs share one helper so load and save stay symmetric; an
     // absent [fanout] keeps the modal defaults instead of blanking the modal.
     populateFanoutSettings(data.fanout);
+    // Workspace quotas share one helper so load and save stay symmetric; an
+    // absent [workspace] keeps the editor defaults instead of blanking the
+    // Tools-tab quota fields.
+    populateWorkspaceSettings(data.workspace);
     // Network bind tolerates older engines without [server]: absent keys keep
     // the loopback defaults so the pane never renders blank, and the textarea
     // formats the stored list so blank lines only exist while editing.
@@ -2885,7 +3042,7 @@ export default function SettingsManager() {
       prev ?? { hostname: fileBindHostname, port: fileBindPort, allowedHosts: fileBindHosts }
     );
     setServerRestartRequired(Boolean(data.requiresRestart));
-  }, [populateMediaSettings, populateDesktopSettings, populateBashSettings, populateGoalsSettings, populateIdeasSettings, populateProactiveSettings, populatePersonaSettings, populateFanoutSettings]);
+  }, [populateMediaSettings, populateDesktopSettings, populateBashSettings, populateGoalsSettings, populateIdeasSettings, populateProactiveSettings, populatePersonaSettings, populateFanoutSettings, populateWorkspaceSettings]);
 
   // Reconciles the boot snapshot from /health when the engine advertises its
   // live bind. Older engines omit the keys, in which case the pre-save file
@@ -3290,10 +3447,20 @@ export default function SettingsManager() {
     // Bash policy shares its validation helper so the full-save and the Tools
     // Bash modal reject the same shapes before any network write. Mirrors
     // BashSettingsUpdate.applyBash bounds (allow|ask|deny, at least one rule,
-    // 1-3600).
+    // 1-3600 timeout, 1-3600 CPU, 64-8192 memory).
     const bashValidationError = validateBashFields();
     if (bashValidationError) {
       setError(bashValidationError);
+      setSaving(false);
+      return;
+    }
+    // Workspace quotas share their validation helper so the Tools-tab save
+    // rejects an out-of-range quota or retention before any network write.
+    // Mirrors WorkspaceConfig clamps (10-10240 MB, 100-100000 files, 0-90
+    // days) so the form agrees with the server 400.
+    const workspaceValidationError = validateWorkspaceFields();
+    if (workspaceValidationError) {
+      setError(workspaceValidationError);
       setSaving(false);
       return;
     }
@@ -3588,6 +3755,7 @@ export default function SettingsManager() {
         media: buildMediaPayload(),
         desktop: buildDesktopPayload(),
         bash: buildBashPayload(),
+        workspace: buildWorkspacePayload(),
         goals: buildGoalsPayload(),
         proactive: buildProactivePayload(),
         ideas: buildIdeasPayload(),
@@ -5409,16 +5577,15 @@ export default function SettingsManager() {
               )}
             </div>
 
-            {/* Agent scratch workspace: bounded usage plus tmp pruning. Quotas
-                arrive from the usage route because the settings patch carries
-                no workspace section, so they render read-only with a
-                config-file hint instead of an editor that would refuse. */}
+            {/* Agent scratch workspace: live usage bars stay read-only from
+                GET /workspace/usage while quota editors persist through the tab
+                save as a workspace delta. */}
             <section aria-label="Workspace storage" style={{ margin: "8px 0 16px 0", padding: "16px", borderRadius: "8px", backgroundColor: "var(--bg-card, #1e2533)", border: "1px solid var(--border-color, #2d3748)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "8px", marginBottom: "8px" }}>
                 <div>
                   <h4 style={{ margin: 0 }}>Workspace Storage</h4>
                   <p className="settings-section-hint" style={{ margin: "4px 0 0 0" }}>
-                    Bounded agent scratch under ~/.runeweaver/workspace. Quotas live in [workspace] in the config file.
+                    Bounded agent scratch under ~/.runeweaver/workspace. Quotas save with the tab below.
                   </p>
                 </div>
                 <div style={{ display: "flex", gap: "8px" }}>
@@ -5480,12 +5647,11 @@ export default function SettingsManager() {
                           </div>
                           {bar(filesPercent)}
                         </div>
-                        <div style={{ fontSize: "0.78rem", color: "var(--text-secondary, #a0aec0)" }}>
-                          Quota: {workspaceUsage.quotaMB} MB / {workspaceUsage.quotaFiles.toLocaleString("en-US")} files
-                          {" · "}
-                          To raise quotas, edit [workspace] quota_mb / quota_files in the config file.
-                          {workspaceUsage.truncated ? " · Walk truncated; actual usage may be higher." : ""}
-                        </div>
+                        {workspaceUsage.truncated ? (
+                          <div style={{ fontSize: "0.78rem", color: "var(--text-secondary, #a0aec0)" }}>
+                            Walk truncated; actual usage may be higher.
+                          </div>
+                        ) : null}
                       </>
                     );
                   })()}
@@ -5493,6 +5659,72 @@ export default function SettingsManager() {
               ) : (
                 <p className="muted text-sm" style={{ margin: 0 }}>Workspace usage unknown.</p>
               )}
+              {/* Workspace quota editors omit native min/max on purpose: range
+                  enforcement lives in validateWorkspaceFields so an out-of-range
+                  value surfaces the custom Invalid workspace quota banner without
+                  a network write. Native min/max would block submit with a
+                  browser bubble before the shared save runs, while every other
+                  tab keeps its native constraints untouched. Bounds stay
+                  single-sourced to the engine clamps; step keeps the spinner. */}
+              <div className="form-row" style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "14px" }}>
+                <div className="form-group" style={{ flex: "1 1 140px" }}>
+                  <label htmlFor="workspace-quota-mb">Quota (MB)</label>
+                  <input
+                    id="workspace-quota-mb"
+                    type="number"
+                    step={1}
+                    className="input-field"
+                    value={workspaceQuotaMB}
+                    onChange={(e) =>
+                      setWorkspaceQuotaMB(
+                        e.target.value === "" ? "" : Number(e.target.value)
+                      )
+                    }
+                    placeholder="500"
+                  />
+                  <span className="form-group-hint">
+                    Total bytes permitted under the workspace root.
+                  </span>
+                </div>
+                <div className="form-group" style={{ flex: "1 1 140px" }}>
+                  <label htmlFor="workspace-quota-files">Max files</label>
+                  <input
+                    id="workspace-quota-files"
+                    type="number"
+                    step={1}
+                    className="input-field"
+                    value={workspaceQuotaFiles}
+                    onChange={(e) =>
+                      setWorkspaceQuotaFiles(
+                        e.target.value === "" ? "" : Number(e.target.value)
+                      )
+                    }
+                    placeholder="10000"
+                  />
+                  <span className="form-group-hint">
+                    Total files permitted under the workspace root.
+                  </span>
+                </div>
+                <div className="form-group" style={{ flex: "1 1 140px" }}>
+                  <label htmlFor="workspace-tmp-ttl">Tmp TTL (days)</label>
+                  <input
+                    id="workspace-tmp-ttl"
+                    type="number"
+                    step={1}
+                    className="input-field"
+                    value={workspaceTmpTTLDays}
+                    onChange={(e) =>
+                      setWorkspaceTmpTTLDays(
+                        e.target.value === "" ? "" : Number(e.target.value)
+                      )
+                    }
+                    placeholder="7"
+                  />
+                  <span className="form-group-hint">
+                    Days tmp entries survive; TTL applies on next prune.
+                  </span>
+                </div>
+              </div>
             </section>
 
             {/* Warning banners */}
@@ -8510,8 +8742,8 @@ export default function SettingsManager() {
               <input
                 id="bash-timeout"
                 type="number"
-                min={1}
-                max={3600}
+                min={BASH_TIMEOUT_MIN_SECONDS}
+                max={BASH_TIMEOUT_MAX_SECONDS}
                 step={1}
                 className="input-field"
                 value={bashTimeoutSeconds}
@@ -8524,6 +8756,50 @@ export default function SettingsManager() {
               />
               <span className="form-group-hint">
                 Default execution timeout in seconds (1 to 3600).
+              </span>
+            </div>
+
+            <div className="form-group" style={{ marginBottom: "12px" }}>
+              <label htmlFor="bash-cpu-seconds" style={{ fontSize: "0.82rem" }}>CPU seconds</label>
+              <input
+                id="bash-cpu-seconds"
+                type="number"
+                min={BASH_CPU_MIN_SECONDS}
+                max={BASH_CPU_MAX_SECONDS}
+                step={1}
+                className="input-field"
+                value={bashCpuSeconds}
+                onChange={(e) =>
+                  setBashCpuSeconds(
+                    e.target.value === "" ? "" : Number(e.target.value)
+                  )
+                }
+                placeholder="120"
+              />
+              <span className="form-group-hint">
+                CPU time budget in seconds; wall-clock may exceed CPU time for sleeping processes.
+              </span>
+            </div>
+
+            <div className="form-group" style={{ marginBottom: "12px" }}>
+              <label htmlFor="bash-memory-mb" style={{ fontSize: "0.82rem" }}>Memory (MB)</label>
+              <input
+                id="bash-memory-mb"
+                type="number"
+                min={BASH_MEMORY_MIN_MB}
+                max={BASH_MEMORY_MAX_MB}
+                step={1}
+                className="input-field"
+                value={bashMemoryMB}
+                onChange={(e) =>
+                  setBashMemoryMB(
+                    e.target.value === "" ? "" : Number(e.target.value)
+                  )
+                }
+                placeholder="1024"
+              />
+              <span className="form-group-hint">
+                Address-space budget in MB as a best-effort ulimit bound.
               </span>
             </div>
 

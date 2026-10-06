@@ -71,7 +71,12 @@ public actor WorkspaceStore {
     public static let tmpDirectoryName = "tmp"
 
     /// Resolved quotas and retention for this store.
-    public let config: WorkspaceConfig
+    ///
+    /// Mutable behind the actor so a settings save can push fresh quotas into
+    /// the live store without rebuilding the root: usage, prune, and quota
+    /// checks all derive limits per call, so the next check after an update
+    /// enforces the new bounds while hermetic roots stay pinned.
+    public private(set) var config: WorkspaceConfig
     /// Home boundary override for tests; nil means the real home.
     private let homeDirectoryURL: URL?
     /// Direct root override for tests; nil derives `~/.runeweaver/workspace`.
@@ -90,6 +95,26 @@ public actor WorkspaceStore {
         self.config = config
         self.homeDirectoryURL = homeDirectoryURL
         self.rootOverride = rootURL
+    }
+
+    /// Pushes fresh quotas into the live store without moving the root.
+    ///
+    /// The root overrides never change here, so a quota decrease takes effect
+    /// on the next enforcement check while isolated test roots keep pointing
+    /// at the same tree instead of falling back to the real home.
+    /// - Parameter newConfig: Fresh `[workspace]` policy from the merged file state.
+    public func updateConfig(_ newConfig: WorkspaceConfig) {
+        config = newConfig
+    }
+
+    /// Returns the hermetic root overrides backing this store.
+    ///
+    /// Callers rebuilding a store for a live-reload pass the pair straight
+    /// into the fresh init, so the rebuilt shell observes the same isolated
+    /// tree instead of enforcing quotas against the wrong directory.
+    /// - Returns: Home boundary plus direct root overrides for the fresh init.
+    public func overrides() -> (homeDirectoryURL: URL?, rootURL: URL?) {
+        (homeDirectoryURL, rootOverride)
     }
 
     /// Resolves the workspace root without touching disk.

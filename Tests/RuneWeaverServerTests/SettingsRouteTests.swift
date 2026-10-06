@@ -786,6 +786,369 @@ struct SettingsRouteTests {
     }
 
     @Test
+    func `Bash cpu_seconds delta preserves other bash keys`() throws {
+        var config = RuneWeaverConfig.default
+        config.bash.enabled = false
+        config.bash.defaultAction = .deny
+        config.bash.rules = [
+            BashRule(pattern: "git *", action: .allow),
+            BashRule(pattern: "*", action: .ask)
+        ]
+        config.bash.timeoutSeconds = 120
+        config.bash.cpuSeconds = 120
+        config.bash.memoryMB = 1024
+        config.bash.allowNetwork = true
+
+        // The dashboard wire shape for a single-knob edit: snake_case inside
+        // the bash object, mirroring the accepted `PUT /settings` body.
+        let request = try JSONDecoder().decode(
+            UpdateSettingsRequest.self,
+            from: Data(#"{"bash":{"cpu_seconds":60}}"#.utf8)
+        )
+        #expect(request.bash?.cpuSeconds == 60)
+        #expect(request.bash?.memoryMb == nil)
+
+        try request.apply(to: &config)
+        try config.validate()
+        #expect(config.bash.cpuSeconds == 60)
+        #expect(config.bash.enabled == false)
+        #expect(config.bash.defaultAction == .deny)
+        #expect(config.bash.rules.count == 2)
+        #expect(config.bash.timeoutSeconds == 120)
+        #expect(config.bash.memoryMB == 1024)
+        #expect(config.bash.allowNetwork == true)
+
+        // GET mirrors the persisted bound so the dashboard shows the live value.
+        let response = SettingsResponse(config: config, configPath: "/test/config.toml")
+        #expect(response.bash.cpuSeconds == 60)
+        #expect(response.bash.memoryMB == 1024)
+    }
+
+    @Test
+    func `BashSettingsUpdate snapshot init carries resource bounds`() {
+        var bash = BashConfig()
+        bash.cpuSeconds = 60
+        bash.memoryMB = 512
+
+        // A caller holding a complete policy reuses the merge path without
+        // hand-mapping the new bounds.
+        let patch = BashSettingsUpdate(bash: bash)
+        #expect(patch.cpuSeconds == 60)
+        #expect(patch.memoryMb == 512)
+        #expect(patch.timeoutSeconds == bash.timeoutSeconds)
+        #expect(patch.allowNetwork == bash.allowNetwork)
+    }
+
+    @Test
+    func `UpdateSettingsRequest rejects out-of-range bash cpu_seconds`() throws {
+        // A zero budget would kill every command instantly and an unbounded one
+        // holds a run past any plausible shell turn, so both fail closed with
+        // the dotted field the route maps to 400.
+        for invalid in [0, -5, 3601] {
+            var config = RuneWeaverConfig.default
+            let preserved = config.bash
+            do {
+                try UpdateSettingsRequest(
+                    bash: BashSettingsUpdate(cpuSeconds: invalid)
+                ).apply(to: &config)
+                Issue.record("Expected a validation error for bash cpu_seconds \(invalid)")
+            } catch let error as ConfigError {
+                guard case let .validationError(field, _) = error, field == "bash.cpu_seconds" else {
+                    Issue.record("Expected bash.cpu_seconds validation, got \(error)")
+                    return
+                }
+            } catch {
+                Issue.record("Expected ConfigError, got \(type(of: error))")
+            }
+            #expect(config.bash == preserved)
+        }
+
+        // Documented edges still save, matching the TOML load path.
+        var edges = RuneWeaverConfig.default
+        try UpdateSettingsRequest(
+            bash: BashSettingsUpdate(cpuSeconds: 1)
+        ).apply(to: &edges)
+        try UpdateSettingsRequest(
+            bash: BashSettingsUpdate(cpuSeconds: 3600)
+        ).apply(to: &edges)
+        try edges.validate()
+        #expect(edges.bash.cpuSeconds == 3600)
+    }
+
+    @Test
+    func `UpdateSettingsRequest rejects out-of-range bash memory_mb`() throws {
+        // A trivially small budget fails every spawn and a host-scale one
+        // invites OOM swaps, so both fail closed with the dotted field the
+        // route maps to 400.
+        for invalid in [0, 63, 8193] {
+            var config = RuneWeaverConfig.default
+            let preserved = config.bash
+            do {
+                try UpdateSettingsRequest(
+                    bash: BashSettingsUpdate(memoryMb: invalid)
+                ).apply(to: &config)
+                Issue.record("Expected a validation error for bash memory_mb \(invalid)")
+            } catch let error as ConfigError {
+                guard case let .validationError(field, _) = error, field == "bash.memory_mb" else {
+                    Issue.record("Expected bash.memory_mb validation, got \(error)")
+                    return
+                }
+            } catch {
+                Issue.record("Expected ConfigError, got \(type(of: error))")
+            }
+            #expect(config.bash == preserved)
+        }
+
+        // Documented edges still save, matching the TOML load path.
+        var edges = RuneWeaverConfig.default
+        try UpdateSettingsRequest(
+            bash: BashSettingsUpdate(memoryMb: 64)
+        ).apply(to: &edges)
+        try UpdateSettingsRequest(
+            bash: BashSettingsUpdate(memoryMb: 8192)
+        ).apply(to: &edges)
+        try edges.validate()
+        #expect(edges.bash.memoryMB == 8192)
+    }
+
+    @Test
+    func `Bash resource bounds keep snake_case with snake winning dual spellings`() throws {
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+
+        // CamelCase aliases mirror the dashboard contract.
+        let camel = try decoder.decode(
+            BashSettingsUpdate.self,
+            from: Data(#"{"cpuSeconds":60,"memoryMb":512}"#.utf8)
+        )
+        #expect(camel.cpuSeconds == 60)
+        #expect(camel.memoryMb == 512)
+
+        // Snake wins when both spellings arrive so the contracts cannot fork.
+        let both = try decoder.decode(
+            BashSettingsUpdate.self,
+            from: Data(#"{"cpu_seconds":60,"cpuSeconds":5,"memory_mb":512,"memoryMb":256}"#.utf8)
+        )
+        #expect(both.cpuSeconds == 60)
+        #expect(both.memoryMb == 512)
+
+        // Encode preserves snake_case so saved payloads keep the file shape.
+        let encoded = try encoder.encode(BashSettingsUpdate(cpuSeconds: 60, memoryMb: 512))
+        let text = String(data: encoded, encoding: .utf8) ?? ""
+        #expect(text.contains("cpu_seconds"))
+        #expect(text.contains("memory_mb"))
+        #expect(!text.contains("cpuSeconds"))
+        #expect(!text.contains("memoryMb"))
+    }
+
+    @Test
+    func `Workspace delta round-trips while preserving other sections`() throws {
+        var config = RuneWeaverConfig.default
+        config.workspace = WorkspaceConfig(quotaMB: 500, quotaFiles: 10000, tmpTTLDays: 7)
+        config.bash.timeoutSeconds = 120
+        config.files.denyPatterns = ["custom*"]
+
+        // The dashboard wire shape for a single-knob edit.
+        let request = try JSONDecoder().decode(
+            UpdateSettingsRequest.self,
+            from: Data(#"{"workspace":{"quota_mb":100}}"#.utf8)
+        )
+        #expect(request.workspace?.quotaMB == 100)
+        #expect(request.workspace?.quotaFiles == nil)
+        #expect(request.workspace?.tmpTTLDays == nil)
+
+        try request.apply(to: &config)
+        try config.validate()
+        #expect(config.workspace.quotaMB == 100)
+        #expect(config.workspace.quotaFiles == 10000)
+        #expect(config.workspace.tmpTTLDays == 7)
+        // Untouched sections survive the merge.
+        #expect(config.bash.timeoutSeconds == 120)
+        #expect(config.files.denyPatterns == ["custom*"])
+
+        let response = SettingsResponse(config: config, configPath: "/test/config.toml")
+        #expect(response.workspace.quotaMB == 100)
+        #expect(response.workspace.quotaFiles == 10000)
+        #expect(response.workspace.tmpTTLDays == 7)
+        #expect(response.bash.timeoutSeconds == 120)
+    }
+
+    @Test
+    func `Workspace quotas survive a save and reload through the settings merge`() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("settings_workspace_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Quotas written through the same merge the route uses must reload
+        // intact, so a quota save is durable rather than live-only.
+        let fileURL = tempDir.appendingPathComponent("config.toml")
+        var config = RuneWeaverConfig.default
+        try UpdateSettingsRequest(
+            workspace: WorkspaceUpdate(quotaMB: 100, tmpTTLDays: 3)
+        ).apply(to: &config)
+        try config.save(to: fileURL)
+
+        let reloaded = try RuneWeaverConfig.load(from: fileURL)
+        #expect(reloaded.workspace.quotaMB == 100)
+        #expect(reloaded.workspace.quotaFiles == WorkspaceConfig.defaultQuotaFiles)
+        #expect(reloaded.workspace.tmpTTLDays == 3)
+        #expect(SettingsResponse(config: reloaded, configPath: fileURL.path).workspace.quotaMB == 100)
+    }
+
+    @Test
+    func `UpdateSettingsRequest rejects out-of-range workspace quotas`() {
+        // Each bound mirrors the loader contract: below the floor the scratch
+        // cannot fit a working checkout, above the ceiling it rivals the index
+        // scale, and a bad TTL either never prunes or reads as storage.
+        let cases: [(WorkspaceUpdate, String)] = [
+            (WorkspaceUpdate(quotaMB: 9), "workspace.quota_mb"),
+            (WorkspaceUpdate(quotaMB: 10241), "workspace.quota_mb"),
+            (WorkspaceUpdate(quotaFiles: 99), "workspace.quota_files"),
+            (WorkspaceUpdate(quotaFiles: 100_001), "workspace.quota_files"),
+            (WorkspaceUpdate(tmpTTLDays: -1), "workspace.tmp_ttl_days"),
+            (WorkspaceUpdate(tmpTTLDays: 91), "workspace.tmp_ttl_days")
+        ]
+        for (patch, field) in cases {
+            var config = RuneWeaverConfig.default
+            let preserved = config.workspace
+            do {
+                try UpdateSettingsRequest(workspace: patch).apply(to: &config)
+                Issue.record("Expected a validation error for \(field)")
+            } catch let error as ConfigError {
+                guard case let .validationError(actual, _) = error, actual == field else {
+                    Issue.record("Expected \(field) validation, got \(error)")
+                    return
+                }
+            } catch {
+                Issue.record("Expected ConfigError, got \(type(of: error))")
+            }
+            #expect(config.workspace == preserved)
+        }
+    }
+
+    @Test
+    func `WorkspaceUpdate decodes both spellings with snake winning and encodes snake_case`() throws {
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+
+        // Snake_case stays canonical.
+        let snake = try decoder.decode(
+            WorkspaceUpdate.self,
+            from: Data(#"{"quota_mb":100,"quota_files":200,"tmp_ttl_days":3}"#.utf8)
+        )
+        #expect(snake.quotaMB == 100)
+        #expect(snake.quotaFiles == 200)
+        #expect(snake.tmpTTLDays == 3)
+
+        // CamelCase aliases mirror the dashboard contract.
+        let camel = try decoder.decode(
+            WorkspaceUpdate.self,
+            from: Data(#"{"quotaMB":100,"quotaFiles":200,"tmpTTLDays":3}"#.utf8)
+        )
+        #expect(camel.quotaMB == 100)
+        #expect(camel.quotaFiles == 200)
+        #expect(camel.tmpTTLDays == 3)
+
+        // Snake wins when both spellings arrive so the contracts cannot fork.
+        let both = try decoder.decode(
+            WorkspaceUpdate.self,
+            from: Data(#"{"quota_mb":100,"quotaMB":200,"quota_files":200,"quotaFiles":400,"tmp_ttl_days":3,"tmpTTLDays":9}"#.utf8)
+        )
+        #expect(both.quotaMB == 100)
+        #expect(both.quotaFiles == 200)
+        #expect(both.tmpTTLDays == 3)
+
+        // Encode preserves snake_case so saved payloads keep the file shape.
+        let encoded = try encoder.encode(WorkspaceUpdate(quotaMB: 100, quotaFiles: 200, tmpTTLDays: 3))
+        let text = String(data: encoded, encoding: .utf8) ?? ""
+        #expect(text.contains("quota_mb"))
+        #expect(text.contains("quota_files"))
+        #expect(text.contains("tmp_ttl_days"))
+        #expect(!text.contains("quotaMB"))
+        #expect(!text.contains("quotaFiles"))
+        #expect(!text.contains("tmpTTLDays"))
+    }
+
+    @Test
+    func `UpdateSettingsRequest without bash or workspace keys leaves both sections equivalent`() throws {
+        var config = RuneWeaverConfig.default
+        config.bash.cpuSeconds = 60
+        config.bash.memoryMB = 512
+        config.workspace.quotaMB = 100
+        let beforeBash = config.bash
+        let beforeWorkspace = config.workspace
+
+        // A full-form PUT carrying unrelated keys must not disturb either
+        // section: the merge is a no-op for absent patches. Compare decoded
+        // values rather than encoded bytes so the test pins the merge
+        // contract instead of encoder key order.
+        try UpdateSettingsRequest(engineName: "Kept Sections").apply(to: &config)
+        #expect(config.bash == beforeBash)
+        #expect(config.workspace == beforeWorkspace)
+    }
+
+    @Test
+    func `Workspace quota decrease bites the next exec without restart`() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("settings_workspace_live_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let root = base.appendingPathComponent("ws", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        // Fill past the decreased file quota: the floor is 100 files, so 101
+        // tiny markers exceed it while staying instant to create.
+        for index in 0 ..< 101 {
+            try "x".write(
+                to: root.appendingPathComponent("marker-\(index).txt"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+
+        // Baseline quotas still allow the tree.
+        let baseline = WorkspaceStore(config: WorkspaceConfig(), rootURL: root)
+        try await baseline.checkQuota()
+
+        // A settings save lowering only the file quota validates and merges
+        // like the route, then threads through a rebuilt shell exactly like
+        // the live reload: a fresh store from the merged config.
+        var config = RuneWeaverConfig.default
+        try UpdateSettingsRequest(workspace: WorkspaceUpdate(quotaFiles: 100)).apply(to: &config)
+        try config.validate()
+        #expect(config.workspace.quotaFiles == 100)
+        #expect(config.workspace.quotaMB == WorkspaceConfig.defaultQuotaMB)
+
+        let live = WorkspaceStore(config: config.workspace, rootURL: root)
+        do {
+            try await live.checkQuota()
+            Issue.record("Expected the decreased quota to refuse the over-quota tree")
+        } catch WorkspaceError.quotaExceeded {
+            // Expected: the threaded decrease refuses the same tree.
+        } catch {
+            Issue.record("Expected quotaExceeded, got \(error)")
+        }
+        var bash = BashConfig(
+            defaultAction: .allow,
+            rules: [BashRule(pattern: "*", action: .allow)]
+        )
+        bash.cpuSeconds = 60
+        bash.memoryMB = 512
+        let tool = BashTool(
+            bashConfig: bash,
+            filesConfig: FilesConfig(),
+            workspaceConfig: config.workspace,
+            workspaceStore: live
+        )
+        #expect(tool.bashConfig.cpuSeconds == 60)
+        #expect(tool.bashConfig.memoryMB == 512)
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "bash.exec", argumentsJSON: #"{"command":"echo hi"}"#),
+            context: ToolContext(conversationID: UUID(), approved: true)
+        )
+        #expect(output.isError)
+        #expect(output.content.contains("Workspace quota exceeded"))
+    }
+
+    @Test
     func `Allow roots order is display-only for FilesAccessGuard decisions`() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("settings_roots_order_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)

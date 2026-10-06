@@ -997,24 +997,9 @@ extension RuneWeaverConfig {
     /// hand-built config degrades to the nearest sane bound instead of
     /// refusing to run.
     private func validateWorkspaceSection() throws {
-        if workspace.quotaMB < WorkspaceConfig.minQuotaMB || workspace.quotaMB > WorkspaceConfig.maxQuotaMB {
-            throw ConfigError.validationError(
-                field: "workspace.quota_mb",
-                message: "must be between \(WorkspaceConfig.minQuotaMB) and \(WorkspaceConfig.maxQuotaMB) (got \(workspace.quotaMB))"
-            )
-        }
-        if workspace.quotaFiles < WorkspaceConfig.minQuotaFiles || workspace.quotaFiles > WorkspaceConfig.maxQuotaFiles {
-            throw ConfigError.validationError(
-                field: "workspace.quota_files",
-                message: "must be between \(WorkspaceConfig.minQuotaFiles) and \(WorkspaceConfig.maxQuotaFiles) (got \(workspace.quotaFiles))"
-            )
-        }
-        if workspace.tmpTTLDays < WorkspaceConfig.minTmpTTLDays || workspace.tmpTTLDays > WorkspaceConfig.maxTmpTTLDays {
-            throw ConfigError.validationError(
-                field: "workspace.tmp_ttl_days",
-                message: "must be between \(WorkspaceConfig.minTmpTTLDays) and \(WorkspaceConfig.maxTmpTTLDays) (got \(workspace.tmpTTLDays))"
-            )
-        }
+        try WorkspaceConfig.validateQuotaMB(workspace.quotaMB)
+        try WorkspaceConfig.validateQuotaFiles(workspace.quotaFiles)
+        try WorkspaceConfig.validateTmpTTLDays(workspace.tmpTTLDays)
     }
 
     /// Validates the `[persona]` section through the shared normalizers.
@@ -1261,6 +1246,61 @@ public extension BashConfig {
             throw ConfigError.validationError(
                 field: "bash.memory_mb",
                 message: "must be between \(minMemoryMB) and \(maxMemoryMB) (got \(memoryMB))"
+            )
+        }
+    }
+}
+
+/// Single-sourced workspace quota validation shared by file-load and the
+/// settings PUT so the two paths agree on fields and messages.
+///
+/// Quotas bound shell scratch so a stray download cannot fill the disk and a
+/// quota walk cannot dominate a turn; the temp TTL bounds `tmp/` growth
+/// without manual cleanup. Both the full-config check and per-field merge
+/// validation route through these helpers so the ranges cannot drift.
+public extension WorkspaceConfig {
+    /// Validates the total size cap in megabytes.
+    ///
+    /// Bounds keep a trivially small scratch quota (which would fail the first
+    /// write) or a host-scale quota from persisting through any write path.
+    /// - Parameter quotaMB: Total bytes permitted under the workspace root, in megabytes.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when outside 10-10240.
+    static func validateQuotaMB(_ quotaMB: Int) throws {
+        if quotaMB < minQuotaMB || quotaMB > maxQuotaMB {
+            throw ConfigError.validationError(
+                field: "workspace.quota_mb",
+                message: "must be between \(minQuotaMB) and \(maxQuotaMB) (got \(quotaMB))"
+            )
+        }
+    }
+
+    /// Validates the total file-count cap.
+    ///
+    /// Bounds keep the quota walk cheap: too few files makes the guard
+    /// trivial while too many lets the walk dominate a shell turn.
+    /// - Parameter quotaFiles: Total files permitted under the workspace root.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when outside 100-100000.
+    static func validateQuotaFiles(_ quotaFiles: Int) throws {
+        if quotaFiles < minQuotaFiles || quotaFiles > maxQuotaFiles {
+            throw ConfigError.validationError(
+                field: "workspace.quota_files",
+                message: "must be between \(minQuotaFiles) and \(maxQuotaFiles) (got \(quotaFiles))"
+            )
+        }
+    }
+
+    /// Validates temp retention in days.
+    ///
+    /// Zero is the deliberate clear-on-boot posture, so the lower bound stays
+    /// at zero while the upper bound keeps `tmp/` as scratch rather than
+    /// long-term storage.
+    /// - Parameter tmpTTLDays: Days `tmp/` entries survive before pruning.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when outside 0-90.
+    static func validateTmpTTLDays(_ tmpTTLDays: Int) throws {
+        if tmpTTLDays < minTmpTTLDays || tmpTTLDays > maxTmpTTLDays {
+            throw ConfigError.validationError(
+                field: "workspace.tmp_ttl_days",
+                message: "must be between \(minTmpTTLDays) and \(maxTmpTTLDays) (got \(tmpTTLDays))"
             )
         }
     }
