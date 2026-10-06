@@ -28,6 +28,10 @@ public struct BashSettingsUpdate: Content, Equatable {
     public var rules: [BashRule]?
     /// Default execution timeout in seconds (1-3600). Nil preserves the stored value.
     public var timeoutSeconds: Int?
+    /// CPU time budget in seconds applied via `ulimit -t` (1-3600). Nil preserves the stored value.
+    public var cpuSeconds: Int?
+    /// Address-space budget in megabytes applied via `ulimit -v` (64-8192). Nil preserves the stored value.
+    public var memoryMb: Int?
     /// Whether network access is permitted in the sandbox. Nil preserves the stored value.
     public var allowNetwork: Bool?
 
@@ -37,18 +41,24 @@ public struct BashSettingsUpdate: Content, Equatable {
     ///   - defaultAction: Default action when no rule matches.
     ///   - rules: Ordered permission rules.
     ///   - timeoutSeconds: Default execution timeout in seconds.
+    ///   - cpuSeconds: CPU time budget in seconds.
+    ///   - memoryMb: Address-space budget in megabytes.
     ///   - allowNetwork: Whether network access is permitted.
     public init(
         enabled: Bool? = nil,
         defaultAction: String? = nil,
         rules: [BashRule]? = nil,
         timeoutSeconds: Int? = nil,
+        cpuSeconds: Int? = nil,
+        memoryMb: Int? = nil,
         allowNetwork: Bool? = nil
     ) {
         self.enabled = enabled
         self.defaultAction = defaultAction
         self.rules = rules
         self.timeoutSeconds = timeoutSeconds
+        self.cpuSeconds = cpuSeconds
+        self.memoryMb = memoryMb
         self.allowNetwork = allowNetwork
     }
 
@@ -60,7 +70,21 @@ public struct BashSettingsUpdate: Content, Equatable {
         self.defaultAction = bash.defaultAction.rawValue
         self.rules = bash.rules
         self.timeoutSeconds = bash.timeoutSeconds
+        self.cpuSeconds = bash.cpuSeconds
+        self.memoryMb = bash.memoryMB
         self.allowNetwork = bash.allowNetwork
+    }
+
+    /// Whether the patch carries no keys, so the save path can skip live
+    /// reloads that would otherwise rebuild tools for a no-op merge.
+    public var isEmpty: Bool {
+        enabled == nil
+            && defaultAction == nil
+            && rules == nil
+            && timeoutSeconds == nil
+            && cpuSeconds == nil
+            && memoryMb == nil
+            && allowNetwork == nil
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -70,6 +94,10 @@ public struct BashSettingsUpdate: Content, Equatable {
         case rules
         case timeoutSeconds = "timeout_seconds"
         case timeoutSecondsCamel = "timeoutSeconds"
+        case cpuSeconds = "cpu_seconds"
+        case cpuSecondsCamel = "cpuSeconds"
+        case memoryMb = "memory_mb"
+        case memoryMbCamel = "memoryMb"
         case allowNetwork = "allow_network"
         case allowNetworkCamel = "allowNetwork"
     }
@@ -91,6 +119,12 @@ public struct BashSettingsUpdate: Content, Equatable {
         let snakeTimeout = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
         let camelTimeout = try container.decodeIfPresent(Int.self, forKey: .timeoutSecondsCamel)
         timeoutSeconds = snakeTimeout ?? camelTimeout
+        let snakeCPU = try container.decodeIfPresent(Int.self, forKey: .cpuSeconds)
+        let camelCPU = try container.decodeIfPresent(Int.self, forKey: .cpuSecondsCamel)
+        cpuSeconds = snakeCPU ?? camelCPU
+        let snakeMemory = try container.decodeIfPresent(Int.self, forKey: .memoryMb)
+        let camelMemory = try container.decodeIfPresent(Int.self, forKey: .memoryMbCamel)
+        memoryMb = snakeMemory ?? camelMemory
         let snakeAllowNetwork = try container.decodeIfPresent(Bool.self, forKey: .allowNetwork)
         let camelAllowNetwork = try container.decodeIfPresent(Bool.self, forKey: .allowNetworkCamel)
         allowNetwork = snakeAllowNetwork ?? camelAllowNetwork
@@ -107,6 +141,8 @@ public struct BashSettingsUpdate: Content, Equatable {
         try container.encodeIfPresent(defaultAction, forKey: .defaultAction)
         try container.encodeIfPresent(rules, forKey: .rules)
         try container.encodeIfPresent(timeoutSeconds, forKey: .timeoutSeconds)
+        try container.encodeIfPresent(cpuSeconds, forKey: .cpuSeconds)
+        try container.encodeIfPresent(memoryMb, forKey: .memoryMb)
         try container.encodeIfPresent(allowNetwork, forKey: .allowNetwork)
     }
 
@@ -116,11 +152,15 @@ public struct BashSettingsUpdate: Content, Equatable {
     /// - Parameter bash: Stored bash policy to mutate in place.
     /// - Throws: `ConfigError.validationError` when the rule list is empty,
     ///   a rule pattern is blank, the default action is unknown, or the
-    ///   timeout falls outside 1-3600.
+    ///   timeout, CPU, or memory bound falls outside its documented range.
+    ///   Range checks reuse the `BashConfig` validators the TOML load path
+    ///   enforces, so the PUT and file-load paths refuse the same values with
+    ///   the same dotted field.
     public func applyBash(to bash: inout BashConfig) throws {
-        if let enabled {
-            bash.enabled = enabled
-        }
+        // Every present field validates before anything mutates, so a
+        // multi-field patch with one bad value leaves the stored policy
+        // untouched instead of half-applying the valid prefix.
+        var validatedAction: BashPermissionAction?
         if let defaultAction {
             guard let action = BashPermissionAction(rawValue: defaultAction.lowercased()) else {
                 throw ConfigError.validationError(
@@ -128,15 +168,37 @@ public struct BashSettingsUpdate: Content, Equatable {
                     message: "must be allow, ask, or deny (got '\(defaultAction)')"
                 )
             }
-            bash.defaultAction = action
+            validatedAction = action
         }
         if let rules {
             try BashConfig.validateRules(rules)
-            bash.rules = rules
         }
         if let timeoutSeconds {
             try BashConfig.validateTimeoutSeconds(timeoutSeconds)
+        }
+        if let cpuSeconds {
+            try BashConfig.validateCPUSeconds(cpuSeconds)
+        }
+        if let memoryMb {
+            try BashConfig.validateMemoryMB(memoryMb)
+        }
+        if let enabled {
+            bash.enabled = enabled
+        }
+        if let validatedAction {
+            bash.defaultAction = validatedAction
+        }
+        if let rules {
+            bash.rules = rules
+        }
+        if let timeoutSeconds {
             bash.timeoutSeconds = timeoutSeconds
+        }
+        if let cpuSeconds {
+            bash.cpuSeconds = cpuSeconds
+        }
+        if let memoryMb {
+            bash.memoryMB = memoryMb
         }
         if let allowNetwork {
             bash.allowNetwork = allowNetwork

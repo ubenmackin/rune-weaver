@@ -2610,7 +2610,11 @@ export interface BashRuleData {
 // camelCase aliases through the same dual-alias decode as providers, so
 // either spelling reads. The dashboard sends snake_case and reads either
 // spelling so file-configured values survive a dashboard PUT instead of
-// being stripped to nil.
+// being stripped to nil. Resource bounds ride the same dual spelling: the
+// CPU budget maps `ulimit -t` while the memory budget maps `ulimit -v`, so
+// both read either key and send the snake form the file persists. The bounds
+// stay optional because older engines omit them, and the form keeps its
+// defaults until a numeric value arrives.
 export interface BashConfigData {
   enabled: boolean;
   default_action: string;
@@ -2618,6 +2622,10 @@ export interface BashConfigData {
   rules: BashRuleData[];
   timeout_seconds: number;
   timeoutSeconds?: number;
+  cpu_seconds?: number;
+  cpuSeconds?: number;
+  memory_mb?: number;
+  memoryMb?: number;
   allow_network: boolean;
   allowNetwork?: boolean;
 }
@@ -2634,19 +2642,25 @@ export interface BashSettingsUpdate {
   rules?: BashRuleData[];
   timeout_seconds?: number;
   timeoutSeconds?: number;
+  cpu_seconds?: number;
+  cpuSeconds?: number;
+  memory_mb?: number;
+  memoryMb?: number;
   allow_network?: boolean;
   allowNetwork?: boolean;
 }
 
 // Bash defaults mirror BashConfig in Sources/RuneWeaverCore/Config.swift
 // (enabled, defaultAction, defaultRules, defaultTimeoutSeconds,
-// allowNetwork). The server owns the values; this mirror seeds the fresh form
+// cpuSeconds, memoryMB, allowNetwork). The server owns the values; this mirror seeds the fresh form
 // before the first GET /settings fetch and the contract test pins it so drift
 // fails loudly. DEFAULT_BASH_CONFIG stays derived from the pieces below so
 // the pieces remain the single source.
 export const DEFAULT_BASH_ENABLED = true;
 export const DEFAULT_BASH_DEFAULT_ACTION = "ask";
 export const DEFAULT_BASH_TIMEOUT_SECONDS = 30;
+export const DEFAULT_BASH_CPU_SECONDS = 120;
+export const DEFAULT_BASH_MEMORY_MB = 1024;
 export const DEFAULT_BASH_ALLOW_NETWORK = false;
 
 // Bash timeout bounds mirror BashConfig.minTimeoutSeconds/maxTimeoutSeconds
@@ -2657,6 +2671,21 @@ export const DEFAULT_BASH_ALLOW_NETWORK = false;
 export const BASH_TIMEOUT_MIN_SECONDS = 1;
 export const BASH_TIMEOUT_MAX_SECONDS = 3600;
 
+// CPU budget bounds mirror BashConfig.minCPUSeconds/maxCPUSeconds: a zero
+// budget would kill every command instantly while an unbounded one holds a
+// run past any plausible shell turn, so both fail closed. Single source for
+// the Bash modal inputs and the client validator so the form clamps agree
+// with the server 400.
+export const BASH_CPU_MIN_SECONDS = 1;
+export const BASH_CPU_MAX_SECONDS = 3600;
+
+// Address-space bounds mirror BashConfig.minMemoryMB/maxMemoryMB: a tiny
+// budget fails every spawn while a host-scale one invites OOM swaps, so both
+// fail closed. Single source for the Bash modal inputs and the client
+// validator so the form clamps agree with the server 400.
+export const BASH_MEMORY_MIN_MB = 64;
+export const BASH_MEMORY_MAX_MB = 8192;
+
 // Mirror of BashConfig.defaultRules; update by hand alongside the Swift
 // default. The contract test pins the catch-all so drift fails loudly.
 export const DEFAULT_BASH_RULES: BashRuleData[] = [
@@ -2665,12 +2694,15 @@ export const DEFAULT_BASH_RULES: BashRuleData[] = [
 
 // Combined bash default mirroring BashConfig. The fresh form seeds from this
 // object so the editor matches the boundary the engine enforces before the
-// first settings fetch.
+// first settings fetch. Resource budgets join the timeout here so a fresh
+// modal shows the same CPU and memory bounds the engine clamps at use.
 export const DEFAULT_BASH_CONFIG: BashConfigData = {
   enabled: DEFAULT_BASH_ENABLED,
   default_action: DEFAULT_BASH_DEFAULT_ACTION,
   rules: DEFAULT_BASH_RULES.map((rule) => ({ ...rule })),
   timeout_seconds: DEFAULT_BASH_TIMEOUT_SECONDS,
+  cpu_seconds: DEFAULT_BASH_CPU_SECONDS,
+  memory_mb: DEFAULT_BASH_MEMORY_MB,
   allow_network: DEFAULT_BASH_ALLOW_NETWORK,
 };
 
@@ -3679,6 +3711,10 @@ export interface SettingsResponse {
   // Parallel worker fan-out policy under [fanout]; optional for back-compat
   // with older engines that predate the section.
   fanout?: FanoutConfigData;
+  // Agent scratch quotas under [workspace]; optional for back-compat with
+  // older engines that predate the section. An absent section keeps the stock
+  // quotas so the Tools editors fall back instead of blanking.
+  workspace?: WorkspaceConfigData;
   // Owner-facing assistant persona under [persona]; optional for back-compat
   // with older engines that predate the section. An absent persona keeps the
   // stock identity, so identity surfaces fall back instead of blanking.
@@ -3753,6 +3789,8 @@ export interface UpdateSettingsInput {
   ideas?: IdeasSettingsUpdate;
   // Partial fan-out patch; an omitted patch preserves the stored [fanout] section.
   fanout?: FanoutSettingsUpdate;
+  // Partial workspace patch; an omitted patch preserves the stored [workspace] section.
+  workspace?: WorkspaceSettingsUpdate;
   // Partial persona patch; an omitted patch preserves the stored [persona]
   // section, so a name-only save never wipes the owner's tone, style, address
   // name, or accent.
@@ -4802,7 +4840,8 @@ export interface AgentToolsResponse {
 // Single client mirror of the engine `WorkspaceConfig` bounds
 // (Sources/RuneWeaverCore/Config.swift). The server owns the values; this
 // mirror only labels quota bars before the first usage fetch and documents
-// the file-owned ranges for the dashboard hint.
+// the file-owned ranges for the dashboard hint. Retention of zero clears
+// `tmp/` on every boot, so the minimum stays zero rather than one.
 export const DEFAULT_WORKSPACE_QUOTA_MB = 500;
 export const DEFAULT_WORKSPACE_QUOTA_FILES = 10000;
 export const DEFAULT_WORKSPACE_TMP_TTL_DAYS = 7;
@@ -4810,6 +4849,44 @@ export const WORKSPACE_QUOTA_MB_MIN = 10;
 export const WORKSPACE_QUOTA_MB_MAX = 10240;
 export const WORKSPACE_QUOTA_FILES_MIN = 100;
 export const WORKSPACE_QUOTA_FILES_MAX = 100000;
+export const WORKSPACE_TMP_TTL_MIN_DAYS = 0;
+export const WORKSPACE_TMP_TTL_MAX_DAYS = 90;
+
+// Full workspace snapshot on `GET /settings`, mirroring the engine
+// `WorkspaceConfig`. The canonical wire keys are snake_case; camelCase
+// aliases decode the same way as the `WorkspaceUpdate` patch, so either
+// spelling reads while the dashboard sends snake_case to keep the file shape.
+export interface WorkspaceConfigData {
+  quota_mb: number;
+  quotaMB?: number;
+  quota_files: number;
+  quotaFiles?: number;
+  tmp_ttl_days: number;
+  tmpTTLDays?: number;
+}
+
+// Partial workspace patch for `PUT /settings`, mirroring the engine
+// `WorkspaceUpdate`. Every field is optional so a request carrying one key
+// leaves the rest of the stored `[workspace]` section untouched. The dashboard
+// sends the snake_case keys the engine persists; camelCase aliases decode but
+// never encode so saved payloads keep the file shape.
+export interface WorkspaceSettingsUpdate {
+  quota_mb?: number;
+  quotaMB?: number;
+  quota_files?: number;
+  quotaFiles?: number;
+  tmp_ttl_days?: number;
+  tmpTTLDays?: number;
+}
+
+// Combined workspace default mirroring WorkspaceConfig. The fresh Tools form
+// seeds from this so the quota editors match the boundary the engine enforces
+// before the first settings fetch.
+export const DEFAULT_WORKSPACE_CONFIG: WorkspaceConfigData = {
+  quota_mb: DEFAULT_WORKSPACE_QUOTA_MB,
+  quota_files: DEFAULT_WORKSPACE_QUOTA_FILES,
+  tmp_ttl_days: DEFAULT_WORKSPACE_TMP_TTL_DAYS,
+};
 
 // Eligible promotion directory, relative to the workspace root. Only scripts
 // beneath this prefix may be pinned; the store re-checks containment
