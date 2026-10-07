@@ -272,6 +272,8 @@ public final class ServerContext: Sendable {
     public let agentTools: AgentToolStore
     /// Single-flight lock serializing agent-tool runs within this process.
     public let agentRunLock: AgentToolRunLock
+    /// Owner persona configured at boot.
+    public let persona: PersonaConfig
 
     /// Creates a server context.
     /// The `steeringQueue` must be the identical instance handed to
@@ -342,7 +344,8 @@ public final class ServerContext: Sendable {
         workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
         workspaceStore: WorkspaceStore? = nil,
         agentTools: AgentToolStore? = nil,
-        agentRunLock: AgentToolRunLock? = nil
+        agentRunLock: AgentToolRunLock? = nil,
+        persona: PersonaConfig = PersonaConfig()
     ) {
         self.config = config
         self.conversations = conversations
@@ -358,6 +361,7 @@ public final class ServerContext: Sendable {
         self.runLock = runLock
         self.activeTurns = activeTurns
         self.steeringQueue = steeringQueue
+        self.persona = persona
         let defaultDBPath = (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
         // Goals resolve before the worker so the default worker below can
         // carry them; an explicit worker still wins untouched for tests that
@@ -368,28 +372,18 @@ public final class ServerContext: Sendable {
         // only when `[ideas]` is enabled and no explicit engine was handed in,
         // so a disabled install stays inert without spending provider memory.
         let resolvedIdeas = ideas ?? IdeasStore(dbPath: resolvedGoals.dbPath)
-        let resolvedIdeasEngine: IdeasEngine? = if let ideasEngine {
-            ideasEngine
-        } else if ideasConfig.enabled {
-            // Facts come from the live memory engine so suggestions observe the
-            // owner's profile; capturing the actor is Sendable and the closure
-            // only reads, never mutates.
-            IdeasEngine(
-                store: resolvedIdeas,
-                llm: servingLLM ?? DefaultGoalLLM(),
-                config: ideasConfig,
-                memoryFacts: { await memoryEngine.getUserProfile().facts.map(\.content) }
-            )
-        } else {
-            nil
-        }
-        let resolvedEngine: GoalEngine = if let goalEngine {
-            goalEngine
-        } else if let servingLLM {
-            GoalEngine(store: resolvedGoals, llm: servingLLM, config: goalsConfig, ideasEngine: resolvedIdeasEngine)
-        } else {
-            GoalEngine(store: resolvedGoals, llm: DefaultGoalLLM(), config: goalsConfig, ideasEngine: resolvedIdeasEngine)
-        }
+        let resolvedIdeasEngine = ideasEngine ?? (ideasConfig.enabled ? IdeasEngine(
+            store: resolvedIdeas,
+            llm: servingLLM ?? DefaultGoalLLM(),
+            config: ideasConfig,
+            memoryFacts: { await memoryEngine.getUserProfile().facts.map(\.content) }
+        ) : nil)
+        let resolvedEngine = goalEngine ?? GoalEngine(
+            store: resolvedGoals,
+            llm: servingLLM ?? DefaultGoalLLM(),
+            config: goalsConfig,
+            ideasEngine: resolvedIdeasEngine
+        )
         self.goals = resolvedGoals
         self.goalEngine = resolvedEngine
         self.ideas = resolvedIdeas
@@ -598,6 +592,7 @@ extension ServerContext {
         let proactiveConfig: ProactiveConfig
         let fanOutConfig: FanOutConfig
         let activeTurns: ActiveTurnTracker
+        let persona: PersonaConfig
     }
 
     /// Boot-time configuration resolved before durable stores open.
@@ -752,7 +747,8 @@ extension ServerContext {
             steeringQueue: steeringQueue,
             securityConfig: args.securityConfig,
             permissionGate: args.permissionGate,
-            recallBudgets: args.recallBudgets
+            recallBudgets: args.recallBudgets,
+            persona: args.persona
         )
         // The serving provider doubles as the guarded judge so file mode plus
         // judge travel together from boot instead of defaulting to surfacing all.
@@ -894,7 +890,8 @@ extension ServerContext {
         workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
         workspaceStore: WorkspaceStore? = nil,
         agentTools: AgentToolStore? = nil,
-        agentRunLock: AgentToolRunLock? = nil
+        agentRunLock: AgentToolRunLock? = nil,
+        persona: PersonaConfig = PersonaConfig()
     ) async throws -> ServerContext {
         // Resolve the one store for this process before any tool registers:
         // an injected store is authoritative, while the factory default is
@@ -962,7 +959,7 @@ extension ServerContext {
             indexCoordinator: indexCoordinator, goalStore: services.goalStore,
             goalEngine: services.goalEngine, ideasEngine: services.ideasEngine,
             proactiveConfig: proactiveConfig, fanOutConfig: fanOutConfig,
-            activeTurns: activeTurns
+            activeTurns: activeTurns, persona: persona
         ))
         let egressSupervisor = try await setupEgressAndPolicy(
             policyStore: resolvedPolicyStore, toolConfigs: toolConfigs,
@@ -997,7 +994,7 @@ extension ServerContext {
             fanOut: engines.fanOutEngine, policyStore: resolvedPolicyStore, egressSupervisor: egressSupervisor,
             mediaConfig: toolConfigs.media, llmServerURLs: toolConfigs.llmServerURLs,
             workspaceConfig: workspaceConfig, workspaceStore: resolvedWorkspaceStore,
-            agentTools: resolvedAgentTools, agentRunLock: agentRunLock
+            agentTools: resolvedAgentTools, agentRunLock: agentRunLock, persona: persona
         )
         await finalizeServerContext(context, sandboxConfig: sandboxConfig, onApprovalRequested: onApprovalRequested)
         return context

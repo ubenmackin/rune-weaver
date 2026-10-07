@@ -640,7 +640,8 @@ enum GoalsCLIHelpers {
             embedder: embedder,
             compactionThresholdPercent: loaded.config.engine.compactionThresholdPercent,
             securityConfig: loaded.config.security,
-            recallBudgets: loaded.config.memory.recallBudgets
+            recallBudgets: loaded.config.memory.recallBudgets,
+            persona: loaded.config.persona
         )
         return AdvanceRuntime(
             orchestrator: orchestrator,

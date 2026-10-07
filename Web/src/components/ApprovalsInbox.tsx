@@ -9,6 +9,7 @@ import {
   listTrustGrants,
   parseRunTimestamp,
   parseTrustGrantExpiry,
+  respondToQuestion,
   revokeTrustGrant,
   trustDurationOptions,
   widenTrustGrant,
@@ -19,6 +20,7 @@ import {
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import { mergeApprovalFrame } from "../approvalsSession";
 import { formatRelativeAgo, formatRelativeIn } from "../relativeTime";
+import InlineQuestionCard from "./InlineQuestionCard";
 import Modal from "./Modal";
 import { CloseIcon, RefreshIcon } from "./icons";
 
@@ -339,6 +341,22 @@ export default function ApprovalsInbox() {
     }
   }
 
+  async function handleQuestionResponse(id: string, answer?: string, cancelled?: boolean) {
+    setDecidingState({ id, action: cancelled ? "denying" : "allowing" });
+    setError(null);
+    try {
+      await respondToQuestion(id, answer, cancelled);
+      setApprovals((previous) => previous.filter((item) => item.id !== id));
+      await refreshGrants();
+    } catch (failure) {
+      setError(
+        failure instanceof ApiError ? failure.message : "Response failed",
+      );
+    } finally {
+      setDecidingState(null);
+    }
+  }
+
   // Staging keeps row clicks non-destructive: the widening request only fires
   // from the modal confirm, so hover alone never expands trust and a
   // mis-click never widens without reading the consequence first.
@@ -462,9 +480,9 @@ export default function ApprovalsInbox() {
     <section className="panel approvals-panel" aria-label="Approvals inbox">
       <div className="panel-header-row">
         <div>
-          <h2>Approvals Inbox</h2>
+          <h2>Inbox</h2>
           <p className="muted text-sm">
-            Review and decide gated tool execution requests from scheduled jobs or agents.
+            Review and decide gated tool execution requests and operator questions.
           </p>
         </div>
 
@@ -490,7 +508,21 @@ export default function ApprovalsInbox() {
       ) : null}
 
       <div className="approvals-list">
-        {approvals.map((request) => (
+        {approvals.map((request) => {
+          if (request.toolName === "question.ask") {
+            return (
+              <InlineQuestionCard
+                key={request.id}
+                request={request}
+                deciding={decidingState?.id === request.id}
+                variant="inbox"
+                onRespond={(id, answer, cancelled) =>
+                  void handleQuestionResponse(id, answer, cancelled)
+                }
+              />
+            );
+          }
+          return (
           <div className="card approval-card" key={request.id}>
             <div className="approval-card-header">
               <div className="approval-title-group">
@@ -647,7 +679,8 @@ export default function ApprovalsInbox() {
               </div>
             </div>
           </div>
-        ))}
+        );
+      })}
       </div>
 
       <div className="active-approvals-section">

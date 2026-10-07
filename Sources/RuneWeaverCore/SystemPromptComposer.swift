@@ -467,6 +467,10 @@ public enum SystemPromptComposer {
             "- Read freely with read-only tools. Approval-gated actions run only after approval; report denials plainly."
         )
         lines.append(
+            "- When an action is ambiguous, has multiple candidate matches, or requires operator input to choose a path, "
+                + "call 'question.ask' with candidate options rather than guessing or picking a default."
+        )
+        lines.append(
             "- Check memories.recall before answering from assumptions or searching documents; "
                 + "call memories.store unprompted for durable user facts, preferences, or state. Never persist secrets."
         )

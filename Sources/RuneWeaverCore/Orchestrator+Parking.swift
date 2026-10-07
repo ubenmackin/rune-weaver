@@ -20,6 +20,7 @@ extension Orchestrator {
     public func resumeNarratedApproval(
         id: UUID,
         approved: Bool,
+        answer: String? = nil,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)? = nil
     ) async throws -> OrchestratorResponse? {
         try Task.checkCancellation()
@@ -32,7 +33,7 @@ extension Orchestrator {
         _ = await conversations.ensureSession(id: parked.sessionID)
         await conversations.removeWaitingMessages(from: parked.sessionID)
         if approved {
-            return try await resumeAllowedParked(parked, onEvent: onEvent)
+            return try await resumeAllowedParked(parked, answer: answer, onEvent: onEvent)
         } else {
             return try await resumeDeniedParked(parked, onEvent: onEvent)
         }
@@ -57,6 +58,7 @@ extension Orchestrator {
     /// Resumes an allowed parked approval, executing then synthesizing once all siblings land.
     private func resumeAllowedParked(
         _ parked: ParkedNarratedApproval,
+        answer: String? = nil,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)? = nil
     ) async throws -> OrchestratorResponse {
         let sessionID = parked.sessionID
@@ -66,6 +68,9 @@ extension Orchestrator {
         }
         if call.toolName == "desktop.resume" {
             return try await resumeAllowedDesktopResume(parked, call: call, sessionID: sessionID, onEvent: onEvent)
+        }
+        if call.toolName == "question.ask" {
+            return try await resumeAllowedQuestionAsk(parked, call: call, sessionID: sessionID, answer: answer, onEvent: onEvent)
         }
         guard let tool = await toolBus.tool(named: call.toolName) else {
             let missingNote = await recordParkedMissingTool(call.toolName, sessionID: sessionID, onEvent: onEvent)
@@ -99,6 +104,51 @@ extension Orchestrator {
         let result = ToolResult.success(toolCallID: call.callID, content: "Continuation granted by user.")
         let action = ToolAction(
             toolName: "engine.continue",
+            callID: call.callID,
+            argumentsJSON: call.argumentsJSON,
+            result: result,
+            roundIndex: parked.roundIndex
+        )
+        await onEvent?(.toolCompleted(
+            toolName: call.toolName,
+            callID: call.callID,
+            result: result,
+            roundIndex: parked.roundIndex
+        ))
+        await OrchestratorToolLoop.appendLabeledResult(
+            for: nil,
+            result: result,
+            to: conversations,
+            sessionID: sessionID,
+            labelingEnabled: labelingEnabled
+        )
+        return try await finishParkedBatch(
+            parked: parked,
+            baseText: "",
+            baseCompletedAt: nil,
+            newAction: action,
+            approved: true,
+            resetToolRounds: true,
+            onEvent: onEvent
+        )
+    }
+
+    /// Resumes an allowed `question.ask` parked approval with the operator's choice.
+    private func resumeAllowedQuestionAsk(
+        _ parked: ParkedNarratedApproval,
+        call: ToolInput,
+        sessionID: UUID,
+        answer: String?,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)? = nil
+    ) async throws -> OrchestratorResponse {
+        let trimmedAnswer = answer?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // Defense in depth: the REST boundary already caps answers, so truncate
+        // here rather than failing when another resume path supplies long text.
+        let chosenAnswer = trimmedAnswer.count > 2000 ? String(trimmedAnswer.prefix(2000)) : trimmedAnswer
+        let content = chosenAnswer.isEmpty ? "Operator acknowledged question." : chosenAnswer
+        let result = ToolResult.success(toolCallID: call.callID, content: content)
+        let action = ToolAction(
+            toolName: "question.ask",
             callID: call.callID,
             argumentsJSON: call.argumentsJSON,
             result: result,
@@ -425,9 +475,9 @@ extension Orchestrator {
         let source = await conversations.session(id: parked.sessionID)?.source
         let supportsVision = llm.modelInfo.supportsVision
         if Orchestrator.isBackgroundSource(source) {
-            return SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision)
+            return SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision, persona: persona)
         }
-        return SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision)
+        return SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision, persona: persona)
     }
 
     /// Pending actions for siblings still awaiting inbox decisions.

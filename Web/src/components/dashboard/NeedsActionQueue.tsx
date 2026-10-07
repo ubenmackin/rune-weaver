@@ -13,10 +13,12 @@ import {
   goalNeedsInput,
   listApprovals,
   listGoals,
+  respondToQuestion,
   type Goal,
   type PermissionRequest,
 } from "../../api";
 import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
+import InlineQuestionCard from "../InlineQuestionCard";
 import {
   AlertTriangleIcon,
   CheckIcon,
@@ -109,6 +111,19 @@ export default function NeedsActionQueue({
     }
   }
 
+  async function handleQuestionResponse(id: string, answer?: string, cancelled?: boolean) {
+    try {
+      setDecidingId(id);
+      await respondToQuestion(id, answer, cancelled);
+      setApprovals((prev) => prev.filter((a) => a.id !== id));
+      onActionDecided?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to record response");
+    } finally {
+      setDecidingId(null);
+    }
+  }
+
   const totalActionsNeeded = approvals.length + blockedGoals.length;
 
   return (
@@ -147,9 +162,23 @@ export default function NeedsActionQueue({
         </div>
       ) : (
         <div className="needs-action-list">
-          {/* Pending Tool Approvals */}
+          {/* Pending Tool Approvals & Questions */}
           {approvals.map((req) => {
             const isBusy = decidingId === req.id;
+            if (req.toolName === "question.ask") {
+              return (
+                <InlineQuestionCard
+                  key={req.id}
+                  request={req}
+                  deciding={isBusy}
+                  variant="dashboard"
+                  onRespond={(id, answer, cancelled) =>
+                    void handleQuestionResponse(id, answer, cancelled)
+                  }
+                  onOpenSession={onOpenSession}
+                />
+              );
+            }
             const isContinuation = req.toolName === "engine.continue";
             const isDesktopResume = req.toolName === "desktop.resume";
             const severity = req.assessment?.severity || "moderate";

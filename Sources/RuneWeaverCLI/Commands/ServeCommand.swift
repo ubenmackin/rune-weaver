@@ -330,7 +330,8 @@ extension ServeCommand {
         let livePrompt = await SystemPromptComposer.resolve(
             flag: systemPrompt,
             toolBus: context.toolBus,
-            supportsVision: selected.modelInfo.supportsVision
+            supportsVision: selected.modelInfo.supportsVision,
+            persona: context.persona
         )
         if livePrompt != effectiveSystemPrompt {
             print(TerminalStyle.dim("Served prompt differs from live registry; continuing with startup snapshot."))
@@ -461,7 +462,8 @@ extension ServeCommand {
             runs: runs,
             hub: hub,
             policyStore: policyStore,
-            workspaceConfig: loaded.config.workspace
+            workspaceConfig: loaded.config.workspace,
+            persona: loaded.config.persona
         )
         await registerAndVerifyTools(
             context: context,
@@ -545,7 +547,8 @@ extension ServeCommand {
         return await SystemPromptComposer.resolve(
             flag: systemPrompt,
             toolBus: previewBus,
-            supportsVision: selected.modelInfo.supportsVision
+            supportsVision: selected.modelInfo.supportsVision,
+            persona: loaded.config.persona
         )
     }
 

@@ -104,6 +104,7 @@ func resolvedResumeStatus(approved: Bool, resumed: OrchestratorResponse) -> Stri
 public func resumeNarratedApproval(
     id: UUID,
     approved: Bool,
+    answer: String? = nil,
     context: ServerContext,
     sessionID: UUID? = nil,
     decidedCallID: String? = nil
@@ -142,6 +143,7 @@ public func resumeNarratedApproval(
         resumed = try await context.orchestrator.resumeNarratedApproval(
             id: id,
             approved: approved,
+            answer: answer,
             onEvent: { event in
                 if let targetSessionID {
                     await broadcastWSEventFrame(event, sessionID: targetSessionID, context: context)

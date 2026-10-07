@@ -65,6 +65,8 @@ public actor Orchestrator {
     /// Stored so every turn injects with the same clamped limits the config
     /// file carries instead of hardcoded per-tier caps.
     private var recallBudgets: RecallBudgets
+    /// Assistant persona configured for this orchestrator.
+    public nonisolated let persona: PersonaConfig
 
     /// Creates an orchestrator.
     public init(
@@ -81,7 +83,8 @@ public actor Orchestrator {
         steeringQueue: SteeringQueue? = nil,
         securityConfig: SecurityConfig = SecurityConfig(),
         permissionGate: PermissionGate? = nil,
-        recallBudgets: RecallBudgets = RecallBudgets()
+        recallBudgets: RecallBudgets = RecallBudgets(),
+        persona: PersonaConfig = PersonaConfig()
     ) {
         self.conversationManager = conversations
         self.toolRegistry = toolBus
@@ -97,6 +100,7 @@ public actor Orchestrator {
         self.securityConfig = securityConfig
         self.permissionGate = permissionGate
         self.recallBudgets = recallBudgets.clamped()
+        self.persona = persona
     }
 
     /// Dynamically updates the maximum tool iterations allowed per turn.
@@ -583,9 +587,9 @@ extension Orchestrator {
         }
         let supportsVision = llm.modelInfo.supportsVision
         if Self.isBackgroundSource(input.source) {
-            return SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision)
+            return SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision, persona: persona)
         }
-        return SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision)
+        return SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision, persona: persona)
     }
 }
 

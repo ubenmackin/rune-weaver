@@ -12,7 +12,7 @@ import MobileBottomNav from "./MobileBottomNav";
 import { NAV_GROUPS, formatBadgeCount, normalizeBadgeCount } from "./navigationConfig";
 
 const ORDERED_GROUPS = ["dashboard", "chat", "approvals", "work", "memory"] as const;
-const ORDERED_LABELS = ["Dashboard", "Chat", "Approvals", "Work", "Memory"];
+const ORDERED_LABELS = ["Dashboard", "Chat", "Inbox", "Work", "Memory"];
 
 describe("MobileBottomNav tab contract", () => {
   it("renders exactly five groups in fixed order with no Settings entry", () => {
@@ -58,7 +58,7 @@ describe("MobileBottomNav tab contract", () => {
     render(<MobileBottomNav currentTab="chat" onSelectTab={onSelectTab} />);
 
     // Direct tab
-    await user.click(screen.getByRole("button", { name: "Approvals" }));
+    await user.click(screen.getByRole("button", { name: "Inbox" }));
     expect(onSelectTab).toHaveBeenCalledWith("approvals");
 
     // Work drop-up
@@ -120,7 +120,7 @@ describe("MobileBottomNav badge contract", () => {
       "true",
     ]);
     expect(
-      screen.getByRole("button", { name: "Approvals, 100 unread" }),
+      screen.getByRole("button", { name: "Inbox, 100 unread" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Work, 250 unread" }),
@@ -140,7 +140,7 @@ describe("MobileBottomNav badge contract", () => {
     render(
       <MobileBottomNav currentTab="chat" onSelectTab={() => {}} approvalsBadge={3} runsBadge={5} />,
     );
-    const approvalsTab = screen.getByRole("button", { name: "Approvals, 3 unread" });
+    const approvalsTab = screen.getByRole("button", { name: "Inbox, 3 unread" });
     const workTab = screen.getByRole("button", { name: "Work, 5 unread" });
     expect(approvalsTab.textContent).toContain("3");
     expect(workTab.textContent).toContain("5");
@@ -157,7 +157,7 @@ describe("MobileBottomNav badge contract", () => {
         badges={{ approvals: 4 }}
       />,
     );
-    const approvalsTab = screen.getByRole("button", { name: "Approvals, 4 unread" });
+    const approvalsTab = screen.getByRole("button", { name: "Inbox, 4 unread" });
     expect(approvalsTab.textContent).toContain("4");
     expect(approvalsTab.textContent).not.toContain("7");
   });

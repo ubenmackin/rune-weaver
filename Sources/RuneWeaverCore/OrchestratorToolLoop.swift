@@ -293,6 +293,9 @@ public enum OrchestratorToolLoop {
         if trimmed == "desktop.resume" {
             return "Desktop automation stopped by operator."
         }
+        if trimmed == "question.ask" {
+            return "Question cancelled by operator. Do not proceed with this action."
+        }
         let name = trimmed.isEmpty ? "the requested tool" : trimmed
         return "Approval denied for \(name); not running it."
     }

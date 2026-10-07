@@ -49,6 +49,8 @@ public enum ServerPaths {
     public static let approvals = "approvals"
     /// Approval decision subpath under `/approvals/:id`.
     public static let decide = "decide"
+    /// Question response subpath under `/approvals/:id`.
+    public static let respond = "respond"
     /// Durable trust grants subpath under `/approvals`.
     public static let grants = "grants"
     /// Widen grant subpath under `/approvals/grants/:id`.
@@ -1196,6 +1198,19 @@ public struct ApprovalDecisionRequest: Content, Equatable {
     /// - Returns: Resolved widen flag.
     public var resolvedWiden: Bool {
         widen ?? false
+    }
+}
+
+/// Operator question response for `POST /approvals/:id/respond`.
+public struct QuestionResponseRequest: Content, Sendable, Equatable {
+    /// Chosen option or custom write-in text.
+    public let answer: String?
+    /// Whether the operator cancelled the question.
+    public let cancelled: Bool?
+
+    public init(answer: String? = nil, cancelled: Bool? = nil) {
+        self.answer = answer
+        self.cancelled = cancelled
     }
 }
 

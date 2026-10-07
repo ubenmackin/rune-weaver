@@ -930,6 +930,19 @@ func handleWebSocketDecision(
         return
     }
     let pending = await context.approvals.request(id: message.id)
+    // Operator choices ride the answer-bearing respond path so an approval
+    // without a choice cannot synthesize an empty acknowledgement. The legacy
+    // decide shape carries no answer, so question approvals fail closed here
+    // and direct the requester to the respond route.
+    if pending?.toolName == "question.ask" {
+        await sendWSError(
+            "Use /respond for question.ask",
+            connectionID: connectionID,
+            context: context,
+            sessionID: pending?.sessionID
+        )
+        return
+    }
     let effectiveApproved: Bool
     if let tier = egressDecision {
         let applied = await applyEgressDecision(tier: tier, pending: pending, context: context)
@@ -972,11 +985,11 @@ func handleWebSocketDecision(
     }
     // Durable approvals create a stored grant inside `decide`, so
     // dashboards need a refresh signal; one-shot approvals store
-    // nothing and leave the grants list untouched. Continuation
-    // approvals stay one-shot inside `decide` (coerced to thisTime
-    // with no stored grant), so a durable vote on engine.continue
-    // must not fire a refresh when nothing changed.
-    if effectiveApproved, message.resolvedDuration != .thisTime, pending?.toolName != "engine.continue" {
+    // nothing and leave the grants list untouched. Continuation and
+    // question approvals stay one-shot inside `decide` (coerced to thisTime
+    // with no stored grant), so a durable vote on engine.continue or
+    // question.ask must not fire a refresh when nothing changed.
+    if effectiveApproved, message.resolvedDuration != .thisTime, pending?.toolName != "engine.continue", pending?.toolName != "question.ask" {
         await context.hub.broadcastTrustGrantsChanged()
     }
     if pending?.sessionID != nil {

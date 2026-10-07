@@ -23,6 +23,8 @@ describe("navigation contract", () => {
       "work",
       "memory",
     ]);
+    const inbox = NAV_GROUPS.find((entry) => entry.id === "approvals");
+    expect(inbox?.label).toBe("Inbox");
     const work = NAV_GROUPS.find((entry) => entry.id === "work");
     expect(work?.kind).toBe("group");
     if (!work || work.kind !== "group") {
