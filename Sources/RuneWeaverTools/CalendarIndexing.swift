@@ -379,7 +379,7 @@ extension CalendarIndexer {
                 externalID: externalID,
                 displayName: title,
                 messageID: rawID,
-                mtime: nil,
+                mtime: event.startDate,
                 contentHash: contentHash,
                 mime: "text/calendar",
                 extractStatus: .extracted,

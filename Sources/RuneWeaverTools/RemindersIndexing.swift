@@ -271,7 +271,7 @@ public actor RemindersIndexer {
                 externalID: row.identifier,
                 displayName: title,
                 messageID: row.identifier,
-                mtime: row.dueDate,
+                mtime: row.dueDate ?? row.creationDate,
                 contentHash: contentHash,
                 mime: "text/plain",
                 extractStatus: .extracted,

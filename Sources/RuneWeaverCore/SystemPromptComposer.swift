@@ -476,7 +476,8 @@ public enum SystemPromptComposer {
         )
         lines.append(
             "- The local document index is current as of last night. "
-                + "For today, this-morning, latest, unread, or just-arrived questions prefer live email.search and files.grep over indexed results; "
+                + "For today, this-morning, latest, unread, just-arrived, next, or upcoming questions prefer "
+                + "live email.search, files.grep, calendar.search, and reminders.search over indexed results; "
                 + "the \(LiveSearchGuidance.forceLiveFlagName) flag forces the live path."
         )
         lines.append("")

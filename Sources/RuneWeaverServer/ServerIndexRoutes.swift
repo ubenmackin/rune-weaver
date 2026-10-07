@@ -287,7 +287,7 @@ private func registerIndexResetRoute(_ app: Application) {
            !rawSource.isEmpty, rawSource != "all"
         {
             guard let source = IndexSource(rawValue: rawSource) else {
-                throw Abort(.badRequest, reason: "Unknown index source '\(rawSource)'. Supported sources: files, mail, messages.")
+                throw Abort(.badRequest, reason: "Unknown index source '\(rawSource)'. Supported sources: files, mail, messages, calendars, reminders.")
             }
             _ = try await store.clearSource(
                 source,
