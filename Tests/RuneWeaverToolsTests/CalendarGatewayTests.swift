@@ -296,4 +296,92 @@ struct CalendarGatewayTests {
         try await gateway.delete(eventID: created.id)
         #expect(try await gateway.search(query: "renamed").isEmpty)
     }
+
+    private func utcDate(_ iso: String) throws -> Date {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return try #require(formatter.date(from: iso))
+    }
+
+    @Test
+    func `Woven fixture renders device-local display while ISO stays Zulu`() async throws {
+        let pacific = try #require(TimeZone(identifier: "America/Los_Angeles"))
+        let start = try utcDate("2026-10-07T00:00:00Z")
+        let end = try utcDate("2026-10-07T01:00:00Z")
+        #expect(CalendarEventDisplay.timedString(from: start, timeZone: pacific) == "Tue, Oct 6, 2026 5:00 PM PDT")
+        #expect(TemporalFilter.isoString(from: start) == "2026-10-07T00:00:00Z")
+        let store = MockEventKitStore(events: [
+            StoreEvent(
+                identifier: "woven-1",
+                calendarIdentifier: "cal-home",
+                title: "Woven",
+                startDate: start,
+                endDate: end,
+                isAllDay: false
+            )
+        ])
+        let gateway = ProductionCalendarGateway(store: store)
+        let hits = try await gateway.search(query: "Woven")
+        #expect(hits.count == 1)
+        #expect(hits.first?.startDateISO == "2026-10-07T00:00:00Z")
+        #expect(hits.first?.endDateISO == "2026-10-07T01:00:00Z")
+        #expect(!(hits.first?.startDisplay.isEmpty ?? true))
+        #expect(!(hits.first?.endDisplay.isEmpty ?? true))
+    }
+
+    @Test
+    func `Timed rendering differs across DST boundary`() throws {
+        let pacific = try #require(TimeZone(identifier: "America/Los_Angeles"))
+        let summer = try utcDate("2026-07-01T19:00:00Z")
+        let winter = try utcDate("2026-01-05T20:00:00Z")
+        let summerDisplay = CalendarEventDisplay.timedString(from: summer, timeZone: pacific)
+        let winterDisplay = CalendarEventDisplay.timedString(from: winter, timeZone: pacific)
+        #expect(summerDisplay.contains("PDT"))
+        #expect(winterDisplay.contains("PST"))
+        #expect(summerDisplay.contains(","))
+        #expect(winterDisplay.contains(","))
+    }
+
+    @Test
+    func `All-day renders date-only`() async throws {
+        let pacific = try #require(TimeZone(identifier: "America/Los_Angeles"))
+        let date = try utcDate("2026-10-07T00:00:00Z")
+        let display = CalendarEventDisplay.string(
+            for: date,
+            isoFallback: "2026-10-07T00:00:00Z",
+            isAllDay: true,
+            timeZone: pacific
+        )
+        #expect(display == "Tue, Oct 6, 2026")
+        #expect(!display.contains(":"))
+        let store = MockEventKitStore(events: [
+            StoreEvent(
+                identifier: "allday-1",
+                calendarIdentifier: "cal-home",
+                title: "Holiday",
+                startDate: date,
+                endDate: date,
+                isAllDay: true
+            )
+        ])
+        let gateway = ProductionCalendarGateway(store: store)
+        let hits = try await gateway.search(query: "Holiday")
+        #expect(hits.count == 1)
+        #expect(!(hits.first?.startDisplay.contains(":") ?? true))
+        #expect(!(hits.first?.endDisplay.contains(":") ?? true))
+    }
+
+    @Test
+    func `Display falls back to ISO when date missing`() {
+        #expect(
+            CalendarEventDisplay.string(for: nil, isoFallback: "2026-10-07T00:00:00Z", isAllDay: false)
+                == "2026-10-07T00:00:00Z"
+        )
+        #expect(
+            CalendarEventDisplay.string(for: nil, isoFallback: "2026-10-07T00:00:00Z", isAllDay: true)
+                == "2026-10-07T00:00:00Z"
+        )
+        #expect(CalendarEventDisplay.string(for: nil, isoFallback: nil, isAllDay: false) == "")
+    }
 }

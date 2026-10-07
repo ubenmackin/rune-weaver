@@ -21,6 +21,8 @@ public struct CalendarEventItem: Codable, Sendable, Equatable {
     public let notes: String?
     public let startDateISO: String?
     public let endDateISO: String?
+    public let startDisplay: String
+    public let endDisplay: String
     public let isAllDay: Bool
     public let location: String?
     public let hasRecurrence: Bool
@@ -33,6 +35,8 @@ public struct CalendarEventItem: Codable, Sendable, Equatable {
         notes: String? = nil,
         startDateISO: String? = nil,
         endDateISO: String? = nil,
+        startDisplay: String,
+        endDisplay: String,
         isAllDay: Bool = false,
         location: String? = nil,
         hasRecurrence: Bool = false
@@ -44,9 +48,46 @@ public struct CalendarEventItem: Codable, Sendable, Equatable {
         self.notes = notes
         self.startDateISO = startDateISO
         self.endDateISO = endDateISO
+        self.startDisplay = startDisplay
+        self.endDisplay = endDisplay
         self.isAllDay = isAllDay
         self.location = location
         self.hasRecurrence = hasRecurrence
+    }
+}
+
+/// Device-timezone display strings for event items.
+public enum CalendarEventDisplay: Sendable {
+    public static func string(
+        for date: Date?,
+        isoFallback: String?,
+        isAllDay: Bool,
+        timeZone: TimeZone = .current
+    ) -> String {
+        guard let date else { return isoFallback ?? "" }
+        let formatted = isAllDay
+            ? dateOnlyString(from: date, timeZone: timeZone)
+            : timedString(from: date, timeZone: timeZone)
+        // DateFormatter returns empty on failure, so fall back to ISO rather than surfacing blank.
+        guard !formatted.isEmpty else { return isoFallback ?? "" }
+        return formatted
+    }
+
+    public static func timedString(from date: Date, timeZone: TimeZone = .current) -> String {
+        // Fresh formatter per call keeps Swift 6 concurrency safe without shared locking.
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "EEE, MMM d, yyyy h:mm a zzz"
+        return formatter.string(from: date)
+    }
+
+    public static func dateOnlyString(from date: Date, timeZone: TimeZone = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "EEE, MMM d, yyyy"
+        return formatter.string(from: date)
     }
 }
 
@@ -753,14 +794,26 @@ extension ProductionCalendarGateway {
         } else {
             nil
         }
+        let startISO = event.startDate.map(TemporalFilter.isoString(from:))
+        let endISO = event.endDate.map(TemporalFilter.isoString(from:))
         return CalendarEventItem(
             id: identifier,
             calendarName: calendar?.title,
             sourceTitle: calendar?.sourceTitle,
             title: event.title ?? "",
             notes: event.notes,
-            startDateISO: event.startDate.map(TemporalFilter.isoString(from:)),
-            endDateISO: event.endDate.map(TemporalFilter.isoString(from:)),
+            startDateISO: startISO,
+            endDateISO: endISO,
+            startDisplay: CalendarEventDisplay.string(
+                for: event.startDate,
+                isoFallback: startISO,
+                isAllDay: event.isAllDay
+            ),
+            endDisplay: CalendarEventDisplay.string(
+                for: event.endDate,
+                isoFallback: endISO,
+                isAllDay: event.isAllDay
+            ),
             isAllDay: event.isAllDay,
             location: event.location,
             hasRecurrence: event.hasRecurrence

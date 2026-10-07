@@ -97,22 +97,26 @@ final class MockCalendarGateway: CalendarGateway, Sendable {
         return state.withLock { s in
             let id = "mock-\(s.nextID)"
             s.nextID += 1
+            let startISO = start.map {
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime]
+                return formatter.string(from: $0)
+            }
+            let endISO = end.map {
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime]
+                return formatter.string(from: $0)
+            }
             let item = CalendarEventItem(
                 id: id,
                 calendarName: calendarName,
                 sourceTitle: nil,
                 title: trimmed,
                 notes: notes,
-                startDateISO: start.map {
-                    let formatter = ISO8601DateFormatter()
-                    formatter.formatOptions = [.withInternetDateTime]
-                    return formatter.string(from: $0)
-                },
-                endDateISO: end.map {
-                    let formatter = ISO8601DateFormatter()
-                    formatter.formatOptions = [.withInternetDateTime]
-                    return formatter.string(from: $0)
-                },
+                startDateISO: startISO,
+                endDateISO: endISO,
+                startDisplay: CalendarEventDisplay.string(for: start, isoFallback: startISO, isAllDay: isAllDay),
+                endDisplay: CalendarEventDisplay.string(for: end, isoFallback: endISO, isAllDay: isAllDay),
                 isAllDay: isAllDay,
                 location: location,
                 hasRecurrence: false
@@ -155,28 +159,38 @@ final class MockCalendarGateway: CalendarGateway, Sendable {
                     notes: current.notes,
                     startDateISO: current.startDateISO,
                     endDateISO: current.endDateISO,
+                    startDisplay: current.startDisplay,
+                    endDisplay: current.endDisplay,
                     isAllDay: current.isAllDay,
                     location: current.location,
                     hasRecurrence: current.hasRecurrence
                 )
             }
             if notes != nil || start != nil || end != nil || calendarName != nil || location != nil {
+                let nextStartISO = start.map {
+                    let formatter = ISO8601DateFormatter()
+                    formatter.formatOptions = [.withInternetDateTime]
+                    return formatter.string(from: $0)
+                } ?? current.startDateISO
+                let nextEndISO = end.map {
+                    let formatter = ISO8601DateFormatter()
+                    formatter.formatOptions = [.withInternetDateTime]
+                    return formatter.string(from: $0)
+                } ?? current.endDateISO
                 current = CalendarEventItem(
                     id: current.id,
                     calendarName: calendarName ?? current.calendarName,
                     sourceTitle: current.sourceTitle,
                     title: current.title,
                     notes: notes ?? current.notes,
-                    startDateISO: start.map {
-                        let formatter = ISO8601DateFormatter()
-                        formatter.formatOptions = [.withInternetDateTime]
-                        return formatter.string(from: $0)
-                    } ?? current.startDateISO,
-                    endDateISO: end.map {
-                        let formatter = ISO8601DateFormatter()
-                        formatter.formatOptions = [.withInternetDateTime]
-                        return formatter.string(from: $0)
-                    } ?? current.endDateISO,
+                    startDateISO: nextStartISO,
+                    endDateISO: nextEndISO,
+                    startDisplay: start.map {
+                        CalendarEventDisplay.string(for: $0, isoFallback: nextStartISO, isAllDay: current.isAllDay)
+                    } ?? current.startDisplay,
+                    endDisplay: end.map {
+                        CalendarEventDisplay.string(for: $0, isoFallback: nextEndISO, isAllDay: current.isAllDay)
+                    } ?? current.endDisplay,
                     isAllDay: current.isAllDay,
                     location: location ?? current.location,
                     hasRecurrence: current.hasRecurrence
@@ -216,6 +230,16 @@ struct CalendarToolsTests {
         let search = tools.first { $0.name == "calendar.search" }
         #expect(search?.description.contains("HTML-free") ?? false)
         #expect(search?.description.contains("Empty") ?? search?.description.contains("empty") ?? false)
+    }
+
+    @Test
+    func `Search description directs display-first`() {
+        let tool = CalendarSearchTool(gateway: MockCalendarGateway())
+        #expect(tool.description.contains("startDisplay"))
+        #expect(tool.description.contains("endDisplay"))
+        #expect(tool.description.contains("startDateISO"))
+        #expect(tool.description.contains("endDateISO"))
+        #expect(tool.description.lowercased().contains("sorting only"))
     }
 
     @Test
@@ -306,8 +330,23 @@ struct CalendarToolsTests {
     @Test
     func `Search round-trips through mock gateway`() async throws {
         let mock = MockCalendarGateway(items: [
-            CalendarEventItem(id: "e1", calendarName: "Home", title: "Dentist appointment", notes: "teeth", isAllDay: false),
-            CalendarEventItem(id: "e2", calendarName: "Home", title: "Lunch with Sam", isAllDay: false)
+            CalendarEventItem(
+                id: "e1",
+                calendarName: "Home",
+                title: "Dentist appointment",
+                notes: "teeth",
+                startDisplay: "Mon, Sep 29, 2026 9:00 AM PDT",
+                endDisplay: "Mon, Sep 29, 2026 10:00 AM PDT",
+                isAllDay: false
+            ),
+            CalendarEventItem(
+                id: "e2",
+                calendarName: "Home",
+                title: "Lunch with Sam",
+                startDisplay: "Mon, Sep 29, 2026 12:00 PM PDT",
+                endDisplay: "Mon, Sep 29, 2026 1:00 PM PDT",
+                isAllDay: false
+            )
         ])
         let tool = CalendarSearchTool(gateway: mock)
         let output = try await tool.execute(
@@ -406,7 +445,14 @@ struct CalendarToolsTests {
     @Test
     func `Calendar tools round-trip through ToolBus`() async {
         let mock = MockCalendarGateway(items: [
-            CalendarEventItem(id: "bus-1", calendarName: "Work", title: "Planning review", isAllDay: false)
+            CalendarEventItem(
+                id: "bus-1",
+                calendarName: "Work",
+                title: "Planning review",
+                startDisplay: "Mon, Sep 29, 2026 2:00 PM PDT",
+                endDisplay: "Mon, Sep 29, 2026 3:00 PM PDT",
+                isAllDay: false
+            )
         ])
         let bus = ToolBus()
         await CalendarTools.register(on: bus, gateway: mock)

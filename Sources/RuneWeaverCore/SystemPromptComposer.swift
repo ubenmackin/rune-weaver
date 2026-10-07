@@ -262,13 +262,17 @@ public enum SystemPromptComposer {
         return lines[1] == composedMarker
     }
 
-    /// Formats a date as YYYY-MM-DD for cache-friendly system prompt injection.
+    /// Formats an instant as `yyyy-MM-dd (Weekday, TimeZone)` in the device zone.
     public static func currentDateString(from date: Date = Date()) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        formatter.timeZone = .current
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        return formatter.string(from: date)
+        let dayFormatter = DateFormatter()
+        dayFormatter.dateFormat = "yyyy-MM-dd"
+        dayFormatter.timeZone = .current
+        dayFormatter.locale = Locale(identifier: "en_US_POSIX")
+        let weekdayFormatter = DateFormatter()
+        weekdayFormatter.dateFormat = "EEEE"
+        weekdayFormatter.timeZone = .current
+        weekdayFormatter.locale = Locale(identifier: "en_US_POSIX")
+        return "\(dayFormatter.string(from: date)) (\(weekdayFormatter.string(from: date)), \(TimeZone.current.identifier))"
     }
 
     /// Prompt cache key.

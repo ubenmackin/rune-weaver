@@ -73,6 +73,8 @@ public actor CalendarIndexer {
     public static let defaultStatePath = "~/.runeweaver/index/calendars-state.json"
     /// Default per-series occurrence cap.
     public static let defaultOccurrenceCap = 500
+    /// Default fetch lookback in calendar years.
+    public static let defaultLookbackYears = 10
 
     private let store: any CalendarStore
     private let index: DocIndexStore
@@ -263,8 +265,10 @@ extension CalendarIndexer {
     /// Fetches live events and applies the per-series cap with calendar lookup.
     private func fetchSelectedEvents(nowDate: Date) throws -> (selected: [StoreEvent], calendarsByID: [String: StoreCalendar]) {
         let calendars = try store.calendars()
+        let start = Calendar.current.date(byAdding: .year, value: -Self.defaultLookbackYears, to: nowDate)
+            ?? nowDate.addingTimeInterval(TimeInterval(-Self.defaultLookbackYears * 365 * 86400))
         let end = Calendar.current.date(byAdding: .day, value: 365, to: nowDate) ?? nowDate.addingTimeInterval(365 * 86400)
-        let predicate = store.predicateForEvents(start: .distantPast, end: end, calendars: calendars)
+        let predicate = store.predicateForEvents(start: start, end: end, calendars: calendars)
         let fetched = try store.events(matching: predicate)
         let selected = Self.cappedOccurrences(fetched, cap: occurrenceCap, end: end)
         let calendarsByID = Dictionary(calendars.map { ($0.identifier, $0) }, uniquingKeysWith: { first, _ in first })

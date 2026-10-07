@@ -15,6 +15,7 @@ final class MockCalendarIndexStore: CalendarStore, Sendable {
         var status: CalendarAuthorizationStatus
         var calendars: [StoreCalendar]
         var events: [StoreEvent]
+        var lastPredicate: CalendarFetchPredicate?
     }
 
     private let state: OSAllocatedUnfairLock<State>
@@ -47,8 +48,18 @@ final class MockCalendarIndexStore: CalendarStore, Sendable {
         CalendarFetchPredicate(start: start, end: end, calendars: calendars)
     }
 
-    func events(matching _: CalendarFetchPredicate) throws -> [StoreEvent] {
-        state.withLock { $0.events }
+    func events(matching predicate: CalendarFetchPredicate) throws -> [StoreEvent] {
+        state.withLock {
+            $0.lastPredicate = predicate
+            return $0.events.filter { event in
+                guard let start = event.startDate else { return true }
+                return start >= predicate.start && start <= predicate.end
+            }
+        }
+    }
+
+    var lastPredicate: CalendarFetchPredicate? {
+        state.withLock { $0.lastPredicate }
     }
 
     func event(withIdentifier identifier: String) throws -> StoreEvent? {
@@ -273,5 +284,46 @@ struct CalendarIndexingTests {
         )
         let report = try await indexer.run(reporter: noProgress())
         #expect(report.vectorsWritten == 1)
+    }
+
+    @Test
+    func `Fetch window spans ten-year lookback through one-year outlook`() async throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let mock = MockCalendarIndexStore()
+        let index = DocIndexStore(dbPath: paths.store)
+        let indexer = CalendarIndexer(store: mock, index: index, statePath: paths.state, now: { now })
+        _ = try await indexer.run(reporter: noProgress())
+        let predicate = try #require(mock.lastPredicate)
+        let expectedStart = Calendar.current.date(byAdding: .year, value: -CalendarIndexer.defaultLookbackYears, to: now)
+        let expectedEnd = Calendar.current.date(byAdding: .day, value: 365, to: now)
+        #expect(CalendarIndexer.defaultLookbackYears == 10)
+        #expect(predicate.start == expectedStart)
+        #expect(predicate.end == expectedEnd)
+    }
+
+    @Test
+    func `Recent occurrence indexes while out-of-window occurrence stays out`() async throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let recentStart = Calendar.current.date(byAdding: .month, value: -1, to: now) ?? now.addingTimeInterval(-30 * 86400)
+        let oldStart = Calendar.current.date(byAdding: .year, value: -11, to: now) ?? now.addingTimeInterval(-11 * 365 * 86400)
+        let mock = MockCalendarIndexStore(events: [
+            makeEvent(id: "evt-recent", title: "Recent", start: recentStart),
+            makeEvent(id: "evt-old", title: "Ancient", start: oldStart)
+        ])
+        let index = DocIndexStore(dbPath: paths.store)
+        let indexer = CalendarIndexer(store: mock, index: index, statePath: paths.state, now: { now })
+        let report = try await indexer.run(reporter: noProgress())
+        #expect(report.indexed == 1)
+        #expect(report.scanned == 1)
+        let recentISO = TemporalFilter.isoString(from: recentStart)
+        let recent = try await index.document(source: .calendars, externalID: "evt-recent@\(recentISO)")
+        #expect(recent != nil)
+        let oldISO = TemporalFilter.isoString(from: oldStart)
+        let old = try await index.document(source: .calendars, externalID: "evt-old@\(oldISO)")
+        #expect(old == nil)
     }
 }
