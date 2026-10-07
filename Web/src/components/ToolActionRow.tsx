@@ -556,12 +556,93 @@ function BrowserDetails({ browser }: { browser: BrowserNavigate }) {
 // with its own class namespace (`tool-badge-*` for cards, bare for pills), so
 // classification and labels live in exactly one branch and the two surfaces
 // cannot drift on errorKind handling.
-type ToolResultStatusKind = "invalid-tool" | "invalid-syntax" | "error" | "ok";
+type ToolResultStatusKind =
+  | "invalid-tool"
+  | "invalid-syntax"
+  | "error"
+  | "warning"
+  | "ok";
 
-function resolveResultStatus(result: ToolResult): {
+interface BashResultEnvelope {
+  denied: boolean;
+  killReason: string | null;
+  exitCode: number;
+}
+
+function parseBashResultEnvelope(
+  content: string | null | undefined,
+): BashResultEnvelope | null {
+  if (typeof content !== "string") return null;
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("{")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const record = parsed as Record<string, unknown>;
+  // Only envelope-owned keys count, so bare command/stdout/stderr JSON never
+  // defaults to a clean exit.
+  const hasSignal =
+    "denied" in record ||
+    "kill_reason" in record ||
+    "killReason" in record ||
+    "exitCode" in record ||
+    "exit_code" in record;
+  if (!hasSignal) return null;
+  const denied = record.denied === true;
+  const rawKill =
+    typeof record.kill_reason === "string"
+      ? record.kill_reason
+      : typeof record.killReason === "string"
+        ? record.killReason
+        : null;
+  const rawExit = record.exitCode ?? record.exit_code;
+  const exitCode =
+    typeof rawExit === "number" && Number.isFinite(rawExit)
+      ? Math.trunc(rawExit)
+      : 0;
+  return { denied, killReason: rawKill, exitCode };
+}
+
+function resolveResultStatus(
+  result: ToolResult,
+  toolName?: string,
+): {
   kind: ToolResultStatusKind;
   label: string;
 } {
+  // Bash-only envelope evidence; every other tool keeps existing behavior.
+  if (toolName === "bash.exec") {
+    const envelope = parseBashResultEnvelope(result.content);
+    if (envelope == null) {
+      if (!result.isError) return { kind: "ok", label: "Done" };
+      return { kind: "error", label: "Error" };
+    }
+    // A refused spawn reads as denied even when the numeric code is zero.
+    if (envelope.denied || envelope.killReason === "denied") {
+      return { kind: "error", label: "Denied" };
+    }
+    if (envelope.killReason === "wall_timeout") {
+      return { kind: "error", label: "Timed out" };
+    }
+    if (envelope.killReason === "resource_limit") {
+      return { kind: "error", label: "Resource limit" };
+    }
+    if (envelope.exitCode !== 0) {
+      return { kind: "warning", label: `Exited ${envelope.exitCode}` };
+    }
+    // A tool-level failure without envelope evidence stays red even when the
+    // numeric exit reads clean, so generic runner faults never show Done.
+    if (result.isError) {
+      return { kind: "error", label: "Error" };
+    }
+    return { kind: "ok", label: "Done" };
+  }
   if (!result.isError) return { kind: "ok", label: "Done" };
   if (result.errorKind === "invalid_tool") {
     return { kind: "invalid-tool", label: "Unknown Tool" };
@@ -576,6 +657,37 @@ function resolveResultStatus(result: ToolResult): {
     return { kind: "error", label: "Idempotency Blocked" };
   }
   return { kind: "error", label: "Error" };
+}
+
+// Whether a bash result is a clean non-zero exit that stays honest-amber.
+// The pill already classifies it as warning while isError stays true for
+// retry and audit; the expanded output must match the pill and skip the red
+// error tone for the same envelope.
+function isBashCleanExitWarning(
+  result: ToolResult,
+  toolName?: string,
+): boolean {
+  if (toolName !== "bash.exec") return false;
+  const envelope = parseBashResultEnvelope(result.content);
+  if (!envelope) return false;
+  if (envelope.denied || envelope.killReason === "denied") return false;
+  if (
+    envelope.killReason === "wall_timeout" ||
+    envelope.killReason === "resource_limit"
+  )
+    return false;
+  return envelope.exitCode !== 0;
+}
+
+// Expanded output tone derives from the envelope, not isError alone, so a
+// clean non-zero bash exit renders neutral while keeping isError true.
+function shouldUseErrorTone(
+  result: ToolResult,
+  toolName?: string,
+): boolean {
+  if (!result.isError) return false;
+  if (isBashCleanExitWarning(result, toolName)) return false;
+  return true;
 }
 
 // Live progress line rendered under the Running pill. The engine reports
@@ -763,7 +875,7 @@ export default function ToolActionRow({
       : null;
   // One classification shared by both variants, rendered below with
   // surface-specific class prefixes.
-  const status = result ? resolveResultStatus(result) : null;
+  const status = result ? resolveResultStatus(result, action.toolName) : null;
 
   if (variant === "card") {
     return (
@@ -828,7 +940,9 @@ export default function ToolActionRow({
                 <div className="tool-label">Result</div>
                 <pre
                   className={`code-block ${
-                    result.isError ? "error-result" : ""
+                    shouldUseErrorTone(result, action.toolName)
+                      ? "error-result"
+                      : ""
                   }`}
                 >
                   {result.content}
@@ -925,7 +1039,9 @@ export default function ToolActionRow({
               <span className="chat-tool-detail-label">Output:</span>
               <pre
                 className={`chat-tool-code ${
-                  result.isError ? "error-text" : ""
+                  shouldUseErrorTone(result, action.toolName)
+                    ? "error-text"
+                    : ""
                 }`}
               >
                 {result.content}

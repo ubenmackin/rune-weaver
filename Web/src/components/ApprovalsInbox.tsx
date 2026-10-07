@@ -21,6 +21,8 @@ import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import { mergeApprovalFrame } from "../approvalsSession";
 import { formatRelativeAgo, formatRelativeIn } from "../relativeTime";
 import InlineQuestionCard from "./InlineQuestionCard";
+import BashTierLine from "./BashTierLine";
+import { resolveSandboxSummary } from "./InlineApprovalBanner";
 import Modal from "./Modal";
 import { CloseIcon, RefreshIcon } from "./icons";
 
@@ -576,6 +578,8 @@ export default function ApprovalsInbox() {
                 {request.assessment.outcome}
               </div>
             ) : null}
+
+            <BashTierLine summary={resolveSandboxSummary(request)} />
 
             {request.assessment?.warnings && request.assessment.warnings.length > 0 ? (
               <ul className="approval-warnings">

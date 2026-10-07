@@ -486,3 +486,231 @@ describe("ToolActionRow tool cancel", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+// Bash-only envelope evidence splits command failure from tool failure, so the
+// pill stays honest while retry plus audit plus run-log behavior never moves.
+describe("ToolActionRow bash envelope status", () => {
+  const bashAction = {
+    toolName: "bash.exec",
+    callID: "call-bash-1",
+    argumentsJSON: '{"command":"ls"}',
+  };
+
+  it("reads denied bash results as Denied", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-1",
+            content: JSON.stringify({ denied: true, kill_reason: "denied" }),
+            isError: true,
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Denied");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("error");
+  });
+
+  it("reads wall_timeout kills as Timed out", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-1",
+            content: JSON.stringify({
+              denied: false,
+              kill_reason: "wall_timeout",
+              exitCode: 0,
+            }),
+            isError: true,
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Timed out");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("error");
+  });
+
+  it("reads resource_limit kills as Resource limit", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-1",
+            content: JSON.stringify({
+              denied: false,
+              kill_reason: "resource_limit",
+              exitCode: 0,
+            }),
+            isError: true,
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Resource limit");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("error");
+  });
+
+  it("reads clean non-zero exits as amber Exited N in the chat pill", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-1",
+            content: JSON.stringify({
+              command: "ls",
+              stdout: "hello",
+              stderr: "",
+              exitCode: 1,
+              denied: false,
+              kill_reason: "clean",
+            }),
+            isError: true,
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Exited 1");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("warning");
+  });
+
+  it("reads clean non-zero exits as amber in the card variant with stdout preserved", async () => {
+    const user = userEvent.setup();
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-1",
+            content: JSON.stringify({
+              command: "ls",
+              stdout: "hello",
+              stderr: "",
+              exitCode: 2,
+              denied: false,
+              kill_reason: "clean",
+            }),
+            isError: true,
+          },
+        }}
+        variant="card"
+      />,
+    );
+    const badge = screen.getByText("Exited 2");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("tool-badge-warning");
+    await user.click(screen.getByRole("button"));
+    expect(screen.getByText(/hello/)).toBeInTheDocument();
+  });
+
+  it("reads clean zero exits as Done", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-1",
+            content: JSON.stringify({
+              denied: false,
+              kill_reason: "clean",
+              exitCode: 0,
+            }),
+            isError: false,
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Done");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("ok");
+  });
+
+  it("keeps a clean envelope with a tool error red instead of Done", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-1",
+            content: JSON.stringify({
+              denied: false,
+              kill_reason: "clean",
+              exitCode: 0,
+            }),
+            isError: true,
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Error");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("error");
+    expect(screen.queryByText("Done")).not.toBeInTheDocument();
+  });
+
+  it("falls back to Error for unparseable bash content", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-1",
+            content: "boom",
+            isError: true,
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Error");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("error");
+  });
+
+  it("never enters the envelope branch for non-bash tools", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...baseAction,
+          result: {
+            toolCallID: "call-debug-123",
+            content: JSON.stringify({
+              denied: true,
+              kill_reason: "denied",
+              exitCode: 3,
+            }),
+            isError: true,
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText("Error")).toBeInTheDocument();
+    expect(screen.queryByText("Denied")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Exited/)).not.toBeInTheDocument();
+  });
+
+  it("ignores bare command/stdout JSON without envelope keys", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-1",
+            content: JSON.stringify({ command: "ls", stdout: "hi" }),
+            isError: true,
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText("Error")).toBeInTheDocument();
+    expect(screen.queryByText("Done")).not.toBeInTheDocument();
+  });
+});

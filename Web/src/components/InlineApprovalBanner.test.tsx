@@ -639,3 +639,82 @@ describe("InlineApprovalBanner split menu upward positioning", () => {
   });
 });
 
+describe("InlineApprovalBanner sandbox tier line", () => {
+  it("renders the verbatim tier line beneath Expected outcome", () => {
+    const onDecide = vi.fn();
+    const summary =
+      "Runs in a temporary container with no internet access. Nothing is kept after the run.";
+    const outcome = "Lists files in /tmp without changing anything";
+    const request: PermissionRequest = {
+      id: "app-tier-1",
+      toolName: "bash.exec",
+      description: "Run shell command",
+      intent: "Listing temp files",
+      assessment: {
+        severity: "moderate",
+        outcome,
+        warnings: [],
+      },
+      sandbox_summary: summary,
+      input: {
+        toolName: "bash.exec",
+        argumentsJSON: '{"command":"ls /tmp"}',
+        callID: "call-tier-1",
+      },
+      suggestedDurations: ["thisTime"],
+    };
+
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    expect(screen.getByText(outcome)).toBeInTheDocument();
+    const tier = screen.getByTestId("bash-tier-line");
+    expect(tier.textContent).toBe(summary);
+    const outcomeLabel = screen.getByText(/Expected outcome:/);
+    expect(
+      Boolean(
+        outcomeLabel.compareDocumentPosition(tier) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+  });
+
+  it("renders nothing when the sandbox summary is absent", () => {
+    const onDecide = vi.fn();
+    const outcome = "Writes updated environment variables to .env";
+    const request: PermissionRequest = {
+      id: "app-tier-2",
+      toolName: "files.write",
+      description: "Write files on disk",
+      intent: "Updating deployment config",
+      assessment: {
+        severity: "moderate",
+        outcome,
+        warnings: [],
+      },
+      input: {
+        toolName: "files.write",
+        argumentsJSON: '{"path":".env"}',
+        callID: "call-tier-2",
+      },
+      suggestedDurations: ["thisTime"],
+    };
+
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    expect(screen.getByText(outcome)).toBeInTheDocument();
+    expect(screen.queryByTestId("bash-tier-line")).not.toBeInTheDocument();
+  });
+});
+

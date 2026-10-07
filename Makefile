@@ -69,12 +69,14 @@ build-swift: version
 
 test: test-web test-swift
 
+test-web: export RUNEWEAVER_HERMETIC_TESTS=1
 test-web:
 	@test -d Web/node_modules || $(MAKE) setup-web
-	cd Web && VITEST_SKIP_INSTALL_CHECKS=1 npm test
+	cd Web && RUNEWEAVER_HERMETIC_TESTS=1 VITEST_SKIP_INSTALL_CHECKS=1 npm test
 
+test-swift: export RUNEWEAVER_HERMETIC_TESTS=1
 test-swift: version
-	swift test
+	RUNEWEAVER_HERMETIC_TESTS=1 swift test
 
 lint: lint-web lint-swift
 

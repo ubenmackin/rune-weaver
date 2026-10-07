@@ -580,6 +580,7 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
     }
     if hasWorkspacePatch {
         await context.workspaceStore.updateConfig(config.workspace)
+        await context.permissionGate.updateWorkspaceRoot(context.workspaceStore.root())
     }
     let live = context.bashFilesSnapshot()
     if hasFilesPatch {

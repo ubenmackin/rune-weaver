@@ -163,6 +163,12 @@ public enum ServerPaths {
     public static let workspaceTmp = "tmp"
     /// Temp prune subpath under `/workspace/tmp`.
     public static let workspacePrune = "prune"
+    /// Workspace machine subpath under `/workspace`.
+    public static let workspaceMachine = "machine"
+    /// Machine stop subpath under `/workspace/machine`.
+    public static let workspaceMachineStop = "stop"
+    /// Machine recycle subpath under `/workspace/machine`.
+    public static let workspaceMachineRecycle = "recycle"
     /// Hash-pinned agent script registry group.
     /// Kebab spelling matches the multi-word route convention (`tool-actions`,
     /// `review-status`, `live-accept`) rather than the single `tool_cancel`
@@ -1138,12 +1144,14 @@ extension ApprovalsResponse {
     /// - Parameters:
     ///   - request: Approval request carrying bash arguments.
     ///   - bashConfig: Live bash policy owning tier plus network defaults.
+    ///   - workspaceRoot: Workspace root execution resolves against, or nil for the production root.
     /// - Returns: Shared summary for bash requests, or nil otherwise.
     public static func bashSandboxSummary(
         for request: PermissionRequest,
-        bashConfig: BashConfig
+        bashConfig: BashConfig,
+        workspaceRoot: URL? = nil
     ) -> String? {
-        ApprovalQueue.bashSandboxSummary(for: request, bashConfig: bashConfig)
+        ApprovalQueue.bashSandboxSummary(for: request, bashConfig: bashConfig, workspaceRoot: workspaceRoot)
     }
 }
 

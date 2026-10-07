@@ -27,6 +27,9 @@ import Vapor
 func registerWorkspaceRoutes(_ app: Application) {
     registerWorkspaceUsageRoute(app)
     registerWorkspacePruneRoute(app)
+    registerWorkspaceMachineStatusRoute(app)
+    registerWorkspaceMachineStopRoute(app)
+    registerWorkspaceMachineRecycleRoute(app)
     registerAgentToolListRoute(app)
     registerAgentToolPromoteRoute(app)
     registerAgentToolPatchRoute(app)
@@ -84,6 +87,81 @@ private func registerWorkspacePruneRoute(_ app: Application) {
         } catch {
             throw Abort(.internalServerError, reason: error.localizedDescription)
         }
+    }
+}
+
+// MARK: - Workspace machine
+
+/// Reports machine lifecycle state for dashboard control.
+///
+/// A missing machine reads as exists false rather than an error, so a fresh
+/// install renders an honest empty state.
+/// - Parameter app: Application receiving the route.
+private func registerWorkspaceMachineStatusRoute(_ app: Application) {
+    app.get(
+        PathComponent.constant(ServerPaths.workspace),
+        PathComponent.constant(ServerPaths.workspaceMachine)
+    ) { req async -> WorkspaceMachineResponse in
+        let context = req.application.runeWeaver
+        let root = await context.workspaceStore.root()
+        let networkDenied = !context.bashConfig.allowNetwork
+        let status = await MachineScopedRunner.machineStatus(workspaceRoot: root, networkDenied: networkDenied)
+        return WorkspaceMachineResponse(
+            exists: status.exists,
+            running: status.running,
+            image: status.image,
+            configMatch: status.configMatch
+        )
+    }
+}
+
+/// Stops the machine container without removing it.
+///
+/// The entry stays listed so the next ensure restarts it without recreating;
+/// a missing machine reports exists false after the best-effort halt.
+/// - Parameter app: Application receiving the route.
+private func registerWorkspaceMachineStopRoute(_ app: Application) {
+    app.post(
+        PathComponent.constant(ServerPaths.workspace),
+        PathComponent.constant(ServerPaths.workspaceMachine),
+        PathComponent.constant(ServerPaths.workspaceMachineStop)
+    ) { req async -> WorkspaceMachineResponse in
+        await MachineScopedRunner.stopMachine()
+        let context = req.application.runeWeaver
+        let root = await context.workspaceStore.root()
+        let networkDenied = !context.bashConfig.allowNetwork
+        let status = await MachineScopedRunner.machineStatus(workspaceRoot: root, networkDenied: networkDenied)
+        return WorkspaceMachineResponse(
+            exists: status.exists,
+            running: status.running,
+            image: status.image,
+            configMatch: status.configMatch
+        )
+    }
+}
+
+/// Stops plus removes the machine container so the next ensure recreates it.
+///
+/// Removal follows the halt so a running entry never half-deletes; a missing
+/// machine reports exists false after the best-effort remove.
+/// - Parameter app: Application receiving the route.
+private func registerWorkspaceMachineRecycleRoute(_ app: Application) {
+    app.post(
+        PathComponent.constant(ServerPaths.workspace),
+        PathComponent.constant(ServerPaths.workspaceMachine),
+        PathComponent.constant(ServerPaths.workspaceMachineRecycle)
+    ) { req async -> WorkspaceMachineResponse in
+        await MachineScopedRunner.recycleMachine()
+        let context = req.application.runeWeaver
+        let root = await context.workspaceStore.root()
+        let networkDenied = !context.bashConfig.allowNetwork
+        let status = await MachineScopedRunner.machineStatus(workspaceRoot: root, networkDenied: networkDenied)
+        return WorkspaceMachineResponse(
+            exists: status.exists,
+            running: status.running,
+            image: status.image,
+            configMatch: status.configMatch
+        )
     }
 }
 

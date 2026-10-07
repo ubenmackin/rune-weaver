@@ -906,6 +906,7 @@ extension ServerContext {
         // shell turn runs; failures stay best-effort with a log because the
         // per-turn quota gate still fails closed when the directory is missing.
         let resolvedWorkspaceStore = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
+        await permissionGate.updateWorkspaceRoot(resolvedWorkspaceStore.root())
         do {
             _ = try await resolvedWorkspaceStore.ensure()
             _ = try await resolvedWorkspaceStore.pruneTmp()
@@ -1053,10 +1054,12 @@ private func installLiveApprovalHandler(
     bus: ToolBus,
     approvals: ApprovalQueue,
     hub: WSHub,
+    workspaceStore: WorkspaceStore,
     onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)?
 ) async {
     let handlerApprovals = approvals
     let handlerHub = hub
+    let handlerWorkspace = workspaceStore
     await bus.setApprovalHandler { tool, call, toolContext in
         // Two-phase filing path: file the pending request immediately with a
         // nil assessment so the inbox renders without awaiting the model, then
@@ -1064,6 +1067,8 @@ private func installLiveApprovalHandler(
         // the updated request on the identical id through the same channel
         // without re-parking, so live views replace the pending card in place.
         let owningSession = toolContext.conversationID
+        let bashSnapshot = (tool as? BashTool)?.bashConfig
+        let workspaceSnapshot = await handlerWorkspace.root()
         let request = await handlerApprovals.fileRequest(
             tool: tool,
             call: call,
@@ -1073,7 +1078,9 @@ private func installLiveApprovalHandler(
                 if let onApprovalRequested {
                     await onApprovalRequested(updated)
                 }
-            }
+            },
+            bashConfig: bashSnapshot,
+            workspaceRoot: workspaceSnapshot
         )
         await handlerHub.broadcastApproval(request)
         if let onApprovalRequested {
@@ -1165,6 +1172,7 @@ private func finalizeServerContext(
         bus: context.toolBus,
         approvals: context.approvals,
         hub: context.hub,
+        workspaceStore: context.workspaceStore,
         onApprovalRequested: onApprovalRequested
     )
     // Stored toggles win over fresh registration defaults so restarts

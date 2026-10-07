@@ -111,6 +111,7 @@ import {
   BASH_MEMORY_MIN_MB,
   BASH_PERMISSION_ACTIONS,
   BASH_SANDBOX_MODES,
+  BASH_SANDBOX_TIERS,
   BASH_TIMEOUT_MAX_SECONDS,
   BASH_TIMEOUT_MIN_SECONDS,
   DEFAULT_BASH_CONFIG,
@@ -161,18 +162,22 @@ import {
   type WorkspaceSettingsUpdate,
   checkSecretStatus,
   formatWorkspaceBytes,
+  getWorkspaceMachine,
   getWorkspaceUsage,
   isPromotableScriptPath,
   listAgentTools,
   promoteAgentTool,
   pruneWorkspaceTmp,
+  recycleWorkspaceMachine,
   runAgentTool,
   setAgentToolStatus,
   shortAgentToolHash,
+  stopWorkspaceMachine,
   validateAgentToolPromote,
   workspaceQuotaPercent,
   WORKSPACE_TOOLS_PREFIX,
   type AgentTool,
+  type WorkspaceMachineResponse,
   type WorkspaceUsageResponse,
 } from "../api";
 import {
@@ -1323,6 +1328,10 @@ export default function SettingsManager() {
   );
   const [pruningWorkspace, setPruningWorkspace] = useState(false);
   const [pendingPruneWorkspace, setPendingPruneWorkspace] = useState(false);
+  const [workspaceMachine, setWorkspaceMachine] = useState<WorkspaceMachineResponse | null>(null);
+  const [workspaceMachineLoading, setWorkspaceMachineLoading] = useState(false);
+  const [workspaceMachineError, setWorkspaceMachineError] = useState<string | null>(null);
+  const [workspaceMachineAction, setWorkspaceMachineAction] = useState<"stop" | "recycle" | null>(null);
   const [agentTools, setAgentTools] = useState<AgentTool[]>([]);
   const [agentToolsLoading, setAgentToolsLoading] = useState(false);
   const [agentToolsError, setAgentToolsError] = useState<string | null>(null);
@@ -1907,6 +1916,57 @@ export default function SettingsManager() {
       setAgentToolsLoading(false);
     }
   }, []);
+
+  const refreshWorkspaceMachine = useCallback(async () => {
+    setWorkspaceMachineLoading(true);
+    setWorkspaceMachineError(null);
+    try {
+      const status = await getWorkspaceMachine();
+      if (
+        typeof status?.exists !== "boolean" ||
+        typeof status?.running !== "boolean" ||
+        typeof status?.image !== "string"
+      ) {
+        setWorkspaceMachine(null);
+        setWorkspaceMachineError("Workspace machine returned an unexpected response; status unknown.");
+        return;
+      }
+      setWorkspaceMachine(status);
+    } catch (err) {
+      setWorkspaceMachine(null);
+      setWorkspaceMachineError(err instanceof Error ? err.message : "Failed to load workspace machine.");
+    } finally {
+      setWorkspaceMachineLoading(false);
+    }
+  }, []);
+
+  const handleStopWorkspaceMachine = async () => {
+    if (workspaceMachineAction !== null) return;
+    setWorkspaceMachineAction("stop");
+    try {
+      await stopWorkspaceMachine();
+      pushSuccessToast("Stopped workspace machine.");
+      await refreshWorkspaceMachine();
+    } catch (err) {
+      pushErrorToast(err instanceof Error ? err.message : "Failed to stop workspace machine.");
+    } finally {
+      setWorkspaceMachineAction(null);
+    }
+  };
+
+  const handleRecycleWorkspaceMachine = async () => {
+    if (workspaceMachineAction !== null) return;
+    setWorkspaceMachineAction("recycle");
+    try {
+      await recycleWorkspaceMachine();
+      pushSuccessToast("Recycled workspace machine.");
+      await refreshWorkspaceMachine();
+    } catch (err) {
+      pushErrorToast(err instanceof Error ? err.message : "Failed to recycle workspace machine.");
+    } finally {
+      setWorkspaceMachineAction(null);
+    }
+  };
 
   // Prunes expired tmp/ entries after the confirm modal. The receipt counts
   // top-level entries removed, so the toast names the count and the bars
@@ -3124,8 +3184,9 @@ export default function SettingsManager() {
     if (activeTab === "tools") {
       void refreshWorkspaceUsage();
       void refreshAgentTools();
+      void refreshWorkspaceMachine();
     }
-  }, [activeTab, refreshWorkspaceUsage, refreshAgentTools]);
+  }, [activeTab, refreshWorkspaceUsage, refreshAgentTools, refreshWorkspaceMachine]);
 
   // Clears the sticky restart flag once the saved file converges with the
   // re-anchored boot: the health poll moves live to the new boot after an
@@ -5631,6 +5692,42 @@ export default function SettingsManager() {
               ) : (
                 <p className="muted text-sm" style={{ margin: 0 }}>Workspace usage unknown.</p>
               )}
+              <div style={{ marginTop: "14px", padding: "12px", borderRadius: "8px", background: "var(--bg-secondary, #141822)", border: "1px solid var(--border-color, #2d3748)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
+                  <div>
+                    <div style={{ fontSize: "0.85rem", fontWeight: 600 }}>Workspace machine</div>
+                    <div data-testid="workspace-machine-status" style={{ fontSize: "0.82rem", color: "var(--text-secondary, #a0aec0)", marginTop: "4px" }}>
+                      {workspaceMachineLoading && !workspaceMachine
+                        ? "Loading machine status…"
+                        : workspaceMachineError
+                          ? workspaceMachineError
+                          : workspaceMachine
+                            ? `Machine exists: ${workspaceMachine.exists ? "yes" : "no"} · running: ${workspaceMachine.running ? "yes" : "no"} · image: ${workspaceMachine.image || "none"} · config: ${workspaceMachine.configMatch == null ? "unknown" : workspaceMachine.configMatch ? "match" : "mismatch"}`
+                            : "Machine status unknown."}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: "8px" }}>
+                    <button
+                      type="button"
+                      className="ghost icon-text-btn"
+                      onClick={() => void handleStopWorkspaceMachine()}
+                      disabled={workspaceMachineAction !== null}
+                    >
+                      <StopIcon size={14} />
+                      <span>{workspaceMachineAction === "stop" ? "Stopping…" : "Stop"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost icon-text-btn"
+                      onClick={() => void handleRecycleWorkspaceMachine()}
+                      disabled={workspaceMachineAction !== null}
+                    >
+                      <RefreshIcon size={14} />
+                      <span>{workspaceMachineAction === "recycle" ? "Recycling…" : "Recycle"}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
               {/* Workspace quota editors omit native min/max on purpose: range
                   enforcement lives in validateWorkspaceFields so an out-of-range
                   value surfaces the custom Invalid workspace quota banner without
@@ -8701,20 +8798,17 @@ export default function SettingsManager() {
                   setBashSaved(false);
                 }}
               >
-                {BASH_SANDBOX_MODES.map((mode) => (
-                  <option key={mode} value={mode}>
-                    {mode}
+                {BASH_SANDBOX_TIERS.map((tier) => (
+                  <option key={tier.value} value={tier.value}>
+                    {tier.label}
                   </option>
                 ))}
               </select>
               <span className="form-group-hint" data-testid="bash-sandbox-help">
                 {bashSandboxSummary(bashSandboxMode, bashAllowNetwork)}
               </span>
-              <span className="form-group-hint">
-                Tiers: {BASH_SANDBOX_MODES[0]} and {BASH_SANDBOX_MODES[1]} stay isolated —{" "}
-                {bashSandboxSummary(BASH_SANDBOX_MODES[0], false)} without network,{" "}
-                {bashSandboxSummary(BASH_SANDBOX_MODES[0], true)} with network;
-                {BASH_SANDBOX_MODES[2]} {bashSandboxSummary(BASH_SANDBOX_MODES[2], false)}
+              <span className="form-group-hint" data-testid="bash-sandbox-scope">
+                {BASH_SANDBOX_TIERS.find((tier) => tier.value === bashSandboxMode)?.scope ?? ""}
               </span>
             </div>
 
@@ -8733,7 +8827,7 @@ export default function SettingsManager() {
                 rows={4}
               />
               <span className="form-group-hint">
-                One pattern per line gating {BASH_SANDBOX_MODES[2]} execution. Empty list blocks host execution entirely.
+                One pattern per line gating {BASH_SANDBOX_TIERS.find((tier) => tier.value === "hostSeatbelt")?.label ?? "On this Mac"} execution. Empty list blocks host execution entirely.
               </span>
             </div>
 
@@ -8782,74 +8876,77 @@ export default function SettingsManager() {
               </span>
             </div>
 
-            <div className="form-group" style={{ marginTop: "16px", marginBottom: "12px" }}>
-              <label htmlFor="bash-timeout" style={{ fontSize: "0.82rem" }}>Timeout (seconds)</label>
-              <input
-                id="bash-timeout"
-                type="number"
-                min={BASH_TIMEOUT_MIN_SECONDS}
-                max={BASH_TIMEOUT_MAX_SECONDS}
-                step={1}
-                className="input-field"
-                value={bashTimeoutSeconds}
-                onChange={(e) => {
-                  setBashTimeoutSeconds(
-                    e.target.value === "" ? "" : Number(e.target.value)
-                  );
-                  setBashSaved(false);
-                }}
-                placeholder="30"
-              />
-              <span className="form-group-hint">
-                Default execution timeout in seconds (1 to 3600).
-              </span>
-            </div>
+            <details data-testid="bash-advanced-details" style={{ marginTop: "16px", marginBottom: "12px" }}>
+              <summary style={{ cursor: "pointer", fontSize: "0.82rem" }}>Advanced</summary>
+              <div className="form-group" style={{ marginTop: "12px", marginBottom: "12px" }}>
+                <label htmlFor="bash-timeout" style={{ fontSize: "0.82rem" }}>Timeout (seconds)</label>
+                <input
+                  id="bash-timeout"
+                  type="number"
+                  min={BASH_TIMEOUT_MIN_SECONDS}
+                  max={BASH_TIMEOUT_MAX_SECONDS}
+                  step={1}
+                  className="input-field"
+                  value={bashTimeoutSeconds}
+                  onChange={(e) => {
+                    setBashTimeoutSeconds(
+                      e.target.value === "" ? "" : Number(e.target.value)
+                    );
+                    setBashSaved(false);
+                  }}
+                  placeholder="30"
+                />
+                <span className="form-group-hint">
+                  Default execution timeout in seconds (1 to 3600).
+                </span>
+              </div>
 
-            <div className="form-group" style={{ marginBottom: "12px" }}>
-              <label htmlFor="bash-cpu-seconds" style={{ fontSize: "0.82rem" }}>CPU seconds</label>
-              <input
-                id="bash-cpu-seconds"
-                type="number"
-                min={BASH_CPU_MIN_SECONDS}
-                max={BASH_CPU_MAX_SECONDS}
-                step={1}
-                className="input-field"
-                value={bashCpuSeconds}
-                onChange={(e) => {
-                  setBashCpuSeconds(
-                    e.target.value === "" ? "" : Number(e.target.value)
-                  );
-                  setBashSaved(false);
-                }}
-                placeholder="120"
-              />
-              <span className="form-group-hint">
-                CPU time budget in seconds; wall-clock may exceed CPU time for sleeping processes.
-              </span>
-            </div>
+              <div className="form-group" style={{ marginBottom: "12px" }}>
+                <label htmlFor="bash-cpu-seconds" style={{ fontSize: "0.82rem" }}>CPU seconds</label>
+                <input
+                  id="bash-cpu-seconds"
+                  type="number"
+                  min={BASH_CPU_MIN_SECONDS}
+                  max={BASH_CPU_MAX_SECONDS}
+                  step={1}
+                  className="input-field"
+                  value={bashCpuSeconds}
+                  onChange={(e) => {
+                    setBashCpuSeconds(
+                      e.target.value === "" ? "" : Number(e.target.value)
+                    );
+                    setBashSaved(false);
+                  }}
+                  placeholder="120"
+                />
+                <span className="form-group-hint">
+                  CPU time budget in seconds; wall-clock may exceed CPU time for sleeping processes.
+                </span>
+              </div>
 
-            <div className="form-group" style={{ marginBottom: "12px" }}>
-              <label htmlFor="bash-memory-mb" style={{ fontSize: "0.82rem" }}>Memory (MB)</label>
-              <input
-                id="bash-memory-mb"
-                type="number"
-                min={BASH_MEMORY_MIN_MB}
-                max={BASH_MEMORY_MAX_MB}
-                step={1}
-                className="input-field"
-                value={bashMemoryMB}
-                onChange={(e) => {
-                  setBashMemoryMB(
-                    e.target.value === "" ? "" : Number(e.target.value)
-                  );
-                  setBashSaved(false);
-                }}
-                placeholder="1024"
-              />
-              <span className="form-group-hint">
-                Address-space budget in MB as a best-effort ulimit bound.
-              </span>
-            </div>
+              <div className="form-group" style={{ marginBottom: "12px" }}>
+                <label htmlFor="bash-memory-mb" style={{ fontSize: "0.82rem" }}>Memory (MB)</label>
+                <input
+                  id="bash-memory-mb"
+                  type="number"
+                  min={BASH_MEMORY_MIN_MB}
+                  max={BASH_MEMORY_MAX_MB}
+                  step={1}
+                  className="input-field"
+                  value={bashMemoryMB}
+                  onChange={(e) => {
+                    setBashMemoryMB(
+                      e.target.value === "" ? "" : Number(e.target.value)
+                    );
+                    setBashSaved(false);
+                  }}
+                  placeholder="1024"
+                />
+                <span className="form-group-hint">
+                  Address-space budget in MB as a best-effort ulimit bound.
+                </span>
+              </div>
+            </details>
 
             <div className="form-group checkbox-group">
               <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>

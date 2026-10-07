@@ -90,14 +90,13 @@ private final class ConcurrentProbeOrchestrator: OrchestratorFanOutSeam {
     }
 }
 
-/// Stub seam whose turn never yields, finishes, or reacts to cancellation, so
-/// only the timeout side of the race can settle a worker.
+/// Stub seam whose turn never returns and ignores cancellation, so only the
+/// timeout side of the race can settle a worker.
 private final class HangingFanOutOrchestrator: OrchestratorFanOutSeam {
-    /// Awaits a stream that never yields, so the turn never returns and the
-    /// timeout alone can settle the worker.
+    /// Parks on a never-resumed continuation, so the turn cannot settle on
+    /// its own and cancellation cannot end it early.
     func process(_: UserInput) async throws {
-        let stream = AsyncStream<Void> { _ in }
-        for await _ in stream {}
+        await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
     }
 }
 

@@ -67,6 +67,10 @@ public actor Orchestrator {
     private var recallBudgets: RecallBudgets
     /// Assistant persona configured for this orchestrator.
     public nonisolated let persona: PersonaConfig
+    /// Strict container registry executed turns run against.
+    /// Nil means the shared live registry; an injected registry keeps
+    /// hermetic turns reaping the same registry execution used.
+    private var strictRegistry: StrictTurnRegistry?
 
     /// Creates an orchestrator.
     public init(
@@ -84,7 +88,8 @@ public actor Orchestrator {
         securityConfig: SecurityConfig = SecurityConfig(),
         permissionGate: PermissionGate? = nil,
         recallBudgets: RecallBudgets = RecallBudgets(),
-        persona: PersonaConfig = PersonaConfig()
+        persona: PersonaConfig = PersonaConfig(),
+        strictRegistry: StrictTurnRegistry? = nil
     ) {
         self.conversationManager = conversations
         self.toolRegistry = toolBus
@@ -101,6 +106,12 @@ public actor Orchestrator {
         self.permissionGate = permissionGate
         self.recallBudgets = recallBudgets.clamped()
         self.persona = persona
+        self.strictRegistry = strictRegistry
+    }
+
+    /// Updates the strict container registry reaped at terminal turn end.
+    public func updateStrictRegistry(_ registry: StrictTurnRegistry?) {
+        self.strictRegistry = registry
     }
 
     /// Dynamically updates the maximum tool iterations allowed per turn.
@@ -187,6 +198,11 @@ public actor Orchestrator {
     /// Read-only recall budgets for tool-loop extensions.
     var budgets: RecallBudgets {
         recallBudgets
+    }
+
+    /// Strict registry executed turns run against for the turn-loop extension.
+    var strictContainerRegistry: StrictTurnRegistry? {
+        strictRegistry
     }
 
     // MARK: - Parked state mutation
@@ -557,6 +573,8 @@ extension Orchestrator {
         // could otherwise stretch one turn into an unbounded tool loop.
         let requestedIterations = input.maxToolIterations ?? self.maxToolIterations
         let effectiveMaxIterations = max(1, min(100, requestedIterations))
+        let bashSnapshot = await permissionGate?.bashConfigSnapshot()
+        let workspaceSnapshot = await permissionGate?.workspaceRootSnapshot()
         let request = TurnLoopRequest(
             workingMessages: workingMessages,
             tools: tools,
@@ -566,7 +584,10 @@ extension Orchestrator {
             systemPrompt: effectiveSystemPrompt,
             onEvent: onEvent,
             toolLimitPolicy: effectivePolicy,
-            effectiveMaxToolIterations: effectiveMaxIterations
+            effectiveMaxToolIterations: effectiveMaxIterations,
+            bashConfig: bashSnapshot,
+            workspaceRoot: workspaceSnapshot,
+            strictRegistry: strictRegistry
         )
         return (request, turnWarnings)
     }
