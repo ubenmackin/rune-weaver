@@ -5098,6 +5098,18 @@ export function installMarketplacePlugin(
   });
 }
 
+export interface SecretListResponse {
+  keys: string[];
+}
+
+export async function listSecretKeys(): Promise<string[]> {
+  const response = await fetchJson<SecretListResponse>("/settings/secrets");
+  const keys = Array.isArray(response?.keys)
+    ? response.keys.filter((entry): entry is string => typeof entry === "string")
+    : [];
+  return [...keys].sort((a, b) => a.localeCompare(b));
+}
+
 export interface SecretStatusResponse {
   status: Record<string, boolean>;
 }

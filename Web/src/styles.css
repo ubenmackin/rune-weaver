@@ -3511,6 +3511,13 @@ button:disabled {
   z-index: 10;
 }
 
+/* Policy pane footer keeps the staged-save hint left and Save right at any width. */
+section[data-testid="policy-pane"] .settings-footer {
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
 /* Shared Save presentation for Settings footers: both the Index policy form
  * and the Settings manager footer consume these classes so enabled Saves stay
  * solid theme blue in one place instead of per-component colors. `.save-button`
@@ -8231,5 +8238,33 @@ button.ghost.staged-expand-all-btn {
   .policy-binding-modal [data-testid="binding-review"] > div {
     grid-template-columns: 1fr;
   }
+}
+
+/* Step indicator drops below the subtitle so the header stacks instead of running inline. */
+.policy-binding-modal .wizard-step-indicator {
+  display: block;
+  margin-top: 4px;
+}
+
+/* Stored pill reuses the shipped success tokens so In Keychain reads like other success states. */
+.policy-binding-modal .keychain-pill-stored {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #34d399;
+}
+
+/* Missing pill stays neutral slate so Not in Keychain never reads as an error. */
+.policy-binding-modal .keychain-pill-missing {
+  background: rgba(148, 163, 184, 0.15);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  color: #cbd5e1;
+}
+
+/* Review allow-domains row wraps so the label and the uncovered count never crowd. */
+.policy-binding-modal .allow-domains-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 

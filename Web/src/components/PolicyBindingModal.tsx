@@ -370,8 +370,9 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
   const keyInputRef = useRef<HTMLInputElement | null>(null);
   const hostsInputRef = useRef<HTMLTextAreaElement | null>(null);
   const methodsFirstInputRef = useRef<HTMLInputElement | null>(null);
+  const probeMethodRef = useRef<HTMLInputElement | null>(null);
 
-  const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
 
   // Add starts empty with Any defaults; edit prefills every section from the
   // stored binding so the conjunction preview matches the row that opened it.
@@ -395,6 +396,10 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
   const [probeHost, setProbeHost] = useState("");
   const [probeMethod, setProbeMethod] = useState("GET");
   const [probePath, setProbePath] = useState("/");
+  // Committed probe inputs: typing alone never moves the verdict, only Test commits.
+  const [probeApplied, setProbeApplied] = useState({ method: "GET", host: "", path: "/" });
+  // Uncovered-hosts opt-in defaults checked so saving also covers network gaps.
+  const [allowDomainsChecked, setAllowDomainsChecked] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -405,8 +410,10 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
       keyInputRef.current?.focus();
     } else if (step === 2) {
       hostsInputRef.current?.focus();
-    } else {
+    } else if (step === 3) {
       methodsFirstInputRef.current?.focus();
+    } else {
+      probeMethodRef.current?.focus();
     }
   }, [step]);
 
@@ -574,6 +581,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
 
   // Live probe mirrors the supervisor verdict for the current draft: host,
   // method, and effective path must all match or the reason names the gate.
+  // Only committed probe inputs drive the verdict so typing alone never moves it.
   const probeDecision = useMemo(
     () =>
       previewBindingDecision(
@@ -582,12 +590,12 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
           allowedMethods: methodsForSave,
           allowedPathPrefixes: prefixesList,
         },
-        probeHost.trim() || hostsList[0] || "",
-        probeMethod.trim() || "GET",
-        probePath || "/",
+        probeApplied.host.trim() || hostsList[0] || "",
+        probeApplied.method.trim() || "GET",
+        probeApplied.path || "/",
         keyTrimmed || "KEY",
       ),
-    [hostsList, methodsForSave, prefixesList, probeHost, probeMethod, probePath, keyTrimmed],
+    [hostsList, methodsForSave, prefixesList, probeApplied, keyTrimmed],
   );
 
   const conjunctionSentence = useMemo(() => {
@@ -596,7 +604,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
     const methodsLabel = methodsForSave.length > 0 ? methodsForSave.join(", ") : "Any method";
     const prefixesLabel =
       prefixesList.length > 0 ? prefixesList.join(", ") : "Any path";
-    return `Key '${keyLabel}' will be sent iff host matches (${hostsLabel}) and method matches (${methodsLabel}) and path matches (${prefixesLabel}).`;
+    return `Key '${keyLabel}' will be sent only when host matches (${hostsLabel}) and method matches (${methodsLabel}) and path matches (${prefixesLabel}).`;
   }, [keyTrimmed, hostsList, methodsForSave, prefixesList]);
 
   const keyInKeychain = keyTrimmed ? secretStatus[keyTrimmed] === true : false;
@@ -610,23 +618,34 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
     );
   }
 
-  // Compact read-only verdict for the hosts step: same preview owner with the
-  // default GET probe against the first host and `/`, so the step needs no inputs.
-  const hostsMiniDecision = useMemo(
-    () =>
-      previewBindingDecision(
-        {
-          allowedHosts: hostsList,
-          allowedMethods: methodsForSave,
-          allowedPathPrefixes: prefixesList,
-        },
-        hostsList[0] || "",
-        "GET",
-        "/",
-        keyTrimmed || "KEY",
-      ),
-    [hostsList, methodsForSave, prefixesList, keyTrimmed],
+  // Opened binding values for Edited pills: only edit mode compares live rows.
+  const originalHostsList = useMemo(
+    () => parseHostsText(initialHostsText(props.initialBinding)),
+    [props.initialBinding],
   );
+  const originalMethodsSorted = useMemo(
+    () => [...initialMethods(props.initialBinding)].sort(),
+    [props.initialBinding],
+  );
+  const originalPrefixesList = useMemo(
+    () => parsePrefixesText(initialPrefixesText(props.initialBinding)),
+    [props.initialBinding],
+  );
+  const isEditMode = mode === "edit";
+  const keyEdited = isEditMode && keyTrimmed !== originalKey;
+  const hostsEdited =
+    isEditMode && hostsList.join("\n") !== originalHostsList.join("\n");
+  const methodsEdited =
+    isEditMode && methodsForSave.join(",") !== originalMethodsSorted.join(",");
+  const prefixesEdited =
+    isEditMode && prefixesList.join("\n") !== originalPrefixesList.join("\n");
+
+  const reviewHostsLabel =
+    hostsList.length > 0 ? hostsList.join(", ") : "no hosts (unusable)";
+  const reviewMethodsLabel =
+    methodsForSave.length > 0 ? methodsForSave.join(", ") : "Any";
+  const reviewPrefixesLabel =
+    prefixesList.length > 0 ? prefixesList.join(", ") : "Any";
 
   function handleNext() {
     if (step === 1) {
@@ -635,11 +654,14 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
     } else if (step === 2) {
       if (hostsError) return;
       setStep(3);
+    } else if (step === 3) {
+      if (methodsError || prefixesError) return;
+      setStep(4);
     }
   }
 
   function handleBack() {
-    setStep((previous) => (previous > 1 ? ((previous - 1) as 1 | 2 | 3) : previous));
+    setStep((previous) => (previous > 1 ? ((previous - 1) as 1 | 2 | 3 | 4) : previous));
   }
 
   async function handleSave() {
@@ -647,6 +669,9 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
     setSaveError(null);
     setSaving(true);
     try {
+      if (allowDomainsChecked && uncoveredHosts.length > 0 && handleAddAllowedDomains) {
+        handleAddAllowedDomains(uncoveredHosts);
+      }
       const draft: PolicyBindingDraft = {
         key: keyTrimmed,
         hosts: hostsList,
@@ -686,9 +711,9 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
             <span className="muted text-sm">
               {mode === "edit" ? "Update hosts, methods, and paths for this key." : "Pair one key with the hosts, methods, and paths it may reach."}
             </span>
-            <span className="wizard-step-indicator" data-testid="wizard-step-indicator">
-              Step {step} of 3 — {step === 1 ? "Key" : step === 2 ? "Hosts" : "Scope + Review"}
-            </span>
+            <div className="wizard-step-indicator" data-testid="wizard-step-indicator">
+              Step {step} of 4 — {step === 1 ? "Key" : step === 2 ? "Hosts" : step === 3 ? "Scope" : "Review"}
+            </div>
           </div>
           <button
             type="button"
@@ -703,7 +728,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
         <div className="wizard-progress-track" data-testid="wizard-progress">
           <div
             className="wizard-progress-bar"
-            style={{ width: `${(step / 3) * 100}%` }}
+            style={{ width: `${(step / 4) * 100}%` }}
           />
         </div>
 
@@ -721,7 +746,6 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
             {step === 1 ? (
               <div className="wizard-step" data-testid="wizard-step-1">
                 <section data-testid="key-section">
-              <h4>Key</h4>
               <div className="form-group">
                 <label htmlFor="binding-key-input">Key</label>
                 <input
@@ -773,7 +797,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
               <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "6px" }}>
                 <span
                   data-testid="keychain-badge"
-                  className="status-pill"
+                  className={keyInKeychain ? "status-pill keychain-pill-stored" : "status-pill keychain-pill-missing"}
                   aria-live="polite"
                 >
                   {keyInKeychain ? "In Keychain" : "Not in Keychain"}
@@ -795,7 +819,6 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
             {step === 2 ? (
               <div className="wizard-step" data-testid="wizard-step-2">
                 <section data-testid="hosts-section">
-              <h4>Hosts</h4>
               <div className="form-group">
                 <label htmlFor="binding-hosts-input">Hosts, one per line</label>
                 <textarea
@@ -843,13 +866,6 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                     </span>
                   )}
                 </div>
-                <div data-testid="hosts-probe-mini" aria-live="polite" className="muted text-sm">
-                  {hostsMiniDecision === null ? (
-                    <span>Yes — the secret would be sent.</span>
-                  ) : (
-                    <span>No — {hostsMiniDecision}</span>
-                  )}
-                </div>
               </div>
             ) : null}
 
@@ -878,15 +894,13 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                   <span>Select methods</span>
                 </label>
               </div>
+              {methodsMode === "select" ? (
               <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "8px" }}>
                 {BINDING_METHODS.map((method) => (
                   <label key={method} className="checkbox-row">
                     <input
                       type="checkbox"
-                      checked={
-                        methodsMode === "select" ? selectedMethods.includes(method) : false
-                      }
-                      disabled={methodsMode === "any"}
+                      checked={selectedMethods.includes(method)}
                       onChange={() => toggleMethod(method)}
                       aria-label={method}
                     />
@@ -894,6 +908,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                   </label>
                 ))}
               </div>
+              ) : null}
               {methodsError ? (
                 <div className="error-banner" data-testid="methods-error">
                   {methodsError}
@@ -956,89 +971,157 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                 creates a cross-product: each prefix is checked on every host.
               </div>
             ) : null}
+              </div>
+            ) : null}
 
-          <div data-testid="binding-review" style={{ marginTop: "16px" }}>
-            <h4>Review</h4>
-            <p className="muted text-sm" data-testid="binding-conjunction">
-              {conjunctionSentence}
-            </p>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr 1fr",
-                gap: "8px",
-              }}
-            >
-              <div className="form-group">
-                <label htmlFor="binding-probe-method">Probe method</label>
-                <input
-                  id="binding-probe-method"
-                  type="text"
-                  className="input-field"
-                  aria-label="Probe method"
-                  value={probeMethod}
-                  onChange={(event) => setProbeMethod(event.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="binding-probe-host">Probe host</label>
-                <input
-                  id="binding-probe-host"
-                  type="text"
-                  className="input-field"
-                  aria-label="Probe host"
-                  placeholder={hostsList[0] ?? "api.example.com"}
-                  value={probeHost}
-                  onChange={(event) => setProbeHost(event.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="binding-probe-path">Probe path</label>
-                <input
-                  id="binding-probe-path"
-                  type="text"
-                  className="input-field"
-                  aria-label="Probe path"
-                  value={probePath}
-                  onChange={(event) => setProbePath(event.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </div>
-            </div>
-            <div data-testid="probe-result" aria-live="polite" className="muted text-sm">
-              {probeDecision === null ? (
-                <span>Yes — the secret would be sent.</span>
-              ) : (
-                <span>No — {probeDecision}</span>
-              )}
-            </div>
-            <div data-testid="network-coverage" className="muted text-sm" style={{ marginTop: "8px" }}>
-              {hostsList.length === 0 ? (
-                <span>Add hosts to check network coverage.</span>
-              ) : uncoveredHosts.length === 0 ? (
-                <span>All binding hosts are covered by Allowed Domains.</span>
-              ) : (
-                <span>
-                  {uncoveredHosts.length} of {hostsList.length} {hostsList.length === 1 ? "host is" : "hosts are"} not in
-                  Allowed Domains: {uncoveredHosts.join(", ")}.{" "}
-                  {handleAddAllowedDomains ? (
+            {step === 4 ? (
+              <div className="wizard-step" data-testid="wizard-step-4">
+                <h4>Review and Test</h4>
+                <div data-testid="binding-review">
+                  <ul data-testid="review-summary" style={{ margin: "8px 0", paddingLeft: "18px" }}>
+                    <li data-testid="review-key">
+                      <span>Key: {keyTrimmed || "…"}</span>
+                      {keyEdited ? (
+                        <span data-testid="edited-tag" className="edited-tag" style={{ marginLeft: "8px" }}>
+                          Edited
+                        </span>
+                      ) : null}
+                    </li>
+                    <li data-testid="review-hosts">
+                      <span>Hosts: {reviewHostsLabel}</span>
+                      {hostsEdited ? (
+                        <span data-testid="edited-tag" className="edited-tag" style={{ marginLeft: "8px" }}>
+                          Edited
+                        </span>
+                      ) : null}
+                    </li>
+                    <li data-testid="review-methods">
+                      <span>Methods: {reviewMethodsLabel}</span>
+                      {methodsEdited ? (
+                        <span data-testid="edited-tag" className="edited-tag" style={{ marginLeft: "8px" }}>
+                          Edited
+                        </span>
+                      ) : null}
+                    </li>
+                    <li data-testid="review-paths">
+                      <span>Paths: {reviewPrefixesLabel}</span>
+                      {prefixesEdited ? (
+                        <span data-testid="edited-tag" className="edited-tag" style={{ marginLeft: "8px" }}>
+                          Edited
+                        </span>
+                      ) : null}
+                    </li>
+                  </ul>
+                  <p className="muted text-sm" data-testid="binding-conjunction">
+                    {conjunctionSentence}
+                  </p>
+                  <div data-testid="probe-test">
+                    <p data-testid="probe-helper" className="muted text-sm">
+                      Enter a method, host, and path, then click Test to check whether the secret would be sent.
+                    </p>
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "1fr 1fr 1fr",
+                        gap: "8px",
+                      }}
+                    >
+                      <div className="form-group">
+                        <label htmlFor="binding-probe-method">Probe method</label>
+                        <input
+                          ref={probeMethodRef}
+                          id="binding-probe-method"
+                          type="text"
+                          className="input-field"
+                          aria-label="Probe method"
+                          value={probeMethod}
+                          onChange={(event) => setProbeMethod(event.target.value)}
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label htmlFor="binding-probe-host">Probe host</label>
+                        <input
+                          id="binding-probe-host"
+                          type="text"
+                          className="input-field"
+                          aria-label="Probe host"
+                          placeholder={hostsList[0] ?? "api.example.com"}
+                          value={probeHost}
+                          onChange={(event) => setProbeHost(event.target.value)}
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label htmlFor="binding-probe-path">Probe path</label>
+                        <input
+                          id="binding-probe-path"
+                          type="text"
+                          className="input-field"
+                          aria-label="Probe path"
+                          value={probePath}
+                          onChange={(event) => setProbePath(event.target.value)}
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                      </div>
+                    </div>
                     <button
                       type="button"
                       className="ghost btn-sm"
-                      onClick={() => handleAddAllowedDomains(uncoveredHosts)}
+                      data-testid="probe-run"
+                      onClick={() =>
+                        setProbeApplied({
+                          method: probeMethod.trim() || "GET",
+                          host: probeHost.trim() || hostsList[0] || "",
+                          path: probePath || "/",
+                        })
+                      }
                     >
-                      Also add to Allowed Domains
+                      Test
                     </button>
+                    <div data-testid="probe-result" aria-live="polite" className="muted text-sm">
+                      {probeDecision === null ? (
+                        <span>Yes — the secret would be sent.</span>
+                      ) : (
+                        <span>No — {probeDecision}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div data-testid="network-coverage" className="muted text-sm" style={{ marginTop: "8px" }}>
+                    {hostsList.length === 0 ? (
+                      <span>Add hosts to check network coverage.</span>
+                    ) : uncoveredHosts.length === 0 ? (
+                      <span>All binding hosts are covered by Allowed Domains.</span>
+                    ) : (
+                      <span>
+                        {uncoveredHosts.length} of {hostsList.length} {hostsList.length === 1 ? "host is" : "hosts are"} not in
+                        Allowed Domains: {uncoveredHosts.join(", ")}.
+                      </span>
+                    )}
+                  </div>
+                  {uncoveredHosts.length > 0 && handleAddAllowedDomains ? (
+                    <label className="checkbox-row allow-domains-check">
+                      <input
+                        type="checkbox"
+                        data-testid="allow-domains-checkbox"
+                        checked={allowDomainsChecked}
+                        onChange={(event) => setAllowDomainsChecked(event.target.checked)}
+                        aria-label={`Also add ${uncoveredHosts.length} uncovered ${uncoveredHosts.length === 1 ? "host" : "hosts"} to Allowed Domains`}
+                      />
+                      <span>
+                        Also add {uncoveredHosts.length} uncovered {uncoveredHosts.length === 1 ? "host" : "hosts"} to Allowed Domains
+                      </span>
+                    </label>
                   ) : null}
-                </span>
-              )}
-            </div>
-          </div>
+                  {uncoveredHosts.length > 0 && !allowDomainsChecked ? (
+                    <div className="muted text-sm">
+                      Uncovered hosts will stay blocked by Allowed Domains until added.
+                    </div>
+                  ) : null}
+                </div>
               </div>
             ) : null}
           </div>
@@ -1058,13 +1141,20 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
           ) : (
             <div />
           )}
-          {step < 3 ? (
+          {step < 4 ? (
             <button
               type="button"
               className="primary"
               data-testid="wizard-next"
               onClick={handleNext}
-              disabled={step === 1 ? Boolean(keyError) || saving : Boolean(hostsError) || saving}
+              disabled={
+                saving ||
+                (step === 1
+                  ? Boolean(keyError)
+                  : step === 2
+                    ? Boolean(hostsError)
+                    : Boolean(methodsError || prefixesError))
+              }
             >
               Continue
             </button>

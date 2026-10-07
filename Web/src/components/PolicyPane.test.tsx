@@ -5,7 +5,7 @@
 // into inline editors, persisting the DTO without raw text, and keeping the
 // saved banner honest across edits with no restart promise ever shown.
 // Scope: Pane fetch and save shapes, network editors, the searchable
-// credentials list, the add/edit modal with its live probe preview, delete
+// credentials list, the add/edit modal with its Test-committed probe preview, delete
 // confirmation, and the per-row Keychain secrets entry (Set, Update, guarded
 // Delete) with its prefix-tolerant keys. Engine invariant math and TOML
 // serialization stay with their owner suites.
@@ -237,7 +237,9 @@ describe("PolicyPane", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("policy-saved")).toBeNull();
     });
-    expect(screen.getByText("Unsaved changes.")).toBeDefined();
+    expect(screen.getByTestId("policy-save-hint").textContent).toContain(
+      "Unsaved changes"
+    );
   });
 
   it("surfaces invalid domain shapes inline and gates Save", async () => {
@@ -278,11 +280,13 @@ describe("PolicyPane", () => {
     await waitFor(() => {
       expect(screen.getByTestId("credential-row")).toBeDefined();
     });
-    expect(screen.queryByText("Unsaved changes.")).toBeNull();
+    expect(screen.getByTestId("policy-save-hint").textContent).not.toContain(
+      "Unsaved changes"
+    );
     expect(screen.queryByTestId("policy-saved")).toBeNull();
   });
 
-  it("opens the binding modal with a live probe preview of the supervisor verdict", async () => {
+  it("opens the binding modal with a Test-committed probe preview of the supervisor verdict", async () => {
     stubPaneFetch(() => jsonResponse(panePolicyPayload));
     const user = userEvent.setup();
     render(<PolicyPane />);
@@ -297,6 +301,14 @@ describe("PolicyPane", () => {
     );
     await user.click(within(modal).getByTestId("wizard-next"));
     await user.click(within(modal).getByTestId("wizard-next"));
+    await user.click(within(modal).getByTestId("wizard-next"));
+    await waitFor(() => {
+      expect(within(modal).getByTestId("binding-review")).toBeDefined();
+    });
+    expect(within(modal).getByTestId("wizard-step-indicator").textContent).toContain(
+      "Step 4 of 4"
+    );
+    expect(within(modal).getByTestId("probe-helper")).toBeDefined();
     // Default probe routes outside the /repos prefix, so it refuses with the
     // path gate named.
     await waitFor(() => {
@@ -304,11 +316,13 @@ describe("PolicyPane", () => {
     });
     expect(within(modal).getByTestId("probe-result").textContent).toContain("/repos");
 
-    // Steering the probe inside the prefix flips the verdict without a
-    // network round trip, proving the preview mirrors the binding gate.
+    // Steering the probe inside the prefix flips the verdict only after Test,
+    // proving the preview commits instead of following keystrokes.
     const probePath = within(modal).getByLabelText("Probe path") as HTMLInputElement;
     await user.clear(probePath);
     await user.type(probePath, "/repos/owner/repo");
+    expect(within(modal).getByTestId("probe-result").textContent).toContain("No —");
+    await user.click(within(modal).getByTestId("probe-run"));
     await waitFor(() => {
       expect(within(modal).getByTestId("probe-result").textContent).toContain(
         "Yes — the secret would be sent."
@@ -319,6 +333,10 @@ describe("PolicyPane", () => {
     const probeHost = within(modal).getByLabelText("Probe host") as HTMLInputElement;
     await user.clear(probeHost);
     await user.type(probeHost, "evil-collector.io");
+    expect(within(modal).getByTestId("probe-result").textContent).toContain(
+      "Yes — the secret would be sent."
+    );
+    await user.click(within(modal).getByTestId("probe-run"));
     await waitFor(() => {
       expect(within(modal).getByTestId("probe-result").textContent).toContain("No —");
     });
@@ -343,11 +361,18 @@ describe("PolicyPane", () => {
     const modal = await screen.findByTestId("policy-binding-modal");
 
     // The fresh modal probes clean: Any method plus Any path on a listed host
-    // authorizes, so the preview starts affirmative.
+    // authorizes, so the Review preview starts affirmative.
     await user.type(within(modal).getByLabelText("Key"), "NEW_KEY");
     await user.click(within(modal).getByTestId("wizard-next"));
     await user.type(within(modal).getByLabelText("Hosts"), "api.example.com");
     await user.click(within(modal).getByTestId("wizard-next"));
+    await user.click(within(modal).getByTestId("wizard-next"));
+    await waitFor(() => {
+      expect(within(modal).getByTestId("binding-review")).toBeDefined();
+    });
+    expect(within(modal).getByTestId("wizard-step-indicator").textContent).toContain(
+      "Step 4 of 4"
+    );
     await waitFor(() => {
       expect(within(modal).getByTestId("probe-result").textContent).toContain(
         "Yes — the secret would be sent."
@@ -361,7 +386,9 @@ describe("PolicyPane", () => {
       expect(screen.queryByTestId("policy-binding-modal")).toBeNull();
     });
     expect(screen.getByText("NEW_KEY")).toBeDefined();
-    expect(screen.getByText("Unsaved changes.")).toBeDefined();
+    expect(screen.getByTestId("policy-save-hint").textContent).toContain(
+      "Unsaved changes"
+    );
     expect(putCount).toBe(0);
     const policyPuts = fetchMock.mock.calls.filter(
       ([url, init]) =>
@@ -398,6 +425,13 @@ describe("PolicyPane", () => {
     await user.click(within(modal).getByTestId("wizard-next"));
     await user.type(within(modal).getByLabelText("Hosts"), "api.example.com");
     await user.click(within(modal).getByTestId("wizard-next"));
+    await user.click(within(modal).getByTestId("wizard-next"));
+    await waitFor(() => {
+      expect(within(modal).getByTestId("binding-review")).toBeDefined();
+    });
+    expect(within(modal).getByTestId("wizard-step-indicator").textContent).toContain(
+      "Step 4 of 4"
+    );
     await user.click(within(modal).getByRole("button", { name: "Save binding" }));
     await waitFor(() => {
       expect(secretProbes()).toBe(2);
@@ -409,6 +443,10 @@ describe("PolicyPane", () => {
       ...panePolicyPayload,
       policy: {
         ...panePolicyPayload.policy,
+        network: {
+          ...panePolicyPayload.policy.network,
+          allowed_domains: ["2001:db8::1"],
+        },
         credentials: {
           IPV6_KEY: {
             allowed_hosts: ["[2001:db8::1]"],
@@ -423,7 +461,7 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
-    // The server accepts this binding, so the pane gate must too: no field
+    // Network stays unbracketed while the binding stays bracketed: no field
     // error and Save stays enabled for the loaded file.
     expect(screen.queryByTestId("policy-field-errors")).toBeNull();
     expect((screen.getByTestId("policy-save") as HTMLButtonElement).disabled).toBe(false);
@@ -432,9 +470,16 @@ describe("PolicyPane", () => {
     const modal = await screen.findByTestId("policy-binding-modal");
     await user.click(within(modal).getByTestId("wizard-next"));
     // The bracket branch is reachable: the host line reads clean and the modal
-    // still offers Save changes for the existing binding.
+    // still offers Save changes from Review for the existing binding.
     expect(within(modal).queryByTestId("hosts-errors")).toBeNull();
     await user.click(within(modal).getByTestId("wizard-next"));
+    await user.click(within(modal).getByTestId("wizard-next"));
+    await waitFor(() => {
+      expect(within(modal).getByTestId("binding-review")).toBeDefined();
+    });
+    expect(within(modal).getByTestId("wizard-step-indicator").textContent).toContain(
+      "Step 4 of 4"
+    );
     expect(
       (within(modal).getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled
     ).toBe(false);
@@ -455,8 +500,12 @@ describe("PolicyPane", () => {
     );
     expect(putCalls).toHaveLength(1);
     const sent = JSON.parse((putCalls[0][1] as RequestInit).body as string) as {
-      policy: { credentials: Record<string, { allowed_hosts: string[] }> };
+      policy: {
+        network: { allowed_domains: string[] };
+        credentials: Record<string, { allowed_hosts: string[] }>;
+      };
     };
+    expect(sent.policy.network.allowed_domains).toEqual(["2001:db8::1"]);
     expect(sent.policy.credentials.IPV6_KEY.allowed_hosts).toEqual(["[2001:db8::1]"]);
   });
 
@@ -517,6 +566,13 @@ describe("PolicyPane", () => {
     expect(within(modal).queryByTestId("key-error")).toBeNull();
     await user.click(within(modal).getByTestId("wizard-next"));
     await user.click(within(modal).getByTestId("wizard-next"));
+    await user.click(within(modal).getByTestId("wizard-next"));
+    await waitFor(() => {
+      expect(within(modal).getByTestId("binding-review")).toBeDefined();
+    });
+    expect(within(modal).getByTestId("wizard-step-indicator").textContent).toContain(
+      "Step 4 of 4"
+    );
     expect(
       (within(modal).getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled
     ).toBe(false);
@@ -549,7 +605,9 @@ describe("PolicyPane", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("credential-row")).toBeNull();
     });
-    expect(screen.getByText("Unsaved changes.")).toBeDefined();
+    expect(screen.getByTestId("policy-save-hint").textContent).toContain(
+      "Unsaved changes"
+    );
   });
 
   it("carries the owner bearer on policy load and save", async () => {
@@ -627,6 +685,10 @@ describe("PolicyPane", () => {
     // always carries at least two colons and never reads as a port suffix.
     expect(isValidDomainLine("::1")).toBe(true);
     expect(isValidDomainLine("2001:db8::1")).toBe(true);
+    // Brackets stay binding-only: network lines refuse them while the binding
+    // modal accepts the same literal bracketed.
+    expect(isValidDomainLine("[2001:db8::1]")).toBe(false);
+    expect(isValidDomainLine("[::1]")).toBe(false);
   });
 
   it("maintains domain validation parity with server SettingsRouteTests", () => {
@@ -655,6 +717,8 @@ describe("PolicyPane", () => {
       "foo#bar",
       "foo bar",
       "foo,bar",
+      "[2001:db8::1]",
+      "[::1]",
     ];
     for (const host of rejected) {
       expect(isValidDomainLine(host)).toBe(false);
@@ -1243,6 +1307,13 @@ describe("PolicyPane", () => {
     await user.click(within(modal).getByTestId("wizard-next"));
     await user.type(within(modal).getByLabelText("Hosts"), "api.example.com");
     await user.click(within(modal).getByTestId("wizard-next"));
+    await user.click(within(modal).getByTestId("wizard-next"));
+    await waitFor(() => {
+      expect(within(modal).getByTestId("binding-review")).toBeDefined();
+    });
+    expect(within(modal).getByTestId("wizard-step-indicator").textContent).toContain(
+      "Step 4 of 4"
+    );
     await user.click(within(modal).getByRole("button", { name: "Save binding" }));
     await waitFor(() => {
       expect(screen.queryByTestId("policy-binding-modal")).toBeNull();

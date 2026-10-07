@@ -255,8 +255,20 @@ private func registerSettingsSecretsRoutes(_ settings: RoutesBuilder) {
     // Responses never cache and never carry secret bytes: store and delete
     // answer `204 No Content` with no body — the same bodyless-success shape
     // every other side-effect route uses — while status returns only an
-    // existence map.
+    // existence map and list returns only sorted names.
     let secretsGroup = settings.grouped(PathComponent.constant(ServerPaths.secrets))
+
+    secretsGroup.get { req async throws -> Response in
+        let secrets = req.application.runeWeaver.secrets ?? SecretsManager()
+        do {
+            let keys = try await secrets.listKeys()
+            let response = try await SecretListResponse(keys: keys).encodeResponse(for: req)
+            response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store, private")
+            return response
+        } catch {
+            throw Abort(.internalServerError, reason: "Failed to list secrets from Keychain: \(error.localizedDescription)")
+        }
+    }
 
     secretsGroup.post { req async throws -> Response in
         let body = try req.content.decode(StoreSecretRequest.self)

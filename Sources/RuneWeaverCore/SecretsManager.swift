@@ -160,6 +160,60 @@ public actor SecretsManager {
         fallbackStore.remove(keyed: key, service: namespace)
     }
 
+    /// Lists stored key names for the service namespace without reading values.
+    ///
+    /// Queries attributes only so no secret bytes are loaded, then returns the
+    /// sorted account names capped to the listing bound. A Keychain failure
+    /// throws without attaching any stored value.
+    /// - Parameter service: Keychain namespace override.
+    /// - Returns: Sorted key names, at most the listing bound.
+    public func listKeys(service: String? = nil) throws -> [String] {
+        let namespace = service ?? self.service
+        #if canImport(Security)
+            if !inMemory {
+                // Attributes-only fetch: no value data requested, so matching
+                // never loads secret bytes into this process.
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: namespace,
+                    kSecReturnAttributes as String: true,
+                    kSecMatchLimit as String: kSecMatchLimitAll
+                ]
+                var result: CFTypeRef?
+                let status = SecItemCopyMatching(query as CFDictionary, &result)
+                if status == errSecItemNotFound {
+                    return []
+                }
+                guard status == errSecSuccess else {
+                    throw SecretsError.keychainError(status: status)
+                }
+                var names: [String] = []
+                if let items = result as? [[String: Any]] {
+                    for item in items {
+                        if let account = item[kSecAttrAccount as String] as? String, !account.isEmpty {
+                            names.append(account)
+                        }
+                    }
+                } else if let item = result as? [String: Any],
+                          let account = item[kSecAttrAccount as String] as? String,
+                          !account.isEmpty
+                {
+                    names.append(account)
+                }
+                names.sort()
+                if names.count > Self.maxListKeys {
+                    names = Array(names.prefix(Self.maxListKeys))
+                }
+                return names
+            }
+        #endif
+        let names = fallbackStore.keys(for: namespace).sorted()
+        if names.count > Self.maxListKeys {
+            return Array(names.prefix(Self.maxListKeys))
+        }
+        return names
+    }
+
     // MARK: - Surrogates (agent-visible references)
 
     /// Prefix marking an agent-visible surrogate for a stored secret.
@@ -271,6 +325,11 @@ public actor SecretsManager {
         }
         return keys
     }
+
+    /// Maximum key names returned by a single listing.
+    ///
+    /// Bounds enumeration so one request cannot stream an unbounded Keychain.
+    public static let maxListKeys = 2000
 
     /// Maximum secret key characters accepted as a surrogate name.
     ///
@@ -475,5 +534,19 @@ private struct FallbackStore: Sendable {
 
     mutating func remove(keyed key: String, service namespace: String) {
         values.removeValue(forKey: "\(namespace)/\(key)")
+    }
+
+    /// Key names stored under one namespace.
+    func keys(for namespace: String) -> [String] {
+        let prefix = "\(namespace)/"
+        var names: [String] = []
+        names.reserveCapacity(values.count)
+        for full in values.keys where full.hasPrefix(prefix) {
+            let key = String(full.dropFirst(prefix.count))
+            if !key.isEmpty {
+                names.append(key)
+            }
+        }
+        return names
     }
 }
