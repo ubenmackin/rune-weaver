@@ -10,12 +10,18 @@ import os
 @testable import RuneWeaverTools
 import Testing
 
+enum MockCalendarIndexError: Error, Sendable, Equatable {
+    case chunkFailed
+}
+
 final class MockCalendarIndexStore: CalendarStore, Sendable {
     struct State: Sendable {
         var status: CalendarAuthorizationStatus
         var calendars: [StoreCalendar]
         var events: [StoreEvent]
         var lastPredicate: CalendarFetchPredicate?
+        var predicates: [CalendarFetchPredicate] = []
+        var failAtCall: Int?
     }
 
     private let state: OSAllocatedUnfairLock<State>
@@ -49,9 +55,17 @@ final class MockCalendarIndexStore: CalendarStore, Sendable {
     }
 
     func events(matching predicate: CalendarFetchPredicate) throws -> [StoreEvent] {
-        state.withLock {
-            $0.lastPredicate = predicate
-            return $0.events.filter { event in
+        let callIndex = state.withLock { s -> Int in
+            let idx = s.predicates.count
+            s.predicates.append(predicate)
+            s.lastPredicate = predicate
+            return idx
+        }
+        if let failAt = state.withLock({ $0.failAtCall }), callIndex == failAt {
+            throw MockCalendarIndexError.chunkFailed
+        }
+        return state.withLock {
+            $0.events.filter { event in
                 guard let start = event.startDate else { return true }
                 return start >= predicate.start && start <= predicate.end
             }
@@ -60,6 +74,14 @@ final class MockCalendarIndexStore: CalendarStore, Sendable {
 
     var lastPredicate: CalendarFetchPredicate? {
         state.withLock { $0.lastPredicate }
+    }
+
+    var predicateHistory: [CalendarFetchPredicate] {
+        state.withLock { $0.predicates }
+    }
+
+    func setFailAtCall(_ index: Int?) {
+        state.withLock { $0.failAtCall = index }
     }
 
     func event(withIdentifier identifier: String) throws -> StoreEvent? {
@@ -287,7 +309,7 @@ struct CalendarIndexingTests {
     }
 
     @Test
-    func `Fetch window spans ten-year lookback through one-year outlook`() async throws {
+    func `Fetch window walks decade in eleven one-year chunks`() async throws {
         let paths = makePaths()
         defer { try? FileManager.default.removeItem(at: paths.base) }
         let now = Date(timeIntervalSince1970: 1_700_000_000)
@@ -295,12 +317,151 @@ struct CalendarIndexingTests {
         let index = DocIndexStore(dbPath: paths.store)
         let indexer = CalendarIndexer(store: mock, index: index, statePath: paths.state, now: { now })
         _ = try await indexer.run(reporter: noProgress())
-        let predicate = try #require(mock.lastPredicate)
-        let expectedStart = Calendar.current.date(byAdding: .year, value: -CalendarIndexer.defaultLookbackYears, to: now)
-        let expectedEnd = Calendar.current.date(byAdding: .day, value: 365, to: now)
+        let predicates = mock.predicateHistory
+        let expectedStart = try #require(Calendar.current.date(byAdding: .year, value: -CalendarIndexer.defaultLookbackYears, to: now))
+        let expectedEnd = try #require(Calendar.current.date(byAdding: .day, value: 365, to: now))
         #expect(CalendarIndexer.defaultLookbackYears == 10)
-        #expect(predicate.start == expectedStart)
-        #expect(predicate.end == expectedEnd)
+        #expect(predicates.count == 11)
+        #expect(predicates.first?.start == expectedStart)
+        #expect(predicates.last?.end == expectedEnd)
+        for offset in 1 ..< predicates.count {
+            #expect(predicates[offset].start == predicates[offset - 1].end)
+        }
+    }
+
+    @Test
+    func `Multi-chunk union covers every year`() async throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        let expectedStart = try #require(Calendar.current.date(byAdding: .year, value: -10, to: now))
+        let expectedEnd = try #require(Calendar.current.date(byAdding: .day, value: 365, to: now))
+        var chunkStart = expectedStart
+        var seeds: [StoreEvent] = []
+        var ordinal = 0
+        while chunkStart < expectedEnd {
+            let next = Calendar.current.date(byAdding: .year, value: 1, to: chunkStart) ?? chunkStart.addingTimeInterval(366 * 86400)
+            let chunkEnd = min(next, expectedEnd)
+            let mid = chunkStart.addingTimeInterval(30 * 86400)
+            #expect(mid < chunkEnd)
+            seeds.append(makeEvent(id: "evt-\(ordinal)", title: "Year \(ordinal)", start: mid))
+            ordinal += 1
+            if chunkEnd >= expectedEnd {
+                break
+            }
+            chunkStart = chunkEnd
+        }
+        #expect(seeds.count == 11)
+        let mock = MockCalendarIndexStore(events: seeds)
+        let index = DocIndexStore(dbPath: paths.store)
+        let indexer = CalendarIndexer(store: mock, index: index, statePath: paths.state, now: { now })
+        let report = try await indexer.run(reporter: noProgress())
+        #expect(report.indexed == seeds.count)
+        #expect(report.scanned == seeds.count)
+        #expect(mock.predicateHistory.count == 11)
+        for seed in seeds {
+            let startDate = try #require(seed.startDate)
+            let identifier = try #require(seed.identifier)
+            let iso = TemporalFilter.isoString(from: startDate)
+            let found = try await index.document(source: .calendars, externalID: "\(identifier)@\(iso)")
+            #expect(found != nil)
+        }
+    }
+
+    @Test
+    func `Boundary instant kept once`() async throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let expectedStart = try #require(Calendar.current.date(byAdding: .year, value: -10, to: now))
+        let boundary = try #require(Calendar.current.date(byAdding: .year, value: 1, to: expectedStart))
+        let mock = MockCalendarIndexStore(events: [makeEvent(id: "evt-edge", title: "Edge", start: boundary)])
+        let index = DocIndexStore(dbPath: paths.store)
+        let indexer = CalendarIndexer(store: mock, index: index, statePath: paths.state, now: { now })
+        let report = try await indexer.run(reporter: noProgress())
+        #expect(report.scanned == 1)
+        #expect(report.indexed == 1)
+        let iso = TemporalFilter.isoString(from: boundary)
+        let found = try await index.document(source: .calendars, externalID: "evt-edge@\(iso)")
+        #expect(found != nil)
+    }
+
+    @Test
+    func `Cap applies post-union newest-first`() async throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let expectedStart = try #require(Calendar.current.date(byAdding: .year, value: -10, to: now))
+        let expectedEnd = try #require(Calendar.current.date(byAdding: .day, value: 365, to: now))
+        var chunkStart = expectedStart
+        var seeds: [StoreEvent] = []
+        var day = 0
+        while chunkStart < expectedEnd, seeds.count < 6 {
+            let next = Calendar.current.date(byAdding: .year, value: 1, to: chunkStart) ?? chunkStart.addingTimeInterval(366 * 86400)
+            let chunkEnd = min(next, expectedEnd)
+            let mid = chunkStart.addingTimeInterval(30 * 86400)
+            seeds.append(StoreEvent(
+                identifier: "series-cap",
+                calendarIdentifier: "cal-home",
+                title: "Cap \(day)",
+                startDate: mid,
+                endDate: mid.addingTimeInterval(3600),
+                isAllDay: false,
+                hasRecurrence: true
+            ))
+            day += 1
+            if chunkEnd >= expectedEnd {
+                break
+            }
+            chunkStart = chunkEnd
+        }
+        #expect(seeds.count == 6)
+        let mock = MockCalendarIndexStore(events: seeds)
+        let index = DocIndexStore(dbPath: paths.store)
+        let indexer = CalendarIndexer(
+            store: mock,
+            index: index,
+            statePath: paths.state,
+            occurrenceCap: 3,
+            now: { now }
+        )
+        let report = try await indexer.run(reporter: noProgress())
+        #expect(report.scanned == 3)
+        #expect(report.indexed == 3)
+        let ranked = seeds.compactMap(\.startDate).sorted(by: >)
+        for start in ranked.prefix(3) {
+            let iso = TemporalFilter.isoString(from: start)
+            let found = try await index.document(source: .calendars, externalID: "series-cap@\(iso)")
+            #expect(found != nil)
+        }
+        for start in ranked.suffix(from: 3) {
+            let iso = TemporalFilter.isoString(from: start)
+            let missing = try await index.document(source: .calendars, externalID: "series-cap@\(iso)")
+            #expect(missing == nil)
+        }
+    }
+
+    @Test
+    func `Chunk throw aborts before any upsert`() async throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let expectedStart = try #require(Calendar.current.date(byAdding: .year, value: -10, to: now))
+        let firstMid = expectedStart.addingTimeInterval(30 * 86400)
+        let mock = MockCalendarIndexStore(events: [makeEvent(id: "evt-1", title: "First", start: firstMid)])
+        mock.setFailAtCall(1)
+        let index = DocIndexStore(dbPath: paths.store)
+        let indexer = CalendarIndexer(store: mock, index: index, statePath: paths.state, now: { now })
+        do {
+            _ = try await indexer.run(reporter: noProgress())
+            Issue.record("Expected chunk failure to throw")
+        } catch let error as MockCalendarIndexError {
+            #expect(error == .chunkFailed)
+        }
+        #expect(mock.predicateHistory.count == 2)
+        let iso = TemporalFilter.isoString(from: firstMid)
+        let found = try await index.document(source: .calendars, externalID: "evt-1@\(iso)")
+        #expect(found == nil)
     }
 
     @Test

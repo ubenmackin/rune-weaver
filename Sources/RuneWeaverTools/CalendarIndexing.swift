@@ -268,9 +268,42 @@ extension CalendarIndexer {
         let start = Calendar.current.date(byAdding: .year, value: -Self.defaultLookbackYears, to: nowDate)
             ?? nowDate.addingTimeInterval(TimeInterval(-Self.defaultLookbackYears * 365 * 86400))
         let end = Calendar.current.date(byAdding: .day, value: 365, to: nowDate) ?? nowDate.addingTimeInterval(365 * 86400)
-        let predicate = store.predicateForEvents(start: start, end: end, calendars: calendars)
-        let fetched = try store.events(matching: predicate)
-        let selected = Self.cappedOccurrences(fetched, cap: occurrenceCap, end: end)
+        var chunkStart = start
+        var unioned: [StoreEvent] = []
+        var chunkCount = 0
+        while chunkStart < end {
+            let next = Calendar.current.date(byAdding: .year, value: 1, to: chunkStart) ?? chunkStart.addingTimeInterval(366 * 86400)
+            let chunkEnd = min(next, end)
+            guard chunkEnd > chunkStart else { break }
+            let predicate = store.predicateForEvents(start: chunkStart, end: chunkEnd, calendars: calendars)
+            let fetched = try store.events(matching: predicate)
+            unioned.append(contentsOf: fetched)
+            chunkCount += 1
+            if chunkEnd >= end {
+                break
+            }
+            chunkStart = chunkEnd
+        }
+        // Adjacent spans share an inclusive edge, so one occurrence can surface twice.
+        var seenKeys = Set<String>()
+        seenKeys.reserveCapacity(unioned.count)
+        var deduped: [StoreEvent] = []
+        deduped.reserveCapacity(unioned.count)
+        for event in unioned {
+            guard let rawID = event.identifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !rawID.isEmpty,
+                  let startDate = event.startDate
+            else {
+                deduped.append(event)
+                continue
+            }
+            let key = "\(rawID)\u{1F}\(startDate.timeIntervalSinceReferenceDate.bitPattern)"
+            if seenKeys.insert(key).inserted {
+                deduped.append(event)
+            }
+        }
+        RuneWeaverLog.stores.debug("CalendarIndexer: fetched \(deduped.count) occurrences in \(chunkCount) chunks")
+        let selected = Self.cappedOccurrences(deduped, cap: occurrenceCap, end: end)
         let calendarsByID = Dictionary(calendars.map { ($0.identifier, $0) }, uniquingKeysWith: { first, _ in first })
         return (selected, calendarsByID)
     }
