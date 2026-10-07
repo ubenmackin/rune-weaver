@@ -307,11 +307,12 @@ public actor ApprovalQueue {
             return false
         }
         let wasTimedOut = timedOutIDs.remove(id) != nil
-        // Continuation approvals resume a single parked batch, so they stay
+        // Continuation and question approvals resume a single parked batch, so they stay
         // one-shot: coerce any durable or widened tier back to thisTime so a
-        // direct decide call cannot mint a dead forever grant for engine.continue.
-        let effectiveDuration: TrustDuration = request.toolName == "engine.continue" ? .thisTime : duration
-        let effectiveWiden: Bool = request.toolName == "engine.continue" ? false : widen
+        // direct decide call cannot mint a dead forever grant for engine.continue or question.ask.
+        let isOneShotTool = request.toolName == "engine.continue" || request.toolName == "question.ask"
+        let effectiveDuration: TrustDuration = isOneShotTool ? .thisTime : duration
+        let effectiveWiden: Bool = isOneShotTool ? false : widen
         let decision = ApprovalQueueDecision(approved: approved, duration: effectiveDuration)
         timeoutTasks.removeValue(forKey: id)?.cancel()
         if let waiter = waiters.removeValue(forKey: id) {

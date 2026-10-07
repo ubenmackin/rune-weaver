@@ -758,6 +758,15 @@ extension AppModel {
     private func decideApproval(id: UUID, approved: Bool, duration: TrustDuration, widen: Bool) async {
         guard let context = serverContext else { return }
         let pending = await context.approvals.request(id: id)
+        // Operator choices ride the answer-bearing respond path so an approval
+        // without a choice cannot synthesize an empty acknowledgement. The
+        // menu-bar decide shape carries no answer, so question approvals fail
+        // closed here and stay pending for the respond flow with guidance.
+        if pending?.toolName == "question.ask" {
+            RuneWeaverLog.app.warning("Refusing menu-bar decide for question.ask; use respond with a non-empty answer.")
+            await refreshPendingApprovals()
+            return
+        }
         let resolved = await context.approvals.decide(id: id, approved: approved, duration: duration, widen: widen)
         guard resolved else {
             await refreshPendingApprovals()
@@ -766,7 +775,10 @@ extension AppModel {
         // Durable approvals create a stored grant inside `decide`, so the
         // grants list must refresh; one-shot approvals store nothing. `widen`
         // only applies off `thisTime`, so a this-time decision never widens.
-        if approved, duration != .thisTime {
+        // Continuation and question approvals stay one-shot inside `decide`
+        // (coerced to thisTime with no stored grant), so a durable menu-bar
+        // vote on either must not fire a refresh when nothing changed.
+        if approved, duration != .thisTime, pending?.toolName != "engine.continue", pending?.toolName != "question.ask" {
             await context.hub.broadcastTrustGrantsChanged()
         }
         // Only session-tagged approvals own a conversation to resume. The
@@ -781,6 +793,62 @@ extension AppModel {
                 context: context,
                 sessionID: pending?.sessionID,
                 decidedCallID: pending?.input.callID
+            )
+        }
+        await refreshPendingApprovals()
+    }
+
+    /// Resolves a question approval with the operator's choice through the
+    /// answer-bearing path so the parked turn resumes with the chosen text
+    /// instead of an empty acknowledgement. Question approvals stay one-shot
+    /// (thisTime with no widened grant), matching the served respond route.
+    public func respondToQuestion(id: UUID, answer: String?, cancelled: Bool = false) {
+        Task {
+            await decideQuestionResponse(id: id, answer: answer, cancelled: cancelled)
+        }
+    }
+
+    /// Validates then resolves one question approval without minting trust.
+    /// An approval without a choice cannot synthesize an empty acknowledgement;
+    /// only an explicit cancel resolves without text. The length bound matches
+    /// the served respond route so history and synthesis stay bounded.
+    private func decideQuestionResponse(id: UUID, answer: String?, cancelled: Bool) async {
+        guard let context = serverContext else { return }
+        let pending = await context.approvals.request(id: id)
+        guard let pending, pending.toolName == "question.ask" else {
+            await refreshPendingApprovals()
+            return
+        }
+        if !cancelled {
+            let trimmed = (answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                RuneWeaverLog.app.warning("Refusing empty answer for question.ask without cancel.")
+                await refreshPendingApprovals()
+                return
+            }
+            guard trimmed.count <= 2000 else {
+                RuneWeaverLog.app.warning("Refusing overlong answer for question.ask; at most 2000 characters.")
+                await refreshPendingApprovals()
+                return
+            }
+        }
+        let approved = !cancelled
+        let resolved = await context.approvals.decide(id: id, approved: approved, duration: .thisTime, widen: false)
+        guard resolved else {
+            await refreshPendingApprovals()
+            return
+        }
+        // Question approvals store no grant, so no grants refresh fires here.
+        // Only session-tagged approvals own a conversation to resume, matching
+        // the shared helper contract used by the decide path.
+        if pending.sessionID != nil {
+            await resumeNarratedApproval(
+                id: id,
+                approved: approved,
+                answer: answer,
+                context: context,
+                sessionID: pending.sessionID,
+                decidedCallID: pending.input.callID
             )
         }
         await refreshPendingApprovals()

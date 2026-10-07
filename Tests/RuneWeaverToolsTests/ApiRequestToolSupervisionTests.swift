@@ -402,6 +402,10 @@ struct ApiRequestToolSupervisionTests {
             // Unrestricted mode keeps the initial host dialable while the
             // explicit blocklist refuses the redirect target, so the hop is
             // stopped by the network policy gate rather than the allowlist.
+            // The initial hop uses a public IP literal so its SSRF vetting
+            // needs no DNS proof: sibling hostname tests already cover the
+            // resolver path, and a literal keeps this redirect-hop refusal
+            // deterministic under parallel suites.
             let store = await makePolicyStore(
                 SecurityPolicy(
                     network: NetworkEgressPolicy(mode: .unrestricted, blockedDomains: ["blocked.example.com"])
@@ -413,7 +417,7 @@ struct ApiRequestToolSupervisionTests {
                 transport: ScriptedRedirectTransport(
                     recorder: recorder,
                     script: [
-                        "https://entry.example.com/start": ScriptedResponse(
+                        "https://93.184.216.34/start": ScriptedResponse(
                             statusCode: 302,
                             location: "https://blocked.example.com/collect"
                         )
@@ -424,7 +428,7 @@ struct ApiRequestToolSupervisionTests {
             let output = try await tool.execute(
                 input: ToolInput(
                     toolName: "api.request",
-                    argumentsJSON: #"{"method":"GET","url":"https://entry.example.com/start"}"#
+                    argumentsJSON: #"{"method":"GET","url":"https://93.184.216.34/start"}"#
                 ),
                 context: ToolContext(conversationID: UUID())
             )

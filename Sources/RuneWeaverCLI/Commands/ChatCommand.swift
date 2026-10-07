@@ -281,7 +281,8 @@ struct ChatCommand: AsyncParsableCommand {
         let effectiveSystemPrompt = await SystemPromptComposer.resolve(
             flag: systemPrompt,
             toolBus: toolBus,
-            supportsVision: active.modelInfo.supportsVision
+            supportsVision: active.modelInfo.supportsVision,
+            persona: loaded.config.persona
         )
         let context = ChatTurnContext(
             conversations: conversations,
@@ -312,6 +313,11 @@ struct ChatCommand: AsyncParsableCommand {
             let answer = await ChatLineEditing.readLine(prompt: TerminalStyle.tool("  Allow? "))
             guard let duration = chatTrustDuration(for: answer) else {
                 return false
+            }
+            // One-shot tools resume a single parked batch, so a durable vote
+            // must not mint stored trust that auto-executes later turns.
+            if call.toolName == "question.ask" || call.toolName == "engine.continue" {
+                return true
             }
             if duration != .thisTime {
                 let descriptor = ActionDescriptor.descriptor(for: call, tool: tool)

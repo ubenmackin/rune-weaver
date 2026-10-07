@@ -643,6 +643,7 @@ private func registerApprovalRoutes(_ app: Application) {
     }
 
     registerTrustGrantsRoutes(app)
+    registerQuestionResponseRoute(app)
 
     app
         .post(PathComponent.constant(ServerPaths.approvals), PathComponent.parameter("id"),
@@ -657,6 +658,11 @@ private func registerApprovalRoutes(_ app: Application) {
             // the pending entry, so the resume path would otherwise lose
             // which conversation to continue.
             let pending = await context.approvals.request(id: id)
+            // Operator choices ride the answer-bearing path so an approval
+            // without a choice cannot synthesize an empty acknowledgement.
+            if pending?.toolName == "question.ask" {
+                throw Abort(.badRequest, reason: "Use /respond for question.ask")
+            }
             let effectiveApproved: Bool
             if let egressDecision = body.egressDecision {
                 // Persistence or grant failures never approve a run the
@@ -698,7 +704,7 @@ private func registerApprovalRoutes(_ app: Application) {
             // approvals stay one-shot inside `decide` (coerced to thisTime
             // with no stored grant), so a durable vote on engine.continue
             // must not fire a refresh when nothing changed.
-            if effectiveApproved, body.resolvedDuration != .thisTime, pending?.toolName != "engine.continue" {
+            if effectiveApproved, body.resolvedDuration != .thisTime, pending?.toolName != "engine.continue", pending?.toolName != "question.ask" {
                 await context.hub.broadcastTrustGrantsChanged()
             }
             if pending?.sessionID != nil {
@@ -713,6 +719,66 @@ private func registerApprovalRoutes(_ app: Application) {
                 }
             }
             return ApprovalDecisionResponse(id: id, approved: effectiveApproved, duration: body.resolvedDuration)
+        }
+}
+
+/// Registers operator question response route for human-in-the-loop choices.
+/// - Parameter app: Application receiving the routes.
+private func registerQuestionResponseRoute(_ app: Application) {
+    app
+        .post(PathComponent.constant(ServerPaths.approvals), PathComponent.parameter("id"),
+              PathComponent.constant(ServerPaths.respond))
+        { req async throws -> ApprovalDecisionResponse in
+            guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+                throw Abort(.badRequest, reason: "id must be a UUID")
+            }
+            let body = try req.content.decode(QuestionResponseRequest.self)
+            let context = req.application.runeWeaver
+            let pending = await context.approvals.request(id: id)
+            guard let pending else {
+                throw Abort(.notFound, reason: "Unknown approval \(raw)")
+            }
+            // The response path resumes with an operator choice, so only
+            // question approvals resolve here; other tools keep decide's
+            // egress and grant handling instead of bypassing it.
+            guard pending.toolName == "question.ask" else {
+                throw Abort(.badRequest, reason: "Use /decide for non-question approvals")
+            }
+            let isCancelled = body.cancelled == true
+            if !isCancelled {
+                let trimmedAnswer = (body.answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedAnswer.isEmpty else {
+                    throw Abort(.badRequest, reason: "Answer must not be empty unless cancelled")
+                }
+                // Matches the persona style bound so history and synthesis
+                // cannot be blown up with unbounded operator text.
+                guard trimmedAnswer.count <= 2000 else {
+                    throw Abort(.badRequest, reason: "Answer must be at most 2000 characters")
+                }
+            }
+            let approved = !isCancelled
+            let resolved = await context.approvals.decide(
+                id: id,
+                approved: approved,
+                duration: .thisTime,
+                widen: false
+            )
+            guard resolved else {
+                throw Abort(.notFound, reason: "Unknown approval \(raw)")
+            }
+            if pending.sessionID != nil {
+                Task {
+                    await resumeNarratedApproval(
+                        id: id,
+                        approved: approved,
+                        answer: body.answer,
+                        context: context,
+                        sessionID: pending.sessionID,
+                        decidedCallID: pending.input.callID
+                    )
+                }
+            }
+            return ApprovalDecisionResponse(id: id, approved: approved, duration: .thisTime)
         }
 }
 

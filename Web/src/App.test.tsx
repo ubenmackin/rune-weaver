@@ -275,7 +275,7 @@ describe("App mobile shell clearance", () => {
     const tabs = Array.from(bar.querySelectorAll("button")).map((tab) =>
       tab.getAttribute("aria-label"),
     );
-    expect(tabs).toEqual(["Dashboard", "Chat", "Approvals", "Work", "Memory"]);
+    expect(tabs).toEqual(["Dashboard", "Chat", "Inbox", "Work", "Memory"]);
     expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
     // Clearance sibling stays mounted so the fixed bar never covers content.
     expect(document.querySelector(".app-main-content")).not.toBeNull();

@@ -35,6 +35,7 @@ import {
   resolveMaxConcurrentChatTurns,
   sortToolActionsByRound,
   textContainsPlaceholderForCall,
+  respondToQuestion,
   toNonNegativeInt,
   toolCancel,
   updateSessionTitle,
@@ -51,6 +52,7 @@ import {
 } from "../api";
 import SessionSidebar from "./SessionSidebar";
 import InlineApprovalBanner from "./InlineApprovalBanner";
+import InlineQuestionCard from "./InlineQuestionCard";
 import MarkdownText from "./MarkdownText";
 import { appendLiveDelta } from "./liveTextBuffer";
 import ToolActionRow from "./ToolActionRow";
@@ -2567,6 +2569,31 @@ export default function ChatView({
       } catch (failure) {
         setError(
           failure instanceof ApiError ? failure.message : "Decision failed",
+        );
+      } finally {
+        setDecidingApprovalIDs((previous) => {
+          if (!previous.has(id)) return previous;
+          const next = new Set(previous);
+          next.delete(id);
+          return next;
+        });
+      }
+      refreshApprovals();
+    },
+    [refreshApprovals],
+  );
+
+  const handleRespondQuestion = useCallback(
+    async (id: string, answer?: string, cancelled?: boolean) => {
+      setDecidingApprovalIDs((previous) => new Set(previous).add(id));
+      try {
+        await respondToQuestion(id, answer, cancelled);
+        setPendingApprovals((previous) =>
+          previous.filter((item) => item.id !== id),
+        );
+      } catch (failure) {
+        setError(
+          failure instanceof ApiError ? failure.message : "Response failed",
         );
       } finally {
         setDecidingApprovalIDs((previous) => {
@@ -5364,22 +5391,33 @@ export default function ChatView({
             className="inline-approval-list"
             aria-label="Session approvals awaiting decision"
           >
-            {sessionApprovals.map((request) => (
-              <InlineApprovalBanner
-                key={request.id}
-                request={request}
-                deciding={decidingApprovalIDs.has(request.id)}
-                onDecide={(id, approved, duration, widen, egressDecision) =>
-                  void handleDecideApproval(
-                    id,
-                    approved,
-                    duration,
-                    widen,
-                    egressDecision,
-                  )
-                }
-              />
-            ))}
+            {sessionApprovals.map((request) =>
+              request.toolName === "question.ask" ? (
+                <InlineQuestionCard
+                  key={request.id}
+                  request={request}
+                  deciding={decidingApprovalIDs.has(request.id)}
+                  onRespond={(id, answer, cancelled) =>
+                    void handleRespondQuestion(id, answer, cancelled)
+                  }
+                />
+              ) : (
+                <InlineApprovalBanner
+                  key={request.id}
+                  request={request}
+                  deciding={decidingApprovalIDs.has(request.id)}
+                  onDecide={(id, approved, duration, widen, egressDecision) =>
+                    void handleDecideApproval(
+                      id,
+                      approved,
+                      duration,
+                      widen,
+                      egressDecision,
+                    )
+                  }
+                />
+              ),
+            )}
           </div>
         ) : null}
 

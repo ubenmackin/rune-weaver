@@ -274,6 +274,7 @@ public enum BuiltinToolPlugins {
             workspaceStore: sharedWorkspace
         )
         tools.append(bashTool)
+        tools.append(QuestionAskTool())
         if let memoryEngine {
             tools += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
         }

@@ -33,7 +33,7 @@ private func validationField(of error: any Error) -> String? {
     return field
 }
 
-@Suite("PersonaConfig")
+@Suite("PersonaConfig", .testLogCaptureBootstrap)
 struct PersonaConfigTests {
     @Test
     func `Defaults carry the stock persona`() {

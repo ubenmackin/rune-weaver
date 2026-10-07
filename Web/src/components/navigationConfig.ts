@@ -79,7 +79,7 @@ export type NavGroupEntry = NavTabEntry | NavChildGroup;
 export const NAV_GROUPS: NavGroupEntry[] = [
   { kind: "tab", id: "dashboard", label: "Dashboard", icon: DashboardIcon },
   { kind: "tab", id: "chat", label: "Chat", icon: ChatIcon },
-  { kind: "tab", id: "approvals", label: "Approvals", icon: ApprovalsIcon },
+  { kind: "tab", id: "approvals", label: "Inbox", icon: ApprovalsIcon },
   {
     kind: "group",
     id: "work",

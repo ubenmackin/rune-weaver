@@ -1391,6 +1391,20 @@ export function decideApproval(
   );
 }
 
+export function respondToQuestion(
+  id: string,
+  answer?: string,
+  cancelled?: boolean,
+): Promise<ApprovalDecisionResponse> {
+  return fetchJson<ApprovalDecisionResponse>(
+    `/approvals/${encodeURIComponent(id)}/respond`,
+    {
+      method: "POST",
+      body: JSON.stringify({ answer, cancelled }),
+    },
+  );
+}
+
 // Normalizes a grant expiry into a Date while preserving the forever contract: null stays
 // null so callers can branch on "never expires" without sentinel-date comparisons. Non-null
 // values delegate to parseRunTimestamp because the engine emits the same dual wire shape as

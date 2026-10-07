@@ -437,7 +437,7 @@ describe("TopNav profile menu", () => {
     const topLevel = Array.from(sections.querySelectorAll(".top-nav-item")).map(
       (tab) => tab.textContent?.trim(),
     );
-    expect(topLevel).toEqual(["Dashboard", "Chat", "Approvals", "Work", "Memory"]);
+    expect(topLevel).toEqual(["Dashboard", "Chat", "Inbox", "Work", "Memory"]);
     expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
 
     // The Work trigger reveals its children in canonical order.
@@ -541,7 +541,7 @@ describe("TopNav profile menu", () => {
       "true",
     ]);
     expect(
-      screen.getByRole("button", { name: "Approvals, 99 unread" }),
+      screen.getByRole("button", { name: "Inbox, 99 unread" }),
     ).toBeInTheDocument();
     // Runs now lives inside Work, so its unread count rolls into that trigger
     // rather than surfacing as a top-level tab.

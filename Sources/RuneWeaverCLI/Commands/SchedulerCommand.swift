@@ -264,7 +264,8 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             embedder: embedder,
             compactionThresholdPercent: loaded.config.engine.compactionThresholdPercent,
             securityConfig: loaded.config.security,
-            recallBudgets: loaded.config.memory.recallBudgets
+            recallBudgets: loaded.config.memory.recallBudgets,
+            persona: loaded.config.persona
         )
         let engine = Self.makeHeadlessSchedulerEngine(jobs: jobs, toolBus: toolBus, orchestrator: orchestrator)
         let goalTurnRunner = Self.makeHeadlessGoalTurnRunner(orchestrator: orchestrator)

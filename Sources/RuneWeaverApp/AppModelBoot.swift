@@ -139,7 +139,11 @@ extension AppModel {
                 await previewBus.disableTool(named: name)
             }
         }
-        let effectiveSystemPrompt = await SystemPromptComposer.resolve(flag: nil, toolBus: previewBus)
+        let effectiveSystemPrompt = await SystemPromptComposer.resolve(
+            flag: nil,
+            toolBus: previewBus,
+            persona: config.persona
+        )
         return (permissionGate, effectiveSystemPrompt)
     }
 
@@ -287,7 +291,8 @@ extension AppModel {
             runs: pipeline.runs,
             hub: pipeline.hub,
             policyStore: pipeline.policyStore,
-            workspaceConfig: pipeline.config.workspace
+            workspaceConfig: pipeline.config.workspace,
+            persona: pipeline.config.persona
         )
     }
 
