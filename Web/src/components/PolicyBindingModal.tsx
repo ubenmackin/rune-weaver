@@ -737,12 +737,6 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
           {/* Single pairing container: key, hosts, methods, and paths read as
               one rule so the conjunction is never edited as separate rows. */}
           <div data-testid="binding-pairing-container">
-            <p data-testid="binding-pairing-sentence" className="muted text-sm">
-              One binding pairs one key with hosts, methods, and path prefixes. The
-              secret is sent only when host, method, and effective path all match —
-              prefixes apply to every host in this binding.
-            </p>
-
             {step === 1 ? (
               <div className="wizard-step" data-testid="wizard-step-1">
                 <section data-testid="key-section">
@@ -871,6 +865,12 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
 
             {step === 3 ? (
               <div className="wizard-step" data-testid="wizard-step-3">
+                <p data-testid="scope-intro" className="muted text-sm">
+                  Most bindings leave both on Any — the binding then covers every method plus path on its hosts.
+                </p>
+                <p data-testid="scope-hosts-context" className="muted text-sm">
+                  Scoping {hostsList.length} hosts: {hostsList.join(", ")}
+                </p>
                 <section aria-label="Methods" data-testid="methods-section">
               <h4>Methods</h4>
               <div role="radiogroup" aria-label="Method scope">
@@ -976,6 +976,11 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
 
             {step === 4 ? (
               <div className="wizard-step" data-testid="wizard-step-4">
+                <p data-testid="binding-pairing-sentence" className="muted text-sm">
+                  One binding pairs one key with hosts, methods, and path prefixes. The
+                  secret is sent only when host, method, and effective path all match —
+                  prefixes apply to every host in this binding.
+                </p>
                 <h4>Review and Test</h4>
                 <div data-testid="binding-review">
                   <ul data-testid="review-summary" style={{ margin: "8px 0", paddingLeft: "18px" }}>
@@ -1070,7 +1075,7 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
                     </div>
                     <button
                       type="button"
-                      className="ghost btn-sm"
+                      className="primary"
                       data-testid="probe-run"
                       onClick={() =>
                         setProbeApplied({

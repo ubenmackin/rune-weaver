@@ -84,6 +84,7 @@ describe("PolicyPane", () => {
     secretStatus?: Record<string, boolean> | ((keys: string[]) => Record<string, boolean>);
     onSecretPosted?: (body: Record<string, unknown>) => void;
     onSecretDeleted?: (key: string) => void;
+    listedKeys?: string[];
   }
 
   function stubPaneFetch(
@@ -110,6 +111,11 @@ describe("PolicyPane", () => {
             decodeURIComponent(urlStr.slice("/settings/secrets/".length))
           );
           return new Response(null, { status: 204 });
+        }
+        // Keychain enumeration for the unlinked section. Defaults to empty so
+        // the empty line reads clean without evidence of orphans.
+        if (urlStr === "/settings/secrets" && method === "GET") {
+          return jsonResponse({ keys: secrets?.listedKeys ?? [] });
         }
         if (urlStr === "/settings/policy") {
           return policyResponse(init);
@@ -138,20 +144,31 @@ describe("PolicyPane", () => {
     return fetchMock;
   }
 
-  // Waits for the snapshot to land in the editors: the mode select proves the
-  // DTO arrived and the credential rows prove the bindings rendered. Counts
-  // rows with getAllBy so one- and two-binding snapshots share the same gate.
+  // Waits for the snapshot to land in the Network editors: the mode select
+  // proves the DTO arrived. Credentials live behind their sub-tab, so this
+  // gate stays Network-only and credential cases open the tab explicitly.
   async function waitForPaneLoaded() {
     await waitFor(() => {
       expect((screen.getByLabelText("Mode") as HTMLSelectElement).value).toBe(
         "allowlist_only"
       );
-      expect(screen.getAllByTestId("credential-row").length).toBeGreaterThan(0);
+    });
+  }
+
+  // Opens the Credentials sub-tab and waits for the bindings list to render.
+  async function openCredentialsTab(
+    user: ReturnType<typeof userEvent.setup>,
+    expectedRows = 1
+  ) {
+    await user.click(screen.getByTestId("policytab-credentials"));
+    await waitFor(() => {
+      expect(screen.getAllByTestId("credential-row").length).toBe(expectedRows);
     });
   }
 
   it("loads the structured snapshot into network editors and the credentials list", async () => {
     stubPaneFetch(() => jsonResponse(panePolicyPayload));
+    const user = userEvent.setup();
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
@@ -161,17 +178,31 @@ describe("PolicyPane", () => {
     expect(
       (screen.getByLabelText("Blocked domains") as HTMLTextAreaElement).value
     ).toContain("metadata.google.internal");
+    // Credentials stay behind their sub-tab: Network is default and the
+    // binding row is hidden until the tab opens.
+    expect(screen.getByTestId("policytab-network")).toBeDefined();
+    // The egress editors own their vertical rhythm, so the section carries the
+    // scoped spacing class that separates each hint from the next label.
+    expect(screen.getByTestId("network-egress-editors").className).toContain(
+      "policy-network-section"
+    );
+    expect(screen.getByTestId("policy-network-section")).toBeDefined();
+    expect(screen.queryByTestId("policy-credentials-section")).toBeNull();
+    expect(screen.queryByTestId("credentials-list")).toBeNull();
+    expect(screen.queryByTestId("credential-row")).toBeNull();
+    expect(screen.queryByTestId("unlinked-secrets")).toBeNull();
+    await openCredentialsTab(user);
+    expect(screen.getByTestId("policy-credentials-section")).toBeDefined();
+    expect(screen.getByTestId("credentials-list")).toBeDefined();
+    expect(screen.getByTestId("unlinked-secrets")).toBeDefined();
+    expect(screen.queryByTestId("policy-network-section")).toBeNull();
+    expect(screen.queryByTestId("network-egress-editors")).toBeNull();
     expect(screen.getByText("GITHUB_TOKEN")).toBeDefined();
     // Keychain presence resolves beside the policy load, so the row badges
     // Stored instead of blocking the render on secrets.
     expect(await screen.findByText("Keychain Stored")).toBeDefined();
     expect(screen.getByText(/All 3 Formal Security Invariants Verified/)).toBeDefined();
     expect(screen.getByTestId("policy-location").textContent).toContain("Customized");
-    // The egress editors own their vertical rhythm, so the section carries the
-    // scoped spacing class that separates each hint from the next label.
-    expect(screen.getByTestId("network-egress-editors").className).toContain(
-      "policy-network-section"
-    );
 
     // The retired contract is gone: no raw editor and no Verify button.
     expect(screen.queryByText(/Raw TOML/i)).toBeNull();
@@ -267,6 +298,7 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
+    await openCredentialsTab(user);
     const search = screen.getByLabelText("Search bindings");
     await user.type(search, "zzz-no-such-key");
     await waitFor(() => {
@@ -292,19 +324,22 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
+    await openCredentialsTab(user);
     await user.click(screen.getByTestId("edit-binding-GITHUB_TOKEN"));
 
     const modal = await screen.findByTestId("policy-binding-modal");
-    // The pairing sentence states the conjunction under edit.
-    expect(within(modal).getByTestId("binding-pairing-sentence").textContent).toContain(
-      "prefixes apply to every host"
-    );
+    // The pairing sentence lives on Review only, so earlier steps show no
+    // sentence before the walk reaches Step 4.
+    expect(within(modal).queryByTestId("binding-pairing-sentence")).toBeNull();
     await user.click(within(modal).getByTestId("wizard-next"));
     await user.click(within(modal).getByTestId("wizard-next"));
     await user.click(within(modal).getByTestId("wizard-next"));
     await waitFor(() => {
       expect(within(modal).getByTestId("binding-review")).toBeDefined();
     });
+    expect(within(modal).getByTestId("binding-pairing-sentence").textContent).toContain(
+      "prefixes apply to every host"
+    );
     expect(within(modal).getByTestId("wizard-step-indicator").textContent).toContain(
       "Step 4 of 4"
     );
@@ -357,6 +392,7 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
+    await openCredentialsTab(user);
     await user.click(screen.getByTestId("credentials-add"));
     const modal = await screen.findByTestId("policy-binding-modal");
 
@@ -419,6 +455,7 @@ describe("PolicyPane", () => {
     expect(secretProbes()).toBe(1);
 
     // Adding a binding changes the key set, so the probe refires for the new key.
+    await openCredentialsTab(user);
     await user.click(screen.getByTestId("credentials-add"));
     const modal = await screen.findByTestId("policy-binding-modal");
     await user.type(within(modal).getByLabelText("Key"), "NEW_KEY");
@@ -466,6 +503,7 @@ describe("PolicyPane", () => {
     expect(screen.queryByTestId("policy-field-errors")).toBeNull();
     expect((screen.getByTestId("policy-save") as HTMLButtonElement).disabled).toBe(false);
 
+    await openCredentialsTab(user);
     await user.click(screen.getByTestId("edit-binding-IPV6_KEY"));
     const modal = await screen.findByTestId("policy-binding-modal");
     await user.click(within(modal).getByTestId("wizard-next"));
@@ -541,6 +579,7 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
+    await openCredentialsTab(user);
 
     // Add path: a key that already owns a binding is refused, because saving
     // it would silently drop the existing binding.
@@ -584,6 +623,7 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
+    await openCredentialsTab(user);
     await user.click(screen.getByTestId("delete-binding-GITHUB_TOKEN"));
     await waitFor(() => {
       expect(screen.getByText("Delete binding?")).toBeDefined();
@@ -1150,9 +1190,11 @@ describe("PolicyPane", () => {
     stubPaneFetch(() => jsonResponse(twoKeyPolicyPayload), {
       secretStatus: { MISSING_KEY: false, STORED_KEY: true },
     });
+    const user = userEvent.setup();
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
+    await openCredentialsTab(user, 2);
     // The stored row settles after the presence probe lands; the missing row
     // never leaves the Set posture.
     await waitFor(() => {
@@ -1180,6 +1222,7 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
+    await openCredentialsTab(user);
     expect(await screen.findByText("Keychain Missing")).toBeDefined();
     expect(screen.getByTestId("set-secret-GITHUB_TOKEN")).toBeDefined();
 
@@ -1224,6 +1267,7 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
+    await openCredentialsTab(user);
     expect(await screen.findByText("Keychain Stored")).toBeDefined();
 
     await user.click(screen.getByTestId("delete-secret-GITHUB_TOKEN"));
@@ -1263,6 +1307,7 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
+    await openCredentialsTab(user);
     expect(await screen.findByText("Keychain Missing")).toBeDefined();
     await user.click(screen.getByTestId("edit-binding-GITHUB_TOKEN"));
     const bindingModal = await screen.findByTestId("policy-binding-modal");
@@ -1301,6 +1346,7 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
+    await openCredentialsTab(user);
     await user.click(screen.getByTestId("credentials-add"));
     const modal = await screen.findByTestId("policy-binding-modal");
     await user.type(within(modal).getByLabelText("Key"), "rwsecret:MY_KEY");
@@ -1328,8 +1374,11 @@ describe("PolicyPane", () => {
       policy: { ...panePolicyPayload.policy, credentials: {} },
     };
     stubPaneFetch(() => jsonResponse(emptyPayload), { secretStatus: {} });
+    const user = userEvent.setup();
     render(<PolicyPane />);
 
+    await waitForPaneLoaded();
+    await user.click(screen.getByTestId("policytab-credentials"));
     await waitFor(() => {
       expect(screen.getByTestId("credentials-empty")).toBeDefined();
     });
@@ -1339,5 +1388,175 @@ describe("PolicyPane", () => {
     expect(empty.textContent).not.toContain("Store the secret value in Keychain as");
     // The in-pane path stays offered from the empty state itself.
     expect(within(empty).getByTestId("credentials-empty-add")).toBeDefined();
+  });
+
+  it("defaults to the Network sub-tab with Credentials hidden", async () => {
+    stubPaneFetch(() => jsonResponse(panePolicyPayload));
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    expect(screen.getByTestId("policy-subtabs")).toBeDefined();
+    expect(
+      (screen.getByTestId("policytab-network") as HTMLButtonElement).getAttribute(
+        "aria-selected"
+      )
+    ).toBe("true");
+    expect(screen.getByTestId("policy-network-section")).toBeDefined();
+    expect(screen.queryByTestId("policy-credentials-section")).toBeNull();
+    expect(screen.queryByTestId("credential-row")).toBeNull();
+  });
+
+  it("switches to Credentials to show bindings plus unlinked while keeping the draft", async () => {
+    stubPaneFetch(() => jsonResponse(panePolicyPayload), {
+      listedKeys: ["ORPHAN_KEY"],
+    });
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    const allowed = screen.getByLabelText("Allowed domains") as HTMLTextAreaElement;
+    await user.clear(allowed);
+    await user.type(allowed, "api.example.com\napi.other.com");
+
+    await user.click(screen.getByTestId("policytab-credentials"));
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-credentials-section")).toBeDefined();
+    });
+    expect(screen.getByText("GITHUB_TOKEN")).toBeDefined();
+    expect(screen.getByTestId("unlinked-secrets")).toBeDefined();
+    expect(screen.getByTestId("unlinked-secret-row")).toBeDefined();
+    expect(screen.getByText("ORPHAN_KEY")).toBeDefined();
+
+    // The Network edit survives the tab switch: the draft stays dirty and the
+    // Network section restores the typed value on return.
+    expect(screen.getByTestId("policy-save-hint").textContent).toContain(
+      "Unsaved changes"
+    );
+    await user.click(screen.getByTestId("policytab-network"));
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-network-section")).toBeDefined();
+    });
+    expect(
+      (screen.getByLabelText("Allowed domains") as HTMLTextAreaElement).value
+    ).toContain("api.other.com");
+    expect(screen.queryByTestId("policy-credentials-section")).toBeNull();
+  });
+
+  it("shows a success toast on save", async () => {
+    stubPaneFetch((init) => {
+      if (init?.method === "PUT") {
+        const sent = JSON.parse(init.body as string) as { policy: unknown };
+        return jsonResponse({ ...panePolicyPayload, policy: sent.policy });
+      }
+      return jsonResponse(panePolicyPayload);
+    });
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    expect(screen.queryByTestId("toast")).toBeNull();
+    await user.click(screen.getByTestId("policy-save"));
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-saved")).toBeDefined();
+    });
+    expect(screen.getByTestId("toast").textContent).toContain("Policy saved");
+  });
+
+  it("shows zero toasts on save failure", async () => {
+    stubPaneFetch((init) => {
+      if (init?.method === "PUT") {
+        return jsonResponse({ reason: "classification failed for mystery.local" }, 400);
+      }
+      return jsonResponse(panePolicyPayload);
+    });
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    await user.click(screen.getByTestId("policy-save"));
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-error")).toBeDefined();
+    });
+    expect(screen.queryByTestId("toast")).toBeNull();
+    expect(screen.queryByTestId("toast-error")).toBeNull();
+    expect(screen.queryByTestId("policy-saved")).toBeNull();
+  });
+
+  it("renders reason lines for rows needing attention", async () => {
+    stubPaneFetch(() => jsonResponse(panePolicyPayload));
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    await openCredentialsTab(user);
+    // The fixture host is outside the allowlist, so the row flags coverage.
+    await waitFor(() => {
+      expect(screen.getByTestId("binding-attention")).toBeDefined();
+    });
+    expect(screen.getByTestId("binding-attention-reason").textContent).toContain(
+      "not in Allowed Domains"
+    );
+  });
+
+  it("leaves the secret stored when the delete-dialog checkbox stays unchecked", async () => {
+    const fetchMock = stubPaneFetch(() => jsonResponse(panePolicyPayload));
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    await openCredentialsTab(user);
+    await user.click(screen.getByTestId("delete-binding-GITHUB_TOKEN"));
+    const checkbox = (await screen.findByTestId(
+      "delete-binding-also-secret"
+    )) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    await user.click(screen.getByRole("button", { name: /Confirm delete GITHUB_TOKEN/ }));
+    await waitFor(() => {
+      expect(screen.queryByTestId("credential-row")).toBeNull();
+    });
+    const secretDeletes = fetchMock.mock.calls.filter(
+      ([url, init]) =>
+        String(url).startsWith("/settings/secrets/") &&
+        (init as RequestInit | undefined)?.method === "DELETE"
+    );
+    expect(secretDeletes).toHaveLength(0);
+    expect(screen.getByTestId("policy-save-hint").textContent).toContain(
+      "Unsaved changes"
+    );
+  });
+
+  it("deletes the secret when the delete-dialog checkbox is checked", async () => {
+    let stored = true;
+    const deletedKeys: string[] = [];
+    const fetchMock = stubPaneFetch(() => jsonResponse(panePolicyPayload), {
+      secretStatus: () => ({ GITHUB_TOKEN: stored }),
+      onSecretDeleted: (key) => {
+        deletedKeys.push(key);
+        stored = false;
+      },
+    });
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    await openCredentialsTab(user);
+    await user.click(screen.getByTestId("delete-binding-GITHUB_TOKEN"));
+    const checkbox = (await screen.findByTestId(
+      "delete-binding-also-secret"
+    )) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    await user.click(checkbox);
+    expect(checkbox.checked).toBe(true);
+    await user.click(screen.getByRole("button", { name: /Confirm delete GITHUB_TOKEN/ }));
+    await waitFor(() => {
+      expect(screen.queryByTestId("credential-row")).toBeNull();
+    });
+    const secretDeletes = fetchMock.mock.calls.filter(
+      ([url, init]) =>
+        String(url).startsWith("/settings/secrets/") &&
+        (init as RequestInit | undefined)?.method === "DELETE"
+    );
+    expect(secretDeletes).toHaveLength(1);
+    expect(deletedKeys).toEqual(["GITHUB_TOKEN"]);
   });
 });

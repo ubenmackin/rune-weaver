@@ -564,4 +564,73 @@ describe("PolicyBindingModal wizard", () => {
     expect(draft.allowedPathPrefixes).toEqual(["/v1"]);
     expect(draft.allowed_path_prefixes).toEqual(["/v1"]);
   });
+
+  it("shows the pairing sentence on Review only", async () => {
+    const user = userEvent.setup();
+    renderAddModal();
+
+    let modal = screen.getByTestId("policy-binding-modal");
+    expect(within(modal).queryByTestId("binding-pairing-sentence")).toBeNull();
+
+    await advanceWithKey(user, "PAIR_KEY");
+    modal = await screen.findByTestId("policy-binding-modal");
+    await waitFor(() => {
+      expect(within(modal).getByTestId("hosts-section")).toBeDefined();
+    });
+    expect(within(modal).queryByTestId("binding-pairing-sentence")).toBeNull();
+
+    modal = screen.getByTestId("policy-binding-modal");
+    await user.type(within(modal).getByLabelText("Hosts"), "api.example.com");
+    await user.click(within(modal).getByTestId("wizard-next"));
+    modal = await screen.findByTestId("policy-binding-modal");
+    await waitFor(() => {
+      expect(within(modal).getByTestId("methods-section")).toBeDefined();
+    });
+    expect(within(modal).queryByTestId("binding-pairing-sentence")).toBeNull();
+
+    await user.click(within(modal).getByTestId("wizard-next"));
+    modal = await screen.findByTestId("policy-binding-modal");
+    await waitFor(() => {
+      expect(within(modal).getByTestId("binding-review")).toBeDefined();
+    });
+    expect(within(modal).getByTestId("binding-pairing-sentence").textContent).toContain(
+      "One binding pairs one key",
+    );
+    expect(within(modal).getByTestId("binding-pairing-sentence").textContent).toContain(
+      "prefixes apply to every host",
+    );
+  });
+
+  it("shows the Scope intro plus host context on Step 3", async () => {
+    const user = userEvent.setup();
+    renderAddModal();
+
+    await advanceWithKey(user, "SCOPE_INTRO_KEY");
+    let modal = await screen.findByTestId("policy-binding-modal");
+    await waitFor(() => {
+      expect(within(modal).getByTestId("hosts-section")).toBeDefined();
+    });
+    modal = screen.getByTestId("policy-binding-modal");
+    await user.type(within(modal).getByLabelText("Hosts"), "api.example.com");
+    await user.click(within(modal).getByTestId("wizard-next"));
+
+    modal = await screen.findByTestId("policy-binding-modal");
+    await waitFor(() => {
+      expect(within(modal).getByTestId("methods-section")).toBeDefined();
+    });
+    expect(within(modal).getByTestId("scope-intro").textContent).toContain("Any");
+    expect(within(modal).getByTestId("scope-hosts-context").textContent).toContain(
+      "api.example.com",
+    );
+  });
+
+  it("offers a primary Test action for the committed probe on Review", async () => {
+    const user = userEvent.setup();
+    renderAddModal();
+
+    const modal = await walkToReview(user, "PRIMARY_TEST_KEY", "api.example.com");
+    const probeRun = within(modal).getByTestId("probe-run") as HTMLButtonElement;
+    expect(probeRun.textContent).toBe("Test");
+    expect(probeRun.className).toContain("primary");
+  });
 });
