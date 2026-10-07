@@ -413,6 +413,8 @@ public struct CalendarSearchTool: Tool, Sendable {
         "Searches calendar events as HTML-free plaintext (titles, notes, and locations contain no HTML). "
             + "Use when the user asks about schedule, meetings, or events. "
             + "Empty or omitted query lists the window defined by since (inclusive) and until (exclusive) as YYYY-MM-DD or full ISO8601 datetimes. "
+            + "Each event carries device-timezone startDisplay and endDisplay strings alongside ISO Zulu startDateISO and endDateISO. "
+            + "Present startDisplay and endDisplay to the user and use startDateISO and endDateISO for sorting only. "
             + "Returns matching events with opaque identifiers for follow-up update or delete."
 
     public let inputSchema = JSONSchema(
