@@ -351,6 +351,8 @@ export interface PermissionRequest {
   assessment?: ImpactAssessment | null;
   egressHost?: string | null;
   egress_host?: string | null;
+  sandboxSummary?: string | null;
+  sandbox_summary?: string | null;
 }
 
 export interface ApprovalsResponse {
@@ -2946,13 +2948,17 @@ export const DEFAULT_BASH_HOST_ALLOW_PATTERNS_TEXT: string =
 
 // Plain-language tier copy mirroring BashSandboxCopy.approvalSummary.
 // Host execution stays user-scoped regardless of the network flag while
-// container tiers describe VM isolation plus the network flag.
+// strict describes a temporary container and machine a persistent workspace.
 export const BASH_SANDBOX_COPY = {
+  strictWithoutNetwork:
+    "Runs in a temporary container with no internet access. Nothing is kept after the run.",
+  strictWithNetwork:
+    "Runs in a temporary container with internet access to approved destinations only. Nothing is kept after the run.",
+  machineWithoutNetwork:
+    "Runs in a persistent workspace machine with no internet access. Workspace files persist across runs.",
+  machineWithNetwork:
+    "Runs in a persistent workspace machine with internet access to approved destinations only. Workspace files persist across runs.",
   host: "Runs on your Mac as you with full access to your files.",
-  isolatedWithNetwork:
-    "Runs in an isolated virtual machine with internet access to approved destinations only.",
-  isolatedWithoutNetwork:
-    "Runs in an isolated virtual machine with no internet access.",
 } as const;
 
 export function bashSandboxSummary(
@@ -2962,11 +2968,37 @@ export function bashSandboxSummary(
   if (sandboxMode === "hostSeatbelt") {
     return BASH_SANDBOX_COPY.host;
   }
-  if (allowNetwork) {
-    return BASH_SANDBOX_COPY.isolatedWithNetwork;
+  if (sandboxMode === "machineScoped") {
+    return allowNetwork
+      ? BASH_SANDBOX_COPY.machineWithNetwork
+      : BASH_SANDBOX_COPY.machineWithoutNetwork;
   }
-  return BASH_SANDBOX_COPY.isolatedWithoutNetwork;
+  return allowNetwork
+    ? BASH_SANDBOX_COPY.strictWithNetwork
+    : BASH_SANDBOX_COPY.strictWithoutNetwork;
 }
+
+// Human-readable tier labels plus scope sentences for the Bash & Shell editor.
+// Values derive from BASH_SANDBOX_MODES so the vocabulary stays single-sourced;
+// labels and scope copy ride alongside, but the tier values never duplicate
+// the closed set above.
+export const BASH_SANDBOX_TIERS = [
+  {
+    value: BASH_SANDBOX_MODES[0],
+    label: "Temporary container",
+    scope: "Scope: fresh workspace scratch, deleted at turn end.",
+  },
+  {
+    value: BASH_SANDBOX_MODES[1],
+    label: "Workspace machine",
+    scope: "Scope: full workspace, kept across runs.",
+  },
+  {
+    value: BASH_SANDBOX_MODES[2],
+    label: "On this Mac",
+    scope: "Scope: your entire Mac, running as you.",
+  },
+] as const;
 
 // Closed-tier check mirroring the engine raw-value decode with surrounding
 // whitespace tolerated but casing exact.
@@ -5498,6 +5530,36 @@ export function getWorkspaceUsage(): Promise<WorkspaceUsageResponse> {
 // removed top-level entries.
 export function pruneWorkspaceTmp(): Promise<WorkspacePruneResponse> {
   return fetchJson<WorkspacePruneResponse>("/workspace/tmp/prune", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+// Machine status for `GET /workspace/machine`. Mirrors the engine
+// WorkspaceMachineResponse so the dashboard control reads live state.
+export interface WorkspaceMachineResponse {
+  exists: boolean;
+  running: boolean;
+  image: string;
+  configMatch: boolean | null;
+}
+
+// Reads the persistent workspace machine status for the Tools-tab control.
+export function getWorkspaceMachine(): Promise<WorkspaceMachineResponse> {
+  return fetchJson<WorkspaceMachineResponse>("/workspace/machine");
+}
+
+// Stops the machine container without removing it.
+export function stopWorkspaceMachine(): Promise<WorkspaceMachineResponse> {
+  return fetchJson<WorkspaceMachineResponse>("/workspace/machine/stop", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+// Stops plus removes the machine so the next call recreates it.
+export function recycleWorkspaceMachine(): Promise<WorkspaceMachineResponse> {
+  return fetchJson<WorkspaceMachineResponse>("/workspace/machine/recycle", {
     method: "POST",
     body: JSON.stringify({}),
   });

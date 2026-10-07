@@ -60,6 +60,18 @@ public actor ApprovalQueue {
         self.permissionGate = permissionGate
     }
 
+    /// Live bash policy for headless tier stamping.
+    /// - Returns: Current bash policy, or nil when no gate is wired.
+    func stampedBashConfig() async -> BashConfig? {
+        await permissionGate?.bashConfigSnapshot()
+    }
+
+    /// Workspace root for headless tier stamping.
+    /// - Returns: Configured root, or nil for the production fallback.
+    func stampedWorkspaceRoot() async -> URL? {
+        await permissionGate?.workspaceRootSnapshot()
+    }
+
     // MARK: - Enrichment broadcast hook
 
     /// Rebroadcast hook for enriched assessments on identical id.
@@ -93,16 +105,25 @@ public actor ApprovalQueue {
         input: ToolInput,
         intent: String? = nil,
         assessment: ImpactAssessment? = nil,
-        egressHost: String? = nil
+        egressHost: String? = nil,
+        bashConfig: BashConfig? = nil,
+        workspaceRoot: URL? = nil
     ) -> PermissionRequest {
         let effectiveEgressHost = egressHost ?? Self.extractEgressHost(toolName: toolName, argumentsJSON: input.argumentsJSON)
+        let sandboxSummary = Self.stampedSandboxSummary(
+            toolName: toolName,
+            argumentsJSON: input.argumentsJSON,
+            bashConfig: bashConfig,
+            workspaceRoot: workspaceRoot
+        )
         let request = PermissionRequest(
             toolName: toolName,
             description: description,
             input: input,
             intent: intent,
             assessment: assessment,
-            egressHost: effectiveEgressHost
+            egressHost: effectiveEgressHost,
+            sandboxSummary: sandboxSummary
         )
         pending[request.id] = request
         return request
@@ -131,9 +152,17 @@ public actor ApprovalQueue {
         intent: String? = nil,
         assessment: ImpactAssessment? = nil,
         egressHost: String? = nil,
-        onEnriched: (@Sendable (PermissionRequest) async -> Void)? = nil
+        onEnriched: (@Sendable (PermissionRequest) async -> Void)? = nil,
+        bashConfig: BashConfig? = nil,
+        workspaceRoot: URL? = nil
     ) async -> PermissionRequest {
         let effectiveEgressHost = egressHost ?? Self.extractEgressHost(toolName: tool.name, argumentsJSON: call.argumentsJSON)
+        let sandboxSummary = Self.stampedSandboxSummary(
+            toolName: tool.name,
+            argumentsJSON: call.argumentsJSON,
+            bashConfig: bashConfig,
+            workspaceRoot: workspaceRoot
+        )
         if let assessment {
             let request = PermissionRequest(
                 toolName: tool.name,
@@ -142,7 +171,8 @@ public actor ApprovalQueue {
                 sessionID: sessionID,
                 intent: intent,
                 assessment: assessment,
-                egressHost: effectiveEgressHost
+                egressHost: effectiveEgressHost,
+                sandboxSummary: sandboxSummary
             )
             pending[request.id] = request
             return request
@@ -154,7 +184,8 @@ public actor ApprovalQueue {
             sessionID: sessionID,
             intent: intent,
             assessment: nil,
-            egressHost: effectiveEgressHost
+            egressHost: effectiveEgressHost,
+            sandboxSummary: sandboxSummary
         )
         pending[request.id] = request
         spawnEnrichment(
@@ -237,7 +268,8 @@ public actor ApprovalQueue {
             sessionID: existing.sessionID,
             intent: existing.intent,
             assessment: assessment,
-            egressHost: existing.egressHost
+            egressHost: existing.egressHost,
+            sandboxSummary: existing.sandboxSummary
         )
         pending[id] = updated
         return updated
@@ -459,7 +491,15 @@ public actor ApprovalQueue {
     /// Headless approval handler for scheduler tool buses.
     public func headlessApprovalHandler() -> ToolApprovalHandler {
         { [queue = self] tool, call, context in
-            await queue.fileRequest(tool: tool, call: call, sessionID: context.conversationID)
+            let bashConfig = await queue.stampedBashConfig()
+            let workspaceRoot = await queue.stampedWorkspaceRoot()
+            await queue.fileRequest(
+                tool: tool,
+                call: call,
+                sessionID: context.conversationID,
+                bashConfig: bashConfig,
+                workspaceRoot: workspaceRoot
+            )
             return false
         }
     }
@@ -501,16 +541,47 @@ extension ApprovalQueue {
     /// - Parameters:
     ///   - request: Filed approval request carrying bash arguments.
     ///   - bashConfig: Live bash policy owning tier plus network defaults.
+    ///   - workspaceRoot: Workspace root execution resolves against, or nil for the production root.
     /// - Returns: Shared summary for bash requests, or nil otherwise.
     public static func bashSandboxSummary(
         for request: PermissionRequest,
-        bashConfig: BashConfig
+        bashConfig: BashConfig,
+        workspaceRoot: URL? = nil
     ) -> String? {
-        guard request.toolName == "bash.exec" else { return nil }
-        guard let command = bashCommand(from: request.input.argumentsJSON) else { return nil }
-        let tier = BashSandboxRouter.resolveTier(command: command, config: bashConfig)
-        let requestedNetwork = bashRequestNetwork(from: request.input.argumentsJSON)
-        return bashSandboxBadge(toolName: request.toolName, sandboxMode: tier, networkAllowed: bashConfig.allowNetwork || requestedNetwork)
+        stampedSandboxSummary(
+            toolName: request.toolName,
+            argumentsJSON: request.input.argumentsJSON,
+            bashConfig: bashConfig,
+            workspaceRoot: workspaceRoot
+        )
+    }
+
+    /// File-time sandbox summary for one tool call.
+    ///
+    /// Hermetic scratch roots and relative system-temp working directories only
+    /// resolve against a concrete root, so callers pass the root execution will
+    /// use; a nil root falls back to the production root so the sync stamping
+    /// path still applies the identical host fallback execution runs.
+    /// - Parameters:
+    ///   - toolName: Tool name gating badge scope.
+    ///   - argumentsJSON: Raw tool arguments document.
+    ///   - bashConfig: Live bash policy, or nil when unavailable.
+    ///   - workspaceRoot: Workspace root execution resolves against, or nil for the production root.
+    /// - Returns: Shared summary for bash calls, or nil otherwise.
+    static func stampedSandboxSummary(
+        toolName: String,
+        argumentsJSON: String,
+        bashConfig: BashConfig?,
+        workspaceRoot: URL? = nil
+    ) -> String? {
+        guard let bashConfig else { return nil }
+        guard toolName == "bash.exec" else { return nil }
+        guard let command = bashCommand(from: argumentsJSON) else { return nil }
+        let rawCwd = bashCwd(from: argumentsJSON)
+        let effectiveRoot = workspaceRoot ?? WorkspaceStore.resolveRoot()
+        let tier = BashSandboxRouter.effectiveTier(command: command, config: bashConfig, rawCwd: rawCwd, workspaceRoot: effectiveRoot)
+        let requestedNetwork = bashRequestNetwork(from: argumentsJSON)
+        return bashSandboxBadge(toolName: toolName, sandboxMode: tier, networkAllowed: bashConfig.allowNetwork || requestedNetwork)
     }
 
     /// Extracts the shell command from bash arguments without a Tools dependency.
@@ -539,5 +610,17 @@ extension ApprovalQueue {
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return false }
         return (dict["request_network"] as? Bool) ?? false
+    }
+
+    /// Reads the requested working directory from bash arguments.
+    /// - Parameter argumentsJSON: Raw tool arguments document.
+    /// - Returns: Raw cwd value, or nil when absent.
+    private static func bashCwd(from argumentsJSON: String) -> String? {
+        guard let data = argumentsJSON.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let raw = dict["cwd"] as? String
+        else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

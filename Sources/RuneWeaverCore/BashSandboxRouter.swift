@@ -26,6 +26,228 @@ public enum BashSandboxRouter: Sendable {
         return config.sandboxMode
     }
 
+    /// Effective execution tier shared by approval stamping and the bash tool.
+    ///
+    /// Applies the host fallback the executor enforces for staged copies,
+    /// hermetic scratch roots, and system-temp paths so the stamped summary
+    /// cannot advertise an isolated tier while execution runs on the host.
+    public static func effectiveTier(
+        command: String,
+        config: BashConfig,
+        rawCwd: String? = nil,
+        workspaceRoot: URL? = nil
+    ) -> BashSandboxMode {
+        let base = resolveTier(command: command, config: config)
+        return applyHostFallback(baseTier: base, command: command, rawCwd: rawCwd, workspaceRoot: workspaceRoot)
+    }
+
+    /// Applies the executor host fallback to a resolved base tier.
+    ///
+    /// Single fallback owner so stamping and execution cannot drift: staged
+    /// copies and hermetic roots force host unconditionally, while temp paths
+    /// force host only when the base tier is isolated. Staged-copy and temp
+    /// matches run on expanded path tokens, never raw substrings, so an echo
+    /// of a name stays isolated while an executed staged path still maps host.
+    public static func applyHostFallback(
+        baseTier: BashSandboxMode,
+        command: String,
+        rawCwd: String? = nil,
+        workspaceRoot: URL? = nil
+    ) -> BashSandboxMode {
+        if commandReferencesStagedCopyPath(command) {
+            return .hostSeatbelt
+        }
+        if let root = workspaceRoot, isHermeticWorkspaceRoot(root) {
+            return .hostSeatbelt
+        }
+        if baseTier != .hostSeatbelt, requiresHostForSystemTemp(command: command, rawCwd: rawCwd, workspaceRoot: workspaceRoot) {
+            return .hostSeatbelt
+        }
+        return baseTier
+    }
+
+    /// Whether the executed argv references a staged agent-tool copy.
+    ///
+    /// Matches the staged filename only as a path token carrying a separator,
+    /// so `echo runeweaver-tool-x` stays isolated while the quoted staged
+    /// execution `'.../runeweaver-tool-UUID.sh'` still maps host. The first
+    /// shell word owns the verdict because it is the executed path; later
+    /// words are data for that execution, not a second execution needing host.
+    static func commandReferencesStagedCopyPath(_ command: String) -> Bool {
+        guard let first = firstShellWord(command) else { return false }
+        return first.contains("runeweaver-tool-") && first.contains("/")
+    }
+
+    /// First shell word with surrounding quotes stripped.
+    ///
+    /// Skips leading whitespace; a leading single or double quote parses to its
+    /// mate so the quoted staged path counts as one word. Unbalanced quotes
+    /// fall back to the whitespace-delimited token.
+    static func firstShellWord(_ command: String) -> String? {
+        var index = command.startIndex
+        while index < command.endIndex, command[index].isWhitespace {
+            index = command.index(after: index)
+        }
+        guard index < command.endIndex else { return nil }
+        let quote: Character? = (command[index] == "'" || command[index] == "\"") ? command[index] : nil
+        if let quote {
+            let afterOpen = command.index(after: index)
+            if let close = command[afterOpen...].firstIndex(of: quote) {
+                let inner = String(command[afterOpen ..< close])
+                return inner.isEmpty ? nil : inner
+            }
+        }
+        var end = index
+        while end < command.endIndex,
+              !command[end].isWhitespace,
+              command[end] != ";",
+              command[end] != "|",
+              command[end] != "&",
+              command[end] != "(",
+              command[end] != ")",
+              command[end] != "<",
+              command[end] != ">"
+        {
+            end = command.index(after: end)
+        }
+        let token = String(command[index ..< end]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let stripped = token.trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
+        return stripped.isEmpty ? nil : stripped
+    }
+
+    /// Unquoted shell words for temp-path fallback.
+    ///
+    /// Tracks single plus double quote state so a quoted `"/tmp/foo"` echo
+    /// stays data while an unquoted `/tmp/foo` path still maps host. Words
+    /// split on whitespace plus shell operators outside quotes; quoted words
+    /// are excluded because they are string data, not executed paths.
+    static func unquotedShellWords(_ command: String) -> [String] {
+        var words: [String] = []
+        var current = ""
+        var hasCurrent = false
+        var quote: Character?
+        var currentWasQuoted = false
+        func flush() {
+            if hasCurrent, !currentWasQuoted, !current.isEmpty {
+                words.append(current)
+            }
+            current = ""
+            hasCurrent = false
+            currentWasQuoted = false
+        }
+        var index = command.startIndex
+        while index < command.endIndex {
+            let character = command[index]
+            if let open = quote {
+                if character == open {
+                    quote = nil
+                } else {
+                    current += String(character)
+                    hasCurrent = true
+                }
+            } else if character == "'" || character == "\"" {
+                quote = character
+                currentWasQuoted = true
+                hasCurrent = true
+            } else if character.isWhitespace || character == ";" || character == "|"
+                || character == "&" || character == "(" || character == ")"
+                || character == "<" || character == ">"
+            {
+                flush()
+            } else {
+                current += String(character)
+                hasCurrent = true
+            }
+            index = command.index(after: index)
+        }
+        flush()
+        return words
+    }
+
+    /// Whether an unquoted path token sits under system temp.
+    ///
+    /// Matches temp as a prefix on unquoted path tokens, never as a raw
+    /// substring, so `echo "/tmp/foo"` stays isolated while `cat /tmp/foo`
+    /// still maps host for the executed path.
+    static func commandReferencesSystemTempPath(_ command: String) -> Bool {
+        for word in unquotedShellWords(command) {
+            let expanded = (word as NSString).expandingTildeInPath
+            guard expanded.hasPrefix("/") else { continue }
+            if isSystemTempPath(expanded) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Whether a workspace root is hermetic scratch under system temp.
+    static func isHermeticWorkspaceRoot(_ root: URL) -> Bool {
+        let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
+        let rootPath = root.standardizedFileURL.path
+        let prefix = tmp.hasSuffix("/") ? tmp : tmp + "/"
+        return rootPath == tmp || rootPath.hasPrefix(prefix)
+    }
+
+    /// Whether an isolated tier cannot honor this turn without hiding host temp.
+    ///
+    /// Cwd inside system temp forces host because no isolated mount covers it;
+    /// command temp references force host only as unquoted path-token prefixes,
+    /// never raw substrings, so an echo of a temp name stays isolated.
+    static func requiresHostForSystemTemp(command: String, rawCwd: String?, workspaceRoot: URL?) -> Bool {
+        if let workspaceRoot {
+            let trimmedCwd = (rawCwd ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedCwd.isEmpty {
+                let expanded = (trimmedCwd as NSString).expandingTildeInPath
+                let candidate: URL =
+                    if expanded.hasPrefix("/") {
+                        URL(fileURLWithPath: expanded).standardizedFileURL
+                    } else {
+                        workspaceRoot.appendingPathComponent(expanded).standardizedFileURL
+                    }
+                if isOutsideWorkspace(path: candidate, workspaceRoot: workspaceRoot),
+                   isSystemTempPath(candidate.path)
+                {
+                    return true
+                }
+            }
+        } else if let rawCwd {
+            let trimmed = rawCwd.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                let expanded = (trimmed as NSString).expandingTildeInPath
+                if expanded.hasPrefix("/"), isSystemTempPath(expanded) {
+                    return true
+                }
+            }
+        }
+        if commandReferencesSystemTempPath(command) {
+            return true
+        }
+        return false
+    }
+
+    /// Symlink-resolved outside-workspace check.
+    static func isOutsideWorkspace(path: URL, workspaceRoot: URL) -> Bool {
+        let root = workspaceRoot.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
+        let candidate = path.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
+        if candidate.path == root.path {
+            return false
+        }
+        return !candidate.path.hasPrefix(root.path + "/")
+    }
+
+    /// Whether a path sits under system temp.
+    static func isSystemTempPath(_ path: String) -> Bool {
+        let prefixes = ["/private/tmp/", "/tmp/", "/private/var/folders/", "/var/folders/"]
+        for prefix in prefixes where path == String(prefix.dropLast()) || path.hasPrefix(prefix) {
+            return true
+        }
+        let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
+        if !tmp.isEmpty, path == tmp || path.hasPrefix(tmp.hasSuffix("/") ? tmp : tmp + "/") {
+            return true
+        }
+        return false
+    }
+
     /// Workspace `tmp/` URL for one root.
     public static func workspaceTmpURL(for workspaceRoot: URL) -> URL {
         workspaceRoot.appendingPathComponent(WorkspaceStore.tmpDirectoryName)

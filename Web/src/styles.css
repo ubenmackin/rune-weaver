@@ -1435,6 +1435,11 @@ a {
   color: var(--status-amber);
 }
 
+.chat-tool-status.warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+
 @keyframes pulseTool {
   0%, 100% {
     opacity: 1;
@@ -2097,6 +2102,11 @@ a {
 .tool-badge-pending {
   background: rgba(245, 158, 11, 0.2);
   color: var(--status-amber);
+}
+
+.tool-badge-warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
 }
 
 .tool-action-body {
@@ -4062,6 +4072,10 @@ section[data-testid="policy-pane"] .settings-footer {
   font-size: 13.5px;
   line-height: 1.45;
   color: var(--text-color, #e2e8f0);
+}
+
+.approval-tier {
+  margin-top: 4px;
 }
 
 .approval-section-label {

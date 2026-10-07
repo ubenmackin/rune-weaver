@@ -7,6 +7,7 @@ import {
   type PermissionRequest,
   type TrustDuration,
 } from "../api";
+import BashTierLine from "./BashTierLine";
 
 export interface InlineApprovalBannerProps {
   request: PermissionRequest;
@@ -93,6 +94,16 @@ interface EgressVerdictShape {
 // neither spelling carries a host.
 export function resolveEgressHost(request: PermissionRequest): string | null {
   return request.egressHost ?? request.egress_host ?? null;
+}
+
+// Server-stamped sandbox tier line across both wire spellings. Absent or
+// non-string reads as null so the tier line renders nothing.
+export function resolveSandboxSummary(
+  request: PermissionRequest,
+): string | null {
+  if (typeof request.sandboxSummary === "string") return request.sandboxSummary;
+  if (typeof request.sandbox_summary === "string") return request.sandbox_summary;
+  return null;
 }
 
 // Reports whether an egress request was denied by an explicit block rather
@@ -208,6 +219,7 @@ export default function InlineApprovalBanner({
   const egressHost = resolveEgressHost(request);
   const isEgress = Boolean(egressHost);
   const egressBlocked = isEgress ? isEgressBlocked(request) : false;
+  const sandboxSummary = resolveSandboxSummary(request);
   const currentOptionsCount = isEgress
     ? splitEgressOptions.length
     : splitAllowOptions.length;
@@ -414,6 +426,8 @@ export default function InlineApprovalBanner({
           {request.assessment.outcome}
         </div>
       ) : null}
+
+      <BashTierLine summary={sandboxSummary} />
 
       {request.assessment?.warnings && request.assessment.warnings.length > 0 ? (
         <ul className="approval-warnings">

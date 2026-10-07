@@ -269,7 +269,9 @@ extension Orchestrator {
         actions: [ToolAction],
         toolRounds: Int,
         tokens: (Int?, Int?),
-        narrationAlreadyPersisted: Bool = false
+        narrationAlreadyPersisted: Bool = false,
+        bashConfig: BashConfig? = nil,
+        workspaceRoot: URL? = nil
     ) -> ParkTurnContext {
         ParkTurnContext(
             gated: gated,
@@ -278,7 +280,9 @@ extension Orchestrator {
             billedTokens: tokens.0,
             toolRounds: toolRounds,
             contextTokens: tokens.1,
-            narrationAlreadyPersisted: narrationAlreadyPersisted
+            narrationAlreadyPersisted: narrationAlreadyPersisted,
+            bashConfig: bashConfig,
+            workspaceRoot: workspaceRoot
         )
     }
 
@@ -380,7 +384,9 @@ extension Orchestrator {
             billedTokens: parkContext.billedTokens,
             toolRounds: parkContext.toolRounds,
             contextTokens: parkContext.contextTokens,
-            narrationAlreadyPersisted: true
+            narrationAlreadyPersisted: true,
+            bashConfig: parkContext.bashConfig ?? request.bashConfig,
+            workspaceRoot: parkContext.workspaceRoot ?? request.workspaceRoot
         )
         return try await parkForContinuation(
             toolRounds: toolRounds,
@@ -548,7 +554,9 @@ extension Orchestrator {
             billedTokens: parkContext.billedTokens,
             toolRounds: toolRounds,
             contextTokens: parkContext.contextTokens,
-            narrationAlreadyPersisted: parkContext.narrationAlreadyPersisted
+            narrationAlreadyPersisted: parkContext.narrationAlreadyPersisted,
+            bashConfig: parkContext.bashConfig ?? request.bashConfig,
+            workspaceRoot: parkContext.workspaceRoot ?? request.workspaceRoot
         )
         if let outcome = try await checkLimitAndPark(
             toolRounds: toolRounds,
@@ -621,7 +629,9 @@ extension Orchestrator {
                 actions: toolActions,
                 toolRounds: params.toolRounds,
                 tokens: params.tokens,
-                narrationAlreadyPersisted: true
+                narrationAlreadyPersisted: true,
+                bashConfig: params.request.bashConfig,
+                workspaceRoot: params.request.workspaceRoot
             )
             return await parkForOperatorTakeover(
                 context: takeoverContext,
@@ -633,9 +643,113 @@ extension Orchestrator {
         // sibling gated calls must park without persisting it a second time.
         let updatedContext = makeParkContext(
             gated: params.admissions.combinedGated, text: params.finalText, actions: toolActions, toolRounds: params.toolRounds, tokens: params.tokens,
-            narrationAlreadyPersisted: true
+            narrationAlreadyPersisted: true,
+            bashConfig: params.request.bashConfig,
+            workspaceRoot: params.request.workspaceRoot
         )
         return await parkTurnIfGated(context: updatedContext, request: params.request, pendingEpisodic: &pendingEpisodic)
+    }
+
+    /// Builds the terminal finished outcome with window occupancy.
+    private func makeFinishedTurnOutcome(
+        toolActions: [ToolAction],
+        finalText: String,
+        billedTokens: Int?,
+        workingMessages: [Message],
+        request: TurnLoopRequest,
+        lastRoundContextTokens: Int?
+    ) -> TurnLoopOutcome {
+        let contextTokens = lastRoundContextTokens ?? Self.estimatedContextTokens(
+            for: workingMessages, tools: request.tools, finalText: finalText
+        )
+        return .finished(
+            finalText: finalText,
+            toolActions: toolActions,
+            billedTokens: billedTokens,
+            contextTokens: contextTokens
+        )
+    }
+
+    /// Mutable loop state for one turn, seeded from the request.
+    private struct TurnLoopState {
+        var workingMessages: [Message]
+        var toolActions: [ToolAction]
+        var finalText = ""
+        var toolRounds: Int
+        var billedTokens: Int?
+        var lastRoundContextTokens: Int?
+        var llmRoundIndex: Int
+        var attemptedEmptyRoundSynthesis = false
+
+        init(request: TurnLoopRequest) {
+            workingMessages = request.workingMessages
+            toolActions = request.initialToolActions
+            toolRounds = request.initialToolRounds
+            llmRoundIndex = request.initialLlmRoundIndex
+        }
+    }
+
+    /// Resolves structured plus narrated calls for the current draft.
+    private func resolveRoundCalls(
+        collected: TurnDraft,
+        state: TurnLoopState,
+        request: TurnLoopRequest
+    ) async throws -> (calls: [ToolInput], narratedGated: [ToolInput]) {
+        let calls = try await resolveCallsForTurn(
+            collected: collected,
+            workingMessages: state.workingMessages,
+            finalText: state.finalText,
+            tools: request.tools
+        )
+        let narratedGated = OrchestratorToolLoop.narratedGatedCalls(from: state.finalText, tools: request.tools)
+        return (calls, narratedGated)
+    }
+
+    private struct RoundDisposition {
+        let admissions: RoundAdmissions
+        let billedTokens: Int?
+        let contextTokens: Int
+        let outcome: TurnLoopOutcome?
+        let shouldStop: Bool
+    }
+
+    /// Evaluates admissions and parking disposition for one round.
+    private func evaluateRoundDisposition(
+        calls: [ToolInput],
+        narratedGated: [ToolInput],
+        state: inout TurnLoopState,
+        request: TurnLoopRequest,
+        pendingEpisodic: inout [(content: String, role: Message.Role)]
+    ) async throws -> RoundDisposition {
+        let currentContextTokens = state.lastRoundContextTokens ?? Self.estimatedContextTokens(
+            for: state.workingMessages, tools: request.tools, finalText: state.finalText
+        )
+        let tokens = (state.billedTokens, currentContextTokens)
+        let admissions = await evaluateRoundAdmissions(
+            calls: calls,
+            narratedGated: narratedGated,
+            isDryRun: request.isDryRun,
+            sessionID: request.sessionID
+        )
+        let parkContext = makeParkContext(
+            gated: admissions.combinedGated, text: state.finalText, actions: state.toolActions, toolRounds: state.toolRounds, tokens: tokens,
+            bashConfig: request.bashConfig,
+            workspaceRoot: request.workspaceRoot
+        )
+        let (dispositionOutcome, shouldStop) = try await parkTurnOrHandleLimit(
+            admissions: admissions,
+            parkContext: parkContext,
+            toolRounds: &state.toolRounds,
+            request: request,
+            pendingEpisodic: &pendingEpisodic
+        )
+        return RoundDisposition(
+            admissions: admissions,
+            billedTokens: state.billedTokens,
+            contextTokens: currentContextTokens,
+            outcome: dispositionOutcome,
+            shouldStop: shouldStop
+        )
     }
 
     /// Runs the bounded tool loop for one turn until final text or parking.
@@ -643,110 +757,104 @@ extension Orchestrator {
         _ request: TurnLoopRequest,
         pendingEpisodic: inout [(content: String, role: Message.Role)]
     ) async throws -> TurnLoopOutcome {
-        var workingMessages = request.workingMessages
-        var toolActions = request.initialToolActions
-        var finalText = ""
-        var toolRounds = request.initialToolRounds
-        var billedTokens: Int?
-        var lastRoundContextTokens: Int?
-        var llmRoundIndex = request.initialLlmRoundIndex
-        var attemptedEmptyRoundSynthesis = false
+        let strictSessionID = request.sessionID
+        let strictRegistry = request.strictRegistry ?? StrictTurnRegistry.shared
+        do {
+            var state = TurnLoopState(request: request)
 
-        while true {
-            let (collected, shouldRetry) = try await stepTurnGeneration(
-                request: request,
-                workingMessages: &workingMessages,
-                pendingEpisodic: &pendingEpisodic,
-                llmRoundIndex: &llmRoundIndex,
-                billedTokens: &billedTokens,
-                lastRoundContextTokens: &lastRoundContextTokens
-            )
-            finalText = collected.text
-            if shouldRetry {
-                continue
-            }
-
-            let calls = try await resolveCallsForTurn(
-                collected: collected,
-                workingMessages: workingMessages,
-                finalText: finalText,
-                tools: request.tools
-            )
-            let narratedGated = OrchestratorToolLoop.narratedGatedCalls(from: finalText, tools: request.tools)
-            if calls.isEmpty, narratedGated.isEmpty {
-                // Collected reasoning stays out of the empty-round path by design.
-                let shouldContinue = await handleEmptyRoundAfterTools(
-                    toolActions: toolActions,
-                    finalText: &finalText,
-                    attemptedEmptyRoundSynthesis: &attemptedEmptyRoundSynthesis,
-                    workingMessages: &workingMessages,
-                    onEvent: request.onEvent
+            while true {
+                let (collected, shouldRetry) = try await stepTurnGeneration(
+                    request: request,
+                    workingMessages: &state.workingMessages,
+                    pendingEpisodic: &pendingEpisodic,
+                    llmRoundIndex: &state.llmRoundIndex,
+                    billedTokens: &state.billedTokens,
+                    lastRoundContextTokens: &state.lastRoundContextTokens
                 )
-                if shouldContinue {
+                state.finalText = collected.text
+                if shouldRetry {
                     continue
                 }
-                break
+
+                let (calls, narratedGated) = try await resolveRoundCalls(
+                    collected: collected, state: state, request: request
+                )
+                if calls.isEmpty, narratedGated.isEmpty {
+                    let shouldContinue = await handleEmptyRoundAfterTools(
+                        toolActions: state.toolActions,
+                        finalText: &state.finalText,
+                        attemptedEmptyRoundSynthesis: &state.attemptedEmptyRoundSynthesis,
+                        workingMessages: &state.workingMessages,
+                        onEvent: request.onEvent
+                    )
+                    if shouldContinue {
+                        continue
+                    }
+                    break
+                }
+                let disposition = try await evaluateRoundDisposition(
+                    calls: calls,
+                    narratedGated: narratedGated,
+                    state: &state,
+                    request: request,
+                    pendingEpisodic: &pendingEpisodic
+                )
+                if let dispositionOutcome = disposition.outcome {
+                    let parked = if case .parked = dispositionOutcome {
+                        true
+                    } else {
+                        false
+                    }
+                    await strictRegistry.reapAfterOutcome(sessionID: strictSessionID, isParked: parked)
+                    return dispositionOutcome
+                }
+                if disposition.shouldStop {
+                    break
+                }
+                let executionParams = RoundExecutionParams(
+                    admissions: disposition.admissions,
+                    calls: calls,
+                    finalText: state.finalText,
+                    toolRounds: state.toolRounds,
+                    tokens: (billed: disposition.billedTokens, context: disposition.contextTokens),
+                    request: request
+                )
+                if let parkedOutcome = try await executeRoundAndCheckParking(
+                    params: executionParams,
+                    toolActions: &state.toolActions,
+                    pendingEpisodic: &pendingEpisodic
+                ) {
+                    let parked = if case .parked = parkedOutcome {
+                        true
+                    } else {
+                        false
+                    }
+                    await strictRegistry.reapAfterOutcome(sessionID: strictSessionID, isParked: parked)
+                    return parkedOutcome
+                }
+                state.workingMessages = await refreshedWorkingMessages(
+                    sessionID: request.sessionID,
+                    recall: request.recall,
+                    starterPack: request.starterPack,
+                    systemPrompt: request.systemPrompt
+                )
+                state.finalText = ""
+                continue
             }
-            // Parked frames carry the latest round's context tokens (or fallback estimate)
-            // so approval pauses report window pressure instead of cumulative cost.
-            let currentContextTokens = lastRoundContextTokens ?? Self.estimatedContextTokens(
-                for: workingMessages, tools: request.tools, finalText: finalText
-            )
-            let tokens = (billedTokens, currentContextTokens)
-            let admissions = await evaluateRoundAdmissions(
-                calls: calls,
-                narratedGated: narratedGated,
-                isDryRun: request.isDryRun,
-                sessionID: request.sessionID
-            )
-            let parkContext = makeParkContext(
-                gated: admissions.combinedGated, text: finalText, actions: toolActions, toolRounds: toolRounds, tokens: tokens
-            )
-            let (dispositionOutcome, shouldStop) = try await parkTurnOrHandleLimit(
-                admissions: admissions,
-                parkContext: parkContext,
-                toolRounds: &toolRounds,
+            let terminal = makeFinishedTurnOutcome(
+                toolActions: state.toolActions,
+                finalText: state.finalText,
+                billedTokens: state.billedTokens,
+                workingMessages: state.workingMessages,
                 request: request,
-                pendingEpisodic: &pendingEpisodic
+                lastRoundContextTokens: state.lastRoundContextTokens
             )
-            if let dispositionOutcome {
-                return dispositionOutcome
-            }
-            if shouldStop {
-                break
-            }
-            let executionParams = RoundExecutionParams(
-                admissions: admissions,
-                calls: calls,
-                finalText: finalText,
-                toolRounds: toolRounds,
-                tokens: tokens,
-                request: request
-            )
-            if let parkedOutcome = try await executeRoundAndCheckParking(
-                params: executionParams,
-                toolActions: &toolActions,
-                pendingEpisodic: &pendingEpisodic
-            ) {
-                return parkedOutcome
-            }
-            workingMessages = await refreshedWorkingMessages(
-                sessionID: request.sessionID,
-                recall: request.recall,
-                starterPack: request.starterPack,
-                systemPrompt: request.systemPrompt
-            )
-            finalText = ""
-            continue
+            await strictRegistry.reapAfterOutcome(sessionID: strictSessionID, isParked: false)
+            return terminal
+        } catch {
+            await strictRegistry.reapAfterOutcome(sessionID: strictSessionID, isParked: false)
+            throw error
         }
-        // Finished turns advertise the latest round's active context window occupancy
-        // (falling back to working-history + tools estimate when provider usage is absent)
-        // so contextTokens divided by the model limit reflects window pressure, kept
-        // separate from the cumulative billed total carried alongside it.
-        let contextTokens = lastRoundContextTokens ?? Self.estimatedContextTokens(
-            for: workingMessages, tools: request.tools, finalText: finalText
-        )
-        return .finished(finalText: finalText, toolActions: toolActions, billedTokens: billedTokens, contextTokens: contextTokens)
     }
 
     private func stepTurnGeneration(

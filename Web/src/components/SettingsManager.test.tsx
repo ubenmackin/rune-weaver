@@ -25,9 +25,12 @@ import {
   BASH_MEMORY_MAX_MB,
   BASH_MEMORY_MIN_MB,
   BASH_PERMISSION_ACTIONS,
+  BASH_SANDBOX_COPY,
   BASH_SANDBOX_MODES,
+  BASH_SANDBOX_TIERS,
   BASH_TIMEOUT_MAX_SECONDS,
   BASH_TIMEOUT_MIN_SECONDS,
+  bashSandboxSummary,
   clearAuthToken,
   DEFAULT_BASH_ALLOW_NETWORK,
   DEFAULT_BASH_CONFIG,
@@ -5152,6 +5155,305 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
       expect(screen.getByText(/Invalid workspace quota/i)).toBeDefined();
     });
     expect(putCount).toBe(0);
+  });
+});
+
+describe("bash sandbox copy and tiers", () => {
+  it("pins tier values plus labels plus scope sentences", () => {
+    expect([...BASH_SANDBOX_TIERS.map((tier) => tier.value)]).toEqual([
+      "strictContainer",
+      "machineScoped",
+      "hostSeatbelt",
+    ]);
+    expect(BASH_SANDBOX_TIERS.map((tier) => tier.label)).toEqual([
+      "Temporary container",
+      "Workspace machine",
+      "On this Mac",
+    ]);
+    expect(BASH_SANDBOX_TIERS.map((tier) => tier.scope)).toEqual([
+      "Scope: fresh workspace scratch, deleted at turn end.",
+      "Scope: full workspace, kept across runs.",
+      "Scope: your entire Mac, running as you.",
+    ]);
+  });
+
+  it("pins per-tier approval copy for every tier plus network flag", () => {
+    expect(bashSandboxSummary("strictContainer", false)).toBe(
+      "Runs in a temporary container with no internet access. Nothing is kept after the run.",
+    );
+    expect(bashSandboxSummary("strictContainer", true)).toBe(
+      "Runs in a temporary container with internet access to approved destinations only. Nothing is kept after the run.",
+    );
+    expect(bashSandboxSummary("machineScoped", false)).toBe(
+      "Runs in a persistent workspace machine with no internet access. Workspace files persist across runs.",
+    );
+    expect(bashSandboxSummary("machineScoped", true)).toBe(
+      "Runs in a persistent workspace machine with internet access to approved destinations only. Workspace files persist across runs.",
+    );
+    expect(bashSandboxSummary("hostSeatbelt", false)).toBe(
+      "Runs on your Mac as you with full access to your files.",
+    );
+    expect(bashSandboxSummary("hostSeatbelt", true)).toBe(
+      "Runs on your Mac as you with full access to your files.",
+    );
+    expect(BASH_SANDBOX_COPY.host).toBe(
+      "Runs on your Mac as you with full access to your files.",
+    );
+  });
+});
+
+describe("SettingsManager bash tier modal copy", () => {
+  const bashToolRow = {
+    name: "bash.exec",
+    description: "Run shell commands",
+    permissionLevel: "requiresApproval",
+    inputSchema: "{}",
+    isEnabled: true,
+    isBuiltIn: true,
+    pluginID: null,
+    source: "builtin",
+    integrityStatus: "valid",
+    hasConfig: true,
+  };
+  const usagePayload = {
+    bytes: 12 * 1024 * 1024,
+    files: 120,
+    truncated: false,
+    quotaMB: 500,
+    quotaFiles: 10000,
+  };
+
+  function stubBashFetch(settings: Record<string, unknown>) {
+    const fetchMock = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr === "/workspace/machine") {
+        return jsonResponse({ exists: true, running: true, image: "alpine:latest", configMatch: true });
+      }
+      if (urlStr === "/workspace/usage") return jsonResponse(usagePayload);
+      if (urlStr === "/agent-tools") return jsonResponse({ tools: [], count: 0 });
+      if (urlStr.includes("/tools") && !urlStr.includes("agent-tools")) {
+        return jsonResponse({ tools: [bashToolRow] });
+      }
+      if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });
+      return jsonResponse(settings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  async function openBashModal(user: ReturnType<typeof userEvent.setup>) {
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /Tools and Runes/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Bash & Shell")).toBeDefined();
+    });
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    await user.click(configureButtons[0]);
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
+    });
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedRunsForTesting();
+  });
+
+  it("renders human-readable tier labels with raw values preserved", async () => {
+    const user = userEvent.setup();
+    const settingsWithBash = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        default_action: "ask",
+        rules: [{ pattern: "*", action: "ask" }],
+        timeout_seconds: 30,
+        cpu_seconds: 60,
+        memory_mb: 512,
+        allow_network: false,
+        sandbox_mode: "strictContainer",
+        host_allow_patterns: ["xcodebuild*", "codesign*"],
+      },
+    };
+    stubBashFetch(settingsWithBash);
+    render(<SettingsManager />);
+    await openBashModal(user);
+
+    const tierSelect = screen.getByLabelText(/Execution tier/i) as HTMLSelectElement;
+    const options = Array.from(tierSelect.querySelectorAll("option"));
+    expect(options.map((option) => option.textContent)).toEqual([
+      "Temporary container",
+      "Workspace machine",
+      "On this Mac",
+    ]);
+    expect(options.map((option) => option.value)).toEqual([
+      "strictContainer",
+      "machineScoped",
+      "hostSeatbelt",
+    ]);
+    expect(tierSelect.value).toBe("strictContainer");
+  });
+
+  it("shows per-tier help plus scope and keeps the blob absent", async () => {
+    const user = userEvent.setup();
+    const settingsWithBash = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        default_action: "ask",
+        rules: [{ pattern: "*", action: "ask" }],
+        timeout_seconds: 30,
+        cpu_seconds: 60,
+        memory_mb: 512,
+        allow_network: false,
+        sandbox_mode: "strictContainer",
+        host_allow_patterns: ["xcodebuild*", "codesign*"],
+      },
+    };
+    stubBashFetch(settingsWithBash);
+    render(<SettingsManager />);
+    await openBashModal(user);
+
+    const tierSelect = screen.getByLabelText(/Execution tier/i) as HTMLSelectElement;
+    expect(screen.getByTestId("bash-sandbox-help").textContent).toBe(
+      "Runs in a temporary container with no internet access. Nothing is kept after the run.",
+    );
+    expect(screen.getByTestId("bash-sandbox-scope").textContent).toBe(
+      "Scope: fresh workspace scratch, deleted at turn end.",
+    );
+    expect(screen.queryByText(/Tiers:/)).toBeNull();
+    expect(document.body.textContent).not.toContain("stay isolated");
+
+    await user.selectOptions(tierSelect, "machineScoped");
+    expect(screen.getByTestId("bash-sandbox-help").textContent).toBe(
+      "Runs in a persistent workspace machine with no internet access. Workspace files persist across runs.",
+    );
+    expect(screen.getByTestId("bash-sandbox-scope").textContent).toBe(
+      "Scope: full workspace, kept across runs.",
+    );
+
+    await user.selectOptions(tierSelect, "hostSeatbelt");
+    expect(screen.getByTestId("bash-sandbox-help").textContent).toBe(
+      "Runs on your Mac as you with full access to your files.",
+    );
+    expect(screen.getByTestId("bash-sandbox-scope").textContent).toBe(
+      "Scope: your entire Mac, running as you.",
+    );
+    expect(screen.queryByText(/Tiers:/)).toBeNull();
+  });
+
+  it("keeps numeric limits collapsed in Advanced with policy visible", async () => {
+    const user = userEvent.setup();
+    const settingsWithBash = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        default_action: "ask",
+        rules: [{ pattern: "*", action: "ask" }],
+        timeout_seconds: 30,
+        cpu_seconds: 60,
+        memory_mb: 512,
+        allow_network: false,
+        sandbox_mode: "strictContainer",
+        host_allow_patterns: ["xcodebuild*", "codesign*"],
+      },
+    };
+    stubBashFetch(settingsWithBash);
+    render(<SettingsManager />);
+    await openBashModal(user);
+
+    const advanced = screen.getByTestId("bash-advanced-details");
+    expect(advanced).not.toBeNull();
+    expect((advanced as HTMLDetailsElement).open).toBe(false);
+    expect(within(advanced as HTMLElement).getByText("Advanced")).toBeDefined();
+    expect((advanced as HTMLElement).textContent).toContain("Advanced");
+    const advancedScope = advanced as HTMLElement;
+    expect(within(advancedScope).getByLabelText(/Timeout \(seconds\)/i)).toBeDefined();
+    expect(within(advancedScope).getByLabelText(/CPU seconds/i)).toBeDefined();
+    expect(within(advancedScope).getByLabelText(/Memory \(MB\)/i)).toBeDefined();
+    expect(screen.getByLabelText(/Execution tier/i)).toBeDefined();
+    expect(screen.getByLabelText(/Host allow patterns/i)).toBeDefined();
+    expect(screen.getByLabelText(/Allow network access/i)).toBeDefined();
+    expect(screen.getByLabelText(/Default action/i)).toBeDefined();
+    expect(screen.getByLabelText(/Rules, one per line/i)).toBeDefined();
+  });
+});
+
+describe("SettingsManager workspace machine control", () => {
+  const usagePayload = {
+    bytes: 12 * 1024 * 1024,
+    files: 120,
+    truncated: false,
+    quotaMB: 500,
+    quotaFiles: 10000,
+  };
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedRunsForTesting();
+  });
+
+  it("reads machine status and posts stop plus recycle with refresh", async () => {
+    const user = userEvent.setup();
+    let machineState = { exists: true, running: true, image: "alpine:latest", configMatch: true };
+    const calls: Array<{ url: string; method?: string }> = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      calls.push({ url: urlStr, method: init?.method });
+      if (urlStr === "/workspace/machine" && (!init?.method || init.method === "GET")) {
+        return jsonResponse({ ...machineState });
+      }
+      if (urlStr === "/workspace/machine/stop" && init?.method === "POST") {
+        machineState = { ...machineState, running: false };
+        return jsonResponse({ ...machineState });
+      }
+      if (urlStr === "/workspace/machine/recycle" && init?.method === "POST") {
+        machineState = { exists: false, running: false, image: "", configMatch: false };
+        return jsonResponse({ ...machineState });
+      }
+      if (urlStr === "/workspace/usage") return jsonResponse(usagePayload);
+      if (urlStr === "/agent-tools") return jsonResponse({ tools: [], count: 0 });
+      if (urlStr.includes("/tools") && !urlStr.includes("agent-tools")) {
+        return jsonResponse({ tools: [] });
+      }
+      if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /Tools and Runes/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Workspace Storage")).toBeDefined();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-machine-status").textContent).toContain("alpine:latest");
+    });
+    expect(screen.getByTestId("workspace-machine-status").textContent).toContain("exists");
+    expect(screen.getByTestId("workspace-machine-status").textContent).toContain("running");
+    expect(screen.getByTestId("workspace-machine-status").textContent).toContain("image");
+    expect(calls.some((call) => call.url === "/workspace/machine")).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() => {
+      expect(calls.some((call) => call.url === "/workspace/machine/stop" && call.method === "POST")).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-machine-status").textContent).toContain("running: no");
+    });
+
+    await user.click(screen.getByRole("button", { name: "Recycle" }));
+    await waitFor(() => {
+      expect(calls.some((call) => call.url === "/workspace/machine/recycle" && call.method === "POST")).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-machine-status").textContent).toContain("exists: no");
+    });
   });
 });
 

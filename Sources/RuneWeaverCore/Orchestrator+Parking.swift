@@ -351,6 +351,8 @@ extension Orchestrator {
         var pendingEpisodic: [(content: String, role: Message.Role)] = []
         let combinedActions = parked.priorActions + buffered
         let initialRounds = resetToolRounds ? 0 : parked.toolRounds
+        let resumedBashConfig = await admissionGate?.bashConfigSnapshot()
+        let resumedWorkspaceRoot = await admissionGate?.workspaceRootSnapshot()
         let request = TurnLoopRequest(
             workingMessages: workingMessages,
             tools: tools,
@@ -362,7 +364,10 @@ extension Orchestrator {
             initialToolActions: combinedActions,
             priorBilledTokens: parked.billedTokens,
             initialToolRounds: initialRounds,
-            initialLlmRoundIndex: parked.synthesisRoundIndex
+            initialLlmRoundIndex: parked.synthesisRoundIndex,
+            bashConfig: resumedBashConfig,
+            workspaceRoot: resumedWorkspaceRoot,
+            strictRegistry: strictContainerRegistry
         )
         do {
             let outcome = try await runTurnLoop(request, pendingEpisodic: &pendingEpisodic)
@@ -649,7 +654,9 @@ extension Orchestrator {
                 billedTokens: context.billedTokens,
                 toolRounds: context.toolRounds,
                 contextTokens: context.contextTokens,
-                narrationAlreadyPersisted: context.narrationAlreadyPersisted
+                narrationAlreadyPersisted: context.narrationAlreadyPersisted,
+                bashConfig: context.bashConfig ?? request.bashConfig,
+                workspaceRoot: context.workspaceRoot ?? request.workspaceRoot
             ),
             request: request,
             pendingEpisodic: &pendingEpisodic
@@ -691,7 +698,9 @@ extension Orchestrator {
                 billedTokens: context.billedTokens,
                 toolRounds: completedRounds,
                 contextTokens: context.contextTokens,
-                narrationAlreadyPersisted: context.narrationAlreadyPersisted
+                narrationAlreadyPersisted: context.narrationAlreadyPersisted,
+                bashConfig: context.bashConfig ?? request.bashConfig,
+                workspaceRoot: context.workspaceRoot ?? request.workspaceRoot
             ),
             request: request,
             pendingEpisodic: &pendingEpisodic
@@ -704,6 +713,14 @@ extension Orchestrator {
         request: TurnLoopRequest,
         pendingEpisodic: inout [(content: String, role: Message.Role)]
     ) async -> TurnLoopOutcome {
+        var liveBashConfig = turn.bashConfig ?? request.bashConfig
+        if liveBashConfig == nil {
+            liveBashConfig = await admissionGate?.bashConfigSnapshot()
+        }
+        var liveWorkspaceRoot = turn.workspaceRoot ?? request.workspaceRoot
+        if liveWorkspaceRoot == nil {
+            liveWorkspaceRoot = await admissionGate?.workspaceRootSnapshot()
+        }
         let context = ParkGatedCallsContext(
             gated: turn.gated,
             narratedText: turn.narratedText,
@@ -718,7 +735,9 @@ extension Orchestrator {
             onEvent: request.onEvent,
             gatedRoundIndex: turn.toolRounds,
             contextTokens: turn.contextTokens,
-            narrationAlreadyPersisted: turn.narrationAlreadyPersisted
+            narrationAlreadyPersisted: turn.narrationAlreadyPersisted,
+            bashConfig: liveBashConfig,
+            workspaceRoot: liveWorkspaceRoot
         )
         let parked = await parkGatedCalls(context, pendingEpisodic: &pendingEpisodic)
         return .parked(parked)
@@ -780,7 +799,9 @@ extension Orchestrator {
                 intent: intent,
                 onEnriched: { updated in
                     await parkOnEvent?(.approval(updated))
-                }
+                },
+                bashConfig: context.bashConfig,
+                workspaceRoot: context.workspaceRoot
             )
         }
         return nil

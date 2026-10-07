@@ -19,6 +19,8 @@ import {
 } from "../../api";
 import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
 import InlineQuestionCard from "../InlineQuestionCard";
+import BashTierLine from "../BashTierLine";
+import { resolveSandboxSummary } from "../InlineApprovalBanner";
 import {
   AlertTriangleIcon,
   CheckIcon,
@@ -219,6 +221,7 @@ export default function NeedsActionQueue({
 
                 <div className="action-card-body">
                   <p className="action-card-desc">{descriptionText}</p>
+                  <BashTierLine summary={resolveSandboxSummary(req)} />
                   {argSummary ? (
                     <details className="action-args-details">
                       <summary className="action-args-summary">

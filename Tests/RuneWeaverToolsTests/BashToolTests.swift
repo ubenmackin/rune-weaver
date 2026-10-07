@@ -5,6 +5,43 @@ import Foundation
 @testable import RuneWeaverTools
 import Testing
 
+/// Builds an isolated workspace base under system temp for one hermetic test.
+private func makeHermeticWorkspaceBase(label: String) throws -> URL {
+    let base = FileManager.default.temporaryDirectory
+        .appendingPathComponent("runeweaver-\(label)-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    return base
+}
+
+/// Removes an isolated workspace base without failing the test on cleanup errors.
+private func removeHermeticWorkspaceBase(_ url: URL) {
+    try? FileManager.default.removeItem(at: url)
+}
+
+/// Builds a hermetic bash tool rooted in isolated scratch with a stubbed seam.
+///
+/// The isolated root forces the host fallback so turns never create
+/// containers, while the stubbed seam keeps any isolated-tier probe hermetic.
+private func makeHermeticBashTool(
+    bashConfig: BashConfig,
+    filesConfig: FilesConfig = FilesConfig(),
+    egressSupervisor: OutboundEgressSupervisor? = nil,
+    base: URL
+) -> BashTool {
+    let root = base.appendingPathComponent("ws", isDirectory: true)
+    let store = WorkspaceStore(config: WorkspaceConfig(), rootURL: root)
+    let (seam, _) = ContainerSeam.hermetic()
+    return BashTool(
+        bashConfig: bashConfig,
+        filesConfig: filesConfig,
+        allowUnsandboxedFallback: true,
+        egressSupervisor: egressSupervisor,
+        workspaceConfig: WorkspaceConfig(),
+        workspaceStore: store,
+        containers: seam
+    )
+}
+
 @Suite("BashSecurity Chaining Detection")
 struct BashChainingDetectionTests {
     @Test
@@ -258,12 +295,17 @@ struct BashToolExecutionTests {
                 BashRule(pattern: "echo", action: .allow)
             ]
         )
-        let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true)
+        // Hermetic execution stays on the host fallback under isolated
+        // scratch so the full suite creates zero containers.
+        let base = try makeHermeticWorkspaceBase(label: "bash-exec")
+        defer { removeHermeticWorkspaceBase(base) }
+        let tool = makeHermeticBashTool(bashConfig: config, base: base)
+        let sessionID = UUID()
         let input = ToolInput(
             toolName: "bash.exec",
             argumentsJSON: #"{"command":"echo Hello Rune Weaver"}"#
         )
-        let context = ToolContext(conversationID: UUID())
+        let context = ToolContext(conversationID: sessionID)
         let output = try await tool.execute(input: input, context: context)
 
         #expect(!output.isError)
@@ -279,7 +321,9 @@ struct BashToolExecutionTests {
                 BashRule(pattern: "rm*", action: .deny)
             ]
         )
-        let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true)
+        // Hermetic stub keeps the suite container-free; the deny parks before any spawn.
+        let (hermeticSeam, _) = ContainerSeam.hermetic()
+        let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true, containers: hermeticSeam)
         let input = ToolInput(
             toolName: "bash.exec",
             argumentsJSON: #"{"command":"rm -rf /tmp/testfile"}"#
@@ -299,7 +343,9 @@ struct BashToolExecutionTests {
                 BashRule(pattern: "*", action: .ask)
             ]
         )
-        let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true)
+        // Hermetic stub keeps the suite container-free; the ask parks before any spawn.
+        let (hermeticSeam, _) = ContainerSeam.hermetic()
+        let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true, containers: hermeticSeam)
         let input = ToolInput(
             toolName: "bash.exec",
             argumentsJSON: #"{"command":"echo test ask"}"#
@@ -321,7 +367,9 @@ struct BashToolExecutionTests {
                 BashRule(pattern: "*", action: .ask)
             ]
         )
-        let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true)
+        // Hermetic stub keeps the suite container-free; the ask parks before any spawn.
+        let (hermeticSeam, _) = ContainerSeam.hermetic()
+        let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true, containers: hermeticSeam)
         let input = ToolInput(
             toolName: "bash.exec",
             argumentsJSON: #"{"command":"echo test confirmed","confirmed":true}"#
@@ -344,7 +392,9 @@ struct BashToolExecutionTests {
                 BashRule(pattern: "echo", action: .allow)
             ]
         )
-        let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true)
+        // Hermetic stub keeps the suite container-free; chaining parks before any spawn.
+        let (hermeticSeam, _) = ContainerSeam.hermetic()
+        let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true, containers: hermeticSeam)
         let input = ToolInput(
             toolName: "bash.exec",
             argumentsJSON: #"{"command":"echo one && echo two"}"#
@@ -367,7 +417,11 @@ struct BashToolExecutionTests {
             ]
         )
         let filesConfig = FilesConfig(allowRoots: ["~", "/tmp", "/private/tmp"])
-        let tool = BashTool(bashConfig: config, filesConfig: filesConfig, allowUnsandboxedFallback: true)
+        // Hermetic execution stays on the host fallback under isolated
+        // scratch so the full suite creates zero containers.
+        let base = try makeHermeticWorkspaceBase(label: "bash-cwd")
+        defer { removeHermeticWorkspaceBase(base) }
+        let tool = makeHermeticBashTool(bashConfig: config, filesConfig: filesConfig, base: base)
         let input = ToolInput(
             toolName: "bash.exec",
             argumentsJSON: #"{"command":"pwd","cwd":"/private/tmp"}"#
@@ -386,7 +440,9 @@ struct BashToolExecutionTests {
                 BashRule(pattern: "echo", action: .allow)
             ]
         )
-        let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true)
+        // Hermetic stub keeps the suite container-free; dry run never spawns.
+        let (hermeticSeam, _) = ContainerSeam.hermetic()
+        let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true, containers: hermeticSeam)
         let input = ToolInput(
             toolName: "bash.exec",
             argumentsJSON: #"{"command":"echo dry run"}"#
@@ -405,12 +461,17 @@ struct BashSmokeContractTests {
     /// Allowed echo executes with no approval envelope.
     @Test
     func `echo Hello World executes without approval`() async throws {
-        let tool = BashTool(bashConfig: ToolsTestSupport.smokeBashConfig(), allowUnsandboxedFallback: true)
+        // Hermetic execution stays on the host fallback under isolated
+        // scratch so the full suite creates zero containers.
+        let base = try makeHermeticWorkspaceBase(label: "bash-smoke-echo")
+        defer { removeHermeticWorkspaceBase(base) }
+        let tool = makeHermeticBashTool(bashConfig: ToolsTestSupport.smokeBashConfig(), base: base)
+        let sessionID = UUID()
         let input = ToolInput(
             toolName: "bash.exec",
             argumentsJSON: #"{"command":"echo Hello World"}"#
         )
-        let output = try await tool.execute(input: input, context: ToolContext(conversationID: UUID()))
+        let output = try await tool.execute(input: input, context: ToolContext(conversationID: sessionID))
 
         #expect(!output.isError)
         #expect(output.content.contains("Hello World"))
@@ -421,7 +482,12 @@ struct BashSmokeContractTests {
     /// Touch parks until approved, then executes instead of enveloping.
     @Test
     func `approved touch executes instead of enveloping`() async throws {
-        let tool = BashTool(bashConfig: ToolsTestSupport.smokeBashConfig(), allowUnsandboxedFallback: true)
+        // Hermetic execution stays on the host fallback under isolated
+        // scratch so the full suite creates zero containers.
+        let base = try makeHermeticWorkspaceBase(label: "bash-smoke-touch")
+        defer { removeHermeticWorkspaceBase(base) }
+        let tool = makeHermeticBashTool(bashConfig: ToolsTestSupport.smokeBashConfig(), base: base)
+        let sessionID = UUID()
         let target = FileManager.default.temporaryDirectory
             .appendingPathComponent("runeweaver-smoke-touch-\(UUID().uuidString).txt")
         defer { try? FileManager.default.removeItem(at: target) }
@@ -431,7 +497,7 @@ struct BashSmokeContractTests {
         )
 
         // Without approval the ask rule parks in the approvals inbox envelope.
-        let parked = try await tool.execute(input: input, context: ToolContext(conversationID: UUID()))
+        let parked = try await tool.execute(input: input, context: ToolContext(conversationID: sessionID))
         #expect(parked.isError)
         #expect(parked.content.contains("\"approvalRequired\":true"))
         #expect(parked.content.contains("Command requires approval"))
@@ -440,7 +506,7 @@ struct BashSmokeContractTests {
         // An approved ask-rule command carries the gate authorization and runs.
         let approved = try await tool.execute(
             input: input,
-            context: ToolContext(conversationID: UUID(), approved: true)
+            context: ToolContext(conversationID: sessionID, approved: true)
         )
         #expect(!approved.isError)
         #expect(!approved.content.contains("\"approvalRequired\":true"))
@@ -450,7 +516,9 @@ struct BashSmokeContractTests {
     /// Denied rm refuses even when an approval flag is present.
     @Test
     func `rm denies even when approved`() async throws {
-        let tool = BashTool(bashConfig: ToolsTestSupport.smokeBashConfig(), allowUnsandboxedFallback: true)
+        // Hermetic stub keeps the suite container-free; the deny parks before any spawn.
+        let (hermeticSeam, _) = ContainerSeam.hermetic()
+        let tool = BashTool(bashConfig: ToolsTestSupport.smokeBashConfig(), allowUnsandboxedFallback: true, containers: hermeticSeam)
         let input = ToolInput(
             toolName: "bash.exec",
             argumentsJSON: #"{"command":"rm ~/helloWorld.txt"}"#
@@ -464,5 +532,44 @@ struct BashSmokeContractTests {
         #expect(output.content.contains("\"denied\":true"))
         #expect(output.content.contains("Command denied by security policy"))
         #expect(!output.content.contains("\"approvalRequired\":true"))
+    }
+}
+
+@Suite("Strict Container Memory")
+struct StrictContainerMemoryTests {
+    private func memoryValue(in args: [String]) -> String? {
+        guard let flag = args.firstIndex(of: "--memory"), flag + 1 < args.count else { return nil }
+        return args[flag + 1]
+    }
+
+    @Test
+    func `Default creation carries the production cap`() {
+        let args = StrictContainerRunner.containerCreateArguments(
+            name: "n",
+            hostPath: "/h",
+            guestPath: "/g",
+            workdir: "/g",
+            networkDenied: true
+        )
+        #expect(memoryValue(in: args) == StrictContainerRunner.defaultMemory)
+        #expect(memoryValue(in: args) == "1G")
+    }
+
+    @Test
+    func `Machine creation carries the production cap`() {
+        let root = URL(fileURLWithPath: "/tmp/rw-memory-probe")
+        let capped = MachineScopedRunner.createArguments(workspaceRoot: root, networkDenied: true)
+        #expect(memoryValue(in: capped) == StrictContainerRunner.defaultMemory)
+        #expect(memoryValue(in: capped) == "1G")
+        #expect(MachineScopedRunner.sharedMemoryCap == StrictContainerRunner.defaultMemory)
+    }
+
+    @Test
+    func `Seams carry the production cap`() {
+        #expect(ContainerSeam.live.memory == StrictContainerRunner.defaultMemory)
+        #expect(ContainerSeam.live.memory == "1G")
+        let (hermeticSeam, _) = ContainerSeam.hermetic()
+        #expect(hermeticSeam.memory == StrictContainerRunner.defaultMemory)
+        #expect(hermeticSeam.memory == "1G")
     }
 }

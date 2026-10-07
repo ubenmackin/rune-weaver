@@ -22,6 +22,7 @@ struct WorkspaceCommand: AsyncParsableCommand {
         subcommands: [
             WorkspaceUsageCommand.self,
             WorkspacePruneCommand.self,
+            WorkspaceMachineCommand.self,
             WorkspaceToolsCommand.self
         ],
         defaultSubcommand: WorkspaceUsageCommand.self
@@ -106,6 +107,121 @@ struct WorkspacePruneCommand: AsyncParsableCommand {
             print(TerminalStyle.dim("Nothing to prune (0 entries removed, 0 bytes reclaimed)."))
         } else {
             print(TerminalStyle.success("Pruned \(removed) tmp entr\(removed == 1 ? "y" : "ies"), reclaimed \(reclaimed) bytes (\(before) -> \(after))."))
+        }
+    }
+}
+
+/// Manages the workspace machine container: status, stop, and recycle.
+struct WorkspaceMachineCommand: AsyncParsableCommand {
+    /// Top-level command configuration.
+    static let configuration = CommandConfiguration(
+        commandName: "machine",
+        abstract: "Inspect and control the workspace machine container.",
+        subcommands: [
+            WorkspaceMachineStatusCommand.self,
+            WorkspaceMachineStopCommand.self,
+            WorkspaceMachineRecycleCommand.self
+        ],
+        defaultSubcommand: WorkspaceMachineStatusCommand.self
+    )
+}
+
+/// Reports machine lifecycle state.
+struct WorkspaceMachineStatusCommand: AsyncParsableCommand {
+    /// Top-level command configuration.
+    static let configuration = CommandConfiguration(
+        commandName: "status",
+        abstract: "Show workspace machine status."
+    )
+
+    /// Config file path override.
+    @Option(name: .long, help: "Path to config.toml (defaults to ~/.runeweaver/config.toml).")
+    var config: String?
+
+    /// Prints live exists plus running plus image plus config agreement.
+    mutating func run() async throws {
+        let loaded = try CLIConfigLoader.loadConfig(path: config)
+        if loaded.isFallback {
+            print(TerminalStyle.dim("No config found at \(loaded.url.path); using built-in defaults."))
+        }
+        let store = WorkspaceStore(config: loaded.config.workspace)
+        let root = await store.root()
+        let networkDenied = !loaded.config.bash.allowNetwork
+        let status = await MachineScopedRunner.machineStatus(workspaceRoot: root, networkDenied: networkDenied)
+        await print("Machine: \(storeRootDescription(store))")
+        print("  exists: \(status.exists)")
+        print("  running: \(status.running)")
+        print("  image: \(status.image.isEmpty ? "(unknown)" : status.image)")
+        print("  configMatch: \(status.configMatch.map(String.init(describing:)) ?? "(unknown)")")
+        if !status.exists {
+            print(TerminalStyle.dim("  note: no machine container; the next run recreates it."))
+        }
+    }
+
+    /// Best-effort root description without touching disk beyond the store.
+    private func storeRootDescription(_ store: WorkspaceStore) async -> String {
+        await store.root().path
+    }
+}
+
+/// Stops the machine container without removing it.
+struct WorkspaceMachineStopCommand: AsyncParsableCommand {
+    /// Top-level command configuration.
+    static let configuration = CommandConfiguration(
+        commandName: "stop",
+        abstract: "Stop the workspace machine without removing it."
+    )
+
+    /// Config file path override.
+    @Option(name: .long, help: "Path to config.toml (defaults to ~/.runeweaver/config.toml).")
+    var config: String?
+
+    /// Halts the machine then prints the live post-stop state.
+    mutating func run() async throws {
+        let loaded = try CLIConfigLoader.loadConfig(path: config)
+        if loaded.isFallback {
+            print(TerminalStyle.dim("No config found at \(loaded.url.path); using built-in defaults."))
+        }
+        let store = WorkspaceStore(config: loaded.config.workspace)
+        await MachineScopedRunner.stopMachine()
+        let root = await store.root()
+        let networkDenied = !loaded.config.bash.allowNetwork
+        let status = await MachineScopedRunner.machineStatus(workspaceRoot: root, networkDenied: networkDenied)
+        if !status.exists {
+            print(TerminalStyle.dim("No machine container (nothing to stop)."))
+        } else {
+            print(TerminalStyle.success("Stopped workspace machine (running: \(status.running))."))
+        }
+    }
+}
+
+/// Stops plus removes the machine container so the next run recreates it.
+struct WorkspaceMachineRecycleCommand: AsyncParsableCommand {
+    /// Top-level command configuration.
+    static let configuration = CommandConfiguration(
+        commandName: "recycle",
+        abstract: "Stop and remove the workspace machine so the next run recreates it."
+    )
+
+    /// Config file path override.
+    @Option(name: .long, help: "Path to config.toml (defaults to ~/.runeweaver/config.toml).")
+    var config: String?
+
+    /// Removes the machine then prints the live post-recycle state.
+    mutating func run() async throws {
+        let loaded = try CLIConfigLoader.loadConfig(path: config)
+        if loaded.isFallback {
+            print(TerminalStyle.dim("No config found at \(loaded.url.path); using built-in defaults."))
+        }
+        let store = WorkspaceStore(config: loaded.config.workspace)
+        await MachineScopedRunner.recycleMachine()
+        let root = await store.root()
+        let networkDenied = !loaded.config.bash.allowNetwork
+        let status = await MachineScopedRunner.machineStatus(workspaceRoot: root, networkDenied: networkDenied)
+        if status.exists {
+            print(TerminalStyle.error("Recycle did not remove the machine (exists: true, running: \(status.running))."))
+        } else {
+            print(TerminalStyle.success("Recycled workspace machine (next run recreates it)."))
         }
     }
 }

@@ -556,6 +556,47 @@ struct ParkGatedCallsContext {
     /// note once; filing must stay a no-op then or the narration and its
     /// placeholders land in history twice.
     let narrationAlreadyPersisted: Bool
+    /// Live bash policy stamped onto filed bash approvals so the tier line
+    /// renders on every card.
+    let bashConfig: BashConfig?
+    /// Workspace root execution resolves against for tier stamping.
+    let workspaceRoot: URL?
+
+    init(
+        gated: [ToolInput],
+        narratedText: String,
+        tools: [any Tool],
+        sessionID: UUID,
+        priorActions: [ToolAction],
+        billedTokens: Int?,
+        priorBilledTokens: Int?,
+        systemPrompt: String?,
+        recall: Message?,
+        starterPack: Message?,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)?,
+        gatedRoundIndex: Int,
+        contextTokens: Int?,
+        narrationAlreadyPersisted: Bool,
+        bashConfig: BashConfig? = nil,
+        workspaceRoot: URL? = nil
+    ) {
+        self.gated = gated
+        self.narratedText = narratedText
+        self.tools = tools
+        self.sessionID = sessionID
+        self.priorActions = priorActions
+        self.billedTokens = billedTokens
+        self.priorBilledTokens = priorBilledTokens
+        self.systemPrompt = systemPrompt
+        self.recall = recall
+        self.starterPack = starterPack
+        self.onEvent = onEvent
+        self.gatedRoundIndex = gatedRoundIndex
+        self.contextTokens = contextTokens
+        self.narrationAlreadyPersisted = narrationAlreadyPersisted
+        self.bashConfig = bashConfig
+        self.workspaceRoot = workspaceRoot
+    }
 }
 
 /// Inputs for one bounded tool-loop run.
@@ -581,6 +622,13 @@ struct TurnLoopRequest {
     var toolLimitPolicy: ToolLimitPolicy = .park
     /// Overridden tool iteration limit for this turn, or nil to use orchestrator default.
     var effectiveMaxToolIterations: Int?
+    /// Live bash policy snapshot stamped onto filed bash approvals.
+    let bashConfig: BashConfig?
+    /// Workspace root execution resolves against for tier stamping.
+    let workspaceRoot: URL?
+    /// Strict container registry execution used, so reap targets the same
+    /// registry instead of the shared live one.
+    let strictRegistry: StrictTurnRegistry?
 
     /// Creates a turn-loop request threading the turn's recall and starter pack.
     init(
@@ -597,7 +645,10 @@ struct TurnLoopRequest {
         initialLlmRoundIndex: Int = 0,
         isDryRun: Bool = false,
         toolLimitPolicy: ToolLimitPolicy = .park,
-        effectiveMaxToolIterations: Int? = nil
+        effectiveMaxToolIterations: Int? = nil,
+        bashConfig: BashConfig? = nil,
+        workspaceRoot: URL? = nil,
+        strictRegistry: StrictTurnRegistry? = nil
     ) {
         self.workingMessages = workingMessages
         self.tools = tools
@@ -613,6 +664,9 @@ struct TurnLoopRequest {
         self.isDryRun = isDryRun
         self.toolLimitPolicy = toolLimitPolicy
         self.effectiveMaxToolIterations = effectiveMaxToolIterations
+        self.bashConfig = bashConfig
+        self.workspaceRoot = workspaceRoot
+        self.strictRegistry = strictRegistry
     }
 }
 
@@ -650,6 +704,10 @@ struct ParkTurnContext {
     /// Whether the assistant narration note was already persisted earlier in this
     /// turn, telling the filing path to skip its own persist.
     var narrationAlreadyPersisted: Bool = false
+    /// Live bash policy snapshot carried into the park filing path.
+    var bashConfig: BashConfig?
+    /// Workspace root execution resolves against for tier stamping.
+    var workspaceRoot: URL?
 }
 
 /// Intermediate result of an LLM round.

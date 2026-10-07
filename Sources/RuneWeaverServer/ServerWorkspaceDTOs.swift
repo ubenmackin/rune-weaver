@@ -108,6 +108,28 @@ extension UpdateSettingsRequest {
     }
 }
 
+// MARK: - Workspace Machine
+
+/// Machine status for `GET /workspace/machine`.
+public struct WorkspaceMachineResponse: Content, Sendable, Equatable {
+    /// Whether the machine container entry exists.
+    public let exists: Bool
+    /// Whether the machine container is running.
+    public let running: Bool
+    /// Image reference reported by the machine, empty when unknown.
+    public let image: String
+    /// Whether the machine label matches the current workspace root, nil when unknown.
+    public let configMatch: Bool?
+
+    /// Creates a machine status response.
+    public init(exists: Bool, running: Bool, image: String, configMatch: Bool?) {
+        self.exists = exists
+        self.running = running
+        self.image = image
+        self.configMatch = configMatch
+    }
+}
+
 // MARK: - Workspace Settings Merge
 
 extension UpdateSettingsRequest {

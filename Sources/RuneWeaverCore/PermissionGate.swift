@@ -576,6 +576,8 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
     public let assessment: ImpactAssessment?
     /// Target host for unlisted network egress requests.
     public let egressHost: String?
+    /// Server-stamped sandbox tier line for bash approvals, rendered verbatim.
+    public let sandboxSummary: String?
 
     /// Coding keys for the approval prompt.
     private enum CodingKeys: String, CodingKey {
@@ -597,6 +599,8 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         case assessment
         /// Target host for egress requests.
         case egressHost = "egress_host"
+        /// Stamped sandbox tier line.
+        case sandboxSummary = "sandbox_summary"
     }
 
     /// Creates a permission request.
@@ -609,7 +613,8 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         sessionID: UUID? = nil,
         intent: String? = nil,
         assessment: ImpactAssessment? = nil,
-        egressHost: String? = nil
+        egressHost: String? = nil,
+        sandboxSummary: String? = nil
     ) {
         self.id = id
         self.toolName = toolName
@@ -620,6 +625,7 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         self.intent = intent
         self.assessment = assessment
         self.egressHost = egressHost
+        self.sandboxSummary = sandboxSummary
     }
 
     /// Decodes a request, tolerating payloads written before session tagging or assessment.
@@ -635,6 +641,7 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         self.intent = try container.decodeIfPresent(String.self, forKey: .intent)
         self.assessment = try container.decodeIfPresent(ImpactAssessment.self, forKey: .assessment)
         self.egressHost = try container.decodeIfPresent(String.self, forKey: .egressHost)
+        self.sandboxSummary = try container.decodeIfPresent(String.self, forKey: .sandboxSummary)
     }
 
     /// Encodes a request, omitting optional fields when absent.
@@ -650,6 +657,7 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         try container.encodeIfPresent(intent, forKey: .intent)
         try container.encodeIfPresent(assessment, forKey: .assessment)
         try container.encodeIfPresent(egressHost, forKey: .egressHost)
+        try container.encodeIfPresent(sandboxSummary, forKey: .sandboxSummary)
     }
 }
 
@@ -724,6 +732,8 @@ public actor PermissionGate {
     private static let ephemeralSessionTTL: TimeInterval = 24 * 60 * 60
     /// Live bash shell policy consulted before parking `bash.exec` calls.
     private var bashConfig = BashConfig()
+    /// Workspace root execution resolves against for tier stamping.
+    private var workspaceRoot: URL?
     /// Recurring task for pruning expired grants periodically.
     private var reaperTask: Task<Void, Never>?
     /// Optional egress policy evaluator for network egress admission.
@@ -761,6 +771,24 @@ public actor PermissionGate {
     /// - Parameter config: Replacement bash policy.
     public func updateBashConfig(_ config: BashConfig) {
         bashConfig = config
+    }
+
+    /// Live bash policy snapshot for approval stamping.
+    /// - Returns: Current bash policy.
+    public func bashConfigSnapshot() -> BashConfig {
+        bashConfig
+    }
+
+    /// Updates the workspace root consulted when stamping bash tiers.
+    /// - Parameter root: Workspace root execution resolves against.
+    public func updateWorkspaceRoot(_ root: URL) {
+        workspaceRoot = root
+    }
+
+    /// Workspace root snapshot for approval stamping.
+    /// - Returns: Configured root, or nil when never set.
+    public func workspaceRootSnapshot() -> URL? {
+        workspaceRoot
     }
 
     /// Hydrates grants from storage, cleaning up expired records immediately.
@@ -862,13 +890,20 @@ public actor PermissionGate {
             case let .explicitlyBlocked(reason):
                 return .denied(reason)
             case .unlisted:
+                let sandboxSummary = ApprovalQueue.stampedSandboxSummary(
+                    toolName: tool.name,
+                    argumentsJSON: toolCall.argumentsJSON,
+                    bashConfig: bashConfig,
+                    workspaceRoot: workspaceRoot
+                )
                 let request = PermissionRequest(
                     toolName: tool.name,
                     description: tool.description,
                     input: toolCall,
                     suggestedDurations: TrustDuration.allCases,
                     sessionID: sessionID,
-                    egressHost: host
+                    egressHost: host,
+                    sandboxSummary: sandboxSummary
                 )
                 return .requiresApproval(request)
             case .allowed:
@@ -917,12 +952,19 @@ public actor PermissionGate {
             if covers(descriptor, sessionID: sessionID) {
                 return .allowed
             }
+            let sandboxSummary = ApprovalQueue.stampedSandboxSummary(
+                toolName: tool.name,
+                argumentsJSON: toolCall.argumentsJSON,
+                bashConfig: bashConfig,
+                workspaceRoot: workspaceRoot
+            )
             let request = PermissionRequest(
                 toolName: tool.name,
                 description: tool.description,
                 input: toolCall,
                 suggestedDurations: TrustDuration.allCases,
-                sessionID: sessionID
+                sessionID: sessionID,
+                sandboxSummary: sandboxSummary
             )
             return .requiresApproval(request)
         }

@@ -40,6 +40,41 @@ struct EgressScopingTests {
         }
     }
 
+    /// Builds an isolated workspace base under system temp for one hermetic test.
+    private func makeHermeticWorkspaceBase(label: String) throws -> URL {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-\(label)-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+
+    /// Removes an isolated workspace base without failing the test on cleanup errors.
+    private func removeHermeticWorkspaceBase(_ url: URL) {
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Builds a hermetic bash tool rooted in isolated scratch with a stubbed seam.
+    ///
+    /// The isolated root forces the host fallback so turns never create
+    /// containers, while the stubbed seam keeps any isolated-tier probe hermetic.
+    private func makeHermeticBashTool(
+        bashConfig: BashConfig,
+        supervisor: OutboundEgressSupervisor?,
+        base: URL
+    ) -> BashTool {
+        let root = base.appendingPathComponent("ws", isDirectory: true)
+        let store = WorkspaceStore(config: WorkspaceConfig(), rootURL: root)
+        let (seam, _) = ContainerSeam.hermetic()
+        return BashTool(
+            bashConfig: bashConfig,
+            allowUnsandboxedFallback: true,
+            egressSupervisor: supervisor,
+            workspaceConfig: WorkspaceConfig(),
+            workspaceStore: store,
+            containers: seam
+        )
+    }
+
     private func allowEchoConfig() -> BashConfig {
         BashConfig(
             defaultAction: .ask,
@@ -263,7 +298,9 @@ struct EgressScopingTests {
     func `Bash rejects network_hosts over the cap and malformed entries`() async throws {
         let policy = SecurityPolicy(network: NetworkEgressPolicy(mode: .unrestricted))
         try await withSupervisor(policy: policy) { supervisor in
-            let tool = BashTool(bashConfig: allowEchoConfig(), allowUnsandboxedFallback: true, egressSupervisor: supervisor)
+            // Hermetic stub keeps the suite container-free; validation parks before any spawn.
+            let (hermeticSeam, _) = ContainerSeam.hermetic()
+            let tool = BashTool(bashConfig: allowEchoConfig(), allowUnsandboxedFallback: true, egressSupervisor: supervisor, containers: hermeticSeam)
             var eleven: [String] = []
             for index in 0 ..< 11 {
                 eleven.append("host\(index).example.com")
@@ -297,7 +334,9 @@ struct EgressScopingTests {
         // declaration refuses first and names the offender.
         let policy = SecurityPolicy(network: NetworkEgressPolicy(mode: .unrestricted))
         try await withSupervisor(policy: policy) { supervisor in
-            let tool = BashTool(bashConfig: allowEchoConfig(), allowUnsandboxedFallback: true, egressSupervisor: supervisor)
+            // Hermetic stub keeps the suite container-free; screening parks before any spawn.
+            let (hermeticSeam, _) = ContainerSeam.hermetic()
+            let tool = BashTool(bashConfig: allowEchoConfig(), allowUnsandboxedFallback: true, egressSupervisor: supervisor, containers: hermeticSeam)
             let output = try await tool.execute(
                 input: ToolInput(
                     toolName: "bash.exec",
@@ -318,13 +357,18 @@ struct EgressScopingTests {
             network: NetworkEgressPolicy(mode: .allowlistOnly, allowedDomains: ["api.example.com"])
         )
         try await withSupervisor(policy: policy) { supervisor in
-            let tool = BashTool(bashConfig: allowEchoConfig(), allowUnsandboxedFallback: true, egressSupervisor: supervisor)
+            // Hermetic execution stays on the host fallback under isolated
+            // scratch so the full suite creates zero containers.
+            let base = try makeHermeticWorkspaceBase(label: "egress-allow")
+            defer { removeHermeticWorkspaceBase(base) }
+            let tool = makeHermeticBashTool(bashConfig: allowEchoConfig(), supervisor: supervisor, base: base)
+            let sessionID = UUID()
             let output = try await tool.execute(
                 input: ToolInput(
                     toolName: "bash.exec",
                     argumentsJSON: #"{"command":"echo https://api.example.com/data","request_network":true,"network_hosts":["api.example.com"]}"#
                 ),
-                context: ToolContext(conversationID: UUID(), approved: true)
+                context: ToolContext(conversationID: sessionID, approved: true)
             )
             #expect(!output.isError)
             #expect(output.content.contains("api.example.com"))
@@ -335,7 +379,9 @@ struct EgressScopingTests {
     func `Bash request_network approval names declared hosts`() async throws {
         let policy = SecurityPolicy(network: NetworkEgressPolicy(mode: .unrestricted))
         try await withSupervisor(policy: policy) { supervisor in
-            let tool = BashTool(bashConfig: allowEchoConfig(), allowUnsandboxedFallback: true, egressSupervisor: supervisor)
+            // Hermetic stub keeps the suite container-free; approval parks before any spawn.
+            let (hermeticSeam, _) = ContainerSeam.hermetic()
+            let tool = BashTool(bashConfig: allowEchoConfig(), allowUnsandboxedFallback: true, egressSupervisor: supervisor, containers: hermeticSeam)
             let output = try await tool.execute(
                 input: ToolInput(
                     toolName: "bash.exec",
@@ -352,7 +398,9 @@ struct EgressScopingTests {
 
     @Test
     func `Bash description documents host-scoped network`() {
-        let tool = BashTool(bashConfig: BashConfig())
+        // Hermetic stub keeps the suite container-free; description never spawns.
+        let (hermeticSeam, _) = ContainerSeam.hermetic()
+        let tool = BashTool(bashConfig: BashConfig(), containers: hermeticSeam)
         #expect(tool.description.contains("network_hosts"))
         #expect(tool.inputSchema.rawValue.contains("network_hosts"))
     }

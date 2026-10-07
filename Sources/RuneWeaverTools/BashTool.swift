@@ -114,6 +114,9 @@ public struct BashTool: Tool {
     /// Workspace store owning the default directory; nil derives one from `workspaceConfig`.
     /// Tests inject an isolated store so the default cwd never touches the real home.
     public let workspaceStore: WorkspaceStore?
+    /// Injected container seam; nil uses the shared live registry plus live machine client.
+    /// Tests inject a hermetic seam so strict plus machine creations never spawn.
+    public let containers: ContainerSeam?
 
     /// Creates a bash execution tool.
     public init(
@@ -122,7 +125,8 @@ public struct BashTool: Tool {
         allowUnsandboxedFallback: Bool = false,
         egressSupervisor: OutboundEgressSupervisor? = nil,
         workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
-        workspaceStore: WorkspaceStore? = nil
+        workspaceStore: WorkspaceStore? = nil,
+        containers: ContainerSeam? = nil
     ) {
         self.bashConfig = bashConfig
         self.filesConfig = filesConfig
@@ -130,6 +134,7 @@ public struct BashTool: Tool {
         self.egressSupervisor = egressSupervisor
         self.workspaceConfig = workspaceConfig
         self.workspaceStore = workspaceStore
+        self.containers = containers
     }
 
     /// Resolves the workspace store for this turn.
@@ -138,8 +143,35 @@ public struct BashTool: Tool {
     /// store derives from the configured quotas so every turn observes file
     /// config without sharing mutable walk state across turns.
     /// - Returns: Store owning the default working directory.
-    private var effectiveWorkspaceStore: WorkspaceStore {
+    var effectiveWorkspaceStore: WorkspaceStore {
         workspaceStore ?? WorkspaceStore(config: workspaceConfig)
+    }
+
+    /// Resolves the container runtime for this turn.
+    var effectiveContainerRuntime: any ContainerHostRuntime {
+        containers?.runtime ?? LiveContainerHostRuntime()
+    }
+
+    /// Resolves the strict registry for this turn.
+    var effectiveStrictRegistry: StrictTurnRegistry {
+        containers?.strictRegistry ?? StrictTurnRegistry.shared
+    }
+
+    /// Resolves the machine client for this turn.
+    var effectiveMachineClient: MachineContainerClient {
+        containers?.machineClient ?? MachineContainerClient.live
+    }
+
+    /// Resolves the guest memory cap for container creation.
+    var effectiveContainerMemory: String {
+        containers?.memory ?? StrictContainerRunner.defaultMemory
+    }
+
+    /// Reaps hermetic containers plus scratch, safe after failure, cancellation, or early return.
+    public func reapHermeticTestContainers(timeoutSeconds: TimeInterval = 5) async {
+        await containers?.strictRegistry.reapAll(timeoutSeconds: timeoutSeconds)
+        await (containers?.runtime as? HermeticContainerRuntime)?.reapAll()
+        await containers?.machineClient.stopAndRemove(timeoutSeconds: timeoutSeconds)
     }
 
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
@@ -227,12 +259,14 @@ public struct BashTool: Tool {
             return hostsFailure
         }
         let declaredHosts = hostsResult.hosts ?? []
+        let validateRoot = await effectiveWorkspaceStore.root()
         if let networkEnvelope = validateNetworkAccess(
             command: trimmedCommand,
             args: args,
             declaredHosts: declaredHosts,
             decision: decision,
-            context: context
+            context: context,
+            workspaceRoot: validateRoot
         ) {
             return .failure(encodeEnvelope(networkEnvelope), callID: input.callID)
         }
@@ -269,7 +303,17 @@ extension BashTool {
         callID: String,
         tier: BashSandboxMode? = nil
     ) async throws -> ToolOutput {
-        let tier = tier ?? BashSandboxRouter.resolveTier(command: command, config: bashConfig)
+        let workspace = effectiveWorkspaceStore
+        let tierRoot = await workspace.root()
+        let baseTier = tier ?? BashSandboxRouter.resolveTier(command: command, config: bashConfig)
+        // Host fallback stays single-sourced on the router with the live
+        // workspace root so approval stamping observes the identical tier execution runs.
+        let tier: BashSandboxMode = BashSandboxRouter.applyHostFallback(
+            baseTier: baseTier,
+            command: command,
+            rawCwd: args.cwd,
+            workspaceRoot: tierRoot
+        )
         let decision = BashSecurity.evaluate(command: command, config: bashConfig)
         let effectiveAllowNetwork = bashConfig.allowNetwork || (args.requestNetwork && context.approved)
         let screenHosts = collectedScreenHosts(in: command)
@@ -280,7 +324,7 @@ extension BashTool {
             let envelope = BashResultEnvelope(
                 command: command,
                 approvalRequired: false,
-                isChained: false,
+                isChained: decision.isChained,
                 denied: true,
                 error: "Command dials undeclared host(s) with no declared hosts (\(diagnostic))",
                 reason: diagnostic
@@ -296,12 +340,12 @@ extension BashTool {
             if let envelope = await screenExplicitURLs(
                 command: command,
                 declaredHosts: declaredHosts,
+                isChained: decision.isChained,
                 sessionID: context.sessionID
             ) {
                 return .failure(encodeEnvelope(envelope), callID: callID)
             }
         }
-        let workspace = effectiveWorkspaceStore
         if let quotaFailure = await checkedQuotaFailure(
             workspace: workspace,
             command: command,
@@ -324,27 +368,48 @@ extension BashTool {
         if let timeoutFailure = timeoutResult.failure {
             return timeoutFailure
         }
-        let validatedTimeoutSeconds = timeoutResult.seconds ?? bashConfig.timeoutSeconds
-        // Execute command
-        let timeout = TimeInterval(validatedTimeoutSeconds)
-        // The verified agent-tool staged copy lives in workspace/tmp, which
-        // sits beside the tools cwd rather than inside it. Allow that one
-        // scratch directory for reads so confined shells can map the
-        // immutable copy in production (where the workspace sits under home
-        // outside the system-temp defaults) without widening writes.
-        let workspaceRoot = await workspace.root()
-        let workspaceTmpPath = workspaceRoot.appendingPathComponent(WorkspaceStore.tmpDirectoryName).path
-        return try await runProcess(
-            command: command,
-            workingDirURL: cwdResult.url,
-            timeoutSeconds: timeout,
-            allowNetwork: effectiveAllowNetwork,
-            allowedEgressHosts: declaredHosts,
-            additionalReadPaths: [workspaceTmpPath],
-            callID: callID,
-            tier: tier,
-            workspaceRoot: workspaceRoot
-        )
+        let timeout = TimeInterval(timeoutResult.seconds ?? bashConfig.timeoutSeconds)
+        switch tier {
+        case .strictContainer:
+            return try await runStrictContainer(
+                command: command,
+                timeoutSeconds: timeout,
+                effectiveAllowNetwork: effectiveAllowNetwork,
+                context: context,
+                decision: decision,
+                callID: callID,
+                requestedCwd: cwdResult.url
+            )
+        case .machineScoped:
+            return try await runMachineScoped(
+                command: command,
+                timeoutSeconds: timeout,
+                effectiveAllowNetwork: effectiveAllowNetwork,
+                decision: decision,
+                callID: callID,
+                requestedCwd: cwdResult.url
+            )
+        case .hostSeatbelt:
+            let workspaceRoot = await workspace.root()
+            // The verified agent-tool staged copy lives in workspace/tmp, which
+            // sits beside the tools cwd rather than inside it. Allow that one
+            // scratch directory for reads so confined shells can map the
+            // immutable copy in production (where the workspace sits under home
+            // outside the system-temp defaults) without widening writes.
+            let workspaceTmpPath = workspaceRoot.appendingPathComponent(WorkspaceStore.tmpDirectoryName).path
+            return try await runProcess(
+                command: command,
+                workingDirURL: cwdResult.url,
+                timeoutSeconds: timeout,
+                allowNetwork: effectiveAllowNetwork,
+                allowedEgressHosts: declaredHosts,
+                additionalReadPaths: [workspaceTmpPath],
+                callID: callID,
+                tier: tier,
+                workspaceRoot: workspaceRoot,
+                isChained: decision.isChained
+            )
+        }
     }
 
     /// Resolves the working directory for a spawned run.
@@ -375,7 +440,7 @@ extension BashTool {
     /// Clamping at use keeps a hand-built config from trapping the shell or
     /// inviting OOM swaps; load-time validation already rejects those values
     /// fail-closed, so this is the degrade-to-sane backstop.
-    private func boundedRunCommand(_ command: String) -> String {
+    func boundedRunCommand(_ command: String) -> String {
         let clamped = bashConfig.clamped()
         return Self.resourceLimitedCommand(
             command,
@@ -414,7 +479,8 @@ extension BashTool {
         additionalReadPaths: [String] = [],
         callID: String,
         tier: BashSandboxMode = .strictContainer,
-        workspaceRoot: URL? = nil
+        workspaceRoot: URL? = nil,
+        isChained: Bool = false
     ) async throws -> ToolOutput {
         let effectiveWorkingDir = resolveRunWorkingDir(
             workingDirURL: workingDirURL,
@@ -507,7 +573,7 @@ extension BashTool {
                     stderr: finalErr,
                     exitCode: exitCode,
                     approvalRequired: false,
-                    isChained: false,
+                    isChained: isChained,
                     denied: false,
                     error: exitCode != 0 ? "Command exited with status \(exitCode)" : nil,
                     reason: nil,
@@ -580,16 +646,24 @@ extension BashTool {
             return hostsFailure
         }
         let declaredHosts = hostsResult.hosts ?? []
+        let workspaceRoot = await effectiveWorkspaceStore.root()
         if let networkEnvelope = validateNetworkAccess(
             command: command,
             args: args,
             declaredHosts: declaredHosts,
             decision: decision,
-            context: context
+            context: context,
+            workspaceRoot: workspaceRoot
         ) {
             return .failure(encodeEnvelope(networkEnvelope), callID: callID)
         }
-        let tier = BashSandboxRouter.resolveTier(command: command, config: bashConfig)
+        let baseTier = BashSandboxRouter.resolveTier(command: command, config: bashConfig)
+        let tier: BashSandboxMode = BashSandboxRouter.applyHostFallback(
+            baseTier: baseTier,
+            command: command,
+            rawCwd: args.cwd,
+            workspaceRoot: workspaceRoot
+        )
         let effectiveAllowNetwork = bashConfig.allowNetwork || (args.requestNetwork && context.approved)
         let screenHosts = collectedScreenHosts(in: command)
         let isNetworkCapable = BashNetworkGuard.requiresNetworkAccess(command) || !screenHosts.isEmpty
@@ -599,7 +673,7 @@ extension BashTool {
             let envelope = BashResultEnvelope(
                 command: command,
                 approvalRequired: false,
-                isChained: false,
+                isChained: decision.isChained,
                 denied: true,
                 error: "Command dials undeclared host(s) with no declared hosts (\(diagnostic))",
                 reason: diagnostic
@@ -615,6 +689,7 @@ extension BashTool {
             if let envelope = await screenExplicitURLs(
                 command: command,
                 declaredHosts: declaredHosts,
+                isChained: decision.isChained,
                 sessionID: context.sessionID
             ) {
                 return .failure(encodeEnvelope(envelope), callID: callID)
@@ -716,6 +791,7 @@ extension BashTool {
                 let envelope = BashResultEnvelope(
                     command: command,
                     approvalRequired: fileDecision.requiresApproval,
+                    isChained: decision.isChained,
                     denied: true,
                     error: "Working directory access denied:"
                         + " \(fileDecision.reason ?? "outside allowed roots")",
@@ -946,7 +1022,8 @@ extension BashTool {
         args: BashArgs,
         declaredHosts: [String] = [],
         decision: BashDecision,
-        context: ToolContext
+        context: ToolContext,
+        workspaceRoot: URL? = nil
     ) -> BashResultEnvelope? {
         let requiresNetwork = BashNetworkGuard.requiresNetworkAccess(command)
         if requiresNetwork, !bashConfig.allowNetwork, !args.requestNetwork {
@@ -957,7 +1034,7 @@ extension BashTool {
             return BashResultEnvelope(
                 command: command,
                 approvalRequired: false,
-                isChained: false,
+                isChained: decision.isChained,
                 denied: true,
                 error: diagnostic,
                 reason: diagnostic
@@ -971,7 +1048,8 @@ extension BashTool {
             // Sandbox copy stays single-sourced so the card, inbox, and
             // dashboard read identical bytes with no command, path, or host
             // interpolation in the summary itself.
-            let tier = BashSandboxRouter.resolveTier(command: command, config: bashConfig)
+            let effectiveRoot = workspaceRoot ?? WorkspaceStore.resolveRoot()
+            let tier = BashSandboxRouter.effectiveTier(command: command, config: bashConfig, rawCwd: args.cwd, workspaceRoot: effectiveRoot)
             let sandboxSummary = ApprovalQueue.bashSandboxSummary(
                 sandboxMode: tier,
                 networkAllowed: bashConfig.allowNetwork || args.requestNetwork
@@ -999,6 +1077,7 @@ extension BashTool {
     private func screenExplicitURLs(
         command: String,
         declaredHosts: [String] = [],
+        isChained: Bool = false,
         sessionID: UUID
     ) async -> BashResultEnvelope? {
         let hosts = collectedScreenHosts(in: command)
@@ -1007,7 +1086,7 @@ extension BashTool {
         // let the command run unscreened. Host-bearing commands deny even
         // if screening widens later.
         guard let supervisor = egressSupervisor else {
-            return nilSupervisorEnvelope(command: command, hosts: hosts)
+            return nilSupervisorEnvelope(command: command, hosts: hosts, isChained: isChained)
         }
         // Declared-hosts gate runs before policy: every screened dial must be
         // declared in `network_hosts`, so a command naming an undeclared host
@@ -1018,12 +1097,14 @@ extension BashTool {
             return undeclaredHostsEnvelope(
                 command: command,
                 undeclared: Set(undeclared),
-                declaredHosts: declaredHosts
+                declaredHosts: declaredHosts,
+                isChained: isChained
             )
         }
         return await screenedPolicyVerdict(
             command: command,
             hosts: hosts,
+            isChained: isChained,
             sessionID: sessionID
         )
     }
@@ -1070,7 +1151,8 @@ extension BashTool {
     private func undeclaredHostsEnvelope(
         command: String,
         undeclared: Set<String>,
-        declaredHosts: [String]
+        declaredHosts: [String],
+        isChained: Bool = false
     ) -> BashResultEnvelope {
         let listed = undeclared.sorted().joined(separator: ", ")
         let declared = declaredHosts.sorted().joined(separator: ", ")
@@ -1082,7 +1164,7 @@ extension BashTool {
         return BashResultEnvelope(
             command: command,
             approvalRequired: false,
-            isChained: false,
+            isChained: isChained,
             denied: true,
             error: diagnostic,
             reason: diagnostic
@@ -1099,10 +1181,11 @@ extension BashTool {
     private func screenedPolicyVerdict(
         command: String,
         hosts: [(display: String, url: URL)],
+        isChained: Bool = false,
         sessionID: UUID
     ) async -> BashResultEnvelope? {
         guard let supervisor = egressSupervisor else {
-            return nilSupervisorEnvelope(command: command, hosts: hosts)
+            return nilSupervisorEnvelope(command: command, hosts: hosts, isChained: isChained)
         }
         var validatedHosts = Set<String>()
         for (display, parsed) in hosts {
@@ -1121,7 +1204,7 @@ extension BashTool {
                 return BashResultEnvelope(
                     command: command,
                     approvalRequired: false,
-                    isChained: false,
+                    isChained: isChained,
                     denied: true,
                     error: "Command contains blocked network target '\(display)': \(reason)",
                     reason: reason
@@ -1130,7 +1213,7 @@ extension BashTool {
                 return BashResultEnvelope(
                     command: command,
                     approvalRequired: true,
-                    isChained: false,
+                    isChained: isChained,
                     denied: true,
                     error: "Command targets unlisted network host '\(host)': \(reason)",
                     reason: reason
@@ -1153,7 +1236,8 @@ extension BashTool {
     /// - Returns: Denied envelope naming the missing supervision.
     private func nilSupervisorEnvelope(
         command: String,
-        hosts: [(display: String, url: URL)]
+        hosts: [(display: String, url: URL)],
+        isChained: Bool = false
     ) -> BashResultEnvelope {
         let screened = hosts.compactMap(\.url.host).filter { !$0.isEmpty }
         let hostClause = screened.isEmpty
@@ -1167,7 +1251,7 @@ extension BashTool {
         return BashResultEnvelope(
             command: command,
             approvalRequired: false,
-            isChained: false,
+            isChained: isChained,
             denied: true,
             error: diagnostic,
             reason: diagnostic

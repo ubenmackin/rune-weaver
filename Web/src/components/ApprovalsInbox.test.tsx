@@ -1732,5 +1732,96 @@ describe("ApprovalsInbox", () => {
       within(dialog).getByText("email sends to alice@example.com are approved"),
     ).toBeInTheDocument();
   });
+
+  it("renders the verbatim sandbox tier line beneath Expected outcome", async () => {
+    const summary =
+      "Runs in a temporary container with no internet access. Nothing is kept after the run.";
+    const outcome = "Lists files in /tmp without changing anything";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
+          return jsonResponse({ grants: [], count: 0 });
+        }
+        return jsonResponse({
+          approvals: [
+            {
+              id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaa001",
+              toolName: "bash.exec",
+              description: "Run shell command",
+              intent: "Listing temp files",
+              assessment: {
+                severity: "moderate",
+                outcome,
+                warnings: [],
+              },
+              sandbox_summary: summary,
+              input: {
+                toolName: "bash.exec",
+                argumentsJSON: '{"command":"ls /tmp"}',
+                callID: "call-tier-1",
+              },
+              suggestedDurations: ["thisTime"],
+            },
+          ],
+          count: 1,
+        });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("bash.exec")).toBeInTheDocument();
+    });
+    expect(screen.getByText(outcome)).toBeInTheDocument();
+    const tier = screen.getByTestId("bash-tier-line");
+    expect(tier.textContent).toBe(summary);
+    const outcomeLabel = screen.getByText(/Expected outcome:/);
+    expect(
+      Boolean(
+        outcomeLabel.compareDocumentPosition(tier) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+  });
+
+  it("renders no tier line when the sandbox summary is absent", async () => {
+    const outcome = "Sends deploy notice to ops";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
+          return jsonResponse({ grants: [], count: 0 });
+        }
+        return jsonResponse({
+          approvals: [
+            {
+              id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaa002",
+              toolName: "email.send",
+              description: "Send email to ops",
+              intent: "Notifying ops of deploy",
+              assessment: {
+                severity: "moderate",
+                outcome,
+                warnings: [],
+              },
+              input: {
+                toolName: "email.send",
+                argumentsJSON: '{"to":"ops@example.com"}',
+                callID: "call-tier-2",
+              },
+              suggestedDurations: ["thisTime"],
+            },
+          ],
+          count: 1,
+        });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    expect(screen.getByText(outcome)).toBeInTheDocument();
+    expect(screen.queryByTestId("bash-tier-line")).not.toBeInTheDocument();
+  });
 });
 

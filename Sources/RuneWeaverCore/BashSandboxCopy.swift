@@ -18,11 +18,16 @@ public enum BashSandboxCopy: Sendable {
         case .hostSeatbelt:
             // Host execution is user-scoped regardless of the network flag.
             return "Runs on your Mac as you with full access to your files."
-        case .strictContainer, .machineScoped:
+        case .strictContainer:
             if networkAllowed {
-                return "Runs in an isolated virtual machine with internet access to approved destinations only."
+                return "Runs in a temporary container with internet access to approved destinations only. Nothing is kept after the run."
             }
-            return "Runs in an isolated virtual machine with no internet access."
+            return "Runs in a temporary container with no internet access. Nothing is kept after the run."
+        case .machineScoped:
+            if networkAllowed {
+                return "Runs in a persistent workspace machine with internet access to approved destinations only. Workspace files persist across runs."
+            }
+            return "Runs in a persistent workspace machine with no internet access. Workspace files persist across runs."
         }
     }
 }

@@ -602,6 +602,7 @@ enum GoalsCLIHelpers {
             pluginsDir: URL(fileURLWithPath: (loaded.config.plugins.pluginsDir as NSString).expandingTildeInPath)
         )
         await permissionGate.updateBashConfig(loaded.config.bash)
+        await permissionGate.updateWorkspaceRoot(WorkspaceStore(config: loaded.config.workspace).root())
         await permissionGate.startPeriodicCleanup()
         let approvalQueue = ApprovalQueue(permissionGate: permissionGate)
         let headlessHandler = await approvalQueue.headlessApprovalHandler()
