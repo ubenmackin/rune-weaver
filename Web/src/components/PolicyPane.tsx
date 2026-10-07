@@ -12,7 +12,7 @@
 // the shared store with no restart and no filesystem watcher.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { authHeaders, checkSecretStatus, deleteSecret } from "../api";
+import { authHeaders, checkSecretStatus, deleteSecret, listSecretKeys } from "../api";
 import {
   classifyWildcard,
   containsTOMLBreakingScalar,
@@ -136,7 +136,10 @@ export function isValidDomainLine(entry: string): boolean {
   const tab = String.fromCharCode(9);
   if (lowered.includes(" ") || lowered.includes(tab)) return false;
   if (lowered.includes(",")) return false;
-  if (lowered.includes("?") || lowered.includes("[") || lowered.includes("]")) return false;
+  // Brackets refuse for network entries: only bindings accept bracketed IPv6
+  // literals, so a network line carrying [ or ] never authorizes.
+  if (lowered.includes("[") || lowered.includes("]")) return false;
+  if (lowered.includes("?")) return false;
   if (
     lowered.includes("/") ||
     lowered.includes("\\") ||
@@ -1071,7 +1074,15 @@ export function PolicyPane() {
   const [bindingModal, setBindingModal] = useState<{
     mode: "add" | "edit";
     editingKey: string | null;
+    initialKey?: string | null;
   } | null>(null);
+  // Full Keychain enumeration for the unlinked section. Refreshed on mount
+  // and after each store or delete so orphan rows read immediately.
+  const [listedKeys, setListedKeys] = useState<string[]>([]);
+  // Tracks enumeration so the empty line never claims a fully-linked state
+  // before the first successful load or after a failed enumeration.
+  const [listedLoaded, setListedLoaded] = useState(false);
+  const [listedError, setListedError] = useState(false);
   // Non-blocking delete confirmation: the pending key renders a true modal so
   // a binding is never removed by an accidental click, mirroring the plugin
   // uninstall confirmation.
@@ -1131,6 +1142,59 @@ export function PolicyPane() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const refreshListedKeys = useCallback(async () => {
+    try {
+      const keys = await listSecretKeys();
+      setListedKeys(Array.isArray(keys) ? keys : []);
+      setListedError(false);
+    } catch {
+      // Enumeration stays silent; the empty line stays hidden without evidence.
+      setListedError(true);
+    } finally {
+      setListedLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshListedKeys();
+  }, [refreshListedKeys]);
+
+  // Keys without a draft binding. Derived from the live draft so a rename
+  // re-sorts without a refetch.
+  const unlinkedKeys = useMemo(() => {
+    const bound = new Set<string>();
+    for (const key of Object.keys(draft?.credentials ?? {})) {
+      const normalized = normalizeSecretKey(key);
+      if (normalized) bound.add(normalized);
+    }
+    const seen = new Set<string>();
+    const rows: string[] = [];
+    for (const raw of listedKeys ?? []) {
+      const normalized = normalizeSecretKey(raw);
+      if (!normalized || bound.has(normalized) || seen.has(normalized)) continue;
+      seen.add(normalized);
+      rows.push(normalized);
+    }
+    rows.sort((a, b) => a.localeCompare(b));
+    return rows;
+  }, [draft, listedKeys]);
+
+  // Listed keys are stored by definition, so the Link modal badges them green
+  // even though the presence probe only covers bound draft keys.
+  const modalSecretStatus = useMemo(
+    () => ({
+      ...secretStatus,
+      ...Object.fromEntries(unlinkedKeys.map((key): [string, boolean] => [key, true])),
+    }),
+    [secretStatus, unlinkedKeys],
+  );
+
+  function handleLinkUnlinkedSecret(rawKey: string) {
+    const normalized = normalizeSecretKey(rawKey ?? "");
+    if (!normalized) return;
+    setBindingModal({ mode: "add", editingKey: null, initialKey: normalized });
+  }
 
   // Field errors gate the pane-local Save. Computed from the live draft so a
   // rejected shape disables persistence before any network write.
@@ -1258,6 +1322,7 @@ export function PolicyPane() {
     } catch {
       // Presence probes stay silent so rows fall back to Missing.
     }
+    void refreshListedKeys();
   }
 
   function handleRequestDeleteSecret(key: string) {
@@ -1283,6 +1348,7 @@ export function PolicyPane() {
     } catch {
       // Deletion failures stay silent; the badge keeps its Stored reading.
     }
+    void refreshListedKeys();
   }
 
   // Modal save writes into the live draft only; the pane Save button owns
@@ -1674,13 +1740,86 @@ export function PolicyPane() {
             />
           </section>
 
+          <section
+            aria-label="Unlinked Keychain secrets"
+            data-testid="unlinked-secrets"
+            style={{ marginTop: "16px" }}
+          >
+            <h4>Unlinked Keychain secrets</h4>
+            <p className="settings-section-hint">
+              Provider and email secrets also appear here because the Keychain service is shared.
+            </p>
+            {unlinkedKeys.length === 0 ? (
+              listedLoaded && !listedError ? (
+                <p className="muted text-sm" data-testid="unlinked-secrets-empty">
+                  All Keychain secrets are linked to a binding.
+                </p>
+              ) : !listedLoaded ? (
+                <p className="muted text-sm" data-testid="unlinked-secrets-loading">
+                  Loading Keychain secrets…
+                </p>
+              ) : null
+            ) : (
+              <ul style={{ listStyle: "none", margin: 0, padding: 0 }} aria-label="Unlinked secrets">
+                {unlinkedKeys.map((key) => (
+                  <li
+                    key={key}
+                    data-testid="unlinked-secret-row"
+                    data-key={key}
+                    style={{
+                      display: "flex",
+                      gap: "8px",
+                      alignItems: "center",
+                      padding: "6px 8px",
+                      borderBottom: "1px solid rgba(148, 163, 184, 0.18)",
+                    }}
+                  >
+                    <code style={{ fontFamily: "monospace", flex: 1 }}>{key}</code>
+                    <span
+                      data-testid={`unlinked-stored-${key}`}
+                      className="status-pill"
+                      style={{
+                        fontSize: "0.72rem",
+                        padding: "1px 8px",
+                        borderRadius: "999px",
+                        border: "1px solid rgba(148, 163, 184, 0.35)",
+                        flexShrink: 0,
+                      }}
+                    >
+                      Stored
+                    </span>
+                    <button
+                      type="button"
+                      className="ghost btn-sm"
+                      data-testid={`link-unlinked-${key}`}
+                      aria-label={`Link ${key}`}
+                      onClick={() => handleLinkUnlinkedSecret(key)}
+                    >
+                      Link
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost btn-sm"
+                      data-testid={`delete-unlinked-${key}`}
+                      aria-label={`Delete secret for ${key}`}
+                      onClick={() => handleRequestDeleteSecret(key)}
+                    >
+                      Delete
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
           {bindingModal ? (
             <PolicyBindingModal
               mode={bindingModal.mode}
               initialBinding={editingBinding ?? undefined}
+              initialKey={bindingModal.initialKey ?? undefined}
               editingKey={bindingModal.editingKey}
               existingBindingKeys={bindingKeys}
-              secretStatus={secretStatus}
+              secretStatus={modalSecretStatus}
               allowedDomains={allowedDomainsForBindings}
               onSave={handleBindingModalSave}
               onClose={() => setBindingModal(null)}
@@ -1867,7 +2006,11 @@ export function PolicyPane() {
           ) : null}
 
           <div className="settings-footer">
-            {changed ? <span className="muted text-sm">Unsaved changes.</span> : null}
+            <span className="muted text-sm" data-testid="policy-save-hint">
+              {changed
+                ? "Unsaved changes — bindings stage here until Save."
+                : "Bindings stage here until Save; Keychain secrets save immediately."}
+            </span>
             <button
               type="button"
               className="primary-button save-button"

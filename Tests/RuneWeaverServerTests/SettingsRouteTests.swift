@@ -1749,6 +1749,69 @@ struct SettingsSecretsRouteTests {
             #expect(try await (secrets.retrieve(key: key) ?? "").isEmpty)
         }
     }
+
+    @Test
+    func `GET /settings/secrets returns empty list with no-store header when nothing stored`() async throws {
+        // An empty store lists no names while keeping the names-only shape and
+        // the non-cacheable header every secrets response carries.
+        let secrets = SecretsManager(inMemory: true)
+
+        try await withRouteApp(secrets: secrets) { app in
+            let response = try await settingsRequest(app: app, method: .GET, path: "/settings/secrets")
+            #expect(response.status == .ok)
+            #expect(response.headers.first(name: "Cache-Control") == "no-store, private")
+            let payload = try response.content.decode(SecretListResponse.self)
+            #expect(payload.keys == [])
+        }
+    }
+
+    @Test
+    func `GET /settings/secrets lists stored keys sorted without values on the wire`() async throws {
+        // Stored keys surface sorted by name while secret bytes never reach the
+        // body; the shared prefix keeps the environment from faking a hit.
+        let secrets = SecretsManager(inMemory: true)
+        let base = "RW_TEST_SECRET_" + UUID().uuidString.replacingOccurrences(of: "-", with: "_")
+        let keyB = base + "_B"
+        let keyA = base + "_A"
+        try await secrets.store(key: keyB, secret: "second-secret")
+        try await secrets.store(key: keyA, secret: "first-secret")
+
+        try await withRouteApp(secrets: secrets) { app in
+            let response = try await settingsRequest(app: app, method: .GET, path: "/settings/secrets")
+            #expect(response.status == .ok)
+            #expect(response.headers.first(name: "Cache-Control") == "no-store, private")
+            let payload = try response.content.decode(SecretListResponse.self)
+            #expect(payload.keys == [keyA, keyB])
+            let body = response.body.string ?? ""
+            #expect(!body.contains("first-secret"))
+            #expect(!body.contains("second-secret"))
+        }
+    }
+
+    @Test
+    func `GET /settings/secrets omits deleted keys`() async throws {
+        // A deleted name vanishes from the next listing while the surviving
+        // name stays listed; values stay off the wire on the follow-up read.
+        let secrets = SecretsManager(inMemory: true)
+        let base = "RW_TEST_SECRET_" + UUID().uuidString.replacingOccurrences(of: "-", with: "_")
+        let kept = base + "_KEPT"
+        let removed = base + "_GONE"
+        try await secrets.store(key: kept, secret: "kept-secret")
+        try await secrets.store(key: removed, secret: "gone-secret")
+        try await secrets.delete(key: removed)
+
+        try await withRouteApp(secrets: secrets) { app in
+            let response = try await settingsRequest(app: app, method: .GET, path: "/settings/secrets")
+            #expect(response.status == .ok)
+            #expect(response.headers.first(name: "Cache-Control") == "no-store, private")
+            let payload = try response.content.decode(SecretListResponse.self)
+            #expect(payload.keys == [kept])
+            #expect(!payload.keys.contains(removed))
+            let body = response.body.string ?? ""
+            #expect(!body.contains("kept-secret"))
+            #expect(!body.contains("gone-secret"))
+        }
+    }
 }
 
 // MARK: - Security Policy Routes

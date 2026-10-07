@@ -883,6 +883,15 @@ public struct SecretStatusResponse: Content, Sendable, Equatable {
     }
 }
 
+/// Response carrying sorted secret key names without values.
+public struct SecretListResponse: Content, Sendable, Equatable {
+    public let keys: [String]
+
+    public init(keys: [String]) {
+        self.keys = keys
+    }
+}
+
 // MARK: - Policy Settings DTOs
 
 /// DTO mirroring NetworkEgressPolicy.
