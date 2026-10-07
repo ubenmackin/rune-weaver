@@ -119,6 +119,14 @@ cat << PLIST_EOF > "${CONTENTS_DIR}/Info.plist"
     <true/>
     <key>NSContactsUsageDescription</key>
     <string>Rune Weaver uses your contacts to resolve recipient names to phone numbers or email addresses when you ask it to send a message.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Rune Weaver uses your calendars to index events and answer your questions about upcoming events when you enable calendar access.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>Rune Weaver uses your reminders to index tasks and answer your questions about to-dos when you enable reminders access.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Rune Weaver uses your calendars to index events and answer your questions about upcoming events when you enable calendar access.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Rune Weaver uses your reminders to index tasks and answer your questions about to-dos when you enable reminders access.</string>
     <key>NSUserNotificationAlertStyle</key>
     <string>banner</string>
     <key>NSAppleEventsUsageDescription</key>

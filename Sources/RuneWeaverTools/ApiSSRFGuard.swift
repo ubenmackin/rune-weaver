@@ -93,6 +93,27 @@ private final class SSRFPermitGate: Sendable {
 private let ssrfDNSGate = SSRFPermitGate(ssrfDNSPoolWidth)
 
 #if DEBUG
+    /// Width for the stub-only DNS queue below.
+    /// Covers parallel hermetic suites with headroom past the single wedged
+    /// stub the timeout test parks, so an instant canned lookup never queues
+    /// behind unrelated work and reads as DNS-unavailable fail-closed.
+    private let ssrfStubDNSQueueWidth = 8
+
+    /// Dedicated queue for DEBUG DNS stubs.
+    /// Hermetic stubs previously shared `DispatchQueue.global` with every
+    /// parallel suite, so an instant canned lookup could starve behind
+    /// unrelated work past the fail-closed timeout and surface as
+    /// DNS-unavailable. A dedicated queue with its own threads isolates stub
+    /// scheduling from that contention while the same timeout still bounds a
+    /// wedged stub, and stubs never consume production `ssrfDNSGate` permits.
+    private let ssrfStubDNSQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "com.runeweaver.ssrf-stub-dns"
+        queue.maxConcurrentOperationCount = ssrfStubDNSQueueWidth
+        queue.qualityOfService = .userInitiated
+        return queue
+    }()
+
     /// Test-only DNS override keeping stubbed suites hermetic without a production allowlist.
     /// Compiled into debug builds only so release has no stub surface to forge: production
     /// always resolves via the system resolver and fails closed when unverified, while
@@ -538,9 +559,9 @@ extension ApiSSRFGuard {
     /// so a wedged lookup keeps its slot until return while the waiter fails
     /// closed and never stalls the cooperative pool. Saturation drops without
     /// queueing, a queued lookup that lost the race to timeout or cancellation
-    /// skips the resolver, and DEBUG stubs answer through the same fail-closed
-    /// timeout without consuming a pool slot so hermetic suites never touch
-    /// the network. Saturation, timeout, cancellation, and an empty or failed
+    /// skips the resolver, and DEBUG stubs answer on the dedicated stub queue
+    /// under the same fail-closed timeout without consuming a pool slot so
+    /// hermetic suites never touch the network. Saturation, timeout, cancellation, and an empty or failed
     /// resolution all return no addresses, and callers must treat that absence
     /// as fail closed. The addresses are vetted by the caller and never
     /// authorize a dial on their own: any dial path goes through
@@ -555,8 +576,8 @@ extension ApiSSRFGuard {
             // Debug-only stub surface, matching `dnsVettingAsync`: a task-scoped
             // binding wins over the process-global holder, so a lookup-counting
             // suite stays isolated from concurrent suites that publish globally.
-            // Stubs enforce the fail-closed timeout without consuming permits from
-            // the production ssrfDNSGate.
+            // Stubs run on the dedicated stub queue under the fail-closed
+            // timeout without consuming permits from the production ssrfDNSGate.
             if let stub = activeTestDNSResolver {
                 return await stubResultWithTimeoutAsync(failure: []) {
                     stub(host)
@@ -569,8 +590,8 @@ extension ApiSSRFGuard {
     }
 
     #if DEBUG
-        /// Runs a test stub under the fail-closed timeout on the global queue
-        /// without consuming production ssrfDNSGate permits.
+        /// Runs a test stub under the fail-closed timeout on the dedicated stub
+        /// queue without consuming production ssrfDNSGate permits.
         private static func stubResultWithTimeoutAsync<T: Sendable>(
             failure: T,
             operation: @escaping @Sendable () -> T
@@ -607,11 +628,12 @@ extension ApiSSRFGuard {
                             late?.cancel()
                         }
                     }
-                    // Hermetic stubs run at user-initiated priority so an instant
-                    // dict lookup never queues behind background work under
-                    // parallel suites; the fail-closed timeout below still
-                    // bounds a wedged lookup without consuming pool permits.
-                    DispatchQueue.global(qos: .userInitiated).async {
+                    // Hermetic stubs run on the dedicated stub queue — never the
+                    // shared global queue — so an instant canned lookup cannot
+                    // stall behind parallel-suite work into a false fail-closed
+                    // timeout; the fail-closed timeout above still bounds a
+                    // wedged stub without consuming pool permits.
+                    ssrfStubDNSQueue.addOperation {
                         let result = operation()
                         let held = sleeper.withLock { current -> Task<Void, Never>? in
                             let task = current
