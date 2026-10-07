@@ -1396,11 +1396,33 @@ describe("PolicyPane", () => {
 
     await waitForPaneLoaded();
     expect(screen.getByTestId("policy-subtabs")).toBeDefined();
+    expect(screen.getByTestId("policy-subtabs")).toHaveClass("policy-tabs");
+    expect(screen.getByRole("tablist", { name: "Policy sections" })).toBeDefined();
+    const networkTab = screen.getByTestId("policytab-network");
+    const credentialsTab = screen.getByTestId("policytab-credentials");
+    expect(screen.getByRole("tab", { name: "Network" })).toBeDefined();
+    expect(screen.getByRole("tab", { name: "Credentials" })).toBeDefined();
+    for (const tab of [networkTab, credentialsTab]) {
+      expect(tab).toHaveClass("policy-tab");
+      expect(tab).not.toHaveClass("settings-tab-btn");
+    }
+    expect(networkTab).toHaveClass("active");
+    expect(credentialsTab).not.toHaveClass("active");
     expect(
       (screen.getByTestId("policytab-network") as HTMLButtonElement).getAttribute(
         "aria-selected"
       )
     ).toBe("true");
+    expect((credentialsTab as HTMLButtonElement).getAttribute("aria-selected")).toBe(
+      "false"
+    );
+    const networkControls = networkTab.getAttribute("aria-controls");
+    expect(networkControls).toBeTruthy();
+    const networkPanel = document.getElementById(networkControls as string);
+    expect(networkPanel).not.toBeNull();
+    expect(networkPanel?.getAttribute("role")).toBe("tabpanel");
+    const credentialsControls = credentialsTab.getAttribute("aria-controls");
+    expect(credentialsControls).toBeTruthy();
     expect(screen.getByTestId("policy-network-section")).toBeDefined();
     expect(screen.queryByTestId("policy-credentials-section")).toBeNull();
     expect(screen.queryByTestId("credential-row")).toBeNull();
@@ -1414,6 +1436,15 @@ describe("PolicyPane", () => {
     render(<PolicyPane />);
 
     await waitForPaneLoaded();
+    const networkTab = screen.getByTestId("policytab-network");
+    const credentialsTab = screen.getByTestId("policytab-credentials");
+    expect(screen.getByTestId("policy-subtabs")).toHaveClass("policy-tabs");
+    for (const tab of [networkTab, credentialsTab]) {
+      expect(tab).toHaveClass("policy-tab");
+      expect(tab).not.toHaveClass("settings-tab-btn");
+    }
+    expect(networkTab).toHaveClass("active");
+    expect(credentialsTab).not.toHaveClass("active");
     const allowed = screen.getByLabelText("Allowed domains") as HTMLTextAreaElement;
     await user.clear(allowed);
     await user.type(allowed, "api.example.com\napi.other.com");
@@ -1422,6 +1453,19 @@ describe("PolicyPane", () => {
     await waitFor(() => {
       expect(screen.getByTestId("policy-credentials-section")).toBeDefined();
     });
+    expect(credentialsTab).toHaveClass("active");
+    expect(networkTab).not.toHaveClass("active");
+    expect((credentialsTab as HTMLButtonElement).getAttribute("aria-selected")).toBe(
+      "true"
+    );
+    expect((networkTab as HTMLButtonElement).getAttribute("aria-selected")).toBe(
+      "false"
+    );
+    const credentialsControls = credentialsTab.getAttribute("aria-controls");
+    expect(credentialsControls).toBeTruthy();
+    const credentialsPanel = document.getElementById(credentialsControls as string);
+    expect(credentialsPanel).not.toBeNull();
+    expect(credentialsPanel?.getAttribute("role")).toBe("tabpanel");
     expect(screen.getByText("GITHUB_TOKEN")).toBeDefined();
     expect(screen.getByTestId("unlinked-secrets")).toBeDefined();
     expect(screen.getByTestId("unlinked-secret-row")).toBeDefined();
@@ -1432,14 +1476,73 @@ describe("PolicyPane", () => {
     expect(screen.getByTestId("policy-save-hint").textContent).toContain(
       "Unsaved changes"
     );
+    expect((screen.getByTestId("policy-save") as HTMLButtonElement).disabled).toBe(
+      false
+    );
     await user.click(screen.getByTestId("policytab-network"));
     await waitFor(() => {
       expect(screen.getByTestId("policy-network-section")).toBeDefined();
     });
+    expect(networkTab).toHaveClass("active");
+    expect(credentialsTab).not.toHaveClass("active");
+    const networkControls = networkTab.getAttribute("aria-controls");
+    expect(networkControls).toBeTruthy();
+    const networkPanel = document.getElementById(networkControls as string);
+    expect(networkPanel).not.toBeNull();
+    expect(networkPanel?.getAttribute("role")).toBe("tabpanel");
     expect(
       (screen.getByLabelText("Allowed domains") as HTMLTextAreaElement).value
     ).toContain("api.other.com");
     expect(screen.queryByTestId("policy-credentials-section")).toBeNull();
+  });
+
+  it("pins the underline tab bar with wired panels and clean draft", async () => {
+    stubPaneFetch(() => jsonResponse(panePolicyPayload));
+    const user = userEvent.setup();
+    render(<PolicyPane />);
+
+    await waitForPaneLoaded();
+    const subtabs = screen.getByTestId("policy-subtabs");
+    expect(subtabs).toHaveClass("policy-tabs");
+    const tabButtons = within(subtabs).getAllByRole("tab");
+    expect(tabButtons).toHaveLength(2);
+    for (const tab of tabButtons) {
+      expect(tab).toHaveClass("policy-tab");
+      expect(tab).not.toHaveClass("settings-tab-btn");
+    }
+    expect(subtabs.querySelector(".settings-tab-btn")).toBeNull();
+    const networkTab = screen.getByTestId("policytab-network");
+    const credentialsTab = screen.getByTestId("policytab-credentials");
+    // Default selection owns the underline while the draft stays clean.
+    expect(networkTab).toHaveClass("active");
+    expect(credentialsTab).not.toHaveClass("active");
+    expect(screen.getByTestId("policy-save-hint").textContent).not.toContain(
+      "Unsaved changes"
+    );
+    expect((screen.getByTestId("policy-save") as HTMLButtonElement).disabled).toBe(
+      false
+    );
+    const networkControls = networkTab.getAttribute("aria-controls");
+    expect(networkControls).toBeTruthy();
+    expect(document.getElementById(networkControls as string)?.getAttribute("role")).toBe(
+      "tabpanel"
+    );
+
+    await user.click(credentialsTab);
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-credentials-section")).toBeDefined();
+    });
+    expect(credentialsTab).toHaveClass("active");
+    expect(networkTab).not.toHaveClass("active");
+    const credentialsControls = credentialsTab.getAttribute("aria-controls");
+    expect(credentialsControls).toBeTruthy();
+    expect(
+      document.getElementById(credentialsControls as string)?.getAttribute("role")
+    ).toBe("tabpanel");
+    // Tab chrome alone never dirties the draft.
+    expect(screen.getByTestId("policy-save-hint").textContent).not.toContain(
+      "Unsaved changes"
+    );
   });
 
   it("shows a success toast on save", async () => {
