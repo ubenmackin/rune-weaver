@@ -5,6 +5,7 @@
 // Scope: in-memory reminder seam plus isolated document store; no live EventKit access.
 // Architectural role: guards the reminders indexing owner while gateway tests own persistence.
 
+import CryptoKit
 import Foundation
 import os
 @testable import RuneWeaverCore
@@ -327,5 +328,194 @@ struct RemindersIndexingTests {
         let report = try await indexer.run(reporter: { _ in })
         #expect(report.indexed == 2)
         #expect(report.vectorsWritten == 2)
+    }
+
+    @Test
+    func `Mtime falls back from due date to creation date to nil`() async throws {
+        let paths = makeReminderIndexPaths()
+        let mock = ReminderIndexingMockStore()
+        let due = Date(timeIntervalSince1970: 1_786_000_000)
+        let created = Date(timeIntervalSince1970: 1_785_500_000)
+        mock.seed(EventKitReminder(
+            identifier: "r-mtime-due",
+            calendarIdentifier: "list-personal",
+            title: "Dated pineapplealpha errand",
+            notes: nil,
+            dueDate: due,
+            isCompleted: false,
+            priority: 0,
+            creationDate: created
+        ))
+        mock.seed(EventKitReminder(
+            identifier: "r-mtime-created",
+            calendarIdentifier: "list-personal",
+            title: "Created mangobeta errand",
+            notes: nil,
+            dueDate: nil,
+            isCompleted: false,
+            priority: 0,
+            creationDate: created
+        ))
+        mock.seed(EventKitReminder(
+            identifier: "r-mtime-dateless",
+            calendarIdentifier: "list-personal",
+            title: "Dateless zebragamma errand",
+            notes: nil,
+            dueDate: nil,
+            isCompleted: false,
+            priority: 0,
+            creationDate: nil
+        ))
+        let docs = DocIndexStore(dbPath: paths.store)
+        let indexer = RemindersIndexer(store: mock, index: docs, statePath: paths.state)
+        _ = try await indexer.run(reporter: { _ in })
+        let dated = try #require(await docs.document(source: .reminders, externalID: "r-mtime-due"))
+        #expect(dated.mtime == due)
+        let fallback = try #require(await docs.document(source: .reminders, externalID: "r-mtime-created"))
+        #expect(fallback.mtime == created)
+        let dateless = try #require(await docs.document(source: .reminders, externalID: "r-mtime-dateless"))
+        #expect(dateless.mtime == nil)
+    }
+
+    @Test
+    func `Content hash join stays byte-identical`() {
+        let due = Date(timeIntervalSince1970: 1_786_000_000)
+        let dueISO = TemporalFilter.isoString(from: due)
+        let actual = RemindersIndexer.contentHash(
+            title: "Buy oat milk",
+            notes: "From the corner shop",
+            dueISO: dueISO,
+            calendarIdentifier: "list-personal",
+            listName: "Personal",
+            isCompleted: false
+        )
+        let joined = [
+            "Buy oat milk",
+            "From the corner shop",
+            dueISO,
+            "list-personal",
+            "Personal",
+            "false"
+        ].joined(separator: "\n")
+        let digest = SHA256.hash(data: Data(joined.utf8))
+        let expected = digest.map { String(format: "%02x", $0) }.joined()
+        #expect(actual == expected)
+    }
+
+    @Test
+    func `Bounded search matches dated rows while dateless rows stay window-invisible`() async throws {
+        let paths = makeReminderIndexPaths()
+        let mock = ReminderIndexingMockStore()
+        let due = Date(timeIntervalSince1970: 1_786_000_000)
+        let created = Date(timeIntervalSince1970: 1_785_000_000)
+        mock.seed(EventKitReminder(
+            identifier: "r-window-dated",
+            calendarIdentifier: "list-personal",
+            title: "Dated pineapplealpha errand",
+            notes: nil,
+            dueDate: due,
+            isCompleted: false,
+            priority: 0,
+            creationDate: created
+        ))
+        mock.seed(EventKitReminder(
+            identifier: "r-window-created",
+            calendarIdentifier: "list-personal",
+            title: "Created mangobeta errand",
+            notes: nil,
+            dueDate: nil,
+            isCompleted: false,
+            priority: 0,
+            creationDate: created
+        ))
+        mock.seed(EventKitReminder(
+            identifier: "r-window-dateless",
+            calendarIdentifier: "list-personal",
+            title: "Dateless zebragamma errand",
+            notes: nil,
+            dueDate: nil,
+            isCompleted: false,
+            priority: 0,
+            creationDate: nil
+        ))
+        let docs = DocIndexStore(dbPath: paths.store)
+        let indexer = RemindersIndexer(store: mock, index: docs, statePath: paths.state)
+        _ = try await indexer.run(reporter: { _ in })
+        let unboundedDateless = try await docs.searchKeyword(query: "zebragamma", limit: 10)
+        #expect(unboundedDateless.count == 1)
+        let dueSince = Date(timeIntervalSince1970: 1_786_000_000 - 86400)
+        let dueUntil = Date(timeIntervalSince1970: 1_786_000_000 + 86400)
+        let boundedDateless = try await docs.searchKeyword(
+            query: "zebragamma",
+            limit: 10,
+            since: dueSince,
+            until: dueUntil
+        )
+        #expect(boundedDateless.isEmpty)
+        let boundedDated = try await docs.searchKeyword(
+            query: "pineapplealpha",
+            limit: 10,
+            since: dueSince,
+            until: dueUntil
+        )
+        #expect(boundedDated.count == 1)
+        #expect(boundedDated.first?.text.contains("pineapplealpha") == true)
+        let createdSince = Date(timeIntervalSince1970: 1_785_000_000 - 86400)
+        let createdUntil = Date(timeIntervalSince1970: 1_785_000_000 + 86400)
+        let boundedCreated = try await docs.searchKeyword(
+            query: "mangobeta",
+            limit: 10,
+            since: createdSince,
+            until: createdUntil
+        )
+        #expect(boundedCreated.count == 1)
+        #expect(boundedCreated.first?.text.contains("mangobeta") == true)
+    }
+
+    @Test
+    func `Second pass upserts nothing across dated creation and dateless rows`() async throws {
+        let paths = makeReminderIndexPaths()
+        let mock = ReminderIndexingMockStore()
+        let due = Date(timeIntervalSince1970: 1_786_000_000)
+        let created = Date(timeIntervalSince1970: 1_785_500_000)
+        mock.seed(EventKitReminder(
+            identifier: "r-skip-due",
+            calendarIdentifier: "list-personal",
+            title: "Dated pineapplealpha errand",
+            notes: nil,
+            dueDate: due,
+            isCompleted: false,
+            priority: 0,
+            creationDate: created
+        ))
+        mock.seed(EventKitReminder(
+            identifier: "r-skip-created",
+            calendarIdentifier: "list-personal",
+            title: "Created mangobeta errand",
+            notes: nil,
+            dueDate: nil,
+            isCompleted: false,
+            priority: 0,
+            creationDate: created
+        ))
+        mock.seed(EventKitReminder(
+            identifier: "r-skip-dateless",
+            calendarIdentifier: "list-personal",
+            title: "Dateless zebragamma errand",
+            notes: nil,
+            dueDate: nil,
+            isCompleted: false,
+            priority: 0,
+            creationDate: nil
+        ))
+        let docs = DocIndexStore(dbPath: paths.store)
+        let indexer = RemindersIndexer(store: mock, index: docs, statePath: paths.state)
+        _ = try await indexer.run(reporter: { _ in })
+        let second = try await indexer.run(reporter: { _ in })
+        #expect(second.didRun == true)
+        #expect(second.scanned == 3)
+        #expect(second.indexed == 0)
+        #expect(second.skipped == 3)
+        #expect(second.pruned == 0)
     }
 }
