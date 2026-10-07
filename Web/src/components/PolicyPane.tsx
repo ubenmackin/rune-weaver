@@ -1752,14 +1752,15 @@ export function PolicyPane() {
             data-testid="policy-subtabs"
             role="tablist"
             aria-label="Policy sections"
-            style={{ display: "flex", gap: "8px", marginBottom: "12px" }}
+            className="policy-tabs"
           >
             <button
               type="button"
               role="tab"
               aria-selected={policySubTab === "network"}
+              aria-controls="policy-panel-network"
               data-testid="policytab-network"
-              className={`settings-tab-btn ${policySubTab === "network" ? "active" : ""}`}
+              className={`policy-tab${policySubTab === "network" ? " active" : ""}`}
               onClick={() => setPolicySubTab("network")}
             >
               Network
@@ -1768,15 +1769,21 @@ export function PolicyPane() {
               type="button"
               role="tab"
               aria-selected={policySubTab === "credentials"}
+              aria-controls="policy-panel-credentials"
               data-testid="policytab-credentials"
-              className={`settings-tab-btn ${policySubTab === "credentials" ? "active" : ""}`}
+              className={`policy-tab${policySubTab === "credentials" ? " active" : ""}`}
               onClick={() => setPolicySubTab("credentials")}
             >
               Credentials
             </button>
           </div>
           {policySubTab === "network" ? (
-            <section aria-label="Network" data-testid="policy-network-section">
+            <section
+              id="policy-panel-network"
+              role="tabpanel"
+              aria-label="Network"
+              data-testid="policy-network-section"
+            >
               <NetworkEgressEditors
                 mode={draft.network.mode}
                 allowedDomains={draft.network.allowed_domains}
@@ -1793,7 +1800,7 @@ export function PolicyPane() {
           ) : null}
 
           {policySubTab === "credentials" ? (
-            <>
+            <div id="policy-panel-credentials" role="tabpanel">
               <section
                 aria-label="Credentials"
                 data-testid="policy-credentials-section"
@@ -1889,7 +1896,7 @@ export function PolicyPane() {
                   </ul>
                 )}
               </section>
-            </>
+            </div>
           ) : null}
 
           {bindingModal ? (
