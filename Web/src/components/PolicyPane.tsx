@@ -29,6 +29,8 @@ import Modal from "./Modal";
 import { PolicyBindingModal, validateBindingHostEntry } from "./PolicyBindingModal";
 import { StoreSecretModal, normalizeSecretKey } from "./StoreSecretModal";
 import { CloseIcon, TrashIcon } from "./icons";
+import { ToastStack } from "./Toast";
+import { useToastStack } from "../hooks/useToastStack";
 
 // Postures the egress supervisor enforces. Only these two persist; older files
 // may still carry a legacy spelling that the engine maps on load, but the pane
@@ -931,12 +933,19 @@ export function CredentialsList({
               data-key={row.key}
               style={{
                 display: "flex",
-                gap: "8px",
-                alignItems: "center",
+                flexDirection: "column",
+                gap: "2px",
                 padding: "6px 8px",
                 borderBottom: "1px solid rgba(148, 163, 184, 0.18)",
               }}
             >
+              <div
+                style={{
+                  display: "flex",
+                  gap: "8px",
+                  alignItems: "center",
+                }}
+              >
               <button
                 type="button"
                 data-testid={`edit-binding-${row.key}`}
@@ -1049,6 +1058,16 @@ export function CredentialsList({
               >
                 <TrashIcon size={14} />
               </button>
+              </div>
+              {row.attention.needsAttention ? (
+                <div
+                  data-testid="binding-attention-reason"
+                  className="muted text-sm"
+                  style={{ fontSize: "0.75rem", lineHeight: "1.35", paddingLeft: "16px" }}
+                >
+                  {row.attention.reasons.join(" ")}
+                </div>
+              ) : null}
             </li>
           ))}
         </ul>
@@ -1087,6 +1106,9 @@ export function PolicyPane() {
   // a binding is never removed by an accidental click, mirroring the plugin
   // uninstall confirmation.
   const [pendingDeleteKey, setPendingDeleteKey] = useState<string | null>(null);
+  // Combined-delete opt-in for the binding confirm: when checked the same
+  // confirm also deletes the Keychain value so no orphan lands in Unlinked.
+  const [deleteAlsoSecret, setDeleteAlsoSecret] = useState<boolean>(false);
   // In-place Keychain value entry: null stays closed, otherwise the normalized
   // key plus whether a value is already stored drives Store versus Update copy.
   const [secretModal, setSecretModal] = useState<{ key: string; isUpdate: boolean } | null>(null);
@@ -1117,6 +1139,9 @@ export function PolicyPane() {
   const [rechecking, setRechecking] = useState<boolean>(false);
   const [applying, setApplying] = useState<boolean>(false);
   const [recheckError, setRecheckError] = useState<string | null>(null);
+  const [policySubTab, setPolicySubTab] = useState<"network" | "credentials">("network");
+  // Success-only toasts: failures stay as inline banners with no toast.
+  const { toasts, pushSuccessToast, dismissToast } = useToastStack();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1260,16 +1285,34 @@ export function PolicyPane() {
 
   function handleRequestDeleteBinding(key: string) {
     setPendingDeleteKey(key);
+    setDeleteAlsoSecret(false);
   }
 
   function handleCancelDeleteBinding() {
     setPendingDeleteKey(null);
+    setDeleteAlsoSecret(false);
   }
 
-  function handleConfirmDeleteBinding() {
-    if (!pendingDeleteKey) return;
-    handleDeleteBinding(pendingDeleteKey);
+  // Single owner of the combined binding-plus-optional-secret confirm. The
+  // binding always goes through handleDeleteBinding; the checked box then
+  // deletes the Keychain value and re-probes so the badge and Unlinked list
+  // reconcile. Unchecked leaves the secret stored for Unlinked to surface.
+  async function handleConfirmDeleteBinding() {
+    const key = pendingDeleteKey;
+    if (!key) return;
+    const shouldDeleteSecret = deleteAlsoSecret;
     setPendingDeleteKey(null);
+    setDeleteAlsoSecret(false);
+    handleDeleteBinding(key);
+    if (!shouldDeleteSecret) return;
+    try {
+      await deleteSecret(key);
+      const status = await checkSecretStatus([key]);
+      mergeSingleKeyStatus(key, status);
+    } catch {
+      // Deletion failures stay silent; the badge keeps its Stored reading.
+    }
+    void refreshListedKeys();
   }
 
   // Opens the in-place Keychain entry for one binding key. The raw key is
@@ -1439,6 +1482,7 @@ export function PolicyPane() {
       setLocalRemoved(result.localAccess?.removed ?? []);
       setNeverDialableHosts(result.localAccess?.neverDialable ?? []);
       setSaved(true);
+      pushSuccessToast("Policy saved. Changes apply immediately with no restart.");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to save security policy.");
       setSaved(false);
@@ -1492,6 +1536,7 @@ export function PolicyPane() {
       setLocalRemoved(result.localAccess?.removed ?? []);
       setNeverDialableHosts(result.localAccess?.neverDialable ?? []);
       setSaved(true);
+      pushSuccessToast("Policy saved. Changes apply immediately with no restart.");
       setRecheckOpen(false);
       setRecheckPreview(null);
     } catch (err: unknown) {
@@ -1699,118 +1744,153 @@ export function PolicyPane() {
         </div>
       ) : null}
 
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+
       {draft ? (
         <>
-          <section aria-label="Network" data-testid="policy-network-section">
-            <NetworkEgressEditors
-              mode={draft.network.mode}
-              allowedDomains={draft.network.allowed_domains}
-              blockedDomains={draft.network.blocked_domains}
-              localExemptions={draft.network.localExemptions}
-              onModeChange={handleModeChange}
-              onAllowedDomainsChange={handleAllowedDomainsChangeFromEditor}
-              onBlockedDomainsChange={handleBlockedDomainsChangeFromEditor}
-              onRecheck={() => void handleRecheck()}
-              rechecking={rechecking}
-              applying={applying}
-            />
-          </section>
-
-          <section
-            aria-label="Credentials"
-            data-testid="policy-credentials-section"
-            style={{ marginTop: "16px" }}
+          <div
+            data-testid="policy-subtabs"
+            role="tablist"
+            aria-label="Policy sections"
+            style={{ display: "flex", gap: "8px", marginBottom: "12px" }}
           >
-            <h4>Target-bound credentials</h4>
-            <p className="settings-section-hint">
-              One binding pairs one key with hosts, methods, and path prefixes. The secret is
-              sent only when host, method, and effective path all match — prefixes apply to every
-              host in the same binding. Empty hosts means the credential can never be sent; empty
-              methods or prefixes mean Any.
-            </p>
-            <CredentialsList
-              bindings={draft.credentials}
-              secretStatus={secretStatus}
-              allowedDomains={allowedDomainsForBindings}
-              onAdd={() => setBindingModal({ mode: "add", editingKey: null })}
-              onEdit={(key) => setBindingModal({ mode: "edit", editingKey: key })}
-              onDeleteRequest={handleRequestDeleteBinding}
-              onSetSecret={openSecretModal}
-              onDeleteSecretRequest={handleRequestDeleteSecret}
-            />
-          </section>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={policySubTab === "network"}
+              data-testid="policytab-network"
+              className={`settings-tab-btn ${policySubTab === "network" ? "active" : ""}`}
+              onClick={() => setPolicySubTab("network")}
+            >
+              Network
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={policySubTab === "credentials"}
+              data-testid="policytab-credentials"
+              className={`settings-tab-btn ${policySubTab === "credentials" ? "active" : ""}`}
+              onClick={() => setPolicySubTab("credentials")}
+            >
+              Credentials
+            </button>
+          </div>
+          {policySubTab === "network" ? (
+            <section aria-label="Network" data-testid="policy-network-section">
+              <NetworkEgressEditors
+                mode={draft.network.mode}
+                allowedDomains={draft.network.allowed_domains}
+                blockedDomains={draft.network.blocked_domains}
+                localExemptions={draft.network.localExemptions}
+                onModeChange={handleModeChange}
+                onAllowedDomainsChange={handleAllowedDomainsChangeFromEditor}
+                onBlockedDomainsChange={handleBlockedDomainsChangeFromEditor}
+                onRecheck={() => void handleRecheck()}
+                rechecking={rechecking}
+                applying={applying}
+              />
+            </section>
+          ) : null}
 
-          <section
-            aria-label="Unlinked Keychain secrets"
-            data-testid="unlinked-secrets"
-            style={{ marginTop: "16px" }}
-          >
-            <h4>Unlinked Keychain secrets</h4>
-            <p className="settings-section-hint">
-              Provider and email secrets also appear here because the Keychain service is shared.
-            </p>
-            {unlinkedKeys.length === 0 ? (
-              listedLoaded && !listedError ? (
-                <p className="muted text-sm" data-testid="unlinked-secrets-empty">
-                  All Keychain secrets are linked to a binding.
+          {policySubTab === "credentials" ? (
+            <>
+              <section
+                aria-label="Credentials"
+                data-testid="policy-credentials-section"
+                style={{ marginTop: "16px" }}
+              >
+                <h4>Target-bound credentials</h4>
+                <p className="settings-section-hint">
+                  One binding pairs one key with hosts, methods, and path prefixes. The secret is
+                  sent only when host, method, and effective path all match — prefixes apply to every
+                  host in the same binding. Empty hosts means the credential can never be sent; empty
+                  methods or prefixes mean Any.
                 </p>
-              ) : !listedLoaded ? (
-                <p className="muted text-sm" data-testid="unlinked-secrets-loading">
-                  Loading Keychain secrets…
+                <CredentialsList
+                  bindings={draft.credentials}
+                  secretStatus={secretStatus}
+                  allowedDomains={allowedDomainsForBindings}
+                  onAdd={() => setBindingModal({ mode: "add", editingKey: null })}
+                  onEdit={(key) => setBindingModal({ mode: "edit", editingKey: key })}
+                  onDeleteRequest={handleRequestDeleteBinding}
+                  onSetSecret={openSecretModal}
+                  onDeleteSecretRequest={handleRequestDeleteSecret}
+                />
+              </section>
+
+              <section
+                aria-label="Unlinked Keychain secrets"
+                data-testid="unlinked-secrets"
+                style={{ marginTop: "16px" }}
+              >
+                <h4>Unlinked Keychain secrets</h4>
+                <p className="settings-section-hint">
+                  Provider and email secrets also appear here because the Keychain service is shared.
                 </p>
-              ) : null
-            ) : (
-              <ul style={{ listStyle: "none", margin: 0, padding: 0 }} aria-label="Unlinked secrets">
-                {unlinkedKeys.map((key) => (
-                  <li
-                    key={key}
-                    data-testid="unlinked-secret-row"
-                    data-key={key}
-                    style={{
-                      display: "flex",
-                      gap: "8px",
-                      alignItems: "center",
-                      padding: "6px 8px",
-                      borderBottom: "1px solid rgba(148, 163, 184, 0.18)",
-                    }}
-                  >
-                    <code style={{ fontFamily: "monospace", flex: 1 }}>{key}</code>
-                    <span
-                      data-testid={`unlinked-stored-${key}`}
-                      className="status-pill"
-                      style={{
-                        fontSize: "0.72rem",
-                        padding: "1px 8px",
-                        borderRadius: "999px",
-                        border: "1px solid rgba(148, 163, 184, 0.35)",
-                        flexShrink: 0,
-                      }}
-                    >
-                      Stored
-                    </span>
-                    <button
-                      type="button"
-                      className="ghost btn-sm"
-                      data-testid={`link-unlinked-${key}`}
-                      aria-label={`Link ${key}`}
-                      onClick={() => handleLinkUnlinkedSecret(key)}
-                    >
-                      Link
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost btn-sm"
-                      data-testid={`delete-unlinked-${key}`}
-                      aria-label={`Delete secret for ${key}`}
-                      onClick={() => handleRequestDeleteSecret(key)}
-                    >
-                      Delete
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
+                {unlinkedKeys.length === 0 ? (
+                  listedLoaded && !listedError ? (
+                    <p className="muted text-sm" data-testid="unlinked-secrets-empty">
+                      All Keychain secrets are linked to a binding.
+                    </p>
+                  ) : !listedLoaded ? (
+                    <p className="muted text-sm" data-testid="unlinked-secrets-loading">
+                      Loading Keychain secrets…
+                    </p>
+                  ) : null
+                ) : (
+                  <ul style={{ listStyle: "none", margin: 0, padding: 0 }} aria-label="Unlinked secrets">
+                    {unlinkedKeys.map((key) => (
+                      <li
+                        key={key}
+                        data-testid="unlinked-secret-row"
+                        data-key={key}
+                        style={{
+                          display: "flex",
+                          gap: "8px",
+                          alignItems: "center",
+                          padding: "6px 8px",
+                          borderBottom: "1px solid rgba(148, 163, 184, 0.18)",
+                        }}
+                      >
+                        <code style={{ fontFamily: "monospace", flex: 1 }}>{key}</code>
+                        <span
+                          data-testid={`unlinked-stored-${key}`}
+                          className="status-pill"
+                          style={{
+                            fontSize: "0.72rem",
+                            padding: "1px 8px",
+                            borderRadius: "999px",
+                            border: "1px solid rgba(148, 163, 184, 0.35)",
+                            flexShrink: 0,
+                          }}
+                        >
+                          Stored
+                        </span>
+                        <button
+                          type="button"
+                          className="ghost btn-sm"
+                          data-testid={`link-unlinked-${key}`}
+                          aria-label={`Link ${key}`}
+                          onClick={() => handleLinkUnlinkedSecret(key)}
+                        >
+                          Link
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost btn-sm"
+                          data-testid={`delete-unlinked-${key}`}
+                          aria-label={`Delete secret for ${key}`}
+                          onClick={() => handleRequestDeleteSecret(key)}
+                        >
+                          Delete
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            </>
+          ) : null}
 
           {bindingModal ? (
             <PolicyBindingModal
@@ -1866,6 +1946,17 @@ export function PolicyPane() {
                   This will remove the binding for &lsquo;{pendingDeleteKey}&rsquo;. The Keychain
                   secret stays stored; only the policy binding is removed. This cannot be undone.
                 </p>
+                <label className="checkbox-row" style={{ marginTop: "8px", fontSize: "0.85rem" }}>
+                  <input
+                    type="checkbox"
+                    data-testid="delete-binding-also-secret"
+                    checked={deleteAlsoSecret}
+                    onChange={(event) => setDeleteAlsoSecret(event.target.checked)}
+                  />
+                  <span>
+                    Also delete the Keychain secret for &lsquo;{pendingDeleteKey}&rsquo;.
+                  </span>
+                </label>
               </div>
               <div className="modal-footer">
                 <button type="button" className="ghost" onClick={handleCancelDeleteBinding}>
@@ -1874,7 +1965,7 @@ export function PolicyPane() {
                 <button
                   type="button"
                   className="danger"
-                  onClick={handleConfirmDeleteBinding}
+                  onClick={() => void handleConfirmDeleteBinding()}
                   aria-label={`Confirm delete ${pendingDeleteKey}`}
                 >
                   Delete

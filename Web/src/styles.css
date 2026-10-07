@@ -3504,10 +3504,12 @@ button:disabled {
   bottom: 0;
   background: rgba(10, 10, 15, 0.85);
   backdrop-filter: blur(8px);
-  padding: 16px 0;
+  padding: 16px;
   border-top: 1px solid var(--border-color);
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
   z-index: 10;
 }
 
@@ -8265,6 +8267,20 @@ button.ghost.staged-expand-all-btn {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  gap: 8px;
+}
+
+/* Review step stacks its blocks so summary, explanation, and probe never crowd. */
+.policy-binding-modal [data-testid="binding-review"] {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Summary rows keep even rhythm without touching other steps. */
+.policy-binding-modal [data-testid="review-summary"] {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 

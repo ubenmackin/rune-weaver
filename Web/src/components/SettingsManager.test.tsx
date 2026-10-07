@@ -4017,7 +4017,7 @@ describe("SettingsManager policy tab", () => {
 
   it("renders the structured pane on its own tab with no raw editor and no Verify button", async () => {
     const fetchMock = stubPolicyTabFetch(() => jsonResponse(structuredPolicyPayload));
-    await openPolicyTab();
+    const user = await openPolicyTab();
 
     // Structured network editors own the egress posture: mode select plus one
     // textarea per domain list.
@@ -4031,8 +4031,16 @@ describe("SettingsManager policy tab", () => {
       (screen.getByLabelText("Blocked domains") as HTMLTextAreaElement).value
     ).toContain("metadata.google.internal");
 
+    // Network is the default sub-tab with credentials hidden behind theirs.
+    expect(screen.getByTestId("policy-subtabs")).toBeDefined();
+    expect(screen.getByTestId("policy-network-section")).toBeDefined();
+    expect(screen.queryByTestId("credentials-list")).toBeNull();
+
     // Credentials read as a bound list, not text: the seeded key renders a row.
-    expect(screen.getByTestId("credentials-list")).toBeDefined();
+    await user.click(screen.getByTestId("policytab-credentials"));
+    await waitFor(() => {
+      expect(screen.getByTestId("credentials-list")).toBeDefined();
+    });
     expect(screen.getByTestId("credential-row")).toBeDefined();
     expect(screen.getByText("GITHUB_TOKEN")).toBeDefined();
     expect(screen.getByTestId("policy-save")).toBeDefined();
