@@ -859,7 +859,7 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     public init(
         pythonExecutable: String? = nil,
         timeoutSeconds: TimeInterval? = nil,
-        maxOutputBytes: Int = ContainerMachineManager.maxProcessOutputBytes,
+        maxOutputBytes: Int = StrictContainerRunner.maxProcessOutputBytes,
         allowlistedOrigins: Set<String> = [],
         egressSupervisor: OutboundEgressSupervisor? = nil
     ) {
@@ -883,7 +883,7 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     public init(
         pythonExecutable: String? = nil,
         timeoutSeconds: TimeInterval? = nil,
-        maxOutputBytes: Int = ContainerMachineManager.maxProcessOutputBytes,
+        maxOutputBytes: Int = StrictContainerRunner.maxProcessOutputBytes,
         browserConfig: BrowserConfig,
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],

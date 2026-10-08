@@ -573,10 +573,10 @@ struct SearXNGEnsurerRuntimeTests {
         // PATH plus a stubbed Homebrew binary resolves on both sides, and a
         // PATH that already carries a fallback probes it once with PATH first.
         let minimalPATH = "/usr/bin:/bin"
-        let coreDirectories = ContainerMachineManager.runtimeSearchDirectories(pathValue: minimalPATH)
+        let coreDirectories = StrictContainerRunner.runtimeSearchDirectories(pathValue: minimalPATH)
         #expect(coreDirectories.contains("/opt/homebrew/bin"))
         #expect(coreDirectories.contains("/usr/local/bin"))
-        let coreResolved = ContainerMachineManager.resolveRuntimeURL(
+        let coreResolved = StrictContainerRunner.resolveRuntimeURL(
             runtime: "container",
             pathValue: minimalPATH,
             isExecutable: { $0 == "/opt/homebrew/bin/container" }

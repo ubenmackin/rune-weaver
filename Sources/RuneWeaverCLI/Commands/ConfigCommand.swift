@@ -53,7 +53,7 @@ struct ConfigShowCommand: AsyncParsableCommand {
         print("whisper_model = \(config.voice.whisperModel)")
         print("tts_provider = \(config.voice.ttsProvider)")
         print("")
-        printSandboxAndFilesSections(config)
+        printContainersAndFilesSections(config)
         print("")
         print("[browser]")
         print("searxng_url = \(config.browser.searxngURL)")
@@ -158,12 +158,12 @@ struct ConfigShowCommand: AsyncParsableCommand {
         }
     }
 
-    /// Prints sandbox detonation and file-policy sections together.
-    private func printSandboxAndFilesSections(_ config: RuneWeaverConfig) {
-        print("[sandbox]")
-        print("container_base_image = \(config.sandbox.containerBaseImage)")
-        print("archive_session_ttl_minutes = \(config.sandbox.archiveSessionTTLMinutes)")
-        print("max_concurrent_machines = \(config.sandbox.maxConcurrentMachines)")
+    /// Prints container admission and file-policy sections together.
+    private func printContainersAndFilesSections(_ config: RuneWeaverConfig) {
+        print("[containers]")
+        print("memory_mb = \(config.containers.memoryMB)")
+        print("max_concurrent = \(config.containers.maxConcurrent)")
+        print("ttl_minutes = \(config.containers.ttlMinutes)")
         print("")
         print("[files]")
         let denyPatterns = "[" + config.files.denyPatterns.map { RuneWeaverConfig.tomlQuoted($0) }.joined(separator: ", ") + "]"
@@ -187,7 +187,7 @@ struct ConfigSetCommand: AsyncParsableCommand {
     @Argument(
         help: ArgumentHelp(
             "Dotted key (e.g. llm.default_provider, llm.providers.mlx.model, "
-                + "memory.embedding_model, sandbox.container_base_image, browser.searxng_url)."
+                + "memory.embedding_model, containers.memory_mb, browser.searxng_url)."
         )
     )
     var key: String
@@ -263,7 +263,7 @@ private func configTOMLAssignment(for key: String, value: String) throws -> TOML
     if let direct = voiceTOMLAssignment(key: lower, value: value) {
         return direct
     }
-    if let direct = try sandboxTOMLAssignment(key: lower, value: value) {
+    if let direct = try containersTOMLAssignment(key: lower, value: value) {
         return direct
     }
     if let direct = try browserTOMLAssignment(key: lower, value: value) {
@@ -322,26 +322,48 @@ private func voiceTOMLAssignment(key lower: String, value: String) -> TOMLAssign
     }
 }
 
-private func sandboxTOMLAssignment(key lower: String, value: String) throws -> TOMLAssignment? {
+private func containersTOMLAssignment(key lower: String, value: String) throws -> TOMLAssignment? {
     switch lower {
+    case "containers.memory_mb":
+        try containersPositiveIntAssignment(dottedKey: "containers.memory_mb", key: "memory_mb", value: value)
+    case "containers.max_concurrent":
+        try containersPositiveIntAssignment(dottedKey: "containers.max_concurrent", key: "max_concurrent", value: value)
+    case "containers.ttl_minutes":
+        try containersPositiveIntAssignment(dottedKey: "containers.ttl_minutes", key: "ttl_minutes", value: value)
+    // Legacy `[sandbox]` keys shed on load, so a set against them guides to
+    // the containers keys instead of writing a value the loader ignores.
     case "sandbox.container_base_image":
-        TOMLAssignment(section: "sandbox", key: "container_base_image", rendered: tomlQuoted(value))
+        throw ValidationError(
+            "'sandbox.container_base_image' was removed; the [sandbox] table no longer exists. "
+                + "Container bounds live under [containers] (memory_mb, max_concurrent, ttl_minutes); "
+                + "the guest base image is no longer configurable."
+        )
     case "sandbox.archive_session_ttl_minutes":
-        try sandboxPositiveIntAssignment(dottedKey: "sandbox.archive_session_ttl_minutes", key: "archive_session_ttl_minutes", value: value)
+        throw ValidationError("'sandbox.archive_session_ttl_minutes' was removed; set 'containers.ttl_minutes' instead.")
     case "sandbox.max_concurrent_machines":
-        try sandboxPositiveIntAssignment(dottedKey: "sandbox.max_concurrent_machines", key: "max_concurrent_machines", value: value)
+        throw ValidationError("'sandbox.max_concurrent_machines' was removed; set 'containers.max_concurrent' instead.")
     default:
         nil
     }
 }
 
-/// Builds a validated positive-integer sandbox assignment so mistyped values fail fast with the offending key.
-private func sandboxPositiveIntAssignment(dottedKey: String, key: String, value: String) throws -> TOMLAssignment {
-    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let intValue = Int(trimmed), intValue > 0 else {
-        throw ValidationError("'\(dottedKey)' must be a positive integer (got '\(value)').")
+/// Builds a validated bounded-integer containers assignment so mistyped values fail fast with the offending key.
+private func containersPositiveIntAssignment(dottedKey: String, key: String, value: String) throws -> TOMLAssignment {
+    let bounds: (min: Int, max: Int) = switch dottedKey {
+    case "containers.memory_mb":
+        (ContainersConfig.minMemoryMB, ContainersConfig.maxMemoryMB)
+    case "containers.max_concurrent":
+        (ContainersConfig.minMaxConcurrent, ContainersConfig.maxMaxConcurrent)
+    case "containers.ttl_minutes":
+        (ContainersConfig.minTTLMinutes, ContainersConfig.maxTTLMinutes)
+    default:
+        (1, Int.max)
     }
-    return TOMLAssignment(section: "sandbox", key: key, rendered: String(intValue))
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let intValue = Int(trimmed), intValue >= bounds.min, intValue <= bounds.max else {
+        throw ValidationError("'\(dottedKey)' must be between \(bounds.min) and \(bounds.max) (got '\(value)').")
+    }
+    return TOMLAssignment(section: "containers", key: key, rendered: String(intValue))
 }
 
 private func browserTOMLAssignment(key lower: String, value: String) throws -> TOMLAssignment? {
@@ -372,7 +394,7 @@ private func providerTOMLAssignment(key: String, lower: String, value: String) t
     guard parts.count == 4, parts[0] == "llm", parts[1] == "providers" else {
         throw ValidationError(
             "Unknown config key '\(key)'. Supported: engine.name, engine.log_level, llm.default_provider, "
-                + "llm.fallback_provider, memory.*, voice.*, sandbox.*, browser.*, "
+                + "llm.fallback_provider, memory.*, voice.*, containers.*, browser.*, "
                 + "llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style|context_length|supports_vision)."
         )
     }
@@ -439,7 +461,7 @@ private func applyConfigValue(key: String, value: String, config: inout RuneWeav
     if applyVoiceValue(key: lower, value: value, config: &config) {
         return
     }
-    if try applySandboxValue(key: lower, value: value, config: &config) {
+    if try applyContainersValue(key: lower, value: value, config: &config) {
         return
     }
     if try applyBrowserValue(key: key, lower: lower, value: value, config: &config) {
@@ -509,26 +531,51 @@ private func applyVoiceValue(key lower: String, value: String, config: inout Run
     }
 }
 
-private func applySandboxValue(key lower: String, value: String, config: inout RuneWeaverConfig) throws -> Bool {
+private func applyContainersValue(key lower: String, value: String, config: inout RuneWeaverConfig) throws -> Bool {
     switch lower {
+    case "containers.memory_mb":
+        config.containers.memoryMB = try containersPositiveIntValue(key: "containers.memory_mb", value: value)
+        return true
+    case "containers.max_concurrent":
+        config.containers.maxConcurrent = try containersPositiveIntValue(key: "containers.max_concurrent", value: value)
+        return true
+    case "containers.ttl_minutes":
+        config.containers.ttlMinutes = try containersPositiveIntValue(key: "containers.ttl_minutes", value: value)
+        return true
+    // Legacy `[sandbox]` keys shed on load, so a set against them guides to
+    // the containers keys instead of writing a value the loader ignores.
     case "sandbox.container_base_image":
-        config.sandbox.containerBaseImage = value
-        return true
+        throw ValidationError(
+            "'sandbox.container_base_image' was removed; the [sandbox] table no longer exists. "
+                + "Container bounds live under [containers] (memory_mb, max_concurrent, ttl_minutes); "
+                + "the guest base image is no longer configurable."
+        )
     case "sandbox.archive_session_ttl_minutes":
-        guard let intVal = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), intVal > 0 else {
-            throw ValidationError("sandbox.archive_session_ttl_minutes must be a positive integer (got '\(value)')")
-        }
-        config.sandbox.archiveSessionTTLMinutes = intVal
-        return true
+        throw ValidationError("'sandbox.archive_session_ttl_minutes' was removed; set 'containers.ttl_minutes' instead.")
     case "sandbox.max_concurrent_machines":
-        guard let intVal = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), intVal > 0 else {
-            throw ValidationError("sandbox.max_concurrent_machines must be a positive integer (got '\(value)')")
-        }
-        config.sandbox.maxConcurrentMachines = intVal
-        return true
+        throw ValidationError("'sandbox.max_concurrent_machines' was removed; set 'containers.max_concurrent' instead.")
     default:
         return false
     }
+}
+
+/// Validates a bounded-integer containers value shared by both file-edit and fresh-file paths.
+private func containersPositiveIntValue(key: String, value: String) throws -> Int {
+    let bounds: (min: Int, max: Int) = switch key {
+    case "containers.memory_mb":
+        (ContainersConfig.minMemoryMB, ContainersConfig.maxMemoryMB)
+    case "containers.max_concurrent":
+        (ContainersConfig.minMaxConcurrent, ContainersConfig.maxMaxConcurrent)
+    case "containers.ttl_minutes":
+        (ContainersConfig.minTTLMinutes, ContainersConfig.maxTTLMinutes)
+    default:
+        (1, Int.max)
+    }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let intValue = Int(trimmed), intValue >= bounds.min, intValue <= bounds.max else {
+        throw ValidationError("'\(key)' must be between \(bounds.min) and \(bounds.max) (got '\(value)').")
+    }
+    return intValue
 }
 
 private func applyBrowserValue(key: String, lower: String, value: String, config: inout RuneWeaverConfig) throws -> Bool {
@@ -558,7 +605,7 @@ private func applyProviderValue(key: String, lower: String, value: String, confi
     guard parts.count == 4, parts[0] == "llm", parts[1] == "providers" else {
         throw ValidationError(
             "Unknown config key '\(key)'. Supported: engine.name, engine.log_level, llm.default_provider, "
-                + "llm.fallback_provider, memory.*, voice.*, sandbox.*, browser.*, "
+                + "llm.fallback_provider, memory.*, voice.*, containers.*, browser.*, "
                 + "llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style|context_length|supports_vision). "
                 + "Run 'rune-weaver config show' for supported keys."
         )

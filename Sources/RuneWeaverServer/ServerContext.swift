@@ -131,8 +131,17 @@ public final class ServerContext: Sendable {
     public let toolStates: ToolStateStore
     /// Staged files metadata store tracking edited files awaiting review.
     public let stagedFiles: StagedFilesStore
-    /// Sandbox staging retention configuration bounding `pending/`, `approved/`, and `attachments/`.
-    public let sandboxConfig: SandboxConfig
+    /// Container admission policy bounding guest memory, concurrency, and
+    /// idle TTL for isolated runs. Settings PUTs persist it to the file and
+    /// thread it into the rebuilt tool generation, so the next admission
+    /// observes the new bounds while in-flight runs finish under the prior
+    /// ones.
+    private let containersBox: OSAllocatedUnfairLock<ContainersConfig>
+    public var containersConfig: ContainersConfig {
+        get { containersBox.withLock { $0 } }
+        set { containersBox.withLock { $0 = newValue } }
+    }
+
     /// Atomic bash plus files policy pair refreshed by settings saves.
     /// One lock covers both so concurrent readers never observe a fresh bash
     /// policy beside a stale files guard (or vice versa) mid-save, mirroring
@@ -304,7 +313,7 @@ public final class ServerContext: Sendable {
         pluginStore: ToolRegistryStore? = nil,
         pluginDiscovery: PluginDiscoveryService? = nil,
         toolStates: ToolStateStore? = nil,
-        sandboxConfig: SandboxConfig = SandboxConfig(),
+        containersConfig: ContainersConfig = ContainersConfig(),
         sandboxCleanup: SandboxCleanupScheduler? = nil,
         filesConfig: FilesConfig = FilesConfig(),
         bashConfig: BashConfig = BashConfig(),
@@ -425,7 +434,7 @@ public final class ServerContext: Sendable {
         self.pluginDiscovery = pluginDiscovery ?? PluginDiscoveryService(pluginsDirectory: PluginDiscoveryService.defaultPluginsDirectory(), store: pStore)
         self.toolStates = toolStates ?? ToolStateStore(dbPath: defaultDBPath)
         self.stagedFiles = stagedFiles ?? StagedFilesStore(dbPath: defaultDBPath)
-        self.sandboxConfig = sandboxConfig
+        self.containersBox = OSAllocatedUnfairLock(initialState: containersConfig)
         self.bashFilesBox = OSAllocatedUnfairLock(initialState: BashFilesPair(bash: bashConfig, files: filesConfig))
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
         self.browserConfig = browserConfig
@@ -568,7 +577,7 @@ extension ServerContext {
         let email: EmailConfig?
         let files: FilesConfig
         let bash: BashConfig
-        let sandbox: SandboxConfig
+        let containers: ContainersConfig
         let browser: BrowserConfig
         let media: MediaConfig?
         let desktop: DesktopConfig
@@ -720,7 +729,7 @@ extension ServerContext {
             emailConfig: args.configs.email,
             filesConfig: args.configs.files,
             bashConfig: args.configs.bash,
-            sandboxConfig: args.configs.sandbox,
+            containersConfig: args.configs.containers,
             browserConfig: args.configs.browser,
             mediaConfig: args.configs.media,
             desktopConfig: args.configs.desktop,
@@ -887,7 +896,7 @@ extension ServerContext {
         pluginConfig: PluginConfig = PluginConfig(),
         notifier: (any SchedulerNotifier)? = nil,
         onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)? = nil,
-        sandboxConfig: SandboxConfig = SandboxConfig(),
+        containersConfig: ContainersConfig = ContainersConfig(),
         browserConfig: BrowserConfig = BrowserConfig(),
         indexCoordinator: IndexCoordinator? = nil,
         indexStore: DocIndexStore? = nil,
@@ -956,7 +965,7 @@ extension ServerContext {
             hub: hub
         )
         let toolConfigs = ToolConfigs(
-            email: emailConfig, files: filesConfig, bash: bashConfig, sandbox: sandboxConfig,
+            email: emailConfig, files: filesConfig, bash: bashConfig, containers: containersConfig,
             browser: browserConfig, media: mediaConfig, desktop: desktopConfig,
             llmServerURLs: llmServerURLs, security: securityConfig, goals: goalsConfig,
             workspace: workspaceConfig
@@ -1016,7 +1025,7 @@ extension ServerContext {
             scheduler: services.durable.scheduler, runs: services.durable.runs, hub: services.durable.hub, runLock: services.durable.runLock,
             activeTurns: activeTurns, steeringQueue: engines.steeringQueue, schedulerWorker: engines.schedulerWorker,
             pluginStore: services.pluginStack.store, pluginDiscovery: services.pluginStack.discovery, toolStates: services.pluginStack.states,
-            sandboxConfig: sandboxConfig, filesConfig: toolConfigs.files, bashConfig: toolConfigs.bash, browserConfig: browserConfig,
+            containersConfig: containersConfig, filesConfig: toolConfigs.files, bashConfig: toolConfigs.bash, browserConfig: browserConfig,
             indexCoordinator: indexCoordinator, indexStore: indexStore, servingLLM: llm, auth: auth, browserGateway: browserGateway,
             searchTransport: searchTransport, fetchTransport: fetchTransport, apiTransport: apiTransport, mediaTransport: mediaTransport,
             searchEnsurer: searchEnsurer, mediaSecrets: mediaSecrets, secrets: secrets,
@@ -1028,7 +1037,7 @@ extension ServerContext {
             workspaceConfig: workspaceConfig, workspaceStore: resolvedWorkspaceStore,
             agentTools: resolvedAgentTools, agentRunLock: agentRunLock, persona: persona
         )
-        await finalizeServerContext(context, sandboxConfig: sandboxConfig, onApprovalRequested: onApprovalRequested)
+        await finalizeServerContext(context, containersConfig: containersConfig, onApprovalRequested: onApprovalRequested)
         return context
     }
 
@@ -1070,10 +1079,10 @@ extension ServerContext {
     }()
 }
 
-/// Reclaims crash-orphaned detonation machines once at boot so restarts never inherit leaked VMs.
+/// Reclaims crash-orphaned containers once at boot so restarts never inherit leaked guests.
 /// The periodic lifecycle keeps pressure bounded afterwards; only aggregate counts reach the audit trail.
-private func reclaimSandboxDetonationMachines(config: SandboxConfig) {
-    let bootSummary = SandboxCleaner.cleanup(config: config)
+private func reclaimOrphanedContainers(config: ContainersConfig, approvals: ApprovalQueue) async {
+    let bootSummary = await SandboxCleaner.cleanup(config: config, approvals: approvals)
     FileSandboxAuditLog.append(bootSummary)
 }
 
@@ -1186,7 +1195,7 @@ private func resolvePluginStack(
 
 /// Wires live approval prompts and restores persisted tool toggles on a built context.
 /// Keeps `make` within the body-length gate by owning the boot tail that must run
-/// after construction: orphaned detonation reclamation, bus approval handler
+/// after construction: orphaned container reclamation, bus approval handler
 /// install, stored-toggle restore so restarts honor operator intent, then one
 /// best-effort index snapshot warm so the first dashboard storage poll hits cache.
 /// Ownership: this is the sole warm site shared by every boot path, so callers
@@ -1195,10 +1204,10 @@ private func resolvePluginStack(
 /// reports an empty breakdown cheaply through the already-covered status path.
 private func finalizeServerContext(
     _ context: ServerContext,
-    sandboxConfig: SandboxConfig,
+    containersConfig: ContainersConfig,
     onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)?
 ) async {
-    reclaimSandboxDetonationMachines(config: sandboxConfig)
+    await reclaimOrphanedContainers(config: containersConfig, approvals: context.approvals)
     await installLiveApprovalHandler(
         bus: context.toolBus,
         approvals: context.approvals,

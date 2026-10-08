@@ -3,8 +3,8 @@
 // Owns `GET`/`PUT /settings`: load, merge, validate, and persist the engine
 // config, then push the saved values into the live engine so orchestrator
 // budgets, media/browser/web/API tools, desktop, bash/files/workspace policies,
-// fan-out policy, and index policy take effect without a restart. `[goals]`,
-// `[proactive]`, `[ideas]`, and `[persona]` persist to the file through the
+// containers policy, fan-out policy, and index policy take effect without a
+// restart. `[goals]`, `[proactive]`, `[ideas]`, and `[persona]` persist to the file through the
 // same partial-patch merge but take effect on restart: the pursuit engine,
 // the scheduler worker, the ideas engine, and the prompt composer's identity
 // hold their policy from boot with no live-reload path. `[server]` bind keys persist
@@ -80,12 +80,19 @@ private func handlePutSettings(req: Request) async throws -> Response {
     // Snapshot the stored bash policy before the single merge so the changed
     // flag reflects a real move, not merely a non-empty patch.
     let bashBefore = BashSettingsUpdate(bash: config.bash)
+    // Snapshot the stored containers policy before the single merge so the
+    // changed flag reflects a real move, not merely a non-empty patch.
+    let containersBefore = config.containers
     do {
         try body.apply(to: &config)
         let bashChanged = BashSettingsUpdate(bash: config.bash) != bashBefore
         // Validate the merged config before persisting so a single bad
         // field cannot corrupt the stored file or live engine state.
         try config.validate()
+        // Deep-compare decides whether the containers generation moves, so
+        // resending identical bounds skips the ledger update plus tool
+        // rebuild instead of churning them on every full-form save.
+        let containersChanged = config.containers != containersBefore
         // The bind and the Host gate stay on the boot values, so only a
         // real hostname/port/allowed_hosts change needs a restart. The
         // `carriesServerPatch` gate short-circuits saves without bind keys
@@ -171,7 +178,7 @@ private func handlePutSettings(req: Request) async throws -> Response {
         await reloadLiveMediaTools(body: body, config: config, context: liveContext)
         try await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
         await reloadLiveDesktopTools(body: body, config: config, context: liveContext)
-        await reloadLiveBashFilesTools(body: body, config: config, context: liveContext, bashChanged: bashChanged)
+        await reloadLiveBashFilesTools(body: body, config: config, context: liveContext, bashChanged: bashChanged, containersChanged: containersChanged)
         await reloadLiveFanOut(body: body, config: config, context: liveContext)
         try await reloadLiveIndexPolicy(body: body, config: config, context: liveContext, prebuilt: prebuiltIndexComponents)
         // Configured services seed the allowlist through the shared derivation
@@ -556,33 +563,45 @@ private func reloadLiveDesktopTools(body: UpdateSettingsRequest, config: RuneWea
 }
 
 /// Reconciles the live bash and files tools with the persisted policies so saved values take effect without a restart.
-/// Follows the desktop reload pattern: a save without any bash, files, or
-/// workspace key is a no-op, and each re-registered tool keeps its live enabled
-/// state. All three policies swap into the context atomically so concurrent turns
-/// never see a fresh shell beside a stale workspace guard, then the file tools
-/// refresh first and the bash tool registers exactly once against the fresh pair
-/// for its working-directory guard. Email tools follow only on a files patch when
-/// mail accounts are configured and already on the bus.
+/// Follows the desktop reload pattern: a save without any bash, files,
+/// workspace, or containers key is a no-op, and each re-registered tool keeps
+/// its live enabled state. All three policies swap into the context atomically
+/// so concurrent turns never see a fresh shell beside a stale workspace guard,
+/// then the file tools refresh first and the bash tool registers exactly once
+/// against the fresh pair for its working-directory guard. Email tools follow on a
+/// files or containers patch when mail accounts are configured and already on
+/// the bus, carrying the fresh `[containers]` admission policy so the rebuilt
+/// generation observes the new bounds on the next admission while in-flight
+/// runs finish under the prior bounds.
 ///
 /// Workspace quotas apply live to every consumer: the save pushes the merged
 /// quotas into the context store in place (usage, prune, and quota checks all
 /// derive limits per call), so the next `GET /workspace/usage`, manual prune,
 /// and `bash.exec` enforce the new bounds with no restart. The rebuilt
 /// `BashTool` carries a fresh store with the same hermetic overrides, so an
-/// isolated root keeps enforcing against the same tree. An all-nil bash or
-/// workspace object is a no-op patch, so an empty object never rebuilds tools.
+/// isolated root keeps enforcing against the same tree. An all-nil bash,
+/// workspace, or containers object is a no-op patch, so an empty object never rebuilds tools.
 /// - Parameters:
 ///   - body: Decoded settings patch selecting which policies move.
 ///   - config: Persisted config carrying the fresh policies.
 ///   - context: Live server context receiving the swap.
 ///   - bashChanged: Deep-compared bash movement around the single merge, so
 ///     resending identical values skips the rebuild instead of churning tools.
-private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext, bashChanged: Bool) async {
+///   - containersChanged: Deep-compared containers movement around the single
+///     merge, so resending identical bounds skips the ledger update plus tool
+///     rebuild instead of churning them on every full-form save.
+private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext, bashChanged: Bool, containersChanged: Bool) async {
     let hasBashPatch = bashChanged
     let hasFilesPatch = body.filesDenyPatterns != nil || body.filesAllowRoots != nil || body.filesRequireApprovalOnDeny != nil || body.filesWriteMode != nil
     let hasWorkspacePatch = body.workspace.map { !$0.isEmpty } ?? false
-    guard hasBashPatch || hasFilesPatch || hasWorkspacePatch else { return }
+    let hasContainersPatch = containersChanged
+    guard hasBashPatch || hasFilesPatch || hasWorkspacePatch || hasContainersPatch else { return }
     context.setBashFiles(bash: config.bash, files: config.files)
+    if hasContainersPatch {
+        context.containersConfig = config.containers
+        await StrictTurnRegistry.shared.applyContainersConfig(config.containers)
+        await context.sandboxCleanup.updateConfig(config.containers)
+    }
     if hasBashPatch {
         await context.permissionGate.updateBashConfig(config.bash)
     }
@@ -604,28 +623,36 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
             await reregisterPreservingToggle(tool, on: context)
         }
     }
-    // The fresh shell keeps the live store's hermetic overrides so an
-    // isolated test root enforces against the same tree instead of falling
-    // back to the real home.
-    let overrides = await context.workspaceStore.overrides()
-    let bashTool = BashTool(
-        bashConfig: live.bash,
-        filesConfig: live.files,
-        egressSupervisor: context.egressSupervisor,
-        workspaceConfig: config.workspace,
-        workspaceStore: WorkspaceStore(
-            config: config.workspace,
-            homeDirectoryURL: overrides.homeDirectoryURL,
-            rootURL: overrides.rootURL
+    if hasBashPatch || hasFilesPatch || hasWorkspacePatch || hasContainersPatch {
+        let overrides = await context.workspaceStore.overrides()
+        let sharedLedger = await StrictTurnRegistry.shared.ephemeralLedger
+        let containerSeam = ContainerSeam(
+            containersConfig: config.containers,
+            strictRegistry: StrictTurnRegistry.shared,
+            ephemeralLedger: sharedLedger
         )
-    )
-    await reregisterPreservingToggle(bashTool, on: context)
-    if hasFilesPatch, !config.email.accounts.isEmpty {
+        let bashTool = BashTool(
+            bashConfig: live.bash,
+            filesConfig: live.files,
+            egressSupervisor: context.egressSupervisor,
+            workspaceConfig: config.workspace,
+            workspaceStore: WorkspaceStore(
+                config: config.workspace,
+                homeDirectoryURL: overrides.homeDirectoryURL,
+                rootURL: overrides.rootURL
+            ),
+            containers: containerSeam
+        )
+        await reregisterPreservingToggle(bashTool, on: context)
+    }
+    if hasFilesPatch || hasContainersPatch, !config.email.accounts.isEmpty {
         if await context.toolBus.tool(named: "email.search") != nil {
+            let sharedLedger = await StrictTurnRegistry.shared.ephemeralLedger
             for tool in EmailTools.makeTools(
                 emailConfig: config.email,
-                sandboxConfig: config.sandbox,
+                containersConfig: config.containers,
                 filesConfig: live.files,
+                ephemeralLedger: sharedLedger,
                 securityConfig: config.security
             ) {
                 await reregisterPreservingToggle(tool, on: context)

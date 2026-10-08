@@ -42,6 +42,7 @@ extension RuneWeaverConfig {
         lines += renderAuthTOML()
         lines += renderLLMTOML()
         lines += renderServicesTOML()
+        lines += renderContainersTOML()
         lines += renderFilesTOML()
         lines += renderIndexTOML()
         lines += renderBrowserTOML()
@@ -167,11 +168,22 @@ extension RuneWeaverConfig {
             "stt_provider = \(Self.tomlQuoted(voice.sttProvider))",
             "whisper_model = \(Self.tomlQuoted(voice.whisperModel))",
             "tts_provider = \(Self.tomlQuoted(voice.ttsProvider))",
-            "",
-            "[sandbox]",
-            "container_base_image = \(Self.tomlQuoted(sandbox.containerBaseImage))",
-            "archive_session_ttl_minutes = \(sandbox.archiveSessionTTLMinutes)",
-            "max_concurrent_machines = \(sandbox.maxConcurrentMachines)",
+            ""
+        ]
+    }
+
+    /// Renders the additive `[containers]` section.
+    ///
+    /// Every knob renders, including the defaults, so a saved file documents
+    /// the container policy and a round-trip never depends on an implicit
+    /// default silently diverging from what was written. The legacy `[sandbox]`
+    /// table never renders, so a resave sheds those retired keys.
+    private func renderContainersTOML() -> [String] {
+        [
+            "[containers]",
+            "memory_mb = \(containers.memoryMB)",
+            "max_concurrent = \(containers.maxConcurrent)",
+            "ttl_minutes = \(containers.ttlMinutes)",
             ""
         ]
     }

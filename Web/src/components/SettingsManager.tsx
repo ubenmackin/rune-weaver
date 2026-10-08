@@ -1,5 +1,5 @@
 // Rune Weaver Dashboard — Settings manager for config.toml configuration.
-// Allows managing LLM providers, engine identity, sandbox policy, memory, voice, web search, email accounts, and the owner-facing assistant persona.
+// Allows managing LLM providers, engine identity, container policy, memory, voice, web search, email accounts, and the owner-facing assistant persona.
 // The persona pane persists [persona] through the shared settings PUT with a
 // changed-only patch and publishes every loaded and saved snapshot to the
 // shared persona store, so identity surfaces mirror the owner's edits live.
@@ -15,9 +15,13 @@ import {
   formatDenyPatternsText,
   parseAllowRootsText,
   parseDenyPatternsText,
-  DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES,
-  DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE,
-  DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
+  DEFAULT_CONTAINERS_CONFIG,
+  CONTAINERS_MAX_CONCURRENT_MAX,
+  CONTAINERS_MAX_CONCURRENT_MIN,
+  CONTAINERS_MEMORY_MAX_MB,
+  CONTAINERS_MEMORY_MIN_MB,
+  CONTAINERS_TTL_MAX_MINUTES,
+  CONTAINERS_TTL_MIN_MINUTES,
   DEFAULT_SEARCH_MAX_RESULTS,
   DEFAULT_SEARCH_SEARXNG_URL,
   DEFAULT_SEARCH_TIMEOUT_SECONDS,
@@ -142,6 +146,8 @@ import {
   type BashConfigData,
   type BashRuleData,
   type BashSettingsUpdate,
+  type ContainersConfigData,
+  type ContainersSettingsUpdate,
   type DesktopConfigData,
   type DesktopSettingsUpdate,
   type EmailAccountData,
@@ -245,7 +251,7 @@ function TerminalIcon(props: { size?: number; className?: string }) {
 }
 
 // Vertical navigation keeps every category visible without horizontal scrolling; Security
-// owns sandbox isolation plus Files & Access (allow roots, deny patterns, approval on deny)
+// owns container governance plus Files & Access (allow roots, deny patterns, approval on deny)
 // plus access management, while the Tools Files category surfaces only the files.write
 // write review mode, so Security stays the single access-policy home and the sidebar
 // stays within the width budget as settings grow. The `search` id stays verbatim while the pane displays as Web: the search* API aliases and
@@ -795,17 +801,19 @@ export default function SettingsManager() {
   const [defaultProvider, setDefaultProvider] = useState("");
   const [fallbackProvider, setFallbackProvider] = useState("");
   const [providersList, setProvidersList] = useState<ProviderEntry[]>([]);
-  // Tier-3 detonation policy: ephemeral microVMs with immediate reap. The
-  // TTL bounds only crash-orphan reclamation and the cap gates concurrent
-  // detonations; the runtime stays pinned server-side with no editor.
-  const [sandboxContainerBaseImage, setSandboxContainerBaseImage] = useState(
-    DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE
+  // Unified container runtime policy ([containers]): one table governs the
+  // three knobs across bash tiers plus detonation, so the editors share one
+  // Security section. Numeric inputs hold raw text (including empty) so a
+  // cleared field surfaces a range error instead of silently keeping the
+  // stored value; the images are pinned in code and never editable here.
+  const [containersMemoryMB, setContainersMemoryMB] = useState<number | string>(
+    DEFAULT_CONTAINERS_CONFIG.memory_mb
   );
-  const [sandboxArchiveSessionTTLMinutes, setSandboxArchiveSessionTTLMinutes] = useState(
-    DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES
+  const [containersMaxConcurrent, setContainersMaxConcurrent] = useState<number | string>(
+    DEFAULT_CONTAINERS_CONFIG.max_concurrent
   );
-  const [sandboxMaxConcurrentMachines, setSandboxMaxConcurrentMachines] = useState(
-    DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES
+  const [containersTTLMinutes, setContainersTTLMinutes] = useState<number | string>(
+    DEFAULT_CONTAINERS_CONFIG.ttl_minutes
   );
   // Blocked-paths editor holds raw textarea text (one glob per line) so blank lines survive editing
   // and only collapse on save; the parsed count drives the live badge while an emptied editor
@@ -2919,6 +2927,83 @@ export default function SettingsManager() {
     return null;
   }, [workspaceQuotaMB, workspaceQuotaFiles, workspaceTmpTTLDays]);
 
+  // Copies one settings fetch into the containers knob editors, tolerating
+  // both snake_case and camelCase DTO aliases and an absent [containers]
+  // section from older engines by keeping the form defaults. Only overwrites
+  // keys the engine returns so a stored knob always wins over the
+  // fresh-form fallback.
+  const populateContainersSettings = useCallback(
+    (containers: ContainersConfigData | undefined | null) => {
+      if (!containers) return;
+      const memoryMB =
+        typeof containers.memory_mb === "number"
+          ? containers.memory_mb
+          : typeof containers.memoryMb === "number"
+            ? containers.memoryMb
+            : null;
+      if (memoryMB !== null) {
+        setContainersMemoryMB(memoryMB);
+      }
+      const maxConcurrent =
+        typeof containers.max_concurrent === "number"
+          ? containers.max_concurrent
+          : typeof containers.maxConcurrent === "number"
+            ? containers.maxConcurrent
+            : null;
+      if (maxConcurrent !== null) {
+        setContainersMaxConcurrent(maxConcurrent);
+      }
+      const ttlMinutes =
+        typeof containers.ttl_minutes === "number"
+          ? containers.ttl_minutes
+          : typeof containers.ttlMinutes === "number"
+            ? containers.ttlMinutes
+            : null;
+      if (ttlMinutes !== null) {
+        setContainersTTLMinutes(ttlMinutes);
+      }
+    },
+    []
+  );
+
+  // Builds the [containers] delta from the Security-tab knob editors so the
+  // page save persists the three knobs through one PUT. Sends the snake_case
+  // keys the engine persists; reads accept both spellings so a
+  // file-configured knob survives the round trip. Numeric fields preserve
+  // the raw input so validation surfaces range errors instead of silently
+  // coercing back to defaults.
+  const buildContainersPatch = useCallback(
+    (): ContainersSettingsUpdate => {
+      return {
+        memory_mb: Number(containersMemoryMB),
+        max_concurrent: Number(containersMaxConcurrent),
+        ttl_minutes: Number(containersTTLMinutes),
+      };
+    },
+    [containersMemoryMB, containersMaxConcurrent, containersTTLMinutes]
+  );
+
+  // Shared containers validation for the page save so an out-of-range knob
+  // fails in the form before any network write with one message. Bounds
+  // mirror ContainersConfig clamps (256-8192 MB, 1-32 concurrent, 5-1440
+  // TTL minutes) so the form agrees with the server 400 instead of
+  // persisting a knob the loader rejects.
+  const validateContainersFields = useCallback((): string | null => {
+    const memoryNum = Number(containersMemoryMB);
+    if (!Number.isInteger(memoryNum) || memoryNum < CONTAINERS_MEMORY_MIN_MB || memoryNum > CONTAINERS_MEMORY_MAX_MB) {
+      return `Invalid containers memory: memory_mb must be between ${CONTAINERS_MEMORY_MIN_MB} and ${CONTAINERS_MEMORY_MAX_MB} MB.`;
+    }
+    const maxConcurrentNum = Number(containersMaxConcurrent);
+    if (!Number.isInteger(maxConcurrentNum) || maxConcurrentNum < CONTAINERS_MAX_CONCURRENT_MIN || maxConcurrentNum > CONTAINERS_MAX_CONCURRENT_MAX) {
+      return `Invalid containers concurrency: max_concurrent must be between ${CONTAINERS_MAX_CONCURRENT_MIN} and ${CONTAINERS_MAX_CONCURRENT_MAX}.`;
+    }
+    const ttlNum = Number(containersTTLMinutes);
+    if (!Number.isInteger(ttlNum) || ttlNum < CONTAINERS_TTL_MIN_MINUTES || ttlNum > CONTAINERS_TTL_MAX_MINUTES) {
+      return `Invalid containers TTL: ttl_minutes must be between ${CONTAINERS_TTL_MIN_MINUTES} and ${CONTAINERS_TTL_MAX_MINUTES} minutes.`;
+    }
+    return null;
+  }, [containersMemoryMB, containersMaxConcurrent, containersTTLMinutes]);
+
   const populateForm = useCallback((data: SettingsResponse) => {
     setSettings(data);
     setEngineName(data.engineName);
@@ -2959,15 +3044,6 @@ export default function SettingsManager() {
     );
     setProvidersList(pList);
 
-    setSandboxContainerBaseImage(
-      data.sandboxContainerBaseImage ?? DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE
-    );
-    setSandboxArchiveSessionTTLMinutes(
-      data.sandboxArchiveSessionTTLMinutes ?? DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES
-    );
-    setSandboxMaxConcurrentMachines(
-      data.sandboxMaxConcurrentMachines ?? DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES
-    );
     setFilesDenyText(formatDenyPatternsText(data.filesDenyPatterns));
     setFilesAllowRootsText(formatAllowRootsText(data.filesAllowRoots));
     setFilesRequireApprovalOnDeny(data.filesRequireApprovalOnDeny ?? true);
@@ -3048,6 +3124,10 @@ export default function SettingsManager() {
     // absent [workspace] keeps the editor defaults instead of blanking the
     // Tools-tab quota fields.
     populateWorkspaceSettings(data.workspace);
+    // Containers knobs share one helper so load and save stay symmetric; an
+    // absent [containers] keeps the editor defaults instead of blanking the
+    // Security-tab knob fields.
+    populateContainersSettings(data.containers);
     // Network bind tolerates older engines without [server]: absent keys keep
     // the loopback defaults so the pane never renders blank, and the textarea
     // formats the stored list so blank lines only exist while editing.
@@ -3517,6 +3597,16 @@ export default function SettingsManager() {
       setSaving(false);
       return;
     }
+    // Container knobs share their validation helper so the page save rejects
+    // an out-of-range memory, concurrency, or TTL before any network write.
+    // Mirrors ContainersConfig clamps (256-8192 MB, 1-32 concurrent, 5-1440
+    // TTL minutes) so the form agrees with the server 400.
+    const containersValidationError = validateContainersFields();
+    if (containersValidationError) {
+      setError(containersValidationError);
+      setSaving(false);
+      return;
+    }
     // Goals and proactivity share their validation helpers so the full-save
     // rejects the same shapes a modal would before any network write. Mirrors
     // GoalsConfig bounds (5-20160, 1-50) plus the ProactiveMode closed set and
@@ -3780,9 +3870,7 @@ export default function SettingsManager() {
         // would preserve the previous value instead.
         fallbackProvider: fallbackProvider,
         providers: providersMap,
-        sandboxContainerBaseImage,
-        sandboxArchiveSessionTTLMinutes: Number(sandboxArchiveSessionTTLMinutes),
-        sandboxMaxConcurrentMachines: Number(sandboxMaxConcurrentMachines),
+        containers: buildContainersPatch(),
         ...buildFilesPayload(),
         memoryVectorDBPath,
         memoryEpisodesDBPath,
@@ -4467,7 +4555,7 @@ export default function SettingsManager() {
         <div>
           <h2>Settings & Configuration</h2>
           <p className="muted text-sm">
-            Manage LLM model routing, engine parameters, sandbox security, web search, and email accounts.
+            Manage LLM model routing, engine parameters, container policy, web search, and email accounts.
           </p>
         </div>
 
@@ -6514,7 +6602,7 @@ export default function SettingsManager() {
           </div>
         )}
 
-        {/* Security pane owns sandbox isolation plus Files & Access plus access
+        {/* Security pane owns containers governance plus Files & Access plus access
             management. Files & Access is the single files editor: both guard
             textareas live here through the shared files payload helper, so
             Security is the only home for file policy. */}
@@ -6522,83 +6610,90 @@ export default function SettingsManager() {
           <>
             <div className="settings-section card">
             <div className="settings-section-title-group">
-              <h3>Sandbox & Security Policy</h3>
+              <h3>Containers</h3>
               <p className="settings-section-hint">
-                Controls ephemeral Tier-3 detonation isolation and crash-orphan reclamation. Document writes use Seatbelt-confined temp with an atomic move on approval.
-                Changes need a restart to take effect.
+                One [containers] table governs memory, concurrency, and idle TTL across the bash execution tiers and detonation containers, while the long-lived workspace machine box is governed by its Stop and Recycle controls.
               </p>
             </div>
 
-            {/* Container Machine (Apple Container microVM for Tier 3 detonation) */}
-            <div className="settings-section-title-group" style={{ marginTop: "10px" }}>
-              <h4>Apple Container Machine</h4>
-              <p className="settings-section-hint">
-                MicroVM settings for untrusted external payloads (email attachments, archives). Zero host directory mounts.
-              </p>
-            </div>
+            {/* Container images are pinned in code so every caller shares one
+                spelling; the pane names both pinned images as read-only text
+                with no editor rather than inputs that suggest a choice. */}
             <div className="form-row">
-              {/* Detonation runtime is pinned server-side so every caller shares
-                  one spelling; the pane shows the fixed value as text with no
-                  editor rather than an input that suggests a choice. */}
               <div className="form-group flex-1">
-                <span className="form-group-label">Container Runtime</span>
-                <p data-testid="sandbox-container-runtime">
-                  <code>container</code>{" "}
-                  <span className="muted text-sm">Apple Container CLI (fixed)</span>
+                <span className="form-group-label">Strict Container Image</span>
+                <p data-testid="containers-strict-image">
+                  <code>debian:stable-slim</code>{" "}
+                  <span className="muted text-sm">Pinned in code (fixed)</span>
                 </p>
                 <span className="form-group-hint">
-                  Tier 3 detonation always uses the Apple Container CLI; no runtime selection.
+                  Per-turn strict containers always run the pinned guest image; no image selection.
                 </span>
               </div>
               <div className="form-group flex-1">
-                <label htmlFor="sandbox-container-base-image">Base Image</label>
-                <input
-                  id="sandbox-container-base-image"
-                  type="text"
-                  className="input-field"
-                  value={sandboxContainerBaseImage}
-                  onChange={(e) => setSandboxContainerBaseImage(e.target.value)}
-                  placeholder="alpine:latest"
-                  required
-                />
+                <span className="form-group-label">Machine Image</span>
+                <p data-testid="containers-machine-image">
+                  <code>debian:stable-slim</code>{" "}
+                  <span className="muted text-sm">Pinned in code (fixed)</span>
+                </p>
                 <span className="form-group-hint">
-                  OCI base image for detonation microVMs (default "alpine:latest").
+                  Machine-scoped containers always use the pinned machine image; no image selection.
+                </span>
+              </div>
+              <div className="form-group flex-1">
+                <span className="form-group-label">Detonation Image</span>
+                <p data-testid="containers-detonation-image">
+                  <code>alpine:3.22</code>{" "}
+                  <span className="muted text-sm">Pinned in code (fixed)</span>
+                </p>
+                <span className="form-group-hint">
+                  Detonation containers always use the pinned detonation image; no image selection.
                 </span>
               </div>
             </div>
             <div className="form-row">
               <div className="form-group flex-1">
-                <label htmlFor="sandbox-archive-ttl">Archive Session TTL (minutes)</label>
+                <label htmlFor="containers-memory-mb">Memory (MB)</label>
                 <input
-                  id="sandbox-archive-ttl"
+                  id="containers-memory-mb"
                   type="number"
-                  min={1}
-                  max={120}
                   step={1}
                   className="input-field"
-                  value={sandboxArchiveSessionTTLMinutes}
-                  onChange={(e) => setSandboxArchiveSessionTTLMinutes(Number(e.target.value))}
-                  required
+                  value={containersMemoryMB}
+                  onChange={(e) => setContainersMemoryMB(e.target.value)}
                 />
                 <span className="form-group-hint">
-                  Crash-orphan reclamation TTL for ephemeral detonation machines; live detonations reap immediately.
+                  Memory budget for one container; a tiny budget fails every spawn while a host-scale one crowds the host.
                 </span>
               </div>
               <div className="form-group flex-1">
-                <label htmlFor="sandbox-max-machines">Max Concurrent Machines</label>
+                <label htmlFor="containers-max-concurrent">Max Concurrent Containers</label>
                 <input
-                  id="sandbox-max-machines"
+                  id="containers-max-concurrent"
                   type="number"
-                  min={1}
-                  max={10}
                   step={1}
                   className="input-field"
-                  value={sandboxMaxConcurrentMachines}
-                  onChange={(e) => setSandboxMaxConcurrentMachines(Number(e.target.value))}
-                  required
+                  value={containersMaxConcurrent}
+                  onChange={(e) => setContainersMaxConcurrent(e.target.value)}
                 />
                 <span className="form-group-hint">
-                  Maximum simultaneous microVM container machines allowed.
+                  Maximum containers running at once; excess spawns fail closed until capacity frees.
+                </span>
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group flex-1">
+                <label htmlFor="containers-ttl-minutes">Idle TTL (minutes)</label>
+                <input
+                  id="containers-ttl-minutes"
+                  type="number"
+                  step={1}
+                  className="input-field"
+                  value={containersTTLMinutes}
+                  onChange={(e) => setContainersTTLMinutes(e.target.value)}
+                />
+                <span className="form-group-hint">
+                  Idle lifetime before a container is reclaimed; live containers are never reaped mid-turn.
                 </span>
               </div>
             </div>

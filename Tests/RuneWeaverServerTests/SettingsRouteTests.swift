@@ -39,9 +39,10 @@ struct SettingsRouteTests {
         #expect(response.engineName == config.engine.name)
         #expect(response.logLevel == config.engine.logLevel)
         #expect(response.configPath == "/test/config.toml")
-        #expect(response.sandboxContainerBaseImage == config.sandbox.containerBaseImage)
-        #expect(response.sandboxArchiveSessionTTLMinutes == config.sandbox.archiveSessionTTLMinutes)
-        #expect(response.sandboxMaxConcurrentMachines == config.sandbox.maxConcurrentMachines)
+        #expect(response.containers == config.containers)
+        #expect(response.containers.memoryMB == config.containers.memoryMB)
+        #expect(response.containers.maxConcurrent == config.containers.maxConcurrent)
+        #expect(response.containers.ttlMinutes == config.containers.ttlMinutes)
         #expect(response.memoryEmbeddingModel == config.memory.embeddingModel)
         #expect(response.memoryEmbeddingBackend == config.memory.embeddingBackend)
     }
@@ -52,19 +53,118 @@ struct SettingsRouteTests {
         let update = UpdateSettingsRequest(
             engineName: "Custom Engine",
             logLevel: "debug",
-            sandboxContainerBaseImage: "debian:bookworm-slim",
-            sandboxArchiveSessionTTLMinutes: 20,
-            sandboxMaxConcurrentMachines: 5
+            containers: ContainersSettingsUpdate(
+                memoryMB: 1024,
+                maxConcurrent: 8,
+                ttlMinutes: 30
+            )
         )
 
         try update.apply(to: &config)
         #expect(config.engine.name == "Custom Engine")
         #expect(config.engine.logLevel == "debug")
-        #expect(config.sandbox.containerBaseImage == "debian:bookworm-slim")
-        #expect(config.sandbox.archiveSessionTTLMinutes == 20)
-        #expect(config.sandbox.maxConcurrentMachines == 5)
+        #expect(config.containers.memoryMB == 1024)
+        #expect(config.containers.maxConcurrent == 8)
+        #expect(config.containers.ttlMinutes == 30)
         // Preserved defaults
         #expect(config.llm.defaultProvider == RuneWeaverConfig.default.llm.defaultProvider)
+    }
+
+    @Test
+    func `Containers delta round-trips via JSON while preserving other sections`() throws {
+        var config = RuneWeaverConfig.default
+        config.bash.timeoutSeconds = 120
+        config.files.denyPatterns = ["custom*"]
+
+        // The dashboard wire shape for a containers edit: snake_case inside
+        // the nested object, mirroring the accepted `PUT /settings` body.
+        let request = try JSONDecoder().decode(
+            UpdateSettingsRequest.self,
+            from: Data(#"{"containers":{"memory_mb":1024,"max_concurrent":8,"ttl_minutes":30}}"#.utf8)
+        )
+        #expect(request.containers?.memoryMB == 1024)
+        #expect(request.containers?.maxConcurrent == 8)
+        #expect(request.containers?.ttlMinutes == 30)
+
+        try request.apply(to: &config)
+        try config.validate()
+        #expect(config.containers.memoryMB == 1024)
+        #expect(config.containers.maxConcurrent == 8)
+        #expect(config.containers.ttlMinutes == 30)
+        // Untouched sections survive the merge.
+        #expect(config.bash.timeoutSeconds == 120)
+        #expect(config.files.denyPatterns == ["custom*"])
+
+        // GET mirrors the persisted bounds so the dashboard renders live values.
+        let response = SettingsResponse(config: config, configPath: "/test/config.toml")
+        #expect(response.containers.memoryMB == 1024)
+        #expect(response.containers.maxConcurrent == 8)
+        #expect(response.containers.ttlMinutes == 30)
+
+        // The nested snapshot encodes as one object with snake_case keys so
+        // GET and PUT share a single lockstep shape.
+        let encoded = try JSONEncoder().encode(response)
+        let text = String(data: encoded, encoding: .utf8) ?? ""
+        #expect(text.contains(#""containers""#))
+        #expect(text.contains("memory_mb"))
+        let decoded = try JSONDecoder().decode(SettingsResponse.self, from: encoded)
+        #expect(decoded.containers == config.containers)
+    }
+
+    @Test
+    func `ContainersSettingsUpdate decodes both spellings with snake winning and encodes snake_case`() throws {
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+
+        let snake = try decoder.decode(
+            ContainersSettingsUpdate.self,
+            from: Data(#"{"memory_mb":1024,"max_concurrent":8,"ttl_minutes":30}"#.utf8)
+        )
+        #expect(snake.memoryMB == 1024)
+        #expect(snake.maxConcurrent == 8)
+        #expect(snake.ttlMinutes == 30)
+
+        let camel = try decoder.decode(
+            ContainersSettingsUpdate.self,
+            from: Data(#"{"memoryMb":1024,"maxConcurrent":8,"ttlMinutes":30}"#.utf8)
+        )
+        #expect(camel.memoryMB == 1024)
+        #expect(camel.maxConcurrent == 8)
+        #expect(camel.ttlMinutes == 30)
+
+        let both = try decoder.decode(
+            ContainersSettingsUpdate.self,
+            from: Data(#"{"memory_mb":1024,"memoryMb":256,"max_concurrent":8,"maxConcurrent":2,"ttl_minutes":30,"ttlMinutes":60}"#.utf8)
+        )
+        #expect(both.memoryMB == 1024)
+        #expect(both.maxConcurrent == 8)
+        #expect(both.ttlMinutes == 30)
+
+        let encoded = try encoder.encode(ContainersSettingsUpdate(memoryMB: 1024, maxConcurrent: 8, ttlMinutes: 30))
+        let text = String(data: encoded, encoding: .utf8) ?? ""
+        #expect(text.contains("memory_mb"))
+        #expect(text.contains("max_concurrent"))
+        #expect(text.contains("ttl_minutes"))
+        #expect(!text.contains("memoryMb"))
+        #expect(!text.contains("maxConcurrent"))
+        #expect(!text.contains("ttlMinutes"))
+    }
+
+    @Test
+    func `Containers patch preserves omitted fields and nil patch is a no-op`() throws {
+        var config = RuneWeaverConfig.default
+        config.containers = ContainersConfig(memoryMB: 1024, maxConcurrent: 8, ttlMinutes: 30)
+
+        try UpdateSettingsRequest(
+            containers: ContainersSettingsUpdate(memoryMB: 2048)
+        ).apply(to: &config)
+        #expect(config.containers.memoryMB == 2048)
+        #expect(config.containers.maxConcurrent == 8)
+        #expect(config.containers.ttlMinutes == 30)
+
+        let before = config.containers
+        try UpdateSettingsRequest(engineName: "Kept Containers").apply(to: &config)
+        #expect(config.containers == before)
     }
 
     @Test

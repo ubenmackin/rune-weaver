@@ -938,10 +938,10 @@ public enum EmailAttachmentLifecycle: Sendable {
         }
     }
 
-    /// Returns whether an attachment part must detonate inside a microVM.
+    /// Returns whether an attachment part must detonate inside a zero-mount container.
     /// Delegates to the single archive truth table so MIME/extension membership
     /// cannot drift from magic-byte routing; byte-level matches layer on top
-    /// inside `AttachmentSecurity.requiresMicroVMDetonation`.
+    /// inside `AttachmentSecurity.requiresZeroMountDetonation`.
     public static func isArchive(contentType: String, filename: String) -> Bool {
         AttachmentSecurity.isArchiveFilenameOrMime(contentType: contentType, filename: filename)
     }
@@ -1052,7 +1052,7 @@ public enum EmailAttachmentLifecycle: Sendable {
         case "text", "pdf":
             return "Document contents extracted directly into 'extractedText'."
         default:
-            return "Attachment processed in isolated microVM container."
+            return "Attachment processed in isolated zero-mount container."
         }
     }
 }

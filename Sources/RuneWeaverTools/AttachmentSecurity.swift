@@ -11,7 +11,7 @@ public enum AttachmentSecurity: Sendable {
     public enum Classification: Sendable, Equatable {
         /// Executable binary or script that should never be staged to the host.
         case executable(String)
-        /// Archive or compound container format (e.g. ZIP, Office doc) that must detonate in a microVM.
+        /// Archive or compound container format (e.g. ZIP, Office doc) that must detonate in a zero-mount container.
         case archive(String)
         /// Validated image matching known image magic bytes.
         case image(String)
@@ -60,8 +60,8 @@ public enum AttachmentSecurity: Sendable {
         detectedExecutable(data: data, filename: filename.lowercased()) != nil
     }
 
-    /// Whether the attachment requires Tier-3 Apple Container microVM detonation.
-    public static func requiresMicroVMDetonation(data: Data, contentType: String, filename: String) -> Bool {
+    /// Whether the attachment requires zero-mount container detonation.
+    public static func requiresZeroMountDetonation(data: Data, contentType: String, filename: String) -> Bool {
         let lowerFilename = filename.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return detectedArchive(data: data, contentType: contentType, filename: lowerFilename) != nil
     }

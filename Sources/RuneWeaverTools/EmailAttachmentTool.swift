@@ -13,8 +13,8 @@ public struct EmailAttachmentTool: Tool, Sendable {
             + "Use when the user asks to save or open an attachment listed by email.read. "
             + "Pass the mailbox labeled on the email.search hit (omitted means INBOX). "
             + "Documents and images stage under isolated temp with inline extracted text or vision payloads; "
-            + "archives detonate in an ephemeral microVM with home-mount none enforced "
-            + "(no HOME mount; stdin in, stdout out; no ssh-agent forwarding) "
+            + "archives detonate in an ephemeral zero-mount container "
+            + "(no host mounts; stdin in, stdout out; read-only rootfs with tmpfs tmp and no DNS) "
             + "returning only a manifest. "
             + "Pass preview true to inline the first 2000 chars for small text parts (binaries are never inlined); "
             + "pass subpath to inspect one file inside a detonated archive, or saveToPath for an approval-gated workspace export."
@@ -79,34 +79,34 @@ public struct EmailAttachmentTool: Tool, Sendable {
     private let emailConfig: EmailConfig
     /// IMAP gateway (subprocess bridge by default, stub in tests).
     private let gateway: any EmailIMAPGateway
-    /// Detonation policy for archive isolation. Document previews stay inline with bounded caps.
-    private let sandboxConfig: SandboxConfig
+    /// Containers runtime policy for archive detonation. Document previews stay inline with bounded caps.
+    private let containersConfig: ContainersConfig
     /// `[files]` policy guarding approval-gated archive exports. Defaults to the built-in defaults.
     private let filesConfig: FilesConfig
     /// Home boundary override forwarded to the guard. Nil means the real home.
     private let homeDirectoryURL: URL?
-    /// Archive detonator (live microVM by default, stub in tests).
-    private let archiveDetonator: any EmailArchiveDetonator
+    /// Archive detonator override (stub in tests). Nil defers to the shared registry ledger.
+    private let archiveDetonator: (any EmailArchiveDetonator)?
+    /// Ledger override for the default detonator. Nil defers to the shared registry ledger.
+    private let ephemeralLedger: EphemeralContainerLedger?
 
     /// Creates an attachment tool.
     public init(
         emailConfig: EmailConfig,
         gateway: (any EmailIMAPGateway)? = nil,
-        sandboxConfig: SandboxConfig = SandboxConfig(),
+        containersConfig: ContainersConfig = ContainersConfig(),
         filesConfig: FilesConfig = FilesConfig(),
         homeDirectoryURL: URL? = nil,
-        archiveDetonator: (any EmailArchiveDetonator)? = nil
+        archiveDetonator: (any EmailArchiveDetonator)? = nil,
+        ephemeralLedger: EphemeralContainerLedger? = nil
     ) {
         self.emailConfig = emailConfig
         self.gateway = gateway ?? SubprocessIMAPGateway()
-        self.sandboxConfig = sandboxConfig
+        self.containersConfig = containersConfig
         self.filesConfig = filesConfig
         self.homeDirectoryURL = homeDirectoryURL
-        self.archiveDetonator = archiveDetonator ?? LiveEmailArchiveDetonator(
-            containerRuntime: sandboxConfig.containerRuntime,
-            containerBaseImage: sandboxConfig.containerBaseImage,
-            maxConcurrentMachines: sandboxConfig.maxConcurrentMachines
-        )
+        self.archiveDetonator = archiveDetonator
+        self.ephemeralLedger = ephemeralLedger
     }
 
     /// Downloads one attachment part, detonating archives in isolation.
@@ -152,7 +152,7 @@ public struct EmailAttachmentTool: Tool, Sendable {
             // Single archive decision via AttachmentSecurity; the lifecycle
             // filename/MIME check delegates to the same table, so one call covers
             // MIME, extension, and magic-byte matches without drift.
-            if AttachmentSecurity.requiresMicroVMDetonation(data: fetched.data, contentType: fetched.contentType, filename: fetched.filename) {
+            if AttachmentSecurity.requiresZeroMountDetonation(data: fetched.data, contentType: fetched.contentType, filename: fetched.filename) {
                 if context.dryRun {
                     return archiveDryRunEnvelope(
                         target: effectiveTarget,
@@ -529,7 +529,7 @@ extension EmailAttachmentTool {
         return successEnvelope(envelope, callID: callID)
     }
 
-    /// Builds the dry-run result for an archive without spawning a machine.
+    /// Builds the dry-run result for an archive without spawning a container.
     private func archiveDryRunEnvelope(
         target: AttachmentTarget,
         accountName: String,
@@ -545,20 +545,35 @@ extension EmailAttachmentTool {
             sizeBytes: fetched.sizeBytes,
             path: nil,
             skipped: true,
-            note: "Dry run: would detonate archive in an isolated microVM without staging to the host.",
+            note: "Dry run: would detonate archive in an isolated zero-mount container without staging to the host.",
             mailbox: target.mailbox
         )
         return successEnvelope(envelope, callID: callID)
     }
 
-    /// Detonates an archive in an ephemeral microVM and builds the manifest result.
+    /// Resolves the detonator on the shared ledger so concurrent admissions serialize.
+    private func resolvedDetonator() async -> any EmailArchiveDetonator {
+        if let archiveDetonator {
+            return archiveDetonator
+        }
+        if let ephemeralLedger {
+            return LiveEmailArchiveDetonator(containersConfig: containersConfig, ephemeralLedger: ephemeralLedger)
+        }
+        return await LiveEmailArchiveDetonator(
+            containersConfig: containersConfig,
+            ephemeralLedger: StrictTurnRegistry.shared.ephemeralLedger
+        )
+    }
+
+    /// Detonates an archive in an ephemeral zero-mount container and builds the manifest result.
     private func detonatedArchiveEnvelope(
         target: AttachmentTarget,
         accountName: String,
         fetched: EmailAttachmentData,
         callID: String
     ) async throws -> ToolOutput {
-        let result = try await archiveDetonator.detonate(
+        let detonator = await resolvedDetonator()
+        let result = try await detonator.detonate(
             filename: fetched.filename,
             contentType: fetched.contentType,
             data: fetched.data,

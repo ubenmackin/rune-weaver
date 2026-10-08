@@ -1,25 +1,33 @@
-// Rune Weaver Core — Tier-3 crash-orphan reclamation.
+// Rune Weaver Core — Sandbox container reclamation.
+//
+// Purpose: reclaim stopped plus orphaned ephemeral containers the immediate
+// teardown missed, so crashed turns never leak containers or scratch.
+// Scope: the hourly pass over the strict name prefix plus the detonation
+// names (the machine singleton workspace container excluded), parked-session
+// exemption, scratch following its owner, and the JSONL audit trail.
+// Architectural role: single owner for sandbox reclamation; the sweep engine
+// lives on the strict turn registry and this pass drives it on a cadence.
 
 import Dispatch
 import Foundation
 
 /// Aggregate outcome of one sandbox cleanup pass.
 public struct SandboxCleanupSummary: Sendable, Equatable, Codable {
-    /// Number of ephemeral or stale container machines destroyed.
+    /// Number of stopped plus orphaned containers reclaimed.
     public let containersDestroyed: Int
-    /// Number of stale running container machines stopped.
-    public let staleMachinesStopped: Int
+    /// Number of scratch leaves deleted with their owners.
+    public let scratchRemoved: Int
     /// Non-fatal problems encountered (for example listing failures).
     public let errors: [String]
 
     /// Creates a cleanup summary.
     public init(
         containersDestroyed: Int = 0,
-        staleMachinesStopped: Int = 0,
+        scratchRemoved: Int = 0,
         errors: [String] = []
     ) {
         self.containersDestroyed = containersDestroyed
-        self.staleMachinesStopped = staleMachinesStopped
+        self.scratchRemoved = scratchRemoved
         self.errors = errors
     }
 }
@@ -28,23 +36,23 @@ public struct SandboxCleanupSummary: Sendable, Equatable, Codable {
 public struct SandboxCleanupAuditEvent: Sendable, Codable, Equatable {
     /// Scope label for the cleanup pass.
     public let scope: String
-    /// Container machines destroyed in this pass.
+    /// Containers reclaimed in this pass.
     public let containersDestroyed: Int
-    /// Stale machines stopped in this pass.
-    public let staleMachinesStopped: Int
+    /// Scratch leaves deleted in this pass.
+    public let scratchRemoved: Int
     /// Number of non-fatal problems encountered.
     public let errorCount: Int
     /// When the pass completed.
     public let timestamp: Date
 
-    /// Scope recorded by passes covering Tier-3 crash orphans.
+    /// Scope recorded by passes reclaiming crash orphans.
     public static let tier3Scope = "tier3-crash-orphans"
 
     /// Creates an audit event from a summary.
     public init(scope: String = tier3Scope, summary: SandboxCleanupSummary, timestamp: Date = Date()) {
         self.scope = scope
         self.containersDestroyed = summary.containersDestroyed
-        self.staleMachinesStopped = summary.staleMachinesStopped
+        self.scratchRemoved = summary.scratchRemoved
         self.errorCount = summary.errors.count
         self.timestamp = timestamp
     }
@@ -101,50 +109,65 @@ public enum FileSandboxAuditLog {
     }
 }
 
-/// Reclaims Tier-3 crash-orphaned detonation machines.
+/// Reclaims stopped plus orphaned ephemeral containers.
 public enum SandboxCleaner {
-    /// Prunes Tier-3 crash orphans.
-    public static func cleanup(config: SandboxConfig, now: Date = Date()) -> SandboxCleanupSummary {
-        let containerResult = sweepContainers(config: config, now: now)
-
-        return SandboxCleanupSummary(
-            containersDestroyed: containerResult.destroyed,
-            staleMachinesStopped: containerResult.stopped,
-            errors: containerResult.errors
-        )
-    }
-
-    private static func sweepContainers(config: SandboxConfig, now: Date) -> ContainerPruneResult {
-        guard ContainerMachineManager.isRuntimeAvailable(runtime: config.containerRuntime) else {
-            return ContainerPruneResult()
-        }
-        return ContainerMachineManager.pruneStaleMachinesSync(
-            prefix: ContainerMachineManager.machinePrefix,
-            maxAgeSeconds: TimeInterval(config.archiveSessionTTLMinutes * 60),
+    /// Sweeps stopped plus orphaned strict and detonation containers.
+    ///
+    /// The strict turn registry owns the sweep engine; this pass drives it
+    /// with the `[containers]` idle TTL so the operator-configured window
+    /// governs reclamation. Parked sessions keep their containers at any
+    /// age, the machine singleton workspace container is never matched, and
+    /// every swept container's scratch follows it.
+    /// - Parameters:
+    ///   - config: Live containers policy supplying the reclamation TTL.
+    ///   - approvals: Approval queue deriving parked-session exemptions.
+    ///   - registry: Turn registry to sweep; nil sweeps the shared live one.
+    ///   - workspaceTmp: Scratch root for orphan aging; nil resolves the
+    ///     default workspace `tmp/`.
+    ///   - now: Current instant for aging.
+    /// - Returns: Aggregate outcome of the pass.
+    public static func cleanup(
+        config: ContainersConfig,
+        approvals: ApprovalQueue,
+        registry: StrictTurnRegistry? = nil,
+        workspaceTmp: URL? = nil,
+        now: Date = Date()
+    ) async -> SandboxCleanupSummary {
+        let sweepRegistry = registry ?? StrictTurnRegistry.shared
+        let scratchRoot = workspaceTmp ?? BashSandboxRouter.workspaceTmpURL(for: WorkspaceStore.resolveRoot())
+        let result = await sweepRegistry.sweep(
+            workspaceTmp: scratchRoot,
+            approvals: approvals,
             now: now,
-            runtime: config.containerRuntime
+            ttlSeconds: TimeInterval(config.ttlMinutes * 60)
+        )
+        return SandboxCleanupSummary(
+            containersDestroyed: result.containersRemoved,
+            scratchRemoved: result.scratchRemoved
         )
     }
 }
 
 /// Periodic scheduler running sandbox reclamation on a cadence.
 public actor SandboxCleanupScheduler {
-    /// Fixed cadence between Tier-3 reclamation passes.
+    /// Fixed cadence between reclamation passes.
     public static let defaultIntervalSeconds: TimeInterval = 3600
     /// In-flight sleep loop, if started.
     private var task: Task<Void, Never>?
     /// Whether the loop is running.
     private var isStarted = false
+    /// Latest containers policy governing reclamation TTL.
+    private var liveConfig: ContainersConfig?
 
     /// Creates an idle scheduler.
     public init() {}
 
     /// Starts the periodic cleanup loop.
-    public func start(config: SandboxConfig) {
+    public func start(config: ContainersConfig, approvals: ApprovalQueue) {
         guard !isStarted else { return }
         isStarted = true
+        liveConfig = config
         let interval = Self.defaultIntervalSeconds
-        let snapshot = config
         task = Task { [weak self] in
             while !Task.isCancelled {
                 do {
@@ -153,9 +176,22 @@ public actor SandboxCleanupScheduler {
                     break
                 }
                 guard !Task.isCancelled else { break }
-                await self?.runOnce(config: snapshot)
+                await self?.runLiveOnce(approvals: approvals)
             }
         }
+    }
+
+    /// Pushes a freshly persisted `[containers]` policy into the live loop so a
+    /// settings save takes effect without a restart.
+    /// - Parameter newConfig: Persisted containers policy from the settings save.
+    public func updateConfig(_ newConfig: ContainersConfig) {
+        liveConfig = newConfig
+    }
+
+    /// Runs one pass against the latest pushed policy.
+    private func runLiveOnce(approvals: ApprovalQueue) async {
+        guard let effective = liveConfig else { return }
+        await runOnce(config: effective, approvals: approvals)
     }
 
     /// Stops the periodic cleanup loop.
@@ -172,10 +208,10 @@ public actor SandboxCleanupScheduler {
         isStarted
     }
 
-    /// Runs one Tier-3 prune pass and records it to the audit trail.
+    /// Runs one reclamation pass and records it to the audit trail.
     @discardableResult
-    public func runOnce(config: SandboxConfig, now: Date = Date()) async -> SandboxCleanupSummary {
-        let summary = SandboxCleaner.cleanup(config: config, now: now)
+    public func runOnce(config: ContainersConfig, approvals: ApprovalQueue, now: Date = Date()) async -> SandboxCleanupSummary {
+        let summary = await SandboxCleaner.cleanup(config: config, approvals: approvals, now: now)
         FileSandboxAuditLog.append(summary)
         return summary
     }

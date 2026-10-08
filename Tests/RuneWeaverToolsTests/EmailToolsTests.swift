@@ -811,8 +811,8 @@ struct EmailToolsTests {
             data: bytes
         ))
         let config = ToolsTestSupport.testEmailConfig()
-        let sandbox = SandboxConfig()
-        let tool = EmailAttachmentTool(emailConfig: config, gateway: gateway, sandboxConfig: sandbox)
+        let sandbox = ContainersConfig()
+        let tool = EmailAttachmentTool(emailConfig: config, gateway: gateway, containersConfig: sandbox)
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
@@ -847,7 +847,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: config,
             gateway: gateway,
-            sandboxConfig: SandboxConfig()
+            containersConfig: ContainersConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -878,7 +878,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: config,
             gateway: gateway,
-            sandboxConfig: SandboxConfig()
+            containersConfig: ContainersConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -907,7 +907,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: config,
             gateway: gateway,
-            sandboxConfig: SandboxConfig()
+            containersConfig: ContainersConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -971,7 +971,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(
             emailConfig: config,
             gateway: gateway,
-            sandboxConfig: SandboxConfig()
+            containersConfig: ContainersConfig()
         ) {
             await bus.register(tool: tool)
         }
@@ -1220,7 +1220,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: config,
             gateway: gateway,
-            sandboxConfig: SandboxConfig()
+            containersConfig: ContainersConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -1397,7 +1397,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig()
+            containersConfig: ContainersConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -1439,7 +1439,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig()
+            containersConfig: ContainersConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -1473,7 +1473,7 @@ struct EmailToolsTests {
             let tool = EmailAttachmentTool(
                 emailConfig: ToolsTestSupport.testEmailConfig(),
                 gateway: gateway,
-                sandboxConfig: SandboxConfig()
+                containersConfig: ContainersConfig()
             )
             try await ToolsTestSupport.withTestPassword {
                 let output = try await tool.execute(
@@ -1506,7 +1506,7 @@ struct EmailToolsTests {
             let tool = EmailAttachmentTool(
                 emailConfig: ToolsTestSupport.testEmailConfig(),
                 gateway: gateway,
-                sandboxConfig: SandboxConfig()
+                containersConfig: ContainersConfig()
             )
             try await ToolsTestSupport.withTestPassword {
                 let output = try await tool.execute(
@@ -1539,7 +1539,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig()
+            containersConfig: ContainersConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -1570,7 +1570,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig()
+            containersConfig: ContainersConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -1623,7 +1623,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(),
+            containersConfig: ContainersConfig(),
             archiveDetonator: detonator
         )
         try await ToolsTestSupport.withTestPassword {
@@ -1661,7 +1661,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(),
+            containersConfig: ContainersConfig(),
             archiveDetonator: detonator
         )
         try await ToolsTestSupport.withTestPassword {
@@ -1698,7 +1698,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(),
+            containersConfig: ContainersConfig(),
             homeDirectoryURL: home,
             archiveDetonator: detonator
         )
@@ -1733,7 +1733,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(),
+            containersConfig: ContainersConfig(),
             homeDirectoryURL: home,
             archiveDetonator: StubArchiveDetonator(manifest: [
                 EmailArchiveEntry(path: "hello.txt", sizeBytes: 11, category: "text")
@@ -1761,7 +1761,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(),
+            containersConfig: ContainersConfig(),
             archiveDetonator: StubArchiveDetonator(failure: "detonator must not run for documents")
         )
         try await ToolsTestSupport.withTestPassword {
@@ -1786,7 +1786,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(),
+            containersConfig: ContainersConfig(),
             archiveDetonator: StubArchiveDetonator(failure: "detonator must not run on dry run")
         )
         try await ToolsTestSupport.withTestPassword {

@@ -533,65 +533,79 @@ public struct VoiceConfig: Sendable, Codable, Equatable {
     }
 }
 
-/// `[sandbox]` — Tier-3 detonation policy only.
-public struct SandboxConfig: Sendable, Equatable {
-    /// Hardcoded Apple Container CLI runtime for Tier 3 detonation.
-    public var containerRuntime: String {
-        Self.defaultContainerRuntime
-    }
+/// `[containers]` — unified container runtime policy for sandboxed execution.
+///
+/// Single source for the container knobs: the guest memory budget, the
+/// concurrent-container cap, and the idle reclamation TTL. Supersedes the
+/// legacy `[sandbox]` table, which is ignored on load (with a logged note)
+/// and shed on resave; legacy values are never migrated into this section.
+/// The container images themselves are pinned in code — strict per-turn and
+/// machine-scoped workspace containers run ``StrictContainerRunner/defaultImage``
+/// (`debian:stable-slim`) and detonation containers run
+/// ``LiveEmailArchiveDetonator/detonationImage`` (`alpine:3.22`) — so this
+/// section carries no image key.
+public struct ContainersConfig: Sendable, Equatable {
+    /// Memory budget in megabytes for one container. Clamped `256...8192`.
+    public var memoryMB: Int
+    /// Maximum containers running at once. Clamped `1...32`.
+    public var maxConcurrent: Int
+    /// Idle lifetime in minutes before a container is reclaimed. Clamped `5...1440`.
+    public var ttlMinutes: Int
 
-    /// Default OCI base image used for quarantine/detonation (defaults to "alpine:latest").
-    public var containerBaseImage: String
-    /// Crash-orphan reclamation TTL in minutes for ephemeral archive detonation machines (defaults to 10).
-    /// Detonations are reaped immediately; the sweeper reclaims only machines orphaned by crashes.
-    public var archiveSessionTTLMinutes: Int
-    /// Maximum concurrent detonation machines allowed (defaults to 3). Enforced before spawn; excess requests fail closed until reclamation frees capacity.
-    public var maxConcurrentMachines: Int
+    /// Default memory budget in megabytes.
+    public static let defaultMemoryMB = 512
+    /// Lower memory bound; below this a container cannot fit toolchains.
+    public static let minMemoryMB = 256
+    /// Upper memory bound before one container crowds the host.
+    public static let maxMemoryMB = 8192
+    /// Default concurrent container cap.
+    public static let defaultMaxConcurrent = 5
+    /// Lower concurrency bound; a zero or negative cap is meaningless.
+    public static let minMaxConcurrent = 1
+    /// Upper concurrency bound before containers oversubscribe the host.
+    public static let maxMaxConcurrent = 32
+    /// Default idle reclamation TTL in minutes.
+    public static let defaultTTLMinutes = 60
+    /// Shortest idle TTL that still survives one model round trip.
+    public static let minTTLMinutes = 5
+    /// Longest idle TTL before reclamation reads as storage rather than scratch.
+    public static let maxTTLMinutes = 1440
 
-    /// Hardcoded Apple Container CLI runtime for Tier 3 detonation.
-    public static let defaultContainerRuntime = "container"
-    /// Default container base image.
-    public static let defaultContainerBaseImage = "alpine:latest"
-    /// Default idle TTL for archive container sessions (10 minutes).
-    public static let defaultArchiveSessionTTLMinutes = 10
-    /// Default maximum concurrent container machines.
-    public static let defaultMaxConcurrentMachines = 3
-
-    /// Creates a sandbox config.
+    /// Creates a containers config.
     public init(
-        containerBaseImage: String = defaultContainerBaseImage,
-        archiveSessionTTLMinutes: Int = defaultArchiveSessionTTLMinutes,
-        maxConcurrentMachines: Int = defaultMaxConcurrentMachines
+        memoryMB: Int = defaultMemoryMB,
+        maxConcurrent: Int = defaultMaxConcurrent,
+        ttlMinutes: Int = defaultTTLMinutes
     ) {
-        self.containerBaseImage = containerBaseImage
-        self.archiveSessionTTLMinutes = archiveSessionTTLMinutes
-        self.maxConcurrentMachines = maxConcurrentMachines
+        self.memoryMB = memoryMB
+        self.maxConcurrent = maxConcurrent
+        self.ttlMinutes = ttlMinutes
     }
 
     private enum CodingKeys: String, CodingKey {
-        case containerBaseImage = "container_base_image"
-        case archiveSessionTTLMinutes = "archive_session_ttl_minutes"
-        case maxConcurrentMachines = "max_concurrent_machines"
+        case memoryMB = "memory_mb"
+        case maxConcurrent = "max_concurrent"
+        case ttlMinutes = "ttl_minutes"
     }
 }
 
-extension SandboxConfig: Codable {
-    /// Decodes a sandbox config with built-in fallbacks.
+extension ContainersConfig: Codable {
+    /// Decodes a containers config, defaulting every omitted key.
     /// - Parameter decoder: Decoder for the config document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        containerBaseImage = try container.decodeIfPresent(String.self, forKey: .containerBaseImage) ?? Self.defaultContainerBaseImage
-        archiveSessionTTLMinutes = try container.decodeIfPresent(Int.self, forKey: .archiveSessionTTLMinutes) ?? Self.defaultArchiveSessionTTLMinutes
-        maxConcurrentMachines = try container.decodeIfPresent(Int.self, forKey: .maxConcurrentMachines) ?? Self.defaultMaxConcurrentMachines
+        memoryMB = try container.decodeIfPresent(Int.self, forKey: .memoryMB) ?? Self.defaultMemoryMB
+        maxConcurrent = try container.decodeIfPresent(Int.self, forKey: .maxConcurrent) ?? Self.defaultMaxConcurrent
+        ttlMinutes = try container.decodeIfPresent(Int.self, forKey: .ttlMinutes) ?? Self.defaultTTLMinutes
     }
 
-    /// Encodes a sandbox config with its Tier-3 detonation policy.
+    /// Encodes a containers config.
     /// - Parameter encoder: Encoder for the config document.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(containerBaseImage, forKey: .containerBaseImage)
-        try container.encode(archiveSessionTTLMinutes, forKey: .archiveSessionTTLMinutes)
-        try container.encode(maxConcurrentMachines, forKey: .maxConcurrentMachines)
+        try container.encode(memoryMB, forKey: .memoryMB)
+        try container.encode(maxConcurrent, forKey: .maxConcurrent)
+        try container.encode(ttlMinutes, forKey: .ttlMinutes)
     }
 }
 
@@ -1261,8 +1275,10 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var memory: MemoryConfig
     /// Voice pipeline providers.
     public var voice: VoiceConfig
-    /// Sandbox staging and trust policy.
-    public var sandbox: SandboxConfig
+    /// Unified container runtime policy for sandboxed execution.
+    /// An absent `[containers]` table keeps the documented defaults; legacy
+    /// `[sandbox]` keys are ignored on load with a logged note and never migrated.
+    public var containers = ContainersConfig()
     /// File-tool access policy (deny list plus allowed roots).
     public var files = FilesConfig()
     /// Mail accounts.
@@ -1308,7 +1324,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         llm: LLMConfig = LLMConfig(),
         memory: MemoryConfig = MemoryConfig(),
         voice: VoiceConfig = VoiceConfig(),
-        sandbox: SandboxConfig = SandboxConfig(),
+        containers: ContainersConfig = ContainersConfig(),
         files: FilesConfig = FilesConfig(),
         email: EmailConfig = EmailConfig(),
         home: HomeConfig = HomeConfig(),
@@ -1333,7 +1349,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.llm = llm
         self.memory = memory
         self.voice = voice
-        self.sandbox = sandbox
+        self.containers = containers
         self.files = files
         self.email = email
         self.home = home
@@ -1431,7 +1447,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         case llm
         case memory
         case voice
-        case sandbox
+        case containers
         case files
         case email
         case home
@@ -1458,9 +1474,9 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     /// proactive surfacing, or idea suggestions existed decode with hardened,
     /// disabled, surfacing, and opt-in defaults instead of throwing.
     /// Present-but-wrong-typed values still throw like every prior section.
-    /// Only the security, goals, bash, proactive, ideas, fanout, workspace, and persona
-    /// sections are absent-tolerant; every other section decodes strictly so a
-    /// truncated payload cannot silently load as hardened defaults.
+    /// Only the security, goals, bash, proactive, ideas, fanout, workspace, persona,
+    /// and containers sections are absent-tolerant; every other section decodes
+    /// strictly so a truncated payload cannot silently load as hardened defaults.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -1470,7 +1486,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.llm = try container.decode(LLMConfig.self, forKey: .llm)
         self.memory = try container.decode(MemoryConfig.self, forKey: .memory)
         self.voice = try container.decode(VoiceConfig.self, forKey: .voice)
-        self.sandbox = try container.decode(SandboxConfig.self, forKey: .sandbox)
+        self.containers = try container.decodeIfPresent(ContainersConfig.self, forKey: .containers) ?? ContainersConfig()
         self.files = try container.decode(FilesConfig.self, forKey: .files)
         self.email = try container.decode(EmailConfig.self, forKey: .email)
         self.home = try container.decode(HomeConfig.self, forKey: .home)
@@ -1502,7 +1518,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         try container.encode(llm, forKey: .llm)
         try container.encode(memory, forKey: .memory)
         try container.encode(voice, forKey: .voice)
-        try container.encode(sandbox, forKey: .sandbox)
+        try container.encode(containers, forKey: .containers)
         try container.encode(files, forKey: .files)
         try container.encode(email, forKey: .email)
         try container.encode(home, forKey: .home)

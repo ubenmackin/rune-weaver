@@ -933,10 +933,11 @@ public enum EmailTools {
         emailConfig: EmailConfig,
         gateway: (any EmailIMAPGateway)? = nil,
         smtpGateway: (any EmailSMTPGateway)? = nil,
-        sandboxConfig: SandboxConfig = SandboxConfig(),
+        containersConfig: ContainersConfig = ContainersConfig(),
         filesConfig: FilesConfig = FilesConfig(),
         homeDirectoryURL: URL? = nil,
         archiveDetonator: (any EmailArchiveDetonator)? = nil,
+        ephemeralLedger: EphemeralContainerLedger? = nil,
         securityConfig: SecurityConfig = SecurityConfig()
     ) -> [any Tool] {
         let shared: any EmailIMAPGateway = gateway ?? SubprocessIMAPGateway()
@@ -946,16 +947,16 @@ public enum EmailTools {
         let attachment: any Tool = EmailAttachmentTool(
             emailConfig: emailConfig,
             gateway: shared,
-            sandboxConfig: sandboxConfig,
+            containersConfig: containersConfig,
             filesConfig: filesConfig,
             homeDirectoryURL: homeDirectoryURL,
-            archiveDetonator: archiveDetonator
+            archiveDetonator: archiveDetonator,
+            ephemeralLedger: ephemeralLedger
         )
         let send: any Tool = EmailSendTool(
             emailConfig: emailConfig,
             smtpGateway: sharedSMTP,
-            gateway: shared,
-            sandboxConfig: sandboxConfig
+            gateway: shared
         )
         let listMailboxes: any Tool = EmailListMailboxesTool(emailConfig: emailConfig, gateway: shared)
         let move: any Tool = EmailMoveTool(emailConfig: emailConfig, gateway: shared)
@@ -968,20 +969,31 @@ public enum EmailTools {
         emailConfig: EmailConfig,
         gateway: (any EmailIMAPGateway)? = nil,
         smtpGateway: (any EmailSMTPGateway)? = nil,
-        sandboxConfig: SandboxConfig = SandboxConfig(),
+        containersConfig: ContainersConfig = ContainersConfig(),
         filesConfig: FilesConfig = FilesConfig(),
         homeDirectoryURL: URL? = nil,
         archiveDetonator: (any EmailArchiveDetonator)? = nil,
+        ephemeralLedger: EphemeralContainerLedger? = nil,
         securityConfig: SecurityConfig = SecurityConfig()
     ) async {
+        let effectiveLedger: EphemeralContainerLedger? = if archiveDetonator == nil {
+            if let ephemeralLedger {
+                ephemeralLedger
+            } else {
+                await StrictTurnRegistry.shared.ephemeralLedger
+            }
+        } else {
+            ephemeralLedger
+        }
         for tool in makeTools(
             emailConfig: emailConfig,
             gateway: gateway,
             smtpGateway: smtpGateway,
-            sandboxConfig: sandboxConfig,
+            containersConfig: containersConfig,
             filesConfig: filesConfig,
             homeDirectoryURL: homeDirectoryURL,
             archiveDetonator: archiveDetonator,
+            ephemeralLedger: effectiveLedger,
             securityConfig: securityConfig
         ) {
             await bus.register(tool: tool)

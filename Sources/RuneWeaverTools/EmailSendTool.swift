@@ -470,20 +470,16 @@ public struct EmailSendTool: Tool, Sendable {
     private let smtpGateway: any EmailSMTPGateway
     /// IMAP gateway for threading fetches and Sent appends (subprocess by default, stub in tests).
     private let imapGateway: any EmailIMAPGateway
-    /// Detonation policy retained for compatibility. Attachment paths are judged by the workspace guard.
-    private let sandboxConfig: SandboxConfig
 
     /// Creates a send tool.
     public init(
         emailConfig: EmailConfig,
         smtpGateway: (any EmailSMTPGateway)? = nil,
-        gateway: (any EmailIMAPGateway)? = nil,
-        sandboxConfig: SandboxConfig = SandboxConfig()
+        gateway: (any EmailIMAPGateway)? = nil
     ) {
         self.emailConfig = emailConfig
         self.smtpGateway = smtpGateway ?? SubprocessSMTPGateway()
         self.imapGateway = gateway ?? SubprocessIMAPGateway()
-        self.sandboxConfig = sandboxConfig
     }
 
     /// Validates, resolves credentials, and sends (or previews under dry-run).

@@ -145,21 +145,21 @@ stt_provider = "whisper"
 whisper_model = "base"
 tts_provider = "system"  # macOS say command
 
-[sandbox]
-# Tier-3 detonation only: there is no host staging. Legacy staging keys
-# (staging_path, retention_days, max_total_bytes, cleanup_interval_seconds)
-# in older files are ignored with no migration; manually clean old dev-only
-# staging directories.
-# Archive detonation always uses the Apple Container CLI ("container");
-# there is no container_runtime key. Older files carrying the key load
-# with the hardcoded default.
-# Default OCI base image for quarantine/detonation chambers.
-container_base_image = "alpine:latest"
-# Crash-orphan reclamation TTL in minutes for ephemeral detonation machines (10 default).
-# Detonations are reaped immediately; the sweeper reclaims only machines orphaned by crashes.
-archive_session_ttl_minutes = 10
-# Maximum concurrent container machines allowed at once (3 default).
-max_concurrent_machines = 3
+[containers]
+# Unified container policy for sandboxed execution and detonation work.
+# Absent keys keep the documented defaults; out-of-range values fail closed
+# at load. Legacy [sandbox] keys (container_base_image,
+# archive_session_ttl_minutes, max_concurrent_machines) in older files are
+# ignored with a logged note and never migrated; a resave sheds them.
+# Memory budget in megabytes per container (256-8192).
+memory_mb = 512
+# Maximum containers running at once (1-32).
+max_concurrent = 5
+# Idle lifetime in minutes before reclamation (5-1440).
+ttl_minutes = 60
+# Container images are pinned in code and carry no config key:
+# strict per-turn and machine-scoped workspace containers run "debian:stable-slim";
+# detonation containers run "alpine:3.22".
 
 [files]
 # Sensitive-path deny list for file tools, mirroring the engine guard.

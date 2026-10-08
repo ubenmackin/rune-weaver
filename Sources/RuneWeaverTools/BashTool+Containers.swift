@@ -285,7 +285,7 @@ extension BashTool {
     ///
     /// Names the Apple container install with no Seatbelt fallback.
     private func missingRuntimeDenied(command: String, decision: BashDecision, callID: String) -> ToolOutput {
-        let detail = ContainerMachineError.runtimeNotFound("container").localizedDescription
+        let detail = ContainerOperationError.runtimeNotFound("container").localizedDescription
         let envelope = BashResultEnvelope(
             command: command,
             approvalRequired: false,

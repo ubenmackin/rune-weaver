@@ -443,12 +443,20 @@ struct WorkspaceToolsRunCommand: AsyncParsableCommand {
             print(TerminalStyle.error("Security policy rejected: \(error.localizedDescription)"))
             throw ExitCode(1)
         }
+        await StrictTurnRegistry.shared.applyContainersConfig(loaded.config.containers)
+        let sharedLedger = await StrictTurnRegistry.shared.ephemeralLedger
+        let containerSeam = ContainerSeam(
+            containersConfig: loaded.config.containers,
+            strictRegistry: StrictTurnRegistry.shared,
+            ephemeralLedger: sharedLedger
+        )
         let bash = BashTool(
             bashConfig: loaded.config.bash,
             filesConfig: loaded.config.files,
             egressSupervisor: supervisor,
             workspaceConfig: loaded.config.workspace,
-            workspaceStore: workspace
+            workspaceStore: workspace,
+            containers: containerSeam
         )
         // Single-flight lock for this process, held across verify plus spawn
         // inside `RunAgentTool`: the CLI passes its lock in rather than
