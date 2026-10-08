@@ -436,7 +436,12 @@ public struct ProductionCalendarGateway: CalendarGateway, Sendable {
             until: until,
             trimmedQuery: trimmedQuery
         )
-        let sorted = sortEventsByStartDescending(filtered)
+        let sorted =
+            if since != nil {
+                sortEventsByStartAscending(filtered)
+            } else {
+                sortEventsByStartDescending(filtered)
+            }
         return try sorted.prefix(capped).map { try makeItem(from: $0, calendarsByID: calendarsByID) }
     }
 
@@ -729,6 +734,24 @@ extension ProductionCalendarGateway {
             filtered.append(stored)
         }
         return filtered
+    }
+
+    private func sortEventsByStartAscending(_ events: [StoreEvent]) -> [StoreEvent] {
+        events.enumerated().sorted { lhs, rhs in
+            switch (lhs.element.startDate, rhs.element.startDate) {
+            case (nil, nil):
+                return lhs.offset < rhs.offset
+            case (nil, _):
+                return false
+            case (_, nil):
+                return true
+            case let (left?, right?):
+                if left != right {
+                    return left < right
+                }
+                return lhs.offset < rhs.offset
+            }
+        }.map(\.element)
     }
 
     private func sortEventsByStartDescending(_ events: [StoreEvent]) -> [StoreEvent] {
