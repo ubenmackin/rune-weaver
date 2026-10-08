@@ -20,7 +20,8 @@ public enum MachineScopedRunner: Sendable {
     /// Label key carrying the expected image plus mount digest.
     public static let configLabel = "runeweaver.config-hash"
 
-    /// Shared guest memory cap, single-sourced with the strict runner.
+    /// Fallback guest memory cap when no containers policy is threaded.
+    /// Production machine turns read the threaded `ContainerSeam` memory instead.
     public static var sharedMemoryCap: String {
         StrictContainerRunner.defaultMemory
     }
@@ -300,7 +301,7 @@ public enum MachineScopedRunner: Sendable {
     public static func exec(
         workdir: String,
         command: String,
-        timeoutSeconds: TimeInterval = ContainerMachineManager.defaultProcessTimeoutSeconds
+        timeoutSeconds: TimeInterval = StrictContainerRunner.defaultProcessTimeoutSeconds
     ) async throws -> BoundedProcessResult {
         try await MachineContainerClient.live.exec(workdir: workdir, command: command, timeoutSeconds: timeoutSeconds)
     }
@@ -363,7 +364,7 @@ public struct MachineContainerClient: Sendable {
     /// Ensures the long-lived workspace container exists plus runs.
     public func ensureMachine(workspaceRoot: URL, networkDenied: Bool, memory: String = MachineScopedRunner.sharedMemoryCap) async throws {
         let expected = MachineScopedRunner.expectedConfigValue(workspaceRoot: workspaceRoot, networkDenied: networkDenied)
-        let timeout = ContainerMachineManager.defaultProcessTimeoutSeconds
+        let timeout = StrictContainerRunner.defaultProcessTimeoutSeconds
         if let snapshot = await inspectSnapshot(timeout: timeout) {
             if snapshot.configValue != expected {
                 try await recreateMismatched(workspaceRoot: workspaceRoot, networkDenied: networkDenied, memory: memory, timeout: timeout)
@@ -384,14 +385,14 @@ public struct MachineContainerClient: Sendable {
     public func exec(
         workdir: String,
         command: String,
-        timeoutSeconds: TimeInterval = ContainerMachineManager.defaultProcessTimeoutSeconds
+        timeoutSeconds: TimeInterval = StrictContainerRunner.defaultProcessTimeoutSeconds
     ) async throws -> BoundedProcessResult {
         let args = MachineScopedRunner.execArguments(workdir: workdir, command: command)
         return try await runtime.run(arguments: args, timeoutSeconds: timeoutSeconds)
     }
 
     public func machineStatus(workspaceRoot: URL, networkDenied: Bool? = nil) async -> MachineScopedRunner.MachineStatus {
-        let timeout = ContainerMachineManager.defaultProcessTimeoutSeconds
+        let timeout = StrictContainerRunner.defaultProcessTimeoutSeconds
         let probed: BoundedProcessResult?
         do {
             probed = try await runtime.run(
@@ -426,7 +427,7 @@ public struct MachineContainerClient: Sendable {
 
     /// Stops the machine container without removing it.
     public func stopMachine() async {
-        let timeout = ContainerMachineManager.defaultProcessTimeoutSeconds
+        let timeout = StrictContainerRunner.defaultProcessTimeoutSeconds
         do {
             _ = try await runtime.run(
                 arguments: StrictContainerRunner.containerStopArguments(name: MachineScopedRunner.workspaceMachineName),
@@ -477,7 +478,7 @@ public struct MachineContainerClient: Sendable {
             timeoutSeconds: timeout
         )
         guard started.exitCode == 0 else {
-            throw ContainerMachineError.operationFailed(
+            throw ContainerOperationError.operationFailed(
                 "Failed to start workspace container '\(MachineScopedRunner.workspaceMachineName)': \(started.stderrString)"
             )
         }
@@ -589,12 +590,12 @@ public struct MachineContainerClient: Sendable {
                 }
                 let retried = try await runtime.run(arguments: createArgs, timeoutSeconds: timeout)
                 guard retried.exitCode == 0 else {
-                    throw ContainerMachineError.operationFailed(
+                    throw ContainerOperationError.operationFailed(
                         "Failed to create workspace container '\(MachineScopedRunner.workspaceMachineName)': \(retried.stderrString)"
                     )
                 }
             } else {
-                throw ContainerMachineError.operationFailed(
+                throw ContainerOperationError.operationFailed(
                     "Failed to create workspace container '\(MachineScopedRunner.workspaceMachineName)': \(created.stderrString)"
                 )
             }

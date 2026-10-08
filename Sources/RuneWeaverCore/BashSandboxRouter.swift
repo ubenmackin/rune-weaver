@@ -5,7 +5,18 @@ import Foundation
 /// Namespace owning tier resolution plus scoped mount and profile helpers.
 public enum BashSandboxRouter: Sendable {
     /// Toolchain resolution reads for `xcode-select` under the host tier.
-    static let hostToolchainReadPaths = ["/var/select", "/var/db/xcode_select_link"]
+    ///
+    /// Every root carries both spellings — symlinked (`/var/...`) and
+    /// canonical (`/private/var/...`): the kernel evaluates opens on the
+    /// canonical path while callers spell the symlinked one, so a
+    /// single-spelling entry can deny a read the profile intends to allow.
+    /// Future path additions must carry both spellings of the same root.
+    static let hostToolchainReadPaths = [
+        "/var/select",
+        "/private/var/select",
+        "/var/db/xcode_select_link",
+        "/private/var/db/xcode_select_link"
+    ]
 
     /// Resolves the execution tier for one command.
     ///

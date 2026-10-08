@@ -147,15 +147,24 @@ Speech-to-text and text-to-speech providers.
 | `whisper_model` | string | `"base"` | Whisper model size (e.g. `tiny`, `base`, `small`). |
 | `tts_provider` | string | `"system"` | Text-to-speech provider (`"system"` uses macOS `say`). |
 
-### `[sandbox]`
+### `[containers]`
 
-Ephemeral microVM archive detonation settings (Tier-3 isolation).
+Unified container policy for sandboxed execution and detonation work.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `container_base_image` | string | `"alpine:latest"` | OCI base image for detonation microVMs using the Apple Container CLI (`container`). |
-| `archive_session_ttl_minutes` | integer | `10` | Crash-orphan reclamation TTL in minutes (`1`–`1440`). |
-| `max_concurrent_machines` | integer | `3` | Maximum simultaneous detonation microVMs enforced before spawn. |
+| `memory_mb` | integer | `512` | Memory budget in megabytes per container (`256`–`8192`). |
+| `max_concurrent` | integer | `5` | Maximum containers running at once (`1`–`32`). |
+| `ttl_minutes` | integer | `60` | Idle lifetime in minutes before reclamation (`5`–`1440`). |
+
+Container images are pinned in code and carry no config key: strict per-turn and machine-scoped workspace containers run `debian:stable-slim`; detonation containers run `alpine:3.22`. Legacy `[sandbox]` keys (`container_base_image`, `archive_session_ttl_minutes`, `max_concurrent_machines`) are ignored on load with a logged note and shed on resave.
+
+```toml
+[containers]
+memory_mb = 512
+max_concurrent = 5
+ttl_minutes = 60
+```
 
 ### `[files]`
 

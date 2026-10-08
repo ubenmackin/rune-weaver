@@ -242,7 +242,7 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             memoryEngine: memoryEngine,
             permissionGate: permissionGate,
             approvalHandler: headlessHandler,
-            sandboxConfig: loaded.config.sandbox,
+            containersConfig: loaded.config.containers,
             embedder: embedder,
             pluginConfig: loaded.config.plugins,
             episodesDBPath: loaded.config.memory.episodesDBPath,

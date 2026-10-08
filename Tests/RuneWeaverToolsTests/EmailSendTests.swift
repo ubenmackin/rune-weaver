@@ -670,8 +670,7 @@ struct EmailSendTests {
         let tool = EmailSendTool(
             emailConfig: config,
             smtpGateway: StubSMTPGateway(),
-            gateway: StubSendIMAPGateway(),
-            sandboxConfig: SandboxConfig()
+            gateway: StubSendIMAPGateway()
         )
         try await ToolsTestSupport.withTestPassword {
             let outside = try await tool.execute(
@@ -709,8 +708,7 @@ struct EmailSendTests {
         let tool = EmailSendTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             smtpGateway: StubSMTPGateway(box: box),
-            gateway: StubSendIMAPGateway(mailboxes: ["INBOX", "Sent"]),
-            sandboxConfig: SandboxConfig()
+            gateway: StubSendIMAPGateway(mailboxes: ["INBOX", "Sent"])
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -855,8 +853,7 @@ struct EmailSendTests {
                 message: EmailFullMessage(id: "9", subject: "Orig", from: "a@example.com", to: "you@yourdomain.com", date: "Mon, 01 Sep 2025 09:00:00 +0000", body: "orig body"),
                 mailboxes: ["INBOX", "Sent"],
                 box: imapBox
-            ),
-            sandboxConfig: SandboxConfig()
+            )
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(

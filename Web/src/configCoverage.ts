@@ -34,7 +34,7 @@ export const SETTINGS_SURFACES = [
 
 export type SettingsSurface = (typeof SETTINGS_SURFACES)[number];
 
-// Engine shares server-pane, sandbox shares security-pane, email shares
+// Engine shares server-pane, containers shares security-pane, email shares
 // scheduler-pane via poll_account linkage, and home shares plugins-pane:
 // the fixed set carries no dedicated pane for those sections.
 export const CONFIG_SETTINGS_COVERAGE: Record<string, SettingsSurface> = {
@@ -73,9 +73,9 @@ export const CONFIG_SETTINGS_COVERAGE: Record<string, SettingsSurface> = {
   "voice.stt_provider": "voice-pane",
   "voice.whisper_model": "voice-pane",
   "voice.tts_provider": "voice-pane",
-  "sandbox.container_base_image": "security-pane",
-  "sandbox.archive_session_ttl_minutes": "security-pane",
-  "sandbox.max_concurrent_machines": "security-pane",
+  "containers.memory_mb": "security-pane",
+  "containers.max_concurrent": "security-pane",
+  "containers.ttl_minutes": "security-pane",
   "files.deny_patterns": "files-pane",
   "files.allow_roots": "files-pane",
   "files.require_approval_on_deny": "files-pane",

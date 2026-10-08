@@ -14,11 +14,11 @@ import {
   concurrentTurnsBusyMessage,
   createJob,
   decideApproval,
+  DEFAULT_CONTAINERS_MAX_CONCURRENT,
+  DEFAULT_CONTAINERS_MEMORY_MB,
+  DEFAULT_CONTAINERS_TTL_MINUTES,
   DEFAULT_FILES_ALLOW_ROOTS,
   DEFAULT_FILES_DENY_PATTERNS,
-  DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES,
-  DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE,
-  DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
   deleteEpisode,
   deleteFact,
   deleteGoal,
@@ -856,11 +856,11 @@ describe("dashboard api client", () => {
 
   it("keeps web default mirrors pinned to the Swift single source", () => {
     // Manual cross-language pin: the dashboard cannot import Swift, so these literals must match
-    // FilesConfig/SandboxConfig Tier-3 defaults in Sources/RuneWeaverCore/Config.swift. Update both
+    // FilesConfig/ContainersConfig defaults in Sources/RuneWeaverCore/Config.swift. Update both
     // sides together.
-    expect(DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES).toBe(10);
-    expect(DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES).toBe(3);
-    expect(DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE).toBe("alpine:latest");
+    expect(DEFAULT_CONTAINERS_MEMORY_MB).toBe(512);
+    expect(DEFAULT_CONTAINERS_MAX_CONCURRENT).toBe(5);
+    expect(DEFAULT_CONTAINERS_TTL_MINUTES).toBe(60);
     expect(DEFAULT_FILES_ALLOW_ROOTS).toEqual(["~"]);
     expect(DEFAULT_FILES_DENY_PATTERNS).toEqual([
       ".env*",

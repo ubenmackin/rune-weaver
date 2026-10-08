@@ -56,20 +56,20 @@ struct AttachmentSecurityTests {
     }
 
     @Test
-    func `Flags archive formats and compound office documents for microVM detonation`() {
+    func `Flags archive formats and compound office documents for zero-mount container detonation`() {
         // ZIP magic bytes: PK\x03\x04
         let zipData = Data([0x50, 0x4B, 0x03, 0x04, 0x14, 0x00])
-        #expect(AttachmentSecurity.requiresMicroVMDetonation(data: zipData, contentType: "application/octet-stream", filename: "archive.bin"))
-        #expect(AttachmentSecurity.requiresMicroVMDetonation(data: zipData, contentType: "application/pdf", filename: "fake.pdf"))
+        #expect(AttachmentSecurity.requiresZeroMountDetonation(data: zipData, contentType: "application/octet-stream", filename: "archive.bin"))
+        #expect(AttachmentSecurity.requiresZeroMountDetonation(data: zipData, contentType: "application/pdf", filename: "fake.pdf"))
 
         // GZIP magic bytes: 0x1F 0x8B
         let gzipData = Data([0x1F, 0x8B, 0x08, 0x00])
-        #expect(AttachmentSecurity.requiresMicroVMDetonation(data: gzipData, contentType: "", filename: "data.gz"))
+        #expect(AttachmentSecurity.requiresZeroMountDetonation(data: gzipData, contentType: "", filename: "data.gz"))
 
         // Compound Office docs (docx, xlsx, docm)
         let officeData = Data([0x50, 0x4B, 0x03, 0x04])
-        #expect(AttachmentSecurity.requiresMicroVMDetonation(data: officeData, contentType: "application/vnd.openxmlformats", filename: "invoice.docx"))
-        #expect(AttachmentSecurity.requiresMicroVMDetonation(data: officeData, contentType: "", filename: "macro.docm"))
+        #expect(AttachmentSecurity.requiresZeroMountDetonation(data: officeData, contentType: "application/vnd.openxmlformats", filename: "invoice.docx"))
+        #expect(AttachmentSecurity.requiresZeroMountDetonation(data: officeData, contentType: "", filename: "macro.docm"))
     }
 
     @Test
@@ -121,7 +121,7 @@ struct AttachmentSecurityTests {
         let fullData = Data([0xAA, 0xBB, 0xCC, 0x50, 0x4B, 0x03, 0x04, 0x14, 0x00])
         let slice = fullData[3...]
         #expect(slice.startIndex == 3)
-        #expect(AttachmentSecurity.requiresMicroVMDetonation(data: slice, contentType: "", filename: "test.zip"))
+        #expect(AttachmentSecurity.requiresZeroMountDetonation(data: slice, contentType: "", filename: "test.zip"))
         let imageHeader = Data([0x00, 0x00, 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
         let imageSlice = imageHeader[2...]
         #expect(imageSlice.startIndex == 2)

@@ -70,7 +70,7 @@ struct StatusCommand: AsyncParsableCommand {
             filesConfig: config.files,
             bashConfig: config.bash,
             memoryEngine: engine,
-            sandboxConfig: config.sandbox,
+            containersConfig: config.containers,
             pluginConfig: config.plugins,
             episodesDBPath: config.memory.episodesDBPath,
             browserConfig: config.browser,

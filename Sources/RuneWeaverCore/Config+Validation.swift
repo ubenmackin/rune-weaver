@@ -17,7 +17,7 @@ extension RuneWeaverConfig {
         try validateLLMSection()
         try validateMemorySection()
         try validateVoiceSection()
-        try validateSandboxSection()
+        try validateContainersSection()
         try validateFilesSection()
         try validateIndexSection()
         try validateBrowserSection()
@@ -491,20 +491,31 @@ extension RuneWeaverConfig {
         }
     }
 
-    private func validateSandboxSection() throws {
-        if sandbox.containerBaseImage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+    /// Validates the `[containers]` section.
+    ///
+    /// Bounds keep container work bounded: a sub-256MB guest cannot fit
+    /// toolchains and an 8GB-plus guest crowds the host, an unbounded
+    /// concurrency cap oversubscribes the machine, and a sub-five-minute TTL
+    /// churns containers faster than one model round while a multi-day TTL
+    /// reads as storage. All three fail closed at load; the runtime paths
+    /// share the same range constants so they cannot drift.
+    private func validateContainersSection() throws {
+        if containers.memoryMB < ContainersConfig.minMemoryMB || containers.memoryMB > ContainersConfig.maxMemoryMB {
             throw ConfigError.validationError(
-                field: "sandbox.container_base_image", message: "must not be empty"
+                field: "containers.memory_mb",
+                message: "must be between \(ContainersConfig.minMemoryMB) and \(ContainersConfig.maxMemoryMB) (got \(containers.memoryMB))"
             )
         }
-        if sandbox.archiveSessionTTLMinutes <= 0 || sandbox.archiveSessionTTLMinutes > 1440 {
+        if containers.maxConcurrent < ContainersConfig.minMaxConcurrent || containers.maxConcurrent > ContainersConfig.maxMaxConcurrent {
             throw ConfigError.validationError(
-                field: "sandbox.archive_session_ttl_minutes", message: "must be between 1 and 1440"
+                field: "containers.max_concurrent",
+                message: "must be between \(ContainersConfig.minMaxConcurrent) and \(ContainersConfig.maxMaxConcurrent) (got \(containers.maxConcurrent))"
             )
         }
-        if sandbox.maxConcurrentMachines <= 0 {
+        if containers.ttlMinutes < ContainersConfig.minTTLMinutes || containers.ttlMinutes > ContainersConfig.maxTTLMinutes {
             throw ConfigError.validationError(
-                field: "sandbox.max_concurrent_machines", message: "must be positive"
+                field: "containers.ttl_minutes",
+                message: "must be between \(ContainersConfig.minTTLMinutes) and \(ContainersConfig.maxTTLMinutes) (got \(containers.ttlMinutes))"
             )
         }
     }

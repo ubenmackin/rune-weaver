@@ -72,19 +72,19 @@ struct ServeCommand: AsyncParsableCommand {
         try LoggingSystem.bootstrap(from: &env)
         let app = try await Application.make(env)
         await permissionGate.startPeriodicCleanup()
-        // Tier-3 crash-orphan prune only; there is no host staging to sweep and no staging audit
-        // tied to an old path. Document writes stage in Seatbelt-confined temp with an atomic move
-        // on approval, so boot reclamation covers only orphaned detonation machines.
-        let serveCleanup = SandboxCleaner.cleanup(config: loaded.config.sandbox)
-        if serveCleanup.containersDestroyed > 0 || serveCleanup.staleMachinesStopped > 0 || !serveCleanup.errors.isEmpty {
+        // Crash-orphan prune only; there is no host staging to sweep and no staging audit
+        // tied to an old path. Document writes stage in Seatbelt-confined temp with an atomic
+        // move on approval, so boot reclamation covers only orphaned strict plus detonation containers.
+        let serveCleanup = await SandboxCleaner.cleanup(config: loaded.config.containers, approvals: context.approvals)
+        if serveCleanup.containersDestroyed > 0 || serveCleanup.scratchRemoved > 0 || !serveCleanup.errors.isEmpty {
             let reclaimed = serveCleanup.containersDestroyed
-            let stopped = serveCleanup.staleMachinesStopped
+            let scratch = serveCleanup.scratchRemoved
             let errorCount = serveCleanup.errors.count
             print(TerminalStyle.dim(
-                "Sandbox cleanup: reclaimed \(reclaimed) machines (\(stopped) stopped), \(errorCount) errors."
+                "Sandbox cleanup: reclaimed \(reclaimed) containers (\(scratch) scratch), \(errorCount) errors."
             ))
         }
-        await context.sandboxCleanup.start(config: loaded.config.sandbox)
+        await context.sandboxCleanup.start(config: loaded.config.containers, approvals: context.approvals)
         // Ensure the local search engine before accepting turns so first searches stay warm; a down
         // engine never blocks boot — the failure surfaces as closed guidance on the next search
         // instead. The container is left running after quit by design.
@@ -290,7 +290,7 @@ extension ServeCommand {
             bashConfig: loaded.config.bash,
             memoryEngine: deps.memoryEngine,
             permissionGate: permissionGate,
-            sandboxConfig: loaded.config.sandbox,
+            containersConfig: loaded.config.containers,
             embedder: deps.embedder,
             pluginConfig: loaded.config.plugins,
             episodesDBPath: loaded.config.memory.episodesDBPath,
@@ -446,7 +446,7 @@ extension ServeCommand {
             schedulerConfig: loaded.config.scheduler,
             episodesDBPath: loaded.config.memory.episodesDBPath,
             pluginConfig: loaded.config.plugins,
-            sandboxConfig: loaded.config.sandbox,
+            containersConfig: loaded.config.containers,
             browserConfig: loaded.config.browser,
             indexCoordinator: indexComponents?.coordinator,
             indexStore: indexComponents?.store,
@@ -517,7 +517,7 @@ extension ServeCommand {
             filesConfig: loaded.config.files,
             bashConfig: loaded.config.bash,
             memoryEngine: deps.memoryEngine,
-            sandboxConfig: loaded.config.sandbox,
+            containersConfig: loaded.config.containers,
             embedder: deps.embedder,
             browserConfig: loaded.config.browser,
             llmConfig: loaded.config.llm,

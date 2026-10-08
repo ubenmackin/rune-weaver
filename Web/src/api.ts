@@ -2712,6 +2712,65 @@ export const DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS = 15;
 export const PROACTIVE_JUDGE_TIMEOUT_MIN_SECONDS = 1;
 export const PROACTIVE_JUDGE_TIMEOUT_MAX_SECONDS = 120;
 
+// Unified container runtime policy mirroring the engine `ContainersConfig`
+// (Sources/RuneWeaverCore/Config.swift). One `[containers]` table governs the
+// container tiers: the guest memory budget, the concurrent-container cap, and
+// the idle reclamation TTL across bash tiers plus detonation; the images
+// themselves are pinned in code and carry no key. The canonical wire keys are
+// snake_case; camelCase aliases decode the same way as the `WorkspaceUpdate`
+// patch, so either spelling reads while the dashboard sends snake_case to
+// keep the file shape.
+export interface ContainersConfigData {
+  memory_mb: number;
+  memoryMb?: number;
+  max_concurrent: number;
+  maxConcurrent?: number;
+  ttl_minutes: number;
+  ttlMinutes?: number;
+}
+
+// Partial containers patch for `PUT /settings`, mirroring the engine
+// `ContainersUpdate`. Every field is optional so a request carrying one key
+// leaves the rest of the stored `[containers]` section untouched. The
+// dashboard sends the snake_case keys the engine persists; camelCase aliases
+// decode but never encode so saved payloads keep the file shape. Legacy
+// sandbox keys are ignored server-side and shed on resave, so no sandbox
+// alias exists here.
+export interface ContainersSettingsUpdate {
+  memory_mb?: number;
+  memoryMb?: number;
+  max_concurrent?: number;
+  maxConcurrent?: number;
+  ttl_minutes?: number;
+  ttlMinutes?: number;
+}
+
+// Manual mirrors of ContainersConfig defaults in Sources/RuneWeaverCore/Config.swift.
+export const DEFAULT_CONTAINERS_MEMORY_MB = 512;
+export const DEFAULT_CONTAINERS_MAX_CONCURRENT = 5;
+export const DEFAULT_CONTAINERS_TTL_MINUTES = 60;
+
+// Container knob bounds mirror ContainersConfig.min*/max* statics in
+// Sources/RuneWeaverCore/Config.swift (memory clamped 256-8192 MB,
+// concurrency clamped 1-32, TTL clamped 5-1440 minutes); the server owns the
+// ranges and this mirror is the single source for the client validator so
+// the form agrees with the server 400. The contract test pins both ends.
+export const CONTAINERS_MEMORY_MIN_MB = 256;
+export const CONTAINERS_MEMORY_MAX_MB = 8192;
+export const CONTAINERS_MAX_CONCURRENT_MIN = 1;
+export const CONTAINERS_MAX_CONCURRENT_MAX = 32;
+export const CONTAINERS_TTL_MIN_MINUTES = 5;
+export const CONTAINERS_TTL_MAX_MINUTES = 1440;
+
+// Combined containers default mirroring ContainersConfig. The fresh Security
+// form seeds from this so the knob editors match the boundary the engine
+// enforces before the first settings fetch.
+export const DEFAULT_CONTAINERS_CONFIG: ContainersConfigData = {
+  memory_mb: DEFAULT_CONTAINERS_MEMORY_MB,
+  max_concurrent: DEFAULT_CONTAINERS_MAX_CONCURRENT,
+  ttl_minutes: DEFAULT_CONTAINERS_TTL_MINUTES,
+};
+
 // Sandboxed shell execution policy mirroring the engine `BashConfig`
 // (Sources/RuneWeaverCore/Config.swift). Rules stay ordered top-to-bottom
 // last-match-wins; the timeout is bounded 1-3600 seconds. Only policy knobs
@@ -4118,12 +4177,12 @@ export interface SettingsResponse {
   voiceSTTProvider: string;
   voiceWhisperModel: string;
   voiceTTSProvider: string;
-  // Tier-3 detonation policy persisted under [sandbox]: ephemeral microVMs with immediate reap; the
-  // TTL reclaims only crash orphans and the cap gates concurrent detonations. The runtime stays
-  // pinned to the Apple Container CLI server-side with no dashboard knob.
-  sandboxContainerBaseImage?: string;
-  sandboxArchiveSessionTTLMinutes?: number;
-  sandboxMaxConcurrentMachines?: number;
+  // Unified container runtime policy under [containers]; optional for
+  // back-compat with older engines that predate the section. An absent
+  // section keeps the documented defaults so the Containers editors fall
+  // back instead of blanking. Container images are pinned in code and never
+  // ride the wire, so no image key exists here.
+  containers?: ContainersConfigData;
   // File access policy persisted under [files]; optional for back-compat
   // with older engines that predate the deny list.
   filesDenyPatterns?: string[];
@@ -4214,9 +4273,9 @@ export interface UpdateSettingsInput {
   voiceSTTProvider?: string;
   voiceWhisperModel?: string;
   voiceTTSProvider?: string;
-  sandboxContainerBaseImage?: string;
-  sandboxArchiveSessionTTLMinutes?: number;
-  sandboxMaxConcurrentMachines?: number;
+  // Partial containers patch; an omitted patch preserves the stored
+  // [containers] section.
+  containers?: ContainersSettingsUpdate;
   filesDenyPatterns?: string[];
   filesAllowRoots?: string[];
   filesRequireApprovalOnDeny?: boolean;
@@ -4683,11 +4742,6 @@ export function formatAllowRootsText(
 ): string {
   return formatListToText(roots, DEFAULT_FILES_ALLOW_ROOTS_TEXT);
 }
-
-// Manual mirrors of SandboxConfig Tier-3 defaults in Sources/RuneWeaverCore/Config.swift.
-export const DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE = "alpine:latest";
-export const DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES = 10;
-export const DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES = 3;
 
 // Manual mirrors of the [browser] defaults (searxng_url, timeout, max_results) pinned to
 // BrowserConfig in Sources/RuneWeaverCore/Config.swift (defaultSearxngURL, defaultMaxResults),

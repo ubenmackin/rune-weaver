@@ -278,7 +278,7 @@ extension AppModel {
                 await self?.notificationManager.postApprovalNotification(req)
                 await self?.refreshPendingApprovals()
             },
-            sandboxConfig: pipeline.config.sandbox,
+            containersConfig: pipeline.config.containers,
             browserConfig: pipeline.config.browser,
             indexCoordinator: pipeline.indexComponents?.coordinator,
             indexStore: pipeline.indexComponents?.store,

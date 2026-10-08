@@ -552,7 +552,7 @@ struct StrictContainerMemoryTests {
             networkDenied: true
         )
         #expect(memoryValue(in: args) == StrictContainerRunner.defaultMemory)
-        #expect(memoryValue(in: args) == "1G")
+        #expect(memoryValue(in: args) == "512M")
     }
 
     @Test
@@ -560,16 +560,16 @@ struct StrictContainerMemoryTests {
         let root = URL(fileURLWithPath: "/tmp/rw-memory-probe")
         let capped = MachineScopedRunner.createArguments(workspaceRoot: root, networkDenied: true)
         #expect(memoryValue(in: capped) == StrictContainerRunner.defaultMemory)
-        #expect(memoryValue(in: capped) == "1G")
+        #expect(memoryValue(in: capped) == "512M")
         #expect(MachineScopedRunner.sharedMemoryCap == StrictContainerRunner.defaultMemory)
     }
 
     @Test
     func `Seams carry the production cap`() {
         #expect(ContainerSeam.live.memory == StrictContainerRunner.defaultMemory)
-        #expect(ContainerSeam.live.memory == "1G")
+        #expect(ContainerSeam.live.memory == "512M")
         let (hermeticSeam, _) = ContainerSeam.hermetic()
         #expect(hermeticSeam.memory == StrictContainerRunner.defaultMemory)
-        #expect(hermeticSeam.memory == "1G")
+        #expect(hermeticSeam.memory == "512M")
     }
 }

@@ -30,6 +30,12 @@ import {
   BASH_SANDBOX_TIERS,
   BASH_TIMEOUT_MAX_SECONDS,
   BASH_TIMEOUT_MIN_SECONDS,
+  CONTAINERS_MAX_CONCURRENT_MAX,
+  CONTAINERS_MAX_CONCURRENT_MIN,
+  CONTAINERS_MEMORY_MAX_MB,
+  CONTAINERS_MEMORY_MIN_MB,
+  CONTAINERS_TTL_MAX_MINUTES,
+  CONTAINERS_TTL_MIN_MINUTES,
   bashSandboxSummary,
   clearAuthToken,
   DEFAULT_BASH_ALLOW_NETWORK,
@@ -42,6 +48,9 @@ import {
   DEFAULT_BASH_RULES,
   DEFAULT_BASH_SANDBOX_MODE,
   DEFAULT_BASH_TIMEOUT_SECONDS,
+  DEFAULT_CONTAINERS_MAX_CONCURRENT,
+  DEFAULT_CONTAINERS_MEMORY_MB,
+  DEFAULT_CONTAINERS_TTL_MINUTES,
   DEFAULT_PERSONA_AVATAR,
   DEFAULT_PERSONA_TONE,
   DEFAULT_WORKSPACE_CONFIG,
@@ -98,9 +107,11 @@ const mockSettings = {
   voiceSTTProvider: "whisper",
   voiceWhisperModel: "base.en",
   voiceTTSProvider: "system",
-  sandboxContainerBaseImage: "alpine:latest",
-  sandboxArchiveSessionTTLMinutes: 10,
-  sandboxMaxConcurrentMachines: 3,
+  containers: {
+    memory_mb: DEFAULT_CONTAINERS_MEMORY_MB,
+    max_concurrent: DEFAULT_CONTAINERS_MAX_CONCURRENT,
+    ttl_minutes: DEFAULT_CONTAINERS_TTL_MINUTES,
+  },
   emailAccounts: [
     {
       name: "icloud",
@@ -143,22 +154,32 @@ describe("SettingsManager", () => {
     await user.click(engineTabBtn);
     expect(screen.getByDisplayValue("Test Engine")).toBeDefined();
 
-    // Switch to Security tab (sandbox plus file guard share one pane)
+    // Switch to Security tab (containers plus file guard share one pane)
     const sandboxTabBtn = screen.getByRole("tab", { name: /Security/i });
     await user.click(sandboxTabBtn);
-    // Tier-3-only contract: no host-staging editors remain and the
-    // detonation runtime renders as fixed text rather than an input.
+    // Containers contract: no legacy sandbox editors remain and both pinned
+    // images render as read-only text rather than inputs.
     expect(screen.queryByLabelText(/Staging Path/i)).toBeNull();
     expect(screen.queryByLabelText(/Retention/i)).toBeNull();
     expect(screen.queryByLabelText(/Max Total Size/i)).toBeNull();
     expect(screen.queryByLabelText(/Cleanup Interval/i)).toBeNull();
     expect(screen.queryByDisplayValue("sandbox/staging")).toBeNull();
     expect(screen.queryByLabelText(/Container Runtime/i)).toBeNull();
-    expect(screen.getByTestId("sandbox-container-runtime").textContent).toContain(
-      "container"
+    expect(screen.queryByLabelText(/Base Image/i)).toBeNull();
+    expect(screen.getByTestId("containers-strict-image").textContent).toContain(
+      "debian:stable-slim"
     );
-    expect(screen.getByText(/Apple Container CLI \(fixed\)/i)).toBeDefined();
-    expect(screen.getByDisplayValue("alpine:latest")).toBeDefined();
+    expect(screen.getByTestId("containers-machine-image").textContent).toContain(
+      "debian:stable-slim"
+    );
+    expect(screen.getByTestId("containers-detonation-image").textContent).toContain(
+      "alpine:3.22"
+    );
+    expect(screen.queryByDisplayValue("debian:stable-slim")).toBeNull();
+    expect(screen.queryByDisplayValue("alpine:3.22")).toBeNull();
+    expect(screen.getByLabelText(/Memory \(MB\)/i)).toBeDefined();
+    expect(screen.getByLabelText(/Max Concurrent Containers/i)).toBeDefined();
+    expect(screen.getByLabelText(/Idle TTL/i)).toBeDefined();
 
     // Switch to Email Accounts tab via the vertical sidenav
     const emailTabBtn = screen.getByRole("tab", { name: /Email Accounts/i });
@@ -837,7 +858,7 @@ describe("SettingsManager", () => {
     ).toBe("false");
   });
 
-  it("allows configuring container sandboxing settings and saving", async () => {
+  it("allows configuring container settings and saving", async () => {
     const user = userEvent.setup();
     let sentPayload: Record<string, unknown> | null = null;
     const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -861,29 +882,37 @@ describe("SettingsManager", () => {
     const sandboxTabBtn = screen.getByRole("tab", { name: /Security/i });
     await user.click(sandboxTabBtn);
 
-    // Tier-3-only contract: the detonation runtime is fixed text with no
-    // editor, and no host-staging inputs remain to suggest a choice.
+    // Containers contract: both pinned images render as read-only text with
+    // no editor, and no legacy sandbox inputs remain to suggest a choice.
     expect(screen.queryByLabelText(/Container Runtime/i)).toBeNull();
-    expect(screen.getByTestId("sandbox-container-runtime").textContent).toContain(
-      "container"
-    );
-    expect(screen.getByText(/Apple Container CLI \(fixed\)/i)).toBeDefined();
+    expect(screen.queryByLabelText(/Base Image/i)).toBeNull();
     expect(screen.queryByLabelText(/Staging Path/i)).toBeNull();
     expect(screen.queryByLabelText(/Retention/i)).toBeNull();
     expect(screen.queryByLabelText(/Max Total Size/i)).toBeNull();
     expect(screen.queryByLabelText(/Cleanup Interval/i)).toBeNull();
+    expect(screen.getByTestId("containers-strict-image").textContent).toContain(
+      "debian:stable-slim"
+    );
+    expect(screen.getByTestId("containers-machine-image").textContent).toContain(
+      "debian:stable-slim"
+    );
+    expect(screen.getByTestId("containers-detonation-image").textContent).toContain(
+      "alpine:3.22"
+    );
+    expect(screen.queryByDisplayValue("debian:stable-slim")).toBeNull();
+    expect(screen.queryByDisplayValue("alpine:3.22")).toBeNull();
 
-    const baseImageInput = screen.getByLabelText(/Base Image/i);
-    await user.clear(baseImageInput);
-    await user.type(baseImageInput, "debian:slim");
+    const memoryInput = screen.getByLabelText(/Memory \(MB\)/i);
+    await user.clear(memoryInput);
+    await user.type(memoryInput, "1024");
 
-    const ttlInput = screen.getByLabelText(/Archive Session TTL/i);
+    const maxConcurrentInput = screen.getByLabelText(/Max Concurrent Containers/i);
+    await user.clear(maxConcurrentInput);
+    await user.type(maxConcurrentInput, "7");
+
+    const ttlInput = screen.getByLabelText(/Idle TTL/i);
     await user.clear(ttlInput);
-    await user.type(ttlInput, "25");
-
-    const maxMachinesInput = screen.getByLabelText(/Max Concurrent Machines/i);
-    await user.clear(maxMachinesInput);
-    await user.type(maxMachinesInput, "7");
+    await user.type(ttlInput, "90");
 
     const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
@@ -893,17 +922,80 @@ describe("SettingsManager", () => {
     });
 
     expect(sentPayload).toBeDefined();
-    expect(sentPayload?.["sandboxContainerBaseImage"]).toBe("debian:slim");
-    expect(sentPayload?.["sandboxArchiveSessionTTLMinutes"]).toBe(25);
-    expect(sentPayload?.["sandboxMaxConcurrentMachines"]).toBe(7);
-    // Deleted host-staging and free-text runtime keys must never reach the
-    // engine; the decoder drops them so sending them would look saved
-    // without persisting.
+    // The [containers] patch carries the snake_case keys the engine persists
+    // with the edited knob values.
+    const containersPatch = sentPayload?.["containers"] as
+      | Record<string, unknown>
+      | undefined;
+    expect(containersPatch?.["memory_mb"]).toBe(1024);
+    expect(containersPatch?.["max_concurrent"]).toBe(7);
+    expect(containersPatch?.["ttl_minutes"]).toBe(90);
+    // Replaced sandbox keys must never reach the engine; the section
+    // replaced them with no compatibility alias, so sending them would look
+    // saved without persisting.
+    expect(sentPayload).not.toHaveProperty("sandboxContainerBaseImage");
+    expect(sentPayload).not.toHaveProperty("sandboxArchiveSessionTTLMinutes");
+    expect(sentPayload).not.toHaveProperty("sandboxMaxConcurrentMachines");
     expect(sentPayload).not.toHaveProperty("sandboxStagingPath");
     expect(sentPayload).not.toHaveProperty("sandboxRetentionDays");
     expect(sentPayload).not.toHaveProperty("sandboxMaxTotalBytes");
     expect(sentPayload).not.toHaveProperty("sandboxCleanupIntervalSeconds");
     expect(sentPayload).not.toHaveProperty("sandboxContainerRuntime");
+  });
+
+  it("rejects out-of-range container knobs inline with no network write", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => {
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const sandboxTabBtn = screen.getByRole("tab", { name: /Security/i });
+    await user.click(sandboxTabBtn);
+
+    const memoryInput = screen.getByLabelText(/Memory \(MB\)/i);
+    await user.clear(memoryInput);
+    await user.type(memoryInput, "99999");
+
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    await user.click(saveButton);
+
+    // Validation mirrors the server bounds (256-8192 MB), so an out-of-range
+    // knob fails inline and no PUT leaves the pane.
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          new RegExp(
+            `memory_mb must be between ${CONTAINERS_MEMORY_MIN_MB} and ${CONTAINERS_MEMORY_MAX_MB}`,
+            "i",
+          ),
+        )
+      ).toBeDefined();
+    });
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "PUT")
+    ).toHaveLength(0);
+  });
+
+  it("pins containers knob bounds to the server containers contract", () => {
+    // Manual cross-language pin: the dashboard cannot import Swift, so these
+    // literals must match ContainersConfig defaults and clamps in
+    // Sources/RuneWeaverCore/Config.swift. Update both sides together.
+    expect(DEFAULT_CONTAINERS_MEMORY_MB).toBe(512);
+    expect(DEFAULT_CONTAINERS_MAX_CONCURRENT).toBe(5);
+    expect(DEFAULT_CONTAINERS_TTL_MINUTES).toBe(60);
+    expect(CONTAINERS_MEMORY_MIN_MB).toBe(256);
+    expect(CONTAINERS_MEMORY_MAX_MB).toBe(8192);
+    expect(CONTAINERS_MAX_CONCURRENT_MIN).toBe(1);
+    expect(CONTAINERS_MAX_CONCURRENT_MAX).toBe(32);
+    expect(CONTAINERS_TTL_MIN_MINUTES).toBe(5);
+    expect(CONTAINERS_TTL_MAX_MINUTES).toBe(1440);
   });
 
   it("edits blocked paths via textarea with live count and trims blanks on save", async () => {
@@ -1067,7 +1159,7 @@ describe("SettingsManager", () => {
     });
 
     // Reset confirmations live in the Security Files & Access section;
-    // Security owns both sandbox isolation and the file editors.
+    // Security owns both container governance and the file editors.
     const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
     await user.click(securityTabBtn);
     await waitFor(() => {
@@ -1172,7 +1264,7 @@ describe("SettingsManager", () => {
     });
 
     // Files header actions live in the Security Files & Access section;
-    // sandbox isolation (Apple Container Machine) shares the same pane.
+    // container governance (Containers) shares the same pane.
     const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
     await user.click(securityTabBtn);
     await waitFor(() => {
@@ -1200,8 +1292,11 @@ describe("SettingsManager", () => {
     // Subsection headings keep each policy surface discoverable in the section.
     expect(screen.getByText("Blocked Paths")).toBeDefined();
     expect(screen.getByText("Allowed Roots")).toBeDefined();
-    // Sandbox isolation shares the Security pane beside the Files section.
-    expect(screen.getByText("Apple Container Machine")).toBeDefined();
+    // Container governance shares the Security pane beside the Files section;
+    // both pinned images render as read-only text lines in it.
+    expect(screen.getByText("Containers")).toBeDefined();
+    expect(screen.getByTestId("containers-strict-image")).toBeDefined();
+    expect(screen.getByTestId("containers-machine-image")).toBeDefined();
 
     // Approval escalation toggle stays with its explanatory hint.
     expect(screen.getByLabelText(/Require approval on deny/i)).toBeDefined();
@@ -2943,17 +3038,18 @@ describe("SettingsManager", () => {
     const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
     await user.click(securityTabBtn);
 
-    // Security owns sandbox isolation plus Files & Access plus access
+    // Security owns container governance plus Files & Access plus access
     // management; the file guard lives in Security as its own section.
     await waitFor(() => {
-      expect(screen.getByText("Sandbox & Security Policy")).toBeDefined();
+      expect(screen.getByText("Containers")).toBeDefined();
     });
     expect(screen.getByText("Files & Access")).toBeDefined();
     expect(screen.getByText("Blocked Paths")).toBeDefined();
     expect(screen.getByText("Allowed Roots")).toBeDefined();
     expect(screen.getByLabelText(/Deny patterns, one per line/i)).toBeDefined();
     expect(screen.getByLabelText(/Allowed roots, one per line/i)).toBeDefined();
-    expect(screen.getByText("Apple Container Machine")).toBeDefined();
+    expect(screen.getByTestId("containers-strict-image")).toBeDefined();
+    expect(screen.getByTestId("containers-machine-image")).toBeDefined();
   });
 
   it("keeps bash.exec out of Other Tools", async () => {

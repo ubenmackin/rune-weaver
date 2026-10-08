@@ -2,9 +2,10 @@
 //
 // Purpose: own isolated per-turn execution in throwaway containers that mount
 // only fresh workspace scratch, keeping sessions from sharing state.
-// Scope: argument builders for create plus exec, runtime capability probing,
-// owner-only scratch leaves, bounded host invocation, and the session-keyed
-// turn registry with terminal reap plus park-aware sweep.
+// Scope: argument builders for create plus exec, the container runtime
+// resolver, runtime capability probing, owner-only scratch leaves, bounded
+// host invocation, the shared ephemeral admission ledger, and the
+// session-keyed turn registry with terminal reap plus park-aware sweep.
 // Architectural role: single owner for strict isolated execution beside the
 // other Core sandbox helpers; callers wrap commands with resource limits.
 
@@ -17,188 +18,164 @@ public enum StrictContainerRunner: Sendable {
     public static let defaultImage = "debian:stable-slim"
     /// Name prefix isolating strict containers from every other container.
     public static let strictNamePrefix = "runeweaver-strict-"
-    /// Guest memory cap; larger sizes stay deferred. Both tiers cap at 1G.
-    public static let defaultMemory = "1G"
+    /// Fallback guest memory cap when no containers policy is threaded.
+    /// Production bash tiers read the threaded `ContainerSeam` memory instead.
+    public static var defaultMemory: String {
+        memoryCapString(forMB: ContainersConfig.defaultMemoryMB)
+    }
+
+    /// Clamped memory budget from the loaded containers policy.
+    public static func clampedMemoryMB(for config: ContainersConfig) -> Int {
+        min(max(config.memoryMB, ContainersConfig.minMemoryMB), ContainersConfig.maxMemoryMB)
+    }
+
+    /// Clamped concurrency cap from the loaded containers policy.
+    public static func clampedMaxConcurrent(for config: ContainersConfig) -> Int {
+        min(max(config.maxConcurrent, ContainersConfig.minMaxConcurrent), ContainersConfig.maxMaxConcurrent)
+    }
+
+    /// Memory string for the loaded containers policy.
+    public static func memoryCap(for config: ContainersConfig) -> String {
+        memoryCapString(forMB: clampedMemoryMB(for: config))
+    }
+
     /// Long-lived workspace container never touched by the strict sweep.
     public static let workspaceContainerName = "runeweaver-workspace"
     /// Environment key enforcing hermetic tests; when "1" live paths refuse.
     public static let hermeticTestsEnvKey = "RUNEWEAVER_HERMETIC_TESTS"
+    /// Default timeout for container CLI invocations, mirroring the plugin
+    /// bridge so an untrusted detonation cannot hang a turn.
+    public static let defaultProcessTimeoutSeconds: TimeInterval = 30
+    /// Maximum stdout bytes retained from a container invocation, bounding
+    /// listings and single-entry extractions.
+    public static let maxProcessOutputBytes = 11 * 1024 * 1024
+    /// Maximum stderr bytes retained for diagnostics.
+    public static let maxProcessErrorBytes = 64 * 1024
+    /// Legacy detonation name shapes kept inside the reclamation scope.
+    ///
+    /// Detonation containers share the strict name prefix today; these
+    /// pre-migration shapes stay matched so historical orphans still count
+    /// against the cap and reclaim. Longer `runeweaver-` names (the SearXNG
+    /// service container, the workspace container) are never derived from
+    /// this list.
+    public static let detonationNamePrefixes = ["runeweaver-session-", "runeweaver-attach-"]
 
-    /// Derives the per-session container name from the session identifier.
-    /// - Parameter sessionID: Owning turn session.
-    /// - Returns: Prefix plus the first 8 lowercase hex chars.
-    public static func strictContainerName(for sessionID: UUID) -> String {
-        let hex = sessionID.uuidString.replacingOccurrences(of: "-", with: "").prefix(8).lowercased()
-        return strictNamePrefix + hex
+    /// Whether a container name counts as an ephemeral RuneWeaver container.
+    ///
+    /// Strict plus detonation containers share the strict name prefix, and
+    /// the legacy detonation shapes stay covered so historical orphans still
+    /// count and reclaim. The machine singleton workspace container and the
+    /// SearXNG service container are never matched.
+    public static func isEphemeralContainerName(_ name: String) -> Bool {
+        guard name != workspaceContainerName else { return false }
+        if name.hasPrefix(strictNamePrefix) {
+            return true
+        }
+        return detonationNamePrefixes.contains { name.hasPrefix($0) }
     }
 
-    /// Builds `container create` arguments for one strict container.
+    /// Formats one configured MB value as the runtime memory string.
+    /// - Parameter megabytes: Configured memory budget in megabytes.
+    /// - Returns: Runtime memory string (e.g. "512M").
+    public static func memoryCapString(forMB megabytes: Int) -> String {
+        "\(megabytes)M"
+    }
+
+    /// Known install locations always probed after PATH entries.
+    /// Single owner for runtime lookup shared by detonation and search:
+    /// a minimal PATH must never hide a standard Homebrew install.
+    public static let fallbackRuntimeDirectories = ["/opt/homebrew/bin", "/usr/local/bin"]
+
+    /// Ordered directories probed for the container runtime.
+    /// PATH order wins so an operator override shadows the fallback, while the
+    /// appended fallbacks keep a Homebrew install visible when PATH is minimal.
+    /// Duplicates collapse so a PATH that already carries a fallback probes it
+    /// once; blanks are skipped so empty segments never become relative probes.
+    /// - Parameter pathValue: Raw `PATH` value, or nil when unset.
+    /// - Returns: Deduplicated directories, PATH entries first.
+    public static func runtimeSearchDirectories(pathValue: String?) -> [String] {
+        var ordered: [String] = []
+        var seen = Set<String>()
+        func append(_ dir: String) {
+            let trimmed = dir.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { return }
+            ordered.append(trimmed)
+        }
+        if let pathValue {
+            for part in pathValue.split(separator: ":") {
+                append(String(part))
+            }
+        }
+        for fallback in fallbackRuntimeDirectories {
+            append(fallback)
+        }
+        return ordered
+    }
+
+    /// Ordered directories probed for the container runtime in this process.
+    /// Reads the live `PATH` so production and diagnostics share one ordering.
+    /// - Returns: Deduplicated directories, PATH entries first.
+    public static func runtimeSearchDirectories() -> [String] {
+        runtimeSearchDirectories(pathValue: ProcessInfo.processInfo.environment["PATH"])
+    }
+
+    /// Resolves the absolute path for the container CLI.
+    /// Absolute runtime values probe directly without PATH expansion; bare
+    /// names probe the shared search ordering with no Docker fallback.
     /// - Parameters:
-    ///   - name: Container name.
-    ///   - hostPath: Fresh scratch leaf on the host.
-    ///   - guestPath: Mount point inside the guest.
-    ///   - workdir: Working directory inside the guest.
-    ///   - networkDenied: When true the container gets no DNS.
-    ///   - memory: Guest memory cap.
-    /// - Returns: Exact argument sequence for the runtime.
-    public static func containerCreateArguments(
-        name: String,
-        hostPath: String,
-        guestPath: String,
-        workdir: String,
-        networkDenied: Bool,
-        memory: String = defaultMemory
-    ) -> [String] {
-        containerCreateArguments(
-            name: name,
-            hostPath: hostPath,
-            guestPath: guestPath,
-            workdir: workdir,
-            networkDenied: networkDenied,
-            memory: memory,
-            labels: [:]
+    ///   - runtime: Binary name or absolute path.
+    ///   - searchDirectories: Ordered directories to probe for bare names.
+    ///   - isExecutable: Filesystem probe, injectable so tests can stub an install.
+    /// - Returns: Executable URL, or nil when missing.
+    public static func resolveRuntimeURL(
+        runtime: String = "container",
+        searchDirectories: [String],
+        isExecutable: (String) -> Bool
+    ) -> URL? {
+        if runtime.hasPrefix("/") {
+            let url = URL(fileURLWithPath: runtime)
+            return isExecutable(url.path) ? url : nil
+        }
+        for dir in searchDirectories {
+            let candidate = URL(fileURLWithPath: dir).appendingPathComponent(runtime)
+            if isExecutable(candidate.path) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    /// Resolves the runtime against an explicit PATH value for testing.
+    /// Routes the same fallback ordering through a stubbed filesystem probe so
+    /// minimal-PATH coverage stays verifiable without touching the real PATH.
+    /// - Parameters:
+    ///   - runtime: Binary name or absolute path.
+    ///   - pathValue: Raw `PATH` value driving the search ordering.
+    ///   - isExecutable: Filesystem probe, injectable so tests can stub an install.
+    /// - Returns: Executable URL, or nil when missing everywhere searched.
+    public static func resolveRuntimeURL(
+        runtime: String = "container",
+        pathValue: String?,
+        isExecutable: (String) -> Bool
+    ) -> URL? {
+        resolveRuntimeURL(
+            runtime: runtime,
+            searchDirectories: runtimeSearchDirectories(pathValue: pathValue),
+            isExecutable: isExecutable
         )
     }
 
-    /// Builds `container create` arguments with labels placed before the image.
-    /// - Parameters:
-    ///   - name: Container name.
-    ///   - hostPath: Fresh scratch leaf on the host.
-    ///   - guestPath: Mount point inside the guest.
-    ///   - workdir: Working directory inside the guest.
-    ///   - networkDenied: When true the container gets no DNS.
-    ///   - memory: Guest memory cap.
-    ///   - labels: Label pairs stored as `--label key=value` before the image.
-    /// - Returns: Exact argument sequence with labels preceding the image.
-    public static func containerCreateArguments(
-        name: String,
-        hostPath: String,
-        guestPath: String,
-        workdir: String,
-        networkDenied: Bool,
-        memory: String = defaultMemory,
-        labels: [String: String]
-    ) -> [String] {
-        var args = [
-            "create",
-            "--name", name,
-            "--volume", "\(hostPath):\(guestPath)",
-            "--workdir", workdir,
-            "--read-only",
-            "--tmpfs", "/tmp",
-            "--memory", memory
-        ]
-        if networkDenied {
-            args.append("--no-dns")
+    /// Resolves the absolute path for the container CLI.
+    public static func resolveRuntimeURL(runtime: String = "container") -> URL? {
+        if runtime.hasPrefix("/") {
+            let url = URL(fileURLWithPath: runtime)
+            return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
         }
-        for key in labels.keys.sorted() {
-            guard let value = labels[key] else { continue }
-            args.append("--label")
-            args.append("\(key)=\(value)")
-        }
-        args.append(contentsOf: ["--entrypoint", "/bin/sleep", defaultImage, "infinity"])
-        return args
-    }
-
-    /// Builds `container exec` arguments for one strict container.
-    /// - Parameters:
-    ///   - name: Container name.
-    ///   - workdir: Working directory inside the guest.
-    ///   - command: Already resource-limited shell command.
-    /// - Returns: Exact argument sequence for the runtime.
-    public static func containerExecArguments(name: String, workdir: String, command: String) -> [String] {
-        ["exec", "-w", workdir, name, "/bin/bash", "-c", command]
-    }
-
-    /// Arguments starting one strict container.
-    public static func containerStartArguments(name: String) -> [String] {
-        ["start", name]
-    }
-
-    /// Arguments stopping one strict container.
-    public static func containerStopArguments(name: String) -> [String] {
-        ["stop", name]
-    }
-
-    /// Arguments deleting one strict container.
-    public static func containerDeleteArguments(name: String) -> [String] {
-        ["delete", name]
-    }
-
-    /// Arguments listing every container including stopped ones.
-    public static func containerListAllArguments() -> [String] {
-        ["list", "--all"]
-    }
-
-    /// Parses `container list --all` output into name plus status pairs.
-    ///
-    /// Rows carry NAME, IMAGE, STATUS left to right, so the image column must
-    /// never read as status. The header owns the STATUS index when present;
-    /// headerless output falls back to the third column, then to a scan for
-    /// status keywords across trailing tokens.
-    /// - Parameter output: Combined stdout plus stderr from the listing.
-    /// - Returns: Name plus status for each row, header skipped.
-    public static func parseContainerListOutput(_ output: String) -> [(name: String, status: String)] {
-        var entries: [(name: String, status: String)] = []
-        let lines = output.split(separator: "\n", omittingEmptySubsequences: true)
-        var statusIndex: Int?
-        var sawHeader = false
-        for line in lines {
-            let parts = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-            guard let name = parts.first else { continue }
-            if !sawHeader, name.lowercased() == "name" {
-                sawHeader = true
-                statusIndex = parts.firstIndex(where: { $0.lowercased() == "status" })
-                continue
-            }
-            guard name.lowercased() != "name", !name.allSatisfy({ $0 == Character("-") }) else { continue }
-            let status: String = if let idx = statusIndex, parts.count > idx {
-                parts[idx...].joined(separator: " ")
-            } else if parts.count >= 3 {
-                parts[2...].joined(separator: " ")
-            } else if parts.count == 2, isStatusToken(parts[1]) {
-                parts[1]
-            } else {
-                "unknown"
-            }
-            entries.append((name: name, status: status.isEmpty ? "unknown" : status))
-        }
-        return entries
-    }
-
-    /// Whether a token reads as a container status marker.
-    ///
-    /// Sweep only reaps stopped shapes, so the fallback must not mistake an
-    /// image reference for a status; only explicit status vocabulary counts.
-    static func isStatusToken(_ token: String) -> Bool {
-        let lowered = token.lowercased()
-        return lowered.contains("running")
-            || lowered.contains("stopped")
-            || lowered.contains("exited")
-            || lowered.contains("created")
-            || lowered.contains("starting")
-            || lowered.contains("stopping")
-            || lowered.contains("paused")
-            || lowered.contains("unknown")
-    }
-
-    /// Whether a status string reports a live container.
-    ///
-    /// Negated and historical mentions never count as live, so
-    /// `not running`, `not-running`, and `stopped (was running)` read as
-    /// stopped while a whole-word `running` reads as live.
-    /// - Parameter status: Raw status text or full inspect dump.
-    /// - Returns: True only for an affirmative live marker.
-    public static func isRunningStatus(_ status: String) -> Bool {
-        let lowered = status.lowercased()
-        if lowered.contains("not running") || lowered.contains("not-running") || lowered.contains("not_running") {
-            return false
-        }
-        if lowered.contains("was running") {
-            return false
-        }
-        let tokens = lowered.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-        return tokens.contains(where: { $0 == "running" })
+        return resolveRuntimeURL(
+            runtime: runtime,
+            searchDirectories: runtimeSearchDirectories(),
+            isExecutable: { FileManager.default.isExecutableFile(atPath: $0) }
+        )
     }
 
     /// Verifies stubbed help text carries every required strict flag.
@@ -209,7 +186,7 @@ public enum StrictContainerRunner: Sendable {
         let combined = createHelp + "\n" + execHelp
         for flag in ["--volume", "--workdir", "--no-dns", "--read-only", "--tmpfs", "--entrypoint", "--memory"] {
             guard combined.contains(flag) else {
-                throw ContainerMachineError.operationFailed(
+                throw ContainerOperationError.operationFailed(
                     "Container runtime is missing required flag '\(flag)'; refusing strict execution without it."
                 )
             }
@@ -219,25 +196,25 @@ public enum StrictContainerRunner: Sendable {
     /// Requires strict flags across live `create --help` plus `exec --help`.
     public static func probeRuntimeHelp() throws {
         guard ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] != "1" else {
-            throw ContainerMachineError.operationFailed(
+            throw ContainerOperationError.operationFailed(
                 "Refusing live container probe by RUNEWEAVER_HERMETIC_TESTS hermetic guard; full suite creates zero containers."
             )
         }
-        guard let runtimeURL = ContainerMachineManager.resolveRuntimeURL() else {
-            throw ContainerMachineError.runtimeNotFound("container")
+        guard let runtimeURL = resolveRuntimeURL() else {
+            throw ContainerOperationError.runtimeNotFound("container")
         }
         let createHelp: String
         do {
             let result = try BoundedProcessRunner.runSync(
                 executableURL: runtimeURL,
                 arguments: ["create", "--help"],
-                timeoutSeconds: ContainerMachineManager.defaultProcessTimeoutSeconds,
-                maxOutputBytes: ContainerMachineManager.maxProcessOutputBytes,
-                maxErrorBytes: ContainerMachineManager.maxProcessErrorBytes
+                timeoutSeconds: defaultProcessTimeoutSeconds,
+                maxOutputBytes: maxProcessOutputBytes,
+                maxErrorBytes: maxProcessErrorBytes
             )
             createHelp = result.stdoutString + "\n" + result.stderrString
         } catch {
-            throw ContainerMachineError.operationFailed(
+            throw ContainerOperationError.operationFailed(
                 "Unable to probe 'container create --help': \(error.localizedDescription)"
             )
         }
@@ -246,13 +223,13 @@ public enum StrictContainerRunner: Sendable {
             let result = try BoundedProcessRunner.runSync(
                 executableURL: runtimeURL,
                 arguments: ["exec", "--help"],
-                timeoutSeconds: ContainerMachineManager.defaultProcessTimeoutSeconds,
-                maxOutputBytes: ContainerMachineManager.maxProcessOutputBytes,
-                maxErrorBytes: ContainerMachineManager.maxProcessErrorBytes
+                timeoutSeconds: defaultProcessTimeoutSeconds,
+                maxOutputBytes: maxProcessOutputBytes,
+                maxErrorBytes: maxProcessErrorBytes
             )
             execHelp = result.stdoutString + "\n" + result.stderrString
         } catch {
-            throw ContainerMachineError.operationFailed(
+            throw ContainerOperationError.operationFailed(
                 "Unable to probe 'container exec --help': \(error.localizedDescription)"
             )
         }
@@ -288,7 +265,7 @@ public enum StrictContainerRunner: Sendable {
     /// - Returns: Bounded result.
     public static func runHostCommand(arguments: [String], timeoutSeconds: TimeInterval) async throws -> BoundedProcessResult {
         guard ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] != "1" else {
-            throw ContainerMachineError.operationFailed(
+            throw ContainerOperationError.operationFailed(
                 "Refusing live container run by RUNEWEAVER_HERMETIC_TESTS hermetic guard; full suite creates zero containers."
             )
         }
@@ -328,14 +305,14 @@ public enum StrictContainerRunner: Sendable {
     }
 
     private static func stopAndDeleteSync(name: String, timeoutSeconds: TimeInterval) {
-        guard ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] != "1" else { return }
-        guard let runtimeURL = ContainerMachineManager.resolveRuntimeURL() else { return }
-        _ = try? ContainerMachineManager.runProcessSync(
+        guard ProcessInfo.processInfo.environment[hermeticTestsEnvKey] != "1" else { return }
+        guard let runtimeURL = resolveRuntimeURL() else { return }
+        _ = try? BoundedProcessRunner.runSync(
             executableURL: runtimeURL,
             arguments: containerStopArguments(name: name),
             timeoutSeconds: timeoutSeconds
         )
-        _ = try? ContainerMachineManager.runProcessSync(
+        _ = try? BoundedProcessRunner.runSync(
             executableURL: runtimeURL,
             arguments: containerDeleteArguments(name: name),
             timeoutSeconds: timeoutSeconds
@@ -358,44 +335,52 @@ public enum StrictContainerRunner: Sendable {
 public protocol ContainerHostRuntime: Sendable {
     /// Resolves the container CLI, nil when absent.
     func resolveRuntimeURL() -> URL?
-    /// Runs one host `container` invocation with bounded output.
-    func run(arguments: [String], timeoutSeconds: TimeInterval) async throws -> BoundedProcessResult
+    /// Runs one host `container` invocation with bounded output and optional stdin bytes.
+    func run(arguments: [String], inputData: Data?, timeoutSeconds: TimeInterval) async throws -> BoundedProcessResult
     /// Requires strict flags across live `create --help` plus `exec --help`.
     func probe() throws
+}
+
+extension ContainerHostRuntime {
+    /// Convenience forwarding a stdin-less invocation.
+    public func run(arguments: [String], timeoutSeconds: TimeInterval) async throws -> BoundedProcessResult {
+        try await run(arguments: arguments, inputData: nil, timeoutSeconds: timeoutSeconds)
+    }
 }
 
 /// Live host runtime spawning the real container CLI.
 public struct LiveContainerHostRuntime: ContainerHostRuntime, Sendable {
     /// Creates the live runtime.
     public init() {}
-    /// Resolves the real container CLI.
+    /// Resolves the real container CLI from the shared strict runner resolver.
     public func resolveRuntimeURL() -> URL? {
-        ContainerMachineManager.resolveRuntimeURL()
+        StrictContainerRunner.resolveRuntimeURL()
     }
 
-    /// Runs one host invocation with bounded output.
-    public func run(arguments: [String], timeoutSeconds: TimeInterval) async throws -> BoundedProcessResult {
+    /// Runs one host invocation with bounded output and optional stdin bytes.
+    public func run(arguments: [String], inputData: Data? = nil, timeoutSeconds: TimeInterval) async throws -> BoundedProcessResult {
         guard ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] != "1" else {
-            throw ContainerMachineError.operationFailed(
+            throw ContainerOperationError.operationFailed(
                 "Refusing live container run by RUNEWEAVER_HERMETIC_TESTS hermetic guard; full suite creates zero containers."
             )
         }
-        guard let runtimeURL = ContainerMachineManager.resolveRuntimeURL() else {
-            throw ContainerMachineError.runtimeNotFound("container")
+        guard let runtimeURL = StrictContainerRunner.resolveRuntimeURL() else {
+            throw ContainerOperationError.runtimeNotFound("container")
         }
         return try await BoundedProcessRunner.runAsync(
             executableURL: runtimeURL,
             arguments: arguments,
+            inputData: inputData,
             timeoutSeconds: timeoutSeconds,
-            maxOutputBytes: 11 * 1024 * 1024,
-            maxErrorBytes: 64 * 1024
+            maxOutputBytes: StrictContainerRunner.maxProcessOutputBytes,
+            maxErrorBytes: StrictContainerRunner.maxProcessErrorBytes
         )
     }
 
     /// Probes the live runtime for strict flags.
     public func probe() throws {
         guard ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] != "1" else {
-            throw ContainerMachineError.operationFailed(
+            throw ContainerOperationError.operationFailed(
                 "Refusing live container probe by RUNEWEAVER_HERMETIC_TESTS hermetic guard; full suite creates zero containers."
             )
         }
@@ -434,7 +419,7 @@ public final class HermeticContainerRuntime: ContainerHostRuntime, Sendable {
     }
 
     /// Stubs one host invocation, recording `create --name` entries.
-    public func run(arguments: [String], timeoutSeconds _: TimeInterval) async throws -> BoundedProcessResult {
+    public func run(arguments: [String], inputData _: Data? = nil, timeoutSeconds _: TimeInterval) async throws -> BoundedProcessResult {
         if let first = arguments.first, first == "create",
            let flag = arguments.firstIndex(of: "--name"), flag + 1 < arguments.count
         {
@@ -508,75 +493,27 @@ public final class HermeticContainerRuntime: ContainerHostRuntime, Sendable {
 
 /// Session-keyed owner of one strict container plus one scratch leaf per session.
 public actor StrictTurnRegistry {
-    /// Live strict turn entry.
-    public struct Entry: Sendable, Equatable {
-        /// Owning session.
-        public let sessionID: UUID
-        /// Isolated container name.
-        public let containerName: String
-        /// Fresh scratch leaf mounted into the container.
-        public let scratchURL: URL
-        /// Creation instant driving the sweep age.
-        public let createdAt: Date
-        /// Mount point inside the guest.
-        public let guestPath: String
-        /// Working directory inside the guest.
-        public let workdir: String
-        /// Whether the container runs without DNS.
-        public let networkDenied: Bool
-
-        /// Creates an entry.
-        public init(
-            sessionID: UUID,
-            containerName: String,
-            scratchURL: URL,
-            createdAt: Date = Date(),
-            guestPath: String = "/workspace",
-            workdir: String = "/workspace",
-            networkDenied: Bool = true
-        ) {
-            self.sessionID = sessionID
-            self.containerName = containerName
-            self.scratchURL = scratchURL
-            self.createdAt = createdAt
-            self.guestPath = guestPath
-            self.workdir = workdir
-            self.networkDenied = networkDenied
-        }
-    }
-
-    /// Outcome of one park-aware sweep.
-    public struct SweepResult: Sendable, Equatable {
-        /// Strict containers stopped plus deleted.
-        public let containersRemoved: Int
-        /// Scratch leaves deleted.
-        public let scratchRemoved: Int
-
-        /// Creates a sweep result.
-        public init(containersRemoved: Int = 0, scratchRemoved: Int = 0) {
-            self.containersRemoved = containersRemoved
-            self.scratchRemoved = scratchRemoved
-        }
-    }
-
-    /// Time-to-live for registry entries plus orphan scratch.
-    public static let sweepTTLSeconds: TimeInterval = 24 * 60 * 60
-    /// Alias keeping scratch aging single-sourced with the sweep TTL.
-    public static let scratchTTLSeconds: TimeInterval = sweepTTLSeconds
-    /// Shared registry used by live turns.
-    public static let shared = StrictTurnRegistry()
-
     private var entries: [UUID: Entry] = [:]
     private let runtime: any ContainerHostRuntime
+    /// Shared ephemeral admission ledger checked before every create.
+    public let ephemeralLedger: EphemeralContainerLedger
 
     /// Creates an empty registry on the live runtime.
     public init() {
         self.runtime = LiveContainerHostRuntime()
+        self.ephemeralLedger = EphemeralContainerLedger()
     }
 
-    /// Creates an empty registry on an injected runtime.
-    public init(runtime: any ContainerHostRuntime) {
+    /// Creates an empty registry on an injected runtime, sharing an injected
+    /// ledger or creating one on the same runtime.
+    public init(runtime: any ContainerHostRuntime, ephemeralLedger: EphemeralContainerLedger? = nil) {
         self.runtime = runtime
+        self.ephemeralLedger = ephemeralLedger ?? EphemeralContainerLedger(runtime: runtime)
+    }
+
+    /// Applies the loaded containers cap to the shared ledger in place.
+    public func applyContainersConfig(_ config: ContainersConfig) async {
+        await ephemeralLedger.updateMaxConcurrent(StrictContainerRunner.clampedMaxConcurrent(for: config))
     }
 
     /// Whether this registry stubs the runtime for hermetic tests.
@@ -625,13 +562,6 @@ public actor StrictTurnRegistry {
         (runtime as? HermeticContainerRuntime)?.noteScratch(url)
     }
 
-    /// Pure reap verdict: parked turns keep their container, terminal turns reap it.
-    /// - Parameter isParked: Whether the turn parked awaiting approval.
-    /// - Returns: True when the caller must reap.
-    public static func shouldReapAfterOutcome(isParked: Bool) -> Bool {
-        !isParked
-    }
-
     /// Returns the live entry for one session, if any.
     /// - Parameter sessionID: Owning session.
     /// - Returns: Entry, or nil when absent.
@@ -654,18 +584,15 @@ public actor StrictTurnRegistry {
         entries.count
     }
 
-    /// Derives parked session IDs from the live approvals list.
-    public static func parkedSessionIDs(from requests: [PermissionRequest]) -> Set<UUID> {
-        Set(requests.compactMap(\.sessionID))
-    }
-
     /// Ensures one isolated container plus one scratch leaf for the session.
     ///
     /// Reuses the live entry within the session when the network mode matches;
     /// a network change recreates the container on the existing scratch so a
     /// parked-then-approved turn cannot reuse the wrong DNS mode. Otherwise
-    /// pre-deletes any same-name leftover before creating, so a crashed turn
-    /// cannot collide.
+    /// the shared ledger admits the create before any spawn, so the cap denies
+    /// fail-closed past its limit and census failure denies without spawning,
+    /// and any same-name leftover pre-deletes before creating, so a crashed
+    /// turn cannot collide.
     public func ensure(
         sessionID: UUID,
         workspaceTmp: URL,
@@ -693,6 +620,10 @@ public actor StrictTurnRegistry {
             }
             return recreated
         }
+        // Admission rides the shared ledger before any create so the cap
+        // denies fail-closed and census failure never spawns; the machine
+        // singleton stays exempt from counts.
+        try await ephemeralLedger.admit(timeoutSeconds: timeoutSeconds)
         let name = StrictContainerRunner.strictContainerName(for: sessionID)
         let scratch = try StrictContainerRunner.makeFreshTmpDir(in: workspaceTmp)
         noteScratchIfHermetic(scratch)
@@ -721,6 +652,7 @@ public actor StrictTurnRegistry {
                 networkDenied: networkDenied
             )
             entries[sessionID] = entry
+            await ephemeralLedger.register(name: name)
             if !(runtime is HermeticContainerRuntime) {
                 StrictContainerRunner.noteTestContainer(sessionID: sessionID, name: name, scratch: scratch)
             }
@@ -772,7 +704,7 @@ public actor StrictTurnRegistry {
         timeoutSeconds: TimeInterval = 30
     ) async throws -> BoundedProcessResult {
         guard let entry = entries[sessionID] else {
-            throw ContainerMachineError.operationFailed("No strict container for session \(sessionID.uuidString).")
+            throw ContainerOperationError.operationFailed("No strict container for session \(sessionID.uuidString).")
         }
         let args = StrictContainerRunner.containerExecArguments(
             name: entry.containerName,
@@ -790,7 +722,7 @@ public actor StrictTurnRegistry {
         timeoutSeconds: TimeInterval = 30
     ) async throws -> BoundedProcessResult {
         guard let entry = entries[sessionID] else {
-            throw ContainerMachineError.operationFailed("No strict container for session \(sessionID.uuidString).")
+            throw ContainerOperationError.operationFailed("No strict container for session \(sessionID.uuidString).")
         }
         let args = StrictContainerRunner.containerExecArguments(
             name: entry.containerName,
@@ -805,6 +737,7 @@ public actor StrictTurnRegistry {
         guard let entry = entries.removeValue(forKey: sessionID) else { return }
         StrictContainerRunner.forgetTestContainer(sessionID: sessionID)
         await bestEffortRemove(name: entry.containerName, timeoutSeconds: timeoutSeconds)
+        await ephemeralLedger.unregister(name: entry.containerName)
         StrictContainerRunner.reapTmpDir(entry.scratchURL)
     }
 
@@ -815,6 +748,7 @@ public actor StrictTurnRegistry {
         for entry in snapshot {
             StrictContainerRunner.forgetTestContainer(sessionID: entry.sessionID)
             await bestEffortRemove(name: entry.containerName, timeoutSeconds: timeoutSeconds)
+            await ephemeralLedger.unregister(name: entry.containerName)
             StrictContainerRunner.reapTmpDir(entry.scratchURL)
         }
         await (runtime as? HermeticContainerRuntime)?.reapAll()
@@ -826,82 +760,82 @@ public actor StrictTurnRegistry {
         await reap(sessionID: sessionID, timeoutSeconds: timeoutSeconds)
     }
 
-    /// Park-aware sweep removing stopped strict containers plus day-old scratch.
+    /// Park-aware sweep removing stopped ephemeral containers plus expired orphan scratch.
     ///
     /// Sessions holding undecided approvals are skipped regardless of age;
-    /// the workspace container is skipped by name while other names filter by prefix.
+    /// the workspace container is skipped by name while other names filter
+    /// by the ephemeral scope (strict prefix plus detonation shapes). Stopped
+    /// orphans reclaim immediately while running orphans reclaim only past the
+    /// TTL (ledger admission age, else the inspect creation stamp) so a fresh
+    /// container racing registration survives. The
+    /// TTL governs registry-entry expiry plus orphan-scratch aging, so the
+    /// hourly reclamation pass passes the `[containers]` idle window here.
     public func sweep(
         workspaceTmp: URL,
         parkedSessionIDs: Set<UUID>,
         now: Date = Date(),
+        ttlSeconds: TimeInterval = StrictTurnRegistry.sweepTTLSeconds,
         timeoutSeconds: TimeInterval = 30
     ) async -> SweepResult {
         var containersRemoved = 0
         var scratchRemoved = 0
         let parkedNames = Set(parkedSessionIDs.map { StrictContainerRunner.strictContainerName(for: $0) })
-
-        var expiredIDs: [UUID] = []
-        for (sessionID, entry) in entries where !parkedSessionIDs.contains(sessionID) {
-            if now.timeIntervalSince(entry.createdAt) > Self.sweepTTLSeconds {
-                expiredIDs.append(sessionID)
-            }
+        let expiredIDs = expiredEntryIDs(parkedSessionIDs: parkedSessionIDs, now: now, ttlSeconds: ttlSeconds)
+        let reaped = await reapExpiredEntries(expiredIDs, timeoutSeconds: timeoutSeconds)
+        containersRemoved += reaped.containersRemoved
+        scratchRemoved += reaped.scratchRemoved
+        if let combined = await listedContainersForSweep(timeoutSeconds: timeoutSeconds) {
+            let liveNames = Set(entries.values.map(\.containerName))
+            containersRemoved += await reclaimListedOrphans(
+                combined: combined,
+                excludedNames: parkedNames.union(liveNames),
+                now: now,
+                ttlSeconds: ttlSeconds,
+                timeoutSeconds: timeoutSeconds
+            )
         }
-        for sessionID in expiredIDs {
-            guard let entry = entries.removeValue(forKey: sessionID) else { continue }
-            await bestEffortRemove(name: entry.containerName, timeoutSeconds: timeoutSeconds)
-            StrictContainerRunner.reapTmpDir(entry.scratchURL)
-            containersRemoved += 1
-            scratchRemoved += 1
-        }
-
-        if runtime.resolveRuntimeURL() != nil {
-            let listed: BoundedProcessResult?
-            do {
-                listed = try await runHost(
-                    arguments: StrictContainerRunner.containerListAllArguments(),
-                    timeoutSeconds: timeoutSeconds
-                )
-            } catch is CancellationError {
-                listed = nil
-            } catch {
-                RuneWeaverLog.sandbox.debug("StrictContainerRunner: failed to list containers during sweep: \(error.localizedDescription)")
-                listed = nil
-            }
-            if let listed {
-                let combined = listed.stdoutString + "\n" + listed.stderrString
-                let liveNames = Set(entries.values.map(\.containerName))
-                for row in StrictContainerRunner.parseContainerListOutput(combined) {
-                    guard row.name != StrictContainerRunner.workspaceContainerName else { continue }
-                    guard row.name.hasPrefix(StrictContainerRunner.strictNamePrefix) else { continue }
-                    guard !parkedNames.contains(row.name) else { continue }
-                    guard !liveNames.contains(row.name) else { continue }
-                    let lowered = row.status.lowercased()
-                    let isStopped = lowered.contains("stopped") || lowered.contains("exited") || lowered.contains("created")
-                    guard isStopped else { continue }
-                    await bestEffortRemove(name: row.name, timeoutSeconds: timeoutSeconds)
-                    containersRemoved += 1
-                }
-            }
-        }
-
         let liveScratch = Set(entries.values.map(\.scratchURL.standardizedFileURL.path))
-        if let children = try? FileManager.default.contentsOfDirectory(
-            at: workspaceTmp,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: []
-        ) {
-            for child in children {
-                guard !liveScratch.contains(child.standardizedFileURL.path) else { continue }
-                let values = try? child.resourceValues(forKeys: [.contentModificationDateKey])
-                // A leaf without a readable mtime reads as expired so an
-                // unreadable orphan cannot pin scratch past the TTL.
-                let mtime = values?.contentModificationDate ?? Date.distantPast
-                guard now.timeIntervalSince(mtime) > Self.scratchTTLSeconds else { continue }
-                StrictContainerRunner.reapTmpDir(child)
-                scratchRemoved += 1
-            }
-        }
+        scratchRemoved += reclaimOrphanScratch(
+            workspaceTmp: workspaceTmp,
+            liveScratch: liveScratch,
+            now: now,
+            ttlSeconds: ttlSeconds
+        )
         return SweepResult(containersRemoved: containersRemoved, scratchRemoved: scratchRemoved)
+    }
+
+    /// Whether one running orphan is old enough to reclaim.
+    ///
+    /// Ledger admission age wins when this process admitted the container;
+    /// otherwise the inspect creation stamp ages it. Unknown age reads as
+    /// fresh so an ageless container is kept instead of reaped blind.
+    private func isExpiredRunningOrphan(
+        name: String,
+        now: Date,
+        ttlSeconds: TimeInterval,
+        timeoutSeconds: TimeInterval
+    ) async -> Bool {
+        if let admitted = await ephemeralLedger.registrationDate(for: name) {
+            return now.timeIntervalSince(admitted) > ttlSeconds
+        }
+        guard let created = await inspectCreatedDate(name: name, timeoutSeconds: timeoutSeconds) else {
+            return false
+        }
+        return now.timeIntervalSince(created) > ttlSeconds
+    }
+
+    /// Reads one orphan creation stamp without ever throwing.
+    private func inspectCreatedDate(name: String, timeoutSeconds: TimeInterval) async -> Date? {
+        do {
+            let probed = try await runHost(
+                arguments: StrictContainerRunner.containerInspectArguments(name: name),
+                timeoutSeconds: timeoutSeconds
+            )
+            guard probed.exitCode == 0 else { return nil }
+            return StrictContainerRunner.inspectCreatedDate(from: probed.stdoutString + "\n" + probed.stderrString)
+        } catch {
+            return nil
+        }
     }
 
     /// Sweep deriving parked sessions from the live approvals queue.
@@ -909,11 +843,121 @@ public actor StrictTurnRegistry {
         workspaceTmp: URL,
         approvals: ApprovalQueue,
         now: Date = Date(),
+        ttlSeconds: TimeInterval = StrictTurnRegistry.sweepTTLSeconds,
         timeoutSeconds: TimeInterval = 30
     ) async -> SweepResult {
         let listed = await approvals.list()
         let parked = Self.parkedSessionIDs(from: listed)
-        return await sweep(workspaceTmp: workspaceTmp, parkedSessionIDs: parked, now: now, timeoutSeconds: timeoutSeconds)
+        return await sweep(
+            workspaceTmp: workspaceTmp,
+            parkedSessionIDs: parked,
+            now: now,
+            ttlSeconds: ttlSeconds,
+            timeoutSeconds: timeoutSeconds
+        )
+    }
+}
+
+// MARK: - StrictTurnRegistry Sweep Steps
+
+extension StrictTurnRegistry {
+    private func expiredEntryIDs(parkedSessionIDs: Set<UUID>, now: Date, ttlSeconds: TimeInterval) -> [UUID] {
+        var expiredIDs: [UUID] = []
+        for (sessionID, entry) in entries where !parkedSessionIDs.contains(sessionID) {
+            if now.timeIntervalSince(entry.createdAt) > ttlSeconds {
+                expiredIDs.append(sessionID)
+            }
+        }
+        return expiredIDs
+    }
+
+    private func reapExpiredEntries(_ expiredIDs: [UUID], timeoutSeconds: TimeInterval) async -> SweepResult {
+        var containersRemoved = 0
+        var scratchRemoved = 0
+        for sessionID in expiredIDs {
+            guard let entry = entries.removeValue(forKey: sessionID) else { continue }
+            await bestEffortRemove(name: entry.containerName, timeoutSeconds: timeoutSeconds)
+            await ephemeralLedger.unregister(name: entry.containerName)
+            StrictContainerRunner.reapTmpDir(entry.scratchURL)
+            containersRemoved += 1
+            scratchRemoved += 1
+        }
+        return SweepResult(containersRemoved: containersRemoved, scratchRemoved: scratchRemoved)
+    }
+
+    private func listedContainersForSweep(timeoutSeconds: TimeInterval) async -> String? {
+        guard runtime.resolveRuntimeURL() != nil else { return nil }
+        do {
+            let listed = try await runHost(
+                arguments: StrictContainerRunner.containerListAllArguments(),
+                timeoutSeconds: timeoutSeconds
+            )
+            return listed.stdoutString + "\n" + listed.stderrString
+        } catch is CancellationError {
+            return nil
+        } catch {
+            RuneWeaverLog.sandbox.debug("StrictContainerRunner: failed to list containers during sweep: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func reclaimListedOrphans(
+        combined: String,
+        excludedNames: Set<String>,
+        now: Date,
+        ttlSeconds: TimeInterval,
+        timeoutSeconds: TimeInterval
+    ) async -> Int {
+        var removed = 0
+        for row in StrictContainerRunner.parseContainerListOutput(combined) {
+            guard row.name != StrictContainerRunner.workspaceContainerName else { continue }
+            guard StrictContainerRunner.isEphemeralContainerName(row.name) else { continue }
+            guard !excludedNames.contains(row.name) else { continue }
+            if !isStoppedStatus(row.status) {
+                guard StrictContainerRunner.isRunningStatus(row.status) else { continue }
+                guard !Task.isCancelled else { break }
+                guard await isExpiredRunningOrphan(
+                    name: row.name,
+                    now: now,
+                    ttlSeconds: ttlSeconds,
+                    timeoutSeconds: timeoutSeconds
+                ) else { continue }
+            }
+            await bestEffortRemove(name: row.name, timeoutSeconds: timeoutSeconds)
+            await ephemeralLedger.unregister(name: row.name)
+            removed += 1
+        }
+        return removed
+    }
+
+    private func isStoppedStatus(_ status: String) -> Bool {
+        let lowered = status.lowercased()
+        return lowered.contains("stopped") || lowered.contains("exited") || lowered.contains("created")
+    }
+
+    private func reclaimOrphanScratch(
+        workspaceTmp: URL,
+        liveScratch: Set<String>,
+        now: Date,
+        ttlSeconds: TimeInterval
+    ) -> Int {
+        guard let children = try? FileManager.default.contentsOfDirectory(
+            at: workspaceTmp,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: []
+        ) else { return 0 }
+        var removed = 0
+        for child in children {
+            guard !liveScratch.contains(child.standardizedFileURL.path) else { continue }
+            let values = try? child.resourceValues(forKeys: [.contentModificationDateKey])
+            // A leaf without a readable mtime reads as expired so an
+            // unreadable orphan cannot pin scratch past the TTL.
+            let mtime = values?.contentModificationDate ?? Date.distantPast
+            guard now.timeIntervalSince(mtime) > ttlSeconds else { continue }
+            StrictContainerRunner.reapTmpDir(child)
+            removed += 1
+        }
+        return removed
     }
 }
 
@@ -930,16 +974,49 @@ public struct ContainerSeam: Sendable {
     public let strictRegistry: StrictTurnRegistry
     /// Machine client sharing the runtime.
     public let machineClient: MachineContainerClient
+    /// Shared ephemeral admission ledger owning the concurrency cap.
+    public let ephemeralLedger: EphemeralContainerLedger
     /// Guest memory cap applied at creation.
     public let memory: String
 
     /// Creates a seam sharing one runtime across both tiers.
     public init(runtime: (any ContainerHostRuntime)? = nil, memory: String = StrictContainerRunner.defaultMemory) {
         let resolved: any ContainerHostRuntime = runtime ?? LiveContainerHostRuntime()
+        let ledger = EphemeralContainerLedger(runtime: resolved)
         self.runtime = resolved
-        self.strictRegistry = StrictTurnRegistry(runtime: resolved)
+        self.strictRegistry = StrictTurnRegistry(runtime: resolved, ephemeralLedger: ledger)
         self.machineClient = MachineContainerClient(runtime: resolved)
+        self.ephemeralLedger = ledger
         self.memory = memory
+    }
+
+    /// Creates a seam from the loaded containers policy with a fresh ledger.
+    public init(containersConfig: ContainersConfig, runtime: (any ContainerHostRuntime)? = nil) {
+        let resolved: any ContainerHostRuntime = runtime ?? LiveContainerHostRuntime()
+        let ledger = EphemeralContainerLedger(
+            runtime: resolved,
+            maxConcurrent: StrictContainerRunner.clampedMaxConcurrent(for: containersConfig)
+        )
+        self.runtime = resolved
+        self.strictRegistry = StrictTurnRegistry(runtime: resolved, ephemeralLedger: ledger)
+        self.machineClient = MachineContainerClient(runtime: resolved)
+        self.ephemeralLedger = ledger
+        self.memory = StrictContainerRunner.memoryCap(for: containersConfig)
+    }
+
+    /// Creates a seam from the loaded policy sharing one registry plus ledger.
+    public init(
+        containersConfig: ContainersConfig,
+        strictRegistry: StrictTurnRegistry,
+        ephemeralLedger: EphemeralContainerLedger,
+        runtime: (any ContainerHostRuntime)? = nil
+    ) {
+        let resolved: any ContainerHostRuntime = runtime ?? LiveContainerHostRuntime()
+        self.runtime = resolved
+        self.strictRegistry = strictRegistry
+        self.machineClient = MachineContainerClient(runtime: resolved)
+        self.ephemeralLedger = ephemeralLedger
+        self.memory = StrictContainerRunner.memoryCap(for: containersConfig)
     }
 
     /// Live seam for production paths.
@@ -950,7 +1027,7 @@ public struct ContainerSeam: Sendable {
     /// Hermetic seam plus its stub, sharing one stubbed runtime.
     ///
     /// The stubbed seam carries the production memory cap so hermetic turns
-    /// verify the same 1G limit production enforces.
+    /// verify the same limit production enforces.
     public static func hermetic() -> (seam: Self, runtime: HermeticContainerRuntime) {
         let stub = HermeticContainerRuntime()
         return (Self(runtime: stub), stub)

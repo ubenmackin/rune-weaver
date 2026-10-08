@@ -3,8 +3,8 @@
 // Purpose: carries the full settings snapshot for `GET /settings` plus the
 // partial update for `PUT /settings` so dashboard edits preserve every field
 // the request omits while engine, server bind, media, index, desktop, goals,
-// proactive, ideas, fanout, browser, bash, workspace, and files patches merge
-// in one place.
+// proactive, ideas, fanout, browser, bash, workspace, containers, and files
+// patches merge in one place.
 // Scope: REST bodies and merge policy only; range and shape checks stay with
 // the config validation layer and live-reload decisions stay with the
 // settings routes.
@@ -58,9 +58,8 @@ public struct SettingsResponse: Content, Equatable {
     public let voiceSTTProvider: String
     public let voiceWhisperModel: String
     public let voiceTTSProvider: String
-    public let sandboxContainerBaseImage: String
-    public let sandboxArchiveSessionTTLMinutes: Int
-    public let sandboxMaxConcurrentMachines: Int
+    /// Unified container runtime policy from `[containers]`.
+    public let containers: ContainersConfig
     public let filesDenyPatterns: [String]
     public let filesAllowRoots: [String]
     public let filesRequireApprovalOnDeny: Bool
@@ -137,9 +136,7 @@ public struct SettingsResponse: Content, Equatable {
         self.voiceSTTProvider = config.voice.sttProvider
         self.voiceWhisperModel = config.voice.whisperModel
         self.voiceTTSProvider = config.voice.ttsProvider
-        self.sandboxContainerBaseImage = config.sandbox.containerBaseImage
-        self.sandboxArchiveSessionTTLMinutes = config.sandbox.archiveSessionTTLMinutes
-        self.sandboxMaxConcurrentMachines = config.sandbox.maxConcurrentMachines
+        self.containers = config.containers
         self.filesDenyPatterns = config.files.denyPatterns
         self.filesAllowRoots = config.files.allowRoots
         self.filesRequireApprovalOnDeny = config.files.requireApprovalOnDeny
@@ -196,9 +193,7 @@ public struct SettingsResponse: Content, Equatable {
         case voiceSTTProvider
         case voiceWhisperModel
         case voiceTTSProvider
-        case sandboxContainerBaseImage
-        case sandboxArchiveSessionTTLMinutes
-        case sandboxMaxConcurrentMachines
+        case containers
         case filesDenyPatterns
         case filesAllowRoots
         case filesRequireApprovalOnDeny
@@ -268,9 +263,10 @@ public struct SettingsResponse: Content, Equatable {
         voiceSTTProvider = try container.decodeIfPresent(String.self, forKey: .voiceSTTProvider) ?? ""
         voiceWhisperModel = try container.decodeIfPresent(String.self, forKey: .voiceWhisperModel) ?? ""
         voiceTTSProvider = try container.decodeIfPresent(String.self, forKey: .voiceTTSProvider) ?? ""
-        sandboxContainerBaseImage = try container.decodeIfPresent(String.self, forKey: .sandboxContainerBaseImage) ?? ""
-        sandboxArchiveSessionTTLMinutes = try container.decodeIfPresent(Int.self, forKey: .sandboxArchiveSessionTTLMinutes) ?? 10
-        sandboxMaxConcurrentMachines = try container.decodeIfPresent(Int.self, forKey: .sandboxMaxConcurrentMachines) ?? 3
+        // Absent containers keeps the documented bounds so payloads written
+        // before the `[containers]` surface existed still decode instead of
+        // failing the settings fetch, mirroring the workspace tolerance.
+        containers = try container.decodeIfPresent(ContainersConfig.self, forKey: .containers) ?? ContainersConfig()
         filesDenyPatterns = try container.decodeIfPresent([String].self, forKey: .filesDenyPatterns) ?? []
         filesAllowRoots = try container.decodeIfPresent([String].self, forKey: .filesAllowRoots) ?? []
         filesRequireApprovalOnDeny = try container.decodeIfPresent(Bool.self, forKey: .filesRequireApprovalOnDeny) ?? true
@@ -336,9 +332,7 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(voiceSTTProvider, forKey: .voiceSTTProvider)
         try container.encode(voiceWhisperModel, forKey: .voiceWhisperModel)
         try container.encode(voiceTTSProvider, forKey: .voiceTTSProvider)
-        try container.encode(sandboxContainerBaseImage, forKey: .sandboxContainerBaseImage)
-        try container.encode(sandboxArchiveSessionTTLMinutes, forKey: .sandboxArchiveSessionTTLMinutes)
-        try container.encode(sandboxMaxConcurrentMachines, forKey: .sandboxMaxConcurrentMachines)
+        try container.encode(containers, forKey: .containers)
         try container.encode(filesDenyPatterns, forKey: .filesDenyPatterns)
         try container.encode(filesAllowRoots, forKey: .filesAllowRoots)
         try container.encode(filesRequireApprovalOnDeny, forKey: .filesRequireApprovalOnDeny)
@@ -405,9 +399,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let voiceSTTProvider: String?
     public let voiceWhisperModel: String?
     public let voiceTTSProvider: String?
-    public let sandboxContainerBaseImage: String?
-    public let sandboxArchiveSessionTTLMinutes: Int?
-    public let sandboxMaxConcurrentMachines: Int?
+    /// Partial containers patch; a nil patch preserves the stored `[containers]` section.
+    public let containers: ContainersSettingsUpdate?
     public let filesDenyPatterns: [String]?
     public let filesAllowRoots: [String]?
     public let filesRequireApprovalOnDeny: Bool?
@@ -473,9 +466,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         voiceSTTProvider: String? = nil,
         voiceWhisperModel: String? = nil,
         voiceTTSProvider: String? = nil,
-        sandboxContainerBaseImage: String? = nil,
-        sandboxArchiveSessionTTLMinutes: Int? = nil,
-        sandboxMaxConcurrentMachines: Int? = nil,
+        containers: ContainersSettingsUpdate? = nil,
         filesDenyPatterns: [String]? = nil,
         filesAllowRoots: [String]? = nil,
         filesRequireApprovalOnDeny: Bool? = nil,
@@ -527,9 +518,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.voiceSTTProvider = voiceSTTProvider
         self.voiceWhisperModel = voiceWhisperModel
         self.voiceTTSProvider = voiceTTSProvider
-        self.sandboxContainerBaseImage = sandboxContainerBaseImage
-        self.sandboxArchiveSessionTTLMinutes = sandboxArchiveSessionTTLMinutes
-        self.sandboxMaxConcurrentMachines = sandboxMaxConcurrentMachines
+        self.containers = containers
         self.filesDenyPatterns = filesDenyPatterns
         self.filesAllowRoots = filesAllowRoots
         self.filesRequireApprovalOnDeny = filesRequireApprovalOnDeny
@@ -560,6 +549,209 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.serverPort = serverPort
         self.serverAllowedHosts = serverAllowedHosts
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case engineName, logLevel, compactionThresholdPercent, maxToolIterations
+        case defaultProvider, fallbackProvider, providers
+        case memoryVectorDBPath, memoryEpisodesDBPath, memoryEmbeddingModel, memoryEmbeddingBackend
+        case memoryRecallPerTierLimit, memoryRecallAutoLimit, memoryRecallThreshold
+        case memoryRecallMaxChars, memoryRecallPerHitChars, memoryRecallDocPoolMultiplier, memoryRecallEpisodicWeight
+        case voiceSTTProvider, voiceWhisperModel, voiceTTSProvider
+        case containers
+        case filesDenyPatterns, filesAllowRoots, filesRequireApprovalOnDeny, filesWriteMode
+        case browserSearxngURL, browserSearchTimeoutSeconds, browserMaxResults
+        case browserTimeoutSeconds, browserFetchTimeoutSeconds
+        case searchSearxngURL, searchTimeoutSeconds, searchMaxResults
+        case emailAccounts, pluginsDir, pluginsMarketplaceIndexURL, pluginsAutoRescan
+        case media, index, desktop, bash, workspace, goals, proactive, ideas, fanout, persona
+        case serverHostname, serverPort, serverAllowedHosts
+    }
+
+    /// Decodes tolerantly so every key stays optional and unknown keys are
+    /// ignored. The containers bounds ride the nested object so a missing
+    /// section preserves the stored policy.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        engineName = try container.decodeIfPresent(String.self, forKey: .engineName)
+        logLevel = try container.decodeIfPresent(String.self, forKey: .logLevel)
+        compactionThresholdPercent = try container.decodeIfPresent(Int.self, forKey: .compactionThresholdPercent)
+        maxToolIterations = try container.decodeIfPresent(Int.self, forKey: .maxToolIterations)
+        defaultProvider = try container.decodeIfPresent(String.self, forKey: .defaultProvider)
+        fallbackProvider = try container.decodeIfPresent(String.self, forKey: .fallbackProvider)
+        providers = try container.decodeIfPresent([String: ProviderConfig].self, forKey: .providers)
+        memoryVectorDBPath = try container.decodeIfPresent(String.self, forKey: .memoryVectorDBPath)
+        memoryEpisodesDBPath = try container.decodeIfPresent(String.self, forKey: .memoryEpisodesDBPath)
+        memoryEmbeddingModel = try container.decodeIfPresent(String.self, forKey: .memoryEmbeddingModel)
+        memoryEmbeddingBackend = try container.decodeIfPresent(String.self, forKey: .memoryEmbeddingBackend)
+        memoryRecallPerTierLimit = try container.decodeIfPresent(Int.self, forKey: .memoryRecallPerTierLimit)
+        memoryRecallAutoLimit = try container.decodeIfPresent(Int.self, forKey: .memoryRecallAutoLimit)
+        memoryRecallThreshold = try container.decodeIfPresent(Double.self, forKey: .memoryRecallThreshold)
+        memoryRecallMaxChars = try container.decodeIfPresent(Int.self, forKey: .memoryRecallMaxChars)
+        memoryRecallPerHitChars = try container.decodeIfPresent(Int.self, forKey: .memoryRecallPerHitChars)
+        memoryRecallDocPoolMultiplier = try container.decodeIfPresent(Int.self, forKey: .memoryRecallDocPoolMultiplier)
+        memoryRecallEpisodicWeight = try container.decodeIfPresent(Double.self, forKey: .memoryRecallEpisodicWeight)
+        voiceSTTProvider = try container.decodeIfPresent(String.self, forKey: .voiceSTTProvider)
+        voiceWhisperModel = try container.decodeIfPresent(String.self, forKey: .voiceWhisperModel)
+        voiceTTSProvider = try container.decodeIfPresent(String.self, forKey: .voiceTTSProvider)
+        containers = try container.decodeIfPresent(ContainersSettingsUpdate.self, forKey: .containers)
+        filesDenyPatterns = try container.decodeIfPresent([String].self, forKey: .filesDenyPatterns)
+        filesAllowRoots = try container.decodeIfPresent([String].self, forKey: .filesAllowRoots)
+        filesRequireApprovalOnDeny = try container.decodeIfPresent(Bool.self, forKey: .filesRequireApprovalOnDeny)
+        filesWriteMode = try container.decodeIfPresent(String.self, forKey: .filesWriteMode)
+        browserSearxngURL = try container.decodeIfPresent(String.self, forKey: .browserSearxngURL)
+        browserSearchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .browserSearchTimeoutSeconds)
+        browserMaxResults = try container.decodeIfPresent(Int.self, forKey: .browserMaxResults)
+        browserTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .browserTimeoutSeconds)
+        browserFetchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .browserFetchTimeoutSeconds)
+        searchSearxngURL = try container.decodeIfPresent(String.self, forKey: .searchSearxngURL)
+        searchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .searchTimeoutSeconds)
+        searchMaxResults = try container.decodeIfPresent(Int.self, forKey: .searchMaxResults)
+        emailAccounts = try container.decodeIfPresent([EmailAccount].self, forKey: .emailAccounts)
+        pluginsDir = try container.decodeIfPresent(String.self, forKey: .pluginsDir)
+        pluginsMarketplaceIndexURL = try container.decodeIfPresent(String.self, forKey: .pluginsMarketplaceIndexURL)
+        pluginsAutoRescan = try container.decodeIfPresent(Bool.self, forKey: .pluginsAutoRescan)
+        media = try container.decodeIfPresent(MediaSettingsUpdate.self, forKey: .media)
+        index = try container.decodeIfPresent(IndexSettingsUpdate.self, forKey: .index)
+        desktop = try container.decodeIfPresent(DesktopSettingsUpdate.self, forKey: .desktop)
+        bash = try container.decodeIfPresent(BashSettingsUpdate.self, forKey: .bash)
+        workspace = try container.decodeIfPresent(WorkspaceUpdate.self, forKey: .workspace)
+        goals = try container.decodeIfPresent(GoalsUpdate.self, forKey: .goals)
+        proactive = try container.decodeIfPresent(ProactiveUpdate.self, forKey: .proactive)
+        ideas = try container.decodeIfPresent(IdeasUpdate.self, forKey: .ideas)
+        fanout = try container.decodeIfPresent(FanOutSettingsUpdate.self, forKey: .fanout)
+        persona = try container.decodeIfPresent(PersonaUpdate.self, forKey: .persona)
+        serverHostname = try container.decodeIfPresent(String.self, forKey: .serverHostname)
+        serverPort = try container.decodeIfPresent(Int.self, forKey: .serverPort)
+        serverAllowedHosts = try container.decodeIfPresent([String].self, forKey: .serverAllowedHosts)
+    }
+}
+
+/// Partial `[containers]` patch for `PUT /settings`.
+///
+/// Every field stays optional so a request carrying only one key leaves the
+/// rest of the stored admission bounds untouched instead of resetting them.
+/// Covers the same field set as the full `ContainersConfig` snapshot, so a
+/// caller holding a complete policy can build the patch through `init(_:)` and
+/// reuse the merge path without hand-mapping fields.
+public struct ContainersSettingsUpdate: Content, Equatable {
+    /// Guest memory cap in MB. Nil preserves the stored value.
+    public var memoryMB: Int?
+    /// Maximum concurrent containers. Nil preserves the stored value.
+    public var maxConcurrent: Int?
+    /// Idle TTL in minutes. Nil preserves the stored value.
+    public var ttlMinutes: Int?
+
+    /// Creates a partial containers patch.
+    /// - Parameters:
+    ///   - memoryMB: Guest memory cap in MB.
+    ///   - maxConcurrent: Maximum concurrent containers.
+    ///   - ttlMinutes: Idle TTL in minutes.
+    public init(
+        memoryMB: Int? = nil,
+        maxConcurrent: Int? = nil,
+        ttlMinutes: Int? = nil
+    ) {
+        self.memoryMB = memoryMB
+        self.maxConcurrent = maxConcurrent
+        self.ttlMinutes = ttlMinutes
+    }
+
+    /// Populates a patch from a full snapshot so programmatic callers holding
+    /// a complete `ContainersConfig` reuse the same merge path.
+    /// - Parameter containers: Complete containers policy.
+    public init(_ containers: ContainersConfig) {
+        self.memoryMB = containers.memoryMB
+        self.maxConcurrent = containers.maxConcurrent
+        self.ttlMinutes = containers.ttlMinutes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case memoryMB = "memory_mb"
+        case memoryMBCamel = "memoryMb"
+        case maxConcurrent = "max_concurrent"
+        case maxConcurrentCamel = "maxConcurrent"
+        case ttlMinutes = "ttl_minutes"
+        case ttlMinutesCamel = "ttlMinutes"
+    }
+
+    /// Decodes a partial containers patch accepting snake_case and camelCase aliases.
+    ///
+    /// Snake_case stays canonical so persisted files round-trip unchanged; the
+    /// camelCase spellings mirror the dashboard contract and fall back only
+    /// when the snake key is absent. When both spellings arrive the snake value
+    /// wins so the two contracts cannot fork the stored policy.
+    /// - Parameter decoder: Decoder carrying the patch.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let snakeMemory = try container.decodeIfPresent(Int.self, forKey: .memoryMB)
+        let camelMemory = try container.decodeIfPresent(Int.self, forKey: .memoryMBCamel)
+        memoryMB = snakeMemory ?? camelMemory
+        let snakeMax = try container.decodeIfPresent(Int.self, forKey: .maxConcurrent)
+        let camelMax = try container.decodeIfPresent(Int.self, forKey: .maxConcurrentCamel)
+        maxConcurrent = snakeMax ?? camelMax
+        let snakeTTL = try container.decodeIfPresent(Int.self, forKey: .ttlMinutes)
+        let camelTTL = try container.decodeIfPresent(Int.self, forKey: .ttlMinutesCamel)
+        ttlMinutes = snakeTTL ?? camelTTL
+    }
+
+    /// Encodes a partial containers patch using canonical snake_case keys.
+    ///
+    /// CamelCase aliases decode but never encode so saved payloads keep the
+    /// file shape and a round-trip never invents a second spelling.
+    /// - Parameter encoder: Encoder receiving the patch.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(memoryMB, forKey: .memoryMB)
+        try container.encodeIfPresent(maxConcurrent, forKey: .maxConcurrent)
+        try container.encodeIfPresent(ttlMinutes, forKey: .ttlMinutes)
+    }
+
+    /// Merges this patch onto the stored policy, preserving every field the
+    /// request omits. A nil field is a no-op, so a dashboard edit to one knob
+    /// never resets the rest of the `[containers]` section.
+    /// - Parameter containers: Stored containers policy to mutate in place.
+    public func apply(to containers: inout ContainersConfig) throws {
+        if let memoryMB {
+            containers.memoryMB = try Self.validatedBound(memoryMB, field: "containers.memory_mb")
+        }
+        if let maxConcurrent {
+            containers.maxConcurrent = try Self.validatedBound(maxConcurrent, field: "containers.max_concurrent")
+        }
+        if let ttlMinutes {
+            containers.ttlMinutes = try Self.validatedBound(ttlMinutes, field: "containers.ttl_minutes")
+        }
+    }
+
+    /// Validates one containers bound against the documented range so
+    /// mistyped values fail fast with the offending field.
+    private static func validatedBound(_ value: Int, field: String) throws -> Int {
+        let bounds: (min: Int, max: Int) = switch field {
+        case "containers.memory_mb":
+            (ContainersConfig.minMemoryMB, ContainersConfig.maxMemoryMB)
+        case "containers.max_concurrent":
+            (ContainersConfig.minMaxConcurrent, ContainersConfig.maxMaxConcurrent)
+        case "containers.ttl_minutes":
+            (ContainersConfig.minTTLMinutes, ContainersConfig.maxTTLMinutes)
+        default:
+            (1, Int.max)
+        }
+        guard value >= bounds.min, value <= bounds.max else {
+            throw ConfigError.validationError(
+                field: field,
+                message: "must be between \(bounds.min) and \(bounds.max) (got \(value))"
+            )
+        }
+        return value
+    }
+}
+
+extension UpdateSettingsRequest {
+    /// Builds a request from a full containers snapshot, routing through the same
+    /// merge path so snapshot callers keep working without hand-mapping fields.
+    /// - Parameter containers: Complete containers policy.
+    public init(containers: ContainersConfig) {
+        self.init(containers: ContainersSettingsUpdate(containers))
+    }
 }
 
 /// Configuration application methods for `UpdateSettingsRequest`.
@@ -575,7 +767,7 @@ extension UpdateSettingsRequest {
         applyMemory(to: &config.memory)
         try applyMemoryEmbeddingBackend(to: &config.memory)
         applyVoice(to: &config.voice)
-        applySandbox(to: &config.sandbox)
+        try applyContainers(to: &config.containers)
         try applyFiles(to: &config.files)
         applyBrowser(to: &config.browser)
         applyEmail(to: &config.email)
@@ -696,16 +888,17 @@ extension UpdateSettingsRequest {
         }
     }
 
-    private func applySandbox(to sandbox: inout SandboxConfig) {
-        if let sandboxContainerBaseImage {
-            sandbox.containerBaseImage = sandboxContainerBaseImage
-        }
-        if let sandboxArchiveSessionTTLMinutes {
-            sandbox.archiveSessionTTLMinutes = sandboxArchiveSessionTTLMinutes
-        }
-        if let sandboxMaxConcurrentMachines {
-            sandbox.maxConcurrentMachines = sandboxMaxConcurrentMachines
-        }
+    /// Merges a partial containers patch onto the stored policy, preserving every
+    /// field the request omits. A nil patch is a no-op, so a dashboard edit
+    /// elsewhere never resets the `[containers]` section. Validation stays
+    /// single-sourced in `ContainersSettingsUpdate.apply(to:)` so the PUT and
+    /// direct-merge paths agree with a clear 400 instead of persisting bad values.
+    ///
+    /// Internal so the shared settings `apply(to:)` keeps one merge path while
+    /// the containers-specific logic lives beside its DTO.
+    func applyContainers(to containers: inout ContainersConfig) throws {
+        guard let update = self.containers else { return }
+        try update.apply(to: &containers)
     }
 
     private func applyFiles(to files: inout FilesConfig) throws {
@@ -889,355 +1082,5 @@ public struct SecretListResponse: Content, Sendable, Equatable {
 
     public init(keys: [String]) {
         self.keys = keys
-    }
-}
-
-// MARK: - Policy Settings DTOs
-
-/// DTO mirroring NetworkEgressPolicy.
-///
-/// Only `allowlist_only` and `unrestricted` persist. The retired
-/// `deny_by_default` name maps to the fail-closed posture on load and at the
-/// REST boundary so older callers keep their intent without storing ambiguity.
-/// `localExemptions` is server-owned: the pane renders it display-only and PUT
-/// ignores any client-supplied value, deriving the stored set from server-side
-/// classification instead. The wire emits camelCase `localExemptions` sorted;
-/// snake_case `local_exemptions` decodes tolerantly for older callers but is
-/// never emitted.
-public struct NetworkEgressPolicyDTO: Content, Sendable, Equatable {
-    public let mode: String
-    public let allowedDomains: [String]
-    public let blockedDomains: [String]
-    public let localExemptions: [String]
-
-    public init(mode: String, allowedDomains: [String], blockedDomains: [String], localExemptions: [String] = []) {
-        self.mode = mode
-        self.allowedDomains = allowedDomains
-        self.blockedDomains = blockedDomains
-        self.localExemptions = localExemptions
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case mode
-        case allowedDomains = "allowed_domains"
-        case blockedDomains = "blocked_domains"
-        case localExemptions
-        case localExemptionsSnake = "local_exemptions"
-    }
-
-    /// Decodes tolerantly so older snake_case payloads still parse: camelCase
-    /// wins when both spellings arrive so the two contracts cannot fork.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        mode = try container.decode(String.self, forKey: .mode)
-        allowedDomains = try container.decodeIfPresent([String].self, forKey: .allowedDomains) ?? []
-        blockedDomains = try container.decodeIfPresent([String].self, forKey: .blockedDomains) ?? []
-        let camel = try container.decodeIfPresent([String].self, forKey: .localExemptions)
-        let snake = try container.decodeIfPresent([String].self, forKey: .localExemptionsSnake)
-        localExemptions = camel ?? snake ?? []
-    }
-
-    /// Encodes the canonical wire shape: snake_case network lists plus
-    /// camelCase `localExemptions`. The snake spelling decodes but never
-    /// encodes so emitted payloads keep one spelling.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(mode, forKey: .mode)
-        try container.encode(allowedDomains, forKey: .allowedDomains)
-        try container.encode(blockedDomains, forKey: .blockedDomains)
-        try container.encode(localExemptions, forKey: .localExemptions)
-    }
-}
-
-/// DTO mirroring CredentialBinding.
-///
-/// One binding pairs one key with its hosts, methods, and path prefixes. The
-/// secret rides only when the request host matches, the method matches (or
-/// the binding leaves methods empty for Any), and the effective route path
-/// matches a prefix (or prefixes stay empty for Any). Prefixes apply to every
-/// host in the same binding, so scoping is per-key rather than per-host. An
-/// empty host list authorizes nothing and is rejected as unusable.
-public struct CredentialBindingDTO: Content, Sendable, Equatable {
-    public let allowedHosts: [String]
-    public let allowedMethods: [String]
-    public let allowedPathPrefixes: [String]
-
-    public init(allowedHosts: [String], allowedMethods: [String], allowedPathPrefixes: [String]) {
-        self.allowedHosts = allowedHosts
-        self.allowedMethods = allowedMethods
-        self.allowedPathPrefixes = allowedPathPrefixes
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case allowedHosts = "allowed_hosts"
-        case allowedMethods = "allowed_methods"
-        case allowedPathPrefixes = "allowed_path_prefixes"
-    }
-}
-
-/// DTO mirroring SecurityPolicy.
-///
-/// The policy file owns network plus credentials only. Filesystem and tool
-/// sections no longer exist as declarative policy; older files may still
-/// carry them but the store ignores those tables on load and never writes
-/// them back, so the DTO carries exactly what the file can persist.
-public struct SecurityPolicyDTO: Content, Sendable, Equatable {
-    public let version: Int
-    public let network: NetworkEgressPolicyDTO
-    public let credentials: [String: CredentialBindingDTO]
-
-    public init(
-        version: Int = 1,
-        network: NetworkEgressPolicyDTO,
-        credentials: [String: CredentialBindingDTO]
-    ) {
-        self.version = version
-        self.network = network
-        self.credentials = credentials
-    }
-}
-
-/// Local-access report returned by `PUT /settings/policy` and `POST /settings/policy/recheck-local/apply`.
-///
-/// `granted` names the exemptions added by this write, `removed` names the
-/// exemptions dropped by it (derived from allowlist deletions on PUT and from
-/// re-classification on re-check apply), and `neverDialable` names added
-/// entries that persist name-only with no grant. `GET /settings/policy`
-/// sends no report.
-public struct PolicyLocalAccessReport: Content, Sendable, Equatable {
-    public let granted: [String]
-    public let removed: [String]
-    public let neverDialable: [String]
-
-    public init(granted: [String] = [], removed: [String] = [], neverDialable: [String] = []) {
-        self.granted = granted
-        self.removed = removed
-        self.neverDialable = neverDialable
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case granted
-        case removed
-        case neverDialable
-        case neverDialableSnake = "never_dialable"
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        granted = try container.decodeIfPresent([String].self, forKey: .granted) ?? []
-        removed = try container.decodeIfPresent([String].self, forKey: .removed) ?? []
-        let camel = try container.decodeIfPresent([String].self, forKey: .neverDialable)
-        let snake = try container.decodeIfPresent([String].self, forKey: .neverDialableSnake)
-        neverDialable = camel ?? snake ?? []
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(granted, forKey: .granted)
-        try container.encode(removed, forKey: .removed)
-        try container.encode(neverDialable, forKey: .neverDialable)
-    }
-}
-
-/// Response returned by GET /settings/policy.
-///
-/// Carries the structured policy plus where it came from and its live
-/// invariant status. There is no raw TOML on the wire: the dashboard edits
-/// the structured shape and the server owns serialization, so the file and
-/// the supervisor can never disagree on quoting. Writes apply live through
-/// the shared store, so the response never advertises a restart for policy.
-/// `localAccess` carries the PUT classification report and stays nil on GET.
-public struct PolicyResponse: Content, Sendable, Equatable {
-    public let policy: SecurityPolicyDTO
-    public let path: String
-    public let loadedFromDisk: Bool
-    public let violations: [String]
-    public let localAccess: PolicyLocalAccessReport?
-
-    public init(
-        policy: SecurityPolicyDTO,
-        path: String,
-        loadedFromDisk: Bool,
-        violations: [String],
-        localAccess: PolicyLocalAccessReport? = nil
-    ) {
-        self.policy = policy
-        self.path = path
-        self.loadedFromDisk = loadedFromDisk
-        self.violations = violations
-        self.localAccess = localAccess
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case policy
-        case path
-        case loadedFromDisk = "loaded_from_disk"
-        case violations
-        case localAccess
-        case localAccessSnake = "local_access"
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        policy = try container.decode(SecurityPolicyDTO.self, forKey: .policy)
-        path = try container.decode(String.self, forKey: .path)
-        loadedFromDisk = try container.decodeIfPresent(Bool.self, forKey: .loadedFromDisk) ?? false
-        violations = try container.decodeIfPresent([String].self, forKey: .violations) ?? []
-        let camel = try container.decodeIfPresent(PolicyLocalAccessReport.self, forKey: .localAccess)
-        let snake = try container.decodeIfPresent(PolicyLocalAccessReport.self, forKey: .localAccessSnake)
-        localAccess = camel ?? snake
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(policy, forKey: .policy)
-        try container.encode(path, forKey: .path)
-        try container.encode(loadedFromDisk, forKey: .loadedFromDisk)
-        try container.encode(violations, forKey: .violations)
-        try container.encodeIfPresent(localAccess, forKey: .localAccess)
-    }
-}
-
-/// Request for PUT /settings/policy.
-///
-/// Carries the structured candidate the caller wants persisted. The legacy
-/// raw-TOML shape is rejected with a 400 naming the field so an old editor
-/// learns the new contract instead of silently persisting unvalidated text.
-public struct UpdatePolicyRequest: Content, Sendable, Equatable {
-    public let policy: SecurityPolicyDTO
-
-    public init(policy: SecurityPolicyDTO) {
-        self.policy = policy
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case policy
-        case rawToml = "raw_toml"
-        case rawTomlCamel = "rawToml"
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        // Fail closed on the retired shape: accepting both keys would let an
-        // old dashboard keep sending unvalidated text alongside the new shape.
-        if container.contains(.rawToml) || container.contains(.rawTomlCamel) {
-            throw Abort(
-                .badRequest,
-                reason: "Invalid policy field 'raw_toml': raw TOML is no longer supported. "
-                    + "Send a structured 'policy' object with version, network, and credentials."
-            )
-        }
-        self.policy = try container.decode(SecurityPolicyDTO.self, forKey: .policy)
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(policy, forKey: .policy)
-    }
-}
-
-/// Request for POST /settings/policy/verify.
-///
-/// Carries a structured candidate for a pure check with no persistence. The
-/// retired raw-TOML shape is rejected the same way as PUT so editors get one
-/// consistent migration signal.
-public struct VerifyPolicyRequest: Content, Sendable, Equatable {
-    public let policy: SecurityPolicyDTO
-
-    public init(policy: SecurityPolicyDTO) {
-        self.policy = policy
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case policy
-        case rawToml = "raw_toml"
-        case rawTomlCamel = "rawToml"
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        if container.contains(.rawToml) || container.contains(.rawTomlCamel) {
-            throw Abort(
-                .badRequest,
-                reason: "Invalid policy field 'raw_toml': raw TOML is no longer supported. "
-                    + "Send a structured 'policy' object with version, network, and credentials."
-            )
-        }
-        self.policy = try container.decode(SecurityPolicyDTO.self, forKey: .policy)
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(policy, forKey: .policy)
-    }
-}
-
-/// Response returned by POST /settings/policy/verify.
-public struct VerifyPolicyResponse: Content, Sendable, Equatable {
-    public let valid: Bool
-    public let violations: [String]
-
-    public init(valid: Bool, violations: [String]) {
-        self.valid = valid
-        self.violations = violations
-    }
-}
-
-/// Request for POST /settings/policy/recheck-local and its apply sibling.
-///
-/// Carries the structured candidate the caller wants re-checked. Any
-/// client-supplied `localExemptions` is ignored (server-owned): the pane
-/// renders the field display-only and both endpoints derive the grant set
-/// from server-side classification instead.
-public struct RecheckLocalExemptionsRequest: Content, Sendable, Equatable {
-    public let policy: SecurityPolicyDTO
-
-    public init(policy: SecurityPolicyDTO) {
-        self.policy = policy
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case policy
-        case rawToml = "raw_toml"
-        case rawTomlCamel = "rawToml"
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        // Fail closed on the retired shape like PUT and verify so an old
-        // editor learns the structured contract instead of sending text.
-        if container.contains(.rawToml) || container.contains(.rawTomlCamel) {
-            throw Abort(
-                .badRequest,
-                reason: "Invalid policy field 'raw_toml': raw TOML is no longer supported. "
-                    + "Send a structured 'policy' object with version, network, and credentials."
-            )
-        }
-        self.policy = try container.decode(SecurityPolicyDTO.self, forKey: .policy)
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(policy, forKey: .policy)
-    }
-}
-
-/// Preview diff returned by POST /settings/policy/recheck-local.
-///
-/// `added` names grants the apply would create, `removed` names grants it
-/// would drop, `unchanged` names grants it would keep, and `unresolved`
-/// names entries that could not be proven without aborting. Every list is
-/// sorted so the pane renders a stable diff. Preview never writes.
-public struct RecheckLocalExemptionsResponse: Content, Sendable, Equatable {
-    public let added: [String]
-    public let removed: [String]
-    public let unchanged: [String]
-    public let unresolved: [String]
-
-    public init(added: [String] = [], removed: [String] = [], unchanged: [String] = [], unresolved: [String] = []) {
-        self.added = added
-        self.removed = removed
-        self.unchanged = unchanged
-        self.unresolved = unresolved
     }
 }

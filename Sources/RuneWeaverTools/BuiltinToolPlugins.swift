@@ -76,7 +76,7 @@ public enum BuiltinToolPlugins {
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
         bashConfig: BashConfig = BashConfig(),
-        sandboxConfig: SandboxConfig? = nil,
+        containersConfig: ContainersConfig? = nil,
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         desktopConfig: DesktopConfig = DesktopConfig(),
@@ -131,44 +131,26 @@ public enum BuiltinToolPlugins {
                 emailConfig: emailConfig
             )
         }
-        var tools: [any Tool] = []
-        if let emailConfig {
-            // Forward the same `[files]` policy the Files tools use so the
-            // email attachment export path enforces one policy, not defaults.
-            tools += EmailTools.makeTools(
-                emailConfig: emailConfig,
-                sandboxConfig: sandboxConfig ?? SandboxConfig(),
-                filesConfig: filesConfig ?? FilesConfig(),
-                securityConfig: securityConfig
-            )
-        }
-        tools += MessagesTools.makeTools(
-            chatDatabasePath: chatDatabasePath,
-            gateway: messagesGateway,
-            recipientAliasStore: recipientAliasStore
+        let resolvedContainers = containersConfig ?? ContainersConfig()
+        await StrictTurnRegistry.shared.applyContainersConfig(resolvedContainers)
+        let sharedLedger = await StrictTurnRegistry.shared.ephemeralLedger
+        let containerSeam = ContainerSeam(
+            containersConfig: resolvedContainers,
+            strictRegistry: StrictTurnRegistry.shared,
+            ephemeralLedger: sharedLedger
         )
-        // Calendar and reminders resolve nil to the shared production default:
-        // a single live EventKit store on EventKit platforms, fail-closed
-        // unavailable elsewhere. Sharing one instance keeps calendar and
-        // reminders on one EKEventStore object; callers inject a gateway to
-        // override (for example hermetic tests).
-        #if canImport(EventKit)
-            // One shared instance backs both gateways so calendar and reminders
-            // never mint separate system stores. Creating it unconditionally is
-            // cheap (no prompt; authorization stays observed fail-closed) and
-            // keeps the two nil-defaults on the same object.
-            let sharedLiveStore = LiveEventKitStore()
-            let effectiveCalendarGateway = calendarGateway ?? ProductionCalendarGateway(store: sharedLiveStore)
-            let effectiveRemindersGateway = remindersGateway ?? ProductionRemindersGateway(store: sharedLiveStore)
-        #else
-            let effectiveCalendarGateway = calendarGateway ?? ProductionCalendarGateway(store: UnavailableEventKitStore())
-            let effectiveRemindersGateway = remindersGateway ?? ProductionRemindersGateway(store: UnavailableEventKitStore())
-        #endif
-        tools += CalendarTools.makeTools(gateway: effectiveCalendarGateway)
-        tools += RemindersTools.makeTools(gateway: effectiveRemindersGateway)
-        tools += FilesTools.makeTools(
-            filesConfig: filesConfig ?? FilesConfig(),
+        var tools: [any Tool] = makeLeadingTools(
+            resolvedContainers: resolvedContainers,
+            sharedLedger: sharedLedger,
+            emailConfig: emailConfig,
+            filesConfig: filesConfig,
+            securityConfig: securityConfig,
+            messagesGateway: messagesGateway,
+            chatDatabasePath: chatDatabasePath,
+            calendarGateway: calendarGateway,
+            remindersGateway: remindersGateway,
             stagedFilesStore: stagedFilesStore,
+            recipientAliasStore: recipientAliasStore,
             supersededReviewNotifier: supersededReviewNotifier
         )
         // Bash always registers so GET /tools stays stable; a disabled
@@ -188,7 +170,8 @@ public enum BuiltinToolPlugins {
             allowUnsandboxedFallback: false,
             egressSupervisor: supervisor,
             workspaceConfig: workspaceConfig,
-            workspaceStore: sharedWorkspace
+            workspaceStore: sharedWorkspace,
+            containers: containerSeam
         )
         tools.append(bashTool)
         tools.append(QuestionAskTool())
@@ -281,7 +264,7 @@ public enum BuiltinToolPlugins {
             emailConfig: config.email,
             filesConfig: config.files,
             bashConfig: config.bash,
-            sandboxConfig: config.sandbox,
+            containersConfig: config.containers,
             browserConfig: config.browser,
             mediaConfig: config.media,
             desktopConfig: config.desktop,
@@ -341,7 +324,7 @@ public enum BuiltinToolPlugins {
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
         bashConfig: BashConfig = BashConfig(),
-        sandboxConfig: SandboxConfig? = nil,
+        containersConfig: ContainersConfig? = nil,
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         desktopConfig: DesktopConfig = DesktopConfig(),
@@ -383,7 +366,7 @@ public enum BuiltinToolPlugins {
             emailConfig: emailConfig,
             filesConfig: filesConfig,
             bashConfig: bashConfig,
-            sandboxConfig: sandboxConfig,
+            containersConfig: containersConfig,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
             desktopConfig: desktopConfig,
@@ -542,6 +525,65 @@ extension BuiltinToolPlugins {
             + MediaTools.toolNames
             + DesktopTools.allToolNames
             + FanOutTools.toolNames
+    }
+
+    /// Builds the leading suites (Email, Messages, Calendar, Reminders, Files) in registration order.
+    private static func makeLeadingTools(
+        resolvedContainers: ContainersConfig,
+        sharedLedger: EphemeralContainerLedger,
+        emailConfig: EmailConfig? = nil,
+        filesConfig: FilesConfig? = nil,
+        securityConfig: SecurityConfig = SecurityConfig(),
+        messagesGateway: (any MessagesGateway)? = nil,
+        chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
+        calendarGateway: (any CalendarGateway)? = nil,
+        remindersGateway: (any RemindersGateway)? = nil,
+        stagedFilesStore: StagedFilesStore? = nil,
+        recipientAliasStore: (any MessageAliasStoring)? = nil,
+        supersededReviewNotifier: (@Sendable (String) async -> Void)? = nil
+    ) -> [any Tool] {
+        var tools: [any Tool] = []
+        if let emailConfig {
+            // Forward the same `[files]` policy the Files tools use so the
+            // email attachment export path enforces one policy, not defaults.
+            tools += EmailTools.makeTools(
+                emailConfig: emailConfig,
+                containersConfig: resolvedContainers,
+                filesConfig: filesConfig ?? FilesConfig(),
+                ephemeralLedger: sharedLedger,
+                securityConfig: securityConfig
+            )
+        }
+        tools += MessagesTools.makeTools(
+            chatDatabasePath: chatDatabasePath,
+            gateway: messagesGateway,
+            recipientAliasStore: recipientAliasStore
+        )
+        // Calendar and reminders resolve nil to the shared production default:
+        // a single live EventKit store on EventKit platforms, fail-closed
+        // unavailable elsewhere. Sharing one instance keeps calendar and
+        // reminders on one EKEventStore object; callers inject a gateway to
+        // override (for example hermetic tests).
+        #if canImport(EventKit)
+            // One shared instance backs both gateways so calendar and reminders
+            // never mint separate system stores. Creating it unconditionally is
+            // cheap (no prompt; authorization stays observed fail-closed) and
+            // keeps the two nil-defaults on the same object.
+            let sharedLiveStore = LiveEventKitStore()
+            let effectiveCalendarGateway = calendarGateway ?? ProductionCalendarGateway(store: sharedLiveStore)
+            let effectiveRemindersGateway = remindersGateway ?? ProductionRemindersGateway(store: sharedLiveStore)
+        #else
+            let effectiveCalendarGateway = calendarGateway ?? ProductionCalendarGateway(store: UnavailableEventKitStore())
+            let effectiveRemindersGateway = remindersGateway ?? ProductionRemindersGateway(store: UnavailableEventKitStore())
+        #endif
+        tools += CalendarTools.makeTools(gateway: effectiveCalendarGateway)
+        tools += RemindersTools.makeTools(gateway: effectiveRemindersGateway)
+        tools += FilesTools.makeTools(
+            filesConfig: filesConfig ?? FilesConfig(),
+            stagedFilesStore: stagedFilesStore,
+            supersededReviewNotifier: supersededReviewNotifier
+        )
+        return tools
     }
 
     /// Builds the mandatory egress supervisor from the already-resolved store.

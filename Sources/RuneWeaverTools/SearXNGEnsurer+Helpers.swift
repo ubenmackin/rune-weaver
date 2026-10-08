@@ -55,51 +55,28 @@ extension SearXNGEnsurer {
     }
 
     /// Known install locations always probed after PATH entries.
-    /// A minimal or GUI-launched PATH often omits Homebrew, so the fallback
-    /// keeps a standard install discoverable without trusting PATH alone.
-    public static let fallbackRuntimeDirectories = ["/opt/homebrew/bin", "/usr/local/bin"]
+    /// Single-sourced on the strict runner so detonation and search share one lookup.
+    public static var fallbackRuntimeDirectories: [String] {
+        StrictContainerRunner.fallbackRuntimeDirectories
+    }
 
     /// Ordered directories probed for the container runtime.
-    /// PATH order wins so an operator override shadows the fallback, while the
-    /// appended fallbacks keep a Homebrew install visible when PATH is minimal.
-    /// Duplicates collapse so a PATH that already carries a fallback probes it
-    /// once; blanks are skipped so empty segments never become relative probes.
+    /// Single-sourced on the strict runner; PATH order wins with fallbacks appended.
     /// - Parameter pathValue: Raw `PATH` value, or nil when unset.
     /// - Returns: Deduplicated directories, PATH entries first.
     public static func runtimeSearchDirectories(pathValue: String?) -> [String] {
-        var ordered: [String] = []
-        var seen = Set<String>()
-        func append(_ dir: String) {
-            let trimmed = dir.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { return }
-            ordered.append(trimmed)
-        }
-        if let pathValue {
-            for part in pathValue.split(separator: ":") {
-                append(String(part))
-            }
-        }
-        for fallback in fallbackRuntimeDirectories {
-            append(fallback)
-        }
-        return ordered
+        StrictContainerRunner.runtimeSearchDirectories(pathValue: pathValue)
     }
 
     /// Ordered directories probed for the container runtime in this process.
-    /// Reads the live `PATH` so production and diagnostics share one ordering
-    /// instead of drifting between call sites.
+    /// Single-sourced on the strict runner so production and diagnostics share one ordering.
     /// - Returns: Deduplicated directories, PATH entries first.
     public static func runtimeSearchDirectories() -> [String] {
-        runtimeSearchDirectories(pathValue: ProcessInfo.processInfo.environment["PATH"])
+        StrictContainerRunner.runtimeSearchDirectories()
     }
 
     /// Resolves the Apple Container runtime with no Docker fallback.
-    /// Docker is intentionally unsupported: the soul reuses the Tier-3
-    /// dependency instead of adding a second container runtime, so hosts
-    /// without `container` fail closed with the escape-hatch guidance.
-    /// Probes the shared search ordering so a minimal PATH never hides a
-    /// Homebrew install; nil preserves the missing-runtime contract for the
-    /// cascade to fail closed with guidance.
+    /// Single-sourced on the strict runner with the runtime pinned to `container`.
     /// - Parameters:
     ///   - searchDirectories: Ordered directories to probe.
     ///   - isExecutable: Filesystem probe, injectable so tests can stub an install.
@@ -108,37 +85,30 @@ extension SearXNGEnsurer {
         searchDirectories: [String],
         isExecutable: (String) -> Bool
     ) -> URL? {
-        let runtime = "container"
-        for dir in searchDirectories {
-            let candidate = URL(fileURLWithPath: dir).appendingPathComponent(runtime)
-            if isExecutable(candidate.path) {
-                return candidate
-            }
-        }
-        return nil
+        StrictContainerRunner.resolveRuntimeURL(
+            runtime: "container",
+            searchDirectories: searchDirectories,
+            isExecutable: isExecutable
+        )
     }
 
     /// Resolves the runtime against an explicit PATH value for testing.
-    /// Keeps the production lookup honest by routing the same fallback
-    /// ordering through a stubbed filesystem probe.
+    /// Single-sourced on the strict runner so the stubbed-filesystem coverage
+    /// exercises the same ordering production uses.
     /// - Parameters:
     ///   - pathValue: Raw `PATH` value driving the search ordering.
     ///   - isExecutable: Filesystem probe, injectable so tests can stub an install.
     /// - Returns: Executable URL, or nil when missing everywhere searched.
     public static func resolveRuntimeURL(pathValue: String?, isExecutable: (String) -> Bool) -> URL? {
-        resolveRuntimeURL(searchDirectories: runtimeSearchDirectories(pathValue: pathValue), isExecutable: isExecutable)
+        StrictContainerRunner.resolveRuntimeURL(runtime: "container", pathValue: pathValue, isExecutable: isExecutable)
     }
 
     /// Resolves the Apple Container runtime with no Docker fallback.
-    /// Docker is intentionally unsupported: the soul reuses the Tier-3
-    /// dependency instead of adding a second container runtime, so hosts
-    /// without `container` fail closed with the escape-hatch guidance.
+    /// Single-sourced on the strict runner; hosts without `container` fail
+    /// closed with the escape-hatch guidance.
     /// - Returns: Executable URL, or nil when the Apple Container CLI is missing.
     public static func resolveRuntimeURL() -> URL? {
-        resolveRuntimeURL(
-            searchDirectories: runtimeSearchDirectories(),
-            isExecutable: { FileManager.default.isExecutableFile(atPath: $0) }
-        )
+        StrictContainerRunner.resolveRuntimeURL(runtime: "container")
     }
 
     /// Fast probe budget for the container system daemon check.

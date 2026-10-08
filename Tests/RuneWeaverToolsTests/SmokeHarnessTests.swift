@@ -114,9 +114,9 @@ private func makeSmokeStack(gateway: any EmailIMAPGateway) async throws -> (
     let episodesPath = base.appendingPathComponent("episodes.db").path
     let conversations = ConversationManager(episodesDBPath: episodesPath)
     let audit = ToolsTestSupport.AuditCapture()
-    let sandbox = SandboxConfig()
+    let sandbox = ContainersConfig()
     let bus = ToolBus(permissionGate: PermissionGate())
-    for tool in EmailTools.makeTools(emailConfig: ToolsTestSupport.testEmailConfig(), gateway: gateway, sandboxConfig: sandbox) {
+    for tool in EmailTools.makeTools(emailConfig: ToolsTestSupport.testEmailConfig(), gateway: gateway, containersConfig: sandbox) {
         await bus.register(tool: tool)
     }
     await MemoryTools.register(on: bus, engine: engine, audit: { audit.record($0) })
@@ -573,7 +573,7 @@ struct SmokeHarnessTests {
             let attachmentTool = EmailAttachmentTool(
                 emailConfig: config,
                 gateway: gateway,
-                sandboxConfig: SandboxConfig()
+                containersConfig: ContainersConfig()
             )
             let stagedOutput = try await attachmentTool.execute(
                 input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),

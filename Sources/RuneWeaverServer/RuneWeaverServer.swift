@@ -41,14 +41,15 @@ struct ServerSchedulerLifecycle: LifecycleHandler {
     }
 }
 
-/// Lifecycle hook running sandbox staging reclamation on a cadence.
+/// Lifecycle hook running sandbox container reclamation on a cadence.
 struct SandboxCleanupLifecycle: LifecycleHandler {
     let scheduler: SandboxCleanupScheduler
-    let config: SandboxConfig
+    let config: ContainersConfig
+    let approvals: ApprovalQueue
 
     func didBootAsync(_: Application) async throws {
-        await scheduler.runOnce(config: config)
-        await scheduler.start(config: config)
+        await scheduler.runOnce(config: config, approvals: approvals)
+        await scheduler.start(config: config, approvals: approvals)
     }
 
     func shutdownAsync(_: Application) async {
@@ -117,7 +118,7 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext, auth
     app.http.server.configuration.shutdownTimeout = .seconds(2)
     app.lifecycle.use(WSHubShutdownLifecycle(hub: context.hub))
     app.lifecycle.use(ServerSchedulerLifecycle(worker: context.schedulerWorker))
-    app.lifecycle.use(SandboxCleanupLifecycle(scheduler: context.sandboxCleanup, config: context.sandboxConfig))
+    app.lifecycle.use(SandboxCleanupLifecycle(scheduler: context.sandboxCleanup, config: context.containersConfig, approvals: context.approvals))
     app.lifecycle.use(BrowserWarmupLifecycle())
     app.runeWeaver = context
     app.runeWeaverAuth = resolvedAuth

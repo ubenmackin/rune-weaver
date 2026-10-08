@@ -1,9 +1,18 @@
-// Rune Weaver Tools — Ephemeral microVM detonation for email archives.
+// Rune Weaver Tools — Ephemeral zero-mount container detonation for email archives.
+//
+// Purpose: own archive inspection in forced zero-mount ephemeral runs, keeping
+// untrusted archive bytes off the host and off every shared mount.
+// Scope: the detonation lifecycle (shared-ledger admission, zero-volume spawn,
+// stdin exec, manifest parse, immediate removal plus best-effort reap), the
+// guest scripts, and the result shape.
+// Architectural role: single owner for archive detonation beside the other
+// Tools sandbox helpers; spawning rides the shared container builder and the
+// shared ephemeral ledger owns admission.
 
 import Foundation
 import RuneWeaverCore
 
-/// Result of detonating one archive inside an isolated microVM.
+/// Result of detonating one archive inside an isolated ephemeral container.
 public struct EmailArchiveDetonationResult: Sendable, Equatable {
     /// Ephemeral detonation correlation id (`runeweaver-session-<uuid>`).
     public let sessionId: String
@@ -23,45 +32,101 @@ public struct EmailArchiveDetonationResult: Sendable, Equatable {
     }
 }
 
-/// Isolates archive inspection inside an ephemeral microVM with home-mount none enforced
-/// and no ssh-agent forwarding (no HOME mount; stdin in, stdout out; never passes --ssh
-/// and strips SSH_AUTH_SOCK).
+/// Isolates archive inspection inside an ephemeral zero-mount container with
+/// no host mounts (stdin in, stdout out; read-only rootfs over a tmpfs tmp).
 public protocol EmailArchiveDetonator: Sendable {
     /// Detonates archive bytes and optionally extracts one entry.
     func detonate(filename: String, contentType: String, data: Data, subpath: String?) async throws -> EmailArchiveDetonationResult
 }
 
-/// Ephemeral microVM detonator backed by the container machine manager.
+/// Ephemeral zero-mount detonator backed by the shared container builder.
+///
+/// Every run admits through the shared ephemeral ledger before spawning, then
+/// creates a zero-volume container with the pinned image, a read-only rootfs
+/// over a tmpfs `tmp`, no DNS, and the configured memory cap. Archive bytes
+/// enter by stdin and only the manifest plus one extracted entry cross back.
+/// Detonation containers share the strict name prefix, so the shared strict
+/// sweep reclaims crash orphans the immediate removal missed.
 public struct LiveEmailArchiveDetonator: EmailArchiveDetonator, Sendable {
-    /// Container CLI runtime name or path.
-    public let containerRuntime: String
-    /// OCI base image for detonation guests.
-    public let containerBaseImage: String
-    /// Maximum concurrent detonation machines, enforced before spawn.
-    public let maxConcurrentMachines: Int
+    /// Pinned OCI image for detonation guests; never config-driven.
+    public static let detonationImage = "alpine:3.22"
 
-    /// Creates a live detonator.
+    /// Guest memory cap applied at creation, derived from the containers config.
+    public let memory: String
+    /// Host runtime behind the shared builder (live by default, stub in tests).
+    private let runtime: any ContainerHostRuntime
+    /// Shared ephemeral admission ledger checked before every spawn.
+    private let ephemeralLedger: EphemeralContainerLedger
+
+    /// Creates a live detonator on the containers policy.
     public init(
-        containerRuntime: String = SandboxConfig.defaultContainerRuntime,
-        containerBaseImage: String = SandboxConfig.defaultContainerBaseImage,
-        maxConcurrentMachines: Int = SandboxConfig.defaultMaxConcurrentMachines
+        memoryMB: Int = ContainersConfig.defaultMemoryMB,
+        maxConcurrent: Int = ContainersConfig.defaultMaxConcurrent,
+        runtime: (any ContainerHostRuntime)? = nil,
+        ephemeralLedger: EphemeralContainerLedger? = nil
     ) {
-        self.containerRuntime = containerRuntime
-        self.containerBaseImage = containerBaseImage
-        self.maxConcurrentMachines = maxConcurrentMachines
+        let resolvedRuntime = runtime ?? LiveContainerHostRuntime()
+        let policy = ContainersConfig(memoryMB: memoryMB, maxConcurrent: maxConcurrent)
+        let clampedMemory = StrictContainerRunner.clampedMemoryMB(for: policy)
+        let clampedConcurrent = StrictContainerRunner.clampedMaxConcurrent(for: policy)
+        self.memory = StrictContainerRunner.memoryCapString(forMB: clampedMemory)
+        self.runtime = resolvedRuntime
+        self.ephemeralLedger = ephemeralLedger ?? EphemeralContainerLedger(runtime: resolvedRuntime, maxConcurrent: clampedConcurrent)
     }
 
-    /// Detonates archive bytes in a fresh ephemeral machine.
+    /// Creates a detonator from the loaded policy sharing one ledger.
+    public init(
+        containersConfig: ContainersConfig,
+        runtime: (any ContainerHostRuntime)? = nil,
+        ephemeralLedger: EphemeralContainerLedger? = nil
+    ) {
+        self.init(
+            memoryMB: containersConfig.memoryMB,
+            maxConcurrent: containersConfig.maxConcurrent,
+            runtime: runtime,
+            ephemeralLedger: ephemeralLedger
+        )
+    }
+
+    /// Detonates archive bytes in a fresh zero-mount container.
     public func detonate(filename: String, contentType _: String, data: Data, subpath: String?) async throws -> EmailArchiveDetonationResult {
-        let sessionId = "runeweaver-session-\(UUID().uuidString.lowercased())"
-        try await enforceConcurrencyLimit()
-        try await ContainerMachineManager.createMachine(name: sessionId, image: containerBaseImage, runtime: containerRuntime)
+        let runID = UUID()
+        let sessionId = "runeweaver-session-\(runID.uuidString.lowercased())"
+        let containerName = StrictContainerRunner.strictContainerName(for: runID)
+        // Admission rides the shared ledger before any spawn so the cap denies
+        // fail-closed past its limit and a census failure never spawns.
+        try await ephemeralLedger.admit(timeoutSeconds: StrictContainerRunner.defaultProcessTimeoutSeconds)
+        try runtime.probe()
         do {
-            let listing = try await ContainerMachineManager.run(
-                machineName: sessionId,
-                command: ["sh", "-c", Self.listScript],
-                runtime: containerRuntime,
-                inputData: data
+            let created = try await runtime.run(
+                arguments: StrictContainerRunner.containerCreateArguments(
+                    name: containerName,
+                    image: Self.detonationImage,
+                    workdir: Self.detonationWorkdir,
+                    networkDenied: true,
+                    memory: memory
+                ),
+                timeoutSeconds: StrictContainerRunner.defaultProcessTimeoutSeconds
+            )
+            guard created.exitCode == 0 else {
+                throw ContainerOperationError.operationFailed(
+                    "Failed to create detonation container '\(containerName)': \(created.stderrString)"
+                )
+            }
+            let started = try await runtime.run(
+                arguments: StrictContainerRunner.containerStartArguments(name: containerName),
+                timeoutSeconds: StrictContainerRunner.defaultProcessTimeoutSeconds
+            )
+            guard started.exitCode == 0 else {
+                throw ContainerOperationError.operationFailed(
+                    "Failed to start detonation container '\(containerName)': \(started.stderrString)"
+                )
+            }
+            await ephemeralLedger.register(name: containerName)
+            let listing = try await runtime.run(
+                arguments: Self.detonationExecArguments(name: containerName, script: Self.listScript),
+                inputData: data,
+                timeoutSeconds: StrictContainerRunner.defaultProcessTimeoutSeconds
             )
             guard listing.exitCode == 0 else {
                 throw EmailIMAPError.bridgeFailed("Could not inspect archive '\(filename)': unsupported or corrupt archive")
@@ -74,17 +139,16 @@ public struct LiveEmailArchiveDetonator: EmailArchiveDetonator, Sendable {
             let truncated = parsed.count > capped.count
             var entryData: Data?
             if let subpath {
-                guard capped.contains(where: { $0.path == subpath }) || parsed.contains(where: { $0.path == subpath }) else {
+                guard parsed.contains(where: { $0.path == subpath }) else {
                     throw EmailIMAPError.bridgeFailed("Invalid subpath: entry not found in archive")
                 }
                 if let known = (parsed.first(where: { $0.path == subpath }))?.sizeBytes, known > EmailAttachmentTool.maxAttachmentBytes {
                     throw EmailIMAPError.bridgeFailed(EmailAttachmentTool.oversizeNote(sizeBytes: known))
                 }
-                let extracted = try await ContainerMachineManager.run(
-                    machineName: sessionId,
-                    command: ["sh", "-c", Self.extractScript, "sh", subpath],
-                    runtime: containerRuntime,
-                    inputData: data
+                let extracted = try await runtime.run(
+                    arguments: Self.detonationExecArguments(name: containerName, script: Self.extractScript, entry: subpath),
+                    inputData: data,
+                    timeoutSeconds: StrictContainerRunner.defaultProcessTimeoutSeconds
                 )
                 guard extracted.exitCode == 0 else {
                     throw EmailIMAPError.bridgeFailed("Invalid subpath: entry not found in archive")
@@ -94,12 +158,30 @@ public struct LiveEmailArchiveDetonator: EmailArchiveDetonator, Sendable {
                 }
                 entryData = extracted.stdout
             }
-            await Self.bestEffortReap(name: sessionId, runtime: containerRuntime)
+            await Self.bestEffortReap(name: containerName, runtime: runtime)
+            await ephemeralLedger.unregister(name: containerName)
             return EmailArchiveDetonationResult(sessionId: sessionId, manifest: capped, manifestTruncated: truncated, entryData: entryData)
         } catch {
-            await Self.bestEffortReap(name: sessionId, runtime: containerRuntime)
+            await Self.bestEffortReap(name: containerName, runtime: runtime)
+            await ephemeralLedger.unregister(name: containerName)
             throw error
         }
+    }
+
+    /// Guest workdir inside the zero-mount container; the tmpfs tmp is the only writable spot.
+    private static let detonationWorkdir = "/tmp"
+
+    /// Guest exec arguments piping stdin into the pinned image's shell.
+    ///
+    /// The pinned alpine image ships no bash, so the exec runs busybox `sh`;
+    /// `-i` keeps stdin open for the payload cat, and the trailing argv entry
+    /// binds as `$1` for the extract script.
+    static func detonationExecArguments(name: String, script: String, entry: String? = nil) -> [String] {
+        var args = ["exec", "-i", name, "/bin/sh", "-c", script]
+        if let entry {
+            args.append(contentsOf: ["sh", entry])
+        }
+        return args
     }
 
     /// Guest script listing archive entries from stdin bytes.
@@ -122,41 +204,27 @@ public struct LiveEmailArchiveDetonator: EmailArchiveDetonator, Sendable {
             + "exit 1"
     }
 
-    /// Stops and deletes a detonation machine without masking the caller error.
-    private static func bestEffortReap(name: String, runtime: String) async {
+    /// Stops and deletes the detonation container without masking the caller error.
+    private static func bestEffortReap(name: String, runtime: any ContainerHostRuntime) async {
         do {
-            try await ContainerMachineManager.stopMachine(name: name, runtime: runtime)
+            _ = try await runtime.run(
+                arguments: StrictContainerRunner.containerStopArguments(name: name),
+                timeoutSeconds: StrictContainerRunner.defaultProcessTimeoutSeconds
+            )
         } catch is CancellationError {
             // allow deletion attempt even if stop was cancelled
         } catch {
-            RuneWeaverLog.tools.debug("bestEffortReap: stopMachine \(name) failed: \(error.localizedDescription)")
+            RuneWeaverLog.tools.debug("bestEffortReap: stop \(name) failed: \(error.localizedDescription)")
         }
         do {
-            try await ContainerMachineManager.deleteMachine(name: name, runtime: runtime)
+            _ = try await runtime.run(
+                arguments: StrictContainerRunner.containerDeleteArguments(name: name),
+                timeoutSeconds: StrictContainerRunner.defaultProcessTimeoutSeconds
+            )
         } catch is CancellationError {
             return
         } catch {
-            RuneWeaverLog.tools.debug("bestEffortReap: deleteMachine \(name) failed: \(error.localizedDescription)")
-        }
-    }
-
-    /// Fails closed when the concurrent detonation cap is already reached.
-    private func enforceConcurrencyLimit() async throws {
-        let cap = max(1, maxConcurrentMachines)
-        do {
-            let live = try await ContainerMachineManager.listMachines(
-                prefix: ContainerMachineManager.machinePrefix,
-                runtime: containerRuntime
-            )
-            guard live.count < cap else {
-                throw EmailIMAPError.bridgeFailed(
-                    "Archive detonation limit reached (\(cap) concurrent sessions); try again after idle sessions are reclaimed."
-                )
-            }
-        } catch let bridge as EmailIMAPError {
-            throw bridge
-        } catch {
-            RuneWeaverLog.tools.debug("EmailArchiveDetonation: Container pre-check listing skipped: \(error.localizedDescription); deferring to creation.")
+            RuneWeaverLog.tools.debug("bestEffortReap: delete \(name) failed: \(error.localizedDescription)")
         }
     }
 }
