@@ -42,89 +42,6 @@ public enum BuiltinToolPlugins {
         DesktopTools.allToolNames + FanOutTools.toolNames + AgentTools.toolNames
     )
 
-    /// Builds the shared five-tool set for one `[browser]` policy.
-    /// - Parameters:
-    ///   - browserConfig: `[browser]` policy feeding search, fetch, and API tools.
-    ///   - mediaConfig: Optional media policy for auto-allowing media server origins.
-    ///   - llmServerURLs: Configured LLM `server_url` values exempted from the SSRF loopback deny.
-    ///   - gateway: Playwright gateway shared by the browser tools.
-    ///   - searchTransport: Hermetic SearXNG transport for tests; live session when nil.
-    ///   - fetchTransport: Hermetic fetch transport for tests; live session when nil.
-    ///   - apiTransport: Hermetic API transport for tests; live session when nil.
-    ///   - ensurer: Lifecycle ensurer for tests; shared actor when nil.
-    ///   - secrets: Shared secrets backing surrogate resolution; fresh instance when nil.
-    ///   - policyStore: Shared security policy store. Nil constructs and loads
-    ///     the factory default, which reads `~/.runeweaver/policy.toml`, seeds
-    ///     safe deny-by-default defaults on first run, and fails closed when
-    ///     the file cannot be verified.
-    /// - Returns: Tools in registration order.
-    /// - Throws: `PolicyInvariantError` when no verified policy is available;
-    ///   an unsupervised `api.request` is never registered.
-    public static func makeTools(
-        browserConfig: BrowserConfig = BrowserConfig(),
-        mediaConfig: MediaConfig? = nil,
-        llmServerURLs: [String] = [],
-        gateway: (any BrowserPlaywrightGateway)? = nil,
-        searchTransport: (any WebSearchTransport)? = nil,
-        fetchTransport: (any WebFetchTransport)? = nil,
-        apiTransport: (any ApiRequestTransport)? = nil,
-        ensurer: (any SearXNGEnsuring)? = nil,
-        secrets: SecretsManager? = nil,
-        policyStore: PolicyStore? = nil,
-        egressSupervisor: OutboundEgressSupervisor? = nil
-    ) async throws -> [any Tool] {
-        // Resolve the one store first so the supervisor and the merged
-        // origins read the same verified snapshot; an injected store stays
-        // authoritative while nil loads the factory default.
-        let resolvedStore = await PolicyStore.makeLoaded(
-            injected: policyStore
-        )
-        let baseOrigins = ApiSSRFGuard.allowlistedOrigins(
-            browserConfig: browserConfig,
-            mediaConfig: mediaConfig,
-            llmServerURLs: llmServerURLs
-        )
-        // Effective exemptions union the config-derived auto origins
-        // (`searxng_url`, enabled media LAN URLs, LLM server URLs) with the
-        // owner-declared local grants; never-exempt targets stay refused
-        // inside the guard even when present in either set.
-        let localExemptions: Set<String> = await (try? resolvedStore.snapshot().network.localExemptions) ?? []
-        let mergedOrigins = baseOrigins.union(localExemptions)
-        let supervisor: OutboundEgressSupervisor = if let egressSupervisor {
-            egressSupervisor
-        } else {
-            try await makeEgressSupervisor(
-                resolvedStore: resolvedStore,
-                secrets: secrets,
-                browserConfig: browserConfig,
-                mediaConfig: mediaConfig,
-                llmServerURLs: llmServerURLs
-            )
-        }
-        return WebTools.makeTools(
-            browserConfig: browserConfig,
-            mediaConfig: mediaConfig,
-            searchTransport: searchTransport,
-            fetchTransport: fetchTransport,
-            ensurer: ensurer,
-            supervisor: supervisor,
-            extraAllowlistedOrigins: mergedOrigins
-        )
-            + BrowserTools.makeTools(
-                gateway: gateway,
-                browserConfig: browserConfig,
-                mediaConfig: mediaConfig,
-                llmServerURLs: llmServerURLs,
-                allowlistedOrigins: mergedOrigins,
-                egressSupervisor: supervisor
-            )
-            + ApiRequestTools.makeTools(
-                supervisor: supervisor,
-                transport: apiTransport,
-                browserConfig: browserConfig
-            )
-    }
-
     /// Builds the full built-in tool suite (Email, Messages, Calendar, Reminders, Files, Bash, Memory, Goals, Agent scripts, Web, Browser, API, Media, Desktop, Fan-out)
     /// from component configurations.
     ///
@@ -509,6 +426,97 @@ public enum BuiltinToolPlugins {
             // registration).
             await bus.register(tool: tool, isEnabled: !shipsDisabled.contains(tool.name))
         }
+    }
+}
+
+// MARK: - Web / Browser Tool Suite
+
+extension BuiltinToolPlugins {
+    /// Builds the shared five-tool set for one `[browser]` policy.
+    /// - Parameters:
+    ///   - browserConfig: `[browser]` policy feeding search, fetch, and API tools.
+    ///   - mediaConfig: Optional media policy for auto-allowing media server origins.
+    ///   - llmServerURLs: Configured LLM `server_url` values exempted from the SSRF loopback deny.
+    ///   - gateway: Playwright gateway shared by the browser tools.
+    ///   - searchTransport: Hermetic SearXNG transport for tests; live session when nil.
+    ///   - fetchTransport: Hermetic fetch transport for tests; live session when nil.
+    ///   - apiTransport: Hermetic API transport for tests; live session when nil.
+    ///   - ensurer: Lifecycle ensurer for tests; shared actor when nil.
+    ///   - secrets: Shared secrets backing surrogate resolution; fresh instance when nil.
+    ///   - policyStore: Shared security policy store. Nil constructs and loads
+    ///     the factory default, which reads `~/.runeweaver/policy.toml`, seeds
+    ///     safe deny-by-default defaults on first run, and fails closed when
+    ///     the file cannot be verified.
+    /// - Returns: Tools in registration order.
+    /// - Throws: `PolicyInvariantError` when no verified policy is available;
+    ///   an unsupervised `api.request` is never registered.
+    public static func makeTools(
+        browserConfig: BrowserConfig = BrowserConfig(),
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        gateway: (any BrowserPlaywrightGateway)? = nil,
+        searchTransport: (any WebSearchTransport)? = nil,
+        fetchTransport: (any WebFetchTransport)? = nil,
+        apiTransport: (any ApiRequestTransport)? = nil,
+        ensurer: (any SearXNGEnsuring)? = nil,
+        secrets: SecretsManager? = nil,
+        policyStore: PolicyStore? = nil,
+        egressSupervisor: OutboundEgressSupervisor? = nil
+    ) async throws -> [any Tool] {
+        // Resolve the one store first so the supervisor and the merged
+        // origins read the same verified snapshot; an injected store stays
+        // authoritative while nil loads the factory default.
+        let resolvedStore = await PolicyStore.makeLoaded(
+            injected: policyStore
+        )
+        let baseOrigins = ApiSSRFGuard.allowlistedOrigins(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs
+        )
+        // Effective exemptions union the config-derived auto origins
+        // (`searxng_url`, enabled media LAN URLs, LLM server URLs) with the
+        let localExemptions: Set<String>
+        do {
+            localExemptions = try await resolvedStore.snapshot().network.localExemptions
+        } catch {
+            RuneWeaverLog.tools.warning("BuiltinToolPlugins: failed to read policy store snapshot for network exemptions: \(error.localizedDescription)")
+            localExemptions = []
+        }
+        let mergedOrigins = baseOrigins.union(localExemptions)
+        let supervisor: OutboundEgressSupervisor = if let egressSupervisor {
+            egressSupervisor
+        } else {
+            try await makeEgressSupervisor(
+                resolvedStore: resolvedStore,
+                secrets: secrets,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs
+            )
+        }
+        return WebTools.makeTools(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            searchTransport: searchTransport,
+            fetchTransport: fetchTransport,
+            ensurer: ensurer,
+            supervisor: supervisor,
+            extraAllowlistedOrigins: mergedOrigins
+        )
+            + BrowserTools.makeTools(
+                gateway: gateway,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                allowlistedOrigins: mergedOrigins,
+                egressSupervisor: supervisor
+            )
+            + ApiRequestTools.makeTools(
+                supervisor: supervisor,
+                transport: apiTransport,
+                browserConfig: browserConfig
+            )
     }
 }
 

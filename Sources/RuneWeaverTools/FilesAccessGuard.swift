@@ -81,6 +81,70 @@ public enum FilesAccessGuard: Sendable {
         ".runeweaver/searxng/*"
     ]
 
+    /// Resolves virtual cloud shortcuts (e.g. "iCloud", "iCloud Drive", "Dropbox", "OneDrive", "Google Drive", "GoogleDrive")
+    /// to their actual canonical directory path on the local filesystem.
+    ///
+    /// If the path matches or begins with a recognized cloud shortcut, the prefix is replaced with
+    /// the first matching cloud root found on disk. If no matching directory exists or the path is
+    /// not a recognized shortcut, the original path is returned unmodified.
+    /// - Parameters:
+    ///   - rawPath: User- or agent-supplied path string.
+    ///   - homeDirectoryURL: Home directory override (for testing).
+    /// - Returns: Resolved filesystem path string, or original path if no shortcut matched.
+    public static func resolveCloudShortcut(_ rawPath: String, homeDirectoryURL: URL? = nil) -> String {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return rawPath }
+
+        var stripped = trimmed
+        if stripped == "~" {
+            return trimmed
+        } else if stripped.hasPrefix("~/") {
+            stripped = String(stripped.dropFirst(2))
+        } else if stripped.hasPrefix("~") {
+            var withoutTilde = String(stripped.dropFirst(1))
+            if withoutTilde.hasPrefix("/") {
+                withoutTilde = String(withoutTilde.dropFirst(1))
+            }
+            stripped = withoutTilde
+        } else if stripped.hasPrefix("/") {
+            let candidate = String(stripped.dropFirst(1))
+            let candidateLower = candidate.lowercased()
+            let prefixes = ["icloud", "icloud drive", "dropbox", "onedrive", "google drive", "googledrive"]
+            if prefixes.contains(where: { candidateLower == $0 || candidateLower.hasPrefix($0 + "/") }) {
+                stripped = candidate
+            }
+        }
+
+        let home = resolvedHomeURL(overriding: homeDirectoryURL)
+        let fileManager = FileManager.default
+
+        let lower = stripped.lowercased()
+        let providers = cloudProviders(home: home, fileManager: fileManager)
+
+        for provider in providers {
+            for alias in provider.aliases {
+                if lower == alias {
+                    for candidate in provider.findRoots() {
+                        var isDir: ObjCBool = false
+                        if fileManager.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue {
+                            return candidate.path
+                        }
+                    }
+                } else if lower.hasPrefix(alias + "/") {
+                    let remainder = String(stripped.dropFirst(alias.count + 1))
+                    for candidate in provider.findRoots() {
+                        var isDir: ObjCBool = false
+                        if fileManager.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue {
+                            return candidate.appendingPathComponent(remainder).path
+                        }
+                    }
+                }
+            }
+        }
+
+        return trimmed
+    }
+
     /// Evaluates a raw path string against the `[files]` policy.
     public static func evaluate(path: String, homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) -> Decision {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -92,7 +156,8 @@ public enum FilesAccessGuard: Sendable {
                 resolvedPath: trimmed
             )
         }
-        let resolved = resolvedURL(for: trimmed)
+        let expanded = resolveCloudShortcut(trimmed, homeDirectoryURL: homeDirectoryURL)
+        let resolved = resolvedURL(for: expanded)
         return evaluate(url: resolved, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
     }
 
@@ -368,6 +433,102 @@ public enum FilesAccessGuard: Sendable {
         }
         let prefix = root.hasSuffix("/") ? root : root + "/"
         return target.hasPrefix(prefix)
+    }
+}
+
+/// Cloud shortcut mount discovery kept out of the guard's primary body.
+extension FilesAccessGuard {
+    /// Reports whether a lowercased `Library/CloudStorage` entry names a provider mount.
+    /// A bare prefix would steer shortcuts into attacker-named siblings
+    /// (`dropboxevil`), so only an exact name or a delimited suffix counts.
+    /// - Parameters:
+    ///   - lowercasedName: Directory entry already lowercased by the caller.
+    ///   - base: Lowercased provider base (for example `dropbox`).
+    /// - Returns: True for an exact or dash/space/slash-suffixed mount name.
+    fileprivate static func matchesCloudMount(_ lowercasedName: String, base: String) -> Bool {
+        lowercasedName == base
+            || lowercasedName.hasPrefix(base + "-")
+            || lowercasedName.hasPrefix(base + " ")
+            || lowercasedName.hasPrefix(base + "/")
+    }
+
+    /// Lists live `Library/CloudStorage` mounts whose names satisfy a predicate.
+    /// - Parameters:
+    ///   - home: Canonical home boundary.
+    ///   - fileManager: Filesystem accessor.
+    ///   - matching: Lowercased-name predicate selecting one provider's mounts.
+    /// - Returns: Sorted live mount URLs.
+    fileprivate static func cloudStorageDirs(
+        home: URL,
+        fileManager: FileManager,
+        matching: (String) -> Bool
+    ) -> [URL] {
+        let cloudStorage = home.appendingPathComponent("Library/CloudStorage")
+        guard let entries = try? fileManager.contentsOfDirectory(atPath: cloudStorage.path) else {
+            return []
+        }
+        return entries.filter { matching($0.lowercased()) }.sorted().map {
+            cloudStorage.appendingPathComponent($0)
+        }
+    }
+
+    /// Known cloud providers and their root directory resolvers.
+    fileprivate static func cloudProviders(
+        home: URL,
+        fileManager: FileManager
+    ) -> [(aliases: [String], findRoots: () -> [URL])] {
+        [
+            (
+                aliases: ["icloud drive", "icloud"],
+                findRoots: {
+                    let key = home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
+                    var candidates = cloudStorageDirs(home: home, fileManager: fileManager) {
+                        $0 == "icloud"
+                            || matchesCloudMount($0, base: "icloud drive")
+                            || matchesCloudMount($0, base: "iclouddrive")
+                    }
+                    candidates.append(key)
+                    return candidates
+                }
+            ),
+            (
+                aliases: ["dropbox"],
+                findRoots: {
+                    var candidates: [URL] = [home.appendingPathComponent("Dropbox")]
+                    let extra = cloudStorageDirs(home: home, fileManager: fileManager) {
+                        matchesCloudMount($0, base: "dropbox")
+                    }
+                    candidates.append(contentsOf: extra)
+                    return candidates
+                }
+            ),
+            (
+                aliases: ["onedrive"],
+                findRoots: {
+                    var candidates: [URL] = [home.appendingPathComponent("OneDrive")]
+                    let extra = cloudStorageDirs(home: home, fileManager: fileManager) {
+                        matchesCloudMount($0, base: "onedrive")
+                    }
+                    candidates.append(contentsOf: extra)
+                    return candidates
+                }
+            ),
+            (
+                aliases: ["google drive", "googledrive"],
+                findRoots: {
+                    var candidates: [URL] = [
+                        home.appendingPathComponent("Google Drive"),
+                        home.appendingPathComponent("GoogleDrive")
+                    ]
+                    let extra = cloudStorageDirs(home: home, fileManager: fileManager) {
+                        matchesCloudMount($0, base: "googledrive")
+                            || matchesCloudMount($0, base: "google drive")
+                    }
+                    candidates.append(contentsOf: extra)
+                    return candidates
+                }
+            )
+        ]
     }
 }
 

@@ -509,13 +509,21 @@ func refreshNetworkToolsAfterPolicySave(context: ServerContext) async {
         llmServerURLs: llmServerURLs,
         store: context.policyStore
     )
-    let fallbackSupervisor = try? await OutboundEgressSupervisor.make(
-        policyStore: context.policyStore,
-        secrets: context.secrets,
-        browserConfig: browserConfig,
-        mediaConfig: mediaConfig,
-        llmServerURLs: llmServerURLs
-    )
+    let fallbackSupervisor: OutboundEgressSupervisor?
+    do {
+        fallbackSupervisor = try await OutboundEgressSupervisor.make(
+            policyStore: context.policyStore,
+            secrets: context.secrets,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs
+        )
+    } catch is CancellationError {
+        return
+    } catch {
+        RuneWeaverLog.server.error("refreshNetworkToolsAfterPolicySave: failed to make fallback OutboundEgressSupervisor: \(error.localizedDescription)")
+        fallbackSupervisor = nil
+    }
     guard let effectiveSupervisor = context.egressSupervisor ?? fallbackSupervisor else { return }
     await reregisterNetworkTools(
         browserConfig: browserConfig,
@@ -819,7 +827,13 @@ private func probedIndexComponents(savedConfig: RuneWeaverConfig, context: Serve
 /// origins UNION the store snapshot's `local_exemptions`.
 private func mergedNetworkOrigins(browserConfig: BrowserConfig, mediaConfig: MediaConfig?, llmServerURLs: [String], store: PolicyStore) async -> Set<String> {
     let base = ApiSSRFGuard.allowlistedOrigins(browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs)
-    let exemptions: Set<String> = await (try? store.snapshot().network.localExemptions) ?? []
+    let exemptions: Set<String>
+    do {
+        exemptions = try await store.snapshot().network.localExemptions
+    } catch {
+        RuneWeaverLog.server.warning("ServerSettingsRoutes: failed to read policy store snapshot for network exemptions: \(error.localizedDescription)")
+        exemptions = []
+    }
     return base.union(exemptions)
 }
 

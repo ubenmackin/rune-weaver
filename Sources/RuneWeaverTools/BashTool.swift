@@ -178,11 +178,14 @@ public struct BashTool: Tool {
         guard bashConfig.enabled else {
             return .failure("Bash tool is disabled by configuration.", callID: input.callID)
         }
-        let decoder = JSONDecoder()
-        guard let data = input.argumentsJSON.data(using: .utf8),
-              let args = try? decoder.decode(BashArgs.self, from: data)
-        else {
-            return .failure("Invalid arguments for bash.exec: failed to parse JSON.", callID: input.callID)
+        guard let data = input.argumentsJSON.data(using: .utf8) else {
+            return .failure("Invalid arguments for bash.exec: invalid UTF-8 string.", callID: input.callID)
+        }
+        let args: BashArgs
+        do {
+            args = try JSONDecoder().decode(BashArgs.self, from: data)
+        } catch {
+            return .failure("Invalid arguments for bash.exec: failed to parse JSON: \(error.localizedDescription)", callID: input.callID)
         }
         let trimmedCommand = args.command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedCommand.isEmpty else {
@@ -454,20 +457,76 @@ extension BashTool {
     /// Centralizes executable, arguments, directory, environment, and output
     /// pipes so `runProcess` stays within the body-length budget without
     /// splitting spawn from collection.
-    private func configureRunProcess(
-        _ process: Process,
+    private struct PreparedProcess {
+        let process: Process
+        let stdoutPipe: Pipe
+        let stderrPipe: Pipe
+    }
+
+    private func makePreparedProcess(
         sandboxTarget: BashSandboxTarget,
         workingDir: URL,
-        tier: BashSandboxMode,
-        stdoutPipe: Pipe,
-        stderrPipe: Pipe
-    ) {
+        tier: BashSandboxMode
+    ) -> PreparedProcess {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
         process.executableURL = sandboxTarget.executableURL
         process.arguments = sandboxTarget.arguments
         process.currentDirectoryURL = workingDir
         process.environment = filteredEnvironment(for: workingDir, tier: tier)
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        return PreparedProcess(process: process, stdoutPipe: stdoutPipe, stderrPipe: stderrPipe)
+    }
+
+    private static func startWatchdog(
+        timeoutSeconds: TimeInterval,
+        process: Process,
+        timedOut: OSAllocatedUnfairLock<Bool>
+    ) -> Task<Void, Never> {
+        Task {
+            let boundedTimeoutSeconds = min(max(timeoutSeconds, 1), 3600)
+            let nanoseconds = UInt64(boundedTimeoutSeconds * 1_000_000_000)
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
+            if process.isRunning {
+                timedOut.withLock { $0 = true }
+                process.terminate()
+            }
+        }
+    }
+
+    private static func makeResultEnvelope(
+        command: String,
+        isChained: Bool,
+        stdout: String,
+        stderr: String,
+        proc: Process,
+        timedOut: Bool
+    ) -> BashResultEnvelope {
+        let exitCode = proc.terminationStatus
+        let killReason = Self.killReason(
+            didTimeOut: timedOut,
+            terminationReason: proc.terminationReason,
+            terminationStatus: proc.terminationStatus,
+            stderr: stderr
+        )
+        return BashResultEnvelope(
+            command: command,
+            stdout: stdout,
+            stderr: stderr,
+            exitCode: exitCode,
+            approvalRequired: false,
+            isChained: isChained,
+            denied: false,
+            error: exitCode != 0 ? "Command exited with status \(exitCode)" : nil,
+            reason: nil,
+            killReason: killReason
+        )
     }
 
     private func runProcess(
@@ -502,17 +561,14 @@ extension BashTool {
         if let sandboxFailure = sandboxTarget.failure {
             return sandboxFailure
         }
-        let process = Process()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        configureRunProcess(
-            process,
+        let prepared = makePreparedProcess(
             sandboxTarget: sandboxTarget,
             workingDir: effectiveWorkingDir,
-            tier: tier,
-            stdoutPipe: stdoutPipe,
-            stderrPipe: stderrPipe
+            tier: tier
         )
+        let process = prepared.process
+        let stdoutPipe = prepared.stdoutPipe
+        let stderrPipe = prepared.stderrPipe
 
         // Buffer limit (1 MB max output)
         let maxBytes = 1024 * 1024
@@ -532,21 +588,12 @@ extension BashTool {
             }
 
             let taskBox = TaskBox()
-            // Set only when the watchdog actually kills the run so a
-            // resource-limit death that lands near the deadline still reads as
-            // a resource kill instead of a wall timeout.
             let timedOut = OSAllocatedUnfairLock<Bool>(initialState: false)
-            taskBox.task = Task {
-                // Bounds were validated before dispatch; clamp again so the
-                // nanosecond conversion below cannot trap on out-of-range input.
-                let boundedTimeoutSeconds = min(max(timeoutSeconds, 1), 3600)
-                let nanoseconds = UInt64(boundedTimeoutSeconds * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: nanoseconds)
-                if process.isRunning {
-                    timedOut.withLock { $0 = true }
-                    process.terminate()
-                }
-            }
+            taskBox.task = Self.startWatchdog(
+                timeoutSeconds: timeoutSeconds,
+                process: process,
+                timedOut: timedOut
+            )
 
             process.terminationHandler = { proc in
                 taskBox.task?.cancel()
@@ -556,32 +603,16 @@ extension BashTool {
                 stdoutBuffer.append(stdoutHandle.readDataToEndOfFile())
                 stderrBuffer.append(stderrHandle.readDataToEndOfFile())
 
-                let finalOut = stdoutBuffer.stringValue
-                let finalErr = stderrBuffer.stringValue
-
-                let exitCode = proc.terminationStatus
-                let wasTimeout = timedOut.withLock { $0 }
-                let killReason = Self.killReason(
-                    didTimeOut: wasTimeout,
-                    terminationReason: proc.terminationReason,
-                    terminationStatus: proc.terminationStatus,
-                    stderr: finalErr
-                )
-                let envelope = BashResultEnvelope(
+                let envelope = Self.makeResultEnvelope(
                     command: command,
-                    stdout: finalOut,
-                    stderr: finalErr,
-                    exitCode: exitCode,
-                    approvalRequired: false,
                     isChained: isChained,
-                    denied: false,
-                    error: exitCode != 0 ? "Command exited with status \(exitCode)" : nil,
-                    reason: nil,
-                    killReason: killReason
+                    stdout: stdoutBuffer.stringValue,
+                    stderr: stderrBuffer.stringValue,
+                    proc: proc,
+                    timedOut: timedOut.withLock { $0 }
                 )
-
                 let json = encodeEnvelope(envelope)
-                if exitCode == 0 {
+                if envelope.exitCode == 0 {
                     continuation.resume(returning: .success(json, callID: callID))
                 } else {
                     continuation.resume(returning: .failure(json, callID: callID))
@@ -845,93 +876,6 @@ extension BashTool {
 }
 
 extension BashTool {
-    /// Builds the `ulimit` prefix bounding CPU time and address space.
-    ///
-    /// The prefix uses `;` (not `&&`) so a failed `ulimit` still runs the
-    /// command best-effort instead of refusing it; the wall-clock watchdog
-    /// stays the hard backstop regardless.
-    /// - Parameters:
-    ///   - cpuSeconds: CPU time budget in seconds, already clamped to 1-3600.
-    ///   - memoryMB: Address-space budget in megabytes, already clamped to 64-8192.
-    /// - Returns: Shell prefix ending in `; ` (e.g. `ulimit -t 5; ulimit -v 524288; `).
-    public static func resourcePrefix(cpuSeconds: Int, memoryMB: Int) -> String {
-        "ulimit -t \(cpuSeconds); ulimit -v \(memoryMB * 1024); "
-    }
-
-    /// Wraps a model command with the `ulimit` resource prefix.
-    ///
-    /// Clamping here keeps direct callers honest even when the stored config
-    /// was hand-built past its bounds; the validated file-load path already
-    /// rejects those values fail-closed with the dotted field.
-    /// - Parameters:
-    ///   - command: Model-authored shell command.
-    ///   - cpuSeconds: CPU time budget in seconds.
-    ///   - memoryMB: Address-space budget in megabytes.
-    /// - Returns: Prefixed command for `bash -c`.
-    public static func resourceLimitedCommand(
-        _ command: String,
-        cpuSeconds: Int,
-        memoryMB: Int
-    ) -> String {
-        let boundedCPU = min(max(cpuSeconds, BashConfig.minCPUSeconds), BashConfig.maxCPUSeconds)
-        let boundedMemory = min(max(memoryMB, BashConfig.minMemoryMB), BashConfig.maxMemoryMB)
-        return resourcePrefix(cpuSeconds: boundedCPU, memoryMB: boundedMemory) + command
-    }
-
-    /// Classifies how a run ended from its wait status.
-    ///
-    /// The timeout flag wins because a signal death landing near the deadline
-    /// still reads as a wall kill only when the watchdog set the flag. The
-    /// contract is CPU-only: only a SIGXCPU signal death (24, CPU limit)
-    /// maps outright; its `128 + signal` wrapper spelling (152) maps only
-    /// with the shell's `cpu time limit` diagnostic on stderr proving the
-    /// limiter fired rather than a voluntary `exit 152`. The diagnostic never
-    /// maps on its own: it is scoped to the wrapper spelling so a voluntary
-    /// phrase on stderr with any other status (for example `exit 1`) stays
-    /// `clean`. Memory-limit deaths stay `clean`: SIGKILL (9 / 137) shares
-    /// its status across OOM, manual, and sandbox kills, and `ulimit -v`
-    /// malloc failures surface as ordinary non-zero exits, so neither reads
-    /// as a resource bound without CPU-limit corroboration.
-    /// - Parameters:
-    ///   - didTimeOut: Whether the wall-clock watchdog terminated the run.
-    ///   - terminationReason: Exit versus uncaught-signal from the wait status.
-    ///   - terminationStatus: Signal number or exit code from the wait status.
-    ///   - stderr: Captured stderr corroborating the wrapper spelling.
-    /// - Returns: The matching kill reason.
-    public static func killReason(
-        didTimeOut: Bool,
-        terminationReason: Process.TerminationReason,
-        terminationStatus: Int32,
-        stderr: String = ""
-    ) -> BashKillReason {
-        if didTimeOut {
-            return .wallTimeout
-        }
-        // Raw signal numbers avoid a Darwin/Glibc import split; 24 is SIGXCPU
-        // (CPU limit). The signal death itself is the corroboration, so no
-        // diagnostic is required. SIGKILL (9) is deliberately excluded: it
-        // may be OOM, manual, or sandbox action.
-        if terminationReason == .uncaughtSignal,
-           terminationStatus == 24
-        {
-            return .resourceLimit
-        }
-        // Wrappers report signals as 128 + signal instead of a signal death;
-        // only the SIGXCPU spelling (152) counts, never the SIGKILL one (137),
-        // and only with the shell diagnostic so a voluntary `exit 152` stays
-        // clean. Scoping the substring to this status keeps a voluntary
-        // `cpu time limit` phrase with any other exit (for example `exit 1`)
-        // from reading as a limiter kill.
-        if terminationReason == .exit,
-           terminationStatus == 152,
-           !stderr.isEmpty,
-           stderr.localizedCaseInsensitiveContains("cpu time limit")
-        {
-            return .resourceLimit
-        }
-        return .clean
-    }
-
     /// Sandbox target for one run, configuring executable plus arguments.
     ///
     /// Sandboxed execution stays preferred; the unsandboxed fallback runs
@@ -1269,40 +1213,5 @@ extension BashTool {
 
     private func encodeEnvelope(_ envelope: BashResultEnvelope) -> String {
         Self.encodeEnvelope(envelope)
-    }
-
-    public static func encodeEnvelope(_ envelope: BashResultEnvelope) -> String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        if let data = try? encoder.encode(envelope), let str = String(data: data, encoding: .utf8) {
-            return str
-        }
-        // Encoder failure stays escaped and fail-closed: never interpolate
-        // raw command or output text into JSON. JSONSerialization escapes
-        // quotes, backslashes, and control characters.
-        var fallback: [String: Any] = [
-            "command": envelope.command,
-            "stdout": envelope.stdout,
-            "stderr": envelope.stderr,
-            "exitCode": Int(envelope.exitCode),
-            "approvalRequired": envelope.approvalRequired,
-            "isChained": envelope.isChained,
-            "denied": envelope.denied,
-            "kill_reason": envelope.killReason.rawValue
-        ]
-        if let error = envelope.error {
-            fallback["error"] = error
-        }
-        if let reason = envelope.reason {
-            fallback["reason"] = reason
-        }
-        if let data = try? JSONSerialization.data(withJSONObject: fallback, options: [.sortedKeys]),
-           let str = String(data: data, encoding: .utf8)
-        {
-            return str
-        }
-        // JSONSerialization cannot fail on string, number, and bool values,
-        // but the static literal keeps the contract total without interpolation.
-        return "{\"command\":\"\",\"denied\":true,\"kill_reason\":\"denied\"}"
     }
 }

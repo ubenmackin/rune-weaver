@@ -15,9 +15,14 @@ enum StagedFilesManager {
     ///   between an empty string and a null old text.
     static func readUTF8Text(at url: URL) -> String? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        guard let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8)
-        else {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            RuneWeaverLog.server.debug("ServerFileRoutes: failed to read file at \(url.path): \(error.localizedDescription)")
+            return nil
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
             return nil
         }
         return text

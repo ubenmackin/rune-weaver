@@ -49,7 +49,15 @@ private func registerGoalListRoute(on goals: RoutesBuilder) {
         for goal in stored {
             // Steps stay per-row because plans are bounded by config; a missing
             // plan degrades to empty progress instead of failing the list.
-            let steps = await (try? req.application.runeWeaver.goals.steps(goalID: goal.id)) ?? []
+            let steps: [GoalStep]
+            do {
+                steps = try await req.application.runeWeaver.goals.steps(goalID: goal.id)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                req.logger.warning("ServerGoalRoutes: failed to load steps for goal \(goal.id): \(error.localizedDescription)")
+                steps = []
+            }
             dtos.append(GoalDTO(goal: goal, steps: steps))
         }
         return GoalsListResponse(goals: dtos)
@@ -82,29 +90,39 @@ private func registerGoalCreateRoute(on goals: RoutesBuilder) {
             // message so dashboards surface why the row was refused.
             throw Abort(.badRequest, reason: error.localizedDescription)
         }
-        let steps = await (try? context.goals.steps(goalID: goal.id)) ?? []
-        let triggers = await (try? context.goals.triggers(for: goal.id))?.map(GoalTriggerDTO.init) ?? []
-        let events = await (try? context.goals.events(goalID: goal.id, limit: 50)) ?? []
+        let steps: [GoalStep]
+        do {
+            steps = try await context.goals.steps(goalID: goal.id)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            req.logger.warning("ServerGoalRoutes: failed to load steps for goal \(goal.id): \(error.localizedDescription)")
+            steps = []
+        }
+        let triggers: [GoalTriggerDTO]
+        do {
+            triggers = try await context.goals.triggers(for: goal.id).map(GoalTriggerDTO.init)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            req.logger.warning("ServerGoalRoutes: failed to load triggers for goal \(goal.id): \(error.localizedDescription)")
+            triggers = []
+        }
+        let events: [GoalEvent]
+        do {
+            events = try await context.goals.events(goalID: goal.id, limit: 50)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            req.logger.warning("ServerGoalRoutes: failed to load events for goal \(goal.id): \(error.localizedDescription)")
+            events = []
+        }
         let dto = GoalDTO(goal: goal, steps: steps)
         await context.hub.broadcastGoal(dto)
         // Planning lands shortly after creation on a tracked background task;
-        // awaiting it here would stall the response, so a detached hop waits
+        // awaiting it here would stall the response, so a background task waits
         // for the plan and pushes the ready row for live dashboards.
-        let hub = context.hub
-        let store = context.goals
-        let engine = context.goalEngine
-        let goalID = goal.id
-        Task.detached(priority: .background) { [hub, store, engine, goalID] in
-            await engine.waitForPendingPlan(goalID: goalID)
-            do {
-                if let updated = try await store.goal(id: goalID) {
-                    let freshSteps = await (try? store.steps(goalID: goalID)) ?? []
-                    await hub.broadcastGoal(GoalDTO(goal: updated, steps: freshSteps))
-                }
-            } catch {
-                RuneWeaverLog.server.error("ServerGoalRoutes: plan-ready broadcast failed: \(error.localizedDescription)")
-            }
-        }
+        context.schedulePlanReadyBroadcast(goalID: goal.id)
         return GoalDetailResponse(
             goal: dto,
             steps: steps.map(GoalStepDTO.init),
@@ -171,7 +189,15 @@ private func registerGoalDetailRoute(on goals: RoutesBuilder) {
         // limit must sit inside the advertised range instead of silently clamping.
         let limit = try parseQueryLimit(req, default: 50, min: 1, max: 200)
         let steps = try await context.goals.steps(goalID: id)
-        let triggers = await (try? context.goals.triggers(for: id))?.map(GoalTriggerDTO.init) ?? []
+        let triggers: [GoalTriggerDTO]
+        do {
+            triggers = try await context.goals.triggers(for: id).map(GoalTriggerDTO.init)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            req.logger.warning("ServerGoalRoutes: failed to load triggers for goal \(id): \(error.localizedDescription)")
+            triggers = []
+        }
         let events = try await context.goals.events(goalID: id, limit: limit)
         return GoalDetailResponse(
             goal: GoalDTO(goal: goal, steps: steps),
@@ -253,9 +279,33 @@ private func registerGoalPatchRoute(on goals: RoutesBuilder) {
         guard let updated = try await context.goals.goal(id: id) else {
             throw Abort(.notFound, reason: "Unknown goal \(raw)")
         }
-        let steps = await (try? context.goals.steps(goalID: id)) ?? []
-        let triggers = await (try? context.goals.triggers(for: id))?.map(GoalTriggerDTO.init) ?? []
-        let events = await (try? context.goals.events(goalID: id, limit: 50)) ?? []
+        let steps: [GoalStep]
+        do {
+            steps = try await context.goals.steps(goalID: id)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            req.logger.warning("ServerGoalRoutes: failed to load steps for goal \(id): \(error.localizedDescription)")
+            steps = []
+        }
+        let triggers: [GoalTriggerDTO]
+        do {
+            triggers = try await context.goals.triggers(for: id).map(GoalTriggerDTO.init)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            req.logger.warning("ServerGoalRoutes: failed to load triggers for goal \(id): \(error.localizedDescription)")
+            triggers = []
+        }
+        let events: [GoalEvent]
+        do {
+            events = try await context.goals.events(goalID: id, limit: 50)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            req.logger.warning("ServerGoalRoutes: failed to load events for goal \(id): \(error.localizedDescription)")
+            events = []
+        }
         let dto = GoalDTO(goal: updated, steps: steps)
         await context.hub.broadcastGoal(dto)
         return GoalDetailResponse(
@@ -292,7 +342,15 @@ private func registerGoalDeleteRoute(on goals: RoutesBuilder) {
             // instead of vanishing, so run filters still resolve.
             try await context.goals.setStatus(goalID: id, status: .abandoned)
             if let updated = try await context.goals.goal(id: id) {
-                let steps = await (try? context.goals.steps(goalID: id)) ?? []
+                let steps: [GoalStep]
+                do {
+                    steps = try await context.goals.steps(goalID: id)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    req.logger.warning("ServerGoalRoutes: failed to load steps for goal \(id): \(error.localizedDescription)")
+                    steps = []
+                }
                 await context.hub.broadcastGoal(GoalDTO(goal: updated, steps: steps))
             }
         }

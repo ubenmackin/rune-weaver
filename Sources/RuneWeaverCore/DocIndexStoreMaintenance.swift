@@ -585,6 +585,57 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             let vectorBytes = sqlite3_column_int64(single, 4)
             let ftsBytes: Int64? = sqlite3_column_type(single, 5) == SQLITE_NULL ? nil : sqlite3_column_int64(single, 5)
             let indexAsOf = Date(timeIntervalSince1970: sqlite3_column_double(single, 6))
+            guard let bySource = readAggregateBySource(handle: handle),
+                  let byExtractStatus = readAggregateByExtractStatus(handle: handle)
+            else {
+                return nil
+            }
+            // Page-counter probes ride fail-closed zeros: a throwing PRAGMA
+            // must not fail a warm poll that already holds a valid aggregate
+            // row. File sizes then fall back to the filesystem probe while the
+            // reclaimable-bytes leg reports zero instead of a 500.
+            let pageCount: Int
+            do {
+                pageCount = try scalarInt(handle: handle, sql: "PRAGMA page_count;")
+            } catch {
+                RuneWeaverLog.stores.debug("DocIndexStore: failed to query PRAGMA page_count: \(error.localizedDescription)")
+                pageCount = 0
+            }
+            let pageSize: Int
+            do {
+                pageSize = try scalarInt(handle: handle, sql: "PRAGMA page_size;")
+            } catch {
+                RuneWeaverLog.stores.debug("DocIndexStore: failed to query PRAGMA page_size: \(error.localizedDescription)")
+                pageSize = 0
+            }
+            let freelistCount: Int
+            do {
+                freelistCount = try scalarInt(handle: handle, sql: "PRAGMA freelist_count;")
+            } catch {
+                RuneWeaverLog.stores.debug("DocIndexStore: failed to query PRAGMA freelist_count: \(error.localizedDescription)")
+                freelistCount = 0
+            }
+            let pageSizeBytes = Int64(max(pageSize, 0))
+            let dbFileBytes = resolvedDbFileBytes(pageCount: pageCount, pageSizeBytes: pageSizeBytes, expandedPath: expanded)
+            let freeBytes = Int64(max(freelistCount, 0)) * pageSizeBytes
+            let walBytes = onDiskBytes(at: expanded + "-wal")
+            return DocIndexStatusSnapshot(
+                documents: documents,
+                chunks: chunks,
+                vectorChunks: vectorChunks,
+                textBytes: textBytes,
+                vectorBytes: vectorBytes,
+                indexAsOf: indexAsOf,
+                bySource: bySource,
+                byExtractStatus: byExtractStatus,
+                dbFileBytes: dbFileBytes,
+                walBytes: walBytes,
+                ftsBytes: ftsBytes,
+                freeBytes: freeBytes
+            )
+        }
+
+        private static func readAggregateBySource(handle: OpaquePointer?) -> [IndexSourceStats]? {
             var sourceStatement: OpaquePointer?
             guard sqlite3_prepare_v2(
                 handle,
@@ -621,8 +672,18 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
                 guard let row = sourceRows[source.rawValue] else { continue }
                 bySource.append(row)
             }
+            return bySource
+        }
+
+        private static func readAggregateByExtractStatus(handle: OpaquePointer?) -> [IndexExtractStatusStats]? {
             var statusStatement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, "SELECT status, documents FROM index_aggregate_by_extract_status;", -1, &statusStatement, nil) == SQLITE_OK else {
+            guard sqlite3_prepare_v2(
+                handle,
+                "SELECT status, documents FROM index_aggregate_by_extract_status;",
+                -1,
+                &statusStatement,
+                nil
+            ) == SQLITE_OK else {
                 sqlite3_finalize(statusStatement)
                 return nil
             }
@@ -644,31 +705,7 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             for key in statusCounts.keys where !knownStatuses.contains(key) {
                 RuneWeaverLog.stores.warning("DocIndexStore: ignoring unknown aggregate extract status '\(key)'")
             }
-            // Page-counter probes ride fail-closed zeros: a throwing PRAGMA
-            // must not fail a warm poll that already holds a valid aggregate
-            // row. File sizes then fall back to the filesystem probe while the
-            // reclaimable-bytes leg reports zero instead of a 500.
-            let pageCount = (try? scalarInt(handle: handle, sql: "PRAGMA page_count;")) ?? 0
-            let pageSize = (try? scalarInt(handle: handle, sql: "PRAGMA page_size;")) ?? 0
-            let freelistCount = (try? scalarInt(handle: handle, sql: "PRAGMA freelist_count;")) ?? 0
-            let pageSizeBytes = Int64(max(pageSize, 0))
-            let dbFileBytes = resolvedDbFileBytes(pageCount: pageCount, pageSizeBytes: pageSizeBytes, expandedPath: expanded)
-            let freeBytes = Int64(max(freelistCount, 0)) * pageSizeBytes
-            let walBytes = onDiskBytes(at: expanded + "-wal")
-            return DocIndexStatusSnapshot(
-                documents: documents,
-                chunks: chunks,
-                vectorChunks: vectorChunks,
-                textBytes: textBytes,
-                vectorBytes: vectorBytes,
-                indexAsOf: indexAsOf,
-                bySource: bySource,
-                byExtractStatus: byExtractStatus,
-                dbFileBytes: dbFileBytes,
-                walBytes: walBytes,
-                ftsBytes: ftsBytes,
-                freeBytes: freeBytes
-            )
+            return byExtractStatus
         }
 
         /// Computes every status aggregate in one pass over a single open handle.
@@ -719,7 +756,13 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             let freeBytes = Int64(max(freelistCount, 0)) * pageSizeBytes
             let walBytes = onDiskBytes(at: expanded + "-wal")
             let vector = try vectorCountAndBytes(handle: handle)
-            let grouped = try? dbstatGroupedPageBytes(handle: handle, probe: dbstatProbe)
+            let grouped: [String: Int64]?
+            do {
+                grouped = try dbstatGroupedPageBytes(handle: handle, probe: dbstatProbe)
+            } catch {
+                RuneWeaverLog.stores.debug("DocIndexStore: failed to query dbstat: \(error.localizedDescription)")
+                grouped = nil
+            }
             // Logical content bytes, not page bytes: only the FTS leg is
             // attributed via the grouped `dbstat` split.
             let ftsBytes: Int64? = if let grouped {

@@ -52,10 +52,16 @@ public actor RecipientAliasStore: MessageAliasStoring {
     /// - Returns: Alias candidates, or an empty array when none are stored.
     public func aliases(nameKey: String, limit: Int) async -> [MessageRecipientCandidate] {
         let dbPath = self.dbPath
-        let stored = try? await SQLiteSerialIO.run {
-            try SQLiteRecipientAliasStore.aliases(nameKey: nameKey, limit: limit, dbPath: dbPath)
+        do {
+            return try await SQLiteSerialIO.run {
+                try SQLiteRecipientAliasStore.aliases(nameKey: nameKey, limit: limit, dbPath: dbPath)
+            }
+        } catch is CancellationError {
+            return []
+        } catch {
+            RuneWeaverLog.stores.error("RecipientAliasStore: failed to read aliases: \(error.localizedDescription)")
+            return []
         }
-        return stored ?? []
     }
 
     /// Records one name-to-handle alias after a send.
@@ -74,14 +80,20 @@ public actor RecipientAliasStore: MessageAliasStoring {
         let trimmedHandle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !nameKey.isEmpty, !trimmedHandle.isEmpty else { return }
         let dbPath = self.dbPath
-        _ = try? await SQLiteSerialIO.run {
-            try SQLiteRecipientAliasStore.recordAlias(
-                nameKey: nameKey,
-                handle: trimmedHandle,
-                service: service,
-                displayName: displayName,
-                dbPath: dbPath
-            )
+        do {
+            _ = try await SQLiteSerialIO.run {
+                try SQLiteRecipientAliasStore.recordAlias(
+                    nameKey: nameKey,
+                    handle: trimmedHandle,
+                    service: service,
+                    displayName: displayName,
+                    dbPath: dbPath
+                )
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            RuneWeaverLog.stores.error("RecipientAliasStore: failed to record alias: \(error.localizedDescription)")
         }
     }
 }

@@ -395,7 +395,7 @@ public actor DocIndexStore {
         do {
             _ = try await refreshAggregates()
         } catch {
-            // Already logged inside refreshAggregates; the previous row stays.
+            RuneWeaverLog.stores.debug("DocIndexStore: refreshAggregates inline refresh ignored failure: \(error.localizedDescription)")
         }
     }
 
@@ -449,8 +449,14 @@ public actor DocIndexStore {
         if let cached = cachedStatus, clock().timeIntervalSince(cached.at) < Self.statsCacheTTLSeconds {
             return cached.snapshot.makeBreakdown()
         }
-        if let stored = try? await readPersistedSnapshot() {
-            return stored.makeBreakdown()
+        do {
+            if let stored = try await readPersistedSnapshot() {
+                return stored.makeBreakdown()
+            }
+        } catch is CancellationError {
+            return nil
+        } catch {
+            RuneWeaverLog.stores.debug("DocIndexStore: failed to read persisted snapshot for storage breakdown: \(error.localizedDescription)")
         }
         return nil
     }

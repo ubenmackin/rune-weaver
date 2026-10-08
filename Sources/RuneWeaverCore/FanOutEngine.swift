@@ -1022,15 +1022,19 @@ extension FanOutEngine {
                     }
                 }
                 Task {
-                    try? await Task.sleep(nanoseconds: timeoutNS)
-                    worker.cancel()
-                    resumption.resume(WorkerOutcome(
-                        succeeded: false,
-                        cancelled: false,
-                        note: "timed out after \(seconds)s",
-                        output: .empty,
-                        durationMs: Self.elapsedMs(since: startedAt)
-                    ))
+                    do {
+                        try await Task.sleep(nanoseconds: timeoutNS)
+                        worker.cancel()
+                        resumption.resume(WorkerOutcome(
+                            succeeded: false,
+                            cancelled: false,
+                            note: "timed out after \(seconds)s",
+                            output: .empty,
+                            durationMs: Self.elapsedMs(since: startedAt)
+                        ))
+                    } catch {
+                        return
+                    }
                 }
             }
         } onCancel: {
@@ -1555,9 +1559,13 @@ extension FanOutEngine {
                     resumption.resume(text)
                 }
                 Task {
-                    try? await Task.sleep(nanoseconds: timeoutNS)
-                    provider.cancel()
-                    resumption.resume(nil)
+                    do {
+                        try await Task.sleep(nanoseconds: timeoutNS)
+                        provider.cancel()
+                        resumption.resume(nil)
+                    } catch {
+                        return
+                    }
                 }
             }
         } onCancel: {

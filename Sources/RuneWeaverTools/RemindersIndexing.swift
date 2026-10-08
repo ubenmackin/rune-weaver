@@ -8,6 +8,7 @@
 
 import CryptoKit
 import Foundation
+import os
 import RuneWeaverCore
 
 // MARK: - Report
@@ -388,18 +389,19 @@ public actor RemindersIndexer {
 ///
 /// A store that calls its completion twice would trap on the second resume,
 /// so the fetch and the timeout-free bridge race through this guard.
-private final class ReminderFetchGuard: @unchecked Sendable {
-    private let lock = NSLock()
-    private var didResume = false
+private final class ReminderFetchGuard: Sendable {
+    private let didResume = OSAllocatedUnfairLock(initialState: false)
 
     func resumeOnce(
         _ result: Result<[EventKitReminder], Error>,
         continuation: CheckedContinuation<[EventKitReminder], Error>
     ) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !didResume else { return }
-        didResume = true
+        let shouldResume = didResume.withLock { resumed -> Bool in
+            guard !resumed else { return false }
+            resumed = true
+            return true
+        }
+        guard shouldResume else { return }
         switch result {
         case let .success(value):
             continuation.resume(returning: value)

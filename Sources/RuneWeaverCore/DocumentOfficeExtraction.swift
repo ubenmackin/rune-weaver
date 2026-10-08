@@ -155,18 +155,34 @@ extension DocumentTextExtractor {
         )
     }
 
+    /// Single-source fallback body for a zero-chunk office document.
+    ///
+    /// Guarantees one searchable row carrying the file identity when no text
+    /// survives extraction, so every indexed file owns at least one chunk.
+    /// - Parameters:
+    ///   - displayName: File name for the `Document` line.
+    ///   - formatToken: Format family for the `Format` line.
+    ///   - path: Relative display path for the `File path` line.
+    /// - Returns: Three-line metadata text.
+    static func fallbackMetadataText(displayName: String, formatToken: String, path: String) -> String {
+        let resolvedPath = path.isEmpty ? displayName : path
+        return "Document: \(displayName)\nFile path: \(resolvedPath)\nFormat: \(formatToken)"
+    }
+
     /// Best-effort text extraction from an iWork package.
     ///
-    /// Modern Pages, Numbers, and Keynote documents store their text in a binary
-    /// IWA payload that is not a supported format here, so the package is opened
-    /// only to recover any XML text it carries (legacy `index.xml` and similar).
-    /// The result is always `partial` because the extraction is best-effort by
-    /// design and may omit body text entirely.
+    /// Tries the legacy XML entries first and returns them as `partial`, then
+    /// decompresses the Snappy IWA payload via `DocumentIWorkArchive` and returns
+    /// it as `extracted`, and finally returns exactly one fallback chunk as
+    /// `partial` carrying `Document` plus `File path` plus `Format` lines.
+    /// The fallback `File path` line carries the file name only; root-relative
+    /// display paths for zero-chunk documents are owned by the indexer fallback.
     /// - Parameters:
     ///   - data: iWork package bytes.
     ///   - format: Recognized iWork format.
-    /// - Returns: `partial` extraction, or `.failed` when the package is unreadable.
-    func extractIWork(data: Data, format: DocumentFormat) -> DocumentExtraction {
+    ///   - fileName: Optional file name for fallback metadata chunk.
+    /// - Returns: `partial` or `extracted` result, or `.failed` when the package is unreadable.
+    func extractIWork(data: Data, format: DocumentFormat, fileName: String = "") -> DocumentExtraction {
         guard let archive = ZipArchiveReader(data: data) else {
             return makeResult(
                 status: .failed,
@@ -191,6 +207,15 @@ extension DocumentTextExtractor {
                 return makeResult(status: .partial, format: format, chunks: chunks, reason: reason, byteCount: data.count)
             }
         }
-        return makeResult(status: .partial, format: format, reason: reason, byteCount: data.count)
+        if let iworkText = DocumentIWorkArchive.extractText(from: archive, maxFileBytes: maxFileBytes) {
+            let chunks = makeChunks(from: iworkText)
+            if !chunks.isEmpty {
+                return makeResult(status: .extracted, format: format, chunks: chunks, reason: nil, byteCount: data.count)
+            }
+        }
+        let displayName = fileName.isEmpty ? format.rawValue : fileName
+        let fallbackText = Self.fallbackMetadataText(displayName: displayName, formatToken: format.rawValue, path: displayName)
+        let fallbackChunks = [DocumentChunk(index: 0, text: fallbackText, estimatedTokens: Self.estimatedTokens(in: fallbackText))]
+        return makeResult(status: .partial, format: format, chunks: fallbackChunks, reason: reason, byteCount: data.count)
     }
 }

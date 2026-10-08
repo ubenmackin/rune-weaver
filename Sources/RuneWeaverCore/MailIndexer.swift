@@ -519,15 +519,31 @@ extension MailIndexer {
     /// - Returns: Number of mail documents retired.
     private func retireDeniedMailboxes(_ denied: Set<String>) async -> Int {
         do {
-            let hashes = await (try? store.mailContentHashes(mailboxes: denied)) ?? []
+            let hashes: Set<String>
+            do {
+                hashes = try await store.mailContentHashes(mailboxes: denied)
+            } catch is CancellationError {
+                return 0
+            } catch {
+                RuneWeaverLog.stores.error("MailIndexer: failed to read content hashes for denied mailboxes: \(error.localizedDescription)")
+                hashes = []
+            }
             let retired = try await store.retireMailboxes(denied)
             if retired > 0 {
-                _ = try? await store.reclaim()
+                do {
+                    _ = try await store.reclaim()
+                } catch is CancellationError {
+                    return retired
+                } catch {
+                    RuneWeaverLog.stores.error("MailIndexer: failed to reclaim store: \(error.localizedDescription)")
+                }
             }
             for account in emailConfig.accounts {
                 for mailbox in denied {
                     do {
                         try await checkpoints.dropMailbox(account: account.name, mailbox: mailbox)
+                    } catch is CancellationError {
+                        return retired
                     } catch {
                         RuneWeaverLog.stores.error("MailIndexer: failed to drop checkpoint for \(account.name)/\(mailbox): \(error.localizedDescription)")
                     }
@@ -536,12 +552,17 @@ extension MailIndexer {
             if !hashes.isEmpty {
                 do {
                     try await checkpoints.removeContentHashes(hashes)
+                } catch is CancellationError {
+                    return retired
                 } catch {
                     RuneWeaverLog.stores.error("MailIndexer: failed to remove content hashes: \(error.localizedDescription)")
                 }
             }
             return retired
+        } catch is CancellationError {
+            return 0
         } catch {
+            RuneWeaverLog.stores.error("MailIndexer: failed to retire denied mailboxes: \(error.localizedDescription)")
             return 0
         }
     }
@@ -979,7 +1000,16 @@ extension MailIndexer {
     /// - Returns: Resolved credentials, or nil when no password is available.
     private func resolvedCredentials(for account: EmailAccount) async -> MailIndexCredentials? {
         let envVar = account.passwordEnvVar
-        guard let password = try? await secrets.retrieve(key: envVar), !password.isEmpty else {
+        let password: String?
+        do {
+            password = try await secrets.retrieve(key: envVar)
+        } catch is CancellationError {
+            return nil
+        } catch {
+            RuneWeaverLog.tools.error("MailIndexer: failed to retrieve secret for \(envVar): \(error.localizedDescription)")
+            return nil
+        }
+        guard let password, !password.isEmpty else {
             return nil
         }
         return MailIndexCredentials(
@@ -1147,7 +1177,15 @@ extension MailIndexer {
                 continue
             }
             defer { discardStaged(at: staged.directory) }
-            let stagedBytes = (try? Data(contentsOf: staged.file)) ?? attachmentData.data
+            let stagedBytes: Data
+            do {
+                stagedBytes = try Data(contentsOf: staged.file)
+            } catch {
+                RuneWeaverLog.stores.debug(
+                    "MailIndexer: failed reading back staged file at \(staged.file.path): \(error.localizedDescription); falling back to raw bytes"
+                )
+                stagedBytes = attachmentData.data
+            }
             let extraction = extractor.extract(
                 data: stagedBytes,
                 fileName: staged.file.lastPathComponent,

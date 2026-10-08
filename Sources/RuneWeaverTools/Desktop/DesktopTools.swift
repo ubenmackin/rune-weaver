@@ -249,7 +249,13 @@ public struct DesktopActionTool: Tool, Sendable {
                 error: friendlyError(.operatorTakeover),
                 operatorInterrupted: true
             )
-            let content = (try? ToolEnvelopeEncoding.encode(envelope)) ?? friendlyError(.operatorTakeover)
+            let content: String
+            do {
+                content = try ToolEnvelopeEncoding.encode(envelope)
+            } catch {
+                RuneWeaverLog.tools.warning("DesktopTools: failed to encode takeover envelope: \(error.localizedDescription)")
+                content = friendlyError(.operatorTakeover)
+            }
             return .success(content)
         } catch let error as DesktopControlError {
             await DesktopControlMonitor.shared.endBatch()

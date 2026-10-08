@@ -397,9 +397,17 @@ extension ServerSchedulerWorker {
         if let mailbox = rule.trimmedMailbox {
             args["mailbox"] = mailbox
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: args),
-              let json = String(data: data, encoding: .utf8)
-        else { return [] }
+        let data: Data
+        do {
+            data = try JSONSerialization.data(withJSONObject: args)
+        } catch {
+            await logger?("ServerSchedulerWorker: failed to serialize poll email.search args: \(error.localizedDescription)")
+            return []
+        }
+        guard let json = String(data: data, encoding: .utf8) else {
+            await logger?("ServerSchedulerWorker: failed to encode poll email.search args to UTF-8")
+            return []
+        }
 
         let result = await toolBus.execute(
             toolCall: ToolInput(toolName: "email.search", argumentsJSON: json),

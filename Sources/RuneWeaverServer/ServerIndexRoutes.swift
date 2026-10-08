@@ -282,7 +282,13 @@ private func registerIndexResetRoute(_ app: Application) {
         struct ResetQuery: Decodable {
             let source: String?
         }
-        let query = try? req.query.decode(ResetQuery.self)
+        let query: ResetQuery?
+        do {
+            query = try req.query.decode(ResetQuery.self)
+        } catch {
+            RuneWeaverLog.server.debug("ServerIndexRoutes: failed to decode ResetQuery: \(error.localizedDescription)")
+            query = nil
+        }
         if let rawSource = query?.source?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
            !rawSource.isEmpty, rawSource != "all"
         {
@@ -410,7 +416,13 @@ private func registerIndexRequestAccessRoute(_ app: Application) {
     let index = app.grouped(PathComponent.constant(ServerPaths.index))
 
     index.post(PathComponent.constant(ServerPaths.indexRequestAccess)) { req async throws -> IndexRequestAccessResponse in
-        let decoded = try? req.content.decode(IndexRequestAccessRequest.self)
+        let decoded: IndexRequestAccessRequest?
+        do {
+            decoded = try req.content.decode(IndexRequestAccessRequest.self)
+        } catch {
+            RuneWeaverLog.server.debug("ServerIndexRoutes: failed to decode IndexRequestAccessRequest: \(error.localizedDescription)")
+            decoded = nil
+        }
         let queryKind: String? = req.query[String.self, at: "kind"] ?? req.query[String.self, at: "source"]
         let rawKind = decoded?.kind ?? decoded?.source ?? queryKind
         guard let kind = normalizeIndexRequestAccessKind(rawKind) else {
@@ -433,7 +445,13 @@ private func registerIndexRequestAccessRoute(_ app: Application) {
                 // Re-read truth after prompting instead of trusting the Bool:
                 // a thrown prompt leaves the store at notDetermined, which
                 // must not masquerade as denied.
-                _ = await (try? liveStore.requestAccess())
+                do {
+                    _ = try await liveStore.requestAccess()
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    RuneWeaverLog.server.debug("ServerIndexRoutes: calendar access prompt threw: \(error.localizedDescription)")
+                }
                 let updated = liveStore.authorizationStatus()
                 return IndexRequestAccessResponse(kind: kind, access: indexRequestAccessToken(updated))
             } else {
@@ -446,7 +464,13 @@ private func registerIndexRequestAccessRoute(_ app: Application) {
                 }
                 // Re-read truth after prompting instead of trusting the Bool,
                 // matching the calendars path above.
-                _ = await (try? liveStore.requestReminderAccess())
+                do {
+                    _ = try await liveStore.requestReminderAccess()
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    RuneWeaverLog.server.debug("ServerIndexRoutes: reminder access prompt threw: \(error.localizedDescription)")
+                }
                 let updated = liveStore.reminderAuthorizationStatus()
                 return IndexRequestAccessResponse(kind: kind, access: indexRequestAccessToken(updated))
             }

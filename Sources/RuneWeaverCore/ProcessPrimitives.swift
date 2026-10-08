@@ -235,7 +235,11 @@ public enum ProcessDrainHelpers: Sendable {
         box: BoundedProcessRunner.ProcessBox
     ) -> Task<Void, Never> {
         Task {
-            try? await Task.sleep(nanoseconds: UInt64(clampedTimeout * 1_000_000_000))
+            do {
+                try await Task.sleep(nanoseconds: UInt64(clampedTimeout * 1_000_000_000))
+            } catch {
+                return
+            }
             guard !Task.isCancelled else { return }
             timedOut.withLock { $0 = true }
             box.terminateIfRunning()

@@ -784,7 +784,9 @@ extension FilesIndexer {
         let chunks = Self.makeChunks(
             extraction: payload.extraction,
             documentID: document.id,
-            vectors: payload.vectors
+            vectors: payload.vectors,
+            fallbackDisplayName: resolved.filename,
+            fallbackPath: resolved.relative
         )
         do {
             _ = try await services.store.upsertDocumentWithChunks(

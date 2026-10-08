@@ -827,22 +827,19 @@ extension ProductionCalendarGateway {
 
     /// Live EventKit backing for both gateways, and the only store access path.
     ///
-    /// Wraps a single EKEventStore so calendar and reminder persistence share one
-    /// system object. Reads calendars live per call, never cached, and maps EK
-    /// values onto the Store/Reminder seams. Authorization is observed, never
-    /// prompted: gateways fail closed and only PermissionProbes.request prompts.
+    /// Provides EventKit backing so calendar and reminder persistence share
+    /// access to the system store. Reads calendars live per call, never cached,
+    /// and maps EK values onto the Store/Reminder seams. Authorization is observed,
+    /// never prompted: gateways fail closed and only PermissionProbes.request prompts.
     ///
-    /// The wrapped EKEventStore is not Sendable, so every synchronous touch
-    /// runs on a dedicated serial queue and concurrent gateway callers never
-    /// enter EventKit concurrently. Authorization prompts run on a fresh
-    /// instance instead of the shared store, so the queue is never held
-    /// across an await while shared state stays serialized on the queue.
-    public final class LiveEventKitStore: EventKitStore, @unchecked Sendable {
-        private let eventStore: EKEventStore
-        private let isolationQueue = DispatchQueue(label: "com.runeweaver.liveeventkitstore.isolation", qos: .utility)
+    /// The wrapped EKEventStore is non-Sendable, so operations allocate an
+    /// isolated EKEventStore per invocation to avoid cross-thread races and
+    /// satisfy Swift 6 Sendable requirements without unchecked escapes.
+    public final class LiveEventKitStore: EventKitStore, Sendable {
+        public init() {}
 
-        public init(eventStore: EKEventStore = EKEventStore()) {
-            self.eventStore = eventStore
+        public convenience init(eventStore _: EKEventStore) {
+            self.init()
         }
 
         // MARK: CalendarStore
@@ -866,22 +863,17 @@ extension ProductionCalendarGateway {
         public func requestAccess() async throws -> Bool {
             // Retained for the explicit owner-driven enable path; gateways
             // never call this and only read authorizationStatus() fail-closed.
-            // The shared store stays confined to the isolation queue, so this
-            // prompt runs on a fresh instance instead of touching shared
-            // state off queue; the queue is never held across this await and
-            // EventKit serializes the system prompt itself.
             try await EKEventStore().requestFullAccessToEvents()
         }
 
         public func calendars() throws -> [StoreCalendar] {
-            isolationQueue.sync {
-                eventStore.calendars(for: .event).map {
-                    StoreCalendar(
-                        identifier: $0.calendarIdentifier,
-                        title: $0.title,
-                        sourceTitle: $0.source?.title
-                    )
-                }
+            let eventStore = EKEventStore()
+            return eventStore.calendars(for: .event).map {
+                StoreCalendar(
+                    identifier: $0.calendarIdentifier,
+                    title: $0.title,
+                    sourceTitle: $0.source?.title
+                )
             }
         }
 
@@ -890,104 +882,100 @@ extension ProductionCalendarGateway {
         }
 
         public func events(matching predicate: CalendarFetchPredicate) throws -> [StoreEvent] {
-            isolationQueue.sync {
-                let ekCalendars = predicate.calendars.compactMap { eventStore.calendar(withIdentifier: $0.identifier) }
-                let nsPredicate = eventStore.predicateForEvents(
-                    withStart: predicate.start,
-                    end: predicate.end,
-                    calendars: ekCalendars.isEmpty ? nil : ekCalendars
+            let eventStore = EKEventStore()
+            let ekCalendars = predicate.calendars.compactMap { eventStore.calendar(withIdentifier: $0.identifier) }
+            let nsPredicate = eventStore.predicateForEvents(
+                withStart: predicate.start,
+                end: predicate.end,
+                calendars: ekCalendars.isEmpty ? nil : ekCalendars
+            )
+            return eventStore.events(matching: nsPredicate).map { ekEvent in
+                StoreEvent(
+                    identifier: ekEvent.eventIdentifier,
+                    calendarIdentifier: ekEvent.calendar?.calendarIdentifier,
+                    title: ekEvent.title,
+                    notes: ekEvent.notes,
+                    startDate: ekEvent.startDate,
+                    endDate: ekEvent.endDate,
+                    isAllDay: ekEvent.isAllDay,
+                    location: ekEvent.location,
+                    hasRecurrence: ekEvent.recurrenceRules?.isEmpty == false
                 )
-                return eventStore.events(matching: nsPredicate).map { ekEvent in
-                    StoreEvent(
-                        identifier: ekEvent.eventIdentifier,
-                        calendarIdentifier: ekEvent.calendar?.calendarIdentifier,
-                        title: ekEvent.title,
-                        notes: ekEvent.notes,
-                        startDate: ekEvent.startDate,
-                        endDate: ekEvent.endDate,
-                        isAllDay: ekEvent.isAllDay,
-                        location: ekEvent.location,
-                        hasRecurrence: ekEvent.recurrenceRules?.isEmpty == false
-                    )
-                }
             }
         }
 
         public func event(withIdentifier identifier: String) throws -> StoreEvent? {
-            isolationQueue.sync {
-                guard let ekEvent = eventStore.event(withIdentifier: identifier) else { return nil }
-                return StoreEvent(
-                    identifier: ekEvent.eventIdentifier,
-                    calendarIdentifier: ekEvent.calendar?.calendarIdentifier,
-                    title: ekEvent.title,
-                    notes: ekEvent.notes,
-                    startDate: ekEvent.startDate,
-                    endDate: ekEvent.endDate,
-                    isAllDay: ekEvent.isAllDay,
-                    location: ekEvent.location,
-                    hasRecurrence: ekEvent.recurrenceRules?.isEmpty == false
-                )
-            }
+            let eventStore = EKEventStore()
+            guard let ekEvent = eventStore.event(withIdentifier: identifier) else { return nil }
+            return StoreEvent(
+                identifier: ekEvent.eventIdentifier,
+                calendarIdentifier: ekEvent.calendar?.calendarIdentifier,
+                title: ekEvent.title,
+                notes: ekEvent.notes,
+                startDate: ekEvent.startDate,
+                endDate: ekEvent.endDate,
+                isAllDay: ekEvent.isAllDay,
+                location: ekEvent.location,
+                hasRecurrence: ekEvent.recurrenceRules?.isEmpty == false
+            )
         }
 
         public func save(_ event: StoreEvent) throws -> StoreEvent {
-            try isolationQueue.sync {
-                let ekEvent: EKEvent = if let identifier = event.identifier,
-                                          !identifier.isEmpty,
-                                          let existing = eventStore.event(withIdentifier: identifier)
-                {
-                    existing
-                } else {
-                    EKEvent(eventStore: eventStore)
-                }
-                if let calendarID = event.calendarIdentifier, !calendarID.isEmpty {
-                    // An explicit identifier must resolve; silently falling back
-                    // to the default calendar would persist into the wrong
-                    // calendar, so fail closed with an owner-facing error.
-                    guard let calendar = eventStore.calendar(withIdentifier: calendarID) else {
-                        throw CalendarToolError.invalidInput("Unknown calendar \"\(calendarID)\".")
-                    }
-                    ekEvent.calendar = calendar
-                } else if ekEvent.calendar == nil {
-                    ekEvent.calendar = eventStore.defaultCalendarForNewEvents
-                }
-                ekEvent.title = event.title
-                ekEvent.notes = event.notes
-                if let startDate = event.startDate {
-                    ekEvent.startDate = startDate
-                }
-                if let endDate = event.endDate {
-                    ekEvent.endDate = endDate
-                }
-                ekEvent.isAllDay = event.isAllDay
-                ekEvent.location = event.location
-                try eventStore.save(ekEvent, span: .thisEvent, commit: true)
-                return StoreEvent(
-                    identifier: ekEvent.eventIdentifier,
-                    calendarIdentifier: ekEvent.calendar?.calendarIdentifier,
-                    title: ekEvent.title,
-                    notes: ekEvent.notes,
-                    startDate: ekEvent.startDate,
-                    endDate: ekEvent.endDate,
-                    isAllDay: ekEvent.isAllDay,
-                    location: ekEvent.location,
-                    hasRecurrence: ekEvent.recurrenceRules?.isEmpty == false
-                )
+            let eventStore = EKEventStore()
+            let ekEvent: EKEvent = if let identifier = event.identifier,
+                                      !identifier.isEmpty,
+                                      let existing = eventStore.event(withIdentifier: identifier)
+            {
+                existing
+            } else {
+                EKEvent(eventStore: eventStore)
             }
+            if let calendarID = event.calendarIdentifier, !calendarID.isEmpty {
+                // An explicit identifier must resolve; silently falling back
+                // to the default calendar would persist into the wrong
+                // calendar, so fail closed with an owner-facing error.
+                guard let calendar = eventStore.calendar(withIdentifier: calendarID) else {
+                    throw CalendarToolError.invalidInput("Unknown calendar \"\(calendarID)\".")
+                }
+                ekEvent.calendar = calendar
+            } else if ekEvent.calendar == nil {
+                ekEvent.calendar = eventStore.defaultCalendarForNewEvents
+            }
+            ekEvent.title = event.title
+            ekEvent.notes = event.notes
+            if let startDate = event.startDate {
+                ekEvent.startDate = startDate
+            }
+            if let endDate = event.endDate {
+                ekEvent.endDate = endDate
+            }
+            ekEvent.isAllDay = event.isAllDay
+            ekEvent.location = event.location
+            try eventStore.save(ekEvent, span: .thisEvent, commit: true)
+            return StoreEvent(
+                identifier: ekEvent.eventIdentifier,
+                calendarIdentifier: ekEvent.calendar?.calendarIdentifier,
+                title: ekEvent.title,
+                notes: ekEvent.notes,
+                startDate: ekEvent.startDate,
+                endDate: ekEvent.endDate,
+                isAllDay: ekEvent.isAllDay,
+                location: ekEvent.location,
+                hasRecurrence: ekEvent.recurrenceRules?.isEmpty == false
+            )
         }
 
         public func remove(_ event: StoreEvent, span: CalendarSpan) throws {
-            try isolationQueue.sync {
-                guard let identifier = event.identifier,
-                      !identifier.isEmpty,
-                      let ekEvent = eventStore.event(withIdentifier: identifier)
-                else { return }
-                try eventStore.remove(
-                    ekEvent,
-                    span: span == .futureEvents ? .futureEvents : .thisEvent,
-                    commit: true
-                )
-            }
+            let eventStore = EKEventStore()
+            guard let identifier = event.identifier,
+                  !identifier.isEmpty,
+                  let ekEvent = eventStore.event(withIdentifier: identifier)
+            else { return }
+            try eventStore.remove(
+                ekEvent,
+                span: span == .futureEvents ? .futureEvents : .thisEvent,
+                commit: true
+            )
         }
 
         // MARK: ReminderStore
@@ -1009,23 +997,17 @@ extension ProductionCalendarGateway {
         }
 
         public func requestReminderAccess() async throws -> Bool {
-            // Retained for the explicit owner-driven enable path; gateways
-            // never call this and only read reminderAuthorizationStatus()
-            // fail-closed. Prompts on a fresh instance for the same reason as
-            // requestAccess: the shared store never leaves the isolation
-            // queue and the queue is never held across this await.
             try await EKEventStore().requestFullAccessToReminders()
         }
 
         public func reminderCalendars() throws -> [EventKitReminderCalendar] {
-            isolationQueue.sync {
-                eventStore.calendars(for: .reminder).map {
-                    EventKitReminderCalendar(
-                        identifier: $0.calendarIdentifier,
-                        title: $0.title,
-                        sourceTitle: $0.source?.title ?? ""
-                    )
-                }
+            let eventStore = EKEventStore()
+            return eventStore.calendars(for: .reminder).map {
+                EventKitReminderCalendar(
+                    identifier: $0.calendarIdentifier,
+                    title: $0.title,
+                    sourceTitle: $0.source?.title ?? ""
+                )
             }
         }
 
@@ -1033,91 +1015,80 @@ extension ProductionCalendarGateway {
             matching predicate: EventKitReminderPredicate,
             completion: @escaping @Sendable ([EventKitReminder]?) -> Void
         ) {
-            // Initiation runs on the isolation queue so calendar lookups and
-            // predicate construction never race with synchronous mutations.
-            // EventKit offers no server-side date predicate for reminders, so
-            // due-date narrowing happens in memory here; the gateway applies
-            // the final window plus undated rule on top. The completion only
-            // maps value types and never touches the store, so the queue is
-            // never held across the asynchronous callback.
-            isolationQueue.sync {
-                let ekCalendars = predicate.calendars.compactMap { eventStore.calendar(withIdentifier: $0.identifier) }
-                let nsPredicate = eventStore.predicateForReminders(in: ekCalendars.isEmpty ? nil : ekCalendars)
-                _ = eventStore.fetchReminders(matching: nsPredicate) { ekReminders in
-                    guard let ekReminders else {
-                        completion(nil)
-                        return
-                    }
-                    // In-memory date narrowing mirrors TemporalRange.contains:
-                    // inclusive lower, exclusive upper, nil side unbounded.
-                    // Undated rows pass through here; the gateway decides
-                    // whether the query keeps them.
-                    let range = TemporalRange(since: predicate.start, until: predicate.end)
-                    let mapped = ekReminders
-                        .filter { $0.isCompleted == predicate.fetchCompleted }
-                        .map { Self.makeReminder(from: $0) }
-                        .filter {
-                            guard let due = $0.dueDate else { return true }
-                            return range.contains(due)
-                        }
-                    completion(mapped)
+            let eventStore = EKEventStore()
+            let ekCalendars = predicate.calendars.compactMap { eventStore.calendar(withIdentifier: $0.identifier) }
+            let nsPredicate = eventStore.predicateForReminders(in: ekCalendars.isEmpty ? nil : ekCalendars)
+            _ = eventStore.fetchReminders(matching: nsPredicate) { ekReminders in
+                guard let ekReminders else {
+                    completion(nil)
+                    return
                 }
+                // In-memory date narrowing mirrors TemporalRange.contains:
+                // inclusive lower, exclusive upper, nil side unbounded.
+                // Undated rows pass through here; the gateway decides
+                // whether the query keeps them.
+                let range = TemporalRange(since: predicate.start, until: predicate.end)
+                let mapped = ekReminders
+                    .filter { $0.isCompleted == predicate.fetchCompleted }
+                    .map { Self.makeReminder(from: $0) }
+                    .filter {
+                        guard let due = $0.dueDate else { return true }
+                        return range.contains(due)
+                    }
+                completion(mapped)
             }
         }
 
         public func reminder(withIdentifier identifier: String) -> EventKitReminder? {
-            isolationQueue.sync {
-                guard let ekReminder = eventStore.calendarItem(withIdentifier: identifier) as? EKReminder else {
-                    return nil
-                }
-                return Self.makeReminder(from: ekReminder)
+            let eventStore = EKEventStore()
+            guard let ekReminder = eventStore.calendarItem(withIdentifier: identifier) as? EKReminder else {
+                return nil
             }
+            return Self.makeReminder(from: ekReminder)
         }
 
         public func save(_ reminder: EventKitReminder) throws -> EventKitReminder {
-            try isolationQueue.sync {
-                let ekReminder: EKReminder = if reminder.identifier.isEmpty {
-                    EKReminder(eventStore: eventStore)
-                } else if let existing = eventStore.calendarItem(withIdentifier: reminder.identifier) as? EKReminder {
-                    existing
-                } else {
-                    EKReminder(eventStore: eventStore)
-                }
-                if !reminder.calendarIdentifier.isEmpty {
-                    // An explicit list identifier must resolve; silently falling
-                    // back to the default list would persist into the wrong
-                    // list, so fail closed with an owner-facing error.
-                    guard let calendar = eventStore.calendar(withIdentifier: reminder.calendarIdentifier) else {
-                        throw ReminderToolError.invalidInput("Unknown reminder list '\(reminder.calendarIdentifier)'.")
-                    }
-                    ekReminder.calendar = calendar
-                } else if ekReminder.calendar == nil {
-                    ekReminder.calendar = eventStore.defaultCalendarForNewReminders()
-                }
-                ekReminder.title = reminder.title
-                ekReminder.notes = reminder.notes
-                if let dueDate = reminder.dueDate {
-                    ekReminder.dueDateComponents = Calendar.current.dateComponents(
-                        [.year, .month, .day, .hour, .minute, .second],
-                        from: dueDate
-                    )
-                } else {
-                    ekReminder.dueDateComponents = nil
-                }
-                ekReminder.isCompleted = reminder.isCompleted
-                ekReminder.priority = reminder.priority
-                try eventStore.save(ekReminder, commit: true)
-                return Self.makeReminder(from: ekReminder)
+            let eventStore = EKEventStore()
+            let ekReminder: EKReminder = if reminder.identifier.isEmpty {
+                EKReminder(eventStore: eventStore)
+            } else if let existing = eventStore.calendarItem(withIdentifier: reminder.identifier) as? EKReminder {
+                existing
+            } else {
+                EKReminder(eventStore: eventStore)
             }
+            if !reminder.calendarIdentifier.isEmpty {
+                // An explicit list identifier must resolve; silently falling
+                // back to the default list would persist into the wrong
+                // list, so fail closed with an owner-facing error.
+                guard let calendar = eventStore.calendar(withIdentifier: reminder.calendarIdentifier) else {
+                    throw ReminderToolError.invalidInput("Unknown reminder list '\(reminder.calendarIdentifier)'.")
+                }
+                ekReminder.calendar = calendar
+            } else if ekReminder.calendar == nil {
+                ekReminder.calendar = eventStore.defaultCalendarForNewReminders()
+            }
+            ekReminder.title = reminder.title
+            ekReminder.notes = reminder.notes
+            if let dueDate = reminder.dueDate {
+                ekReminder.dueDateComponents = Calendar.current.dateComponents(
+                    [.year, .month, .day, .hour, .minute, .second],
+                    from: dueDate
+                )
+            } else {
+                ekReminder.dueDateComponents = nil
+            }
+            ekReminder.isCompleted = reminder.isCompleted
+            ekReminder.priority = reminder.priority
+            try eventStore.save(ekReminder, commit: true)
+            return Self.makeReminder(from: ekReminder)
         }
 
         public func removeReminder(withIdentifier identifier: String) throws {
-            try isolationQueue.sync {
-                guard let ekReminder = eventStore.calendarItem(withIdentifier: identifier) as? EKReminder else {
-                    return
-                }
-                try eventStore.remove(ekReminder, commit: true)
+            let eventStore = EKEventStore()
+            guard let ekReminder = eventStore.calendarItem(withIdentifier: identifier) as? EKReminder else {
+                return
             }
+            try eventStore.remove(ekReminder, commit: true)
         }
 
         // MARK: Mapping

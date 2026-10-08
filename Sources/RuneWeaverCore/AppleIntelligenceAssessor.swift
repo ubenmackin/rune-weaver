@@ -225,7 +225,11 @@ public actor AppleIntelligenceAssessor {
             let warnings: [String]?
         }
 
-        guard let decoded = try? JSONDecoder().decode(Payload.self, from: data) else {
+        let decoded: Payload
+        do {
+            decoded = try JSONDecoder().decode(Payload.self, from: data)
+        } catch {
+            RuneWeaverLog.tools.debug("AppleIntelligenceAssessor: failed to decode assessment JSON payload: \(error.localizedDescription)")
             return nil
         }
 

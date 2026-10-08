@@ -5,6 +5,7 @@
 // Architectural role: single persistence owner behind RemindersGateway, mirroring MessagesGateway per-domain seam.
 
 import Foundation
+import os
 import RuneWeaverCore
 #if canImport(EventKit)
     import EventKit
@@ -496,7 +497,13 @@ public struct ProductionRemindersGateway: RemindersGateway, Sendable {
         } catch {
             throw ReminderToolError.storeUnavailable(error.localizedDescription)
         }
-        let calendars = (try? store.reminderCalendars()) ?? []
+        let calendars: [EventKitReminderCalendar]
+        do {
+            calendars = try store.reminderCalendars()
+        } catch {
+            RuneWeaverLog.tools.debug("RemindersGateway: failed to fetch reminder calendars: \(error.localizedDescription)")
+            calendars = []
+        }
         let calendar = calendars.first { $0.identifier == persisted.calendarIdentifier }
             ?? EventKitReminderCalendar(identifier: persisted.calendarIdentifier, title: persisted.calendarIdentifier)
         return Self.makeItem(persisted, calendar: calendar)
@@ -780,18 +787,19 @@ extension ProductionRemindersGateway {
 /// The store must call its completion exactly once, but a buggy store could
 /// call twice (trapping on second resume) or never (hanging the tool). The
 /// timeout and the fetch race through this guard so only the first wins.
-private final class FetchResumeGuard: @unchecked Sendable {
-    private let lock = NSLock()
-    private var didResume = false
+private final class FetchResumeGuard: Sendable {
+    private let didResume = OSAllocatedUnfairLock(initialState: false)
 
     func resumeOnce(
         _ result: Result<[EventKitReminder], Error>,
         continuation: CheckedContinuation<[EventKitReminder], Error>
     ) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !didResume else { return }
-        didResume = true
+        let shouldResume = didResume.withLock { resumed -> Bool in
+            guard !resumed else { return false }
+            resumed = true
+            return true
+        }
+        guard shouldResume else { return }
         switch result {
         case let .success(value):
             continuation.resume(returning: value)

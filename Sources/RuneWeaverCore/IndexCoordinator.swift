@@ -1001,7 +1001,11 @@ extension IndexCoordinator {
         let intervalNanoseconds = instanceHeartbeatIntervalNanoseconds
         return Task<Void, Never> {
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: intervalNanoseconds)
+                do {
+                    try await Task.sleep(nanoseconds: intervalNanoseconds)
+                } catch {
+                    break
+                }
                 if Task.isCancelled {
                     break
                 }

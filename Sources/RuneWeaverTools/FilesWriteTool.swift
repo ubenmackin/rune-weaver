@@ -512,7 +512,14 @@ public struct FilesWriteTool: Tool, Sendable {
     /// bytes rather than treating them as empty text.
     private static func readExistingContent(at url: URL) -> String? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        guard let data = try? Data(contentsOf: url), let str = String(bytes: data, encoding: .utf8) else {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            RuneWeaverLog.tools.debug("FilesWriteTool: failed to read existing content at \(url.path): \(error.localizedDescription)")
+            return nil
+        }
+        guard let str = String(bytes: data, encoding: .utf8) else {
             return nil
         }
         return str

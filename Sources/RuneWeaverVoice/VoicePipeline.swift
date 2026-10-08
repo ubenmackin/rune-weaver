@@ -196,7 +196,13 @@ public actor VoicePipeline {
         guard status == 0 else {
             throw VoicePipelineError.synthesisFailed("System TTS exited with status \(status)")
         }
-        guard let data = try? Data(contentsOf: outputURL), !data.isEmpty else {
+        let data: Data
+        do {
+            data = try Data(contentsOf: outputURL)
+        } catch {
+            throw VoicePipelineError.synthesisFailed("System TTS output unreadable at \(outputURL.path): \(error.localizedDescription)")
+        }
+        guard !data.isEmpty else {
             throw VoicePipelineError.synthesisFailed("System TTS produced no audio")
         }
         return Array(data)

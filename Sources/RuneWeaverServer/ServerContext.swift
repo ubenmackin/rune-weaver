@@ -517,6 +517,37 @@ public final class ServerContext: Sendable {
     public func bashFilesSnapshot() -> (bash: BashConfig, files: FilesConfig) {
         bashFilesBox.withLock { ($0.bash, $0.files) }
     }
+
+    /// Schedules a background task to await completion of goal planning and broadcast the updated goal.
+    ///
+    /// Managed within the server context lifecycle at background priority so the creating HTTP route
+    /// can return immediately without unmonitored detached spawns.
+    public func schedulePlanReadyBroadcast(goalID: UUID) {
+        let hub = self.hub
+        let store = self.goals
+        let engine = self.goalEngine
+        Task(priority: .background) {
+            await engine.waitForPendingPlan(goalID: goalID)
+            do {
+                if let updated = try await store.goal(id: goalID) {
+                    let freshSteps: [GoalStep]
+                    do {
+                        freshSteps = try await store.steps(goalID: goalID)
+                    } catch is CancellationError {
+                        return
+                    } catch {
+                        RuneWeaverLog.server.warning("ServerContext: plan-ready steps lookup failed for \(goalID): \(error.localizedDescription)")
+                        freshSteps = []
+                    }
+                    await hub.broadcastGoal(GoalDTO(goal: updated, steps: freshSteps))
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                RuneWeaverLog.server.error("ServerContext: plan-ready broadcast failed for \(goalID): \(error.localizedDescription)")
+            }
+        }
+    }
 }
 
 // MARK: - Factory and Bootstrapping
@@ -1185,9 +1216,14 @@ private func finalizeServerContext(
         let reconciled = try await context.goalEngine.reconcileActiveGoalsCompletion()
         if !reconciled.isEmpty {
             for goalID in reconciled {
-                if let goal = try? await context.goals.goal(id: goalID) {
-                    let steps = await (try? context.goals.steps(goalID: goalID)) ?? []
+                do {
+                    guard let goal = try await context.goals.goal(id: goalID) else { continue }
+                    let steps = try await context.goals.steps(goalID: goalID)
                     await context.hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
+                } catch is CancellationError {
+                    break
+                } catch {
+                    RuneWeaverLog.server.warning("ServerContext: failed to load reconciled goal \(goalID): \(error.localizedDescription)")
                 }
             }
         }
@@ -1196,7 +1232,7 @@ private func finalizeServerContext(
     }
     // Warm fills the 60s TTL snapshot so the first dashboard poll finds slow fields cached.
     let store = context.indexStore
-    Task.detached(priority: .utility) {
+    Task(priority: .utility) {
         do {
             _ = try await store?.storageBreakdown()
         } catch {

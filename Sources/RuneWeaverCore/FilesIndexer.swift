@@ -480,7 +480,7 @@ extension FilesIndexer {
                 break
             }
             let rootURL = resolvedRootURL(root)
-            await candidates.append(contentsOf: collectCandidates(rootURL: rootURL, workers: workers, budget: budget, counters: &counters))
+            await candidates.append(contentsOf: collectCandidates(rootURL: rootURL, rawRoot: root, workers: workers, budget: budget, counters: &counters))
         }
         return candidates
     }
@@ -588,17 +588,21 @@ extension FilesIndexer {
     /// the sequential walk instead of counting a full-tree prune set.
     /// - Parameters:
     ///   - rootURL: Resolved root to walk.
+    ///   - rawRoot: Configured root string for optional cloud-root classification.
     ///   - workers: Files in flight absent any pressure, for the thermal gate.
     ///   - budget: Shared nightly budget; exhaustion stops discovery.
     ///   - counters: Cumulative run counters.
     /// - Returns: Candidate files with the root they were discovered under.
-    func collectCandidates(rootURL: URL, workers: Int, budget: FileIndexBudget, counters: inout Counters) async -> [(file: URL, root: URL)] {
+    func collectCandidates(rootURL: URL, rawRoot: String = "", workers: Int, budget: FileIndexBudget, counters: inout Counters) async -> [(file: URL, root: URL)] {
         var collected: [(file: URL, root: URL)] = []
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: rootURL.path, isDirectory: &isDirectory)
         // A missing root marks the run unreadable like the sequential path so
         // the reconcile stays skipped instead of deleting live documents.
         guard exists else {
+            if Self.isOptionalCloudRoot(rootURL: rootURL, rawRoot: rawRoot) {
+                return collected
+            }
             counters.hasUnreadableRoot = true
             return collected
         }
@@ -1064,9 +1068,12 @@ extension FilesIndexer {
     }
 
     /// Best-effort trigger for an evicted iCloud download; failures are ignored.
-    /// - Parameter url: File URL to download.
     static func startLiveDownload(at url: URL) {
-        try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+        do {
+            try FileManager.default.startDownloadingUbiquitousItem(at: url)
+        } catch {
+            RuneWeaverLog.stores.debug("FilesIndexer: failed to trigger download for ubiquitous item at \(url.path): \(error.localizedDescription)")
+        }
     }
 
     /// Maps extraction chunks to indexed chunks, attaching vectors when present.
@@ -1074,14 +1081,33 @@ extension FilesIndexer {
     ///   - extraction: Extracted document body.
     ///   - documentID: Owning document identifier.
     ///   - vectors: One vector per chunk, or nil for keyword-only.
+    ///   - fallbackDisplayName: Display name used if extraction produced 0 chunks.
+    ///   - fallbackPath: Relative display path used if extraction produced 0 chunks.
     /// - Returns: Indexed chunks in extraction order.
-    static func makeChunks(extraction: DocumentExtraction, documentID: UUID, vectors: [[Float]]?) -> [IndexedChunk] {
-        extraction.chunks.enumerated().map { position, chunk in
-            let vector: [Float] = if let vectors, position < vectors.count {
-                vectors[position]
-            } else {
-                []
+    static func makeChunks(
+        extraction: DocumentExtraction,
+        documentID: UUID,
+        vectors: [[Float]]?,
+        fallbackDisplayName: String? = nil,
+        fallbackPath: String? = nil
+    ) -> [IndexedChunk] {
+        if extraction.chunks.isEmpty {
+            if let displayName = fallbackDisplayName {
+                // Single-sourced fallback body so the indexer and the office
+                // extraction layer never drift on labels or format tokens.
+                let path = (fallbackPath?.isEmpty == false ? fallbackPath : nil) ?? displayName
+                let text = DocumentTextExtractor.fallbackMetadataText(
+                    displayName: displayName,
+                    formatToken: extraction.format.rawValue,
+                    path: path
+                )
+                let vector = vectors?.first ?? []
+                return [IndexedChunk(documentID: documentID, ordinal: 0, text: text, embedding: vector)]
             }
+            return []
+        }
+        return extraction.chunks.enumerated().map { position, chunk in
+            let vector = vectors.flatMap { $0.indices.contains(position) ? $0[position] : nil } ?? []
             return IndexedChunk(documentID: documentID, ordinal: chunk.index, text: chunk.text, embedding: vector)
         }
     }
@@ -1199,6 +1225,74 @@ extension FilesIndexer {
         return isWorkspaceScratchComponents(components)
     }
 
+    /// Reports whether a path relative to the walk root is an allowed cloud storage path within Library.
+    ///
+    /// The indexer skips machine caches and application support trees under
+    /// `Library`, but exempts user cloud storage trees residing under
+    /// `Library/CloudStorage` (modern FileProvider roots such as iCloud Drive, Dropbox,
+    /// OneDrive, Google Drive) and `Library/Mobile Documents` (legacy iCloud Drive).
+    /// - Parameter components: Lowercased path components relative to the walk root.
+    /// - Returns: True when the components represent or lead to an allowed cloud tree.
+    static func isAllowedLibraryCloudPath(components: [String]) -> Bool {
+        guard !components.isEmpty, components[0] == "library" else { return false }
+        if components.count == 1 {
+            // Exactly "library": allow descending so CloudStorage and Mobile Documents are reached
+            return true
+        }
+        let second = components[1]
+        return second == "cloudstorage" || second == "mobile documents"
+    }
+
+    /// Reports whether a root path is an optional cloud storage root.
+    ///
+    /// Optional cloud roots (such as iCloud Drive or CloudStorage) may not exist
+    /// on all machines or setups. Missing optional cloud roots are ignored without
+    /// flagging `hasUnreadableRoot = true`, allowing `retireUnseenFiles` to proceed.
+    static func isOptionalCloudRoot(rootURL: URL, rawRoot: String? = nil) -> Bool {
+        // Component-anchored so a coincidental substring never clears the
+        // unreadable-root flag: only an exact cloud component or a Library
+        // cloud-storage prefix counts, never `~/Documents/icloud drive backup`.
+        if isCloudRootComponents(pathComponents(of: rootURL.path)) {
+            return true
+        }
+        if let rawRoot, !rawRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if isCloudRootComponents(pathComponents(of: rawRoot)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Splits a raw path into lowercased components for cloud-root matching.
+    /// - Parameter rawPath: File path or configured root string.
+    /// - Returns: Non-empty lowercased components.
+    private static func pathComponents(of rawPath: String) -> [String] {
+        rawPath.lowercased().split(separator: "/").map(String.init).filter { !$0.isEmpty }
+    }
+
+    /// Reports whether anchored components name an optional cloud root.
+    ///
+    /// Matches the `Library/CloudStorage` and `Library/Mobile Documents`
+    /// prefixes plus exact `icloud drive` and `com~apple~clouddocs`
+    /// components; anything else stays fail-closed.
+    /// - Parameter components: Lowercased non-empty path components.
+    /// - Returns: True for an optional cloud root.
+    private static func isCloudRootComponents(_ components: [String]) -> Bool {
+        guard !components.isEmpty else { return false }
+        for index in 0 ..< components.count {
+            if components[index] == "library", index + 1 < components.count {
+                let next = components[index + 1]
+                if next == "cloudstorage" || next == "mobile documents" {
+                    return true
+                }
+            }
+            if components[index] == "icloud drive" || components[index] == "com~apple~clouddocs" {
+                return true
+            }
+        }
+        return false
+    }
+
     /// Reports whether a candidate is excluded by the given patterns.
     ///
     /// Static so the shared walk classification stays off the actor: the
@@ -1232,6 +1326,20 @@ extension FilesIndexer {
             if raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "workspace" {
                 return false
             }
+            // A Library prune still descends into the two allowed cloud
+            // subtrees; configured spellings of the same root honor it too.
+            var libraryPattern = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+            if libraryPattern.hasPrefix("~/") {
+                libraryPattern = String(libraryPattern.dropFirst(2))
+            }
+            if libraryPattern.hasSuffix("/*") {
+                libraryPattern = String(libraryPattern.dropLast(2))
+            } else if libraryPattern.hasSuffix("/") {
+                libraryPattern = String(libraryPattern.dropLast(1))
+            }
+            if libraryPattern == "library", isAllowedLibraryCloudPath(components: components) {
+                return false
+            }
             // Bare directory names guard the whole subtree: any component
             // match excludes nested files without requiring a glob.
             if !pattern.contains("/"), !pattern.contains("*"), !pattern.contains("?"), !pattern.contains("[") {
@@ -1256,9 +1364,18 @@ extension FilesIndexer {
     ///   - root: Walk root.
     /// - Returns: Relative path, or the final path component when outside the root.
     static func relativePath(of url: URL, root: URL) -> String {
-        let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
-        if url.path.hasPrefix(prefix) {
-            let relative = String(url.path.dropFirst(prefix.count))
+        let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
+        let canonicalURL = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let prefix = canonicalRoot.hasSuffix("/") ? canonicalRoot : canonicalRoot + "/"
+        if canonicalURL.hasPrefix(prefix) {
+            let relative = String(canonicalURL.dropFirst(prefix.count))
+            if !relative.isEmpty {
+                return relative
+            }
+        }
+        let fallbackPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        if url.path.hasPrefix(fallbackPrefix) {
+            let relative = String(url.path.dropFirst(fallbackPrefix.count))
             if !relative.isEmpty {
                 return relative
             }

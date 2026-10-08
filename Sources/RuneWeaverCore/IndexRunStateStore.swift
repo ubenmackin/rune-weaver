@@ -81,7 +81,15 @@ public actor IndexRunStateStore {
         guard !loaded else { return }
         loaded = true
         let expanded = (path as NSString).expandingTildeInPath
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: expanded)) else { return }
+        let url = URL(fileURLWithPath: expanded)
+        guard FileManager.default.fileExists(atPath: expanded) else { return }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            RuneWeaverLog.scheduler.warning("IndexRunStateStore: failed to read index run state from '\(expanded)': \(error.localizedDescription)")
+            return
+        }
         do {
             state = try JSONDecoder().decode(IndexRunState.self, from: data)
         } catch {

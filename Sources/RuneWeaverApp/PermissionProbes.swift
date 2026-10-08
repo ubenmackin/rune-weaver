@@ -112,8 +112,13 @@ public struct LivePermissionProbes: PermissionProbing {
         switch kind {
         case .contacts:
             // Prompt once, then re-read the cached state so the row reflects
-            // what the system recorded rather than the transient Bool.
-            _ = try? await CNContactStore().requestAccess(for: .contacts)
+            do {
+                _ = try await CNContactStore().requestAccess(for: .contacts)
+            } catch is CancellationError {
+                return await status(.contacts)
+            } catch {
+                RuneWeaverLog.app.debug("CNContactStore requestAccess failed: \(error.localizedDescription)")
+            }
             return await status(.contacts)
         case .calendars:
             // Prompting full-access variant reserved for the explicit Enable
@@ -168,9 +173,21 @@ public struct LivePermissionProbes: PermissionProbing {
     private func requestEventKitAccess(for entity: EKEntityType) async -> PermissionStatus {
         switch entity {
         case .event:
-            _ = try? await EKEventStore().requestFullAccessToEvents()
+            do {
+                _ = try await EKEventStore().requestFullAccessToEvents()
+            } catch is CancellationError {
+                return eventKitStatus(for: entity)
+            } catch {
+                RuneWeaverLog.app.debug("EKEventStore requestFullAccessToEvents failed: \(error.localizedDescription)")
+            }
         case .reminder:
-            _ = try? await EKEventStore().requestFullAccessToReminders()
+            do {
+                _ = try await EKEventStore().requestFullAccessToReminders()
+            } catch is CancellationError {
+                return eventKitStatus(for: entity)
+            } catch {
+                RuneWeaverLog.app.debug("EKEventStore requestFullAccessToReminders failed: \(error.localizedDescription)")
+            }
         @unknown default:
             return .unavailable
         }

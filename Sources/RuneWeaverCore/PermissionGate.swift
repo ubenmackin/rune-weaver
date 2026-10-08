@@ -795,7 +795,13 @@ public actor PermissionGate {
     public func bootstrap() async {
         guard let store else { return }
         let now = Date()
-        try? await store.pruneExpired(at: now)
+        do {
+            try await store.pruneExpired(at: now)
+        } catch is CancellationError {
+            return
+        } catch {
+            RuneWeaverLog.stores.debug("PermissionGate: failed to prune expired grants at bootstrap: \(error.localizedDescription)")
+        }
         do {
             grants = try await store.load()
         } catch {
@@ -848,7 +854,13 @@ public actor PermissionGate {
         grants.removeAll { $0.isExpired(at: now) }
         evictStaleEphemeralGrants(now: now)
         if let store {
-            try? await store.pruneExpired(at: now)
+            do {
+                try await store.pruneExpired(at: now)
+            } catch is CancellationError {
+                return
+            } catch {
+                RuneWeaverLog.stores.debug("PermissionGate: failed to prune expired grants: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -1330,12 +1342,16 @@ extension PermissionGate {
     /// - Parameter toolCall: Raw invocation arguments.
     /// - Returns: Trimmed command (possibly empty so `evaluate` denies), or nil only when unparseable.
     private static func bashCommand(from toolCall: ToolInput) -> String? {
-        guard let data = toolCall.argumentsJSON.data(using: .utf8),
-              let args = try? JSONDecoder().decode(BashCommandArgs.self, from: data)
-        else { return nil }
-        // Blank commands return empty so the evaluator denies closed instead
-        // of skipping evaluation and parking for approval.
-        return args.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = toolCall.argumentsJSON.data(using: .utf8) else { return nil }
+        do {
+            let args = try JSONDecoder().decode(BashCommandArgs.self, from: data)
+            // Blank commands return empty so the evaluator denies closed instead
+            // of skipping evaluation and parking for approval.
+            return args.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            RuneWeaverLog.stores.debug("bashCommand: failed to decode arguments JSON: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     /// Whether the first effective expiry strictly outlives the second. A nil

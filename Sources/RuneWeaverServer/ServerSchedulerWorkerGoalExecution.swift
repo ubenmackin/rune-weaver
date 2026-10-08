@@ -481,9 +481,19 @@ extension ServerSchedulerWorker {
     func broadcastGoalSnapshot(goalID: UUID, store: GoalStore) async {
         do {
             if let goal = try await store.goal(id: goalID) {
-                let steps = await (try? store.steps(goalID: goalID)) ?? []
+                let steps: [GoalStep]
+                do {
+                    steps = try await store.steps(goalID: goalID)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    await logger?("Goal snapshot steps lookup failed for \(goalID): \(error.localizedDescription)")
+                    steps = []
+                }
                 await hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
             }
+        } catch is CancellationError {
+            return
         } catch {
             await logger?("Goal snapshot broadcast failed: \(error.localizedDescription)")
         }

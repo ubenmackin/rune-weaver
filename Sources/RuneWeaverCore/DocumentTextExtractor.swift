@@ -201,11 +201,15 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
                 truncated: true
             )
         }
-        guard let data = try? Data(contentsOf: fileURL, options: [.mappedIfSafe]) else {
+        let data: Data
+        do {
+            data = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
+        } catch {
+            RuneWeaverLog.stores.warning("DocumentTextExtractor: failed to read '\(fileName)' at \(fileURL.path): \(error.localizedDescription)")
             return makeResult(
                 status: .failed,
                 format: format,
-                reason: "The document at '\(fileName)' could not be read.",
+                reason: "The document at '\(fileName)' could not be read: \(error.localizedDescription).",
                 byteCount: 0
             )
         }
@@ -253,7 +257,7 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
         case .pptx:
             return extractPPTX(data: data)
         case .pages, .numbers, .keynote:
-            return extractIWork(data: data, format: format)
+            return extractIWork(data: data, format: format, fileName: fileName)
         case .unsupported:
             return makeResult(
                 status: .unsupported,

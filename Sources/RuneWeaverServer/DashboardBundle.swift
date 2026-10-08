@@ -438,7 +438,13 @@ extension DashboardBundle {
         cacheControl: String = htmlCacheControl,
         fileManager: FileManager = .default
     ) -> Response {
-        guard let url, let data = try? Data(contentsOf: url) else {
+        guard let url else {
+            return jsonError(status: .internalServerError, message: "Dashboard bundle unreadable", fileManager: fileManager)
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
             return jsonError(status: .internalServerError, message: "Dashboard bundle unreadable", fileManager: fileManager)
         }
         var headers = HTTPHeaders([

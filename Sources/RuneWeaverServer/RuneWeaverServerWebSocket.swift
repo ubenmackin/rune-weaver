@@ -806,19 +806,11 @@ private func handleWebSocketTurnCancellation(
         status: "cancelled",
         durationMs: durationMs
     ) ?? initialEntry
-    // Terminal settlement runs inside the cancelled turn task, where the
-    // per-send timeout observes cancellation and would drop the fan-out.
-    // A detached task carries a fresh cancellation scope so the run update
-    // plus the session-tagged cancelled frame still reach every viewer,
+    // Terminal settlement runs inside the cancelled turn task. Broadcasts
+    // deliver terminal settlement to viewers without unmonitored detached spawns
     // while the event-path guard keeps emitting zero further deltas.
     let cancelledText = encodeWSFrame(WSCancelledFrame(sessionID: sessionID))
-    let hub = context.hub
-    await Task.detached {
-        await hub.broadcastRun(entry)
-        if let frame = cancelledText {
-            await hub.broadcast(text: frame)
-        }
-    }.value
+    await context.hub.broadcastTerminalCancellation(run: entry, frameText: cancelledText)
     await context.steeringQueue.clear(for: sessionID)
 }
 
@@ -1050,9 +1042,16 @@ private func wsEgressDecisionTier(from text: String) -> WSEgressDecisionOutcome 
         var egressDecision: EgressDecisionTier?
         enum CodingKeys: String, CodingKey { case egressDecision }
     }
-    guard let fields = try? JSONDecoder().decode(EgressFields.self, from: data),
-          let tier = fields.egressDecision
-    else { return WSEgressDecisionOutcome(tier: nil, invalid: true) }
+    let fields: EgressFields
+    do {
+        fields = try JSONDecoder().decode(EgressFields.self, from: data)
+    } catch {
+        RuneWeaverLog.server.debug("decodeEgressDecision: failed to decode egressDecision: \(error.localizedDescription)")
+        return WSEgressDecisionOutcome(tier: nil, invalid: true)
+    }
+    guard let tier = fields.egressDecision else {
+        return WSEgressDecisionOutcome(tier: nil, invalid: true)
+    }
     return WSEgressDecisionOutcome(tier: tier, invalid: false)
 }
 

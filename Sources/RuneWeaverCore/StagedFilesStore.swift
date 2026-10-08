@@ -326,9 +326,16 @@ public actor StagedFilesStore {
                 // while the serial lane is per-process. Re-read it to join,
                 // and never delete the copy at the derived path: it may be
                 // the winner's only rollback point.
-                guard let winner = try? SQLiteStagedFilesStore.liveReview(forPath: trimmed, dbPath: dbPath),
-                      winner.resolution == nil
-                else {
+                let winner: LiveReviewRecord
+                do {
+                    guard let found = try SQLiteStagedFilesStore.liveReview(forPath: trimmed, dbPath: dbPath),
+                          found.resolution == nil
+                    else {
+                        return .unreadable
+                    }
+                    winner = found
+                } catch {
+                    RuneWeaverLog.stores.error("StagedFilesStore: liveReview failed for \(trimmed): \(error.localizedDescription)")
                     return .unreadable
                 }
                 if let writeFailure = Self.applyLiveWrite(write) {
@@ -707,7 +714,12 @@ private enum SQLiteStagedFilesStore {
             }
             guard let handle else { return nil }
             defer { sqlite3_close(handle) }
-            return try? state(forPath: path, table: table, handle: handle)
+            do {
+                return try state(forPath: path, table: table, handle: handle)
+            } catch {
+                RuneWeaverLog.stores.error("StagedFilesStore: failed reading state for path \(path): \(error.localizedDescription)")
+                return nil
+            }
         #else
             return nil
         #endif
@@ -797,11 +809,16 @@ private enum SQLiteStagedFilesStore {
             do {
                 handle = try open(dbPath: dbPath)
             } catch {
+                RuneWeaverLog.stores.error("StagedFilesStore: could not open database at \(dbPath): \(error.localizedDescription)")
                 return
             }
             guard let handle else { return }
             defer { sqlite3_close(handle) }
-            _ = try? SQLiteHelpers.exec(handle: handle, sql: "DELETE FROM staged_files;", failure: { StagedFilesStoreDBError(message: $0) })
+            do {
+                _ = try SQLiteHelpers.exec(handle: handle, sql: "DELETE FROM staged_files;", failure: { StagedFilesStoreDBError(message: $0) })
+            } catch {
+                RuneWeaverLog.stores.error("StagedFilesStore: failed to clear staged_files table: \(error.localizedDescription)")
+            }
         #endif
     }
 }

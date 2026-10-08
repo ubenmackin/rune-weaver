@@ -99,13 +99,18 @@ public struct FilesListTool: Tool, Sendable {
     public let description =
         "Lists immediate files and subdirectories directly inside a directory (shallow, non-recursive). "
             + "Use when inspecting folder contents or directory hierarchy without scanning deep subdirectories. "
-            + "Accepts path (defaults to home or current workspace), showHidden (default false), and limit (1-500, default 100)."
+            + "Accepts path (defaults to home or current workspace), showHidden (default false), and limit (1-500, default 100). "
+            + "Cloud shortcuts \"iCloud\", \"iCloud Drive\", \"Dropbox\", \"OneDrive\", "
+            + "\"Google Drive\", \"GoogleDrive\" (plus \"~/\" forms and subpaths) resolve to live mounts."
 
     /// JSON schema for tool arguments.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"path":{"type":"string","#
-                + #""description":"Directory path to list (\"~\" expands to home). Omitted lists home directory."},"#
+                + #""description":"Directory path to list (\"~\" expands to home; "#
+                + #"\"iCloud\", \"iCloud Drive\", \"Dropbox\", \"OneDrive\", "#
+                + #"\"Google Drive\", \"GoogleDrive\" plus \"~/\" forms and subpaths "#
+                + #"expand to cloud roots). Omitted lists home directory."},"#
                 + #""showHidden":{"type":"boolean","#
                 + #""description":"Whether to include hidden files (names starting with '.'). Defaults to false."},"#
                 + #""limit":{"type":"integer","description":"Maximum entries (1-500, default 100).","#

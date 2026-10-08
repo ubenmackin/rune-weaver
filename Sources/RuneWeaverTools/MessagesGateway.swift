@@ -210,7 +210,13 @@ public struct ProductionMessagesGateway: MessagesGateway {
                 }
                 let sender = row.isFromMe ? "Me" : MessagesIndexer.displayName(for: row, names: names)
                 let dateStr = row.date.map { isoFormatter.string(from: TemporalFilter.date(fromMacEpoch: $0)) } ?? ""
-                let atts = (try? MessagesDatabaseIO.attachments(handle: handle, messageID: row.rowID)) ?? []
+                let atts: [MessagesAttachmentRow]
+                do {
+                    atts = try MessagesDatabaseIO.attachments(handle: handle, messageID: row.rowID)
+                } catch {
+                    RuneWeaverLog.tools.debug("MessagesGateway: failed to fetch attachments for message \(row.rowID): \(error.localizedDescription)")
+                    atts = []
+                }
                 let attNames = atts.map { MessagesIndexer.attachmentName(for: $0) }
                 let tapback = MessagesTapback.description(for: row.associatedMessageType)
 
@@ -286,7 +292,13 @@ public struct ProductionMessagesGateway: MessagesGateway {
                 let resolved = MessagesIndexer.resolveText(for: row).text ?? ""
                 let sender = row.isFromMe ? "Me" : MessagesIndexer.displayName(for: row, names: names)
                 let dateStr = row.date.map { isoFormatter.string(from: TemporalFilter.date(fromMacEpoch: $0)) } ?? ""
-                let atts = (try? MessagesDatabaseIO.attachments(handle: handle, messageID: row.rowID)) ?? []
+                let atts: [MessagesAttachmentRow]
+                do {
+                    atts = try MessagesDatabaseIO.attachments(handle: handle, messageID: row.rowID)
+                } catch {
+                    RuneWeaverLog.tools.debug("MessagesGateway: failed to fetch attachments for message \(row.rowID): \(error.localizedDescription)")
+                    atts = []
+                }
                 let attNames = atts.map { MessagesIndexer.attachmentName(for: $0) }
                 let tapback = MessagesTapback.description(for: row.associatedMessageType)
 
@@ -382,7 +394,13 @@ public struct ProductionMessagesGateway: MessagesGateway {
                 return nil
             }
             let history = MessagesChatHistorySource(chatDatabasePath: chatDatabasePath)
-            guard let stats = try? await history.recentDirectHandleStats(limit: 200) else {
+            let stats: [MessageHandleStats]
+            do {
+                stats = try await history.recentDirectHandleStats(limit: 200)
+            } catch is CancellationError {
+                return nil
+            } catch {
+                RuneWeaverLog.tools.debug("MessagesGateway: recentDirectHandleStats failed: \(error.localizedDescription)")
                 return nil
             }
             return stats.first { MessageRecipientNameNormalizer.handleKey($0.handle) == recipientKey }?.service

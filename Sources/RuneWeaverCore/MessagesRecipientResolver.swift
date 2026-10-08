@@ -273,7 +273,13 @@ public protocol MessageAliasStoring: Sendable {
         /// alias resolution intact rather than failing the whole lookup.
         /// - Returns: Best stat per normalized handle key; empty on any failure.
         private func bestHistoryStats() async -> [String: MessageHandleStats] {
-            guard let stats = try? await history.recentDirectHandleStats(limit: Self.historyLookback) else {
+            let stats: [MessageHandleStats]
+            do {
+                stats = try await history.recentDirectHandleStats(limit: Self.historyLookback)
+            } catch is CancellationError {
+                return [:]
+            } catch {
+                RuneWeaverLog.tools.debug("Failed to read recent direct handle stats: \(error.localizedDescription)")
                 return [:]
             }
             var best: [String: MessageHandleStats] = [:]

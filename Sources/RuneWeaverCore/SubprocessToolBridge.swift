@@ -117,8 +117,11 @@ public struct SubprocessToolBridge: Tool, Sendable {
             ]
         ]
 
-        guard let requestData = try? JSONSerialization.data(withJSONObject: rpcPayload) else {
-            return .failure("Failed to serialize JSON-RPC request for tool '\(name)'.", callID: input.callID)
+        let requestData: Data
+        do {
+            requestData = try JSONSerialization.data(withJSONObject: rpcPayload)
+        } catch {
+            return .failure("Failed to serialize JSON-RPC request for tool '\(name)': \(error.localizedDescription)", callID: input.callID)
         }
 
         return try await executeSubprocess(
