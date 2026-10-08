@@ -100,9 +100,7 @@ extension MailIndexer {
         credentials: MailIndexCredentials,
         mailbox: String
     ) async {
-        await Task.detached { [gateway, credentials, mailbox] in
-            await gateway.closeMailboxSession(credentials: credentials, mailbox: mailbox)
-        }.value
+        await gateway.closeMailboxSession(credentials: credentials, mailbox: mailbox)
     }
 
     /// Parses an IMAP UID, returning zero for anything non-numeric.

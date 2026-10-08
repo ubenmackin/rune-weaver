@@ -423,4 +423,45 @@ struct FilesAccessGuardTests {
             )
         }
     }
+
+    @Test
+    func `Cloud shortcuts resolve to active cloud roots and subpaths`() throws {
+        let (base, home) = try GuardTestSupport.makeBaseAndHome()
+        defer { GuardTestSupport.cleanup(base) }
+
+        // Set up mock cloud storage folders
+        let iCloudDir = home.appendingPathComponent("Library/CloudStorage/iCloud Drive", isDirectory: true)
+        try FileManager.default.createDirectory(at: iCloudDir, withIntermediateDirectories: true)
+        let canonicalICloud = iCloudDir.resolvingSymlinksInPath().path
+        try GuardTestSupport.write("content", at: iCloudDir.appendingPathComponent("Money.numbers"))
+        let canonicalFile = iCloudDir.appendingPathComponent("Money.numbers").resolvingSymlinksInPath().path
+
+        let dropboxDir = home.appendingPathComponent("Library/CloudStorage/Dropbox-Personal", isDirectory: true)
+        try FileManager.default.createDirectory(at: dropboxDir, withIntermediateDirectories: true)
+        let canonicalDropbox = dropboxDir.resolvingSymlinksInPath().path
+        try GuardTestSupport.write("db-content", at: dropboxDir.appendingPathComponent("notes.txt"))
+
+        // Test root resolution
+        let resolvedICloud = FilesAccessGuard.resolveCloudShortcut("iCloud", homeDirectoryURL: home)
+        #expect(resolvedICloud == canonicalICloud)
+
+        let resolvedICloudDrive = FilesAccessGuard.resolveCloudShortcut("~/iCloud Drive", homeDirectoryURL: home)
+        #expect(resolvedICloudDrive == canonicalICloud)
+
+        let resolvedDropbox = FilesAccessGuard.resolveCloudShortcut("Dropbox", homeDirectoryURL: home)
+        #expect(resolvedDropbox == canonicalDropbox)
+
+        // Test subpath resolution
+        let resolvedFile = FilesAccessGuard.resolveCloudShortcut("iCloud/Money.numbers", homeDirectoryURL: home)
+        #expect(resolvedFile == canonicalFile)
+
+        // Evaluate through guard
+        let decision = FilesAccessGuard.evaluate(path: "iCloud/Money.numbers", homeDirectoryURL: home)
+        #expect(decision.allowed == true)
+        #expect(decision.resolvedPath == canonicalFile)
+
+        // Non-shortcut paths remain unchanged
+        let regular = FilesAccessGuard.resolveCloudShortcut("~/Documents/test.txt", homeDirectoryURL: home)
+        #expect(regular == "~/Documents/test.txt")
+    }
 }

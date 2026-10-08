@@ -193,7 +193,15 @@ extension MemoryEngine {
     /// - Returns: Freshness for the pack to render honestly.
     func starterIndexState() async -> StarterIndexState {
         guard let store = docIndexStore else { return .disabled }
-        guard let stats = try? await store.stats() else { return .empty }
+        let stats: IndexStats
+        do {
+            stats = try await store.stats()
+        } catch is CancellationError {
+            return .empty
+        } catch {
+            RuneWeaverLog.stores.debug("RecallStarterPack: failed to read store stats: \(error.localizedDescription)")
+            return .empty
+        }
         guard stats.documents > 0 else { return .empty }
         guard stats.indexAsOf.timeIntervalSince1970 > 0 else { return .empty }
         return .ready(stats.indexAsOf)

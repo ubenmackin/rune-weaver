@@ -1363,4 +1363,65 @@ struct FilesIndexerTests {
         #expect(tracker.peak == 2)
         #expect(await pool.availableCount == 2)
     }
+
+    @Test
+    func `Library CloudStorage documents are indexed while other Library trees are pruned`() async throws {
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        writeFile("cloud data", at: base.appendingPathComponent("Library/CloudStorage/iCloud Drive/money.txt"))
+        writeFile("mobile doc", at: base.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/notes.txt"))
+        writeFile("cached", at: base.appendingPathComponent("Library/Caches/cache.txt"))
+        writeFile("app support", at: base.appendingPathComponent("Library/Application Support/app.txt"))
+        writeFile("regular", at: base.appendingPathComponent("Documents/regular.txt"))
+
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard()
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == 3)
+        let stats = try await store.stats()
+        #expect(stats.documents == 3)
+
+        let cloudDoc = try await store.document(source: .files, externalID: base.appendingPathComponent("Library/CloudStorage/iCloud Drive/money.txt").path)
+        #expect(cloudDoc != nil)
+
+        let mobileDoc = try await store.document(source: .files, externalID: base.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/notes.txt").path)
+        #expect(mobileDoc != nil)
+
+        let regularDoc = try await store.document(source: .files, externalID: base.appendingPathComponent("Documents/regular.txt").path)
+        #expect(regularDoc != nil)
+
+        let cacheDoc = try await store.document(source: .files, externalID: base.appendingPathComponent("Library/Caches/cache.txt").path)
+        #expect(cacheDoc == nil)
+    }
+
+    @Test
+    func `Missing optional cloud storage roots do not block retirement reconcile`() async {
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        writeFile("doc 1", at: base.appendingPathComponent("doc1.txt"))
+        let missingCloudRoot = base.appendingPathComponent("Library/CloudStorage/MissingProvider").path
+
+        let config = IndexConfig(enabled: true, files: true, roots: [base.path, missingCloudRoot])
+        let indexer = FilesIndexer(
+            store: store,
+            extractor: FilesIndexerStubExtractor(),
+            accessGuard: FilesIndexerStubGuard(),
+            config: config,
+            homeDirectoryURL: base
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == 1)
+        #expect(report.errors == 0)
+    }
 }

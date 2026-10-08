@@ -240,7 +240,13 @@ private func registerAuthSessionRoutes(_ app: Application, auth: ServerAuth) {
         let identity = throttle.identity
 
         // Read token from JSON body or Authorization header
-        let bodyToken = (try? req.content.decode(AuthSessionRequestBody.self))?.token?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bodyToken: String?
+        do {
+            bodyToken = try req.content.decode(AuthSessionRequestBody.self).token?.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            RuneWeaverLog.server.debug("RuneWeaverServer: session login did not decode JSON body: \(error.localizedDescription)")
+            bodyToken = nil
+        }
         let headerToken = req.headers.bearerAuthorization?.token.trimmingCharacters(in: .whitespacesAndNewlines)
         let candidate = (bodyToken?.isEmpty == false ? bodyToken : nil) ?? (headerToken?.isEmpty == false ? headerToken : nil) ?? ""
 
@@ -884,7 +890,11 @@ private func registerWebSocketRoute(_ app: Application) {
                     connectionTasks.cancelAll()
                     await context.hub.remove(id: connectionID)
                     continuation.finish()
-                    _ = try? await box.close(code: .policyViolation)
+                    do {
+                        _ = try await box.close(code: .policyViolation)
+                    } catch {
+                        RuneWeaverLog.server.debug("WebSocket unregister/retired close error: \(error.localizedDescription)")
+                    }
                     return
                 }
                 for await text in stream {
@@ -907,7 +917,11 @@ private func registerWebSocketRoute(_ app: Application) {
                 connectionTasks.cancelAll()
                 await context.hub.remove(id: connectionID)
                 if retiredAtEnd {
-                    _ = try? await box.close(code: .policyViolation)
+                    do {
+                        _ = try await box.close(code: .policyViolation)
+                    } catch {
+                        RuneWeaverLog.server.debug("WebSocket retiredAtEnd close error: \(error.localizedDescription)")
+                    }
                 }
             }
             webSocket.onText { _, text in

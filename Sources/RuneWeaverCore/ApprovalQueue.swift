@@ -434,7 +434,11 @@ public actor ApprovalQueue {
                 let nsDouble = (timeoutSeconds * 1_000_000_000).rounded(.down)
                 let nanoseconds: UInt64 = nsDouble >= Double(UInt64.max) ? UInt64.max : UInt64(max(nsDouble, 0))
                 timeoutTasks[id] = Task { [self] in
-                    try? await Task.sleep(nanoseconds: nanoseconds)
+                    do {
+                        try await Task.sleep(nanoseconds: nanoseconds)
+                    } catch {
+                        return
+                    }
                     guard !Task.isCancelled else { return }
                     await self.timeoutWaiter(id: id)
                 }

@@ -50,8 +50,18 @@ public actor WSSocketBox: WSConnectionSocket {
 private actor WSSendQueue {
     /// Sends one frame through the queue, best-effort with timeout.
     @discardableResult
-    func send(_ text: String, to box: any WSConnectionSocket, timeoutNanoseconds: UInt64 = 1_000_000_000) async -> Bool {
-        await wsSendWithTimeout(text, to: box, timeoutNanoseconds: timeoutNanoseconds)
+    func send(
+        _ text: String,
+        to box: any WSConnectionSocket,
+        timeoutNanoseconds: UInt64 = 1_000_000_000,
+        ignoreCallerCancellation: Bool = false
+    ) async -> Bool {
+        await wsSendWithTimeout(
+            text,
+            to: box,
+            timeoutNanoseconds: timeoutNanoseconds,
+            ignoreCallerCancellation: ignoreCallerCancellation
+        )
     }
 }
 
@@ -124,7 +134,11 @@ public actor WSHub {
         sockets.removeAll()
         queues.removeAll()
         for box in targets {
-            _ = try? await box.close(code: .goingAway)
+            do {
+                _ = try await box.close(code: .goingAway)
+            } catch {
+                RuneWeaverLog.server.debug("WSHub: closeAll socket close error: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -144,7 +158,11 @@ public actor WSHub {
     public func retire(liveGeneration: Int) async {
         minimumLiveGeneration = max(minimumLiveGeneration ?? 0, liveGeneration)
         for box in drainRetired() {
-            _ = try? await box.close(code: .policyViolation)
+            do {
+                _ = try await box.close(code: .policyViolation)
+            } catch {
+                RuneWeaverLog.server.debug("WSHub: drainRetired socket close error: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -225,6 +243,27 @@ public actor WSHub {
         await fanOut(text)
     }
 
+    /// Broadcasts terminal turn settlement (run log entry plus optional cancelled frame)
+    /// to all connected viewers even when called from inside a cancelled turn task.
+    public func broadcastTerminalCancellation(run: RunLogEntry, frameText: String?) async {
+        struct WSRunEvent: Codable {
+            let type: String
+            let run: RunLogEntry
+        }
+        let eventType = run.status == "running" ? "run_started" : "run_completed"
+        do {
+            let data = try JSONEncoder().encode(WSRunEvent(type: eventType, run: run))
+            if let text = String(data: data, encoding: .utf8) {
+                await fanOut(text, ignoreCallerCancellation: true)
+            }
+        } catch {
+            RuneWeaverLog.server.warning("WSHub: failed to encode terminal cancellation event: \(error.localizedDescription)")
+        }
+        if let frameText {
+            await fanOut(frameText, ignoreCallerCancellation: true)
+        }
+    }
+
     /// Broadcasts one goal snapshot to every connected socket.
     ///
     /// The DTO converts to the core snapshot so the REST list and the live push
@@ -298,7 +337,7 @@ public actor WSHub {
     }
 
     /// Concurrent best-effort fan-out shared by every broadcast path.
-    private func fanOut(_ text: String) async {
+    private func fanOut(_ text: String, ignoreCallerCancellation: Bool = false) async {
         // A socket the hub already knows holds a retired generation is skipped
         // here, so revocation does not depend on the socket sending a frame to
         // discover it was dropped.
@@ -310,7 +349,11 @@ public actor WSHub {
         await withTaskGroup(of: (UUID, Bool).self) { group in
             for target in targets {
                 group.addTask {
-                    let ok = await target.queue.send(text, to: target.box)
+                    let ok = await target.queue.send(
+                        text,
+                        to: target.box,
+                        ignoreCallerCancellation: ignoreCallerCancellation
+                    )
                     return (target.id, ok)
                 }
             }
@@ -387,7 +430,8 @@ private final class WSSendGate: Sendable {
 private func wsSendWithTimeout(
     _ text: String,
     to box: any WSConnectionSocket,
-    timeoutNanoseconds: UInt64 = 1_000_000_000
+    timeoutNanoseconds: UInt64 = 1_000_000_000,
+    ignoreCallerCancellation: Bool = false
 ) async -> Bool {
     let gate = WSSendGate()
     let sendTasks = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
@@ -402,7 +446,11 @@ private func wsSendWithTimeout(
                     return
                 }
                 sendTasks.withLock { $0 }?.cancel()
-                _ = try? await box.close(code: .policyViolation)
+                do {
+                    _ = try await box.close(code: .policyViolation)
+                } catch {
+                    RuneWeaverLog.server.debug("WSHub: timeout socket close error: \(error.localizedDescription)")
+                }
                 gate.resume(returning: false)
             }
             timeoutTasks.withLock { $0 = timeoutTask }
@@ -413,20 +461,26 @@ private func wsSendWithTimeout(
                     gate.resume(returning: true)
                 } catch {
                     timeoutTasks.withLock { $0 }?.cancel()
-                    _ = try? await box.close(code: .policyViolation)
+                    do {
+                        _ = try await box.close(code: .policyViolation)
+                    } catch {
+                        RuneWeaverLog.server.debug("WSHub: send error socket close error: \(error.localizedDescription)")
+                    }
                     gate.resume(returning: false)
                 }
             }
             sendTasks.withLock { $0 = sendTask }
-            if Task.isCancelled {
+            if !ignoreCallerCancellation, Task.isCancelled {
                 timeoutTasks.withLock { $0 }?.cancel()
                 sendTasks.withLock { $0 }?.cancel()
                 gate.resume(returning: false)
             }
         }
     } onCancel: {
-        timeoutTasks.withLock { $0 }?.cancel()
-        sendTasks.withLock { $0 }?.cancel()
-        gate.resume(returning: false)
+        if !ignoreCallerCancellation {
+            timeoutTasks.withLock { $0 }?.cancel()
+            sendTasks.withLock { $0 }?.cancel()
+            gate.resume(returning: false)
+        }
     }
 }

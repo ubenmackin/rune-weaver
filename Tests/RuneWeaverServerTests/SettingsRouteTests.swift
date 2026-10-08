@@ -1122,7 +1122,7 @@ struct SettingsRouteTests {
             try await live.checkQuota()
             Issue.record("Expected the decreased quota to refuse the over-quota tree")
         } catch WorkspaceError.quotaExceeded {
-            // Expected: the threaded decrease refuses the same tree.
+            #expect(true)
         } catch {
             Issue.record("Expected quotaExceeded, got \(error)")
         }

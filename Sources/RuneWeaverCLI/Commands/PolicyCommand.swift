@@ -53,10 +53,13 @@ struct PolicyShowCommand: AsyncParsableCommand {
         let loaded = await store.load()
 
         if raw {
-            if FileManager.default.fileExists(atPath: fileURL.path),
-               let text = try? String(contentsOf: fileURL, encoding: .utf8)
-            {
-                print(text)
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                do {
+                    let text = try String(contentsOf: fileURL, encoding: .utf8)
+                    print(text)
+                } catch {
+                    print(PolicyStore.serialize(loaded))
+                }
             } else {
                 print(PolicyStore.serialize(loaded))
             }
@@ -193,8 +196,11 @@ struct PolicyVerifyCommand: AsyncParsableCommand {
             return
         }
 
-        guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else {
-            print(TerminalStyle.error("Could not read policy file at \(fileURL.path)."))
+        let text: String
+        do {
+            text = try String(contentsOf: fileURL, encoding: .utf8)
+        } catch {
+            print(TerminalStyle.error("Could not read policy file at \(fileURL.path): \(error.localizedDescription)"))
             throw ExitCode.failure
         }
 

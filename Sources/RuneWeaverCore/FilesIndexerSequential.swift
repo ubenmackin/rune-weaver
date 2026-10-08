@@ -20,6 +20,9 @@ extension FilesIndexer {
         // against that partial view would delete live documents, so the run is
         // marked unreadable and the reconcile stays skipped.
         guard exists else {
+            if Self.isOptionalCloudRoot(rootURL: rootURL, rawRoot: root) {
+                return
+            }
             counters.hasUnreadableRoot = true
             return
         }
@@ -399,7 +402,13 @@ extension FilesIndexer {
         let written: [IndexedChunk]
         // Chunks bind the fresh identifier up front; the atomic commit remaps
         // them onto the stable row when the path was already indexed.
-        let chunks = Self.makeChunks(extraction: pending.extraction, documentID: document.id, vectors: vectors)
+        let chunks = Self.makeChunks(
+            extraction: pending.extraction,
+            documentID: document.id,
+            vectors: vectors,
+            fallbackDisplayName: filename,
+            fallbackPath: relative
+        )
         do {
             _ = try await store.upsertDocumentWithChunks(
                 document: document,

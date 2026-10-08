@@ -200,12 +200,17 @@ public struct FilesReadTool: Tool, Sendable {
         "Reads a local text file with a line window. "
             + "Use when the user asks to open, quote, or summarize a file on disk. "
             + "Pass path plus optional 1-indexed offset and limit (default 2000 lines, max 5000). "
-            + "Returns the canonical path, byte size, truncation flag, and text; sensitive paths fail with an approval hint."
+            + "Returns the canonical path, byte size, truncation flag, and text; sensitive paths fail with an approval hint. "
+            + "Cloud shortcuts \"iCloud\", \"iCloud Drive\", \"Dropbox\", \"OneDrive\", "
+            + "\"Google Drive\", \"GoogleDrive\" (plus \"~/\" forms and subpaths) resolve to live mounts."
     /// Function-calling contract for `path`, `offset`, `limit`, and `encoding`.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"path":{"type":"string","description":"File path to read "#
-                + #"(\"~\" expands to the home directory)"},"offset":{"type":"integer","description":"1-indexed first "#
+                + #"(\"~\" expands to home; \"iCloud\", \"iCloud Drive\", \"Dropbox\", "#
+                + #"\"OneDrive\", \"Google Drive\", \"GoogleDrive\" plus \"~/\" forms and "#
+                + #"subpaths expand to cloud roots)"},"#
+                + #""offset":{"type":"integer","description":"1-indexed first "#
                 + #"line to return (default 1)","minimum":1},"limit":{"type":"integer","description":"Maximum lines "#
                 + #"(1-5000, default 2000)","minimum":1,"maximum":5000},"encoding":{"type":"string","description":"Text "#
                 + #"encoding name (UTF-8 only in v1; omit for UTF-8)"}},"required":["path"],"additionalProperties":false}"#
@@ -511,13 +516,18 @@ public struct FilesGrepTool: Tool, Sendable {
             + "Pass pattern (RE2-safe regex, max 500 chars) plus a file or directory path, "
             + "optional include filename glob (e.g. *.swift), and maxResults (1-200, default 50). "
             + "Returns matching lines with 200-char previews and a truncation flag; sensitive paths fail with an approval hint. "
-            + "Pass recursive false to search only the immediate children of the searched directory (default true)."
+            + "Pass recursive false to search only the immediate children of the searched directory (default true). "
+            + "Cloud shortcuts \"iCloud\", \"iCloud Drive\", \"Dropbox\", \"OneDrive\", "
+            + "\"Google Drive\", \"GoogleDrive\" (plus \"~/\" forms and subpaths) resolve to live mounts."
     /// Function-calling contract for `pattern`, `path`, `include`, `maxResults`, and `recursive`.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression "#
                 + #"matched per line (RE2-safe, max 500 chars)"},"path":{"type":"string","description":"File or "#
-                + #"directory to search (\"~\" expands to the home directory)"},"include":{"type":"string","description":"Optional "#
+                + #"directory to search (\"~\" expands to home; \"iCloud\", \"iCloud Drive\", "#
+                + #"\"Dropbox\", \"OneDrive\", \"Google Drive\", \"GoogleDrive\" plus \"~/\" "#
+                + #"forms and subpaths expand to cloud roots)"},"#
+                + #""include":{"type":"string","description":"Optional "#
                 + #"filename glob narrowing candidates (e.g. *.swift)"},"maxResults":{"type":"integer","description":"Maximum "#
                 + #"matches (1-200, default 50)","minimum":1,"maximum":200},"recursive":{"type":"boolean","description":"Whether "#
                 + #"to recurse into subdirectories (default true). Pass false to search only the immediate children of the searched directory."}}"#
@@ -899,14 +909,18 @@ public struct FilesGlobTool: Tool, Sendable {
             + "Pass pattern (*, ?, **, [...], max 500 chars, no '..'), "
             + "always pass the narrowest baseDir that covers the target, and maxResults (1-500, default 100). "
             + "Omitting baseDir searches the entire home directory, so pass it unless a home-wide scan is intended. "
-            + "Returns sorted paths with a truncation flag; sensitive paths are pruned, denied bases fail with an approval hint."
+            + "Returns sorted paths with a truncation flag; sensitive paths are pruned, denied bases fail with an approval hint. "
+            + "Cloud shortcuts \"iCloud\", \"iCloud Drive\", \"Dropbox\", \"OneDrive\", "
+            + "\"Google Drive\", \"GoogleDrive\" (plus \"~/\" forms and subpaths) resolve to live mounts."
     /// Function-calling contract for `pattern`, `baseDir`, and `maxResults`.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern "#
                 + #"(*, ?, **, [...]; max 500 chars; no '..'). Patterns without '/' (e.g. *.md, config.json) match "#
                 + #"filenames at any depth under baseDir. Patterns with '/' match paths relative to baseDir."},"baseDir":{"type":"string","description":"Base "#
-                + #"directory to search; prefer the narrowest directory (\"~\" expands to home). "#
+                + #"directory to search; prefer the narrowest directory (\"~\" expands to home; "#
+                + #"\"iCloud\", \"iCloud Drive\", \"Dropbox\", \"OneDrive\", \"Google Drive\", "#
+                + #"\"GoogleDrive\" plus \"~/\" forms and subpaths expand to cloud roots). "#
                 + #"Omitted searches the entire home directory"},"maxResults":{"type":"integer","description":"Maximum "#
                 + #"paths (1-500, default 100)","minimum":1,"maximum":500},"recursive":{"type":"boolean","description":"Whether "#
                 + #"to recurse into subdirectories (default true). Pass false to search only the immediate children of baseDir."}}"#

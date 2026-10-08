@@ -649,14 +649,32 @@ extension SearXNGEnsurer {
                 )
                 return nil
             }
-            if let existing = try? String(contentsOfFile: overridePath, encoding: .utf8) {
+            let existing: String?
+            do {
+                existing = try String(contentsOfFile: overridePath, encoding: .utf8)
+            } catch {
+                RuneWeaverLog.tools.warning("SearXNGEnsurer: failed to read override file at \(overridePath): \(error.localizedDescription)")
+                existing = nil
+            }
+            if let existing {
                 // Stale installs predate the marker entirely, so rebuild from
                 // the current template (not a secret swap in the stale
                 // document) with a fresh secret at 0600. The caller recreates
                 // the container afterwards so the new settings actually boot.
                 if overrideNeedsMigration(contents: existing) {
                     let fresh = makeSecretKey()
-                    let regenerated: String = if let bundledURL = bundledTemplateURL(), let template = try? String(contentsOf: bundledURL, encoding: .utf8) {
+                    let template: String?
+                    if let bundledURL = bundledTemplateURL() {
+                        do {
+                            template = try String(contentsOf: bundledURL, encoding: .utf8)
+                        } catch {
+                            RuneWeaverLog.tools.warning("SearXNGEnsurer: failed reading bundled template at \(bundledURL.path): \(error.localizedDescription)")
+                            template = nil
+                        }
+                    } else {
+                        template = nil
+                    }
+                    let regenerated: String = if let template {
                         renderedSettingsYAML(template: template, secretKey: fresh)
                     } else {
                         settingsYAML(secretKey: fresh)
@@ -695,7 +713,18 @@ extension SearXNGEnsurer {
             return overridePath
         }
         let secret = makeSecretKey()
-        let content: String = if let bundledURL = bundledTemplateURL(), let template = try? String(contentsOf: bundledURL, encoding: .utf8) {
+        let template: String?
+        if let bundledURL = bundledTemplateURL() {
+            do {
+                template = try String(contentsOf: bundledURL, encoding: .utf8)
+            } catch {
+                RuneWeaverLog.tools.warning("SearXNGEnsurer: failed reading bundled template at \(bundledURL.path): \(error.localizedDescription)")
+                template = nil
+            }
+        } else {
+            template = nil
+        }
+        let content: String = if let template {
             renderedSettingsYAML(template: template, secretKey: secret)
         } else {
             settingsYAML(secretKey: secret)

@@ -11,7 +11,7 @@ import os
 import Testing
 
 /// Provider that captures messages passed to chat for prompt assertions.
-private final class CapturingPersonaLLM: LLMProvider, @unchecked Sendable {
+private final class CapturingPersonaLLM: LLMProvider, Sendable {
     let modelInfo = ModelInfo(name: "capturing-persona-fixture", provider: "test", contextLength: 8192)
     private let lock = OSAllocatedUnfairLock(initialState: [[Message]]())
 

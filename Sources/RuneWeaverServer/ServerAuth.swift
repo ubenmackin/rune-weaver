@@ -306,7 +306,12 @@ public struct ServerAuthTokenStore: Sendable {
         if permissions.intValue & 0o077 != 0 {
             throw insecureFileError(fileURL.path)
         }
-        return try? Data(contentsOf: fileURL)
+        do {
+            return try Data(contentsOf: fileURL)
+        } catch {
+            RuneWeaverLog.server.error("ServerAuth: failed to read restricted data at \(fileURL.path): \(error.localizedDescription)")
+            throw error
+        }
     }
 
     /// Reads a restricted token file and normalizes its text value.

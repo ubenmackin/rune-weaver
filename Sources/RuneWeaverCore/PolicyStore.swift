@@ -187,8 +187,12 @@ public actor PolicyStore {
             return current
         }
 
-        guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else {
+        let text: String
+        do {
+            text = try String(contentsOf: fileURL, encoding: .utf8)
+        } catch {
             diagnostics.append("Policy file at \(fileURL.path) is unreadable. Using safe defaults.")
+            RuneWeaverLog.stores.error("PolicyStore: policy file at \(fileURL.path) is unreadable: \(error.localizedDescription)")
             current = .safeDefault
             loadedFromDisk = false
             verifiedPolicy = nil

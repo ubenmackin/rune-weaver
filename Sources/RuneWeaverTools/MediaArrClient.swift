@@ -431,10 +431,14 @@ extension MediaArrClient {
             throw ToolExecutionError.httpError(status: resp.statusCode, body: errorPreview(data))
         }
 
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            let appName = json["appName"] as? String ?? service.rawValue.capitalized
-            let version = json["version"] as? String ?? "unknown"
-            return "\(appName) is online and reachable. Version: \(version)."
+        do {
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let appName = json["appName"] as? String ?? service.rawValue.capitalized
+                let version = json["version"] as? String ?? "unknown"
+                return "\(appName) is online and reachable. Version: \(version)."
+            }
+        } catch {
+            RuneWeaverLog.tools.debug("MediaArrClient: could not parse status json: \(error.localizedDescription)")
         }
         return "\(service.rawValue.capitalized) is online."
     }
@@ -447,9 +451,14 @@ extension MediaArrClient {
             throw ToolExecutionError.httpError(status: resp.statusCode, body: errorPreview(data))
         }
 
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let records = json["records"] as? [[String: Any]]
-        else {
+        let json: [String: Any]?
+        do {
+            json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        } catch {
+            RuneWeaverLog.tools.debug("checkQueue: JSON parsing failed: \(error.localizedDescription)")
+            json = nil
+        }
+        guard let json, let records = json["records"] as? [[String: Any]] else {
             return "Unable to parse queue response."
         }
 
@@ -485,7 +494,14 @@ extension MediaArrClient {
             throw ToolExecutionError.httpError(status: resp.statusCode, body: errorPreview(data))
         }
 
-        guard let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+        let list: [[String: Any]]?
+        do {
+            list = try JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        } catch {
+            RuneWeaverLog.tools.debug("searchTitles: JSON parsing failed: \(error.localizedDescription)")
+            list = nil
+        }
+        guard let list else {
             return "No matching titles found."
         }
 
@@ -546,9 +562,14 @@ extension MediaArrClient {
             throw ToolExecutionError.httpError(status: searchResp.statusCode, body: errorPreview(searchData))
         }
 
-        guard let searchResults = try? JSONSerialization.jsonObject(with: searchData) as? [[String: Any]],
-              let firstCandidate = searchResults.first
-        else {
+        let searchResults: [[String: Any]]?
+        do {
+            searchResults = try JSONSerialization.jsonObject(with: searchData) as? [[String: Any]]
+        } catch {
+            RuneWeaverLog.tools.debug("titleLookup: JSON parsing failed: \(error.localizedDescription)")
+            searchResults = nil
+        }
+        guard let searchResults, let firstCandidate = searchResults.first else {
             throw ToolExecutionError.notFound("No matching \(service.rawValue) title found for '\(queryTerm)'")
         }
 
@@ -634,10 +655,17 @@ extension MediaArrClient {
         let url = baseURL.appendingPathComponent("api/v3/rootfolder")
         let req = makeRequest(url: url, apiKey: apiKey)
         let (data, resp) = try await sendFollowingRedirects(request: req)
-        guard resp.statusCode == 200,
-              let folders = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-              let firstPath = folders.first?["path"] as? String
-        else {
+        guard resp.statusCode == 200 else {
+            throw ToolExecutionError.httpError(status: resp.statusCode, body: errorPreview(data))
+        }
+        let folders: [[String: Any]]?
+        do {
+            folders = try JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        } catch {
+            RuneWeaverLog.tools.debug("resolveRootFolder: JSON parsing failed: \(error.localizedDescription)")
+            folders = nil
+        }
+        guard let folders, let firstPath = folders.first?["path"] as? String else {
             throw ToolExecutionError.notFound(
                 "No root folders configured in \(service.rawValue.capitalized). "
                     + "Please configure root folders in \(service.rawValue.capitalized) settings."
@@ -650,10 +678,17 @@ extension MediaArrClient {
         let url = baseURL.appendingPathComponent("api/v3/qualityprofile")
         let req = makeRequest(url: url, apiKey: apiKey)
         let (data, resp) = try await sendFollowingRedirects(request: req)
-        guard resp.statusCode == 200,
-              let profiles = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-              !profiles.isEmpty
-        else {
+        guard resp.statusCode == 200 else {
+            throw ToolExecutionError.httpError(status: resp.statusCode, body: errorPreview(data))
+        }
+        let profiles: [[String: Any]]?
+        do {
+            profiles = try JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        } catch {
+            RuneWeaverLog.tools.debug("resolveQualityProfile: JSON parsing failed: \(error.localizedDescription)")
+            profiles = nil
+        }
+        guard let profiles, !profiles.isEmpty else {
             throw ToolExecutionError.notFound("No quality profiles configured in \(service.rawValue.capitalized).")
         }
 

@@ -339,7 +339,13 @@ public actor VectorStore {
     private static func loadBestEffort(directoryPath: String) -> [StoredFact] {
         let url = fileURL(directoryPath: directoryPath)
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-        guard let data = try? Data(contentsOf: url) else { return [] }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            RuneWeaverLog.memory.warning("VectorStore: failed to read facts from \(url.path): \(error.localizedDescription)")
+            return []
+        }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
         do {

@@ -278,7 +278,16 @@ public actor GoalEngine {
     /// a quiet no-op so scheduled retries never throw on a deleted goal.
     /// - Parameter goalID: Identifier of the goal to plan for.
     public func decompose(goalID: UUID) async {
-        guard let goal = try? await store.goal(id: goalID) else { return }
+        let goal: Goal?
+        do {
+            goal = try await store.goal(id: goalID)
+        } catch is CancellationError {
+            return
+        } catch {
+            RuneWeaverLog.stores.error("GoalEngine: failed to load goal \(goalID): \(error.localizedDescription)")
+            return
+        }
+        guard let goal else { return }
         await decompose(goal: goal)
     }
 
@@ -658,19 +667,33 @@ public struct GoalTriggerBridge: Sendable {
     ) async -> [GoalTriggerFire] {
         let effectiveSince = max(since, now.addingTimeInterval(-max(0, lookback)))
         var events: [GoalObservedEvent] = []
-        if let goalEvents = try? await store.observedEvents(since: effectiveSince, limit: Self.maxEventsPerPoll) {
+        do {
+            let goalEvents = try await store.observedEvents(since: effectiveSince, limit: Self.maxEventsPerPoll)
             events.append(contentsOf: goalEvents)
+        } catch is CancellationError {
+            return []
+        } catch {
+            RuneWeaverLog.stores.error("GoalEngine: failed to load observed events: \(error.localizedDescription)")
         }
-        if let episodes = try? await episodeStore.recent(limit: Self.maxEventsPerPoll) {
-            // `recent` returns newest-first across sessions, so the filter keeps
-            // only events inside the window; the read bound already caps the
-            // downstream settle work.
+        do {
+            let episodes = try await episodeStore.recent(limit: Self.maxEventsPerPoll)
             events.append(contentsOf: episodes
                 .filter { $0.timestamp > effectiveSince }
                 .map(Self.observedEvent))
+        } catch is CancellationError {
+            return []
+        } catch {
+            RuneWeaverLog.stores.error("GoalEngine: failed to load recent episodes: \(error.localizedDescription)")
         }
         guard !events.isEmpty else { return [] }
-        return await (try? store.fireMatchingTriggers(events: events, now: now)) ?? []
+        do {
+            return try await store.fireMatchingTriggers(events: events, now: now)
+        } catch is CancellationError {
+            return []
+        } catch {
+            RuneWeaverLog.stores.error("GoalEngine: failed to fire matching triggers: \(error.localizedDescription)")
+            return []
+        }
     }
 
     /// Classifies one mirrored episode into the trigger event vocabulary.

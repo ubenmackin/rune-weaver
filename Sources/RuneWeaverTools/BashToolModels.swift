@@ -244,3 +244,129 @@ final class BashOutputBuffer: Sendable {
         }
     }
 }
+
+// MARK: - BashTool Static Helpers
+
+extension BashTool {
+    /// Builds the `ulimit` prefix bounding CPU time and address space.
+    ///
+    /// The prefix uses `;` (not `&&`) so a failed `ulimit` still runs the
+    /// command best-effort instead of refusing it; the wall-clock watchdog
+    /// stays the hard backstop regardless.
+    /// - Parameters:
+    ///   - cpuSeconds: CPU time budget in seconds, already clamped to 1-3600.
+    ///   - memoryMB: Address-space budget in megabytes, already clamped to 64-8192.
+    /// - Returns: Shell prefix ending in `; ` (e.g. `ulimit -t 5; ulimit -v 524288; `).
+    public static func resourcePrefix(cpuSeconds: Int, memoryMB: Int) -> String {
+        "ulimit -t \(cpuSeconds); ulimit -v \(memoryMB * 1024); "
+    }
+
+    /// Wraps a model command with the `ulimit` resource prefix.
+    ///
+    /// Clamping here keeps direct callers honest even when the stored config
+    /// was hand-built past its bounds; the validated file-load path already
+    /// rejects those values fail-closed with the dotted field.
+    /// - Parameters:
+    ///   - command: Model-authored shell command.
+    ///   - cpuSeconds: CPU time budget in seconds.
+    ///   - memoryMB: Address-space budget in megabytes.
+    /// - Returns: Prefixed command for `bash -c`.
+    public static func resourceLimitedCommand(
+        _ command: String,
+        cpuSeconds: Int,
+        memoryMB: Int
+    ) -> String {
+        let boundedCPU = min(max(cpuSeconds, BashConfig.minCPUSeconds), BashConfig.maxCPUSeconds)
+        let boundedMemory = min(max(memoryMB, BashConfig.minMemoryMB), BashConfig.maxMemoryMB)
+        return resourcePrefix(cpuSeconds: boundedCPU, memoryMB: boundedMemory) + command
+    }
+
+    /// Classifies how a run ended from its wait status.
+    ///
+    /// The timeout flag wins because a signal death landing near the deadline
+    /// still reads as a wall kill only when the watchdog set the flag. The
+    /// contract is CPU-only: only a SIGXCPU signal death (24, CPU limit)
+    /// maps outright; its `128 + signal` wrapper spelling (152) maps only
+    /// with the shell's `cpu time limit` diagnostic on stderr proving the
+    /// limiter fired rather than a voluntary `exit 152`. The diagnostic never
+    /// maps on its own: it is scoped to the wrapper spelling so a voluntary
+    /// phrase on stderr with any other status (for example `exit 1`) stays
+    /// `clean`. Memory-limit deaths stay `clean`: SIGKILL (9 / 137) shares
+    /// its status across OOM, manual, and sandbox kills, and `ulimit -v`
+    /// malloc failures surface as ordinary non-zero exits, so neither reads
+    /// as a resource bound without CPU-limit corroboration.
+    /// - Parameters:
+    ///   - didTimeOut: Whether the wall-clock watchdog terminated the run.
+    ///   - terminationReason: Exit versus uncaught-signal from the wait status.
+    ///   - terminationStatus: Signal number or exit code from the wait status.
+    ///   - stderr: Captured stderr corroborating the wrapper spelling.
+    /// - Returns: The matching kill reason.
+    public static func killReason(
+        didTimeOut: Bool,
+        terminationReason: Process.TerminationReason,
+        terminationStatus: Int32,
+        stderr: String = ""
+    ) -> BashKillReason {
+        if didTimeOut {
+            return .wallTimeout
+        }
+        // Raw signal numbers avoid a Darwin/Glibc import split; 24 is SIGXCPU
+        // (CPU limit). The signal death itself is the corroboration, so no
+        // diagnostic is required. SIGKILL (9) is deliberately excluded: it
+        // may be OOM, manual, or sandbox action.
+        if terminationReason == .uncaughtSignal,
+           terminationStatus == 24
+        {
+            return .resourceLimit
+        }
+        // Wrappers report signals as 128 + signal instead of a signal death;
+        // only the SIGXCPU spelling (152) counts, never the SIGKILL one (137),
+        // and only with the shell diagnostic so a voluntary `exit 152` stays
+        // clean. Scoping the substring to this status keeps a voluntary
+        // `cpu time limit` phrase with any other exit (for example `exit 1`)
+        // from reading as a limiter kill.
+        if terminationReason == .exit,
+           terminationStatus == 152,
+           !stderr.isEmpty,
+           stderr.localizedCaseInsensitiveContains("cpu time limit")
+        {
+            return .resourceLimit
+        }
+        return .clean
+    }
+
+    public static func encodeEnvelope(_ envelope: BashResultEnvelope) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        if let data = try? encoder.encode(envelope), let str = String(data: data, encoding: .utf8) {
+            return str
+        }
+        // Encoder failure stays escaped and fail-closed: never interpolate
+        // raw command or output text into JSON. JSONSerialization escapes
+        // quotes, backslashes, and control characters.
+        var fallback: [String: Any] = [
+            "command": envelope.command,
+            "stdout": envelope.stdout,
+            "stderr": envelope.stderr,
+            "exitCode": Int(envelope.exitCode),
+            "approvalRequired": envelope.approvalRequired,
+            "isChained": envelope.isChained,
+            "denied": envelope.denied,
+            "kill_reason": envelope.killReason.rawValue
+        ]
+        if let error = envelope.error {
+            fallback["error"] = error
+        }
+        if let reason = envelope.reason {
+            fallback["reason"] = reason
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: fallback, options: [.sortedKeys]),
+           let str = String(data: data, encoding: .utf8)
+        {
+            return str
+        }
+        // JSONSerialization cannot fail on string, number, and bool values,
+        // but the static literal keeps the contract total without interpolation.
+        return "{\"command\":\"\",\"denied\":true,\"kill_reason\":\"denied\"}"
+    }
+}

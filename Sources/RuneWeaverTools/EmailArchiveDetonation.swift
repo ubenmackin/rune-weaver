@@ -124,8 +124,20 @@ public struct LiveEmailArchiveDetonator: EmailArchiveDetonator, Sendable {
 
     /// Stops and deletes a detonation machine without masking the caller error.
     private static func bestEffortReap(name: String, runtime: String) async {
-        try? await ContainerMachineManager.stopMachine(name: name, runtime: runtime)
-        try? await ContainerMachineManager.deleteMachine(name: name, runtime: runtime)
+        do {
+            try await ContainerMachineManager.stopMachine(name: name, runtime: runtime)
+        } catch is CancellationError {
+            // allow deletion attempt even if stop was cancelled
+        } catch {
+            RuneWeaverLog.tools.debug("bestEffortReap: stopMachine \(name) failed: \(error.localizedDescription)")
+        }
+        do {
+            try await ContainerMachineManager.deleteMachine(name: name, runtime: runtime)
+        } catch is CancellationError {
+            return
+        } catch {
+            RuneWeaverLog.tools.debug("bestEffortReap: deleteMachine \(name) failed: \(error.localizedDescription)")
+        }
     }
 
     /// Fails closed when the concurrent detonation cap is already reached.

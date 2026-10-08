@@ -11,6 +11,7 @@
 // renewal, and logging.
 
 import Foundation
+import RuneWeaverCore
 
 /// One browser session as it is persisted to disk.
 ///
@@ -139,9 +140,15 @@ public struct ServerAuthSessionStore: Sendable {
         }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
-        guard let state = try? decoder.decode(PersistedAuthSessions.self, from: data),
-              state.version == PersistedAuthSessions.currentVersion
-        else {
+        let state: PersistedAuthSessions
+        do {
+            state = try decoder.decode(PersistedAuthSessions.self, from: data)
+        } catch {
+            RuneWeaverLog.server.error("ServerAuthSessionStore: failed to decode session store at \(fileURL.path): \(error.localizedDescription)")
+            throw ServerAuthError.sessionStoreUnreadable(path: fileURL.path)
+        }
+        guard state.version == PersistedAuthSessions.currentVersion else {
+            RuneWeaverLog.server.error("ServerAuthSessionStore: unsupported version \(state.version) at \(fileURL.path)")
             throw ServerAuthError.sessionStoreUnreadable(path: fileURL.path)
         }
         return state

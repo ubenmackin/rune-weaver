@@ -285,8 +285,15 @@ public actor MemoryEngine {
                 content: content,
                 metadata: metadata ?? [:]
             )
-            if let total = try? await episodeStore.count(), total > Self.maxEpisodicCount {
-                _ = try? await episodeStore.compactSessions(olderThan: Date().addingTimeInterval(-30 * 86400))
+            do {
+                let total = try await episodeStore.count()
+                if total > Self.maxEpisodicCount {
+                    _ = try await episodeStore.compactSessions(olderThan: Date().addingTimeInterval(-30 * 86400))
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                RuneWeaverLog.memory.warning("MemoryEngine: episodic compaction check failed: \(error.localizedDescription)")
             }
             return MemoryResult(
                 content: episode.content,
@@ -501,9 +508,15 @@ public actor MemoryEngine {
         profile
     }
 
-    /// Total stored episode count from the shared episode store.
     public func episodeCount() async -> Int {
-        await (try? episodeStore.count()) ?? 0
+        do {
+            return try await episodeStore.count()
+        } catch is CancellationError {
+            return 0
+        } catch {
+            RuneWeaverLog.memory.warning("MemoryEngine: failed to query episode count: \(error.localizedDescription)")
+            return 0
+        }
     }
 
     /// Stores an explicit user-supplied fact in structured memory.
@@ -610,7 +623,13 @@ public actor MemoryEngine {
 
     /// Removes a profile fact and its semantic row best-effort.
     public func removeFact(id: UUID) async {
-        try? await vectorStore.remove(id: id)
+        do {
+            try await vectorStore.remove(id: id)
+        } catch is CancellationError {
+            return
+        } catch {
+            RuneWeaverLog.memory.warning("MemoryEngine: failed to remove vector fact \(id): \(error.localizedDescription)")
+        }
         profile.facts.removeAll { $0.id == id }
         touchProfile()
     }
@@ -1085,7 +1104,13 @@ extension MemoryEngine {
     private static func loadProfileBestEffort(path: String) -> UserProfile? {
         let expanded = (path as NSString).expandingTildeInPath
         guard FileManager.default.fileExists(atPath: expanded) else { return nil }
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: expanded)) else { return nil }
+        let data: Data
+        do {
+            data = try Data(contentsOf: URL(fileURLWithPath: expanded))
+        } catch {
+            RuneWeaverLog.memory.warning("MemoryEngine: Failed to read user profile from '\(expanded)': \(error.localizedDescription)")
+            return nil
+        }
         do {
             return try JSONDecoder().decode(UserProfile.self, from: data)
         } catch {

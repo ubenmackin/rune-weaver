@@ -380,7 +380,11 @@ extension AppModel {
                             RuneWeaverLog.server.info("SearXNG \(progress.stage.userCopy)… (\(elapsed)s)")
                         }
                     }
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    do {
+                        try await Task.sleep(nanoseconds: 1_000_000_000)
+                    } catch {
+                        break
+                    }
                 }
             }
             do {
@@ -407,7 +411,11 @@ extension AppModel {
             }
         }
         if let app = vaporApp {
-            try? await app.asyncShutdown()
+            do {
+                try await app.asyncShutdown()
+            } catch {
+                RuneWeaverLog.app.warning("cleanupBootFailure: asyncShutdown failed: \(error.localizedDescription)")
+            }
             self.vaporApp = nil
         }
         // Keep the full failure in the log for diagnostics; only the
@@ -483,10 +491,16 @@ extension AppModel {
             } else {
                 self.needsOwnerToken = false
                 self.ownerTokenError = nil
-                if let resolved = try? await ServerAuthTokenStore(authConfig: config.auth).resolve() {
-                    self.ownerTokenFingerprint = ServerAuth.fingerprint(resolved.token)
-                    self.ownerTokenSourceLabel = resolved.source.label
-                } else {
+                do {
+                    if let resolved = try await ServerAuthTokenStore(authConfig: config.auth).resolve() {
+                        self.ownerTokenFingerprint = ServerAuth.fingerprint(resolved.token)
+                        self.ownerTokenSourceLabel = resolved.source.label
+                    } else {
+                        self.ownerTokenFingerprint = nil
+                        self.ownerTokenSourceLabel = nil
+                    }
+                } catch {
+                    RuneWeaverLog.app.debug("Could not resolve owner token on boot: \(error.localizedDescription)")
                     self.ownerTokenFingerprint = nil
                     self.ownerTokenSourceLabel = nil
                 }
@@ -545,7 +559,11 @@ extension AppModel {
         pollingTask?.cancel()
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                do {
+                    try await Task.sleep(nanoseconds: 1_500_000_000)
+                } catch {
+                    break
+                }
                 guard !Task.isCancelled else { break }
                 await self?.refreshState()
             }
@@ -949,7 +967,13 @@ extension AppModel {
         if let url = dashboardURL(fragment: "settings", queryItems: [URLQueryItem(name: "standalone", value: "true")]) {
             Task { [weak self] in
                 guard let self else { return }
-                let sessionToken = try? await self.serverContext?.auth?.createSession()
+                let sessionToken: String?
+                do {
+                    sessionToken = try await self.serverContext?.auth?.createSession()
+                } catch {
+                    RuneWeaverLog.app.error("Failed to create session for Settings window: \(error.localizedDescription)")
+                    sessionToken = nil
+                }
                 await SettingsWindowController.shared.show(url: url, sessionToken: sessionToken)
             }
         }
@@ -1175,8 +1199,12 @@ extension AppModel {
             // status surfaces render the fingerprint derived below, never this.
             self.generatedOnceToken = token
             self.ownerTokenFingerprint = ServerAuth.fingerprint(token)
-            if let reread = try? await store.resolve() {
-                self.ownerTokenSourceLabel = reread.source.label
+            do {
+                if let reread = try await store.resolve() {
+                    self.ownerTokenSourceLabel = reread.source.label
+                }
+            } catch {
+                RuneWeaverLog.app.warning("Failed to reread owner token store: \(error.localizedDescription)")
             }
         } catch let error as ServerAuthError {
             // An environment override outranks persisted storage across
@@ -1237,7 +1265,11 @@ private actor ServerRunnerActor {
             await context.hub.closeAll()
         }
         if let app {
-            try? await app.asyncShutdown()
+            do {
+                try await app.asyncShutdown()
+            } catch {
+                RuneWeaverLog.app.warning("ServerRunnerActor shutdown: asyncShutdown failed: \(error.localizedDescription)")
+            }
         }
     }
 }

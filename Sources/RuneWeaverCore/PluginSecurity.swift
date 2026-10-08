@@ -237,7 +237,11 @@ public enum PluginSecurity {
     ) -> Bool {
         hasher.update(data: Data([0x46]))
         let fileURL = directoryURL.appendingPathComponent(entry.relativePath)
-        guard let handle = try? FileHandle(forReadingFrom: fileURL) else {
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forReadingFrom: fileURL)
+        } catch {
+            RuneWeaverLog.tools.debug("PluginSecurity: failed opening file handle at \(fileURL.path): \(error.localizedDescription)")
             return false
         }
         defer { try? handle.close() }
@@ -254,7 +258,14 @@ public enum PluginSecurity {
         let chunkSize = 64 * 1024
         var bytesRead: UInt64 = 0
         while true {
-            guard let chunk = try? handle.read(upToCount: chunkSize), !chunk.isEmpty else {
+            let chunk: Data?
+            do {
+                chunk = try handle.read(upToCount: chunkSize)
+            } catch {
+                RuneWeaverLog.tools.debug("PluginSecurity: failed reading chunk from \(fileURL.path): \(error.localizedDescription)")
+                chunk = nil
+            }
+            guard let chunk, !chunk.isEmpty else {
                 break
             }
             bytesRead += UInt64(chunk.count)

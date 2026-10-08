@@ -606,7 +606,11 @@ extension ApiSSRFGuard {
                     once.set(continuation)
                     let timeoutTask = Task {
                         let nanos = UInt64((dnsResolutionTimeoutSeconds * 1_000_000_000).rounded(.down))
-                        try? await Task.sleep(nanoseconds: nanos)
+                        do {
+                            try await Task.sleep(nanoseconds: nanos)
+                        } catch {
+                            return
+                        }
                         let held = sleeper.withLock { current -> Task<Void, Never>? in
                             let task = current
                             current = nil
@@ -698,7 +702,11 @@ extension ApiSSRFGuard {
                     // burst lookups from stacking lingering sleeps.
                     let timeoutTask = Task {
                         let nanos = UInt64((dnsResolutionTimeoutSeconds * 1_000_000_000).rounded(.down))
-                        try? await Task.sleep(nanoseconds: nanos)
+                        do {
+                            try await Task.sleep(nanoseconds: nanos)
+                        } catch {
+                            return
+                        }
                         let held = sleeper.withLock { current -> Task<Void, Never>? in
                             let task = current
                             current = nil

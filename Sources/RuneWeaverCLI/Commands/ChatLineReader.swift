@@ -73,9 +73,13 @@ struct ChatHistoryStore: Sendable {
 
     /// Loads persisted entries best-effort, replacing in-memory history.
     mutating func load() {
-        guard let fileURL else { return }
-        guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else { return }
-        entries = Self.parseHistoryLines(text, maxEntries: maxEntries)
+        guard let fileURL, FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        do {
+            let text = try String(contentsOf: fileURL, encoding: .utf8)
+            entries = Self.parseHistoryLines(text, maxEntries: maxEntries)
+        } catch {
+            return
+        }
     }
 
     /// Loads persisted entries off the cooperative pool.
@@ -84,11 +88,16 @@ struct ChatHistoryStore: Sendable {
         let maxEntries = self.maxEntries
         let loaded: [String]? = await withCheckedContinuation { continuation in
             Self.persistenceQueue.async {
-                guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else {
+                guard FileManager.default.fileExists(atPath: fileURL.path) else {
                     continuation.resume(returning: nil)
                     return
                 }
-                continuation.resume(returning: Self.parseHistoryLines(text, maxEntries: maxEntries))
+                do {
+                    let text = try String(contentsOf: fileURL, encoding: .utf8)
+                    continuation.resume(returning: Self.parseHistoryLines(text, maxEntries: maxEntries))
+                } catch {
+                    continuation.resume(returning: nil)
+                }
             }
         }
         if let loaded {

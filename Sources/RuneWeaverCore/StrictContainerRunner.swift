@@ -295,10 +295,21 @@ public enum StrictContainerRunner: Sendable {
         return try await LiveContainerHostRuntime().run(arguments: arguments, timeoutSeconds: timeoutSeconds)
     }
 
-    /// Best-effort stop plus delete for crash idempotence.
     static func bestEffortRemoveContainer(name: String, timeoutSeconds: TimeInterval) async {
-        _ = try? await runHostCommand(arguments: containerStopArguments(name: name), timeoutSeconds: timeoutSeconds)
-        _ = try? await runHostCommand(arguments: containerDeleteArguments(name: name), timeoutSeconds: timeoutSeconds)
+        do {
+            _ = try await runHostCommand(arguments: containerStopArguments(name: name), timeoutSeconds: timeoutSeconds)
+        } catch is CancellationError {
+            // Teardown continues
+        } catch {
+            RuneWeaverLog.sandbox.debug("StrictContainerRunner: stop container failed: \(error.localizedDescription)")
+        }
+        do {
+            _ = try await runHostCommand(arguments: containerDeleteArguments(name: name), timeoutSeconds: timeoutSeconds)
+        } catch is CancellationError {
+            // Teardown continues
+        } catch {
+            RuneWeaverLog.sandbox.debug("StrictContainerRunner: delete container failed: \(error.localizedDescription)")
+        }
     }
 
     private struct TestContainerTrack: Sendable {
@@ -588,14 +599,26 @@ public actor StrictTurnRegistry {
     }
 
     private func bestEffortRemove(name: String, timeoutSeconds: TimeInterval) async {
-        _ = try? await runtime.run(
-            arguments: StrictContainerRunner.containerStopArguments(name: name),
-            timeoutSeconds: timeoutSeconds
-        )
-        _ = try? await runtime.run(
-            arguments: StrictContainerRunner.containerDeleteArguments(name: name),
-            timeoutSeconds: timeoutSeconds
-        )
+        do {
+            _ = try await runtime.run(
+                arguments: StrictContainerRunner.containerStopArguments(name: name),
+                timeoutSeconds: timeoutSeconds
+            )
+        } catch is CancellationError {
+            // Teardown continues
+        } catch {
+            RuneWeaverLog.sandbox.debug("StrictContainerRunner: bestEffortRemove stop failed: \(error.localizedDescription)")
+        }
+        do {
+            _ = try await runtime.run(
+                arguments: StrictContainerRunner.containerDeleteArguments(name: name),
+                timeoutSeconds: timeoutSeconds
+            )
+        } catch is CancellationError {
+            // Teardown continues
+        } catch {
+            RuneWeaverLog.sandbox.debug("StrictContainerRunner: bestEffortRemove delete failed: \(error.localizedDescription)")
+        }
     }
 
     private func noteScratchIfHermetic(_ url: URL) {
@@ -832,10 +855,19 @@ public actor StrictTurnRegistry {
         }
 
         if runtime.resolveRuntimeURL() != nil {
-            if let listed = try? await runHost(
-                arguments: StrictContainerRunner.containerListAllArguments(),
-                timeoutSeconds: timeoutSeconds
-            ) {
+            let listed: BoundedProcessResult?
+            do {
+                listed = try await runHost(
+                    arguments: StrictContainerRunner.containerListAllArguments(),
+                    timeoutSeconds: timeoutSeconds
+                )
+            } catch is CancellationError {
+                listed = nil
+            } catch {
+                RuneWeaverLog.sandbox.debug("StrictContainerRunner: failed to list containers during sweep: \(error.localizedDescription)")
+                listed = nil
+            }
+            if let listed {
                 let combined = listed.stdoutString + "\n" + listed.stderrString
                 let liveNames = Set(entries.values.map(\.containerName))
                 for row in StrictContainerRunner.parseContainerListOutput(combined) {

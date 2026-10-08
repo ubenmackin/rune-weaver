@@ -227,7 +227,13 @@ public actor MailIndexCheckpointStore {
         }
         guard !loaded else { return }
         loaded = true
-        guard let data = try? Data(contentsOf: url) else { return }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            RuneWeaverLog.stores.warning("MailIndexCheckpointStore: failed to read checkpoint from '\(expanded)': \(error.localizedDescription)")
+            return
+        }
         do {
             checkpoint = try JSONDecoder().decode(MailIndexCheckpoint.self, from: data)
         } catch {

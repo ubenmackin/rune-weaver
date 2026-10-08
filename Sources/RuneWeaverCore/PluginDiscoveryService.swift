@@ -61,9 +61,19 @@ public final class PluginDiscoveryService: Sendable {
                 continue
             }
 
-            guard let data = try? Data(contentsOf: manifestFile),
-                  let manifest = try? PluginManifest.from(jsonData: data)
-            else {
+            let data: Data
+            do {
+                data = try Data(contentsOf: manifestFile)
+            } catch {
+                RuneWeaverLog.tools.warning("PluginDiscoveryService: failed to read manifest at \(manifestFile.path): \(error.localizedDescription)")
+                continue
+            }
+
+            let manifest: PluginManifest
+            do {
+                manifest = try PluginManifest.from(jsonData: data)
+            } catch {
+                RuneWeaverLog.tools.warning("PluginDiscoveryService: failed to parse manifest at \(manifestFile.path): \(error.localizedDescription)")
                 continue
             }
 
@@ -208,11 +218,15 @@ public final class PluginDiscoveryService: Sendable {
         for subdir in subdirs {
             for filename in ["rune.json", "plugin.json"] {
                 let manifestURL = subdir.appendingPathComponent(filename)
-                if let data = try? Data(contentsOf: manifestURL),
-                   let manifest = try? PluginManifest.from(jsonData: data),
-                   manifest.id == id
-                {
-                    return (manifest, subdir)
+                guard fileManager.fileExists(atPath: manifestURL.path) else { continue }
+                do {
+                    let data = try Data(contentsOf: manifestURL)
+                    let manifest = try PluginManifest.from(jsonData: data)
+                    if manifest.id == id {
+                        return (manifest, subdir)
+                    }
+                } catch {
+                    RuneWeaverLog.tools.debug("PluginDiscoveryService: failed to read candidate manifest at \(manifestURL.path): \(error.localizedDescription)")
                 }
             }
         }

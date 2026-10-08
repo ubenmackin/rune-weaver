@@ -71,9 +71,12 @@ struct GoalsListCommand: AsyncParsableCommand {
         }
         print("Goals (\(goals.count)) — \(loaded.url.path)")
         for goal in goals {
-            // A missing plan degrades to an empty tally instead of failing the
-            // list, matching the service list route.
-            let steps = await (try? store.steps(goalID: goal.id)) ?? []
+            let steps: [GoalStep]
+            do {
+                steps = try await store.steps(goalID: goal.id)
+            } catch {
+                steps = []
+            }
             GoalsCLIHelpers.printGoalRow(goal: goal, steps: steps)
         }
     }
@@ -146,8 +149,12 @@ struct GoalsAddCommand: AsyncParsableCommand {
         }
         // Creation returns before planning lands; awaiting the tracked plan
         // keeps the printed steps honest instead of showing the placeholder.
-        await engine.waitForPendingPlan(goalID: goal.id)
-        let steps = await (try? store.steps(goalID: goal.id)) ?? []
+        let steps: [GoalStep]
+        do {
+            steps = try await store.steps(goalID: goal.id)
+        } catch {
+            steps = []
+        }
         print(TerminalStyle.success("Created goal \(goal.id.uuidString)"))
         GoalsCLIHelpers.printGoalRow(goal: goal, steps: steps)
     }
@@ -178,8 +185,18 @@ struct GoalsShowCommand: AsyncParsableCommand {
             print(TerminalStyle.error("Unknown goal \(id)."))
             throw ExitCode(1)
         }
-        let steps = await (try? store.steps(goalID: goalID)) ?? []
-        let events = await (try? store.events(goalID: goalID, limit: 10)) ?? []
+        let steps: [GoalStep]
+        do {
+            steps = try await store.steps(goalID: goalID)
+        } catch {
+            steps = []
+        }
+        let events: [GoalEvent]
+        do {
+            events = try await store.events(goalID: goalID, limit: 10)
+        } catch {
+            events = []
+        }
         GoalsCLIHelpers.printGoalRow(goal: goal, steps: steps)
         print(TerminalStyle.dim("  statement: \(goal.statement)"))
         print(TerminalStyle.dim("  cadence: every \(goal.stepIntervalMinutes) min"))
@@ -418,7 +435,13 @@ struct GoalsStepsCommand: AsyncParsableCommand {
             print(TerminalStyle.error("Unknown goal \(id)."))
             throw ExitCode(1)
         }
-        let ordered = await ((try? store.steps(goalID: goalID)) ?? []).sorted { $0.ordinal < $1.ordinal }
+        let rawSteps: [GoalStep]
+        do {
+            rawSteps = try await store.steps(goalID: goalID)
+        } catch {
+            rawSteps = []
+        }
+        let ordered = rawSteps.sorted { $0.ordinal < $1.ordinal }
         guard let stepNumber = done else {
             guard !ordered.isEmpty else {
                 print(TerminalStyle.dim("Goal '\(goal.title)' has no steps yet."))

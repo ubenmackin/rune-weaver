@@ -130,8 +130,11 @@ private func registerIdeaAcceptRoute(on ideas: RoutesBuilder) {
             // all-or-nothing), so restore our own claim to leave the suggestion
             // actionable for a retry instead of stranding it accepted with no
             // change applied. The guarded revert only touches the row while it
-            // still holds the status this request claimed.
-            _ = try? await context.ideas.claim(id: id, from: .accepted, to: .proposed)
+            do {
+                _ = try await context.ideas.claim(id: id, from: .accepted, to: .proposed)
+            } catch {
+                RuneWeaverLog.server.warning("Failed to restore idea \(id) claim to proposed after apply failure: \(error.localizedDescription)")
+            }
             throw error
         }
         return IdeaDTO(claimed)
@@ -165,23 +168,17 @@ private func applyAcceptedIdea(_ idea: Idea, context: ServerContext) async throw
         // The creation already landed, so push the row for live dashboards the
         // same way the create route does: an immediate snapshot plus a detached
         // plan-ready refresh once background decomposition lands.
-        let plan = await (try? context.goals.steps(goalID: created.id)) ?? []
-        await context.hub.broadcastGoal(GoalDTO(goal: created, steps: plan))
-        let hub = context.hub
-        let store = context.goals
-        let engine = context.goalEngine
-        let goalID = created.id
-        Task.detached(priority: .background) { [hub, store, engine, goalID] in
-            await engine.waitForPendingPlan(goalID: goalID)
-            do {
-                if let updated = try await store.goal(id: goalID) {
-                    let freshSteps = await (try? store.steps(goalID: goalID)) ?? []
-                    await hub.broadcastGoal(GoalDTO(goal: updated, steps: freshSteps))
-                }
-            } catch {
-                RuneWeaverLog.server.error("ServerIdeaRoutes: plan-ready broadcast failed: \(error.localizedDescription)")
-            }
+        let plan: [GoalStep]
+        do {
+            plan = try await context.goals.steps(goalID: created.id)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            RuneWeaverLog.server.warning("ServerIdeaRoutes: failed to read steps for created goal \(created.id): \(error.localizedDescription)")
+            plan = []
         }
+        await context.hub.broadcastGoal(GoalDTO(goal: created, steps: plan))
+        context.schedulePlanReadyBroadcast(goalID: created.id)
     case .planAdjustment:
         let goalID = try await linkedActiveGoalID(for: idea, store: context.goals)
         let steps = planSteps(from: idea, goalID: goalID)
@@ -200,7 +197,15 @@ private func applyAcceptedIdea(_ idea: Idea, context: ServerContext) async throw
             throw mapGoalStoreError(error, raw: goalID.uuidString)
         }
         if let updated = refreshed {
-            let plan = await (try? context.goals.steps(goalID: goalID)) ?? []
+            let plan: [GoalStep]
+            do {
+                plan = try await context.goals.steps(goalID: goalID)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                RuneWeaverLog.server.warning("ServerIdeaRoutes: failed to read steps for updated goal \(goalID): \(error.localizedDescription)")
+                plan = []
+            }
             await context.hub.broadcastGoal(GoalDTO(goal: updated, steps: plan))
         }
     case .tip:

@@ -25,8 +25,16 @@ extension AppModel {
             guard let envVar = entry.apiKeyEnv, !envVar.isEmpty else { continue }
             if let key = LLMProviderFactory.resolveAPIKey(explicit: nil, envVar: envVar) {
                 keysByEntry[entryName] = key
-            } else if let stored = try? await secrets.retrieve(key: envVar) {
-                keysByEntry[entryName] = stored
+            } else {
+                do {
+                    if let stored = try await secrets.retrieve(key: envVar) {
+                        keysByEntry[entryName] = stored
+                    }
+                } catch is CancellationError {
+                    return keysByEntry
+                } catch {
+                    RuneWeaverLog.app.debug("Could not retrieve stored API key for \(envVar): \(error.localizedDescription)")
+                }
             }
         }
         return keysByEntry

@@ -770,7 +770,15 @@ public struct GoalStatusTool: Tool, Sendable {
         let trails = events.map { GoalStatusEvent(kind: $0.kind.rawValue, message: $0.message, createdAt: $0.createdAt) }
         // Triggers read best-effort: a store hiccup degrades the list to the
         // plan alone instead of failing a read-only status call.
-        let armed = await (try? store.triggers(for: goal.id))?.map(GoalStatusTrigger.init) ?? []
+        let armed: [GoalStatusTrigger]
+        do {
+            armed = try await store.triggers(for: goal.id).map(GoalStatusTrigger.init)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            RuneWeaverLog.tools.warning("GoalTools: failed to read triggers for goal \(goal.id): \(error.localizedDescription)")
+            armed = []
+        }
         return GoalStatusDetail(
             goalID: goal.id.uuidString,
             title: goal.title,
@@ -902,7 +910,15 @@ public struct GoalProgressTool: Tool, Sendable {
                 try await engine.checkCompletion(goalID: goalID)
             }
             if let goalUpdatedNotifier, let freshGoal = try await store.goal(id: goalID) {
-                let freshSteps = await (try? store.steps(goalID: goalID)) ?? []
+                let freshSteps: [GoalStep]
+                do {
+                    freshSteps = try await store.steps(goalID: goalID)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    RuneWeaverLog.tools.warning("GoalTools: failed to reload steps for goal \(goalID): \(error.localizedDescription)")
+                    freshSteps = []
+                }
                 await goalUpdatedNotifier(freshGoal, freshSteps)
             }
             let envelope = GoalProgressEnvelope(

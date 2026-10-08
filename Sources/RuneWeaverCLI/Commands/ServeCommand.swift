@@ -108,7 +108,11 @@ struct ServeCommand: AsyncParsableCommand {
                         print(TerminalStyle.dim("SearXNG \(progress.stage.userCopy)… (\(elapsed)s)"))
                     }
                 }
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                } catch {
+                    break
+                }
             }
         }
         do {
@@ -605,7 +609,11 @@ extension ServeCommand {
             await permissionGate.stopPeriodicCleanup()
             await context.sandboxCleanup.stop()
             await context.hub.closeAll()
-            try? await app.asyncShutdown()
+            do {
+                try await app.asyncShutdown()
+            } catch {
+                RuneWeaverLog.server.debug("ServeCommand: asyncShutdown error: \(error.localizedDescription)")
+            }
             throw error
         }
     }

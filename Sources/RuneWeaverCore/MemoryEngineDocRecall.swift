@@ -148,15 +148,47 @@ extension MemoryEngine {
         // `docPoolMultiplier` clamps to `1...8`, so the widened pool never
         // shrinks below `clamped` and needs no lower bound.
         let pool = min(clamped * clampedBudgets.docPoolMultiplier, Self.maxPerTierResults)
-        let keyword = await (try? docIndexStore.searchKeyword(query: trimmed, limit: pool, since: since, until: until)) ?? []
+        let keyword: [IndexedChunk]
+        do {
+            keyword = try await docIndexStore.searchKeyword(query: trimmed, limit: pool, since: since, until: until)
+        } catch is CancellationError {
+            return []
+        } catch {
+            RuneWeaverLog.memory.warning("MemoryEngine: searchKeyword failed: \(error.localizedDescription)")
+            keyword = []
+        }
         let vectorLimit = (since != nil || until != nil) ? DocIndexStore.maxVectorWindowResults : min(max(pool * 10, 500), Self.maxPerTierResults)
-        let vectors = await (try? docIndexStore.chunkVectors(limit: vectorLimit, since: since, until: until)) ?? []
+        let vectors: [IndexedChunk]
+        do {
+            vectors = try await docIndexStore.chunkVectors(limit: vectorLimit, since: since, until: until)
+        } catch is CancellationError {
+            return []
+        } catch {
+            RuneWeaverLog.memory.warning("MemoryEngine: chunkVectors failed: \(error.localizedDescription)")
+            vectors = []
+        }
         let queryEmbedding = (embedding?.isEmpty == false) ? embedding : nil
         let candidates = Self.docIndexCandidates(keyword: keyword, vectors: vectors, queryEmbedding: queryEmbedding)
         guard !candidates.isEmpty else { return [] }
-        let stats = try? await docIndexStore.stats()
+        let stats: IndexStats?
+        do {
+            stats = try await docIndexStore.stats()
+        } catch is CancellationError {
+            return []
+        } catch {
+            RuneWeaverLog.memory.warning("MemoryEngine: docIndexStore.stats failed: \(error.localizedDescription)")
+            stats = nil
+        }
         let docIDs = Set(candidates.map(\.chunk.documentID))
-        let documents = await (try? docIndexStore.documents(ids: docIDs)) ?? [:]
+        let documents: [UUID: IndexedDocument]
+        do {
+            documents = try await docIndexStore.documents(ids: docIDs)
+        } catch is CancellationError {
+            return []
+        } catch {
+            RuneWeaverLog.memory.warning("MemoryEngine: docIndexStore.documents failed: \(error.localizedDescription)")
+            documents = [:]
+        }
         let salient = Set(Tokenization.salientTokens(from: trimmed))
         let effectiveQueryTokens = salient.isEmpty ? Tokenization.tokenize(trimmed) : salient
         let ranked = Self.rankedDocIndexResults(

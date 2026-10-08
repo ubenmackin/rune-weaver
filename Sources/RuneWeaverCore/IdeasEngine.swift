@@ -319,7 +319,13 @@ public actor IdeasEngine {
     /// - Returns: Recent outcome lines, newest first.
     private func recentOutcomes() async -> [String] {
         let since = Date().addingTimeInterval(-Self.outcomeLookback)
-        guard let events = try? await goalStore.observedEvents(since: since, limit: Self.maxOutcomeEvents) else {
+        let events: [GoalObservedEvent]
+        do {
+            events = try await goalStore.observedEvents(since: since, limit: Self.maxOutcomeEvents)
+        } catch is CancellationError {
+            return []
+        } catch {
+            RuneWeaverLog.stores.error("IdeasEngine: failed to load recent outcome events: \(error.localizedDescription)")
             return []
         }
         return events
@@ -356,9 +362,13 @@ public actor IdeasEngine {
                     resumption.resume(text)
                 }
                 Task {
-                    try? await Task.sleep(nanoseconds: timeoutNS)
-                    provider.cancel()
-                    resumption.resume(nil)
+                    do {
+                        try await Task.sleep(nanoseconds: timeoutNS)
+                        provider.cancel()
+                        resumption.resume(nil)
+                    } catch {
+                        return
+                    }
                 }
             }
         } onCancel: {

@@ -71,10 +71,17 @@ extension QuestionAskTool: ToolAdmissionValidating {
     /// - Parameter input: Raw `question.ask` invocation.
     /// - Returns: `.refuse` with the caller-facing reason, or `.proceed`.
     public func admissionVerdict(for input: ToolInput) async -> ToolAdmissionVerdict {
-        guard let data = input.argumentsJSON.data(using: .utf8),
-              let args = try? JSONDecoder().decode(QuestionAskArgs.self, from: data)
-        else {
-            return .refuse(reason: "Invalid arguments for question.ask: expected 'question' (string) and 'options' (array of 2-4 strings).")
+        guard let data = input.argumentsJSON.data(using: .utf8) else {
+            return .refuse(reason: "Invalid arguments for question.ask: invalid UTF-8 string.")
+        }
+        let args: QuestionAskArgs
+        do {
+            args = try JSONDecoder().decode(QuestionAskArgs.self, from: data)
+        } catch {
+            return .refuse(
+                reason: "Invalid arguments for question.ask: expected 'question' (string) "
+                    + "and 'options' (array of 2-4 strings): \(error.localizedDescription)"
+            )
         }
         let trimmedQuestion = args.question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedQuestion.isEmpty else {

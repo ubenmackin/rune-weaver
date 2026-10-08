@@ -863,9 +863,16 @@ extension MessagesIndexer {
             guard let attributes = try? FileManager.default.attributesOfItem(atPath: expanded),
                   let size = (attributes[.size] as? NSNumber)?.intValue,
                   size > 0,
-                  size <= maxAttachmentBytes,
-                  let data = try? Data(contentsOf: URL(fileURLWithPath: expanded), options: [.mappedIfSafe])
+                  size <= maxAttachmentBytes
             else {
+                results.append((name: name, text: nil))
+                continue
+            }
+            let data: Data
+            do {
+                data = try Data(contentsOf: URL(fileURLWithPath: expanded), options: [.mappedIfSafe])
+            } catch {
+                RuneWeaverLog.stores.debug("MessagesIndexer: failed to read attachment at \(expanded): \(error.localizedDescription)")
                 results.append((name: name, text: nil))
                 continue
             }

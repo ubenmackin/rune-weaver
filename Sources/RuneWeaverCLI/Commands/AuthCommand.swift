@@ -84,7 +84,12 @@ struct AuthTokenGenerateCommand: AsyncParsableCommand {
         if existing != nil {
             // The refusal is decided against the authoritative store; the same
             // accessor supplies the credential-free source label.
-            let source = await (try? store.resolve())?.source
+            let source: ServerAuthTokenSource?
+            do {
+                source = try await store.resolve()?.source
+            } catch {
+                source = nil
+            }
             let sourceNote = source.map { " (\($0.label))" } ?? ""
             cliPrintError(
                 TerminalStyle.error(
@@ -134,7 +139,12 @@ struct AuthTokenRotateCommand: AsyncParsableCommand {
             )
             throw ExitCode(1)
         }
-        let source = await (try? ServerAuthTokenStore(authConfig: authConfig).resolve())?.source
+        let source: ServerAuthTokenSource?
+        do {
+            source = try await ServerAuthTokenStore(authConfig: authConfig).resolve()?.source
+        } catch {
+            source = nil
+        }
         let sourceNote = source.map { " from \($0.label)" } ?? ""
         print(TerminalStyle.bold("Rotating the owner token\(sourceNote) rewrites the stored credential."))
         print(

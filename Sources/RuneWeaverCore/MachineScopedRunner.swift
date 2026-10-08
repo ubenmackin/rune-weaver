@@ -392,10 +392,19 @@ public struct MachineContainerClient: Sendable {
 
     public func machineStatus(workspaceRoot: URL, networkDenied: Bool? = nil) async -> MachineScopedRunner.MachineStatus {
         let timeout = ContainerMachineManager.defaultProcessTimeoutSeconds
-        guard let probed = try? await runtime.run(
-            arguments: MachineScopedRunner.inspectArguments(),
-            timeoutSeconds: timeout
-        ), probed.exitCode == 0 else {
+        let probed: BoundedProcessResult?
+        do {
+            probed = try await runtime.run(
+                arguments: MachineScopedRunner.inspectArguments(),
+                timeoutSeconds: timeout
+            )
+        } catch is CancellationError {
+            probed = nil
+        } catch {
+            RuneWeaverLog.sandbox.debug("MachineScopedRunner: inspect failed: \(error.localizedDescription)")
+            probed = nil
+        }
+        guard let probed, probed.exitCode == 0 else {
             if let fallback = await listedStatus(timeout: timeout) {
                 return fallback
             }
@@ -418,10 +427,16 @@ public struct MachineContainerClient: Sendable {
     /// Stops the machine container without removing it.
     public func stopMachine() async {
         let timeout = ContainerMachineManager.defaultProcessTimeoutSeconds
-        _ = try? await runtime.run(
-            arguments: StrictContainerRunner.containerStopArguments(name: MachineScopedRunner.workspaceMachineName),
-            timeoutSeconds: timeout
-        )
+        do {
+            _ = try await runtime.run(
+                arguments: StrictContainerRunner.containerStopArguments(name: MachineScopedRunner.workspaceMachineName),
+                timeoutSeconds: timeout
+            )
+        } catch is CancellationError {
+            // Teardown continues
+        } catch {
+            RuneWeaverLog.sandbox.debug("MachineScopedRunner: stopMachine failed: \(error.localizedDescription)")
+        }
     }
 
     /// Stops plus removes the machine container so the next ensure recreates it.
@@ -434,14 +449,26 @@ public struct MachineContainerClient: Sendable {
     /// Runs even when the calling task is cancelled, so failure, cancellation,
     /// or early return cannot orphan the workspace container.
     public func stopAndRemove(timeoutSeconds: TimeInterval = 5) async {
-        _ = try? await runtime.run(
-            arguments: StrictContainerRunner.containerStopArguments(name: MachineScopedRunner.workspaceMachineName),
-            timeoutSeconds: timeoutSeconds
-        )
-        _ = try? await runtime.run(
-            arguments: StrictContainerRunner.containerDeleteArguments(name: MachineScopedRunner.workspaceMachineName),
-            timeoutSeconds: timeoutSeconds
-        )
+        do {
+            _ = try await runtime.run(
+                arguments: StrictContainerRunner.containerStopArguments(name: MachineScopedRunner.workspaceMachineName),
+                timeoutSeconds: timeoutSeconds
+            )
+        } catch is CancellationError {
+            // Teardown continues
+        } catch {
+            RuneWeaverLog.sandbox.debug("MachineScopedRunner: stop failed in stopAndRemove: \(error.localizedDescription)")
+        }
+        do {
+            _ = try await runtime.run(
+                arguments: StrictContainerRunner.containerDeleteArguments(name: MachineScopedRunner.workspaceMachineName),
+                timeoutSeconds: timeoutSeconds
+            )
+        } catch is CancellationError {
+            // Teardown continues
+        } catch {
+            RuneWeaverLog.sandbox.debug("MachineScopedRunner: delete failed in stopAndRemove: \(error.localizedDescription)")
+        }
     }
 
     private func start(timeout: TimeInterval) async throws {
@@ -457,20 +484,38 @@ public struct MachineContainerClient: Sendable {
     }
 
     private func inspectSnapshot(timeout: TimeInterval) async -> MachineScopedRunner.InspectSnapshot? {
-        guard let probed = try? await runtime.run(
-            arguments: MachineScopedRunner.inspectArguments(),
-            timeoutSeconds: timeout
-        ), probed.exitCode == 0 else {
+        let probed: BoundedProcessResult?
+        do {
+            probed = try await runtime.run(
+                arguments: MachineScopedRunner.inspectArguments(),
+                timeoutSeconds: timeout
+            )
+        } catch is CancellationError {
+            return nil
+        } catch {
+            RuneWeaverLog.sandbox.debug("MachineScopedRunner: inspectSnapshot failed: \(error.localizedDescription)")
+            return nil
+        }
+        guard let probed, probed.exitCode == 0 else {
             return nil
         }
         return MachineScopedRunner.parseInspectOutput(probed.stdoutString + "\n" + probed.stderrString)
     }
 
     private func listedStatus(timeout: TimeInterval) async -> MachineScopedRunner.MachineStatus? {
-        guard let listed = try? await runtime.run(
-            arguments: StrictContainerRunner.containerListAllArguments(),
-            timeoutSeconds: timeout
-        ), listed.exitCode == 0 else {
+        let listed: BoundedProcessResult?
+        do {
+            listed = try await runtime.run(
+                arguments: StrictContainerRunner.containerListAllArguments(),
+                timeoutSeconds: timeout
+            )
+        } catch is CancellationError {
+            return nil
+        } catch {
+            RuneWeaverLog.sandbox.debug("MachineScopedRunner: listedStatus failed: \(error.localizedDescription)")
+            return nil
+        }
+        guard let listed, listed.exitCode == 0 else {
             return nil
         }
         let rows = StrictContainerRunner.parseContainerListOutput(listed.stdoutString + "\n" + listed.stderrString)
@@ -481,10 +526,19 @@ public struct MachineContainerClient: Sendable {
     }
 
     private func reviveListed(timeout: TimeInterval) async -> Bool {
-        guard let probed = try? await runtime.run(
-            arguments: StrictContainerRunner.containerListAllArguments(),
-            timeoutSeconds: timeout
-        ), probed.exitCode == 0 else {
+        let probed: BoundedProcessResult?
+        do {
+            probed = try await runtime.run(
+                arguments: StrictContainerRunner.containerListAllArguments(),
+                timeoutSeconds: timeout
+            )
+        } catch is CancellationError {
+            return false
+        } catch {
+            RuneWeaverLog.sandbox.debug("MachineScopedRunner: reviveListed check failed: \(error.localizedDescription)")
+            return false
+        }
+        guard let probed, probed.exitCode == 0 else {
             return false
         }
         let combined = probed.stdoutString + "\n" + probed.stderrString
@@ -493,10 +547,16 @@ public struct MachineContainerClient: Sendable {
             return false
         }
         if !StrictContainerRunner.isRunningStatus(row.status) {
-            _ = try? await runtime.run(
-                arguments: StrictContainerRunner.containerStartArguments(name: MachineScopedRunner.workspaceMachineName),
-                timeoutSeconds: timeout
-            )
+            do {
+                _ = try await runtime.run(
+                    arguments: StrictContainerRunner.containerStartArguments(name: MachineScopedRunner.workspaceMachineName),
+                    timeoutSeconds: timeout
+                )
+            } catch is CancellationError {
+                // Cancellation
+            } catch {
+                RuneWeaverLog.sandbox.debug("MachineScopedRunner: reviveListed start failed: \(error.localizedDescription)")
+            }
         }
         return true
     }
@@ -507,14 +567,26 @@ public struct MachineContainerClient: Sendable {
         if created.exitCode != 0 {
             let detail = created.stdoutString + "\n" + created.stderrString
             if detail.lowercased().contains("already exists") || detail.lowercased().contains("conflict") {
-                _ = try? await runtime.run(
-                    arguments: StrictContainerRunner.containerStopArguments(name: MachineScopedRunner.workspaceMachineName),
-                    timeoutSeconds: timeout
-                )
-                _ = try? await runtime.run(
-                    arguments: StrictContainerRunner.containerDeleteArguments(name: MachineScopedRunner.workspaceMachineName),
-                    timeoutSeconds: timeout
-                )
+                do {
+                    _ = try await runtime.run(
+                        arguments: StrictContainerRunner.containerStopArguments(name: MachineScopedRunner.workspaceMachineName),
+                        timeoutSeconds: timeout
+                    )
+                } catch is CancellationError {
+                    // Teardown continues
+                } catch {
+                    RuneWeaverLog.sandbox.debug("MachineScopedRunner: cleanup stop failed: \(error.localizedDescription)")
+                }
+                do {
+                    _ = try await runtime.run(
+                        arguments: StrictContainerRunner.containerDeleteArguments(name: MachineScopedRunner.workspaceMachineName),
+                        timeoutSeconds: timeout
+                    )
+                } catch is CancellationError {
+                    // Teardown continues
+                } catch {
+                    RuneWeaverLog.sandbox.debug("MachineScopedRunner: cleanup delete failed: \(error.localizedDescription)")
+                }
                 let retried = try await runtime.run(arguments: createArgs, timeoutSeconds: timeout)
                 guard retried.exitCode == 0 else {
                     throw ContainerMachineError.operationFailed(

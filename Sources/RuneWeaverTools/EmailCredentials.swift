@@ -120,7 +120,14 @@ public enum EmailCredentialResolver {
     public static func resolvePassword(for account: EmailAccount) async -> String? {
         let envVar = passwordEnvVar(for: account)
         let secrets = SecretsManager()
-        return try? await secrets.retrieve(key: envVar)
+        do {
+            return try await secrets.retrieve(key: envVar)
+        } catch is CancellationError {
+            return nil
+        } catch {
+            RuneWeaverLog.tools.debug("resolvePassword: failed to retrieve secret for \(envVar): \(error.localizedDescription)")
+            return nil
+        }
     }
 
     /// Resolves every account's password, skipping missing ones.
