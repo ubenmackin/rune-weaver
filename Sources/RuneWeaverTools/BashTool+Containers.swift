@@ -86,7 +86,7 @@ extension BashTool {
         }
         let guestWorkdir = guestWorkdirResult.workdir ?? entry.workdir
         ensureStrictGuestSubdir(relative: guestWorkdirResult.relative, scratchURL: entry.scratchURL)
-        let bounded = boundedRunCommand(command)
+        let bounded = boundedRunCommand(command, tier: .strictContainer)
         do {
             let result = try await registry.exec(
                 sessionID: context.sessionID,
@@ -169,7 +169,7 @@ extension BashTool {
             return failure
         }
         let workdir = machineWorkdirResult.workdir ?? ensuredRoot.standardizedFileURL.path
-        let bounded = boundedRunCommand(command)
+        let bounded = boundedRunCommand(command, tier: .machineScoped)
         do {
             let result = try await client.exec(
                 workdir: workdir,

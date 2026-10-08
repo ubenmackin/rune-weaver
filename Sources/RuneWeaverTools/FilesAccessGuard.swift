@@ -481,13 +481,23 @@ extension FilesAccessGuard {
             (
                 aliases: ["icloud drive", "icloud"],
                 findRoots: {
-                    let key = home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
-                    var candidates = cloudStorageDirs(home: home, fileManager: fileManager) {
-                        $0 == "icloud"
-                            || matchesCloudMount($0, base: "icloud drive")
-                            || matchesCloudMount($0, base: "iclouddrive")
+                    let liveCloudDocs = home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
+                    var candidates = [liveCloudDocs]
+                    let primaryCloudStorage = cloudStorageDirs(home: home, fileManager: fileManager) { name in
+                        guard !name.contains("(") && !name.contains(")") else { return false }
+                        return name == "icloud"
+                            || name == "icloud drive"
+                            || name == "iclouddrive"
+                            || name.hasPrefix("icloud drive-")
+                            || name.hasPrefix("icloud-")
                     }
-                    candidates.append(key)
+                    candidates.append(contentsOf: primaryCloudStorage)
+                    let fallbackCloudStorage = cloudStorageDirs(home: home, fileManager: fileManager) { name in
+                        guard !name.contains("(") && !name.contains(")") else { return false }
+                        return matchesCloudMount(name, base: "icloud drive")
+                            || matchesCloudMount(name, base: "iclouddrive")
+                    }
+                    candidates.append(contentsOf: fallbackCloudStorage)
                     return candidates
                 }
             ),

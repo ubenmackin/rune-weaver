@@ -248,39 +248,6 @@ final class BashOutputBuffer: Sendable {
 // MARK: - BashTool Static Helpers
 
 extension BashTool {
-    /// Builds the `ulimit` prefix bounding CPU time and address space.
-    ///
-    /// The prefix uses `;` (not `&&`) so a failed `ulimit` still runs the
-    /// command best-effort instead of refusing it; the wall-clock watchdog
-    /// stays the hard backstop regardless.
-    /// - Parameters:
-    ///   - cpuSeconds: CPU time budget in seconds, already clamped to 1-3600.
-    ///   - memoryMB: Address-space budget in megabytes, already clamped to 64-8192.
-    /// - Returns: Shell prefix ending in `; ` (e.g. `ulimit -t 5; ulimit -v 524288; `).
-    public static func resourcePrefix(cpuSeconds: Int, memoryMB: Int) -> String {
-        "ulimit -t \(cpuSeconds); ulimit -v \(memoryMB * 1024); "
-    }
-
-    /// Wraps a model command with the `ulimit` resource prefix.
-    ///
-    /// Clamping here keeps direct callers honest even when the stored config
-    /// was hand-built past its bounds; the validated file-load path already
-    /// rejects those values fail-closed with the dotted field.
-    /// - Parameters:
-    ///   - command: Model-authored shell command.
-    ///   - cpuSeconds: CPU time budget in seconds.
-    ///   - memoryMB: Address-space budget in megabytes.
-    /// - Returns: Prefixed command for `bash -c`.
-    public static func resourceLimitedCommand(
-        _ command: String,
-        cpuSeconds: Int,
-        memoryMB: Int
-    ) -> String {
-        let boundedCPU = min(max(cpuSeconds, BashConfig.minCPUSeconds), BashConfig.maxCPUSeconds)
-        let boundedMemory = min(max(memoryMB, BashConfig.minMemoryMB), BashConfig.maxMemoryMB)
-        return resourcePrefix(cpuSeconds: boundedCPU, memoryMB: boundedMemory) + command
-    }
-
     /// Classifies how a run ended from its wait status.
     ///
     /// The timeout flag wins because a signal death landing near the deadline
