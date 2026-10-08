@@ -217,18 +217,32 @@ struct BashBoundsPrefixTests {
     @Test
     func `Prefix carries configured values with kilobyte conversion`() {
         // 256 MB lands as kilobytes for `ulimit -v`, which counts 1024-byte blocks.
-        let prefixed = BashTool.resourceLimitedCommand("echo hi", cpuSeconds: 5, memoryMB: 256)
+        let prefixed = BashTool.resourceLimitedCommand("echo hi", cpuSeconds: 5, memoryMB: 256, tier: .strictContainer)
         #expect(prefixed == "ulimit -t 5; ulimit -v 262144; echo hi")
         #expect(prefixed.hasPrefix("ulimit -t 5; ulimit -v 262144; "))
     }
 
     @Test
     func `Prefix clamps hand-built bounds instead of trapping`() {
-        let floored = BashTool.resourceLimitedCommand("echo hi", cpuSeconds: 0, memoryMB: 1)
+        let floored = BashTool.resourceLimitedCommand("echo hi", cpuSeconds: 0, memoryMB: 1, tier: .strictContainer)
         #expect(floored == "ulimit -t 1; ulimit -v 65536; echo hi")
 
-        let capped = BashTool.resourceLimitedCommand("echo hi", cpuSeconds: 99999, memoryMB: 99999)
+        let capped = BashTool.resourceLimitedCommand("echo hi", cpuSeconds: 99999, memoryMB: 99999, tier: .strictContainer)
         #expect(capped == "ulimit -t 3600; ulimit -v 8388608; echo hi")
+    }
+
+    @Test
+    func `Host tier carries CPU time only`() {
+        // Shared-library accounting over-reports address space on the host,
+        // so the host prefix omits the memory bound that guests keep.
+        let prefixed = BashTool.resourceLimitedCommand("echo hi", cpuSeconds: 5, memoryMB: 256, tier: .hostSeatbelt)
+        #expect(prefixed == "ulimit -t 5; echo hi")
+    }
+
+    @Test
+    func `Machine tier keeps both bounds`() {
+        let prefixed = BashTool.resourceLimitedCommand("echo hi", cpuSeconds: 5, memoryMB: 256, tier: .machineScoped)
+        #expect(prefixed == "ulimit -t 5; ulimit -v 262144; echo hi")
     }
 
     @Test

@@ -4,6 +4,9 @@ import Foundation
 
 /// Namespace owning tier resolution plus scoped mount and profile helpers.
 public enum BashSandboxRouter: Sendable {
+    /// Toolchain resolution reads for `xcode-select` under the host tier.
+    static let hostToolchainReadPaths = ["/var/select", "/var/db/xcode_select_link"]
+
     /// Resolves the execution tier for one command.
     ///
     /// Chained commands never reach the host tier: any chaining operator,
@@ -302,6 +305,7 @@ public enum BashSandboxRouter: Sendable {
             var reads = Set(SeatbeltProfileBuilder.defaultSystemReadPaths)
             reads.insert(dir)
             reads.insert(tmp)
+            reads.formUnion(Self.hostToolchainReadPaths)
             var writes = Set(SeatbeltProfileBuilder.defaultSystemWritePaths)
             writes.insert(dir)
             let builder = SeatbeltProfileBuilder(

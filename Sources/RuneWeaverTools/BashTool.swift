@@ -50,6 +50,22 @@ private struct BashSandboxTarget: Sendable {
     let failure: ToolOutput?
 }
 
+/// Sandbox target inputs for one run.
+///
+/// Bundles the spawn inputs so the helper stays within the parameter-count
+/// lint budget while keeping working directory, command, and tier together.
+private struct SandboxTargetRequest: Sendable {
+    let workingDirURL: URL?
+    let effectiveWorkingDir: URL
+    let boundedCommand: String
+    let allowNetwork: Bool
+    let allowedEgressHosts: [String]
+    let additionalReadPaths: [String]
+    let callID: String
+    let tier: BashSandboxMode
+    let workspaceRoot: URL?
+}
+
 /// Tool for executing shell commands with granular per-command permissions,
 /// strict chaining protection, and optional Seatbelt sandbox confinement.
 public struct BashTool: Tool {
@@ -304,11 +320,11 @@ extension BashTool {
         declaredHosts: [String],
         context: ToolContext,
         callID: String,
-        tier: BashSandboxMode? = nil
+        tier: BashSandboxMode
     ) async throws -> ToolOutput {
         let workspace = effectiveWorkspaceStore
         let tierRoot = await workspace.root()
-        let baseTier = tier ?? BashSandboxRouter.resolveTier(command: command, config: bashConfig)
+        let baseTier = tier
         // Host fallback stays single-sourced on the router with the live
         // workspace root so approval stamping observes the identical tier execution runs.
         let tier: BashSandboxMode = BashSandboxRouter.applyHostFallback(
@@ -438,18 +454,62 @@ extension BashTool {
         return FileManager.default.homeDirectoryForCurrentUser
     }
 
-    /// Wraps a model command with clamped resource bounds.
+    /// Wraps a model command with clamped resource bounds for one tier.
     ///
     /// Clamping at use keeps a hand-built config from trapping the shell or
     /// inviting OOM swaps; load-time validation already rejects those values
     /// fail-closed, so this is the degrade-to-sane backstop.
-    func boundedRunCommand(_ command: String) -> String {
+    func boundedRunCommand(_ command: String, tier: BashSandboxMode) -> String {
         let clamped = bashConfig.clamped()
         return Self.resourceLimitedCommand(
             command,
             cpuSeconds: clamped.cpuSeconds,
-            memoryMB: clamped.memoryMB
+            memoryMB: clamped.memoryMB,
+            tier: tier
         )
+    }
+
+    /// Wraps a model command with the tier-scoped `ulimit` resource prefix.
+    ///
+    /// Clamping here keeps direct callers honest even when the stored config
+    /// was hand-built past its bounds; the validated file-load path already
+    /// rejects those values fail-closed with the dotted field.
+    /// - Parameters:
+    ///   - command: Model-authored shell command.
+    ///   - cpuSeconds: CPU time budget in seconds.
+    ///   - memoryMB: Address-space budget in megabytes.
+    ///   - tier: Resolved sandbox tier selecting the prefix shape.
+    /// - Returns: Prefixed command for `bash -c`.
+    public static func resourceLimitedCommand(
+        _ command: String,
+        cpuSeconds: Int,
+        memoryMB: Int,
+        tier: BashSandboxMode
+    ) -> String {
+        let boundedCPU = min(max(cpuSeconds, BashConfig.minCPUSeconds), BashConfig.maxCPUSeconds)
+        let boundedMemory = min(max(memoryMB, BashConfig.minMemoryMB), BashConfig.maxMemoryMB)
+        return resourcePrefix(cpuSeconds: boundedCPU, memoryMB: boundedMemory, tier: tier) + command
+    }
+
+    /// Builds the tier-scoped `ulimit` prefix bounding CPU time and address space.
+    ///
+    /// The prefix uses `;` (not `&&`) so a failed `ulimit` still runs the
+    /// command best-effort instead of refusing it; the wall-clock watchdog
+    /// stays the hard backstop regardless. Host shells skip the address-space
+    /// bound because shared-library accounting over-reports there and breaks
+    /// toolchain spawns, while isolated guests keep both bounds.
+    /// - Parameters:
+    ///   - cpuSeconds: CPU time budget in seconds, already clamped to 1-3600.
+    ///   - memoryMB: Address-space budget in megabytes, already clamped to 64-8192.
+    ///   - tier: Resolved sandbox tier selecting the prefix shape.
+    /// - Returns: Shell prefix ending in `; `.
+    public static func resourcePrefix(cpuSeconds: Int, memoryMB: Int, tier: BashSandboxMode) -> String {
+        switch tier {
+        case .hostSeatbelt:
+            "ulimit -t \(cpuSeconds); "
+        case .strictContainer, .machineScoped:
+            "ulimit -t \(cpuSeconds); ulimit -v \(memoryMB * 1024); "
+        }
     }
 
     /// Applies sandbox target plus directory and pipes to a fresh process.
@@ -537,7 +597,7 @@ extension BashTool {
         allowedEgressHosts: [String] = [],
         additionalReadPaths: [String] = [],
         callID: String,
-        tier: BashSandboxMode = .strictContainer,
+        tier: BashSandboxMode,
         workspaceRoot: URL? = nil,
         isChained: Bool = false
     ) async throws -> ToolOutput {
@@ -546,17 +606,19 @@ extension BashTool {
             tier: tier,
             workspaceRoot: workspaceRoot
         )
-        let boundedCommand = boundedRunCommand(command)
+        let boundedCommand = boundedRunCommand(command, tier: tier)
         let sandboxTarget = configuredSandboxTarget(
-            workingDirURL: workingDirURL,
-            effectiveWorkingDir: effectiveWorkingDir,
-            boundedCommand: boundedCommand,
-            allowNetwork: allowNetwork,
-            allowedEgressHosts: allowedEgressHosts,
-            additionalReadPaths: additionalReadPaths,
-            callID: callID,
-            tier: tier,
-            workspaceRoot: workspaceRoot
+            SandboxTargetRequest(
+                workingDirURL: workingDirURL,
+                effectiveWorkingDir: effectiveWorkingDir,
+                boundedCommand: boundedCommand,
+                allowNetwork: allowNetwork,
+                allowedEgressHosts: allowedEgressHosts,
+                additionalReadPaths: additionalReadPaths,
+                callID: callID,
+                tier: tier,
+                workspaceRoot: workspaceRoot
+            )
         )
         if let sandboxFailure = sandboxTarget.failure {
             return sandboxFailure
@@ -885,22 +947,12 @@ extension BashTool {
     /// agent-tool staged copy) so confined shells can map the immutable
     /// copy without widening writes.
     /// - Returns: Executable plus arguments, or a failure to return directly.
-    private func configuredSandboxTarget(
-        workingDirURL: URL?,
-        effectiveWorkingDir: URL,
-        boundedCommand: String,
-        allowNetwork: Bool,
-        allowedEgressHosts: [String],
-        additionalReadPaths: [String] = [],
-        callID: String,
-        tier: BashSandboxMode = .strictContainer,
-        workspaceRoot: URL? = nil
-    ) -> BashSandboxTarget {
+    private func configuredSandboxTarget(_ request: SandboxTargetRequest) -> BashSandboxTarget {
         let sandboxExecPath = "/usr/bin/sandbox-exec"
         let isSandboxAvailable = FileManager.default.isExecutableFile(atPath: sandboxExecPath)
         if isSandboxAvailable {
             let profile: String
-            if let workspaceRoot {
+            if let workspaceRoot = request.workspaceRoot {
                 // Single seatbelt contract for every tier: isolated tiers scope
                 // to their mounts while the host tier scopes to the working
                 // directory, so routing, mounts, and confinement cannot drift.
@@ -910,43 +962,43 @@ extension BashTool {
                 // supervisor remains the per-host gate, preserving the
                 // declared-hosts plus fail-closed posture.
                 profile = BashSandboxRouter.seatbeltProfile(
-                    for: tier,
+                    for: request.tier,
                     workspaceRoot: workspaceRoot,
-                    workingDir: workingDirURL ?? effectiveWorkingDir,
-                    allowNetwork: allowNetwork,
-                    declaredHosts: allowedEgressHosts
+                    workingDir: request.workingDirURL ?? request.effectiveWorkingDir,
+                    allowNetwork: request.allowNetwork,
+                    declaredHosts: request.allowedEgressHosts
                 )
             } else {
-                let allowedWrites: [String] = if let workingDirURL {
+                let allowedWrites: [String] = if let workingDirURL = request.workingDirURL {
                     SeatbeltProfileBuilder.defaultSystemWritePaths + [workingDirURL.path]
                 } else {
                     SeatbeltProfileBuilder.defaultSystemWritePaths
                 }
                 let builder = SeatbeltProfileBuilder(
                     allowedReadPaths: SeatbeltProfileBuilder.defaultSystemReadPaths
-                        + [effectiveWorkingDir.path]
-                        + additionalReadPaths,
+                        + [request.effectiveWorkingDir.path]
+                        + request.additionalReadPaths,
                     allowedWritePaths: allowedWrites,
                     deniedPaths: SeatbeltProfileBuilder.defaultDeniedPaths,
-                    allowNetwork: allowNetwork,
-                    allowedEgressHosts: allowedEgressHosts
+                    allowNetwork: request.allowNetwork,
+                    allowedEgressHosts: request.allowedEgressHosts
                 )
                 profile = builder.buildProfile()
             }
             return BashSandboxTarget(
                 executableURL: URL(fileURLWithPath: sandboxExecPath),
-                arguments: ["-p", profile, "/bin/bash", "-c", boundedCommand],
+                arguments: ["-p", profile, "/bin/bash", "-c", request.boundedCommand],
                 failure: nil
             )
         } else if allowUnsandboxedFallback {
             return BashSandboxTarget(
                 executableURL: URL(fileURLWithPath: "/bin/bash"),
-                arguments: ["-c", boundedCommand],
+                arguments: ["-c", request.boundedCommand],
                 failure: nil
             )
         } else {
             let message = "Sandbox execution unavailable and unsandboxed execution disabled."
-            return BashSandboxTarget(executableURL: nil, arguments: nil, failure: .failure(message, callID: callID))
+            return BashSandboxTarget(executableURL: nil, arguments: nil, failure: .failure(message, callID: request.callID))
         }
     }
 
@@ -957,7 +1009,7 @@ extension BashTool {
     /// kernel's physical `/private/var` spelling.
     /// - Parameter workingDir: Sanctioned directory for this turn.
     /// - Returns: Filtered environment with `PWD` plus the bash marker.
-    private func filteredEnvironment(for workingDir: URL, tier: BashSandboxMode = .strictContainer) -> [String: String] {
+    private func filteredEnvironment(for workingDir: URL, tier: BashSandboxMode) -> [String: String] {
         BashSandboxRouter.scopedEnvironment(for: tier, workingDir: workingDir)
     }
 

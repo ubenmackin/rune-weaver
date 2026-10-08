@@ -464,4 +464,27 @@ struct FilesAccessGuardTests {
         let regular = FilesAccessGuard.resolveCloudShortcut("~/Documents/test.txt", homeDirectoryURL: home)
         #expect(regular == "~/Documents/test.txt")
     }
+
+    @Test
+    func `Cloud shortcuts prefer live CloudDocs over orphaned CloudStorage copies`() throws {
+        let (base, home) = try GuardTestSupport.makeBaseAndHome()
+        defer { GuardTestSupport.cleanup(base) }
+
+        // Both live CloudDocs and orphaned CloudStorage/iCloud Drive 2 exist
+        let liveCloudDocs = home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
+        try FileManager.default.createDirectory(at: liveCloudDocs, withIntermediateDirectories: true)
+        let orphanDir = home.appendingPathComponent("Library/CloudStorage/iCloud Drive 2", isDirectory: true)
+        try FileManager.default.createDirectory(at: orphanDir, withIntermediateDirectories: true)
+        let backupDir = home.appendingPathComponent(
+            "Library/CloudStorage/iCloudDrive-iCloudDrive (12-11-24 7:53 PM)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
+
+        let resolved = FilesAccessGuard.resolveCloudShortcut("iCloud", homeDirectoryURL: home)
+        #expect(resolved == liveCloudDocs.path)
+
+        let resolvedDrive = FilesAccessGuard.resolveCloudShortcut("iCloud Drive/Sheet.numbers", homeDirectoryURL: home)
+        #expect(resolvedDrive == liveCloudDocs.appendingPathComponent("Sheet.numbers").path)
+    }
 }
