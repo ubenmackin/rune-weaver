@@ -286,6 +286,17 @@ export function groupToolActionsByRound(actions: ToolAction[]): ToolAction[][] {
   return groups;
 }
 
+export interface RecallDiagnostics {
+  // Per-hit source names in rank order, never hit content.
+  sources: string[];
+  // True when the document index was skipped for this pass.
+  skippedDocIndex: boolean;
+  // Total injected hits, always equal to sources.length on encode.
+  hitCount: number;
+  // Per-tier tallies derived from sources.
+  countsBySource: Record<string, number>;
+}
+
 export interface OrchestratorResponse {
   text: string;
   sessionID: string;
@@ -310,6 +321,109 @@ export interface OrchestratorResponse {
   // Carries the same dual wire shape as run timestamps (Unix seconds from
   // SQLite persistence versus ISO strings), normalized via parseRunTimestamp.
   completedAt?: string | number | null;
+  // Content-free recall counts plus source names plus skip flag for the chip.
+  // Optional because older engines predate the chip; absent renders no chip.
+  recallDiagnostics?: RecallDiagnostics | null;
+}
+
+// Maximum per-hit sources accepted from the wire, pinned to the engine's
+// RecallBudgets limit bounds (1...50) so a handcrafted frame cannot smuggle
+// an unbounded list into the chip.
+const MAX_RECALL_SOURCES = 50;
+
+// Maximum source label length retained for display, keeping a handcrafted
+// tier name from smuggling hit text into the chip.
+const MAX_RECALL_SOURCE_LENGTH = 32;
+
+// Normalizes one recall source label: trims, drops blanks, and caps length
+// so a drifted or handcrafted value degrades to absent rather than rendering
+// hit text smuggled through the tier slot.
+function normalizeRecallSource(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, MAX_RECALL_SOURCE_LENGTH);
+}
+
+// Tallies one count per source value so collapsed and expanded copies agree
+// without a second derivation drifting.
+function talliedRecallCounts(sources: string[]): Record<string, number> {
+  const tallied: Record<string, number> = {};
+  for (const source of sources) {
+    tallied[source] = (tallied[source] ?? 0) + 1;
+  }
+  return tallied;
+}
+
+// Validates one recall diagnostics block before it enters turn state. Absent
+// blocks degrade to null so older engines render no chip, while drifted shapes
+// degrade the same way instead of failing the turn. Only counts plus source
+// names plus the skip flag cross this boundary; hit identifiers, scores, and
+// content never appear here by construction.
+export function parseRecallDiagnostics(value: unknown): RecallDiagnostics | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value)) return null;
+  const rawSources = value.sources;
+  if (!Array.isArray(rawSources)) return null;
+  const sources: string[] = [];
+  for (const entry of rawSources) {
+    const normalized = normalizeRecallSource(entry);
+    if (normalized) sources.push(normalized);
+    if (sources.length >= MAX_RECALL_SOURCES) break;
+  }
+  const rawSkipped = value.skippedDocIndex;
+  if (rawSkipped !== undefined && rawSkipped !== null && typeof rawSkipped !== "boolean") return null;
+  const skippedDocIndex = rawSkipped === true;
+  const rawHitCount = toNonNegativeInt(value.hitCount);
+  const hitCount = rawHitCount ?? sources.length;
+  const rawCounts = value.countsBySource;
+  let countsBySource: Record<string, number>;
+  if (rawCounts === undefined || rawCounts === null) {
+    countsBySource = talliedRecallCounts(sources);
+  } else {
+    if (!isRecord(rawCounts)) return null;
+    countsBySource = {};
+    for (const [key, count] of Object.entries(rawCounts)) {
+      const normalizedKey = normalizeRecallSource(key);
+      const normalizedCount = toNonNegativeInt(count);
+      if (!normalizedKey || normalizedCount === undefined) return null;
+      countsBySource[normalizedKey] = normalizedCount;
+    }
+  }
+  return { sources, skippedDocIndex, hitCount, countsBySource };
+}
+
+// Reports whether a diagnostics block deserves a chip: any injected hit or a
+// skipped index. Zero-hit unskipped turns and absent blocks render nothing so
+// older engines and silent recalls cause no layout shift.
+export function isRecallDiagnosticsVisible(
+  diagnostics: RecallDiagnostics | null | undefined,
+): boolean {
+  if (!diagnostics) return false;
+  if (diagnostics.skippedDocIndex) return true;
+  return diagnostics.sources.length > 0 || diagnostics.hitCount > 0;
+}
+
+// Collapsed chip copy: recalled counts per source plus skipped state. Counts
+// derive from the tallied map so the line reads identically with or without
+// an explicit hitCount on the wire; an empty map falls back to tallying
+// sources so drifted payloads still read per-source.
+export function formatRecallCollapsed(
+  diagnostics: RecallDiagnostics,
+): string {
+  const tallied =
+    Object.keys(diagnostics.countsBySource).length > 0
+      ? diagnostics.countsBySource
+      : talliedRecallCounts(diagnostics.sources);
+  const entries = Object.entries(tallied).sort(([a], [b]) => a.localeCompare(b));
+  const total = diagnostics.hitCount ?? diagnostics.sources.length;
+  if (entries.length === 0) {
+    const base = total > 0 ? `Recalled ${total}` : "Recalled 0";
+    return diagnostics.skippedDocIndex ? `${base} · index skipped` : base;
+  }
+  const parts = entries.map(([source, count]) => `${count} ${source}`);
+  const base = `Recalled ${parts.join(" · ")}`;
+  return diagnostics.skippedDocIndex ? `${base} · index skipped` : base;
 }
 
 export interface CancelChatResponse {
@@ -961,6 +1075,8 @@ export class ApiError extends Error {
 // The parked flag stays optional for back-compat and defaults to not parked when absent.
 // Degraded-tool notices stay optional the same way: missing or malformed warnings degrade to
 // absent via the shared sanitizer so an older or drifted payload never fails a complete turn.
+// Recall diagnostics stay optional the same way: the shared parser proves the
+// shape so drifted blocks degrade to absent instead of failing the turn.
 function isOrchestratorResponse(value: unknown): value is OrchestratorResponse {
   if (!isRecord(value)) return false;
   if (typeof value.text !== "string") return false;
@@ -971,6 +1087,9 @@ function isOrchestratorResponse(value: unknown): value is OrchestratorResponse {
   // Probe the shared sanitizer so malformed shapes degrade to absent without a second inline
   // validator drifting from the banner path; any result still validates the turn.
   sanitizeWarnings(value.warnings);
+  // Probe the shared recall parser so a drifted diagnostics block degrades to
+  // absent without failing an otherwise complete turn.
+  parseRecallDiagnostics(value.recallDiagnostics);
   return true;
 }
 
@@ -978,6 +1097,8 @@ function isOrchestratorResponse(value: unknown): value is OrchestratorResponse {
 // engine payload surfaces as an error instead of rendering a partial reply.
 // Warning shapes normalize through the shared sanitizer on the same pass so
 // chat and scheduler paths degrade drifted notices to absent identically.
+// Recall shapes normalize through the shared parser so drifted blocks degrade
+// to absent the same way.
 function validateTurnResponse(
   response: unknown,
   invalidMessage: string,
@@ -987,6 +1108,10 @@ function validateTurnResponse(
   }
   if (response.warnings !== undefined && response.warnings !== null) {
     response.warnings = sanitizeWarnings(response.warnings);
+  }
+  if (response.recallDiagnostics !== undefined && response.recallDiagnostics !== null) {
+    const parsed = parseRecallDiagnostics(response.recallDiagnostics);
+    response.recallDiagnostics = parsed;
   }
   return response;
 }

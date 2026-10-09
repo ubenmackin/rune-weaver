@@ -225,6 +225,83 @@ public struct ToolAction: Sendable, Codable, Equatable {
     }
 }
 
+/// Content-free recall observability carried on every turn completion.
+///
+/// Projects `RecallDiagnostics` down to hit counts plus per-tier source names
+/// plus the index-skip flag so dashboards can render a recall chip without ever
+/// receiving hit identifiers, scores, or content. The per-hit `sources` array
+/// stays in rank order and `countsBySource` tallies it, so collapsed and
+/// expanded copies agree without a second derivation drifting.
+public struct RecallSummary: Sendable, Codable, Equatable {
+    /// Per-hit source raw values in rank order, never content.
+    public let sources: [String]
+    /// True when the document index was skipped for this pass.
+    public let skippedDocIndex: Bool
+    /// Total injected hits, always equal to `sources.count` on encode.
+    public let hitCount: Int
+    /// Per-tier tallies derived from `sources`.
+    public let countsBySource: [String: Int]
+
+    /// Creates a summary, deriving absent counts from the source list.
+    public init(
+        sources: [String] = [],
+        skippedDocIndex: Bool = false,
+        hitCount: Int? = nil,
+        countsBySource: [String: Int]? = nil
+    ) {
+        self.sources = sources
+        self.skippedDocIndex = skippedDocIndex
+        self.hitCount = hitCount ?? sources.count
+        self.countsBySource = countsBySource ?? Self.talliedCounts(for: sources)
+    }
+
+    /// Projects diagnostics to the wire-safe subset, dropping identifiers and scores.
+    public init(from diagnostics: RecallDiagnostics) {
+        self.init(
+            sources: diagnostics.sources,
+            skippedDocIndex: diagnostics.skippedDocIndex
+        )
+    }
+
+    /// Tallies one count per source value.
+    static func talliedCounts(for sources: [String]) -> [String: Int] {
+        var tallied: [String: Int] = [:]
+        for source in sources {
+            tallied[source, default: 0] += 1
+        }
+        return tallied
+    }
+
+    /// Coding keys matching the JSON wire shape.
+    private enum CodingKeys: String, CodingKey {
+        case sources
+        case skippedDocIndex
+        case hitCount
+        case countsBySource
+    }
+
+    /// Decodes tolerantly so payloads missing derived tallies still land.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let sources = try container.decodeIfPresent([String].self, forKey: .sources) ?? []
+        self.sources = sources
+        self.skippedDocIndex = try container.decodeIfPresent(Bool.self, forKey: .skippedDocIndex) ?? false
+        self.hitCount = try container.decodeIfPresent(Int.self, forKey: .hitCount) ?? sources.count
+        self.countsBySource = try container.decodeIfPresent([String: Int].self, forKey: .countsBySource) ?? Self.talliedCounts(for: sources)
+    }
+
+    /// Encodes every field so older decoders ignoring the parent key stay silent.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sources, forKey: .sources)
+        try container.encode(skippedDocIndex, forKey: .skippedDocIndex)
+        try container.encode(hitCount, forKey: .hitCount)
+        try container.encode(countsBySource, forKey: .countsBySource)
+    }
+}
+
 /// Response returned by the orchestrator.
 public struct OrchestratorResponse: Sendable, Codable, Equatable {
     /// Final assistant text.
@@ -255,6 +332,9 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
     public let completedAt: Double?
     /// Whether this turn ran out of tool iteration budget before completing all actions.
     public let isBudgetExceeded: Bool
+    /// Content-free recall counts plus source names plus skip flag for the chip.
+    /// Nil on payloads from engines predating the chip, which render no chip.
+    public let recallDiagnostics: RecallSummary?
 
     /// Coding keys matching the JSON wire shape.
     private enum CodingKeys: String, CodingKey {
@@ -282,6 +362,8 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         case completedAt
         /// Whether tool budget was exceeded.
         case isBudgetExceeded = "is_budget_exceeded"
+        /// Content-free recall summary for the chip.
+        case recallDiagnostics
     }
 
     /// Creates a response.
@@ -297,7 +379,8 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         isParked: Bool = false,
         warnings: [String] = [],
         completedAt: Double? = nil,
-        isBudgetExceeded: Bool = false
+        isBudgetExceeded: Bool = false,
+        recallDiagnostics: RecallSummary? = nil
     ) {
         self.text = text
         self.sessionID = sessionID
@@ -314,6 +397,7 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         // keeps equality deterministic and lets clients fall back to receipt time.
         self.completedAt = completedAt
         self.isBudgetExceeded = isBudgetExceeded
+        self.recallDiagnostics = recallDiagnostics
     }
 
     /// Decodes a response, defaulting missing parked flags to not parked and missing warnings to empty
@@ -348,6 +432,7 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         self.warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
         self.completedAt = try container.decodeIfPresent(Double.self, forKey: .completedAt)
         self.isBudgetExceeded = try container.decodeIfPresent(Bool.self, forKey: .isBudgetExceeded) ?? false
+        self.recallDiagnostics = try container.decodeIfPresent(RecallSummary.self, forKey: .recallDiagnostics)
     }
 
     /// Encodes a response.
@@ -373,6 +458,8 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         if isBudgetExceeded {
             try container.encode(isBudgetExceeded, forKey: .isBudgetExceeded)
         }
+        // Omit an absent summary so older dashboards see no new key and render no chip.
+        try container.encodeIfPresent(recallDiagnostics, forKey: .recallDiagnostics)
     }
 }
 
@@ -484,6 +571,8 @@ public struct ParkedNarratedApproval: Sendable, Equatable {
     public let toolRounds: Int
     /// Active context tokens in KV cache before parking.
     public let contextTokens: Int?
+    /// Content-free recall summary preserved across resume so parked turns keep their chip.
+    public let recallDiagnostics: RecallSummary?
 
     /// Creates a parked approval.
     public init(
@@ -498,7 +587,8 @@ public struct ParkedNarratedApproval: Sendable, Equatable {
         synthesisRoundIndex: Int? = nil,
         priorActions: [ToolAction] = [],
         toolRounds: Int = 0,
-        contextTokens: Int? = nil
+        contextTokens: Int? = nil,
+        recallDiagnostics: RecallSummary? = nil
     ) {
         self.sessionID = sessionID
         self.toolCall = toolCall
@@ -514,6 +604,7 @@ public struct ParkedNarratedApproval: Sendable, Equatable {
         self.priorActions = priorActions
         self.toolRounds = toolRounds
         self.contextTokens = contextTokens
+        self.recallDiagnostics = recallDiagnostics
     }
 }
 
@@ -546,6 +637,8 @@ struct ParkGatedCallsContext {
     /// the turn's pack verbatim across resume instead of recomposing.
     let starterPack: Message?
     let onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+    /// Content-free recall summary threaded from the turn request so parked cards keep their chip.
+    let recallDiagnostics: RecallSummary?
     /// Chronological round for the gated batch: one past the structured batch in
     /// mixed turns, otherwise one past all prior tool rounds so reloads interleave
     /// identically to live.
@@ -578,7 +671,8 @@ struct ParkGatedCallsContext {
         contextTokens: Int?,
         narrationAlreadyPersisted: Bool,
         bashConfig: BashConfig? = nil,
-        workspaceRoot: URL? = nil
+        workspaceRoot: URL? = nil,
+        recallDiagnostics: RecallSummary? = nil
     ) {
         self.gated = gated
         self.narratedText = narratedText
@@ -591,6 +685,7 @@ struct ParkGatedCallsContext {
         self.recall = recall
         self.starterPack = starterPack
         self.onEvent = onEvent
+        self.recallDiagnostics = recallDiagnostics
         self.gatedRoundIndex = gatedRoundIndex
         self.contextTokens = contextTokens
         self.narrationAlreadyPersisted = narrationAlreadyPersisted
@@ -629,6 +724,8 @@ struct TurnLoopRequest {
     /// Strict container registry execution used, so reap targets the same
     /// registry instead of the shared live one.
     let strictRegistry: StrictTurnRegistry?
+    /// Content-free recall summary carried to terminal payloads without extra I/O.
+    let recallDiagnostics: RecallSummary?
 
     /// Creates a turn-loop request threading the turn's recall and starter pack.
     init(
@@ -648,7 +745,8 @@ struct TurnLoopRequest {
         effectiveMaxToolIterations: Int? = nil,
         bashConfig: BashConfig? = nil,
         workspaceRoot: URL? = nil,
-        strictRegistry: StrictTurnRegistry? = nil
+        strictRegistry: StrictTurnRegistry? = nil,
+        recallDiagnostics: RecallSummary? = nil
     ) {
         self.workingMessages = workingMessages
         self.tools = tools
@@ -667,6 +765,7 @@ struct TurnLoopRequest {
         self.bashConfig = bashConfig
         self.workspaceRoot = workspaceRoot
         self.strictRegistry = strictRegistry
+        self.recallDiagnostics = recallDiagnostics
     }
 }
 

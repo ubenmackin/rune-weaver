@@ -14,6 +14,7 @@ import {
   compareToolActionsByRound,
   concurrentTurnsBusyMessage,
   decideApproval,
+  formatRecallCollapsed,
   getGoal,
   getLiveTurn,
   getSession,
@@ -21,6 +22,7 @@ import {
   goalStatusTone,
   groupToolActionsByRound,
   isActiveRunStatus,
+  isRecallDiagnosticsVisible,
   isValidToolIDs,
   listApprovals,
   MAX_CHAT_TEXT_LENGTH,
@@ -28,6 +30,7 @@ import {
   normalizeLineEndings,
   normalizeRoundIndex,
   parseGoalUpdatedFrame,
+  parseRecallDiagnostics,
   parseRunTimestamp,
   parseToolProgress,
   placeholderCallIDsInText,
@@ -45,6 +48,7 @@ import {
   type Goal,
   type HealthResponse,
   type PermissionRequest,
+  type RecallDiagnostics,
   type SessionMessageToolActions,
   type ToolAction,
   type ToolProgress,
@@ -100,10 +104,50 @@ import { sanitizeWarnings } from "../warnings";
 import { formatRelativeAgo } from "../relativeTime";
 import { logWarn } from "../logger";
 
+function RecallChip({ diagnostics }: { diagnostics: RecallDiagnostics }) {
+  if (!isRecallDiagnosticsVisible(diagnostics)) return null;
+  const collapsed = formatRecallCollapsed(diagnostics);
+  // Prefer the wire tallies so collapsed and expanded agree; fall back to
+  // tallying sources when a drifted payload carries an empty map.
+  const tallied: Record<string, number> =
+    Object.keys(diagnostics.countsBySource).length > 0
+      ? diagnostics.countsBySource
+      : (() => {
+          const fallback: Record<string, number> = {};
+          for (const source of diagnostics.sources) {
+            fallback[source] = (fallback[source] ?? 0) + 1;
+          }
+          return fallback;
+        })();
+  const entries = Object.entries(tallied).sort(([a], [b]) => a.localeCompare(b));
+  return (
+    <details className="recall-chip muted" data-testid="recall-chip">
+      <summary className="recall-chip-summary muted text-xs">{collapsed}</summary>
+      <div className="recall-chip-details muted text-xs">
+        {entries.map(([source, count]) => (
+          <div key={source} className="recall-chip-row" data-testid="recall-chip-row">
+            <span className="recall-chip-source">{source}</span>
+            <span className="recall-chip-count">{count}</span>
+          </div>
+        ))}
+        {diagnostics.skippedDocIndex ? (
+          <div className="recall-chip-row" data-testid="recall-chip-row">
+            <span className="recall-chip-source">index skipped</span>
+            <span className="recall-chip-count">skipped</span>
+          </div>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
 interface MessageItem {
   id: string;
   role: "user" | "assistant" | "system" | "tool";
   text: string;
+  // Content-free recall summary for the per-turn chip. Absent on history
+  // reloads and older engines, which render no chip and no placeholder.
+  recallDiagnostics?: RecallDiagnostics | null;
   toolActions?: ToolAction[];
   // Chronological timeline for this turn: text and tool batches alternate in the
   // order the engine produced them so multi-round turns never collapse into one
@@ -2654,6 +2698,9 @@ export default function ChatView({
             const doneCompletedAt = normalizeCompletedAtMs(
               (data as unknown as Record<string, unknown>).completedAt,
             );
+            const doneRecall = parseRecallDiagnostics(
+              (data as unknown as Record<string, unknown>).recallDiagnostics,
+            );
             const finalMsg: MessageItem = {
               id: newSessionId(),
               role: "assistant",
@@ -2661,6 +2708,7 @@ export default function ChatView({
               toolActions: legacyActions.length > 0 ? legacyActions : undefined,
               segments: doneSegments.length > 0 ? doneSegments : undefined,
               ...(doneCompletedAt != null ? { completedAt: doneCompletedAt } : {}),
+              ...(doneRecall ? { recallDiagnostics: doneRecall } : {}),
             };
             flight.completedMessage = finalMsg;
           }
@@ -3543,6 +3591,9 @@ export default function ChatView({
       const doneCompletedAt = normalizeCompletedAtMs(
         (data as unknown as Record<string, unknown>).completedAt,
       );
+      const doneRecall = parseRecallDiagnostics(
+        (data as unknown as Record<string, unknown>).recallDiagnostics,
+      );
       const finalMsg: MessageItem = {
         id: newSessionId(),
         role: "assistant",
@@ -3550,6 +3601,7 @@ export default function ChatView({
         toolActions: legacyActions.length > 0 ? legacyActions : undefined,
         segments: doneSegments.length > 0 ? doneSegments : undefined,
         ...(doneCompletedAt != null ? { completedAt: doneCompletedAt } : {}),
+        ...(doneRecall ? { recallDiagnostics: doneRecall } : {}),
       };
       setMessages((prev) => {
         // Terminal dedup stays batch-scoped: any prior bubble whose callIDs
@@ -4727,6 +4779,9 @@ export default function ChatView({
       const restCompletedAt = normalizeCompletedAtMs(
         (response as unknown as Record<string, unknown>).completedAt,
       );
+      const restRecall = parseRecallDiagnostics(
+        (response as unknown as Record<string, unknown>).recallDiagnostics,
+      );
       const assistantMessage: MessageItem = {
         id: newSessionId(),
         role: "assistant",
@@ -4734,6 +4789,7 @@ export default function ChatView({
         toolActions: restFlat.length > 0 ? restFlat : undefined,
         segments: restSegments.length > 0 ? restSegments : undefined,
         ...(restCompletedAt != null ? { completedAt: restCompletedAt } : {}),
+        ...(restRecall ? { recallDiagnostics: restRecall } : {}),
       };
 
       setMessages((prev) => [...prev, assistantMessage].slice(-MAX_MESSAGES));
@@ -5177,6 +5233,13 @@ export default function ChatView({
                 key={message.id}
                 className={`message ${message.role}${message.isError ? " message-error" : ""}`}
               >
+                {message.role === "assistant" && message.recallDiagnostics
+                  ? (() => {
+                      const parsed = parseRecallDiagnostics(message.recallDiagnostics);
+                      if (!parsed || !isRecallDiagnosticsVisible(parsed)) return null;
+                      return <RecallChip diagnostics={parsed} />;
+                    })()
+                  : null}
                 {segments && segments.length > 0 ? (
                   <>
                     {segments.map((segment, segmentIndex) =>

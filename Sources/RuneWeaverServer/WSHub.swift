@@ -325,6 +325,9 @@ public actor WSHub {
     }
 
     /// Broadcasts an arbitrary text frame to every connected socket.
+    ///
+    /// Terminal `done` frames ride this generic path carrying the content-free
+    /// recall summary, so no per-type filtering may drop the diagnostics block.
     public func broadcast(text: String) async {
         await fanOut(text)
     }
