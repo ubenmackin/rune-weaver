@@ -326,7 +326,16 @@ public enum BashSandboxRouter: Sendable {
                 allowNetwork: allowNetwork,
                 allowedEgressHosts: declaredHosts
             )
-            return builder.buildProfile()
+            let profile = builder.buildProfile()
+            // DVTKeychain frameworks match the lowercase filename deny despite the capital K, so drop that single
+            // regex on host; real stores stay denied via the Keychains subpath deny. Exact line equality keeps
+            // the exemption to that one deny so a rename or addition fails visibly instead of widening silently,
+            // and no subpath allow line can match.
+            let keychainFilenameDenyLine = ##"    (regex #"/[^/]*keychain[^/]*"#)"##
+            return profile
+                .components(separatedBy: "\n")
+                .filter { $0 != keychainFilenameDenyLine }
+                .joined(separator: "\n")
         }
     }
 
@@ -343,7 +352,7 @@ public enum BashSandboxRouter: Sendable {
         case .strictContainer, .machineScoped:
             ["PATH", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM"]
         case .hostSeatbelt:
-            ["PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM"]
+            ["PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM", "DEVELOPER_DIR"]
         }
         env = env.filter { allowedKeys.contains($0.key) }
         env.removeValue(forKey: "SSH_AUTH_SOCK")
