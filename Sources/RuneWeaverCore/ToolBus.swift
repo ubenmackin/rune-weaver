@@ -13,13 +13,26 @@ public struct ToolResult: Sendable, Codable, Equatable {
     public let isError: Bool
     /// Category of tool error, if failed.
     public let errorKind: ToolErrorKind?
+    /// Process exit status recorded by the producing tool, if it spawned a process.
+    ///
+    /// Typed metadata carried end-to-end (wire, SQLite, dashboard) so exit badges
+    /// never depend on parsing untrusted `content`. Nil for non-process tools and
+    /// for history written before the field existed.
+    public let exitCode: Int32?
 
     /// Creates a tool result.
-    public init(toolCallID: String, content: String, isError: Bool = false, errorKind: ToolErrorKind? = nil) {
+    public init(
+        toolCallID: String,
+        content: String,
+        isError: Bool = false,
+        errorKind: ToolErrorKind? = nil,
+        exitCode: Int32? = nil
+    ) {
         self.toolCallID = toolCallID
         self.content = content
         self.isError = isError
         self.errorKind = isError ? (errorKind ?? .executionError) : nil
+        self.exitCode = exitCode
     }
 
     /// Convenience success result.
@@ -37,6 +50,7 @@ public struct ToolResult: Sendable, Codable, Equatable {
         self.toolCallID = toolCallID ?? output.callID ?? ""
         self.content = output.content
         self.isError = output.isError
+        self.exitCode = output.exitCode
         if output.isError {
             if let kind = output.errorKind {
                 // An explicit kind is authoritative: a tool that can tell a
@@ -63,14 +77,22 @@ public struct ToolResult: Sendable, Codable, Equatable {
     /// Converts this result back to a ``ToolOutput``.
     /// - Returns: Equivalent tool output.
     public func asToolOutput() -> ToolOutput {
-        ToolOutput(content: content, isError: isError, callID: toolCallID, errorKind: errorKind)
+        ToolOutput(content: content, isError: isError, callID: toolCallID, errorKind: errorKind, exitCode: exitCode)
     }
 
     /// Converts this result to a `tool`-role ``Message`` for LLM history.
-    /// Carries the error category alongside the failure flag so a reloaded history
-    /// preserves the badge taxonomy instead of collapsing to a generic error.
+    /// Carries the error category and exit code alongside the failure flag so a
+    /// reloaded history preserves the badge taxonomy instead of collapsing to a
+    /// generic error.
     public func asMessage() -> Message {
-        Message(role: .tool, content: content, toolCallID: toolCallID, isError: isError, errorKind: errorKind)
+        Message(
+            role: .tool,
+            content: content,
+            toolCallID: toolCallID,
+            isError: isError,
+            errorKind: errorKind,
+            exitCode: exitCode
+        )
     }
 }
 

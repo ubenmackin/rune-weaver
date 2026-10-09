@@ -48,6 +48,16 @@ func registerChatRoute(_ app: Application) {
         // same response/toolActions/totalTokens shape as success instead of a tool-less
         // row; success keeps using the authoritative response verbatim.
         let auditProgress = ChatTurnAuditProgress()
+        await context.activeTurns.registerSnapshotProvider(sessionID: sessionID) {
+            let snap = auditProgress.snapshot()
+            return LiveTurnSnapshot(
+                sessionID: sessionID,
+                text: snap.partialText,
+                reasoning: snap.partialReasoning,
+                toolActions: snap.toolActions,
+                totalTokens: snap.totalTokens
+            )
+        }
         let chatTask: Task<OrchestratorResponse, Error> = Task {
             try await context.orchestrator.process(
                 input: UserInput(
@@ -153,10 +163,12 @@ private func handleRESTChatError(
     turn: RESTChatErrorTurn
 ) async throws -> Never {
     await context.activeTurns.unregister(sessionID: turn.sessionID, token: turn.registrationToken)
+    let errorReasoning: String? = turn.audit.partialReasoning.isEmpty ? nil : turn.audit.partialReasoning
     let errorMessage = Message(
         role: .assistant,
         content: "Error: \(error.localizedDescription)",
-        isError: true
+        isError: true,
+        reasoning: errorReasoning
     )
     await context.conversations.append(errorMessage, to: turn.sessionID)
     await updateRESTChatRunAndBroadcast(
@@ -166,6 +178,7 @@ private func handleRESTChatError(
         status: "error",
         fallback: ChatTurnAuditSnapshot(
             partialText: turn.audit.partialText.isEmpty ? error.localizedDescription : turn.audit.partialText,
+            partialReasoning: turn.audit.partialReasoning,
             toolActions: turn.audit.toolActions,
             totalTokens: turn.audit.totalTokens
         )
@@ -240,9 +253,14 @@ private func registerChatCancelRoute(_ app: Application) {
     app.post(PathComponent.constant(ServerPaths.chat), PathComponent.constant("cancel")) { req async throws -> CancelChatResponse in
         let body = try req.content.decode(CancelChatRequest.self)
         let cancelled = await req.application.runeWeaver.activeTurns.cancel(sessionID: body.sessionID)
+        LLMCancelRegistry.shared.cancel(sessionID: body.sessionID)
         // Clear queued steering on cancel so stale guidance does not leak into the next turn.
         await req.application.runeWeaver.steeringQueue.clear(for: body.sessionID)
-        return CancelChatResponse(sessionID: body.sessionID, cancelled: cancelled)
+        let cancelledRuns = await req.application.runeWeaver.runs.cancelRunning(sessionID: body.sessionID)
+        for run in cancelledRuns {
+            await req.application.runeWeaver.hub.broadcastRun(run)
+        }
+        return CancelChatResponse(sessionID: body.sessionID, cancelled: cancelled || !cancelledRuns.isEmpty)
     }
 }
 

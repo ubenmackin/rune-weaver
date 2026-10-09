@@ -401,7 +401,8 @@ public enum OrchestratorToolLoop {
             content: content,
             toolCallID: result.toolCallID,
             isError: result.isError,
-            errorKind: result.errorKind
+            errorKind: result.errorKind,
+            exitCode: result.exitCode
         )
     }
 

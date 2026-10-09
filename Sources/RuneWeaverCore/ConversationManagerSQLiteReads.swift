@@ -74,7 +74,7 @@ import Foundation
             sessionsByID: inout [String: ConversationSession]
         ) throws {
             var statement: OpaquePointer?
-            let messageSelectSQL = "SELECT id, session_id, role, content, tool_call_id, is_error, created_at, error_kind "
+            let messageSelectSQL = "SELECT id, session_id, role, content, tool_call_id, is_error, created_at, error_kind, reasoning, exit_code "
                 + "FROM messages ORDER BY created_at ASC, rowid ASC;"
             guard sqlite3_prepare_v2(handle, messageSelectSQL, -1, &statement, nil) == SQLITE_OK else {
                 throw ConversationManagerError.persistenceFailed("Could not read messages")
@@ -98,7 +98,9 @@ import Foundation
                     toolCallID: toolCallID,
                     isError: outcome.isError,
                     errorKind: outcome.errorKind,
-                    createdAt: outcome.createdAt
+                    createdAt: outcome.createdAt,
+                    reasoning: outcome.reasoning,
+                    exitCode: outcome.exitCode
                 ))
                 sessionsByID[sessionIDText] = session
             }
@@ -160,7 +162,7 @@ import Foundation
         ) throws {
             let sessionID = session.id
             var statement: OpaquePointer?
-            let messageSQL = "SELECT id, session_id, role, content, tool_call_id, is_error, created_at, error_kind FROM messages "
+            let messageSQL = "SELECT id, session_id, role, content, tool_call_id, is_error, created_at, error_kind, reasoning, exit_code FROM messages "
                 + "WHERE session_id = ? ORDER BY created_at ASC, rowid ASC;"
             guard sqlite3_prepare_v2(handle, messageSQL, -1, &statement, nil) == SQLITE_OK else {
                 throw ConversationManagerError.persistenceFailed("Could not read messages for session \(sessionID)")
@@ -183,7 +185,9 @@ import Foundation
                     toolCallID: toolCallID,
                     isError: outcome.isError,
                     errorKind: outcome.errorKind,
-                    createdAt: outcome.createdAt
+                    createdAt: outcome.createdAt,
+                    reasoning: outcome.reasoning,
+                    exitCode: outcome.exitCode
                 ))
             }
         }
@@ -261,19 +265,22 @@ import Foundation
             )
         }
 
-        /// Decoded error-flag, timestamp, and category columns for one message row.
+        /// Decoded error-flag, timestamp, category, reasoning, and exit-code columns for one message row.
         /// A named shape keeps the decode result self-describing at the call sites.
         struct MessageOutcome {
             let isError: Bool?
             let createdAt: Date
             let errorKind: ToolErrorKind?
+            let reasoning: String?
+            let exitCode: Int32?
         }
 
-        /// Decodes error-flag, timestamp, and category columns for one message row.
+        /// Decodes error-flag, timestamp, category, reasoning, and exit-code columns for one message row.
         /// An absent or unrecognized category decodes to nil so legacy rows and future
         /// values both fall back to the generic client badge instead of failing the read.
+        /// A NULL exit code stays nil so legacy rows never fabricate a status.
         /// - Parameter statement: Stepped statement positioned on a message row.
-        /// - Returns: Decoded error flag, creation date, and failure category.
+        /// - Returns: Decoded error flag, creation date, failure category, reasoning, and exit code.
         static func messageOutcome(from statement: OpaquePointer?) -> MessageOutcome {
             let isError: Bool? = if sqlite3_column_type(statement, 5) == SQLITE_NULL {
                 nil
@@ -282,7 +289,19 @@ import Foundation
             }
             let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
             let errorKind = columnText(statement, index: 7).flatMap { ToolErrorKind(rawValue: $0) }
-            return MessageOutcome(isError: isError, createdAt: createdAt, errorKind: errorKind)
+            let reasoning = nonemptyText(statement, index: 8)
+            let exitCode: Int32? = if sqlite3_column_type(statement, 9) == SQLITE_NULL {
+                nil
+            } else {
+                Int32(exactly: sqlite3_column_int64(statement, 9))
+            }
+            return MessageOutcome(
+                isError: isError,
+                createdAt: createdAt,
+                errorKind: errorKind,
+                reasoning: reasoning,
+                exitCode: exitCode
+            )
         }
 
         /// Reads a nullable text column, preserving nil for SQL NULL.

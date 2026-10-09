@@ -374,9 +374,10 @@ extension Orchestrator {
             switch outcome {
             case let .parked(parkedResponse):
                 return parkedResponse
-            case let .finished(finalText, toolActions, loopBilled, contextTokens, isBudgetExceeded):
+            case let .finished(finalText, toolActions, loopBilled, contextTokens, isBudgetExceeded, reasoning):
                 return try await finishResumedTurn(
                     finalText: finalText,
+                    reasoning: reasoning,
                     toolActions: toolActions,
                     loopBilled: loopBilled,
                     contextTokens: contextTokens,
@@ -425,6 +426,7 @@ extension Orchestrator {
 
     private func finishResumedTurn(
         finalText: String,
+        reasoning: String? = nil,
         toolActions: [ToolAction],
         loopBilled: Int?,
         contextTokens: Int? = nil,
@@ -434,7 +436,7 @@ extension Orchestrator {
         isBudgetExceeded: Bool = false
     ) async throws -> OrchestratorResponse {
         let sessionID = parked.sessionID
-        let finalNote = await storeFinalAssistantText(finalText, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
+        let finalNote = await storeFinalAssistantText(finalText, reasoning: reasoning, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
         try Task.checkCancellation()
         await flushEpisodic(pendingEpisodic, sessionID: sessionID)
         let cumulative = accumulateSessionTokens(loopBilled, for: sessionID)

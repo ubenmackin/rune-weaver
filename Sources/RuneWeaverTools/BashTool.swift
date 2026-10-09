@@ -675,9 +675,9 @@ extension BashTool {
                 )
                 let json = encodeEnvelope(envelope)
                 if envelope.exitCode == 0 {
-                    continuation.resume(returning: .success(json, callID: callID))
+                    continuation.resume(returning: .success(json, callID: callID, exitCode: envelope.exitCode))
                 } else {
-                    continuation.resume(returning: .failure(json, callID: callID))
+                    continuation.resume(returning: .failure(json, callID: callID, exitCode: envelope.exitCode))
                 }
             }
 

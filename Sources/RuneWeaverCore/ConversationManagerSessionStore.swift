@@ -135,73 +135,72 @@ enum SessionStoreIO {
                     is_error INTEGER,
                     created_at REAL NOT NULL,
                     error_kind TEXT,
+                    reasoning TEXT,
+                    exit_code INTEGER,
                     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
                 """,
                 failure: ConversationManagerError.persistenceFailed
             )
+            migrateSchemaIfNeeded(handle: handle, dbPath: dbPath)
+            try SQLiteHelpers.exec(handle: handle, sql: "PRAGMA foreign_keys = ON;", failure: ConversationManagerError.persistenceFailed)
+            return handle
+        }
+
+        /// Runs column additions for existing databases that were created with older schemas.
+        private static func migrateSchemaIfNeeded(handle: OpaquePointer?, dbPath: String) {
             let cacheKey = migrationCacheKey(dbPath)
             // Snapshot the migration cache without holding the lock across blocking SQLite I/O, so
             // concurrent opens never block on disk work. A duplicate migration from a concurrent
             // open is safe because the probe plus conditional `ALTER` is idempotent.
-            let needsMigration = !migratedPaths.contains(cacheKey)
-            if needsMigration {
-                // Best-effort migration for existing databases created without title, source,
-                // goal-link, parent-link, error-flag, or error-category columns.
-                let existingSessions = SQLiteHelpers.columnNames(handle: handle, table: .sessions)
-                let sessionColumnsToAdd: [(name: String, sql: String)] = [
-                    ("title", "ALTER TABLE sessions ADD COLUMN title TEXT;"),
-                    ("source", "ALTER TABLE sessions ADD COLUMN source TEXT;"),
-                    ("goal_id", "ALTER TABLE sessions ADD COLUMN goal_id TEXT;"),
-                    ("parent_session_id", "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;"),
-                    ("is_archived", "ALTER TABLE sessions ADD COLUMN is_archived INTEGER DEFAULT 0;")
-                ]
-                for (col, alterSQL) in sessionColumnsToAdd where !existingSessions.contains(col) {
-                    do {
-                        try SQLiteHelpers.exec(
-                            handle: handle,
-                            sql: alterSQL,
-                            failure: ConversationManagerError.persistenceFailed
-                        )
-                    } catch {
-                        let code = sqlite3_errcode(handle)
-                        RuneWeaverLog.stores.warning("SQLiteSessionStore: Migration failed for column '\(col)' (code \(code)): \(error)")
-                    }
+            guard !migratedPaths.contains(cacheKey) else { return }
+
+            // Best-effort migration for existing databases created without title, source,
+            // goal-link, parent-link, error-flag, or error-category columns.
+            let existingSessions = SQLiteHelpers.columnNames(handle: handle, table: .sessions)
+            let sessionColumnsToAdd: [(name: String, sql: String)] = [
+                ("title", "ALTER TABLE sessions ADD COLUMN title TEXT;"),
+                ("source", "ALTER TABLE sessions ADD COLUMN source TEXT;"),
+                ("goal_id", "ALTER TABLE sessions ADD COLUMN goal_id TEXT;"),
+                ("parent_session_id", "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;"),
+                ("is_archived", "ALTER TABLE sessions ADD COLUMN is_archived INTEGER DEFAULT 0;")
+            ]
+            for (col, alterSQL) in sessionColumnsToAdd where !existingSessions.contains(col) {
+                do {
+                    try SQLiteHelpers.exec(
+                        handle: handle,
+                        sql: alterSQL,
+                        failure: ConversationManagerError.persistenceFailed
+                    )
+                } catch {
+                    let code = sqlite3_errcode(handle)
+                    RuneWeaverLog.stores.warning("SQLiteSessionStore: Migration failed for column '\(col)' (code \(code)): \(error)")
                 }
-                if !SQLiteHelpers.columnNames(handle: handle, table: .messages).contains("is_error") {
-                    do {
-                        try SQLiteHelpers.exec(
-                            handle: handle,
-                            sql: "ALTER TABLE messages ADD COLUMN is_error INTEGER;",
-                            failure: ConversationManagerError.persistenceFailed
-                        )
-                    } catch {
-                        let code = sqlite3_errcode(handle)
-                        RuneWeaverLog.stores.warning("SQLiteSessionStore: Migration failed for column 'is_error' (code \(code)): \(error)")
-                    }
-                }
-                // Category backfill: history written before the taxonomy existed keeps
-                // NULL here and degrades to the generic error badge on reload.
-                if !SQLiteHelpers.columnNames(handle: handle, table: .messages).contains("error_kind") {
-                    do {
-                        try SQLiteHelpers.exec(
-                            handle: handle,
-                            sql: "ALTER TABLE messages ADD COLUMN error_kind TEXT;",
-                            failure: ConversationManagerError.persistenceFailed
-                        )
-                    } catch {
-                        let code = sqlite3_errcode(handle)
-                        RuneWeaverLog.stores.warning("SQLiteSessionStore: Migration failed for column 'error_kind' (code \(code)): \(error)")
-                    }
-                }
-                // Record through the lock-guarded box so only the cache
-                // mutation is serialized while the probe and `ALTER` above
-                // run unlocked.
-                noteMigrated(cacheKey)
             }
-            try SQLiteHelpers.exec(handle: handle, sql: "PRAGMA foreign_keys = ON;", failure: ConversationManagerError.persistenceFailed)
-            return handle
+            let existingMessages = SQLiteHelpers.columnNames(handle: handle, table: .messages)
+            let messageColumnsToAdd: [(name: String, sql: String)] = [
+                ("is_error", "ALTER TABLE messages ADD COLUMN is_error INTEGER;"),
+                ("error_kind", "ALTER TABLE messages ADD COLUMN error_kind TEXT;"),
+                ("reasoning", "ALTER TABLE messages ADD COLUMN reasoning TEXT;"),
+                ("exit_code", "ALTER TABLE messages ADD COLUMN exit_code INTEGER;")
+            ]
+            for (col, alterSQL) in messageColumnsToAdd where !existingMessages.contains(col) {
+                do {
+                    try SQLiteHelpers.exec(
+                        handle: handle,
+                        sql: alterSQL,
+                        failure: ConversationManagerError.persistenceFailed
+                    )
+                } catch {
+                    let code = sqlite3_errcode(handle)
+                    RuneWeaverLog.stores.warning("SQLiteSessionStore: Migration failed for column '\(col)' (code \(code)): \(error)")
+                }
+            }
+            // Record through the lock-guarded box so only the cache
+            // mutation is serialized while the probe and `ALTER` above
+            // run unlocked.
+            noteMigrated(cacheKey)
         }
 
         /// Executes a multi-statement SQL string.
@@ -281,8 +280,8 @@ enum SessionStoreIO {
 
         /// Inserts one message row.
         private static func insertMessage(_ message: Message, sessionID: UUID, handle: OpaquePointer?) throws {
-            let messageSQL = "INSERT INTO messages(id, session_id, role, content, tool_call_id, is_error, created_at, error_kind) "
-                + "VALUES(?, ?, ?, ?, ?, ?, ?, ?);"
+            let messageSQL = "INSERT INTO messages(id, session_id, role, content, tool_call_id, is_error, created_at, error_kind, reasoning, exit_code) "
+                + "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
             var messageStatement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, messageSQL, -1, &messageStatement, nil) == SQLITE_OK else {
                 let code = sqlite3_errcode(handle)
@@ -301,6 +300,12 @@ enum SessionStoreIO {
             }
             sqlite3_bind_double(messageStatement, 7, message.createdAt.timeIntervalSince1970)
             bindText(messageStatement, index: 8, value: message.errorKind?.rawValue)
+            bindText(messageStatement, index: 9, value: message.reasoning)
+            if let exitCode = message.exitCode {
+                sqlite3_bind_int64(messageStatement, 10, Int64(exitCode))
+            } else {
+                sqlite3_bind_null(messageStatement, 10)
+            }
             guard sqlite3_step(messageStatement) == SQLITE_DONE else {
                 throw ConversationManagerError.persistenceFailed("Could not write message \(message.id)")
             }

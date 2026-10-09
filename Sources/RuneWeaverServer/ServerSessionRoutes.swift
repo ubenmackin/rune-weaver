@@ -61,6 +61,34 @@ func registerSessionRoutes(_ app: Application) {
         }
         return SessionToolActionsResponse(sessionID: id, actions: actions)
     }
+    sessions.get(PathComponent.parameter("id"), PathComponent.constant(ServerPaths.liveTurn)) { req async throws -> LiveTurnResponse in
+        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+            throw Abort(.badRequest, reason: "id must be a UUID")
+        }
+        let context = req.application.runeWeaver
+        if let snap = await context.activeTurns.liveSnapshot(for: id) {
+            return LiveTurnResponse(
+                active: true,
+                sessionID: id,
+                text: snap.text,
+                reasoning: snap.reasoning,
+                toolActions: snap.toolActions,
+                totalTokens: snap.totalTokens,
+                warnings: [],
+                startedAt: nil
+            )
+        }
+        return LiveTurnResponse(
+            active: false,
+            sessionID: id,
+            text: "",
+            reasoning: "",
+            toolActions: [],
+            totalTokens: nil,
+            warnings: [],
+            startedAt: nil
+        )
+    }
     sessions.patch(PathComponent.parameter("id")) { req async throws -> Response in
         guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
             throw Abort(.badRequest, reason: "id must be a UUID")

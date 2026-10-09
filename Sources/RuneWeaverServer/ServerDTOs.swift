@@ -87,6 +87,8 @@ public enum ServerPaths {
     public static let sessions = "sessions"
     /// Structured tool actions subpath under `/sessions/:id`.
     public static let toolActions = "tool-actions"
+    /// Active in-flight live turn snapshot subpath under `/sessions/:id`.
+    public static let liveTurn = "live-turn"
     /// Archive subpath under `/sessions/:id`.
     public static let archive = "archive"
     /// Unarchive subpath under `/sessions/:id`.
@@ -426,20 +428,9 @@ public struct HealthResponse: Content, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case status
-        case engine
-        case version
-        case model
-        case provider
-        case contextLength
-        case searchReachable
-        case searchURL
-        case searchStatus
-        case searchStage
-        case searchStartedAt
-        case serverHostname
-        case serverPort
-        case serverAllowedHosts
+        case status, engine, version, model, provider, contextLength
+        case searchReachable, searchURL, searchStatus, searchStage, searchStartedAt
+        case serverHostname, serverPort, serverAllowedHosts
     }
 
     /// Decodes tolerantly so payloads from engines that predate staged Start
@@ -641,16 +632,8 @@ public struct ToolInfo: Content, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case name
-        case description
-        case permissionLevel
-        case inputSchema
-        case isEnabled
-        case isBuiltIn
-        case pluginID
-        case source
-        case integrityStatus
-        case hasConfig
+        case name, description, permissionLevel, inputSchema
+        case isEnabled, isBuiltIn, pluginID, source, integrityStatus, hasConfig
     }
 
     /// Decodes tolerantly so registries persisted before the settings flag
@@ -1445,6 +1428,90 @@ public struct SessionToolActionsResponse: Content, Equatable {
         self.sessionID = sessionID
         self.actions = actions
         self.count = actions.reduce(0) { $0 + $1.actions.count }
+    }
+}
+
+/// Active in-flight turn snapshot for `GET /sessions/:id/live-turn`.
+public struct LiveTurnResponse: Content, Equatable {
+    /// Whether an interactive turn is currently running for this session.
+    public let active: Bool
+    /// Owning session identifier.
+    public let sessionID: UUID
+    /// Accumulated assistant text so far.
+    public let text: String
+    /// Accumulated model reasoning/thinking text so far.
+    public let reasoning: String
+    /// Structured tool calls started or completed so far.
+    public let toolActions: [ToolAction]
+    /// Total billed tokens accumulated so far, when reported.
+    public let totalTokens: Int?
+    /// Degraded-tool notices for the in-flight turn.
+    public let warnings: [String]
+    /// Turn start time as Unix seconds since 1970 on the server clock, when known.
+    public let startedAt: Double?
+
+    public init(
+        active: Bool,
+        sessionID: UUID,
+        text: String,
+        reasoning: String,
+        toolActions: [ToolAction],
+        totalTokens: Int? = nil,
+        warnings: [String] = [],
+        startedAt: Double? = nil
+    ) {
+        self.active = active
+        self.sessionID = sessionID
+        self.text = text
+        self.reasoning = reasoning
+        self.toolActions = toolActions
+        self.totalTokens = totalTokens
+        self.warnings = warnings
+        self.startedAt = startedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case active
+        case isRunning
+        case sessionID
+        case text
+        case reasoning
+        case toolActions
+        case totalTokens
+        case warnings
+        case startedAt
+    }
+
+    /// Decodes tolerantly so payloads from engines that predate the `active`
+    /// rename still parse via `isRunning`, and payloads predating `warnings`
+    /// or `startedAt` degrade to empty rather than failing the poll.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let active = try container.decodeIfPresent(Bool.self, forKey: .active)
+        let legacy = try container.decodeIfPresent(Bool.self, forKey: .isRunning)
+        self.active = active ?? legacy ?? false
+        self.sessionID = try container.decode(UUID.self, forKey: .sessionID)
+        self.text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
+        self.reasoning = try container.decodeIfPresent(String.self, forKey: .reasoning) ?? ""
+        self.toolActions = try container.decodeIfPresent([ToolAction].self, forKey: .toolActions) ?? []
+        self.totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens)
+        self.warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
+        self.startedAt = try container.decodeIfPresent(Double.self, forKey: .startedAt)
+    }
+
+    /// Encodes the canonical `active` key plus the legacy `isRunning` alias so
+    /// older dashboards keep parsing while newer clients read `active`.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(active, forKey: .active)
+        try container.encode(active, forKey: .isRunning)
+        try container.encode(sessionID, forKey: .sessionID)
+        try container.encode(text, forKey: .text)
+        try container.encode(reasoning, forKey: .reasoning)
+        try container.encode(toolActions, forKey: .toolActions)
+        try container.encodeIfPresent(totalTokens, forKey: .totalTokens)
+        try container.encode(warnings, forKey: .warnings)
+        try container.encodeIfPresent(startedAt, forKey: .startedAt)
     }
 }
 

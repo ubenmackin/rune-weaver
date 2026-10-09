@@ -318,9 +318,9 @@ extension BashTool {
         )
         let json = Self.encodeEnvelope(envelope)
         if result.exitCode == 0 {
-            return .success(json, callID: callID)
+            return .success(json, callID: callID, exitCode: result.exitCode)
         }
-        return .failure(json, callID: callID)
+        return .failure(json, callID: callID, exitCode: result.exitCode)
     }
 
     private func containerFailureOutput(command: String, decision: BashDecision, error: Error, callID: String) -> ToolOutput {
@@ -344,6 +344,6 @@ extension BashTool {
             reason: error.localizedDescription,
             killReason: kill
         )
-        return .failure(Self.encodeEnvelope(envelope), callID: callID)
+        return .failure(Self.encodeEnvelope(envelope), callID: callID, exitCode: exitCode)
     }
 }

@@ -309,8 +309,8 @@ public actor Orchestrator {
             switch outcome {
             case let .parked(parkedResponse):
                 return parkedResponse
-            case let .finished(finalText, toolActions, loopBilled, contextTokens, isBudgetExceeded):
-                let finalNote = await storeFinalAssistantText(finalText, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
+            case let .finished(finalText, toolActions, loopBilled, contextTokens, isBudgetExceeded, reasoning):
+                let finalNote = await storeFinalAssistantText(finalText, reasoning: reasoning, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
                 try Task.checkCancellation()
                 await flushEpisodic(pendingEpisodic, sessionID: sessionID)
                 let cumulativeTokens = accumulateSessionTokens(loopBilled, for: sessionID)
@@ -760,6 +760,7 @@ extension Orchestrator {
         onReasoningDelta: (@Sendable (String) async -> Void)? = nil
     ) async throws -> TurnDraft {
         var text = ""
+        var reasoning = ""
         var billed: Int?
         var toolCalls: [ToolInput] = []
         // Steering callbacks arrive off this executor while the stream is
@@ -776,37 +777,41 @@ extension Orchestrator {
         let effectiveMessages = VisionGate.stripMessages(messages, supportsVision: llm.modelInfo.supportsVision)
         let stream = llm.chat(messages: effectiveMessages, tools: tools, session: sessionID)
         do {
-            for await chunk in stream {
-                try Task.checkCancellation()
-                if interrupted.withLock({ $0 }) {
-                    break
-                }
-                if let message = chunk.errorMessage {
-                    throw OrchestratorError.llmFailed(message.isEmpty ? "unknown error" : message)
-                }
-                if !chunk.reasoningDelta.isEmpty {
-                    // Reasoning streams live via the callback below but stays out
-                    // of the final text by design: it is never accumulated or
-                    // promoted into the draft, so no unused per-turn state remains.
-                    await onReasoningDelta?(chunk.reasoningDelta)
-                }
-                text += chunk.delta
-                if !chunk.toolCalls.isEmpty {
-                    toolCalls.append(contentsOf: chunk.toolCalls)
-                }
-                // Deltas stream even when a chunk also carries tool calls:
-                // suppressing them breaks streaming fidelity for models that
-                // narrate alongside function calls.
-                if !chunk.delta.isEmpty {
-                    await onDelta?(chunk.delta)
-                }
-                if chunk.isFinished {
-                    // Drop malformed negative usage like the dashboard so a drifted
-                    // backend cannot decrement session totals or emit negative progress.
-                    if let total = chunk.totalTokens {
-                        billed = total >= 0 ? total : nil
+            try await withTaskCancellationHandler {
+                for await chunk in stream {
+                    try Task.checkCancellation()
+                    if interrupted.withLock({ $0 }) {
+                        break
                     }
-                    break
+                    if let message = chunk.errorMessage {
+                        throw OrchestratorError.llmFailed(message.isEmpty ? "unknown error" : message)
+                    }
+                    if !chunk.reasoningDelta.isEmpty {
+                        reasoning += chunk.reasoningDelta
+                        await onReasoningDelta?(chunk.reasoningDelta)
+                    }
+                    text += chunk.delta
+                    if !chunk.toolCalls.isEmpty {
+                        toolCalls.append(contentsOf: chunk.toolCalls)
+                    }
+                    // Deltas stream even when a chunk also carries tool calls:
+                    // suppressing them breaks streaming fidelity for models that
+                    // narrate alongside function calls.
+                    if !chunk.delta.isEmpty {
+                        await onDelta?(chunk.delta)
+                    }
+                    if chunk.isFinished {
+                        // Drop malformed negative usage like the dashboard so a drifted
+                        // backend cannot decrement session totals or emit negative progress.
+                        if let total = chunk.totalTokens {
+                            billed = total >= 0 ? total : nil
+                        }
+                        break
+                    }
+                }
+            } onCancel: {
+                if let sessionID {
+                    LLMCancelRegistry.shared.cancel(sessionID: sessionID)
                 }
             }
         } catch {
@@ -824,6 +829,7 @@ extension Orchestrator {
         }
         return TurnDraft(
             text: text,
+            reasoning: reasoning.isEmpty ? nil : reasoning,
             billedTokens: billed,
             toolCalls: toolCalls
         )

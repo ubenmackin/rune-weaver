@@ -5,6 +5,7 @@
 
 import Foundation
 import os
+import RuneWeaverCore
 
 /// Receipt binding one registered turn to its tracker slot.
 public struct TurnRegistration: Sendable, Equatable {
@@ -20,6 +21,29 @@ public struct TurnRegistration: Sendable, Equatable {
     }
 }
 
+/// In-flight turn snapshot for an active session.
+public struct LiveTurnSnapshot: Sendable, Equatable {
+    public let sessionID: UUID
+    public let text: String
+    public let reasoning: String
+    public let toolActions: [ToolAction]
+    public let totalTokens: Int?
+
+    public init(
+        sessionID: UUID,
+        text: String,
+        reasoning: String,
+        toolActions: [ToolAction],
+        totalTokens: Int? = nil
+    ) {
+        self.sessionID = sessionID
+        self.text = text
+        self.reasoning = reasoning
+        self.toolActions = toolActions
+        self.totalTokens = totalTokens
+    }
+}
+
 /// Manages in-flight chat turn tasks so they can be cancelled cooperatively.
 public actor ActiveTurnTracker {
     /// One slot: registration identity plus its cooperative cancel action.
@@ -32,6 +56,8 @@ public actor ActiveTurnTracker {
 
     /// Active turns indexed by session identifier.
     private var entries: [UUID: Entry] = [:]
+    /// Live snapshot providers for in-flight turns indexed by session identifier.
+    private var snapshotProviders: [UUID: @Sendable () -> LiveTurnSnapshot] = [:]
     /// Cancel marks waiting for a turn that has not registered yet.
     private var pendingCancels: [UUID: Date] = [:]
     /// Last registration per session, bounding idle-cancel poisoning.
@@ -94,6 +120,8 @@ public actor ActiveTurnTracker {
         let replaced: Bool
         if let existing = entries[sessionID] {
             existing.cancel()
+            LLMCancelRegistry.shared.cancel(sessionID: sessionID)
+            snapshotProviders.removeValue(forKey: sessionID)
             replaced = true
         } else {
             replaced = false
@@ -106,6 +134,7 @@ public actor ActiveTurnTracker {
             pendingCancels.removeValue(forKey: sessionID)
             if Date().timeIntervalSince(marked) <= Self.pendingCancelTTL {
                 cancel()
+                LLMCancelRegistry.shared.cancel(sessionID: sessionID)
             } else {
                 pruneExpiredPendingCancels()
             }
@@ -123,15 +152,35 @@ public actor ActiveTurnTracker {
         Array(entries.keys)
     }
 
+    /// Registers a snapshot provider for an active turn so in-flight state can be queried.
+    public func registerSnapshotProvider(sessionID: UUID, provider: @Sendable @escaping () -> LiveTurnSnapshot) {
+        snapshotProviders[sessionID] = provider
+    }
+
+    /// Returns the live snapshot for an in-flight session, if active.
+    public func liveSnapshot(for sessionID: UUID) -> LiveTurnSnapshot? {
+        guard entries[sessionID] != nil else { return nil }
+        return snapshotProviders[sessionID]?()
+    }
+
     /// Unregisters the turn for a session when it completes.
     public func unregister(sessionID: UUID, token: UUID) {
-        guard entries[sessionID]?.token == token else { return }
+        guard let entry = entries[sessionID] else {
+            // No active slot (already cancelled): drop any late-registered provider
+            // so a cancelled turn cannot resurrect a stale live-turn snapshot.
+            snapshotProviders.removeValue(forKey: sessionID)
+            return
+        }
+        guard entry.token == token else { return }
         entries.removeValue(forKey: sessionID)
+        snapshotProviders.removeValue(forKey: sessionID)
     }
 
     /// Cancels the in-flight turn for a session.
     @discardableResult
     public func cancel(sessionID: UUID) -> Bool {
+        LLMCancelRegistry.shared.cancel(sessionID: sessionID)
+        snapshotProviders.removeValue(forKey: sessionID)
         if let entry = entries.removeValue(forKey: sessionID) {
             entry.cancel()
             return true

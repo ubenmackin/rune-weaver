@@ -157,6 +157,19 @@ public enum LLMProviderError: Error, Sendable, Equatable {
     case embeddingsUnsupported(String)
 }
 
+// Helper checking whether yielding to an AsyncStream continuation encountered a terminated stream.
+
+// swiftformat:disable opaqueGenericParameters
+
+func isYieldTerminated<Element>(_ result: AsyncStream<Element>.Continuation.YieldResult) -> Bool {
+    if case .terminated = result {
+        return true
+    }
+    return false
+}
+
+// swiftformat:enable opaqueGenericParameters
+
 // MARK: - Provider conveniences
 
 extension LLMProvider {
@@ -222,14 +235,23 @@ extension ChunkStreamingProvider {
         return AsyncStream { continuation in
             let task = Task {
                 chunkLoop: for await chunk in chunks {
+                    if Task.isCancelled {
+                        break chunkLoop
+                    }
                     switch chunk {
                     case let .textDelta(text):
-                        continuation.yield(LLMResponse(delta: text))
+                        if Task.isCancelled || isYieldTerminated(continuation.yield(LLMResponse(delta: text))) {
+                            break chunkLoop
+                        }
                     case let .reasoningDelta(thought):
-                        continuation.yield(LLMResponse(delta: "", reasoningDelta: thought))
+                        if Task.isCancelled || isYieldTerminated(continuation.yield(LLMResponse(delta: "", reasoningDelta: thought))) {
+                            break chunkLoop
+                        }
                     case let .toolCall(call):
                         let input = ToolInput(toolName: call.name, argumentsJSON: call.argumentsJSON, callID: call.id)
-                        continuation.yield(LLMResponse(delta: "", toolCalls: [input]))
+                        if Task.isCancelled || isYieldTerminated(continuation.yield(LLMResponse(delta: "", toolCalls: [input]))) {
+                            break chunkLoop
+                        }
                     case let .done(meta):
                         continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: meta.usage?.totalTokens))
                         break chunkLoop
@@ -749,6 +771,31 @@ public enum LlamaCppSlot: Sendable {
     }
 }
 
+/// Task delegate capturing the URLSessionTask so cancellation immediately terminates the socket.
+final class StreamingTaskDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: URLSessionTask?
+    private var isCancelled = false
+
+    func urlSession(_: URLSession, didCreateTask task: URLSessionTask) {
+        let shouldCancel: Bool = lock.withLock {
+            self.task = task
+            return self.isCancelled
+        }
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
+    func cancel() {
+        let taskToCancel: URLSessionTask? = lock.withLock {
+            self.isCancelled = true
+            return self.task
+        }
+        taskToCancel?.cancel()
+    }
+}
+
 /// Minimal shared client for OpenAI-compatible backends.
 struct OpenAICompatibleHTTPClient: Sendable {
     /// API root ending in `/v1` (no trailing slash).
@@ -855,10 +902,21 @@ struct OpenAICompatibleHTTPClient: Sendable {
         }
         let clientModel = model
         let clientBase = baseURL
+        let sessionUUID = sessionID.flatMap(UUID.init(uuidString:))
         return AsyncStream { continuation in
+            let delegate = StreamingTaskDelegate()
+            var unregister: (@Sendable () -> Void)?
+            if let sessionUUID {
+                unregister = LLMCancelRegistry.shared.register(sessionID: sessionUUID) {
+                    delegate.cancel()
+                }
+            }
             let task = Task {
+                defer {
+                    unregister?()
+                }
                 do {
-                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    let (bytes, response) = try await URLSession.shared.bytes(for: request, delegate: delegate)
                     guard let http = response as? HTTPURLResponse else {
                         continuation.yield(.error("No HTTP response from \(clientBase)"))
                         continuation.finish()
@@ -873,6 +931,8 @@ struct OpenAICompatibleHTTPClient: Sendable {
                     await pump(bytes, clientModel, continuation)
                 } catch is CancellationError {
                     continuation.finish()
+                } catch let urlError as URLError where urlError.code == .cancelled {
+                    continuation.finish()
                 } catch {
                     let message = if let urlError = error as? URLError, urlError.code == .appTransportSecurityRequiresSecureConnection {
                         "\(label) cleartext HTTP was blocked by macOS App Transport Security. " +
@@ -884,7 +944,10 @@ struct OpenAICompatibleHTTPClient: Sendable {
                     continuation.finish()
                 }
             }
-            continuation.onTermination = { @Sendable _ in task.cancel() }
+            continuation.onTermination = { @Sendable _ in
+                delegate.cancel()
+                task.cancel()
+            }
         }
     }
 
@@ -989,313 +1052,5 @@ struct OpenAICompatibleHTTPClient: Sendable {
         } catch {
             return false
         }
-    }
-}
-
-/// Pumps SSE byte streams into chunk events.
-enum OpenAISSEPump {
-    /// Reads a short error preview from an errored byte stream.
-    /// - Parameter bytes: Response byte stream.
-    /// - Returns: Decoded preview, or a placeholder.
-    static func responseDetail(from bytes: URLSession.AsyncBytes) async -> String {
-        var preview = ""
-        do {
-            for try await line in bytes.lines {
-                preview += line
-                if preview.count > 500 {
-                    break
-                }
-            }
-        } catch {
-            return "unreadable error body"
-        }
-        let trimmed = preview.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "empty error body" : String(trimmed.prefix(500))
-    }
-
-    /// Applies one decoded chat SSE chunk to streaming state.
-    static func ingestChatChunk(
-        _ chunk: OpenAIStreamChunkDTO,
-        lastModel: inout String,
-        lastUsage: inout TokenUsage?,
-        lastFinishReason: inout String?,
-        toolAccumulator: inout OpenAIToolCallAccumulator
-    ) -> (text: String?, reasoning: String?) {
-        if let reported = chunk.model, !reported.isEmpty {
-            lastModel = reported
-        }
-        if let usage = chunk.usage {
-            let prompt = usage.promptTokens ?? 0
-            let completion = usage.completionTokens ?? 0
-            let total = usage.totalTokens ?? (prompt + completion)
-            let cached = usage.effectiveCachedTokens
-            lastUsage = TokenUsage(
-                promptTokens: prompt,
-                completionTokens: completion,
-                totalTokens: total,
-                cachedTokens: cached
-            )
-            // Surface prefix reuse where the server reports it: a growing cached
-            // count beside a stable prompt count proves the leading bytes (system
-            // prompt plus tools plus early history) hit the KV cache instead of
-            // re-evaluating. Missing fields stay silent to preserve current behavior.
-            if let cached {
-                RuneWeaverLog.server.info("Chat usage: prompt \(prompt) tokens (\(cached) cached)")
-            }
-        }
-        guard let choice = chunk.choices?.first else { return (nil, nil) }
-        if let reason = choice.finishReason {
-            lastFinishReason = reason
-        }
-        let delta = choice.delta ?? choice.message
-        for toolDelta in delta?.toolCalls ?? [] {
-            toolAccumulator.apply(toolDelta)
-        }
-        let reasoning = delta?.effectiveReasoning
-        let text = (delta?.content?.isEmpty == false) ? delta?.content : nil
-        return (text: text, reasoning: reasoning)
-    }
-
-    /// Pumps SSE lines into chunk events.
-    static func pumpSSE(
-        bytes: URLSession.AsyncBytes,
-        fallbackModel: String,
-        continuation: AsyncStream<LLMResponseChunk>.Continuation
-    ) async {
-        var accumulator = OpenAIToolCallAccumulator()
-        var sawSSE = false
-        var bufferedJSON = ""
-        var lastModel = fallbackModel
-        var lastUsage: TokenUsage?
-        var lastFinishReason: String?
-        do {
-            for try await line in bytes.lines {
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty || trimmed.hasPrefix(":") {
-                    continue
-                }
-                guard trimmed.hasPrefix("data:") else {
-                    bufferedJSON += line + "\n"
-                    continue
-                }
-                sawSSE = true
-                let payload = trimmed.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
-                if payload == "[DONE]" {
-                    break
-                }
-                guard let data = payload.data(using: .utf8) else { continue }
-                let chunk: OpenAIStreamChunkDTO
-                do {
-                    chunk = try JSONDecoder().decode(OpenAIStreamChunkDTO.self, from: data)
-                } catch {
-                    RuneWeaverLog.tools.debug("OpenAIStream: failed to decode chunk: \(error.localizedDescription)")
-                    continue
-                }
-                let ingested = ingestChatChunk(
-                    chunk,
-                    lastModel: &lastModel,
-                    lastUsage: &lastUsage,
-                    lastFinishReason: &lastFinishReason,
-                    toolAccumulator: &accumulator
-                )
-                if let reasoning = ingested.reasoning, !reasoning.isEmpty {
-                    continuation.yield(.reasoningDelta(reasoning))
-                }
-                if let text = ingested.text, !text.isEmpty {
-                    continuation.yield(.textDelta(text))
-                }
-            }
-            if !sawSSE, !bufferedJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               let data = bufferedJSON.data(using: .utf8)
-            {
-                do {
-                    let chunk = try JSONDecoder().decode(OpenAIStreamChunkDTO.self, from: data)
-                    let ingested = ingestChatChunk(
-                        chunk,
-                        lastModel: &lastModel,
-                        lastUsage: &lastUsage,
-                        lastFinishReason: &lastFinishReason,
-                        toolAccumulator: &accumulator
-                    )
-                    if let reasoning = ingested.reasoning, !reasoning.isEmpty {
-                        continuation.yield(.reasoningDelta(reasoning))
-                    }
-                    if let text = ingested.text, !text.isEmpty {
-                        continuation.yield(.textDelta(text))
-                    }
-                } catch {
-                    RuneWeaverLog.tools.debug("OpenAIStream: failed to decode buffered JSON chunk: \(error.localizedDescription)")
-                }
-            }
-        } catch is CancellationError {
-            continuation.finish()
-            return
-        } catch {
-            continuation.yield(.error("Chat stream failed: \(error.localizedDescription)"))
-            continuation.finish()
-            return
-        }
-        for call in accumulator.finishedCalls() {
-            continuation.yield(.toolCall(call))
-        }
-        continuation.yield(.done(ResponseMetadata(model: lastModel, usage: lastUsage, finishReason: lastFinishReason)))
-        continuation.finish()
-    }
-
-    /// One outcome of a Responses stream event.
-    enum ResponsesEventEffect {
-        /// Emit incremental text.
-        case textDelta(String)
-        /// Record completion details.
-        case completed(model: String?, usage: TokenUsage?)
-        /// Fail the stream with a message.
-        case error(String)
-        /// Buffer a tool call for the end of the stream.
-        case toolCall(ToolCall)
-        /// No observable effect.
-        case ignored
-    }
-
-    /// Maps one Responses event to its stream effect.
-    static func effect(for event: OpenAIResponsesStreamEventDTO, nextIndex: Int) -> ResponsesEventEffect {
-        guard let type = event.type else {
-            if let message = event.errorMessage {
-                return .error(message)
-            }
-            return .ignored
-        }
-        switch type {
-        case "response.output_text.delta":
-            guard let delta = event.delta, !delta.isEmpty else {
-                return .ignored
-            }
-            return .textDelta(delta)
-        case "response.completed":
-            let model = event.response?.model.flatMap { $0.isEmpty ? nil : $0 }
-            return .completed(model: model, usage: responsesUsage(from: event.response?.usage))
-        case "error", "response.failed", "response.error":
-            return .error(event.errorMessage ?? "unknown error")
-        default:
-            if let call = responsesToolCall(from: event, nextIndex: nextIndex) {
-                return .toolCall(call)
-            }
-            return .ignored
-        }
-    }
-
-    /// Extracts a tool call from a function-call event.
-    static func responsesToolCall(from event: OpenAIResponsesStreamEventDTO, nextIndex: Int) -> ToolCall? {
-        guard let type = event.type else {
-            return nil
-        }
-        if let item = event.item, item.type == "function_call" {
-            let name = item.name ?? event.name ?? ""
-            guard !name.isEmpty else {
-                return nil
-            }
-            let rawArguments = item.arguments ?? event.arguments ?? ""
-            let callId = item.callId ?? item.id ?? event.callId ?? "call_\(nextIndex)"
-            return ToolCall(id: callId, name: name, argumentsJSON: rawArguments.isEmpty ? "{}" : rawArguments)
-        }
-        if type.contains("function_call") {
-            guard let name = event.name, !name.isEmpty else {
-                return nil
-            }
-            let rawArguments = event.arguments ?? ""
-            let callId = event.callId ?? "call_\(nextIndex)"
-            return ToolCall(id: callId, name: name, argumentsJSON: rawArguments.isEmpty ? "{}" : rawArguments)
-        }
-        return nil
-    }
-
-    /// Converts a Responses usage block to token accounting.
-    static func responsesUsage(from dto: OpenAIResponsesUsageDTO?) -> TokenUsage? {
-        guard let dto else {
-            return nil
-        }
-        let prompt = dto.inputTokens ?? 0
-        let completion = dto.outputTokens ?? 0
-        let cached = dto.effectiveCachedTokens
-        let usage = TokenUsage(
-            promptTokens: prompt,
-            completionTokens: completion,
-            totalTokens: dto.totalTokens ?? (prompt + completion),
-            cachedTokens: cached
-        )
-        // Same prefix-reuse signal as the chat wire: log only when the server
-        // reports a cache count so absent fields degrade to current behavior.
-        if let cached {
-            RuneWeaverLog.server.info("Responses usage: prompt \(prompt) tokens (\(cached) cached)")
-        }
-        return usage
-    }
-
-    /// Pumps Responses SSE lines into chunk events.
-    static func pumpResponsesSSE(
-        bytes: URLSession.AsyncBytes,
-        fallbackModel: String,
-        continuation: AsyncStream<LLMResponseChunk>.Continuation
-    ) async {
-        var lastModel = fallbackModel
-        var lastUsage: TokenUsage?
-        var accumulator = OpenAIResponsesToolCallAccumulator()
-        do {
-            for try await line in bytes.lines {
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty || trimmed.hasPrefix(":") {
-                    continue
-                }
-                guard trimmed.hasPrefix("data:") else {
-                    continue
-                }
-                let payload = trimmed.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
-                if payload == "[DONE]" {
-                    break
-                }
-                guard let data = payload.data(using: .utf8) else { continue }
-                let event: OpenAIResponsesStreamEventDTO
-                do {
-                    event = try JSONDecoder().decode(OpenAIResponsesStreamEventDTO.self, from: data)
-                } catch {
-                    RuneWeaverLog.tools.debug("OpenAIResponsesStream: failed to decode event: \(error.localizedDescription)")
-                    continue
-                }
-                let nextIndex = accumulator.count
-                accumulator.ingest(event, nextIndex: nextIndex)
-                switch effect(for: event, nextIndex: nextIndex) {
-                case let .textDelta(delta):
-                    continuation.yield(.textDelta(delta))
-                case let .completed(model, usage):
-                    if let model {
-                        lastModel = model
-                    }
-                    if let usage {
-                        lastUsage = usage
-                    }
-                case let .error(message):
-                    continuation.yield(.error(message))
-                    continuation.finish()
-                    return
-                case .toolCall:
-                    // Buffered in the accumulator and emitted at the end,
-                    // once delta fragments have reassembled.
-                    continue
-                case .ignored:
-                    continue
-                }
-            }
-        } catch is CancellationError {
-            continuation.finish()
-            return
-        } catch {
-            continuation.yield(.error("Responses stream failed: \(error.localizedDescription)"))
-            continuation.finish()
-            return
-        }
-        for call in accumulator.finishedCalls() {
-            continuation.yield(.toolCall(call))
-        }
-        continuation.yield(.done(ResponseMetadata(model: lastModel, usage: lastUsage, finishReason: nil)))
-        continuation.finish()
     }
 }

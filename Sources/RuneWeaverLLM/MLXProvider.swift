@@ -75,6 +75,21 @@ public struct MLXProvider: ChunkStreamingProvider, Sendable {
         client.streamChunks(messages: messages, tools: tools)
     }
 
+    /// Streams chunk-level events for one chat session.
+    public func chatChunks(messages: [Message], tools: [ToolDefinition], sessionID: String?) -> AsyncStream<LLMResponseChunk> {
+        let perTurn = OpenAICompatibleHTTPClient(
+            baseURL: serverURL,
+            model: model,
+            sessionID: sessionID
+        )
+        return perTurn.streamChunks(messages: messages, tools: tools)
+    }
+
+    /// Streams chunk-level events for one chat session UUID.
+    public func chatChunks(messages: [Message], tools: [ToolDefinition], session: UUID?) -> AsyncStream<LLMResponseChunk> {
+        chatChunks(messages: messages, tools: tools, sessionID: session?.uuidString)
+    }
+
     /// Embeds texts via the MLX server's embeddings endpoint.
     public func embeddings(text: [String]) async throws -> [[Float]] {
         try await client.requestEmbeddings(texts: text)

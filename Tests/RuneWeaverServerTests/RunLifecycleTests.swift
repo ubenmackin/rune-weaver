@@ -311,7 +311,7 @@ struct RunApprovalLifecycleTests {
     }
 
     @Test
-    func `Resume allow with failing tool transitions to error`() async throws {
+    func `Resume allow with failing tool completes run as ok`() async throws {
         let args = #"{"text":"hi"}"#
         let narrated = ToolInput.placeholderContent(for: [
             ToolInput(toolName: "stub.write", argumentsJSON: args, callID: "call_fail")
@@ -327,7 +327,7 @@ struct RunApprovalLifecycleTests {
         #expect(await context.approvals.decide(id: approvalID, approved: true) == true)
         await resumeNarratedApproval(id: approvalID, approved: true, context: context)
         let transitioned = await context.runs.entry(id: parked.id)
-        #expect(transitioned?.status == "error")
+        #expect(transitioned?.status == "ok")
         #expect(transitioned?.sessionID == sessionID)
         #expect(transitioned?.toolActions.first?.didSucceed == false)
     }
@@ -363,7 +363,7 @@ struct RunApprovalLifecycleTests {
             sessionID: UUID(),
             toolActions: [ToolAction(toolName: "stub.write", callID: "c", argumentsJSON: "{}", result: .failure(toolCallID: "c", content: "boom"))]
         )
-        #expect(resolvedResumeStatus(approved: true, resumed: failedResponse) == "error")
+        #expect(resolvedResumeStatus(approved: true, resumed: failedResponse) == "ok")
         let deniedResponse = OrchestratorResponse(text: "Approval denied for stub.write; not running it.", sessionID: UUID(), toolActions: [])
         #expect(resolvedResumeStatus(approved: false, resumed: deniedResponse) == "denied")
         let missingTool = OrchestratorResponse(text: "missing", sessionID: UUID(), toolActions: [])

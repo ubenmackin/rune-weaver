@@ -612,6 +612,51 @@ describe("ToolActionRow bash envelope status", () => {
     expect(screen.getByText(/hello/)).toBeInTheDocument();
   });
 
+  it("renders amber Exited 2 when result.exitCode is set even if content has untrusted wrapper", () => {
+    const wrappedContent = `--- BEGIN UNTRUSTED EXTERNAL CONTENT ---
+{"approvalRequired":false,"command":"pwd; whoami; ls /Users","denied":false,"error":"Command exited with status 2","exitCode":2,"isChained":true,"kill_reason":"clean","stderr":"ls: cannot access '/Users': No such file or directory\\n","stdout":"/workspace\\nroot\\n"}
+--- END UNTRUSTED EXTERNAL CONTENT ---`;
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-untrusted",
+            content: wrappedContent,
+            isError: true,
+            exitCode: 2,
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Exited 2");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("warning");
+  });
+
+  it("renders amber Exited 2 in card variant when result.exitCode is set with untrusted wrapper", async () => {
+    const wrappedContent = `--- BEGIN UNTRUSTED EXTERNAL CONTENT ---
+{"command":"pwd; whoami; ls /Users","exitCode":2,"stderr":"ls: cannot access '/Users': No such file or directory\\n"}
+--- END UNTRUSTED EXTERNAL CONTENT ---`;
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-untrusted-card",
+            content: wrappedContent,
+            isError: true,
+            exitCode: 2,
+          },
+        }}
+        variant="card"
+      />,
+    );
+    const badge = screen.getByText("Exited 2");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("tool-badge-warning");
+  });
+
   it("reads clean zero exits as Done", () => {
     render(
       <ToolActionRow
@@ -712,5 +757,51 @@ describe("ToolActionRow bash envelope status", () => {
     );
     expect(screen.getByText("Error")).toBeInTheDocument();
     expect(screen.queryByText("Done")).not.toBeInTheDocument();
+  });
+
+  it("renders amber Exited N when typed exitCode survives truncated untrusted content", () => {
+    // Truncated history cuts the envelope JSON mid-object inside the
+    // untrusted wrapper, so content parsing fails but the typed code stays honest.
+    const truncatedContent =
+      `--- BEGIN UNTRUSTED EXTERNAL CONTENT ---\n{"command":"ls -R","stdout":"${"a".repeat(2000)}…`;
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-truncated",
+            content: truncatedContent,
+            isError: true,
+            exitCode: 2,
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Exited 2");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("warning");
+  });
+
+  it("falls back to red Error for truncated content without typed exitCode", () => {
+    // Same truncated shape with no typed code degrades to the generic
+    // error badge instead of fabricating an exit status.
+    const truncatedContent =
+      `--- BEGIN UNTRUSTED EXTERNAL CONTENT ---\n{"command":"ls -R","stdout":"${"a".repeat(2000)}…`;
+    render(
+      <ToolActionRow
+        action={{
+          ...bashAction,
+          result: {
+            toolCallID: "call-bash-truncated-no-code",
+            content: truncatedContent,
+            isError: true,
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Error");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("error");
+    expect(screen.queryByText(/Exited/)).not.toBeInTheDocument();
   });
 });

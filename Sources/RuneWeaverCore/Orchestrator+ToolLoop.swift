@@ -168,13 +168,14 @@ extension Orchestrator {
     private func recordAndExecuteCalls(
         calls: [ToolInput],
         finalText: String,
+        reasoning: String? = nil,
         toolRounds: Int,
         request: TurnLoopRequest,
         pendingEpisodic: inout [(content: String, role: Message.Role)],
         noteCalls: [ToolInput]? = nil
     ) async throws -> (actions: [ToolAction], operatorTakeover: Bool) {
         let noteInputs = noteCalls ?? calls
-        let assistantNote = assistantNoteMessage(text: finalText, calls: noteInputs)
+        let assistantNote = assistantNoteMessage(text: finalText, calls: noteInputs, reasoning: reasoning)
         await conversations.append(assistantNote, to: request.sessionID)
         return try await executeToolCalls(
             calls,
@@ -466,7 +467,8 @@ extension Orchestrator {
             toolActions: updatedActions,
             billedTokens: effectiveBilled,
             contextTokens: contextTokens,
-            isBudgetExceeded: true
+            isBudgetExceeded: true,
+            reasoning: synthesisDraft.reasoning
         )
     }
 
@@ -574,6 +576,7 @@ extension Orchestrator {
         admissions: RoundAdmissions,
         noteCalls: [ToolInput],
         finalText: String,
+        reasoning: String? = nil,
         toolRounds: Int,
         request: TurnLoopRequest,
         pendingEpisodic: inout [(content: String, role: Message.Role)]
@@ -581,6 +584,7 @@ extension Orchestrator {
         let (executed, operatorTakeover) = try await recordAndExecuteCalls(
             calls: admissions.allowed,
             finalText: finalText,
+            reasoning: reasoning,
             toolRounds: toolRounds,
             request: request,
             pendingEpisodic: &pendingEpisodic,
@@ -602,6 +606,7 @@ extension Orchestrator {
         let admissions: RoundAdmissions
         let calls: [ToolInput]
         let finalText: String
+        let reasoning: String?
         let toolRounds: Int
         let tokens: (billed: Int?, context: Int?)
         let request: TurnLoopRequest
@@ -617,6 +622,7 @@ extension Orchestrator {
             admissions: params.admissions,
             noteCalls: params.calls,
             finalText: params.finalText,
+            reasoning: params.reasoning,
             toolRounds: params.toolRounds,
             request: params.request,
             pendingEpisodic: &pendingEpisodic
@@ -654,6 +660,7 @@ extension Orchestrator {
     private func makeFinishedTurnOutcome(
         toolActions: [ToolAction],
         finalText: String,
+        reasoning: String? = nil,
         billedTokens: Int?,
         workingMessages: [Message],
         request: TurnLoopRequest,
@@ -666,7 +673,8 @@ extension Orchestrator {
             finalText: finalText,
             toolActions: toolActions,
             billedTokens: billedTokens,
-            contextTokens: contextTokens
+            contextTokens: contextTokens,
+            reasoning: reasoning
         )
     }
 
@@ -675,6 +683,7 @@ extension Orchestrator {
         var workingMessages: [Message]
         var toolActions: [ToolAction]
         var finalText = ""
+        var reasoning: String?
         var toolRounds: Int
         var billedTokens: Int?
         var lastRoundContextTokens: Int?
@@ -686,6 +695,7 @@ extension Orchestrator {
             toolActions = request.initialToolActions
             toolRounds = request.initialToolRounds
             llmRoundIndex = request.initialLlmRoundIndex
+            reasoning = nil
         }
     }
 
@@ -752,6 +762,72 @@ extension Orchestrator {
         )
     }
 
+    private enum RoundStepOutcome {
+        case terminal(TurnLoopOutcome)
+        case stop
+        case continueLoop
+    }
+
+    private func reapRegistry(
+        _ registry: StrictTurnRegistry,
+        sessionID: UUID,
+        outcome: TurnLoopOutcome? = nil
+    ) async {
+        let isParked = if let outcome, case .parked = outcome {
+            true
+        } else {
+            false
+        }
+        await registry.reapAfterOutcome(sessionID: sessionID, isParked: isParked)
+    }
+
+    private func processRoundCalls(
+        calls: [ToolInput],
+        narratedGated: [ToolInput],
+        state: inout TurnLoopState,
+        request: TurnLoopRequest,
+        pendingEpisodic: inout [(content: String, role: Message.Role)]
+    ) async throws -> RoundStepOutcome {
+        let disposition = try await evaluateRoundDisposition(
+            calls: calls,
+            narratedGated: narratedGated,
+            state: &state,
+            request: request,
+            pendingEpisodic: &pendingEpisodic
+        )
+        if let dispositionOutcome = disposition.outcome {
+            return .terminal(dispositionOutcome)
+        }
+        if disposition.shouldStop {
+            return .stop
+        }
+        let executionParams = RoundExecutionParams(
+            admissions: disposition.admissions,
+            calls: calls,
+            finalText: state.finalText,
+            reasoning: state.reasoning,
+            toolRounds: state.toolRounds,
+            tokens: (billed: disposition.billedTokens, context: disposition.contextTokens),
+            request: request
+        )
+        if let parkedOutcome = try await executeRoundAndCheckParking(
+            params: executionParams,
+            toolActions: &state.toolActions,
+            pendingEpisodic: &pendingEpisodic
+        ) {
+            return .terminal(parkedOutcome)
+        }
+        state.workingMessages = await refreshedWorkingMessages(
+            sessionID: request.sessionID,
+            recall: request.recall,
+            starterPack: request.starterPack,
+            systemPrompt: request.systemPrompt
+        )
+        state.finalText = ""
+        state.reasoning = nil
+        return .continueLoop
+    }
+
     /// Runs the bounded tool loop for one turn until final text or parking.
     func runTurnLoop(
         _ request: TurnLoopRequest,
@@ -772,6 +848,9 @@ extension Orchestrator {
                     lastRoundContextTokens: &state.lastRoundContextTokens
                 )
                 state.finalText = collected.text
+                if let roundReasoning = collected.reasoning, !roundReasoning.isEmpty {
+                    state.reasoning = (state.reasoning ?? "") + roundReasoning
+                }
                 if shouldRetry {
                     continue
                 }
@@ -792,67 +871,35 @@ extension Orchestrator {
                     }
                     break
                 }
-                let disposition = try await evaluateRoundDisposition(
+                let step = try await processRoundCalls(
                     calls: calls,
                     narratedGated: narratedGated,
                     state: &state,
                     request: request,
                     pendingEpisodic: &pendingEpisodic
                 )
-                if let dispositionOutcome = disposition.outcome {
-                    let parked = if case .parked = dispositionOutcome {
-                        true
-                    } else {
-                        false
-                    }
-                    await strictRegistry.reapAfterOutcome(sessionID: strictSessionID, isParked: parked)
-                    return dispositionOutcome
+                if case let .terminal(outcome) = step {
+                    await reapRegistry(strictRegistry, sessionID: strictSessionID, outcome: outcome)
+                    return outcome
                 }
-                if disposition.shouldStop {
+                if case .stop = step {
                     break
                 }
-                let executionParams = RoundExecutionParams(
-                    admissions: disposition.admissions,
-                    calls: calls,
-                    finalText: state.finalText,
-                    toolRounds: state.toolRounds,
-                    tokens: (billed: disposition.billedTokens, context: disposition.contextTokens),
-                    request: request
-                )
-                if let parkedOutcome = try await executeRoundAndCheckParking(
-                    params: executionParams,
-                    toolActions: &state.toolActions,
-                    pendingEpisodic: &pendingEpisodic
-                ) {
-                    let parked = if case .parked = parkedOutcome {
-                        true
-                    } else {
-                        false
-                    }
-                    await strictRegistry.reapAfterOutcome(sessionID: strictSessionID, isParked: parked)
-                    return parkedOutcome
-                }
-                state.workingMessages = await refreshedWorkingMessages(
-                    sessionID: request.sessionID,
-                    recall: request.recall,
-                    starterPack: request.starterPack,
-                    systemPrompt: request.systemPrompt
-                )
-                state.finalText = ""
                 continue
             }
             let terminal = makeFinishedTurnOutcome(
                 toolActions: state.toolActions,
                 finalText: state.finalText,
+                reasoning: state.reasoning,
                 billedTokens: state.billedTokens,
                 workingMessages: state.workingMessages,
                 request: request,
                 lastRoundContextTokens: state.lastRoundContextTokens
             )
-            await strictRegistry.reapAfterOutcome(sessionID: strictSessionID, isParked: false)
+            await reapRegistry(strictRegistry, sessionID: strictSessionID, outcome: terminal)
             return terminal
         } catch {
-            await strictRegistry.reapAfterOutcome(sessionID: strictSessionID, isParked: false)
+            await reapRegistry(strictRegistry, sessionID: strictSessionID)
             throw error
         }
     }
@@ -885,7 +932,7 @@ extension Orchestrator {
             workingMessages: &workingMessages,
             pendingEpisodic: &pendingEpisodic
         )
-        let draft = TurnDraft(text: text, billedTokens: collected.billedTokens, toolCalls: collected.toolCalls)
+        let draft = TurnDraft(text: text, reasoning: collected.reasoning, billedTokens: collected.billedTokens, toolCalls: collected.toolCalls)
         return (draft, shouldRetry)
     }
 

@@ -109,14 +109,22 @@ final class ConnectionChatTasks: Sendable {
 struct ChatTurnAuditSnapshot: Sendable {
     /// Assistant text streamed before the failure, possibly empty.
     let partialText: String
+    /// Assistant reasoning streamed before the failure, possibly empty.
+    let partialReasoning: String
     /// Tool actions completed or started before the failure.
     let toolActions: [ToolAction]
     /// Billed total accumulated before the failure, when reported.
     let totalTokens: Int?
 
     /// Creates a snapshot.
-    init(partialText: String, toolActions: [ToolAction], totalTokens: Int? = nil) {
+    init(
+        partialText: String,
+        partialReasoning: String = "",
+        toolActions: [ToolAction],
+        totalTokens: Int? = nil
+    ) {
         self.partialText = partialText
+        self.partialReasoning = partialReasoning
         self.toolActions = toolActions
         self.totalTokens = totalTokens
     }
@@ -142,6 +150,7 @@ final class ChatTurnAuditProgress: Sendable {
         var pendingStarts: [String: PendingStart] = [:]
         var completed: [ToolAction] = []
         var partialText = ""
+        var partialReasoning = ""
         var totalTokens: Int?
     }
 
@@ -172,10 +181,12 @@ final class ChatTurnAuditProgress: Sendable {
                 ))
             case let .textDelta(delta):
                 locked.partialText += delta
+            case let .reasoningDelta(delta):
+                locked.partialReasoning += delta
             case let .turnTokens(_, _, turnTotalTokens, _):
                 guard turnTotalTokens >= 0 else { break }
                 locked.totalTokens = turnTotalTokens
-            case .warning, .toolProgress, .approval, .reasoningDelta:
+            case .warning, .toolProgress, .approval:
                 break
             }
         }
@@ -198,6 +209,7 @@ final class ChatTurnAuditProgress: Sendable {
             }
             return ChatTurnAuditSnapshot(
                 partialText: locked.partialText,
+                partialReasoning: locked.partialReasoning,
                 toolActions: actions,
                 totalTokens: locked.totalTokens
             )
@@ -647,6 +659,16 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters) async {
     let heartbeat = startHeartbeat(context: context, sessionID: sessionID)
     defer { heartbeat.cancel() }
     let auditProgress = ChatTurnAuditProgress()
+    await context.activeTurns.registerSnapshotProvider(sessionID: sessionID) {
+        let snap = auditProgress.snapshot()
+        return LiveTurnSnapshot(
+            sessionID: sessionID,
+            text: snap.partialText,
+            reasoning: snap.partialReasoning,
+            toolActions: snap.toolActions,
+            totalTokens: snap.totalTokens
+        )
+    }
     do {
         let response = try await context.orchestrator.process(
             input: UserInput(
@@ -771,10 +793,12 @@ private func finishWebSocketFailedTurn(
         durationMs: durationMs
     ) ?? params.initialEntry
     await context.hub.broadcastRun(entry)
+    let errorReasoning: String? = audit.partialReasoning.isEmpty ? nil : audit.partialReasoning
     let errorMessage = Message(
         role: .assistant,
         content: "Error: \(error.localizedDescription)",
-        isError: true
+        isError: true,
+        reasoning: errorReasoning
     )
     await context.conversations.append(errorMessage, to: params.sessionID)
     if let frame = encodeWSFrame(WSErrorFrame(message: error.localizedDescription, sessionID: params.sessionID)) {
@@ -848,7 +872,16 @@ func handleWebSocketCancel(_ message: WSCancelMessage, connectionID: UUID, conte
     var cancelled = false
     if let sid = message.sessionID {
         cancelled = await context.activeTurns.cancel(sessionID: sid)
+        LLMCancelRegistry.shared.cancel(sessionID: sid)
         await context.steeringQueue.clear(for: sid)
+        let cancelledRuns = await context.runs.cancelRunning(sessionID: sid)
+        for run in cancelledRuns {
+            let cancelledText = encodeWSFrame(WSCancelledFrame(sessionID: sid))
+            await context.hub.broadcastTerminalCancellation(run: run, frameText: cancelledText)
+        }
+        if !cancelledRuns.isEmpty {
+            cancelled = true
+        }
     }
     let cancelledFrame = WSCancelledFrame(sessionID: message.sessionID, cancelled: cancelled)
     if let frame = encodeWSFrame(cancelledFrame) {

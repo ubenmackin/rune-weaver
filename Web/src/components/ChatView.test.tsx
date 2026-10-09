@@ -1241,6 +1241,81 @@ describe("reconstructMessages", () => {
     expect(result[1].toolActions).toHaveLength(1);
     expect(result[1].toolActions?.[0].toolName).toBe("email.attachment");
   });
+
+  it("reconstructs thought segments when assistant message has reasoning", async () => {
+    const { reconstructMessages } = await import("./ChatView");
+    const raw = [
+      { id: "u1", role: "user", content: "Solve this math problem" },
+      {
+        id: "m1",
+        role: "assistant",
+        content: "The answer is 42.",
+        reasoning: "Let me calculate step by step: 6 * 7 = 42.",
+      },
+    ];
+
+    const result = reconstructMessages(raw);
+    expect(result).toHaveLength(2);
+    expect(result[0].role).toBe("user");
+    expect(result[1].role).toBe("assistant");
+    expect(result[1].text).toBe("The answer is 42.");
+    expect(result[1].segments).toBeDefined();
+    expect(result[1].segments).toHaveLength(2);
+    expect(result[1].segments?.[0]).toEqual({
+      kind: "thought",
+      text: "Let me calculate step by step: 6 * 7 = 42.",
+    });
+    expect(result[1].segments?.[1]).toEqual({
+      kind: "text",
+      text: "The answer is 42.",
+    });
+  });
+
+  it("places thought segments before tool actions and prose", async () => {
+    const { reconstructMessages, toolActionMap } = await import("./ChatView");
+    const raw = [
+      { id: "u1", role: "user", content: "Find files" },
+      {
+        id: "m1",
+        role: "assistant",
+        content: "Found the files.",
+        reasoning: "I need to call file.search first.",
+      },
+      {
+        role: "tool",
+        content: "file1.txt",
+        toolCallID: "call_f1",
+      },
+    ];
+    const structured = toolActionMap([
+      {
+        messageID: "m1",
+        actions: [
+          {
+            toolName: "file.search",
+            callID: "call_f1",
+            argumentsJSON: '{"pattern":"*.txt"}',
+            result: {
+              toolCallID: "call_f1",
+              content: "file1.txt",
+              isError: false,
+            },
+          },
+        ],
+      },
+    ]);
+
+    const result = reconstructMessages(raw, structured);
+    expect(result).toHaveLength(2);
+    expect(result[1].role).toBe("assistant");
+    expect(result[1].segments).toBeDefined();
+    expect(result[1].segments?.[0].kind).toBe("thought");
+    expect((result[1].segments?.[0] as { kind: "thought"; text: string }).text).toBe(
+      "I need to call file.search first.",
+    );
+    expect(result[1].segments?.[1].kind).toBe("text");
+    expect(result[1].segments?.[2].kind).toBe("tools");
+  });
 });
 
 describe("Inline session approval banner", () => {
@@ -1721,6 +1796,120 @@ describe("Background turns across sessions", () => {
     expect(
       screen.getAllByText(/partial progress more while away/),
     ).toHaveLength(1);
+  });
+
+  it("preserves reasoning thought blocks when switching away and back to a running turn", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+
+    const sessionA = "think-session-aaaa-2222";
+    localStorage.setItem("rw_active_session_id", sessionA);
+    const now = new Date().toISOString();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input === "/sessions") {
+          return jsonResponse({
+            sessions: [
+              {
+                id: sessionA,
+                title: "Session A",
+                messageCount: 1,
+                createdAt: now,
+                updatedAt: now,
+                source: "chat",
+              },
+            ],
+            count: 1,
+          });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID: sessionA, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionA,
+            title: "Session A",
+            messages: [],
+            createdAt: now,
+            updatedAt: now,
+            source: "chat",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    await user.type(screen.getByLabelText("Chat input"), "explain quantum physics");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "reasoning_delta",
+      delta: "Step 1: Consider wave-particle duality. ",
+      sessionID: sessionA,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/wave-particle duality/)).toBeInTheDocument();
+    });
+
+    // Switch away to new session
+    await user.click(screen.getByRole("button", { name: "New session" }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Chat input")).not.toBeDisabled();
+    });
+    expect(screen.queryByText(/wave-particle duality/)).not.toBeInTheDocument();
+
+    // While away, more text streams
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "Quantum mechanics describes nature at atomic scales.",
+      sessionID: sessionA,
+    });
+
+    // Return to Session A
+    const sessionRow = screen.getByText("Session A").closest(".session-item");
+    if (!sessionRow) throw new Error("Expected parked session row");
+    await user.click(sessionRow);
+
+    // Thought container and streamed text are both present
+    await waitFor(() => {
+      expect(screen.getByText(/wave-particle duality/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Quantum mechanics describes nature/)).toBeInTheDocument();
+
+    // Turn finishes
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      text: "Quantum mechanics describes nature at atomic scales.",
+      sessionID: sessionA,
+      toolActions: [],
+      totalTokens: 25,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+    // Thought block is still retained in completed message
+    expect(screen.getByText(/wave-particle duality/)).toBeInTheDocument();
   });
 });
 
