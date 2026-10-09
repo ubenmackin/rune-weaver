@@ -172,14 +172,14 @@ struct ToolSchemaTests {
                     #expect(properties[key] != nil, "email.read missing property \(key)")
                 }
                 #expect(properties["messageId"] == nil)
-                #expect(raw.contains(#""required":["account","id"]"#))
+                #expect(raw.contains(#""required":["account","id","mailbox"]"#))
             case "email.attachment":
                 for key in ["account", "id", "index", "mailbox", "preview", "subpath", "saveToPath"] {
                     #expect(properties[key] != nil, "email.attachment missing property \(key)")
                 }
                 #expect(properties["messageId"] == nil)
                 #expect(properties["attachmentIndex"] == nil)
-                #expect(raw.contains(#""required":["account","id","index"]"#))
+                #expect(raw.contains(#""required":["account","id","index","mailbox"]"#))
             case "email.send":
                 for key in ["account", "to", "cc", "bcc", "subject", "bodyText", "bodyHtml", "attachmentPaths", "replyToId", "mailbox"] {
                     #expect(properties[key] != nil, "email.send missing property \(key)")

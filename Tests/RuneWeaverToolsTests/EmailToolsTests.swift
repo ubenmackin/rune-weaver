@@ -293,18 +293,27 @@ struct EmailToolsTests {
 
     @Test
     func `Attachment args accept id and index aliases`() throws {
-        let direct = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0}"#.utf8))
+        let direct = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0,"mailbox":"INBOX"}"#.utf8))
         #expect(direct.messageID == "42")
         #expect(direct.attachmentIndex == 0)
-        let camel = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","messageId":"43","attachmentIndex":1}"#.utf8))
+        #expect(direct.trimmedMailbox == "INBOX")
+        let camel = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","messageId":"43","attachmentIndex":1,"folder":"Archive"}"#.utf8))
         #expect(camel.messageID == "43")
         #expect(camel.attachmentIndex == 1)
-        let snake = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","message_id":"44","attachment_index":2}"#.utf8))
+        #expect(camel.trimmedMailbox == "Archive")
+        let snake = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","message_id":"44","attachment_index":2,"mailbox":"INBOX"}"#.utf8))
         #expect(snake.messageID == "44")
         #expect(snake.attachmentIndex == 2)
-        let uid = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","uid":"45","index":3}"#.utf8))
+        let uid = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","uid":"45","index":3,"mailbox":"INBOX"}"#.utf8))
         #expect(uid.messageID == "45")
         #expect(uid.attachmentIndex == 3)
+    }
+
+    @Test
+    func `Attachment args require mailbox`() {
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0}"#.utf8))
+        }
     }
 
     @Test
@@ -338,14 +347,23 @@ struct EmailToolsTests {
 
     @Test
     func `Read args accept id aliases`() throws {
-        let direct = try JSONDecoder().decode(EmailReadArgs.self, from: Data(#"{"account":"personal","id":"42"}"#.utf8))
+        let direct = try JSONDecoder().decode(EmailReadArgs.self, from: Data(#"{"account":"personal","id":"42","mailbox":"INBOX"}"#.utf8))
         #expect(direct.messageID == "42")
-        let camel = try JSONDecoder().decode(EmailReadArgs.self, from: Data(#"{"account":"personal","messageId":"43"}"#.utf8))
+        #expect(direct.trimmedMailbox == "INBOX")
+        let camel = try JSONDecoder().decode(EmailReadArgs.self, from: Data(#"{"account":"personal","messageId":"43","folder":"Archive"}"#.utf8))
         #expect(camel.messageID == "43")
-        let snake = try JSONDecoder().decode(EmailReadArgs.self, from: Data(#"{"account":"personal","message_id":"44"}"#.utf8))
+        #expect(camel.trimmedMailbox == "Archive")
+        let snake = try JSONDecoder().decode(EmailReadArgs.self, from: Data(#"{"account":"personal","message_id":"44","mailbox":"INBOX"}"#.utf8))
         #expect(snake.messageID == "44")
-        let uid = try JSONDecoder().decode(EmailReadArgs.self, from: Data(#"{"account":"personal","uid":"45"}"#.utf8))
+        let uid = try JSONDecoder().decode(EmailReadArgs.self, from: Data(#"{"account":"personal","uid":"45","mailbox":"INBOX"}"#.utf8))
         #expect(uid.messageID == "45")
+    }
+
+    @Test
+    func `Read args require mailbox`() {
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(EmailReadArgs.self, from: Data(#"{"account":"personal","id":"42"}"#.utf8))
+        }
     }
 
     @Test
@@ -410,7 +428,7 @@ struct EmailToolsTests {
         let tool = EmailReadTool(emailConfig: config, gateway: gateway)
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"personal","id":"42"}"#),
+                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"personal","id":"42","mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)
@@ -527,11 +545,65 @@ struct EmailToolsTests {
     }
 
     @Test
+    func `Bridge script reports mailbox in message not found errors`() {
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("Message %s not found in mailbox '%s'"))
+    }
+
+    @Test
+    func `Bridge script includes attachment info in search op`() {
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("atts_info = attachments_of(msg)"))
+        #expect(source.contains("\"attachments\": atts_info"))
+    }
+
+    @Test
+    func `Search hits decode and expose attachment metadata`() async throws {
+        let json = """
+        {"ok": true, "messages": [
+          {
+            "id": "42",
+            "subject": "Quarterly report",
+            "from": "boss@example.com",
+            "date": "Mon, 01 Sep 2025 09:00:00 +0000",
+            "snippet": "Please review the quarterly numbers",
+            "mailbox": "INBOX",
+            "attachmentCount": 1,
+            "attachments": [
+              {"index": 0, "filename": "q3_report.pdf", "contentType": "application/pdf", "sizeBytes": 102400}
+            ]
+          }
+        ]}
+        """
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(json.utf8))
+        #expect(hits.count == 1)
+        #expect(hits[0].attachmentCount == 1)
+        let atts = try #require(hits[0].attachments)
+        #expect(atts.count == 1)
+        #expect(atts[0].filename == "q3_report.pdf")
+        #expect(atts[0].contentType == "application/pdf")
+        #expect(atts[0].sizeBytes == 102_400)
+
+        let tool = EmailSearchTool(emailConfig: ToolsTestSupport.testEmailConfig(), gateway: ToolsTestSupport.StubEmailGateway(hits: hits))
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"report"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(output.content.contains("q3_report.pdf"))
+            struct Envelope: Decodable { let messages: [EmailSearchHit] }
+            let envelope = try JSONDecoder().decode(Envelope.self, from: Data(output.content.utf8))
+            #expect(envelope.messages.first?.attachments?.first?.contentType == "application/pdf")
+        }
+    }
+
+    @Test
     func `Read tool rejects unknown account without secrets`() async throws {
         let config = ToolsTestSupport.testEmailConfig()
         let tool = EmailReadTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway())
         let output = try await tool.execute(
-            input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"missing","id":"1"}"#),
+            input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"missing","id":"1","mailbox":"INBOX"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(output.isError == true)
@@ -607,7 +679,7 @@ struct EmailToolsTests {
         for bad in badIDs {
             let escaped = bad.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
                 .replacingOccurrences(of: "\r", with: "\\r").replacingOccurrences(of: "\n", with: "\\n")
-            let payload = "{\"account\":\"personal\",\"id\":\"\(escaped)\"}"
+            let payload = "{\"account\":\"personal\",\"id\":\"\(escaped)\",\"mailbox\":\"INBOX\"}"
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.read", argumentsJSON: payload),
                 context: ToolContext(conversationID: UUID())
@@ -640,7 +712,7 @@ struct EmailToolsTests {
         try await ToolsTestSupport.withTestPassword {
             for valid in ["7", "1,2", "1:10"] {
                 let output = try await tool.execute(
-                    input: ToolInput(toolName: "email.read", argumentsJSON: "{\"account\":\"personal\",\"id\":\"\(valid)\"}"),
+                    input: ToolInput(toolName: "email.read", argumentsJSON: "{\"account\":\"personal\",\"id\":\"\(valid)\",\"mailbox\":\"INBOX\"}"),
                     context: ToolContext(conversationID: UUID())
                 )
                 #expect(output.isError == false)
@@ -725,7 +797,7 @@ struct EmailToolsTests {
         let tool = EmailReadTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway(message: message))
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"PERSONAL","id":"7"}"#),
+                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"PERSONAL","id":"7","mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)
@@ -782,7 +854,7 @@ struct EmailToolsTests {
         let tool = EmailReadTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway(message: message))
         try await ToolsTestSupport.withICloudTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"ICLOUD","id":"7"}"#),
+                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"ICLOUD","id":"7","mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)
@@ -815,7 +887,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(emailConfig: config, gateway: gateway, containersConfig: sandbox)
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)
@@ -851,7 +923,7 @@ struct EmailToolsTests {
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)
@@ -882,7 +954,7 @@ struct EmailToolsTests {
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)
@@ -911,7 +983,7 @@ struct EmailToolsTests {
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID(), dryRun: true)
             )
             #expect(output.isError == false)
@@ -931,13 +1003,13 @@ struct EmailToolsTests {
         let config = ToolsTestSupport.testEmailConfig()
         let tool = EmailAttachmentTool(emailConfig: config, gateway: gateway)
         let negative = try await tool.execute(
-            input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":-1}"#),
+            input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":-1,"mailbox":"INBOX"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(negative.isError == true)
         #expect(negative.content.contains("Invalid attachment index"))
         let badID = try await tool.execute(
-            input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"1;DROP","index":0}"#),
+            input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"1;DROP","index":0,"mailbox":"INBOX"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(badID.isError == true)
@@ -949,7 +1021,7 @@ struct EmailToolsTests {
         let config = ToolsTestSupport.testEmailConfig()
         let tool = EmailAttachmentTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway())
         let output = try await tool.execute(
-            input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"missing","id":"1","index":0}"#),
+            input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"missing","id":"1","index":0,"mailbox":"INBOX"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(output.isError == true)
@@ -976,7 +1048,7 @@ struct EmailToolsTests {
             await bus.register(tool: tool)
         }
         await ToolsTestSupport.withTestPassword {
-            let input = ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#)
+            let input = ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX"}"#)
             let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
             #expect(result.isError == true)
             #expect(result.content.contains("requires approval"))
@@ -1302,9 +1374,9 @@ struct EmailToolsTests {
     @Test
     func `Attachment args default preview to false when omitted`() throws {
         // When callers omit the flag, decoding defaults to false.
-        let omitted = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0}"#.utf8))
+        let omitted = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0,"mailbox":"INBOX"}"#.utf8))
         #expect(omitted.preview == false)
-        let requested = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0,"preview":true}"#.utf8))
+        let requested = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0,"mailbox":"INBOX","preview":true}"#.utf8))
         #expect(requested.preview == true)
     }
 
@@ -1401,7 +1473,7 @@ struct EmailToolsTests {
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)
@@ -1443,7 +1515,7 @@ struct EmailToolsTests {
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"preview":true}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX","preview":true}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)
@@ -1477,7 +1549,7 @@ struct EmailToolsTests {
             )
             try await ToolsTestSupport.withTestPassword {
                 let output = try await tool.execute(
-                    input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"preview":true}"#),
+                    input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX","preview":true}"#),
                     context: ToolContext(conversationID: UUID())
                 )
                 #expect(output.isError == false)
@@ -1510,7 +1582,7 @@ struct EmailToolsTests {
             )
             try await ToolsTestSupport.withTestPassword {
                 let output = try await tool.execute(
-                    input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"preview":true}"#),
+                    input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX","preview":true}"#),
                     context: ToolContext(conversationID: UUID())
                 )
                 #expect(output.isError == false)
@@ -1543,7 +1615,7 @@ struct EmailToolsTests {
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"preview":true}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX","preview":true}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)
@@ -1574,7 +1646,7 @@ struct EmailToolsTests {
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"preview":true}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX","preview":true}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)
@@ -1628,7 +1700,7 @@ struct EmailToolsTests {
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)
@@ -1666,7 +1738,7 @@ struct EmailToolsTests {
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"subpath":"hello.txt"}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX","subpath":"hello.txt"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)
@@ -1703,7 +1775,7 @@ struct EmailToolsTests {
             archiveDetonator: detonator
         )
         try await ToolsTestSupport.withTestPassword {
-            let payload = "{\"account\":\"personal\",\"id\":\"42\",\"index\":0,\"subpath\":\"hello.txt\",\"saveToPath\":\"\(destination.path)\"}"
+            let payload = "{\"account\":\"personal\",\"id\":\"42\",\"index\":0,\"mailbox\":\"INBOX\",\"subpath\":\"hello.txt\",\"saveToPath\":\"\(destination.path)\"}"
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.attachment", argumentsJSON: payload),
                 context: ToolContext(conversationID: UUID())
@@ -1741,7 +1813,10 @@ struct EmailToolsTests {
         )
         // No stub password needed: the workspace guard must win before credential resolution.
         let output = try await tool.execute(
-            input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"saveToPath":"/tmp/evil-outside-roots.txt"}"#),
+            input: ToolInput(
+                toolName: "email.attachment",
+                argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX","saveToPath":"/tmp/evil-outside-roots.txt"}"#
+            ),
             context: ToolContext(conversationID: UUID())
         )
         #expect(output.isError == true)
@@ -1766,7 +1841,7 @@ struct EmailToolsTests {
         )
         try await ToolsTestSupport.withTestPassword {
             let subpathOutput = try await tool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"subpath":"hello.txt"}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX","subpath":"hello.txt"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(subpathOutput.isError == true)
@@ -1791,7 +1866,7 @@ struct EmailToolsTests {
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID(), dryRun: true)
             )
             #expect(output.isError == false)
@@ -1801,12 +1876,12 @@ struct EmailToolsTests {
 
     @Test
     func `Archive attachment args decode subpath and saveToPath`() throws {
-        let minimal = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0}"#.utf8))
+        let minimal = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0,"mailbox":"INBOX"}"#.utf8))
         #expect(minimal.trimmedSubpath == nil)
         #expect(minimal.trimmedSaveToPath == nil)
         let followUp = try JSONDecoder().decode(
             EmailAttachmentArgs.self,
-            from: Data(#"{"account":"personal","id":"42","index":0,"subpath":"hello.txt","saveToPath":"~/workspace/hello.txt"}"#.utf8)
+            from: Data(#"{"account":"personal","id":"42","index":0,"mailbox":"INBOX","subpath":"hello.txt","saveToPath":"~/workspace/hello.txt"}"#.utf8)
         )
         #expect(followUp.trimmedSubpath == "hello.txt")
         #expect(followUp.trimmedSaveToPath == "~/workspace/hello.txt")

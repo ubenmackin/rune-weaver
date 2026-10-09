@@ -705,7 +705,11 @@ function trimBrowserText(value: unknown): string | null {
 // dashboard contract test); update both together.
 export const SECRET_STATUS_CHUNK_SIZE = 500;
 
-export default function SettingsManager() {
+export interface SettingsManagerProps {
+  onSettingsSaved?: () => void;
+}
+
+export default function SettingsManager({ onSettingsSaved }: SettingsManagerProps = {}) {
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [activeTab, setActiveTab] = useState<SettingsTab>("providers");
   const [loading, setLoading] = useState(false);
@@ -3013,9 +3017,10 @@ export default function SettingsManager() {
     setDefaultProvider(data.defaultProvider);
     setFallbackProvider(data.fallbackProvider ?? "");
 
-    // Transform providers record into editable list with stable keys
-    const pList: ProviderEntry[] = Object.entries(data.providers || {}).map(
-      ([name, cfg], idx) => ({
+    // Transform providers record into editable list with stable keys, sorted alphabetically by name
+    const pList: ProviderEntry[] = Object.entries(data.providers || {})
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, cfg], idx) => ({
         id: `p-${idx}-${name}`,
         name,
         config: {
@@ -3409,6 +3414,7 @@ export default function SettingsManager() {
         // delta baseline, and publishes the persona into the shared store so the
         // profile block and chat header adopt the new identity without a reload.
         populateForm(updated);
+        onSettingsSaved?.();
         pushSuccessToast(
           "Persona saved. The agent adopts the new identity on engine reload.",
         );
@@ -3916,16 +3922,21 @@ export default function SettingsManager() {
         setLiveServerBind((prev) => prev ?? preSaveFileBind);
       }
       populateForm(updated);
+      onSettingsSaved?.();
       // The bind never live-reloads: when the save really moved [server] keys
       // the route returns requiresRestart and the Network pane keeps its banner
       // until a restart, while safe sections hot-reload live underneath.
       if (updated.requiresRestart) {
-        setServerRestartRequired(true);
-        pushSuccessToast("Settings saved. Restart required for network changes.");
+        if (serverDirty) {
+          setServerRestartRequired(true);
+          pushSuccessToast("Settings saved. Restart required for network changes.");
+        } else {
+          pushSuccessToast("Settings saved. Restart required.");
+        }
       } else {
         // Saved confirmation stays exact so operators recognize it; safe
-        // sections hot-reload live while providers, engine identity, and DB
-        // paths take effect on restart without blanket restart claims here.
+        // sections hot-reload live while engine identity and DB paths take
+        // effect on restart; providers hot-reload live via reloadLiveLLM.
         pushSuccessToast("Settings saved.");
       }
     } catch (failure) {
@@ -4793,7 +4804,7 @@ export default function SettingsManager() {
           <div className="settings-section card">
             <div className="settings-section-header">
               <div className="settings-section-title-group">
-                <h3>LLM & Providers</h3>
+                <h3>LLM Providers</h3>
                 <p className="settings-section-hint">
                   Configure active model routing, provider API endpoints, keys, and parameters.
                 </p>

@@ -99,7 +99,11 @@ public enum ServerIndexBoot {
         if indexConfig.describeImagesWithLLM, let visionLLM {
             // The store exposes no pending-image listing, so boot wires an empty
             // backlog: the stage stays toggle-gated and reports an honest empty
-            // pass until explicit backlog plumbing supplies candidates.
+            // pass until explicit backlog plumbing supplies candidates. An LLM-only
+            // settings save refreshes `servingLLM` without rebuilding these stages,
+            // so this adapter stays on the boot provider until the next index enable
+            // or `db_path` rebuild; the empty backlog keeps the window harmless
+            // because the stage never reaches `describeImage`.
             stages.append(IndexClosureStage.vision(
                 config: indexConfig,
                 store: store,

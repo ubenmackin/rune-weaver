@@ -772,7 +772,8 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
                     snippet: $0.snippet,
                     mailbox: trimmedMailbox,
                     hasAttachments: $0.hasAttachments,
-                    attachmentCount: $0.attachmentCount
+                    attachmentCount: $0.attachmentCount,
+                    attachments: $0.attachments
                 )
             }
             guard let range, !range.isUnbounded else { return labeled }

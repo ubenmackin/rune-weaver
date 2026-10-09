@@ -314,7 +314,7 @@ struct ToolBusTests {
             Issue.record("email.attachment was not registered")
             return
         }
-        let payload = "{\"account\":\"personal\",\"id\":\"42\",\"index\":0,\"saveToPath\":\"\(exportPath)\"}"
+        let payload = "{\"account\":\"personal\",\"id\":\"42\",\"index\":0,\"mailbox\":\"INBOX\",\"saveToPath\":\"\(exportPath)\"}"
         let output = try await attachment.execute(
             input: ToolInput(toolName: "email.attachment", argumentsJSON: payload),
             context: ToolContext(conversationID: UUID())

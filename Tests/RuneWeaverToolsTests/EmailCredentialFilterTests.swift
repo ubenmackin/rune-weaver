@@ -283,7 +283,7 @@ struct EmailCredentialFilterTests {
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
-                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"personal","id":"7"}"#),
+                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"personal","id":"7","mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(output.isError == false)

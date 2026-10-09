@@ -66,6 +66,7 @@ let package = Package(
             name: "RuneWeaverServer",
             dependencies: [
                 "RuneWeaverCore",
+                "RuneWeaverLLM",
                 "RuneWeaverTools",
                 .product(name: "Vapor", package: "vapor")
             ]
