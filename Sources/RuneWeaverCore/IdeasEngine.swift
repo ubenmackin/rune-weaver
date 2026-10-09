@@ -75,7 +75,7 @@ public actor IdeasEngine {
     private let store: IdeasStore
     /// Injected language provider shared with chat turns; never self-built so
     /// suggestions observe the same model, routing, and fallback posture.
-    private let llm: any LLMProvider
+    private var llm: any LLMProvider
     /// Suggestion policy clamped at init so hand-built configs degrade to the
     /// nearest sane bound instead of refusing to run.
     private let config: IdeasConfig
@@ -109,6 +109,11 @@ public actor IdeasEngine {
         self.config = config.clamped()
         self.goalStore = GoalStore(dbPath: store.dbPath)
         self.memoryFacts = memoryFacts
+    }
+
+    /// Dynamically updates the serving LLM provider without a restart.
+    public func updateLLM(_ provider: any LLMProvider) {
+        self.llm = provider
     }
 
     /// Whether proactive idea generation is enabled by configuration.

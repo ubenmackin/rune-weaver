@@ -43,7 +43,7 @@ public actor GoalEngine {
     private let store: GoalStore
     /// Injected language provider shared with chat turns; never self-built so
     /// planning observes the same model, routing, and fallback posture.
-    private let llm: any LLMProvider
+    private var llm: any LLMProvider
     /// Pursuit policy clamped at init so hand-built configs degrade to the
     /// nearest sane bound instead of refusing to run.
     private let config: GoalsConfig
@@ -72,6 +72,11 @@ public actor GoalEngine {
         self.llm = llm
         self.config = config.clamped()
         self.ideasEngine = ideasEngine
+    }
+
+    /// Dynamically updates the serving LLM provider without a restart.
+    public func updateLLM(_ provider: any LLMProvider) {
+        self.llm = provider
     }
 
     /// Whether steady goal pursuit is enabled by configuration.

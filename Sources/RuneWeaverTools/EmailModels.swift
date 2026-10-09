@@ -162,11 +162,11 @@ public struct EmailReadArgs: Sendable, Equatable, Decodable {
     public let account: String
     /// IMAP UID (falling back to sequence number) of the message.
     public let messageID: String
-    /// Optional mailbox holding the message (nil means `INBOX`).
-    public let mailbox: String?
+    /// Mailbox holding the message.
+    public let mailbox: String
 
     /// Memberwise initializer.
-    public init(account: String, messageID: String, mailbox: String? = nil) {
+    public init(account: String, messageID: String, mailbox: String) {
         self.account = account
         self.messageID = messageID
         self.mailbox = mailbox
@@ -182,7 +182,7 @@ public struct EmailReadArgs: Sendable, Equatable, Decodable {
         case folder
     }
 
-    /// Decodes arguments, accepting every documented id alias.
+    /// Decodes arguments, accepting every documented id alias and requiring mailbox.
     /// Blank aliases behave as omitted so a valid later alias still wins.
     /// - Parameter decoder: Decoder for the arguments document.
     public init(from decoder: Decoder) throws {
@@ -205,7 +205,16 @@ public struct EmailReadArgs: Sendable, Equatable, Decodable {
         messageID = resolvedID
         let mailboxAlias = try container.decodeIfPresent(String.self, forKey: .mailbox)
         let folderAlias = try container.decodeIfPresent(String.self, forKey: .folder)
-        mailbox = EmailMailboxNormalization.firstNonBlank([mailboxAlias, folderAlias])
+        guard let resolvedMailbox = EmailMailboxNormalization.firstNonBlank([mailboxAlias, folderAlias]) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.mailbox,
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Missing mailbox (expected 'mailbox' or 'folder')"
+                )
+            )
+        }
+        mailbox = resolvedMailbox
     }
 
     /// Trimmed account nickname.
@@ -218,9 +227,9 @@ public struct EmailReadArgs: Sendable, Equatable, Decodable {
         messageID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Trimmed mailbox holding the message, or nil when omitted or blank (meaning `INBOX`).
-    public var trimmedMailbox: String? {
-        EmailMailboxNormalization.trimmed(mailbox)
+    /// Trimmed mailbox holding the message.
+    public var trimmedMailbox: String {
+        mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -246,6 +255,8 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
     public let hasAttachments: Bool?
     /// Number of attachment parts in the message.
     public let attachmentCount: Int?
+    /// Listed attachment parts with filename, MIME type, and size.
+    public let attachments: [EmailAttachmentInfo]?
 
     /// Creates a search hit.
     public init(
@@ -257,7 +268,8 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
         mailbox: String = "INBOX",
         account: String = "",
         hasAttachments: Bool? = nil,
-        attachmentCount: Int? = nil
+        attachmentCount: Int? = nil,
+        attachments: [EmailAttachmentInfo]? = nil
     ) {
         self.id = id
         self.subject = subject
@@ -268,6 +280,7 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
         self.account = account
         self.hasAttachments = hasAttachments
         self.attachmentCount = attachmentCount
+        self.attachments = attachments
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -280,6 +293,7 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
         case account
         case hasAttachments
         case attachmentCount
+        case attachments
     }
 
     /// Decodes a hit, defaulting omitted `mailbox` to `INBOX` and omitted
@@ -298,6 +312,7 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
         account = try container.decodeIfPresent(String.self, forKey: .account) ?? ""
         hasAttachments = try container.decodeIfPresent(Bool.self, forKey: .hasAttachments)
         attachmentCount = try container.decodeIfPresent(Int.self, forKey: .attachmentCount)
+        attachments = try container.decodeIfPresent([EmailAttachmentInfo].self, forKey: .attachments)
     }
 
     /// Encodes a hit including its mailbox and account labels.
@@ -313,6 +328,7 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
         try container.encode(account, forKey: .account)
         try container.encodeIfPresent(hasAttachments, forKey: .hasAttachments)
         try container.encodeIfPresent(attachmentCount, forKey: .attachmentCount)
+        try container.encodeIfPresent(attachments, forKey: .attachments)
     }
 }
 
@@ -590,8 +606,8 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     public let messageID: String
     /// Zero-based position in the `email.read` attachment list.
     public let attachmentIndex: Int
-    /// Optional mailbox holding the message (nil means `INBOX`).
-    public let mailbox: String?
+    /// Mailbox holding the message.
+    public let mailbox: String
     /// Whether to inline a text preview in the success envelope. Defaults to false.
     public let preview: Bool
     /// Relative path of one entry inside a detonated archive to inspect (nil means list only).
@@ -600,7 +616,7 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     public let saveToPath: String?
 
     /// Memberwise initializer.
-    public init(account: String, messageID: String, attachmentIndex: Int, mailbox: String? = nil, preview: Bool = false, subpath: String? = nil, saveToPath: String? = nil) {
+    public init(account: String, messageID: String, attachmentIndex: Int, mailbox: String, preview: Bool = false, subpath: String? = nil, saveToPath: String? = nil) {
         self.account = account
         self.messageID = messageID
         self.attachmentIndex = attachmentIndex
@@ -626,7 +642,7 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
         case saveToPath
     }
 
-    /// Decodes arguments, accepting every documented id and index alias.
+    /// Decodes arguments, accepting every documented id and index alias and requiring mailbox.
     /// Blank id and mailbox aliases behave as omitted so valid later aliases still win.
     /// - Parameter decoder: Decoder for the arguments document.
     public init(from decoder: Decoder) throws {
@@ -664,7 +680,16 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
         }
         let mailboxAlias = try container.decodeIfPresent(String.self, forKey: .mailbox)
         let folderAlias = try container.decodeIfPresent(String.self, forKey: .folder)
-        mailbox = EmailMailboxNormalization.firstNonBlank([mailboxAlias, folderAlias])
+        guard let resolvedMailbox = EmailMailboxNormalization.firstNonBlank([mailboxAlias, folderAlias]) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.mailbox,
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Missing mailbox (expected 'mailbox' or 'folder')"
+                )
+            )
+        }
+        mailbox = resolvedMailbox
         // Optional preview flag defaults to false.
         preview = try container.decodeIfPresent(Bool.self, forKey: .preview) ?? false
         // Archive follow-ups stay optional;
@@ -683,9 +708,9 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
         messageID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Trimmed mailbox holding the message, or nil when omitted or blank (meaning `INBOX`).
-    public var trimmedMailbox: String? {
-        EmailMailboxNormalization.trimmed(mailbox)
+    /// Trimmed mailbox holding the message.
+    public var trimmedMailbox: String {
+        mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Trimmed archive entry path, or nil when omitted or blank (meaning list only).
@@ -1151,7 +1176,8 @@ extension EmailSearchHit {
                 mailbox: mailbox,
                 account: account,
                 hasAttachments: hasAttachments,
-                attachmentCount: attachmentCount
+                attachmentCount: attachmentCount,
+                attachments: attachments
             )
         }
     }

@@ -282,7 +282,8 @@ enum ToolsTestSupport {
                         snippet: $0.snippet,
                         mailbox: mailbox,
                         hasAttachments: $0.hasAttachments,
-                        attachmentCount: $0.attachmentCount
+                        attachmentCount: $0.attachmentCount,
+                        attachments: $0.attachments
                     )
                 }
             }
@@ -298,7 +299,8 @@ enum ToolsTestSupport {
                     snippet: $0.snippet,
                     mailbox: mailbox,
                     hasAttachments: $0.hasAttachments,
-                    attachmentCount: $0.attachmentCount
+                    attachmentCount: $0.attachmentCount,
+                    attachments: $0.attachments
                 )
             }
         }
@@ -326,7 +328,8 @@ enum ToolsTestSupport {
                         snippet: $0.snippet,
                         mailbox: mailbox,
                         hasAttachments: $0.hasAttachments,
-                        attachmentCount: $0.attachmentCount
+                        attachmentCount: $0.attachmentCount,
+                        attachments: $0.attachments
                     )
                 }
             } else if hitsByMailbox != nil {
@@ -341,7 +344,8 @@ enum ToolsTestSupport {
                         snippet: $0.snippet,
                         mailbox: mailbox,
                         hasAttachments: $0.hasAttachments,
-                        attachmentCount: $0.attachmentCount
+                        attachmentCount: $0.attachmentCount,
+                        attachments: $0.attachments
                     )
                 }
             }
@@ -357,7 +361,7 @@ enum ToolsTestSupport {
             }
             mailboxCapture?.set(mailbox)
             guard let message else {
-                throw EmailIMAPError.bridgeFailed("Message \(messageID) not found")
+                throw EmailIMAPError.bridgeFailed("Message \(messageID) not found in mailbox '\(mailbox)'")
             }
             return message
         }

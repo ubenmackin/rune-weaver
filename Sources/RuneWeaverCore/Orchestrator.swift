@@ -10,7 +10,7 @@ public actor Orchestrator {
     /// Tool registry and permission gate.
     private let toolRegistry: ToolBus
     /// LLM backend serving completions.
-    private let languageProvider: any LLMProvider
+    private var languageProvider: any LLMProvider
     /// Developer instructions prepended to every turn.
     private let storedSystemPrompt: String?
     /// Maximum tool-call rounds per response, plus one final synthesis turn.
@@ -131,6 +131,11 @@ public actor Orchestrator {
     /// persisted settings contract even if a caller passes an edge value.
     public func updateCompactionPercent(_ percent: Int) {
         self.compactionPercent = max(10, min(100, percent))
+    }
+
+    /// Dynamically updates the serving LLM provider without a restart.
+    public func updateLanguageProvider(_ provider: any LLMProvider) {
+        self.languageProvider = provider
     }
 
     // MARK: - Shared dependency views

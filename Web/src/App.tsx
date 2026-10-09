@@ -18,7 +18,7 @@
 // before any lazy boundary mounts, so an unauthenticated browser never fetches
 // a dashboard chunk at all.
 
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import {
   clearAuthToken,
   getHealth,
@@ -163,6 +163,16 @@ export default function App() {
     });
   }, []);
 
+  const refreshHealth = useCallback(() => {
+    getHealth()
+      .then((response) => {
+        if (isAuthenticatedHealth(response)) {
+          setHealth(response);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   if (authGate === "required") {
     return <LoginView onAuthenticated={() => setAuthGate("authenticated")} />;
   }
@@ -176,16 +186,17 @@ export default function App() {
     );
   }
 
-  return <AuthenticatedApp health={health} />;
+  return <AuthenticatedApp health={health} onRefreshHealth={refreshHealth} />;
 }
 
 interface AuthenticatedAppProps {
   // Live engine health owned by the gate so a post-login probe reaches the
   // header without the child re-probing on every mount.
   health: HealthResponse | null;
+  onRefreshHealth?: () => void;
 }
 
-function AuthenticatedApp({ health }: AuthenticatedAppProps) {
+function AuthenticatedApp({ health, onRefreshHealth }: AuthenticatedAppProps) {
   const isStandalone = isStandaloneMode();
   const [tab, setTab] = useState<Tab>(() => (isStandalone ? "settings" : getInitialTab()));
   const [stagedDrawerOpen, setStagedDrawerOpen] = useState(false);
@@ -256,7 +267,10 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
     // way the flat runs tab does.
     if (selected === "goals") clearGoalsAttention();
     // Warnings surface in the chat banner, so viewing chat clears the bell badge.
-    if (selected === "chat") clearWarningsBadge();
+    if (selected === "chat") {
+      clearWarningsBadge();
+      onRefreshHealth?.();
+    }
   }
 
   // Bell wiring owns badge clearing plus the permission prompt, while the bell
@@ -311,7 +325,7 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
         <main className="app-main-content">
           <div className="app-container">
             <Suspense fallback={<SectionProgress />}>
-              <SettingsManager />
+              <SettingsManager onSettingsSaved={onRefreshHealth} />
             </Suspense>
           </div>
         </main>
@@ -423,7 +437,7 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
           ) : null}
           {tab === "settings" ? (
             <Suspense fallback={<SectionProgress />}>
-              <SettingsManager />
+              <SettingsManager onSettingsSaved={onRefreshHealth} />
             </Suspense>
           ) : null}
         </div>

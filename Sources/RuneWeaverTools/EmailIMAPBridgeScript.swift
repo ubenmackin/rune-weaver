@@ -778,8 +778,8 @@ private enum EmailIMAPBridgeScriptSearch {
                                 continue
                             # Skip malformed message so single bad MIME does not fail entire search
                             msg = email.message_from_bytes(raw, policy=policy.default)
-                            atts = attachment_parts(msg)
-                            has_atts = bool(atts)
+                            atts_info = attachments_of(msg)
+                            has_atts = bool(atts_info)
                             if has_att_filter is not None and has_atts != bool(has_att_filter):
                                 continue
                             text = body_text(msg)
@@ -791,7 +791,8 @@ private enum EmailIMAPBridgeScriptSearch {
                                 "snippet": snippet_of(text),
                                 "mailbox": mailbox,
                                 "hasAttachments": has_atts,
-                                "attachmentCount": len(atts),
+                                "attachmentCount": len(atts_info),
+                                "attachments": atts_info,
                             })
                             if len(messages) >= limit:
                                 break
@@ -830,7 +831,7 @@ private enum EmailIMAPBridgeScriptTail {
                                 raw = chunk[1]
                                 break
                     if not raw:
-                        fail("Message %s not found" % mid)
+                        fail("Message %s not found in mailbox '%s'" % (mid, mailbox))
                         return
                     msg = email.message_from_bytes(raw, policy=policy.default)
                     text = body_text(msg)
@@ -882,7 +883,7 @@ private enum EmailIMAPBridgeScriptTail {
                                 raw = chunk[1]
                                 break
                     if not raw:
-                        fail("Message %s not found" % mid)
+                        fail("Message %s not found in mailbox '%s'" % (mid, mailbox))
                         return
                     msg = email.message_from_bytes(raw, policy=policy.default)
                     parts = attachment_parts(msg)

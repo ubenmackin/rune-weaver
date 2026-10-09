@@ -1690,6 +1690,95 @@ struct SettingsRouteTests {
             #expect(policy.network.allowedDomains.contains(host))
         }
     }
+
+    @Test
+    func `LLM provider switch applies live with health reflecting new provider`() async throws {
+        // An `[llm]` save carrying a provider/default change must reach the live
+        // orchestrator without a restart, so the next health probe reports the
+        // new model while the response claims no restart.
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("rw-llm-live-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let dbPath = base.appendingPathComponent("episodes.db").path
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let approvals = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        let steering = SteeringQueue()
+        let initial = LLMLiveReloadStub(modelName: "live-reload-before", providerName: "before")
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: initial,
+            steeringQueue: steering
+        )
+        let memory = MemoryEngine(
+            episodesDBPath: dbPath,
+            vectorDBPath: base.appendingPathComponent("vectors").path,
+            profilePath: base.appendingPathComponent("profile.json").path
+        )
+        let context = ServerContext(
+            conversations: conversations,
+            toolBus: bus,
+            orchestrator: orchestrator,
+            memoryEngine: memory,
+            permissionGate: gate,
+            approvals: approvals,
+            steeringQueue: steering,
+            servingLLM: initial
+        )
+        #expect(await orchestrator.modelInfo.name == "live-reload-before")
+
+        // Two OpenAI-compatible entries keep distinct router names so the
+        // default switch selects deterministically.
+        var config = RuneWeaverConfig.default
+        config.llm.providers = [
+            "before": ProviderConfig(enabled: true, model: "live-reload-before"),
+            "after": ProviderConfig(enabled: true, model: "live-reload-after")
+        ]
+        config.llm.defaultProvider = "before"
+        config.llm.fallbackProvider = nil
+
+        let body = UpdateSettingsRequest(defaultProvider: "after")
+        #expect(body.carriesServerPatch == false)
+        var merged = config
+        try body.apply(to: &merged)
+        try merged.validate()
+        #expect(merged.llm.defaultProvider == "after")
+
+        // Drives the same live-reload path the settings save uses.
+        try await reloadLiveLLM(config: merged, context: context)
+        let live = await orchestrator.modelInfo
+        #expect(live.name == "live-reload-after")
+        #expect(live.provider == "after")
+        #expect(context.servingLLM?.modelInfo.name == "live-reload-after")
+
+        // An LLM-only patch never joins the restart set.
+        let bootHeld = body.goals != nil || body.proactive != nil || body.ideas != nil || body.persona != nil
+        #expect(bootHeld == false)
+        #expect(SettingsResponse(config: merged, configPath: "/test/config.toml", requiresRestart: false).requiresRestart == false)
+
+        let app = try await Application.make(.testing)
+        do {
+            app.runeWeaver = context
+            registerRuneWeaverRoutes(app)
+            let request = Request(
+                application: app,
+                method: .GET,
+                url: URI(string: "/health"),
+                on: app.eventLoopGroup.next()
+            )
+            let response = try await app.responder.respond(to: request).get()
+            #expect(response.status == .ok)
+            let health = try response.content.decode(HealthResponse.self)
+            #expect(health.model == "live-reload-after")
+            #expect(health.provider == "after")
+            try await app.asyncShutdown()
+        } catch {
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
 }
 
 // MARK: - Shared Settings Route Helpers
@@ -1915,6 +2004,27 @@ struct SettingsSecretsRouteTests {
 }
 
 // MARK: - Security Policy Routes
+
+/// Stub provider pinning one model identity so the live-reload test proves a switch without the network.
+private struct LLMLiveReloadStub: LLMProvider, Sendable {
+    /// Fixed model identity served before the switch.
+    let modelInfo: ModelInfo
+
+    /// Pins the stub to one model identity.
+    init(modelName: String, providerName: String) {
+        self.modelInfo = ModelInfo(name: modelName, provider: providerName, contextLength: 8192)
+    }
+
+    /// Never runs a turn in these tests.
+    func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
+        AsyncStream { $0.finish() }
+    }
+
+    /// Unused embeddings stub.
+    func embeddings(text _: [String]) async throws -> [[Float]] {
+        []
+    }
+}
 
 /// Minimal orchestrator stub so fan-out live-reload tests can own an engine
 /// without the full LLM stack; turns never run in these tests.

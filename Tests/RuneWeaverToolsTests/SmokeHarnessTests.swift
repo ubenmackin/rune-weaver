@@ -565,7 +565,7 @@ struct SmokeHarnessTests {
             #expect(searchOutput.content.contains("Quarterly report"))
             let readTool = EmailReadTool(emailConfig: config, gateway: gateway)
             let readOutput = try await readTool.execute(
-                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"personal","id":"42"}"#),
+                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"personal","id":"42","mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(readOutput.isError == false)
@@ -576,7 +576,7 @@ struct SmokeHarnessTests {
                 containersConfig: ContainersConfig()
             )
             let stagedOutput = try await attachmentTool.execute(
-                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"INBOX"}"#),
                 context: ToolContext(conversationID: UUID())
             )
             #expect(stagedOutput.isError == false)

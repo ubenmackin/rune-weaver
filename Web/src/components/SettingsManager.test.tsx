@@ -5551,6 +5551,73 @@ describe("SettingsManager workspace machine control", () => {
       expect(screen.getByTestId("workspace-machine-status").textContent).toContain("exists: no");
     });
   });
+
+  it("renders LLM Providers pane title matching the nav bar", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(mockSettings)));
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      const heading = screen.getByRole("heading", { level: 3, name: "LLM Providers" });
+      expect(heading).toBeInTheDocument();
+    });
+  });
+
+  it("sorts provider cards alphabetically by provider name on load", async () => {
+    const unorderedProvidersSettings = {
+      ...mockSettings,
+      providers: {
+        zulu: { enabled: true, model: "zulu-model" },
+        alpha: { enabled: true, model: "alpha-model" },
+        bravo: { enabled: true, model: "bravo-model" },
+      },
+    };
+
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(unorderedProvidersSettings)));
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      const providerInputs = screen.getAllByPlaceholderText("Provider Name") as HTMLInputElement[];
+      expect(providerInputs.length).toBe(3);
+      expect(providerInputs[0].value).toBe("alpha");
+      expect(providerInputs[1].value).toBe("bravo");
+      expect(providerInputs[2].value).toBe("zulu");
+    });
+  });
+
+  it("calls onSettingsSaved when settings are successfully saved", async () => {
+    const user = userEvent.setup();
+    const onSettingsSaved = vi.fn();
+    let saved = false;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "PUT" && url.includes("/settings")) {
+          saved = true;
+          return jsonResponse({ ...mockSettings, requiresRestart: false });
+        }
+        if (url.includes("/runs")) {
+          return jsonResponse({ runs: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+
+    render(<SettingsManager onSettingsSaved={onSettingsSaved} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Save" })).toBeDefined();
+    });
+
+    const saveBtn = screen.getByRole("button", { name: "Save" });
+    await user.click(saveBtn);
+
+    await waitFor(() => {
+      expect(saved).toBe(true);
+      expect(onSettingsSaved).toHaveBeenCalled();
+    });
+  });
 });
 
 

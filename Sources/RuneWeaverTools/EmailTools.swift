@@ -240,7 +240,8 @@ extension EmailSearchTool {
                 mailbox: canonical,
                 account: accountName,
                 hasAttachments: $0.hasAttachments,
-                attachmentCount: $0.attachmentCount
+                attachmentCount: $0.attachmentCount,
+                attachments: $0.attachments
             )
         }
     }
@@ -794,9 +795,9 @@ public struct EmailReadTool: Tool, Sendable {
     public let description =
         "Reads one email by id from an IMAP mailbox. "
             + "Use when the user asks to open or summarize a specific message. "
-            + "Pass the mailbox labeled on the email.search hit (omitted means INBOX). "
+            + "Pass the mailbox labeled on the email.search hit. "
             + "Returns headers plus the text body; attachments are listed with filename, MIME type, and byte size (use email.attachment to download)."
-    /// Function-calling contract for `account`, `id`, and optional `mailbox`.
+    /// Function-calling contract for `account`, `id`, and mandatory `mailbox`.
     /// Schema advertises only canonical keys; decoder tolerance for retired
     /// spellings stays out of the schema as intentional compatibility so strict
     /// validators and the decoder agree on what is advertised.
@@ -816,10 +817,10 @@ public struct EmailReadTool: Tool, Sendable {
                 },
                 "mailbox": {
                   "type": "string",
-                  "description": "Mailbox from the email.search hit (e.g. INBOX); omitted means INBOX"
+                  "description": "Mailbox from the email.search hit (e.g. INBOX, Archive, Deleted Messages)"
                 }
               },
-              "required":["account","id"],
+              "required":["account","id","mailbox"],
               "additionalProperties": false
             }
             """
@@ -859,7 +860,10 @@ public struct EmailReadTool: Tool, Sendable {
         do {
             args = try JSONDecoder().decode(EmailReadArgs.self, from: Data(input.argumentsJSON.utf8))
         } catch {
-            return .failure("Invalid email.read arguments: expected {\"account\": \"<name>\", \"id\": \"<message-id>\"}.", callID: input.callID)
+            return .failure(
+                "Invalid email.read arguments: expected {\"account\": \"<name>\", \"id\": \"<message-id>\", \"mailbox\": \"<mailbox>\"}.",
+                callID: input.callID
+            )
         }
         // Fail fast on allowlist before touching accounts or credentials so invalid input reports
         // "Invalid message id" even when the password is missing. Checks the raw value first, then
@@ -869,12 +873,11 @@ public struct EmailReadTool: Tool, Sendable {
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
-        if let requestedMailbox = args.trimmedMailbox {
-            do {
-                try EmailIMAPValidation.validateMailbox(requestedMailbox)
-            } catch {
-                return .failure(error.localizedDescription, callID: input.callID)
-            }
+        let requestedMailbox = args.trimmedMailbox
+        do {
+            try EmailIMAPValidation.validateMailbox(requestedMailbox)
+        } catch {
+            return .failure(error.localizedDescription, callID: input.callID)
         }
         let accountName = args.trimmedAccount
         let messageID = args.trimmedMessageID
@@ -883,6 +886,9 @@ public struct EmailReadTool: Tool, Sendable {
         }
         guard !messageID.isEmpty else {
             return .failure("Invalid email.read arguments: 'id' must not be empty.", callID: input.callID)
+        }
+        guard !requestedMailbox.isEmpty else {
+            return .failure("Invalid email.read arguments: 'mailbox' must not be empty.", callID: input.callID)
         }
         do {
             try EmailIMAPValidation.validateMessageID(messageID)
@@ -901,12 +907,11 @@ public struct EmailReadTool: Tool, Sendable {
         }
         do {
             // Reuse the found mailbox so fan-out hits stay openable.
-            let requestedOrDefault = args.trimmedMailbox ?? "INBOX"
             let listed = try await gateway.listMailboxes(credentials: credentials)
             let available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
             let effectiveMailbox: String
             do {
-                effectiveMailbox = try EmailBridgeParsing.resolveMailboxAgainstList(requested: requestedOrDefault, available: available)
+                effectiveMailbox = try EmailBridgeParsing.resolveMailboxAgainstList(requested: requestedMailbox, available: available)
             } catch {
                 return .failure(error.localizedDescription, callID: input.callID)
             }

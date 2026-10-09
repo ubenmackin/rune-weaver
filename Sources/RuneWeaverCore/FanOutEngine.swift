@@ -398,7 +398,7 @@ public actor FanOutEngine {
     /// the same serving instance the Wayfinder uses so review quality tracks the
     /// active model posture; nil keeps the merge pass on its deterministic
     /// and fail-open fallbacks instead of spending a review call.
-    private let reviewer: (any LLMProvider)?
+    private var reviewer: (any LLMProvider)?
 
     /// In-flight runs keyed by parent audit-row id, the cancellation surface
     /// the owner drives through ``cancel(rowID:)``. A run registers before its
@@ -422,6 +422,11 @@ public actor FanOutEngine {
         self.orchestrator = orchestrator
         self.runLogs = runLogs
         self.config = config.clamped()
+        self.reviewer = reviewer
+    }
+
+    /// Dynamically updates the background reviewer provider without a restart.
+    public func updateReviewer(_ reviewer: (any LLMProvider)?) {
         self.reviewer = reviewer
     }
 

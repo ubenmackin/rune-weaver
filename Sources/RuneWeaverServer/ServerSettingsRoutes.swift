@@ -2,7 +2,7 @@
 //
 // Owns `GET`/`PUT /settings`: load, merge, validate, and persist the engine
 // config, then push the saved values into the live engine so orchestrator
-// budgets, media/browser/web/API tools, desktop, bash/files/workspace policies,
+// budgets, LLM providers, media/browser/web/API tools, desktop, bash/files/workspace policies,
 // containers policy, fan-out policy, and index policy take effect without a
 // restart. `[goals]`, `[proactive]`, `[ideas]`, and `[persona]` persist to the file through the
 // same partial-patch merge but take effect on restart: the pursuit engine,
@@ -27,6 +27,7 @@
 
 import Foundation
 import RuneWeaverCore
+import RuneWeaverLLM
 import RuneWeaverTools
 import Vapor
 
@@ -116,10 +117,6 @@ private func handlePutSettings(req: Request) async throws -> Response {
                 || config.server.port != oldServerPort
                 || Set(normalizedAllowedHosts) != Set(normalizedOldAllowedHosts))
         let llmChanged = config.llm != oldLLMConfig
-        // Providers build the live LLM at boot with no live-reload path,
-        // so any provider delta (including supportsVision) leaves the live
-        // model stale until restart.
-        let providersChanged = config.llm.providers != oldLLMConfig.providers
         // `[goals]`, `[proactive]`, `[ideas]`, and `[persona]` persist to the
         // file through the same partial-patch merge but take effect on restart:
         // the pursuit engine, the scheduler worker, the ideas engine, and the
@@ -128,9 +125,9 @@ private func handlePutSettings(req: Request) async throws -> Response {
         // a restart instead of silently claiming live.
         let bootHeldSectionPatchPresent =
             body.goals != nil || body.proactive != nil || body.ideas != nil || body.persona != nil
-        // Bash sandbox keys apply live through the shared context and never
-        // join the restart set, so a tier or allowlist save returns false.
-        let needsRestart = serverChanged || llmChanged || providersChanged || bootHeldSectionPatchPresent
+        // LLM providers, budgets, tools, bash, containers, and network apply live
+        // through the shared context and never join the restart set.
+        let needsRestart = serverChanged || bootHeldSectionPatchPresent
         let liveContext = req.application.runeWeaver
         // Fail-closed bind guard: a changed non-loopback hostname persists
         // only when an owner token resolves. Without one the save is
@@ -173,6 +170,9 @@ private func handlePutSettings(req: Request) async throws -> Response {
             }
         }
         try config.save(to: url)
+        if llmChanged {
+            try await reloadLiveLLM(config: config, context: liveContext)
+        }
         await applyLiveOrchestratorTuning(body: body, context: liveContext)
         await applyLiveRecallBudgets(body: body, config: config, context: liveContext)
         await reloadLiveMediaTools(body: body, config: config, context: liveContext)
@@ -378,6 +378,48 @@ private func serverBindHasOwnerToken(config: RuneWeaverConfig) async -> Bool {
     }
 }
 
+/// Live-reloads the active LLM provider into the live orchestrator, goal engine, fanout, and context without a restart.
+///
+/// Fails closed when the persisted `[llm]` section selects no provider, so a save that disables
+/// every entry reports a bad request instead of success with stale engines. The index vision stage
+/// keeps the provider captured at boot until the next index rebuild; the boot wiring supplies an
+/// empty backlog so the stale adapter never describes, and the next enable or `db_path` rebuild
+/// resolves the fresh serving provider.
+/// - Parameters:
+///   - config: Persisted config carrying the `[llm]` section.
+///   - context: Live server context receiving the swap.
+/// - Throws: `Abort(.badRequest)` when no enabled provider can be selected.
+/// Exposed internally so the live-reload regression can drive the same path the save uses.
+func reloadLiveLLM(config: RuneWeaverConfig, context: ServerContext) async throws {
+    var keysByEntry: [String: String] = [:]
+    for (entryName, entry) in config.llm.providers {
+        guard let envVar = entry.apiKeyEnv, !envVar.isEmpty else { continue }
+        if let key = LLMProviderFactory.resolveAPIKey(explicit: nil, envVar: envVar) {
+            keysByEntry[entryName] = key
+        } else if let secrets = context.secrets {
+            if let stored = try? await secrets.retrieve(key: envVar) {
+                keysByEntry[entryName] = stored
+            }
+        }
+    }
+    let providers = LLMProviderFactory.makeProviders(from: config.llm, apiKeysByEntry: keysByEntry)
+    guard let selected = LLMProviderFactory.selectProvider(named: nil, from: providers, config: config.llm) else {
+        throw Abort(.badRequest, reason: "No enabled LLM provider is configured; enable at least one [llm.providers.*] entry matching [llm] default_provider.")
+    }
+    await context.orchestrator.updateLanguageProvider(selected)
+    context.servingLLM = selected
+    await context.goalEngine.updateLLM(selected)
+    await context.fanOut.updateReviewer(selected)
+    if let ideas = context.ideasEngine {
+        await ideas.updateLLM(selected)
+    }
+    let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
+    context.llmServerURLs = appLLMOrigins
+    if let live = context.egressSupervisor {
+        await live.updateLLMServerURLs(appLLMOrigins)
+    }
+}
+
 /// Pushes persisted engine budgets into the live orchestrator so saved values take effect without a restart.
 private func applyLiveOrchestratorTuning(body: UpdateSettingsRequest, context: ServerContext) async {
     if let maxToolIterations = body.maxToolIterations {
@@ -478,6 +520,18 @@ func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWeaverConfi
         llmServerURLs: appLLMOrigins,
         store: context.policyStore
     )
+    if let live = context.egressSupervisor {
+        await live.updateLLMServerURLs(appLLMOrigins)
+        await reregisterNetworkTools(
+            browserConfig: config.browser,
+            mediaConfig: config.media,
+            llmServerURLs: appLLMOrigins,
+            origins: browserOrigins,
+            supervisor: live,
+            context: context
+        )
+        return
+    }
     let supervisor = try await OutboundEgressSupervisor.make(
         policyStore: context.policyStore,
         secrets: context.secrets,
@@ -485,13 +539,12 @@ func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWeaverConfi
         mediaConfig: config.media,
         llmServerURLs: appLLMOrigins
     )
-    let effectiveSupervisor = context.egressSupervisor ?? supervisor
     await reregisterNetworkTools(
         browserConfig: config.browser,
         mediaConfig: config.media,
         llmServerURLs: appLLMOrigins,
         origins: browserOrigins,
-        supervisor: effectiveSupervisor,
+        supervisor: supervisor,
         context: context
     )
 }

@@ -189,7 +189,12 @@ public final class ServerContext: Sendable {
     /// Active chat provider backing vision description for live index rebuilds.
     /// Stored at boot so a settings save can resolve the vision stage the same
     /// way boot does without reaching back into the orchestrator.
-    public let servingLLM: (any LLMProvider)?
+    private let servingLLMBox: OSAllocatedUnfairLock<(any LLMProvider)?>
+    public var servingLLM: (any LLMProvider)? {
+        get { servingLLMBox.withLock { $0 } }
+        set { servingLLMBox.withLock { $0 = newValue } }
+    }
+
     /// Live document index pair. Held behind a lock because settings PUTs swap
     /// the store and coordinator in place while this class stays Sendable,
     /// mirroring `desktopConfigBox`.
@@ -257,7 +262,12 @@ public final class ServerContext: Sendable {
     /// Live `[media]` policy carrying LAN exemption origins.
     public let mediaConfig: MediaConfig?
     /// Configured LLM server URLs feeding the SSRF loopback exemption.
-    public let llmServerURLs: [String]
+    private let llmServerURLsBox: OSAllocatedUnfairLock<[String]>
+    public var llmServerURLs: [String] {
+        get { llmServerURLsBox.withLock { $0 } }
+        set { llmServerURLsBox.withLock { $0 = newValue } }
+    }
+
     /// Hermetic desktop capture bridge preserved across live-reloads so a
     /// settings PUT refreshes capture knobs without dropping test doubles.
     public let desktopCaptureBridge: (any DesktopCapturing)?
@@ -438,7 +448,7 @@ public final class ServerContext: Sendable {
         self.bashFilesBox = OSAllocatedUnfairLock(initialState: BashFilesPair(bash: bashConfig, files: filesConfig))
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
         self.browserConfig = browserConfig
-        self.servingLLM = servingLLM
+        self.servingLLMBox = OSAllocatedUnfairLock(initialState: servingLLM)
         self.liveIndexBox = OSAllocatedUnfairLock(initialState: LiveIndexPair(store: indexStore, coordinator: indexCoordinator))
         self.indexMessagesStatePath = indexMessagesStatePath
         self.indexMailCheckpointPath = indexMailCheckpointPath
@@ -459,7 +469,7 @@ public final class ServerContext: Sendable {
         self.egressSupervisor = egressSupervisor
         self.policyWriteLock = policyWriteLock
         self.mediaConfig = mediaConfig
-        self.llmServerURLs = llmServerURLs
+        self.llmServerURLsBox = OSAllocatedUnfairLock(initialState: llmServerURLs)
         self.desktopCaptureBridge = desktopCaptureBridge
         self.desktopControlBridge = desktopControlBridge
         self.desktopConfigBox = OSAllocatedUnfairLock(initialState: desktopConfig)

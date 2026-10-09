@@ -66,7 +66,7 @@ public actor OutboundEgressSupervisor {
     /// Media config for SSRF guard LAN exemptions.
     private let mediaConfig: MediaConfig?
     /// Configured LLM server URLs for loopback exemptions.
-    private let llmServerURLs: [String]
+    private var llmServerURLs: [String]
     /// Per-session allowed domains granted interactively during an active chat turn.
     private var sessionAllowedDomains: [UUID: SessionGrant] = [:]
     /// Ephemeral one-shot domains keyed by owning session (nil for grants
@@ -158,6 +158,14 @@ public actor OutboundEgressSupervisor {
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs
         )
+    }
+
+    /// Refreshes the configured LLM server URLs in place.
+    ///
+    /// Live provider switches refresh origins without replacing the instance
+    /// so session and one-shot grants survive the swap.
+    public func updateLLMServerURLs(_ urls: [String]) {
+        llmServerURLs = urls
     }
 
     /// Grants egress permission to a domain for the duration of a session.

@@ -11,7 +11,7 @@ public struct EmailAttachmentTool: Tool, Sendable {
     public let description =
         "Downloads one email attachment by index. "
             + "Use when the user asks to save or open an attachment listed by email.read. "
-            + "Pass the mailbox labeled on the email.search hit (omitted means INBOX). "
+            + "Pass the mailbox labeled on the email.search hit. "
             + "Documents and images stage under isolated temp with inline extracted text or vision payloads; "
             + "archives detonate in an ephemeral zero-mount container "
             + "(no host mounts; stdin in, stdout out; read-only rootfs with tmpfs tmp and no DNS) "
@@ -43,7 +43,7 @@ public struct EmailAttachmentTool: Tool, Sendable {
                 },
                 "mailbox": {
                   "type": "string",
-                  "description": "Mailbox from the email.search hit (e.g. INBOX); omitted means INBOX"
+                  "description": "Mailbox from the email.search hit (e.g. INBOX, Archive, Deleted Messages)"
                 },
                 "preview": {
                   "type": "boolean",
@@ -58,7 +58,7 @@ public struct EmailAttachmentTool: Tool, Sendable {
                   "description": "Workspace destination for an approval-gated archive export"
                 }
               },
-              "required":["account","id","index"],
+              "required":["account","id","index","mailbox"],
               "additionalProperties": false
             }
             """
@@ -226,14 +226,13 @@ extension EmailAttachmentTool {
             args = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(input.argumentsJSON.utf8))
         } catch {
             throw EmailIMAPError.bridgeFailed(
-                "Invalid email.attachment arguments: expected {\"account\": \"<name>\", \"id\": \"<message-id>\", \"index\": <0-based>}."
+                "Invalid email.attachment arguments: "
+                    + "expected {\"account\": \"<name>\", \"id\": \"<message-id>\", \"index\": <0-based>, \"mailbox\": \"<mailbox>\"}."
             )
         }
         try EmailIMAPValidation.validateMessageID(args.messageID)
         try EmailIMAPValidation.validateAttachmentIndex(args.attachmentIndex)
-        if let requestedMailbox = args.trimmedMailbox {
-            try EmailIMAPValidation.validateMailbox(requestedMailbox)
-        }
+        try EmailIMAPValidation.validateMailbox(args.trimmedMailbox)
         if let rawSubpath = args.trimmedSubpath {
             _ = try EmailAttachmentLifecycle.validateArchiveSubpath(rawSubpath)
         }
@@ -248,12 +247,15 @@ extension EmailAttachmentTool {
         let accountName = args.trimmedAccount
         let messageID = args.trimmedMessageID
         let attachmentIndex = args.attachmentIndex
-        let mailbox = args.trimmedMailbox ?? "INBOX"
+        let mailbox = args.trimmedMailbox
         guard !accountName.isEmpty else {
             throw EmailIMAPError.bridgeFailed("Invalid email.attachment arguments: 'account' must not be empty.")
         }
         guard !messageID.isEmpty else {
             throw EmailIMAPError.bridgeFailed("Invalid email.attachment arguments: 'id' must not be empty.")
+        }
+        guard !mailbox.isEmpty else {
+            throw EmailIMAPError.bridgeFailed("Invalid email.attachment arguments: 'mailbox' must not be empty.")
         }
         try EmailIMAPValidation.validateMessageID(messageID)
         try EmailIMAPValidation.validateAttachmentIndex(attachmentIndex)
