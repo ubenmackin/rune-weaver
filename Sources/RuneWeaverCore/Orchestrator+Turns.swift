@@ -29,10 +29,11 @@ extension Orchestrator {
     }
 
     /// Builds the working-memory note recording one tool round's intent.
-    func assistantNoteMessage(text: String, calls: [ToolInput]) -> Message {
+    func assistantNoteMessage(text: String, calls: [ToolInput], reasoning: String? = nil) -> Message {
         Message(
             role: .assistant,
-            content: OrchestratorToolLoop.assistantNoteContent(text: text, calls: calls)
+            content: OrchestratorToolLoop.assistantNoteContent(text: text, calls: calls),
+            reasoning: reasoning
         )
     }
 
@@ -121,11 +122,12 @@ extension Orchestrator {
     @discardableResult
     func storeFinalAssistantText(
         _ finalText: String,
+        reasoning: String? = nil,
         sessionID: UUID,
         pendingEpisodic: inout [(content: String, role: Message.Role)]
     ) async -> Message? {
         guard OrchestratorToolLoop.shouldStoreAssistantText(finalText) else { return nil }
-        let note = Message(role: .assistant, content: finalText)
+        let note = Message(role: .assistant, content: finalText, reasoning: reasoning)
         // Stamp from the stored instant so the live response and the history reload share one time.
         let persisted = await conversations.append(note, to: sessionID)
         pendingEpisodic.append((finalText, .assistant))

@@ -677,7 +677,8 @@ enum TurnLoopOutcome {
         toolActions: [ToolAction],
         billedTokens: Int?,
         contextTokens: Int? = nil,
-        isBudgetExceeded: Bool = false
+        isBudgetExceeded: Bool = false,
+        reasoning: String? = nil
     )
     case parked(OrchestratorResponse)
 }
@@ -711,16 +712,16 @@ struct ParkTurnContext {
 }
 
 /// Intermediate result of an LLM round.
-/// Reasoning deltas stream to clients live but stay out of the final text by
-/// design: they are never promoted into `text` or persisted per turn, so no
-/// unused reasoning state is carried here.
+/// Stores generated text and optional reasoning / thought deltas.
 struct TurnDraft: Sendable {
     let text: String
+    let reasoning: String?
     let billedTokens: Int?
     let toolCalls: [ToolInput]
 
-    init(text: String, billedTokens: Int? = nil, toolCalls: [ToolInput] = []) {
+    init(text: String, reasoning: String? = nil, billedTokens: Int? = nil, toolCalls: [ToolInput] = []) {
         self.text = text
+        self.reasoning = reasoning
         self.billedTokens = billedTokens
         self.toolCalls = toolCalls
     }

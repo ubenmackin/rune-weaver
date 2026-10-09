@@ -33,6 +33,13 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
     /// render the same status badge as the live turn. Nil for successes and for rows
     /// written before the category was persisted, which degrade to the generic error badge.
     public let errorKind: ToolErrorKind?
+    /// Model reasoning or Chain-of-Thought text, if produced during this turn.
+    public let reasoning: String?
+    /// Process exit status of a `tool`-role result, recorded directly by the tool.
+    /// Persisted as typed metadata so history reloads render the same exit badge as
+    /// the live turn without parsing untrusted content. Nil for non-process tools and
+    /// for rows written before the column existed.
+    public let exitCode: Int32?
     /// Creation timestamp.
     /// The conversation store quantizes this to whole milliseconds on append so the live
     /// stamp and the reloaded history share one instant across persistence round-trips.
@@ -48,7 +55,9 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
         toolCallID: String? = nil,
         isError: Bool? = nil,
         errorKind: ToolErrorKind? = nil,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        reasoning: String? = nil,
+        exitCode: Int32? = nil
     ) {
         self.id = id
         self.role = role
@@ -57,6 +66,8 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
         self.isError = isError
         self.errorKind = errorKind
         self.createdAt = createdAt
+        self.reasoning = reasoning
+        self.exitCode = exitCode
     }
 
     /// Returns a copy stamped with the given creation instant.
@@ -71,7 +82,7 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
         return copy
     }
 
-    /// Returns a copy with updated content, preserving id, role, toolCallID, isError, errorKind, and createdAt.
+    /// Returns a copy with updated content, preserving other properties.
     public func withContent(_ content: String) -> Message {
         Message(
             id: id,
@@ -80,7 +91,24 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
             toolCallID: toolCallID,
             isError: isError,
             errorKind: errorKind,
-            createdAt: createdAt
+            createdAt: createdAt,
+            reasoning: reasoning,
+            exitCode: exitCode
+        )
+    }
+
+    /// Returns a copy with updated reasoning, preserving other properties.
+    public func withReasoning(_ reasoning: String?) -> Message {
+        Message(
+            id: id,
+            role: role,
+            content: content,
+            toolCallID: toolCallID,
+            isError: isError,
+            errorKind: errorKind,
+            createdAt: createdAt,
+            reasoning: reasoning,
+            exitCode: exitCode
         )
     }
 }

@@ -15,6 +15,7 @@ import {
   concurrentTurnsBusyMessage,
   decideApproval,
   getGoal,
+  getLiveTurn,
   getSession,
   getSessionToolActions,
   goalStatusTone,
@@ -138,6 +139,8 @@ interface InFlightTurn {
 interface ParkedFlight {
   turn: InFlightTurn | null;
   pending: boolean;
+  messages?: MessageItem[];
+  completedMessage?: MessageItem | null;
   warnings: string[];
   turnTokens: number | null;
   base: number;
@@ -325,6 +328,21 @@ function flatActionsFromSegments(segments: ChatSegment[]): ToolAction[] {
     if (segment.kind === "tools") flat.push(...segment.actions);
   }
   return flat;
+}
+
+// Keeps the pending user bubble out of reloaded history while its reply streams.
+function messagesUpToLastUser<T extends { role: string }>(messages: T[]): T[] {
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx >= 0) {
+    return messages.slice(0, lastUserIdx + 1);
+  }
+  return messages;
 }
 
 export async function copyToClipboard(text: string): Promise<boolean> {
@@ -670,11 +688,11 @@ function buildDoneSegments(
             (doneTrimmed.length > streamedFlat.length &&
               doneTrimmed.includes(streamedFlat)))
         ) {
-          const toolsOnly = merged.filter(
-            (segment) => segment.kind === "tools",
+          const nonText = merged.filter(
+            (segment) => segment.kind !== "text",
           );
           return [
-            ...toolsOnly,
+            ...nonText,
             { kind: "text" as const, text: doneText as string },
           ];
         }
@@ -1166,6 +1184,7 @@ export function reconstructMessages(
     id?: string;
     role: string;
     content: string;
+    reasoning?: string | null;
     toolCallID?: string | null;
     isError?: boolean | null;
     createdAt?: string | number;
@@ -1275,6 +1294,23 @@ export function reconstructMessages(
       })();
       if (isInterimWaiting) {
         continue;
+      }
+
+      // Restore persisted reasoning / thought block to the turn timeline before actions or prose.
+      if (
+        typeof m.reasoning === "string" &&
+        m.reasoning.trim().length > 0
+      ) {
+        const trimmedReasoning = m.reasoning.trim();
+        const alreadyHasReasoning = pendingSegments.some(
+          (s) => s.kind === "thought" && s.text.trim() === trimmedReasoning,
+        );
+        if (!alreadyHasReasoning) {
+          pendingSegments.push({
+            kind: "thought",
+            text: m.reasoning,
+          });
+        }
       }
 
       // Completion for this note prefers the persisted history instant so
@@ -1699,6 +1735,7 @@ export default function ChatView({
   // so the done handler reads this ref instead of nesting a message append
   // inside a turn updater, which would duplicate under double-invoke.
   const inFlightTurnRef = useRef<InFlightTurn | null>(null);
+  const messagesRef = useRef<MessageItem[]>(messages);
   // Mirrors for parking: switching sessions must carry the active banner and
   // running token sum into the parked flight so returning restores them.
   const turnWarningsRef = useRef<string[]>([]);
@@ -1767,6 +1804,9 @@ export default function ChatView({
   useEffect(() => {
     inFlightTurnRef.current = inFlightTurn;
   }, [inFlightTurn]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
   useEffect(() => {
     turnWarningsRef.current = turnWarnings;
   }, [turnWarnings]);
@@ -1938,14 +1978,23 @@ export default function ChatView({
           return;
         }
         if (res && Array.isArray(res.messages)) {
+          const isTurnPending =
+            pendingRef.current &&
+            normalizeSessionID(turnSessionIDRef.current) ===
+              normalizeSessionID(snapshotID);
+          let messagesToMap = res.messages;
+          if (isTurnPending) {
+            messagesToMap = messagesUpToLastUser(res.messages);
+          }
           const mapped = reconstructMessages(
-            res.messages,
+            messagesToMap,
             structured ? toolActionMap(structured.actions) : undefined,
             structured
               ? toolActionCompletedAtMap(structured.actions)
               : undefined,
           );
           setMessages(mapped);
+          messagesRef.current = mapped;
         }
       })
       .catch((failure) => {
@@ -2034,6 +2083,81 @@ export default function ChatView({
     turnSessionIDRef.current = activeID;
     activeTurnStartMsRef.current = startedAt ?? Date.now();
     armTurnTimeout();
+
+    // Hydrate the live turn snapshot (reasoning, toolActions, text) from the engine
+    getLiveTurn(activeID)
+      .then((live) => {
+        if (
+          normalizeSessionID(sessionIDRef.current) !== activeNorm ||
+          !pendingRef.current
+        ) {
+          return;
+        }
+        const isLiveActive = live.active ?? live.isRunning ?? false;
+        if (live && isLiveActive) {
+          const current = inFlightTurnRef.current;
+          const currentHasData =
+            current &&
+            (current.text.length > 0 ||
+              current.toolActions.length > 0 ||
+              current.segments.length > 0);
+          let next: InFlightTurn | null = current;
+          if (currentHasData && current) {
+            if (
+              live.reasoning &&
+              live.reasoning.trim().length > 0 &&
+              !current.segments.some((s) => s.kind === "thought")
+            ) {
+              next = {
+                ...current,
+                segments: [
+                  { kind: "thought" as const, text: live.reasoning },
+                  ...current.segments,
+                ],
+              };
+            }
+          } else {
+            const newSegments: ChatSegment[] = [];
+            if (live.reasoning && live.reasoning.trim().length > 0) {
+              newSegments.push({
+                kind: "thought",
+                text: live.reasoning,
+              });
+            }
+            if (live.toolActions && live.toolActions.length > 0) {
+              const groups = groupToolActionsByRound(live.toolActions);
+              for (const group of groups) {
+                newSegments.push({ kind: "tools", actions: group });
+              }
+            }
+            if (live.text && live.text.trim().length > 0) {
+              newSegments.push({
+                kind: "text",
+                text: live.text,
+              });
+            }
+            next = {
+              toolActions: live.toolActions ?? [],
+              text: live.text ?? "",
+              held: "",
+              segments: newSegments,
+            };
+          }
+          if (next !== current) {
+            setInFlightTurn(next);
+            inFlightTurnRef.current = next;
+          }
+          const liveTotal = toNonNegativeInt(live.totalTokens);
+          if (typeof liveTotal === "number") {
+            setLastTurnTokens(liveTotal);
+            lastTurnTokensRef.current = liveTotal;
+          }
+        }
+      })
+      .catch(() => {
+        // Degrades gracefully if live turn endpoint is unavailable
+      });
+
     return true;
   }, [armTurnTimeout]);
 
@@ -2157,6 +2281,8 @@ export default function ChatView({
           }
         : { toolActions: [], text: "", held: "", segments: [] },
       pending: true,
+      messages: [...messagesRef.current],
+      completedMessage: null,
       // Carry the banner and running sum so returning restores the exact live
       // footer instead of resetting to zero mid-turn.
       warnings: [...turnWarningsRef.current],
@@ -2219,6 +2345,14 @@ export default function ChatView({
         if (parked.turnTokens != null) {
           setLastTurnTokens(parked.turnTokens);
         }
+        if (parked.completedMessage) {
+          const restoredMessages = [
+            ...(parked.messages ?? []),
+            parked.completedMessage,
+          ];
+          setMessages(restoredMessages);
+          messagesRef.current = restoredMessages;
+        }
         parkedFlightsRef.current.delete(key);
         markBackgroundRunning(key, false);
         return;
@@ -2237,8 +2371,13 @@ export default function ChatView({
       if (parked.warnings.length > 0) {
         setTurnWarnings([...parked.warnings]);
       }
+      if (parked.messages) {
+        setMessages(parked.messages);
+        messagesRef.current = parked.messages;
+      }
       if (parked.turn) {
         setInFlightTurn(parked.turn);
+        inFlightTurnRef.current = parked.turn;
       }
       setPending(true);
       pendingRef.current = true;
@@ -2481,6 +2620,49 @@ export default function ChatView({
               flight.warnings,
               terminalWarnings,
             );
+          }
+          // Build and stash the completed MessageItem so returning renders immediately
+          if (flight && flight.turn) {
+            const rawDoneText: unknown = (data as unknown as Record<string, unknown>).text;
+            const rawToolActions: unknown = (data as unknown as Record<string, unknown>).toolActions;
+            const doneText = typeof rawDoneText === "string" ? rawDoneText : undefined;
+            const doneToolActions = Array.isArray(rawToolActions)
+              ? rawToolActions.filter(isToolAction)
+              : undefined;
+            const snapshot = flight.turn;
+            const snapshotFullText = (snapshot.text ?? "") + (snapshot.held ?? "");
+            const orderedDoneActions = deduplicateToolActionsByCallID([
+              ...(doneToolActions ?? []),
+            ]).sort(compareToolActionsByRound);
+            const finalActions =
+              orderedDoneActions.length > 0
+                ? orderedDoneActions
+                : deduplicateToolActionsByCallID([
+                    ...(snapshot.toolActions ?? []),
+                  ]).sort(compareToolActionsByRound);
+            const doneSegments = buildDoneSegments(
+              snapshot.segments ?? [],
+              finalActions,
+              doneText,
+              snapshotFullText,
+            );
+            const legacyText =
+              doneSegments.length > 0
+                ? flatTextFromSegments(doneSegments)
+                : (doneText ?? snapshotFullText ?? "");
+            const legacyActions = flatActionsFromSegments(doneSegments);
+            const doneCompletedAt = normalizeCompletedAtMs(
+              (data as unknown as Record<string, unknown>).completedAt,
+            );
+            const finalMsg: MessageItem = {
+              id: newSessionId(),
+              role: "assistant",
+              text: legacyText,
+              toolActions: legacyActions.length > 0 ? legacyActions : undefined,
+              segments: doneSegments.length > 0 ? doneSegments : undefined,
+              ...(doneCompletedAt != null ? { completedAt: doneCompletedAt } : {}),
+            };
+            flight.completedMessage = finalMsg;
           }
           // Persist the authoritative total so returning hydrates the footer
           // instead of resetting to zero mid-history.
@@ -3797,14 +3979,25 @@ export default function ChatView({
     ])
       .then(([res, structured]) => {
         if (!cancelled && res && Array.isArray(res.messages)) {
+          const isTurnPending =
+            pendingRef.current &&
+            normalizeSessionID(turnSessionIDRef.current) ===
+              normalizeSessionID(activeID);
+
+          let messagesToMap = res.messages;
+          if (isTurnPending) {
+            messagesToMap = messagesUpToLastUser(res.messages);
+          }
+
           const mapped = reconstructMessages(
-            res.messages,
+            messagesToMap,
             structured ? toolActionMap(structured.actions) : undefined,
             structured
               ? toolActionCompletedAtMap(structured.actions)
               : undefined,
           );
           setMessages(mapped);
+          messagesRef.current = mapped;
           // Adopt the session's goal link, if any. A blank or absent value
           // leaves the chip hidden rather than guessing an owner.
           setSessionGoalId(
@@ -4302,7 +4495,7 @@ export default function ChatView({
       );
       return;
     }
-    const cancelSID = sessionID;
+    const cancelSID = turnSessionIDRef.current ?? sessionIDRef.current ?? sessionID;
     cancelledRef.current = true;
     clearTurnTimeout();
     clearAllToolProgress();

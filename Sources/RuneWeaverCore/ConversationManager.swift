@@ -903,7 +903,8 @@ private func collectToolResults(from messages: [Message]) -> [String: ToolResult
             toolCallID: callID,
             content: message.content,
             isError: message.isError ?? false,
-            errorKind: message.errorKind
+            errorKind: message.errorKind,
+            exitCode: message.exitCode
         )
     }
     return resultsByCallID

@@ -399,6 +399,56 @@ public actor RunLogStore {
         return updated
     }
 
+    /// Atomically settles all live run rows for a session to `cancelled`.
+    /// Finds any rows currently `running` or `awaiting_approval` for this session,
+    /// marks them as `cancelled`, and persists the changes immediately so that
+    /// observers and reloads never see an orphaned running turn.
+    /// - Parameters:
+    ///   - sessionID: Session identifier.
+    ///   - durationMs: Wall-clock duration in milliseconds.
+    /// - Returns: List of settled entries.
+    @discardableResult
+    public func cancelRunning(sessionID: UUID, durationMs: Int? = nil) async -> [RunLogEntry] {
+        let targets = entries.filter {
+            $0.sessionID == sessionID && ($0.status == "running" || $0.status == "awaiting_approval")
+        }
+        guard !targets.isEmpty else { return [] }
+        var cancelledEntries: [RunLogEntry] = []
+        cancelledEntries.reserveCapacity(targets.count)
+        for existing in targets {
+            let updated = RunLogEntry(
+                id: existing.id,
+                jobID: existing.jobID,
+                sessionID: existing.sessionID,
+                goalID: existing.goalID,
+                kind: existing.kind,
+                status: "cancelled",
+                message: existing.message,
+                timestamp: existing.timestamp,
+                response: existing.response,
+                toolActions: existing.toolActions,
+                totalTokens: existing.totalTokens,
+                durationMs: durationMs ?? existing.durationMs
+            )
+            if let index = entries.firstIndex(where: { $0.id == existing.id }) {
+                entries[index] = updated
+            }
+            cancelledEntries.append(updated)
+        }
+        if let dbPath {
+            #if canImport(SQLite3)
+                let pruneCap = capacity
+                for updated in cancelledEntries {
+                    let persisted = Self.redactedForPersistence(updated)
+                    await SQLiteSerialIO.runUncancellable {
+                        SQLiteRunLogStore.write(entry: persisted, dbPath: dbPath, pruneCapacity: pruneCap)
+                    }
+                }
+            #endif
+        }
+        return cancelledEntries
+    }
+
     /// Truncates a run-log message to the fixed bound.
     /// - Parameter message: Raw message.
     /// - Returns: Message capped at `maxMessageLength` characters.
@@ -427,7 +477,8 @@ public actor RunLogStore {
                 toolCallID: result.toolCallID,
                 content: redacted,
                 isError: result.isError,
-                errorKind: result.errorKind
+                errorKind: result.errorKind,
+                exitCode: result.exitCode
             )
             return ToolAction(
                 toolName: action.toolName,

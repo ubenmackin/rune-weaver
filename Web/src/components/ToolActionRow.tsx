@@ -616,6 +616,24 @@ function resolveResultStatus(
   kind: ToolResultStatusKind;
   label: string;
 } {
+  // Direct typed exitCode check takes precedence for clean non-zero exits,
+  // immune to content truncation, wrapper labels (e.g. untrusted content banners), or JSON escaping.
+  if (result.exitCode != null && result.exitCode !== 0) {
+    if (toolName === "bash.exec") {
+      const envelope = parseBashResultEnvelope(result.content);
+      if (envelope?.denied || envelope?.killReason === "denied") {
+        return { kind: "error", label: "Denied" };
+      }
+      if (envelope?.killReason === "wall_timeout") {
+        return { kind: "error", label: "Timed out" };
+      }
+      if (envelope?.killReason === "resource_limit") {
+        return { kind: "error", label: "Resource limit" };
+      }
+    }
+    return { kind: "warning", label: `Exited ${result.exitCode}` };
+  }
+
   // Bash-only envelope evidence; every other tool keeps existing behavior.
   if (toolName === "bash.exec") {
     const envelope = parseBashResultEnvelope(result.content);
@@ -668,6 +686,18 @@ function isBashCleanExitWarning(
   toolName?: string,
 ): boolean {
   if (toolName !== "bash.exec") return false;
+  if (result.exitCode != null && result.exitCode !== 0) {
+    const envelope = parseBashResultEnvelope(result.content);
+    if (envelope) {
+      if (envelope.denied || envelope.killReason === "denied") return false;
+      if (
+        envelope.killReason === "wall_timeout" ||
+        envelope.killReason === "resource_limit"
+      )
+        return false;
+    }
+    return true;
+  }
   const envelope = parseBashResultEnvelope(result.content);
   if (!envelope) return false;
   if (envelope.denied || envelope.killReason === "denied") return false;

@@ -89,9 +89,6 @@ func resolvedResumeStatus(approved: Bool, resumed: OrchestratorResponse) -> Stri
     if resumed.toolActions.isEmpty {
         return "error"
     }
-    if resumed.toolActions.contains(where: { !$0.didSucceed }) {
-        return "error"
-    }
     return "ok"
 }
 

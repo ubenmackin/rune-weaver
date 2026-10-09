@@ -12,9 +12,21 @@ public struct ToolOutput: Sendable, Codable, Equatable {
     public let callID: String?
     /// Classification of the failure if failed, or nil when the tool left it for the bus to infer.
     public let errorKind: ToolErrorKind?
+    /// Process exit status captured directly by tools that spawn a process.
+    ///
+    /// Typed metadata recorded at termination, never parsed from `content`, so
+    /// clients can render honest exit badges without inspecting untrusted output.
+    /// Nil for tools that do not run a process.
+    public let exitCode: Int32?
 
     /// Creates a tool output.
-    public init(content: String, isError: Bool = false, callID: String? = nil, errorKind: ToolErrorKind? = nil) {
+    public init(
+        content: String,
+        isError: Bool = false,
+        callID: String? = nil,
+        errorKind: ToolErrorKind? = nil,
+        exitCode: Int32? = nil
+    ) {
         self.content = content
         self.isError = isError
         self.callID = callID
@@ -22,15 +34,21 @@ public struct ToolOutput: Sendable, Codable, Equatable {
         // content prefix at the bus boundary. Forcing `.executionError` here would make
         // argument errors indistinguishable from runtime failures. Successes carry none.
         self.errorKind = isError ? errorKind : nil
+        self.exitCode = exitCode
     }
 
     /// Convenience success output.
-    public static func success(_ content: String, callID: String? = nil) -> ToolOutput {
-        ToolOutput(content: content, isError: false, callID: callID, errorKind: nil)
+    public static func success(_ content: String, callID: String? = nil, exitCode: Int32? = nil) -> ToolOutput {
+        ToolOutput(content: content, isError: false, callID: callID, errorKind: nil, exitCode: exitCode)
     }
 
     /// Convenience failure output.
-    public static func failure(_ content: String, callID: String? = nil, errorKind: ToolErrorKind? = nil) -> ToolOutput {
-        ToolOutput(content: content, isError: true, callID: callID, errorKind: errorKind)
+    public static func failure(
+        _ content: String,
+        callID: String? = nil,
+        errorKind: ToolErrorKind? = nil,
+        exitCode: Int32? = nil
+    ) -> ToolOutput {
+        ToolOutput(content: content, isError: true, callID: callID, errorKind: errorKind, exitCode: exitCode)
     }
 }

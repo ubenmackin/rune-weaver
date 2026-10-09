@@ -67,6 +67,7 @@ export interface ToolResult {
   content: string;
   isError: boolean;
   errorKind?: ToolErrorKind | null;
+  exitCode?: number | null;
 }
 
 export interface ToolAction {
@@ -813,6 +814,7 @@ export interface ChatMessage {
   id?: string;
   role: "system" | "user" | "assistant" | "tool";
   content: string;
+  reasoning?: string | null;
   toolCallID?: string | null;
   isError?: boolean | null;
   // Creation time in either wire shape the engine emits: ISO-8601 strings from
@@ -1703,6 +1705,24 @@ export function getSessionToolActions(
 ): Promise<SessionToolActionsResponse> {
   return fetchJson<SessionToolActionsResponse>(
     `/sessions/${encodeURIComponent(id)}/tool-actions`,
+  );
+}
+
+export interface LiveTurnResponse {
+  active: boolean;
+  isRunning?: boolean;
+  sessionID: string;
+  text: string;
+  reasoning: string;
+  toolActions: ToolAction[];
+  totalTokens?: number | null;
+  warnings: string[];
+  startedAt?: number | null;
+}
+
+export function getLiveTurn(id: string): Promise<LiveTurnResponse> {
+  return fetchJson<LiveTurnResponse>(
+    `/sessions/${encodeURIComponent(id)}/live-turn`,
   );
 }
 
