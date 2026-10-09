@@ -711,7 +711,7 @@ public enum LiveSearchGuidance: Sendable {
     }
 
     /// Adjacent token pair sharing the whole-word letter boundary.
-    private static func containsAdjacentPair(first: String, second: String, in lowered: String) -> Bool {
+    static func containsAdjacentPair(first: String, second: String, in lowered: String) -> Bool {
         let tokens = lowered.split { !$0.isLetter }.map { String($0) }
         guard tokens.count >= 2 else { return false }
         for index in 0 ..< (tokens.count - 1) where tokens[index] == first && tokens[index + 1] == second {

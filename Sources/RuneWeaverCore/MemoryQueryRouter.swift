@@ -36,12 +36,15 @@ public struct RecallPlan: Sendable, Equatable {
 
 /// Deterministic query-to-plan inference for automatic recall.
 ///
-/// No LLM call: lowercased trimming plus mailbox alias folding only. All date
+/// No LLM call: lowercased trimming plus mailbox alias folding only. Day
 /// bounds come from `TemporalFilter.parse`; the calendar is used solely to
-/// derive `YYYY-MM-DD` strings for yesterday, today, single-date, and month
-/// windows. Exactly one temporal behavior wins by precedence: yesterday, then
-/// single `YYYY-MM-DD`, then month name, then today-like freshness, else
-/// unbounded. Blank queries yield an unbounded plan.
+/// derive `YYYY-MM-DD` strings for yesterday, today, single-date, month,
+/// future-relative, and offset day, week, and month windows. The bare future
+/// window anchors at now.
+/// Exactly one temporal behavior wins by precedence: yesterday, then
+/// single `YYYY-MM-DD`, then past-relative, then future-relative, then offset
+/// arithmetic, then bare future, then month name, then tonight plus today-like
+/// freshness, else unbounded. Blank queries yield an unbounded plan.
 public enum MemoryQueryRouter: Sendable {
     /// Infers a recall plan for one query at one instant.
     /// - Parameters:
@@ -66,7 +69,40 @@ public enum MemoryQueryRouter: Sendable {
         if let range = singleDateRange(lowered: lowered) {
             return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
         }
+        if let range = pastWeekdayRange(currentDate: currentDate, lowered: lowered) {
+            return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
+        }
+        if let range = lastWeekRange(currentDate: currentDate, lowered: lowered) {
+            return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
+        }
+        if let range = tomorrowRange(currentDate: currentDate, lowered: lowered) {
+            return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
+        }
+        if let range = weekdayRange(currentDate: currentDate, lowered: lowered) {
+            return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
+        }
+        if let range = weekRange(currentDate: currentDate, lowered: lowered) {
+            return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
+        }
+        if let range = weekendRange(currentDate: currentDate, lowered: lowered) {
+            return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
+        }
+        if let range = offsetDayRange(currentDate: currentDate, lowered: lowered) {
+            return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
+        }
+        if let range = offsetWeekRange(currentDate: currentDate, lowered: lowered) {
+            return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
+        }
+        if let range = offsetMonthRange(currentDate: currentDate, lowered: lowered) {
+            return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
+        }
+        if let range = bareFutureRange(currentDate: currentDate, lowered: lowered) {
+            return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
+        }
         if let range = monthRange(currentDate: currentDate, lowered: lowered) {
+            return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
+        }
+        if let range = tonightRange(currentDate: currentDate, lowered: lowered) {
             return RecallPlan(since: range.since, until: range.until, skipDocIndex: skipDocIndex, perTier: perTier, expandedQuery: expanded)
         }
         if let range = todayRange(currentDate: currentDate, lowered: lowered) {
@@ -82,37 +118,177 @@ public enum MemoryQueryRouter: Sendable {
         // Word boundary owned by `LiveSearchGuidance`; the router delegates
         // one-way so temporal checks share the single freshness boundary.
         guard LiveSearchGuidance.containsWord("yesterday", in: lowered) else { return nil }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = .current
+        let calendar = gregorianCalendar()
         let todayStart = calendar.startOfDay(for: currentDate)
         guard let yesterdayStart = calendar.date(byAdding: .day, value: -1, to: todayStart) else { return nil }
-        let sinceString = dayString(from: yesterdayStart, calendar: calendar)
-        let untilString = dayString(from: todayStart, calendar: calendar)
-        return try? TemporalFilter.parse(since: sinceString, until: untilString)
+        return dayWindow(since: yesterdayStart, until: todayStart, calendar: calendar)
+    }
+
+    /// Last-weekday window for the first `last <weekday>` pair.
+    ///
+    /// A same-weekday `last` reaches seven days back so the window stays
+    /// strictly in the past.
+    private static func pastWeekdayRange(currentDate: Date, lowered: String) -> TemporalRange? {
+        let tokens = lowered.split { !$0.isLetter }.map { String($0) }
+        var target: Int?
+        for index in 0 ..< tokens.count where tokens[index] == "last" {
+            guard index + 1 < tokens.count, let weekday = weekdayIndex[tokens[index + 1]] else { continue }
+            target = weekday
+            break
+        }
+        guard let target else { return nil }
+        let calendar = gregorianCalendar()
+        let todayStart = calendar.startOfDay(for: currentDate)
+        let todayWeekday = calendar.component(.weekday, from: currentDate)
+        var back = (todayWeekday - target + 7) % 7
+        if back == 0 {
+            back = 7
+        }
+        guard let dayStart = calendar.date(byAdding: .day, value: -back, to: todayStart) else { return nil }
+        guard let nextDay = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return nil }
+        return dayWindow(since: dayStart, until: nextDay, calendar: calendar)
+    }
+
+    /// Last-week window `[today-7-midnight, today-midnight)` for `last week`.
+    private static func lastWeekRange(currentDate: Date, lowered: String) -> TemporalRange? {
+        guard LiveSearchGuidance.containsAdjacentPair(first: "last", second: "week", in: lowered) else { return nil }
+        let calendar = gregorianCalendar()
+        let todayStart = calendar.startOfDay(for: currentDate)
+        guard let weekAgo = calendar.date(byAdding: .day, value: -7, to: todayStart) else { return nil }
+        return dayWindow(since: weekAgo, until: todayStart, calendar: calendar)
     }
 
     /// Single `YYYY-MM-DD` day window `[date, next-day)` for the first match.
     private static func singleDateRange(lowered: String) -> TemporalRange? {
         guard let match = firstDateString(in: lowered) else { return nil }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = .current
+        let calendar = gregorianCalendar()
         guard let midnight = try? TemporalFilter.parse(since: match, until: nil).since else { return nil }
         guard let nextDay = calendar.date(byAdding: .day, value: 1, to: midnight) else { return nil }
-        let untilString = dayString(from: nextDay, calendar: calendar)
-        return try? TemporalFilter.parse(since: match, until: untilString)
+        return dayWindow(since: midnight, until: nextDay, calendar: calendar)
+    }
+
+    /// Tomorrow window `[tomorrow-midnight, next-day-midnight)` when present.
+    private static func tomorrowRange(currentDate: Date, lowered: String) -> TemporalRange? {
+        // The day-after phrase contains tomorrow but resolves two days out.
+        if hasDayAfterTomorrow(offsetTokens(lowered)) {
+            return nil
+        }
+        guard LiveSearchGuidance.containsWord("tomorrow", in: lowered) else { return nil }
+        let calendar = gregorianCalendar()
+        let todayStart = calendar.startOfDay(for: currentDate)
+        guard let tomorrowStart = calendar.date(byAdding: .day, value: 1, to: todayStart) else { return nil }
+        guard let dayAfter = calendar.date(byAdding: .day, value: 1, to: tomorrowStart) else { return nil }
+        return dayWindow(since: tomorrowStart, until: dayAfter, calendar: calendar)
+    }
+
+    /// Tonight folds into the today window so evening queries stay in-day.
+    private static func tonightRange(currentDate: Date, lowered: String) -> TemporalRange? {
+        guard LiveSearchGuidance.containsWord("tonight", in: lowered) else { return nil }
+        let calendar = gregorianCalendar()
+        let todayStart = calendar.startOfDay(for: currentDate)
+        guard let tomorrowStart = calendar.date(byAdding: .day, value: 1, to: todayStart) else { return nil }
+        return dayWindow(since: todayStart, until: tomorrowStart, calendar: calendar)
+    }
+
+    /// Next-occurrence weekday window for the first non-`last` weekday name.
+    ///
+    /// Today counts when it is that weekday, so a same-day name stays in-day
+    /// instead of leaping a week forward.
+    private static func weekdayRange(currentDate: Date, lowered: String) -> TemporalRange? {
+        let tokens = lowered.split { !$0.isLetter }.map { String($0) }
+        var target: Int?
+        for (index, token) in tokens.enumerated() {
+            guard let weekday = weekdayIndex[token] else { continue }
+            if index > 0, tokens[index - 1] == "last" {
+                continue
+            }
+            target = weekday
+            break
+        }
+        guard let target else { return nil }
+        let calendar = gregorianCalendar()
+        let todayStart = calendar.startOfDay(for: currentDate)
+        let todayWeekday = calendar.component(.weekday, from: currentDate)
+        let ahead = (target - todayWeekday + 7) % 7
+        guard let dayStart = calendar.date(byAdding: .day, value: ahead, to: todayStart) else { return nil }
+        guard let nextDay = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return nil }
+        return dayWindow(since: dayStart, until: nextDay, calendar: calendar)
+    }
+
+    /// Rolling week windows: `this week` is seven days from today, `next` or
+    /// `following` or `upcoming week` is next Monday through plus seven days.
+    private static func weekRange(currentDate: Date, lowered: String) -> TemporalRange? {
+        let tokens = lowered.split { !$0.isLetter }.map { String($0) }
+        var kind: Int?
+        for index in 0 ..< tokens.count where tokens[index] == "week" {
+            guard index > 0 else { continue }
+            let previous = tokens[index - 1]
+            if previous == "this" {
+                kind = 0
+                break
+            }
+            if previous == "next" || previous == "following" || previous == "upcoming" {
+                kind = 1
+                break
+            }
+        }
+        guard let kind else { return nil }
+        let calendar = gregorianCalendar()
+        let todayStart = calendar.startOfDay(for: currentDate)
+        if kind == 0 {
+            guard let weekOut = calendar.date(byAdding: .day, value: 7, to: todayStart) else { return nil }
+            return dayWindow(since: todayStart, until: weekOut, calendar: calendar)
+        } else {
+            let weekday = calendar.component(.weekday, from: currentDate)
+            let daysSinceMonday = (weekday - 2 + 7) % 7
+            guard let mondayStart = calendar.date(byAdding: .day, value: -daysSinceMonday, to: todayStart),
+                  let nextMonday = calendar.date(byAdding: .day, value: 7, to: mondayStart),
+                  let weekAfter = calendar.date(byAdding: .day, value: 7, to: nextMonday) else { return nil }
+            return dayWindow(since: nextMonday, until: weekAfter, calendar: calendar)
+        }
+    }
+
+    /// Coming-weekend window `[Saturday-midnight, Monday-midnight)`.
+    ///
+    /// A same-day Saturday stays in-day; Sunday reaches forward six days so
+    /// the window never reaches backward.
+    private static func weekendRange(currentDate: Date, lowered: String) -> TemporalRange? {
+        guard LiveSearchGuidance.containsWord("weekend", in: lowered) else { return nil }
+        let calendar = gregorianCalendar()
+        let todayStart = calendar.startOfDay(for: currentDate)
+        let todayWeekday = calendar.component(.weekday, from: currentDate)
+        let ahead = (7 - todayWeekday + 7) % 7
+        guard let saturdayStart = calendar.date(byAdding: .day, value: ahead, to: todayStart) else { return nil }
+        guard let mondayStart = calendar.date(byAdding: .day, value: 2, to: saturdayStart) else { return nil }
+        return dayWindow(since: saturdayStart, until: mondayStart, calendar: calendar)
+    }
+
+    /// Bare future window `[now, now+60-days)` for `next`, `following`, or `upcoming`.
+    ///
+    /// Specific `next` phrases win earlier; only a bare marker with no day,
+    /// week, or weekend window reaches here, so the bound anchors at now
+    /// instead of local midnight.
+    private static func bareFutureRange(currentDate: Date, lowered: String) -> TemporalRange? {
+        let isBare = LiveSearchGuidance.containsWord("next", in: lowered)
+            || LiveSearchGuidance.containsWord("upcoming", in: lowered)
+            || LiveSearchGuidance.containsWord("following", in: lowered)
+        guard isBare else { return nil }
+        let calendar = gregorianCalendar()
+        guard let sixtyOut = calendar.date(byAdding: .day, value: 60, to: currentDate) else { return nil }
+        return TemporalRange(since: currentDate, until: sixtyOut)
     }
 
     /// Month window `[first-of-month, first-of-next-month)` for the first month name.
     ///
     /// A bare month name resolves to the most recent occurrence: when the
     /// same-year window would start after `currentDate` (for example asking
-    /// for `december` in January), the window rolls back one year so recall
-    /// looks backward instead of opening a months-future window the stores
-    /// can never satisfy.
+    /// for `december` in January), the window rolls back one year so mail
+    /// recall looks backward. Calendars now satisfy explicit future windows
+    /// through the future-relative builders; the rollback stays conservative
+    /// for mail.
     private static func monthRange(currentDate: Date, lowered: String) -> TemporalRange? {
         guard let month = firstMonth(in: lowered) else { return nil }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = .current
+        let calendar = gregorianCalendar()
         let year = calendar.component(.year, from: currentDate)
         let sinceString = String(format: "%04d-%02d-01", year, month)
         let nextMonth = month == 12 ? 1 : month + 1
@@ -137,87 +313,9 @@ public enum MemoryQueryRouter: Sendable {
     private static func todayRange(currentDate: Date, lowered: String) -> TemporalRange? {
         let isTodayLike = LiveSearchGuidance.containsWord("today", in: lowered) || LiveSearchGuidance.containsThisMorning(in: lowered)
         guard isTodayLike else { return nil }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = .current
+        let calendar = gregorianCalendar()
         let todayStart = calendar.startOfDay(for: currentDate)
         guard let tomorrowStart = calendar.date(byAdding: .day, value: 1, to: todayStart) else { return nil }
-        let sinceString = dayString(from: todayStart, calendar: calendar)
-        let untilString = dayString(from: tomorrowStart, calendar: calendar)
-        return try? TemporalFilter.parse(since: sinceString, until: untilString)
-    }
-
-    // MARK: - Query helpers
-
-    /// Month names to calendar months for window inference.
-    private static let monthIndex: [String: Int] = [
-        "january": 1, "february": 2, "march": 3, "april": 4,
-        "may": 5, "june": 6, "july": 7, "august": 8,
-        "september": 9, "october": 10, "november": 11, "december": 12
-    ]
-
-    /// First month name in query order, or nil when absent.
-    private static func firstMonth(in lowered: String) -> Int? {
-        let tokens = lowered.split { !$0.isLetter }.map { String($0) }
-        for token in tokens {
-            if let month = monthIndex[token] {
-                return month
-            }
-        }
-        return nil
-    }
-
-    /// Compiled once so every turn reuses the same matcher instead of rebuilding it.
-    private static let dateStringRegex: NSRegularExpression? = try? NSRegularExpression(
-        pattern: "\\b\\d{4}-\\d{2}-\\d{2}\\b"
-    )
-
-    /// First `YYYY-MM-DD` substring, or nil when absent.
-    private static func firstDateString(in lowered: String) -> String? {
-        guard let regex = dateStringRegex else { return nil }
-        let range = NSRange(lowered.startIndex ..< lowered.endIndex, in: lowered)
-        guard let match = regex.firstMatch(in: lowered, range: range) else { return nil }
-        guard let swiftRange = Range(match.range, in: lowered) else { return nil }
-        return String(lowered[swiftRange])
-    }
-
-    /// Formats an instant as `YYYY-MM-DD` in the resolving calendar zone.
-    private static func dayString(from date: Date, calendar: Calendar) -> String {
-        let components = calendar.dateComponents([.year, .month, .day], from: date)
-        return String(format: "%04d-%02d-%02d", components.year ?? 2000, components.month ?? 1, components.day ?? 1)
-    }
-
-    // MARK: - Expansion
-
-    /// Lowercased query with mailbox alias folding only, no other synonyms.
-    private static func foldMailboxAliases(_ lowered: String) -> String {
-        var folded = lowered
-        for (regex, replacement) in mailboxAliasMatchers {
-            let range = NSRange(folded.startIndex ..< folded.endIndex, in: folded)
-            folded = regex.stringByReplacingMatches(in: folded, range: range, withTemplate: replacement)
-        }
-        return folded
-    }
-
-    /// Ordered word-boundary replacements from alias phrases to canonical mailboxes.
-    ///
-    /// Only multi-word mailbox phrases plus the unambiguous `archived` form
-    /// fold; single-word verbs such as `deleted` or `draft` stay untouched so
-    /// action queries never misfire into mailbox tokens.
-    private static let mailboxAliasReplacements: [(pattern: String, replacement: String)] = [
-        ("\\bsent items\\b", "sent"),
-        ("\\bsent mail\\b", "sent"),
-        ("\\bsent mailbox\\b", "sent"),
-        ("\\bdeleted messages\\b", "trash"),
-        ("\\bdeleted items\\b", "trash"),
-        ("\\bjunk mail\\b", "junk"),
-        ("\\bspam mail\\b", "spam"),
-        ("\\ball mail\\b", "archive"),
-        ("\\barchived\\b", "archive")
-    ]
-
-    /// Compiled alias matchers reused across turns so planning never recompiles per query.
-    private static let mailboxAliasMatchers: [(regex: NSRegularExpression, replacement: String)] = mailboxAliasReplacements.compactMap { pattern, replacement in
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
-        return (regex, replacement)
+        return dayWindow(since: todayStart, until: tomorrowStart, calendar: calendar)
     }
 }
