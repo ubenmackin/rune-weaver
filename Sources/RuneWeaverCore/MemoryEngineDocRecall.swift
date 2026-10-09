@@ -390,7 +390,7 @@ extension MemoryEngine {
         }
         func keywordScore(for chunk: IndexedChunk) -> Double {
             guard let rank = keywordRanks[chunk.id] else { return 0 }
-            return 1.0 / Double(rank)
+            return rrfScore(rank: rank)
         }
         var scoredVectors: [(chunk: IndexedChunk, cosine: Double)] = []
         if let queryEmbedding, !queryEmbedding.isEmpty {

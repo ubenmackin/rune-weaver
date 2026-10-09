@@ -129,6 +129,9 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
     /// answered. Counted at done construction so the terminal frame and the queue
     /// agree without an extra round trip.
     public var retainedSteerCount: Int?
+    /// Content-free recall counts plus source names plus skip flag for the chip.
+    /// Nil on frames from engines predating the chip, which render no chip.
+    public var recallDiagnostics: RecallSummary?
 
     /// Creates a stream done frame.
     public init(
@@ -144,7 +147,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         warnings: [String]? = nil,
         roundIndex: Int? = nil,
         completedAt: Double? = nil,
-        retainedSteerCount: Int? = nil
+        retainedSteerCount: Int? = nil,
+        recallDiagnostics: RecallSummary? = nil
     ) {
         self.type = "done"
         self.text = text
@@ -168,6 +172,7 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         } else {
             retainedSteerCount
         }
+        self.recallDiagnostics = recallDiagnostics
         // Derive the turn's highest round from its actions when the caller omits it,
         // so multi-round turns advertise their boundary count without extra bookkeeping.
         if let roundIndex {
@@ -207,6 +212,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         case completedAt
         /// Late steering still queued at completion.
         case retainedSteerCount
+        /// Content-free recall summary for the chip.
+        case recallDiagnostics
     }
 
     /// Decodes a terminal frame, defaulting a missing parked flag for back-compat
@@ -251,6 +258,7 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         } else {
             retainedSteerCount
         }
+        self.recallDiagnostics = try container.decodeIfPresent(RecallSummary.self, forKey: .recallDiagnostics)
     }
 
     /// Encodes a terminal frame, omitting an absent round so older decoders see no new key.
@@ -273,6 +281,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
         // Omit an absent retained count so older dashboards see no new key.
         try container.encodeIfPresent(retainedSteerCount, forKey: .retainedSteerCount)
+        // Omit an absent summary so older dashboards see no new key and render no chip.
+        try container.encodeIfPresent(recallDiagnostics, forKey: .recallDiagnostics)
     }
 
     /// Creates a terminal frame from an orchestrator response.
@@ -291,7 +301,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
             isParked: response.isParked,
             warnings: response.warnings.isEmpty ? nil : response.warnings,
             completedAt: response.completedAt,
-            retainedSteerCount: retainedSteerCount
+            retainedSteerCount: retainedSteerCount,
+            recallDiagnostics: response.recallDiagnostics
         )
     }
 }

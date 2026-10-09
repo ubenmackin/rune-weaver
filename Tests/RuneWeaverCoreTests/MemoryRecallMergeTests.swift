@@ -15,6 +15,41 @@ private func makeRecallMergeEngine() -> (engine: MemoryEngine, base: URL) {
     return (engine, base)
 }
 
+/// Builds an isolated engine sharing one document index with the test.
+private func makeKeywordCurveEngine() -> (engine: MemoryEngine, store: DocIndexStore, base: URL) {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    let docIndexPath = base.appendingPathComponent("docindex.db").path
+    let engine = MemoryEngine(
+        episodesDBPath: base.appendingPathComponent("episodes.db").path,
+        vectorDBPath: base.appendingPathComponent("vectors").path,
+        docIndexDBPath: docIndexPath,
+        profilePath: base.appendingPathComponent("profile.json").path
+    )
+    return (engine, DocIndexStore(dbPath: docIndexPath), base)
+}
+
+/// Stores one keyword-only document with a single chunk.
+@discardableResult
+private func storeKeywordCurveDoc(
+    in store: DocIndexStore,
+    externalID: String,
+    text: String
+) async throws -> IndexedDocument {
+    let document = try await store.upsertDocument(IndexedDocument(
+        source: .files,
+        externalID: externalID,
+        displayName: externalID,
+        contentHash: "hash-\(externalID)",
+        indexedAt: Date()
+    ))
+    _ = try await store.upsertChunks(
+        documentID: document.id,
+        chunks: [IndexedChunk(documentID: document.id, ordinal: 0, text: text)]
+    )
+    return document
+}
+
 /// Deterministic paraphrase stand-in for vector recall.
 private struct MergeParaphraseStubBackend: EmbeddingsBackend, Sendable {
     /// Stable identifier marking vectors as test fixtures.
@@ -282,5 +317,190 @@ struct MemoryRecallMergeTests {
         #expect(tightContext.count <= 300)
         #expect(tightContext.hasSuffix("…"))
         #expect(tightContext.contains(MemoryEngine.automaticRecallHeader))
+    }
+
+    @Test
+    func `Deep two-token series reaches top five while birthday still ranks`() async throws {
+        let (engine, store, base) = makeKeywordCurveEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // Long series body dilutes BM25 length normalization while short
+        // high-TF chatter outranks it, burying the full-overlap hit deep in
+        // keyword order despite matching both query tokens.
+        let filler = (0 ..< 120).map { "filler\($0)" }.joined(separator: " ")
+        try await storeKeywordCurveDoc(
+            in: store,
+            externalID: "series",
+            text: "karate cobra kai finale showdown birthday celebration special retrospective \(filler)"
+        )
+        for index in 0 ..< 16 {
+            try await storeKeywordCurveDoc(
+                in: store,
+                externalID: "chatter-\(index)",
+                text: "karate karate karate drills session \(index) footwork kata"
+            )
+        }
+        try await storeKeywordCurveDoc(
+            in: store,
+            externalID: "birthday",
+            text: "karate birthday party cake candles celebration"
+        )
+
+        let keywordHits = try await store.searchKeyword(query: "karate birthday", limit: 30)
+        #expect(keywordHits.count >= 17)
+
+        let budgets = RecallBudgets(
+            perTierLimit: 20,
+            autoLimit: 10,
+            threshold: 0.1,
+            maxChars: 4000,
+            perHitChars: 500,
+            docPoolMultiplier: 4
+        )
+        let fused = await engine.recallDocuments(query: "karate birthday", limit: 10, budgets: budgets)
+        #expect(fused.count >= 5)
+        guard let seriesIndex = fused.firstIndex(where: { $0.content.contains("cobra kai finale") }) else {
+            Issue.record("Expected the two-token series chunk in fused results")
+            return
+        }
+        #expect(seriesIndex < 5)
+        #expect(fused.contains { $0.content.contains("party cake") })
+        for hit in fused {
+            #expect(hit.score >= 0 && hit.score <= 1)
+        }
+    }
+
+    @Test
+    func `Reciprocal-rank curve stays bounded monotonic with soft deep gap`() async throws {
+        let rankOne = 1.0 / (60.0 + 1.0)
+        let rankFifteen = 1.0 / (60.0 + 15.0)
+        let rankFifty = 1.0 / (60.0 + 50.0)
+        #expect(rankOne > rankFifteen)
+        #expect(rankFifteen > rankFifty)
+        #expect(rankOne > 0 && rankFifty > 0)
+        #expect(rankOne <= 1.0)
+        #expect(rankOne - rankFifteen < 0.01)
+        #expect(rankOne - rankFifty < 0.01)
+
+        let (engine, store, base) = makeKeywordCurveEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        for index in 0 ..< 5 {
+            try await storeKeywordCurveDoc(
+                in: store,
+                externalID: "curve-\(index)",
+                text: "identical curve body karate birthday"
+            )
+        }
+        let budgets = RecallBudgets(
+            perTierLimit: 20,
+            autoLimit: 10,
+            threshold: 0.1,
+            maxChars: 4000,
+            perHitChars: 500,
+            docPoolMultiplier: 4
+        )
+        let results = await engine.recallDocuments(query: "karate birthday", limit: 10, budgets: budgets)
+        #expect(results.count == 5)
+        let first = try #require(results.first)
+        let last = try #require(results.last)
+        #expect(first.score >= last.score)
+        #expect(first.score - last.score < 0.2)
+        for hit in results {
+            #expect(hit.score >= 0 && hit.score <= 1)
+        }
+        // Identical bodies tie on BM25, so newest-first rowid order decides.
+        #expect(results.first?.metadata["display_name"] == "curve-4")
+        #expect(results.last?.metadata["display_name"] == "curve-0")
+    }
+
+    @Test
+    func `Rank-one exact match still outranks deep partial`() async throws {
+        let (engine, store, base) = makeKeywordCurveEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        for index in 0 ..< 50 {
+            try await storeKeywordCurveDoc(
+                in: store,
+                externalID: "partial-\(index)",
+                text: "quarterly summary chatter \(index) plan review"
+            )
+        }
+        try await storeKeywordCurveDoc(
+            in: store,
+            externalID: "exact",
+            text: "quarterly notes.md summary"
+        )
+
+        let budgets = RecallBudgets(
+            perTierLimit: 20,
+            autoLimit: 10,
+            threshold: 0.1,
+            maxChars: 4000,
+            perHitChars: 500,
+            docPoolMultiplier: 4
+        )
+        let results = await engine.recallDocuments(query: "quarterly notes.md", limit: 10, budgets: budgets)
+        #expect(results.count >= 2)
+        #expect(results.first?.content.contains("notes.md") == true)
+        #expect(results.dropFirst().contains { $0.content.contains("chatter") })
+    }
+
+    @Test
+    func `Recency overlap and exact bonuses still decide close ranks`() async throws {
+        let budgets = RecallBudgets(
+            perTierLimit: 20,
+            autoLimit: 10,
+            threshold: 0.1,
+            maxChars: 4000,
+            perHitChars: 500,
+            docPoolMultiplier: 4
+        )
+
+        let (recencyEngine, recencyStore, recencyBase) = makeKeywordCurveEngine()
+        defer { try? FileManager.default.removeItem(at: recencyBase) }
+        try await storeKeywordCurveDoc(
+            in: recencyStore,
+            externalID: "recency-older",
+            text: "identical recency body harbor voyage"
+        )
+        try await storeKeywordCurveDoc(
+            in: recencyStore,
+            externalID: "recency-newer",
+            text: "identical recency body harbor voyage"
+        )
+        let recency = await recencyEngine.recallDocuments(query: "identical recency", limit: 10, budgets: budgets)
+        #expect(recency.count == 2)
+        #expect(recency.first?.metadata["display_name"] == "recency-newer")
+
+        let (overlapEngine, overlapStore, overlapBase) = makeKeywordCurveEngine()
+        defer { try? FileManager.default.removeItem(at: overlapBase) }
+        try await storeKeywordCurveDoc(
+            in: overlapStore,
+            externalID: "overlap-partial",
+            text: "harbor voyage ledger notes"
+        )
+        try await storeKeywordCurveDoc(
+            in: overlapStore,
+            externalID: "overlap-full",
+            text: "harbor compassrose voyage manifest"
+        )
+        let overlap = await overlapEngine.recallDocuments(query: "harbor compassrose", limit: 10, budgets: budgets)
+        #expect(overlap.count == 2)
+        #expect(overlap.first?.content.contains("compassrose") == true)
+
+        let (exactEngine, exactStore, exactBase) = makeKeywordCurveEngine()
+        defer { try? FileManager.default.removeItem(at: exactBase) }
+        try await storeKeywordCurveDoc(
+            in: exactStore,
+            externalID: "exact-topical",
+            text: "quarterly summary plan review"
+        )
+        try await storeKeywordCurveDoc(
+            in: exactStore,
+            externalID: "exact-name",
+            text: "quarterly notes.md summary"
+        )
+        let exact = await exactEngine.recallDocuments(query: "quarterly notes.md", limit: 10, budgets: budgets)
+        #expect(exact.count == 2)
+        #expect(exact.first?.content.contains("notes.md") == true)
     }
 }

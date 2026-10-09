@@ -91,6 +91,8 @@ func registerChatRoute(_ app: Application) {
             // decision can transition the same session entry. The per-turn parked flag keeps a
             // stale prior park in this session from mis-marking a fresh normal turn.
             await broadcastParkedApprovals(for: response, context: context)
+            // The terminal response carries the content-free recall summary verbatim
+            // so REST turns surface per-tier counts plus the skip flag with no extra lookup.
             let parkedStatus = if response.isParked {
                 "awaiting_approval"
             } else {

@@ -4,11 +4,18 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   isValidToolIDs,
+  parseRecallDiagnostics,
   parseToolProgress,
   subscribeAuthState,
   toNonNegativeInt,
 } from "../api";
-import type { Goal, PermissionRequest, ToolAction, ToolResult } from "../api";
+import type {
+  Goal,
+  PermissionRequest,
+  RecallDiagnostics,
+  ToolAction,
+  ToolResult,
+} from "../api";
 import { isApprovalFrame, isRecord } from "../approvalsSession";
 import { sanitizeWarnings } from "../warnings";
 
@@ -84,6 +91,9 @@ export interface WSStreamDone {
   // next turn and releases the consumed ones answered here; absent on older
   // engines where the view clears consumed tracking as answered.
   retainedSteerCount?: number;
+  // Content-free recall counts plus source names plus skip flag for the chip.
+  // Optional because older engines predate the chip; absent renders no chip.
+  recallDiagnostics?: RecallDiagnostics | null;
 }
 
 export interface WSCancelledFrame {
@@ -356,7 +366,8 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
       // streamed deltas already carry the reply or when the turn was never parked, and the view
       // finalizes from its accumulated snapshot while treating a missing flag as not parked.
       // Terminal warnings degrade to absent via the shared sanitizer so a drifted shape never
-      // drops an otherwise complete turn.
+      // drops an otherwise complete turn. Recall diagnostics degrade the same way
+      // through the shared parser.
       if (
         !(value.text === undefined || typeof value.text === "string") ||
         typeof value.sessionID !== "string" ||
@@ -366,6 +377,9 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
       }
       // Probe the shared sanitizer so done-frame validation never drifts from the banner path.
       sanitizeWarnings(value.warnings);
+      // Probe the shared recall parser so a drifted diagnostics block degrades
+      // to absent instead of dropping an otherwise complete turn.
+      parseRecallDiagnostics(value.recallDiagnostics);
       return true;
     case "cancelled":
       return (

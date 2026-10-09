@@ -331,7 +331,8 @@ extension Orchestrator {
                 contextTokens: parked.contextTokens,
                 isParked: false,
                 warnings: resumeWarnings,
-                completedAt: baseCompletedAt
+                completedAt: baseCompletedAt,
+                recallDiagnostics: parked.recallDiagnostics
             )
         }
         let prompt = await resolveParkedSynthesisPrompt(parked)
@@ -367,13 +368,14 @@ extension Orchestrator {
             initialLlmRoundIndex: parked.synthesisRoundIndex,
             bashConfig: resumedBashConfig,
             workspaceRoot: resumedWorkspaceRoot,
-            strictRegistry: strictContainerRegistry
+            strictRegistry: strictContainerRegistry,
+            recallDiagnostics: parked.recallDiagnostics
         )
         do {
             let outcome = try await runTurnLoop(request, pendingEpisodic: &pendingEpisodic)
             switch outcome {
             case let .parked(parkedResponse):
-                return parkedResponse
+                return Self.responseWithRecall(parkedResponse, summary: parked.recallDiagnostics)
             case let .finished(finalText, toolActions, loopBilled, contextTokens, isBudgetExceeded, reasoning):
                 return try await finishResumedTurn(
                     finalText: finalText,
@@ -420,7 +422,8 @@ extension Orchestrator {
             contextTokens: parked.contextTokens,
             isParked: true,
             warnings: context.warnings,
-            completedAt: nil
+            completedAt: nil,
+            recallDiagnostics: parked.recallDiagnostics
         )
     }
 
@@ -463,7 +466,8 @@ extension Orchestrator {
             isParked: false,
             warnings: resumeWarnings,
             completedAt: finalNote?.createdAt.timeIntervalSince1970,
-            isBudgetExceeded: isBudgetExceeded
+            isBudgetExceeded: isBudgetExceeded,
+            recallDiagnostics: parked.recallDiagnostics
         )
     }
 
@@ -739,7 +743,8 @@ extension Orchestrator {
             contextTokens: turn.contextTokens,
             narrationAlreadyPersisted: turn.narrationAlreadyPersisted,
             bashConfig: liveBashConfig,
-            workspaceRoot: liveWorkspaceRoot
+            workspaceRoot: liveWorkspaceRoot,
+            recallDiagnostics: request.recallDiagnostics
         )
         let parked = await parkGatedCalls(context, pendingEpisodic: &pendingEpisodic)
         return .parked(parked)
@@ -851,7 +856,8 @@ extension Orchestrator {
                     synthesisRoundIndex: effectiveGatedRound + 1,
                     priorActions: context.priorActions,
                     toolRounds: effectiveGatedRound,
-                    contextTokens: context.contextTokens
+                    contextTokens: context.contextTokens,
+                    recallDiagnostics: context.recallDiagnostics
                 )
                 storeParkedNarratedApproval(parkedApproval, id: request.id)
                 await context.onEvent?(.approval(request))
@@ -885,7 +891,8 @@ extension Orchestrator {
             contextTokens: context.contextTokens,
             isParked: true,
             warnings: parkedWarnings,
-            completedAt: persistedWaiting.createdAt.timeIntervalSince1970
+            completedAt: persistedWaiting.createdAt.timeIntervalSince1970,
+            recallDiagnostics: context.recallDiagnostics
         )
     }
 }

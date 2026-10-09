@@ -1308,6 +1308,48 @@ a {
   font-style: normal;
 }
 
+/* Per-turn recall chip above the first assistant message. Muted and collapsed
+ * by default so absent diagnostics render nothing and cause no layout shift. */
+.recall-chip {
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--text-muted, #8e8e9f);
+}
+
+.recall-chip-summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  opacity: 0.85;
+}
+
+.recall-chip-summary::-webkit-details-marker {
+  display: none;
+}
+
+.recall-chip-summary::before {
+  content: "▸ ";
+}
+
+.recall-chip[open] .recall-chip-summary::before {
+  content: "▾ ";
+}
+
+.recall-chip-details {
+  margin-top: 4px;
+  padding-left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.recall-chip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  opacity: 0.85;
+}
+
 /* Distinct Tool Activity Display in Chat */
 
 .chat-tool-container {

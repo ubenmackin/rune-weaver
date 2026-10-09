@@ -291,12 +291,13 @@ public actor Orchestrator {
                 // so every turn carries exactly one diagnostics entry. The skip
                 // flag mirrors the recall path (freshness plus store presence)
                 // so a freshness query logs the same flag here as on a full turn.
-                RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))))")
+                let earlyDiagnostics = RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))
+                RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(earlyDiagnostics))")
                 didEmitRecallDiagnostics = true
                 try Task.checkCancellation()
                 await flushEpisodic(pendingEpisodic, sessionID: sessionID)
                 await permissionGate?.clearTaskGrants(for: sessionID)
-                return earlyResponse
+                return Self.responseWithRecall(earlyResponse, diagnostics: earlyDiagnostics)
             }
 
             let (request, turnWarnings) = try await prepareTurnLoopRequest(
@@ -308,7 +309,7 @@ public actor Orchestrator {
             let outcome = try await runTurnLoop(request, pendingEpisodic: &pendingEpisodic)
             switch outcome {
             case let .parked(parkedResponse):
-                return parkedResponse
+                return Self.responseWithRecall(parkedResponse, summary: request.recallDiagnostics)
             case let .finished(finalText, toolActions, loopBilled, contextTokens, isBudgetExceeded, reasoning):
                 let finalNote = await storeFinalAssistantText(finalText, reasoning: reasoning, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
                 try Task.checkCancellation()
@@ -328,7 +329,8 @@ public actor Orchestrator {
                     contextTokens: contextTokens,
                     warnings: turnWarnings,
                     completedAt: finalNote?.createdAt.timeIntervalSince1970,
-                    isBudgetExceeded: isBudgetExceeded
+                    isBudgetExceeded: isBudgetExceeded,
+                    recallDiagnostics: request.recallDiagnostics
                 )
             }
         } catch let error as CancellationError {
@@ -357,7 +359,7 @@ public actor Orchestrator {
         text: String,
         sessionID: UUID,
         didEmitRecallDiagnostics: inout Bool
-    ) async throws -> (recall: Message?, starterPack: Message?) {
+    ) async throws -> TurnRecallResolution {
         do {
             if let memoryEngine {
                 let wired = try await Self.resolveTurnRecallAndStarter(
@@ -374,13 +376,14 @@ public actor Orchestrator {
                 // zero-hit line via the diagnostics payload above.
                 RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(wired.diagnostics))")
                 didEmitRecallDiagnostics = true
-                return (wired.recall, wired.starterPack)
+                return TurnRecallResolution(recall: wired.recall, starterPack: wired.starterPack, summary: RecallSummary(from: wired.diagnostics))
             } else {
                 // No engine means no doc index: derive the freshness flag
                 // so a freshness query logs skipped here as on every path.
-                RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))))")
+                let zero = RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))
+                RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(zero))")
                 didEmitRecallDiagnostics = true
-                return (nil, nil)
+                return TurnRecallResolution(recall: nil, starterPack: nil, summary: RecallSummary(from: zero))
             }
         } catch let recallError as CancellationError {
             // Cancelled recall still emits one zero-hit line before the
@@ -505,6 +508,35 @@ extension Orchestrator {
         source == "scheduler" || source == "goal"
     }
 
+    /// Returns a copy of a turn response carrying the content-free recall summary.
+    ///
+    /// Existing summaries win so a parked resume keeps its original footing
+    /// instead of adopting a later turn's counts.
+    static func responseWithRecall(_ response: OrchestratorResponse, summary: RecallSummary?) -> OrchestratorResponse {
+        guard let summary else { return response }
+        guard response.recallDiagnostics == nil else { return response }
+        return OrchestratorResponse(
+            text: response.text,
+            sessionID: response.sessionID,
+            toolActions: response.toolActions,
+            totalTokens: response.totalTokens,
+            modelName: response.modelName,
+            contextLength: response.contextLength,
+            sessionTokens: response.sessionTokens,
+            contextTokens: response.contextTokens,
+            isParked: response.isParked,
+            warnings: response.warnings,
+            completedAt: response.completedAt,
+            isBudgetExceeded: response.isBudgetExceeded,
+            recallDiagnostics: summary
+        )
+    }
+
+    /// Returns a copy of a turn response carrying projected diagnostics.
+    static func responseWithRecall(_ response: OrchestratorResponse, diagnostics: RecallDiagnostics) -> OrchestratorResponse {
+        responseWithRecall(response, summary: RecallSummary(from: diagnostics))
+    }
+
     /// Prepares the tool-loop request and degraded-tool warnings for one turn.
     ///
     /// Resolves the tool snapshot filtered by caller permissions, the effective
@@ -543,11 +575,14 @@ extension Orchestrator {
         // turn wiring: one plan plus recall plus starter so service and
         // CLI turns cannot drift. No date math here; the router owns every
         // calendar derivation inside the shared helper.
-        let (recall, starterPack) = try await resolveTurnRecall(
+        let resolvedRecall = try await resolveTurnRecall(
             text: text,
             sessionID: input.sessionID,
             didEmitRecallDiagnostics: &didEmitRecallDiagnostics
         )
+        let recall = resolvedRecall.recall
+        let starterPack = resolvedRecall.starterPack
+        let recallSummary = resolvedRecall.summary
         let reservedToolTokens = ConversationManager.estimateToolTokens(in: tools)
         await conversations.compactHistoryIfNeeded(
             for: input.sessionID,
@@ -587,7 +622,8 @@ extension Orchestrator {
             effectiveMaxToolIterations: effectiveMaxIterations,
             bashConfig: bashSnapshot,
             workspaceRoot: workspaceSnapshot,
-            strictRegistry: strictRegistry
+            strictRegistry: strictRegistry,
+            recallDiagnostics: recallSummary
         )
         return (request, turnWarnings)
     }
@@ -856,4 +892,10 @@ extension Orchestrator {
         }
         return OrchestratorToolLoop.narratedToolCalls(from: assistantText, tools: tools)
     }
+}
+
+private struct TurnRecallResolution: Sendable {
+    let recall: Message?
+    let starterPack: Message?
+    let summary: RecallSummary
 }
