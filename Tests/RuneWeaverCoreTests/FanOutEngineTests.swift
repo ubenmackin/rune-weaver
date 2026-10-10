@@ -93,10 +93,17 @@ private final class ConcurrentProbeOrchestrator: OrchestratorFanOutSeam {
 /// Stub seam whose turn never returns and ignores cancellation, so only the
 /// timeout side of the race can settle a worker.
 private final class HangingFanOutOrchestrator: OrchestratorFanOutSeam {
-    /// Parks on a never-resumed continuation, so the turn cannot settle on
+    /// Parked turns held for the life of the test process. Retaining the
+    /// continuation escapes it from the suspension, so the runtime does not
+    /// report a leak while the turn stays suspended.
+    private static let parked = OSAllocatedUnfairLock<[CheckedContinuation<Void, Never>]>(initialState: [])
+
+    /// Parks on a retained continuation, so the turn cannot settle on
     /// its own and cancellation cannot end it early.
     func process(_: UserInput) async throws {
-        await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            Self.parked.withLock { $0.append(continuation) }
+        }
     }
 }
 

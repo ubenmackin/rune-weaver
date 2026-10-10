@@ -60,6 +60,23 @@ export default function MorningRecommendations({
 
   useSharedWebSocket(handleWSFrame);
 
+  // Tab visibility resync ensures returning to the tab immediately refreshes ideas
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        fetchProposedIdeas();
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [fetchProposedIdeas]);
+
+  // Periodic heartbeat polling keeps recommendations synced
+  useEffect(() => {
+    const interval = setInterval(fetchProposedIdeas, 15000);
+    return () => clearInterval(interval);
+  }, [fetchProposedIdeas]);
+
   async function handleAccept(idea: Idea) {
     try {
       setActionInProgress(idea.id);

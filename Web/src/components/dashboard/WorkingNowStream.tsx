@@ -64,6 +64,16 @@ export default function WorkingNowStream({
     fetchActiveRuns();
   }, [fetchActiveRuns]);
 
+  // 1-second live elapsed timer tick while tasks are active so elapsed seconds count up smoothly
+  const [, setSecondTick] = useState(0);
+  useEffect(() => {
+    if (activeRuns.length === 0) return;
+    const timer = setInterval(() => {
+      setSecondTick((s) => s + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [activeRuns.length]);
+
   // WebSocket updates on run lifecycle frames
   const handleWSFrame = useCallback(
     (frame: WSIncomingFrame) => {
@@ -81,12 +91,28 @@ export default function WorkingNowStream({
     [fetchActiveRuns],
   );
 
-  useSharedWebSocket(handleWSFrame);
+  const handleSocketOpen = useCallback(() => {
+    fetchActiveRuns(true);
+  }, [fetchActiveRuns]);
 
-  // Poll while there are active tasks so timers update
+  useSharedWebSocket(handleWSFrame, undefined, handleSocketOpen);
+
+  // Tab visibility resync ensures returning to the tab immediately refreshes live tasks
   useEffect(() => {
-    if (activeRuns.length === 0) return;
-    const interval = setInterval(fetchActiveRuns, 4000);
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        fetchActiveRuns(true);
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [fetchActiveRuns]);
+
+  // Dynamic poll cadence: fast (4s) while work is in flight, resilient (8s) when idle
+  // so background cron triggers or index catch-up runs are caught even without a WebSocket frame
+  useEffect(() => {
+    const cadence = activeRuns.length > 0 ? 4000 : 8000;
+    const interval = setInterval(fetchActiveRuns, cadence);
     return () => clearInterval(interval);
   }, [activeRuns.length, fetchActiveRuns]);
 

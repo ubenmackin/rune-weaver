@@ -55,7 +55,28 @@ export default function UpcomingSchedules({
     [fetchJobs],
   );
 
-  useSharedWebSocket(handleWSFrame);
+  const handleSocketOpen = useCallback(() => {
+    fetchJobs();
+  }, [fetchJobs]);
+
+  useSharedWebSocket(handleWSFrame, undefined, handleSocketOpen);
+
+  // Tab visibility resync ensures returning to the tab immediately refreshes schedules
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        fetchJobs();
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [fetchJobs]);
+
+  // Periodic heartbeat polling keeps schedule list and cadence updated
+  useEffect(() => {
+    const interval = setInterval(fetchJobs, 10000);
+    return () => clearInterval(interval);
+  }, [fetchJobs]);
 
   async function handleRunNow(job: SchedulerJob) {
     try {

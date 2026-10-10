@@ -5,7 +5,13 @@
 // - Workspace staged git changes count
 // - Direct shortcuts to Settings and Staged Changes
 
-import type { HealthResponse } from "../../api";
+import { useCallback, useEffect, useState } from "react";
+import {
+  getHealth,
+  getStagedFiles,
+  type HealthResponse,
+} from "../../api";
+import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
 import { FileDiffIcon, SettingsIcon } from "../icons";
 
 interface SystemPulseCardProps {
@@ -21,9 +27,70 @@ export default function SystemPulseCard({
   onOpenStagedDrawer,
   onOpenSettings,
 }: SystemPulseCardProps) {
-  const isHealthy = health?.status === "ok";
-  const modelName = health?.model || "Configured LLM";
-  const provider = health?.provider || health?.engine || "RuneWeaver";
+  const [liveHealth, setLiveHealth] = useState<HealthResponse | null>(health);
+  const [liveStagedCount, setLiveStagedCount] = useState<number>(stagedFilesCount);
+
+  useEffect(() => {
+    if (health) setLiveHealth(health);
+  }, [health]);
+
+  useEffect(() => {
+    if (stagedFilesCount !== undefined) setLiveStagedCount(stagedFilesCount);
+  }, [stagedFilesCount]);
+
+  const refreshTelemetry = useCallback(async () => {
+    try {
+      const [hRes, sRes] = await Promise.all([
+        getHealth().catch(() => null),
+        getStagedFiles().catch(() => null),
+      ]);
+      if (hRes) setLiveHealth(hRes);
+      if (sRes && Array.isArray(sRes.files)) setLiveStagedCount(sRes.files.length);
+    } catch {
+      // Best-effort telemetry
+    }
+  }, []);
+
+  const handleWSFrame = useCallback(
+    (frame: WSIncomingFrame) => {
+      const type = (frame as { type?: string }).type;
+      if (type === "file_accepted" || type === "file_discarded" || type === "tool_end") {
+        void refreshTelemetry();
+      }
+    },
+    [refreshTelemetry],
+  );
+
+  const handleSocketOpen = useCallback(() => {
+    void refreshTelemetry();
+  }, [refreshTelemetry]);
+
+  useSharedWebSocket(handleWSFrame, undefined, handleSocketOpen);
+
+  // Tab visibility resync
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        void refreshTelemetry();
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [refreshTelemetry]);
+
+  // Periodic heartbeat keeps telemetry and engine connectivity accurate
+  useEffect(() => {
+    const interval = setInterval(() => {
+      void refreshTelemetry();
+    }, 12000);
+    return () => clearInterval(interval);
+  }, [refreshTelemetry]);
+
+  const effectiveHealth = liveHealth ?? health;
+  const effectiveStagedCount = liveStagedCount;
+  const isHealthy = effectiveHealth?.status === "ok";
+  const modelName = effectiveHealth?.model || "Configured LLM";
+  const provider = effectiveHealth?.provider || effectiveHealth?.engine || "RuneWeaver";
 
   return (
     <section className="dashboard-section system-pulse-section" aria-label="System status & telemetry">
@@ -76,15 +143,15 @@ export default function SystemPulseCard({
             Staged File Edits
           </div>
           <div className="pulse-metric-value">
-            {stagedFilesCount > 0 ? (
+            {effectiveStagedCount > 0 ? (
               <button
                 type="button"
                 className="btn-staged-pill active"
                 onClick={onOpenStagedDrawer}
-                aria-label={`View ${stagedFilesCount} staged files`}
+                aria-label={`View ${effectiveStagedCount} staged files`}
               >
                 <FileDiffIcon size={12} />
-                <span>{stagedFilesCount} {stagedFilesCount === 1 ? "file" : "files"}</span>
+                <span>{effectiveStagedCount} {effectiveStagedCount === 1 ? "file" : "files"}</span>
               </button>
             ) : (
               <span className="text-xs muted">Clean workspace</span>

@@ -9,7 +9,9 @@
 // The persona describe pins the text-only identity header contract (muted name
 // with no avatar image when a persona exists, today's UI otherwise) and
 // ChatView's single-writer claim over the avatar activity clock and working
-// flag.
+// flag. The terminal-reconcile describes pin the missed-terminal settle to a
+// closed socket, the done frame's synchronous release of pending state, and
+// the history reload's refusal to evict a completed trailing assistant.
 
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -366,6 +368,101 @@ describe("ChatView", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
     });
+  });
+
+  it("preserves in-flight thinking and tool blocks when run settles and completes over healthy WebSocket", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    await user.type(screen.getByLabelText("Chat input"), "investigate logs");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+      .sessionID;
+
+    // 1. Tool starts and ends
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_start",
+      toolName: "logs.search",
+      callID: "call-log-1",
+      argumentsJSON: "{}",
+      sessionID: turnSID,
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_end",
+      toolName: "logs.search",
+      callID: "call-log-1",
+      result: { toolCallID: "call-log-1", content: "log found", isError: false },
+      sessionID: turnSID,
+    });
+
+    // 2. Reasoning delta
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "reasoning_delta",
+      delta: "Analyzing log entries carefully...",
+      sessionID: turnSID,
+    });
+
+    // 3. Text delta
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "The log confirms the service restarted.",
+      sessionID: turnSID,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Thinking Process")).toBeInTheDocument();
+      expect(screen.getByText("The log confirms the service restarted.")).toBeInTheDocument();
+    });
+
+    // 4. Server broadcasts run_completed before or with done frame
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_completed",
+      run: {
+        id: "run-turn-1",
+        kind: "interactive",
+        status: "ok",
+        sessionID: turnSID,
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    // Verify it is not wiped out
+    expect(screen.getByText("Thinking Process")).toBeInTheDocument();
+    expect(screen.getByText("The log confirms the service restarted.")).toBeInTheDocument();
+
+    // 5. Done frame arrives
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      text: "The log confirms the service restarted.",
+      sessionID: turnSID,
+      toolActions: [
+        {
+          toolName: "logs.search",
+          callID: "call-log-1",
+          argumentsJSON: "{}",
+          result: { toolCallID: "call-log-1", content: "log found", isError: false },
+        },
+      ],
+      totalTokens: 120,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+
+    // Both the thinking block and the final response remain in the document
+    expect(screen.getByText("Thinking Process")).toBeInTheDocument();
+    expect(screen.getByText("The log confirms the service restarted.")).toBeInTheDocument();
+    expect(screen.getByText("logs.search")).toBeInTheDocument();
   });
 
   it("processes tool_start, delta, and done when server returns uppercase UUID matching lowercase client session", async () => {
@@ -4542,6 +4639,775 @@ describe("ChatView persona header", () => {
     await waitFor(() => {
       expect(peekPersonaSignals().working).toBe(false);
     });
+  });
+});
+
+describe("missed-terminal settle requires a closed socket", () => {
+  function makeCountingSocket(): {
+    capture: ReturnType<typeof createMockWebSocketCapture>;
+    instances: WebSocket[];
+    CountingSocket: new (url?: string) => WebSocket;
+  } {
+    const capture = createMockWebSocketCapture();
+    const BaseSocket = createMockWebSocket(capture) as unknown as new (
+      url?: string,
+    ) => WebSocket;
+    const instances: WebSocket[] = [];
+    class CountingSocket extends BaseSocket {
+      constructor(url?: string) {
+        super(url);
+        instances.push(this);
+      }
+    }
+    return { capture, instances, CountingSocket };
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+    // Clear URL-routed session state so a hash left by an earlier auto-start
+    // test cannot override the pinned localStorage session below.
+    if (typeof window !== "undefined") {
+      window.location.hash = "";
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
+  it("keeps the in-flight turn while open and settles with a reload once closed", async () => {
+    const user = userEvent.setup();
+    const { capture, instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    const sessionA = "missed-settle-aaaa-1111";
+    localStorage.setItem("rw_active_session_id", sessionA);
+    // Pin the clock so the settle grace is deterministic: the send stamps the
+    // start, then the poll runs 11s later past the 10s grace.
+    const baseNow = Date.now();
+    const nowSpy = vi.spyOn(Date, "now");
+    nowSpy.mockReturnValue(baseNow);
+    const settledAt = new Date(baseNow).toISOString();
+    let mockRuns: Array<Record<string, unknown>> = [];
+    let historyMessages: Array<Record<string, unknown>> = [];
+    const seenFetch: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        seenFetch.push(typeof input === "string" ? input : String(input));
+        if (
+          typeof input === "string" &&
+          (input === "/sessions" || input.startsWith("/sessions?"))
+        ) {
+          return jsonResponse({
+            sessions: [
+              {
+                id: sessionA,
+                title: "Missed Session",
+                messageCount: historyMessages.length,
+                createdAt: settledAt,
+                updatedAt: settledAt,
+                source: "chat",
+              },
+            ],
+            count: 1,
+          });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID: sessionA, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.includes("/live-turn")) {
+          return jsonResponse({
+            active: false,
+            sessionID: sessionA,
+            text: "",
+            reasoning: "",
+            toolActions: [],
+            warnings: [],
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionA,
+            title: "Missed Session",
+            messages: historyMessages,
+            createdAt: settledAt,
+            updatedAt: settledAt,
+            source: "chat",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          return jsonResponse({ runs: mockRuns, count: mockRuns.length });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    try {
+      render(<ChatView />);
+      await waitFor(() => {
+        expect(capture.onMessage).not.toBeNull();
+      });
+      const detailCalls = (): number =>
+        seenFetch.filter(
+          (url) =>
+            url === `/sessions/${sessionA}` ||
+            url.startsWith(`/sessions/${sessionA}?`),
+        ).length;
+      await waitFor(() => {
+        expect(detailCalls()).toBeGreaterThanOrEqual(1);
+      });
+      const baselineDetailCalls = detailCalls();
+      const { result } = renderHook(() => useRunningRuns());
+      // Let the initial empty poll settle so the later refresh reads fresh rows.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+
+      await user.type(screen.getByLabelText("Chat input"), "missed terminal prompt");
+      await user.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => {
+        expect(capture.sentFrames.length).toBe(1);
+      });
+      const turnSID =
+        (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+          .sessionID ?? sessionA;
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "delta",
+        delta: "live partial progress ",
+        sessionID: turnSID,
+      });
+      await waitFor(() => {
+        expect(screen.getByText(/live partial progress/)).toBeInTheDocument();
+      });
+
+      // The run log reports the turn settled while the socket stays open.
+      mockRuns = [
+        {
+          id: "run-settled-1",
+          kind: "chat",
+          status: "ok",
+          message: "missed terminal prompt",
+          sessionID: sessionA,
+          timestamp: settledAt,
+          response: "persisted reply from server",
+        },
+      ];
+      historyMessages = [
+        {
+          id: "u1",
+          role: "user",
+          content: "missed terminal prompt",
+          createdAt: settledAt,
+        },
+        {
+          id: "a1",
+          role: "assistant",
+          content: "persisted reply from server",
+          createdAt: settledAt,
+        },
+      ];
+      nowSpy.mockReturnValue(baseNow + 11_000);
+      await act(async () => {
+        result.current.refresh();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await waitFor(() => {
+        expect(result.current.runs).toHaveLength(1);
+      });
+      // Give the view effect a tick to (not) reconcile while open.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+      // Open socket: the live bubble stays and no history reload fires.
+      expect(
+        screen.getByRole("button", { name: "Cancel turn" }),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/live partial progress/)).toBeInTheDocument();
+      expect(
+        screen.queryByText("persisted reply from server"),
+      ).not.toBeInTheDocument();
+      expect(detailCalls()).toBe(baselineDetailCalls);
+
+      // Closing the socket lets the same poll evidence settle the turn.
+      // Pin the stub to closed so the reconcile reads a downed socket even
+      // if the shared client re-arms around the close event.
+      await act(async () => {
+        for (const inst of instances) {
+          (inst as unknown as { readyState: number }).readyState = 3;
+          inst.close();
+        }
+      });
+      // A changed fingerprint forces the shared poller to publish again so the
+      // view reconciles on the closed socket instead of skipping identical rows.
+      mockRuns = [
+        {
+          id: "run-settled-1",
+          kind: "chat",
+          status: "ok",
+          message: "missed terminal prompt",
+          sessionID: sessionA,
+          timestamp: new Date(baseNow + 11_000).toISOString(),
+          response: "persisted reply from server",
+        },
+      ];
+      await act(async () => {
+        result.current.refresh();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+      });
+      await waitFor(() => {
+        expect(
+          screen.getByText("persisted reply from server"),
+        ).toBeInTheDocument();
+      });
+      expect(
+        screen.queryByRole("button", { name: "Cancel turn" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/live partial progress/),
+      ).not.toBeInTheDocument();
+      // Settle releases locally with no cancel for a turn the server no longer owns.
+      expect(capture.sentFrames).toHaveLength(1);
+      expect(detailCalls()).toBeGreaterThan(baselineDetailCalls);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+});
+
+describe("done frame clears pending state without a render hop", () => {
+  function makeCountingSocket(): {
+    capture: ReturnType<typeof createMockWebSocketCapture>;
+    instances: WebSocket[];
+    CountingSocket: new (url?: string) => WebSocket;
+  } {
+    const capture = createMockWebSocketCapture();
+    const BaseSocket = createMockWebSocket(capture) as unknown as new (
+      url?: string,
+    ) => WebSocket;
+    const instances: WebSocket[] = [];
+    class CountingSocket extends BaseSocket {
+      constructor(url?: string) {
+        super(url);
+        instances.push(this);
+      }
+    }
+    return { capture, instances, CountingSocket };
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+    // Clear URL-routed session state so a hash left by an earlier auto-start
+    // test cannot override the pinned localStorage session below.
+    if (typeof window !== "undefined") {
+      window.location.hash = "";
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
+  it("does not fire a history reload after the terminal frame", async () => {
+    const user = userEvent.setup();
+    const { capture, instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    const sessionB = "done-noreload-aaaa-2222";
+    localStorage.setItem("rw_active_session_id", sessionB);
+    const baseNow = Date.now();
+    const nowSpy = vi.spyOn(Date, "now");
+    nowSpy.mockReturnValue(baseNow);
+    const stamp = new Date(baseNow).toISOString();
+    let mockRuns: Array<Record<string, unknown>> = [];
+    // Decoy history the reload would surface if it fired spuriously.
+    const decoyMessages: Array<Record<string, unknown>> = [
+      { id: "u1", role: "user", content: "completed prompt", createdAt: stamp },
+      {
+        id: "a9",
+        role: "assistant",
+        content: "server decoy reply",
+        createdAt: stamp,
+      },
+    ];
+    let historyMessages: Array<Record<string, unknown>> = [];
+    const seenFetch: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        seenFetch.push(typeof input === "string" ? input : String(input));
+        if (
+          typeof input === "string" &&
+          (input === "/sessions" || input.startsWith("/sessions?"))
+        ) {
+          return jsonResponse({
+            sessions: [
+              {
+                id: sessionB,
+                title: "Done Session",
+                messageCount: historyMessages.length,
+                createdAt: stamp,
+                updatedAt: stamp,
+                source: "chat",
+              },
+            ],
+            count: 1,
+          });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID: sessionB, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.includes("/live-turn")) {
+          return jsonResponse({
+            active: false,
+            sessionID: sessionB,
+            text: "",
+            reasoning: "",
+            toolActions: [],
+            warnings: [],
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionB,
+            title: "Done Session",
+            messages: historyMessages,
+            createdAt: stamp,
+            updatedAt: stamp,
+            source: "chat",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          return jsonResponse({ runs: mockRuns, count: mockRuns.length });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    try {
+      render(<ChatView />);
+      await waitFor(() => {
+        expect(capture.onMessage).not.toBeNull();
+      });
+      const detailCalls = (): number =>
+        seenFetch.filter(
+          (url) =>
+            url === `/sessions/${sessionB}` ||
+            url.startsWith(`/sessions/${sessionB}?`),
+        ).length;
+      await waitFor(() => {
+        expect(detailCalls()).toBeGreaterThanOrEqual(1);
+      });
+      const { result } = renderHook(() => useRunningRuns());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+
+      await user.type(screen.getByLabelText("Chat input"), "completed prompt");
+      await user.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => {
+        expect(capture.sentFrames.length).toBe(1);
+      });
+      const turnSID =
+        (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+          .sessionID ?? sessionB;
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "done",
+        text: "completed reply final",
+        sessionID: turnSID,
+        toolActions: [],
+        totalTokens: 10,
+      });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+      });
+      expect(screen.getByText("completed reply final")).toBeInTheDocument();
+      const settledDetailCalls = detailCalls();
+
+      // Settled poll evidence on a closed socket must not reload afterwards:
+      // the terminal frame already released pending synchronously.
+      historyMessages = decoyMessages;
+      mockRuns = [
+        {
+          id: "run-done-1",
+          kind: "chat",
+          status: "ok",
+          message: "completed prompt",
+          sessionID: sessionB,
+          timestamp: stamp,
+          response: "server decoy reply",
+        },
+      ];
+      nowSpy.mockReturnValue(baseNow + 11_000);
+      // Pin the stub to closed so the reconcile reads a downed socket even
+      // if the shared client re-arms around the close event.
+      await act(async () => {
+        for (const inst of instances) {
+          (inst as unknown as { readyState: number }).readyState = 3;
+          inst.close();
+        }
+      });
+      await act(async () => {
+        result.current.refresh();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await waitFor(() => {
+        expect(result.current.runs).toHaveLength(1);
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Cancel turn" }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByText("completed reply final")).toBeInTheDocument();
+      expect(screen.getAllByText("completed reply final")).toHaveLength(1);
+      expect(screen.queryByText("server decoy reply")).not.toBeInTheDocument();
+      expect(capture.sentFrames).toHaveLength(1);
+      expect(detailCalls()).toBe(settledDetailCalls);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+});
+
+describe("history reload never clobbers the completed last turn", () => {
+  function makeCountingSocket(): {
+    capture: ReturnType<typeof createMockWebSocketCapture>;
+    instances: WebSocket[];
+    CountingSocket: new (url?: string) => WebSocket;
+  } {
+    const capture = createMockWebSocketCapture();
+    const BaseSocket = createMockWebSocket(capture) as unknown as new (
+      url?: string,
+    ) => WebSocket;
+    const instances: WebSocket[] = [];
+    class CountingSocket extends BaseSocket {
+      constructor(url?: string) {
+        super(url);
+        instances.push(this);
+      }
+    }
+    return { capture, instances, CountingSocket };
+  }
+
+  // Routes session reads through mutable boxes so each case seeds the mounted
+  // history first and swaps the reload answer before settling.
+  function installFetch(
+    sessionID: string,
+    boxes: {
+      history: Array<Record<string, unknown>>;
+      runs: Array<Record<string, unknown>>;
+    },
+    seenFetch: string[],
+  ): void {
+    const now = new Date().toISOString();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        seenFetch.push(typeof input === "string" ? input : String(input));
+        if (
+          typeof input === "string" &&
+          (input === "/sessions" || input.startsWith("/sessions?"))
+        ) {
+          return jsonResponse({
+            sessions: [
+              {
+                id: sessionID,
+                title: "Settle Session",
+                messageCount: boxes.history.length,
+                createdAt: now,
+                updatedAt: now,
+                source: "chat",
+              },
+            ],
+            count: 1,
+          });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.includes("/live-turn")) {
+          return jsonResponse({
+            active: false,
+            sessionID,
+            text: "",
+            reasoning: "",
+            toolActions: [],
+            warnings: [],
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionID,
+            title: "Settle Session",
+            messages: boxes.history,
+            createdAt: now,
+            updatedAt: now,
+            source: "chat",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          return jsonResponse({ runs: boxes.runs, count: boxes.runs.length });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+    // Clear URL-routed session state so a hash left by an earlier auto-start
+    // test cannot override the pinned localStorage session below.
+    if (typeof window !== "undefined") {
+      window.location.hash = "";
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
+  it("keeps the rendered reply when the server record is shorter without a trailing assistant", async () => {
+    const { capture, instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    const sessionC = "keep-trailing-aaaa-3333";
+    localStorage.setItem("rw_active_session_id", sessionC);
+    const stamp = new Date().toISOString();
+    // A 20s-old running row clears the settle grace once it appears.
+    const runningAt = new Date(Date.now() - 20_000).toISOString();
+    const boxes: {
+      history: Array<Record<string, unknown>>;
+      runs: Array<Record<string, unknown>>;
+    } = {
+      history: [
+        { id: "u1", role: "user", content: "earlier prompt", createdAt: stamp },
+        {
+          id: "a1",
+          role: "assistant",
+          content: "earlier reply",
+          createdAt: stamp,
+        },
+      ],
+      runs: [],
+    };
+    const seenFetch: string[] = [];
+    installFetch(sessionC, boxes, seenFetch);
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    // Seed the completed reply with no running row so history settles idly
+    // before any adoption; a running row on the first poll would win the
+    // mount race and truncate the trailing assistant behind a pending shell.
+    await waitFor(() => {
+      expect(screen.getByText("earlier prompt")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("earlier reply")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: "Cancel turn" }),
+    ).not.toBeInTheDocument();
+    const { result } = renderHook(() => useRunningRuns());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    // Publish the running row after the reply rendered so adoption lights
+    // pending without re-slicing the completed list.
+    boxes.runs = [
+      {
+        id: "run-keep-1",
+        kind: "chat",
+        status: "running",
+        message: "earlier prompt",
+        sessionID: sessionC,
+        timestamp: runningAt,
+      },
+    ];
+    await act(async () => {
+      result.current.refresh();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Cancel turn" }),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText("earlier prompt")).toBeInTheDocument();
+    expect(screen.getByText("earlier reply")).toBeInTheDocument();
+    const detailCalls = (): number =>
+      seenFetch.filter(
+        (url) =>
+          url === `/sessions/${sessionC}` ||
+          url.startsWith(`/sessions/${sessionC}?`),
+      ).length;
+    const baseline = detailCalls();
+
+    // The settled record is shorter and carries no trailing assistant, so the
+    // reload must keep the rendered list instead of evicting the completed turn.
+    boxes.history = [
+      { id: "u1", role: "user", content: "earlier prompt", createdAt: stamp },
+    ];
+    boxes.runs = [
+      {
+        id: "run-keep-1",
+        kind: "chat",
+        status: "ok",
+        message: "earlier prompt",
+        sessionID: sessionC,
+        timestamp: stamp,
+        response: "earlier reply",
+      },
+    ];
+    // Pin the stub to closed so the reconcile reads a downed socket even
+    // if the shared client re-arms around the close event.
+    await act(async () => {
+      for (const inst of instances) {
+        (inst as unknown as { readyState: number }).readyState = 3;
+        inst.close();
+      }
+    });
+    await act(async () => {
+      result.current.refresh();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+    expect(detailCalls()).toBeGreaterThan(baseline);
+    expect(screen.getByText("earlier prompt")).toBeInTheDocument();
+    expect(screen.getByText("earlier reply")).toBeInTheDocument();
+    expect(capture.sentFrames).toHaveLength(0);
+  });
+
+  it("replaces the list when the server record ends with an assistant", async () => {
+    const { capture, instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    const sessionD = "replace-trailing-aaaa-4444";
+    localStorage.setItem("rw_active_session_id", sessionD);
+    const stamp = new Date().toISOString();
+    const runningAt = new Date(Date.now() - 20_000).toISOString();
+    const boxes: {
+      history: Array<Record<string, unknown>>;
+      runs: Array<Record<string, unknown>>;
+    } = {
+      history: [
+        { id: "u1", role: "user", content: "earlier prompt", createdAt: stamp },
+        {
+          id: "a1",
+          role: "assistant",
+          content: "earlier reply",
+          createdAt: stamp,
+        },
+      ],
+      runs: [],
+    };
+    const seenFetch: string[] = [];
+    installFetch(sessionD, boxes, seenFetch);
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    // Seed the completed reply idly first so the later adoption cannot win
+    // the mount race and truncate it behind a pending shell.
+    await waitFor(() => {
+      expect(screen.getByText("earlier prompt")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("earlier reply")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: "Cancel turn" }),
+    ).not.toBeInTheDocument();
+    const { result } = renderHook(() => useRunningRuns());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    boxes.runs = [
+      {
+        id: "run-replace-1",
+        kind: "chat",
+        status: "running",
+        message: "earlier prompt",
+        sessionID: sessionD,
+        timestamp: runningAt,
+      },
+    ];
+    await act(async () => {
+      result.current.refresh();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Cancel turn" }),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText("earlier prompt")).toBeInTheDocument();
+    expect(screen.getByText("earlier reply")).toBeInTheDocument();
+    const detailCalls = (): number =>
+      seenFetch.filter(
+        (url) =>
+          url === `/sessions/${sessionD}` ||
+          url.startsWith(`/sessions/${sessionD}?`),
+      ).length;
+    const baseline = detailCalls();
+
+    // A record that still ends with an assistant is fresh enough to replace.
+    boxes.history = [
+      { id: "u1", role: "user", content: "earlier prompt", createdAt: stamp },
+      {
+        id: "a2",
+        role: "assistant",
+        content: "updated reply",
+        createdAt: stamp,
+      },
+    ];
+    boxes.runs = [
+      {
+        id: "run-replace-1",
+        kind: "chat",
+        status: "ok",
+        message: "earlier prompt",
+        sessionID: sessionD,
+        timestamp: stamp,
+        response: "updated reply",
+      },
+    ];
+    // Pin the stub to closed so the reconcile reads a downed socket even
+    // if the shared client re-arms around the close event.
+    await act(async () => {
+      for (const inst of instances) {
+        (inst as unknown as { readyState: number }).readyState = 3;
+        inst.close();
+      }
+    });
+    await act(async () => {
+      result.current.refresh();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+    expect(detailCalls()).toBeGreaterThan(baseline);
+    expect(screen.getByText("updated reply")).toBeInTheDocument();
+    expect(screen.queryByText("earlier reply")).not.toBeInTheDocument();
+    expect(capture.sentFrames).toHaveLength(0);
   });
 });
 
