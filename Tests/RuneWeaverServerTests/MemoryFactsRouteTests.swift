@@ -117,6 +117,29 @@ private func factsRequest(app: Application, method: HTTPMethod, path: String) as
     return try await app.responder.respond(to: request).get()
 }
 
+/// Sends one body-carrying request through the full registered surface.
+/// - Parameters:
+///   - app: Configured application.
+///   - method: HTTP method.
+///   - path: Path plus optional query string.
+///   - body: Request payload encoded as the wire content.
+/// - Returns: Route response.
+private func factsWriteRequest(
+    app: Application,
+    method: HTTPMethod,
+    path: String,
+    body: some Content
+) async throws -> Response {
+    let request = Request(
+        application: app,
+        method: method,
+        url: URI(string: path),
+        on: app.eventLoopGroup.next()
+    )
+    try request.content.encode(body)
+    return try await app.responder.respond(to: request).get()
+}
+
 @Suite("Memory Facts Routes")
 struct MemoryFactsRouteTests {
     @Test
@@ -220,6 +243,33 @@ struct MemoryFactsRouteTests {
 
             let nonNumeric = try await factsRequest(app: app, method: .GET, path: "/memory/facts?offset=abc")
             #expect(nonNumeric.status == .badRequest)
+        }
+    }
+
+    @Test
+    func `Reserved run bookkeeping content is refused on write`() async throws {
+        try await withFactsApp { app, context in
+            // The scheduler run cursor is framework-owned, so the REST write
+            // boundary refuses the reserved marker shape exactly like the
+            // memory tool does.
+            let forged = try await factsWriteRequest(
+                app: app,
+                method: .POST,
+                path: "/memory/facts",
+                body: StoreFactRequest(content: "Email report last run: 2999-01-01T00:00:00Z", source: "api")
+            )
+            #expect(forged.status == .badRequest)
+
+            let ordinary = try await factsWriteRequest(
+                app: app,
+                method: .POST,
+                path: "/memory/facts",
+                body: StoreFactRequest(content: "Lighthouse keeper alias is Zephyr", source: "api")
+            )
+            #expect(ordinary.status == .ok)
+            let facts = await context.memoryEngine.allSemanticFacts()
+            #expect(facts.count == 1)
+            #expect(facts.first?.content == "Lighthouse keeper alias is Zephyr")
         }
     }
 }

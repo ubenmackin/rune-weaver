@@ -368,25 +368,7 @@ func validatedChatText(_ raw: String) throws -> String {
 /// Registers memory search plus facts CRUD routes.
 /// - Parameter app: Application receiving the routes.
 private func registerMemoryRoutes(_ app: Application) {
-    app.get(PathComponent.constant(ServerPaths.memory), PathComponent.constant(ServerPaths.memorySearch)) { req async throws -> MemorySearchResponse in
-        guard let query = req.query[String.self, at: "q"],
-              !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            throw Abort(.badRequest, reason: "q query parameter is required")
-        }
-        let limit = try parseQueryLimit(req, default: 10, min: 1, max: 50)
-        let context = req.application.runeWeaver
-        // Embed best-effort so vector hits rank by cosine similarity while
-        // the response shape stays unchanged; any failure keeps keywords
-        // while cancellation propagates.
-        let embedding: [Float]? = if let embedder = context.embedder {
-            try await embedder.embedQuery(query)
-        } else {
-            nil
-        }
-        let memories = try await context.memoryEngine.recall(query: query, embedding: embedding, limit: limit)
-        return MemorySearchResponse(query: query, memories: memories)
-    }
+    registerMemorySearchRoute(app)
 
     app.get(PathComponent.constant(ServerPaths.memory), PathComponent.constant(ServerPaths.memoryFacts)) { req async throws -> FactsPageResponse in
         // Query trimming plus limit plus offset parsing stay at the transport
@@ -427,6 +409,11 @@ private func registerMemoryRoutes(_ app: Application) {
 
     app.post(PathComponent.constant(ServerPaths.memory), PathComponent.constant(ServerPaths.memoryFacts)) { req async throws -> UserFact in
         let body = try req.content.decode(StoreFactRequest.self)
+        // The scheduler run cursor is framework-owned, so the REST boundary
+        // refuses the reserved marker shape exactly like the memory tool.
+        guard !SchedulerRunBookkeeping.isReservedFactText(body.content) else {
+            throw Abort(.badRequest, reason: "content must not restate framework run bookkeeping")
+        }
         guard MemoryEngine.isStorableFact(body.content) else {
             throw Abort(.badRequest, reason: "content must contain alphanumeric characters")
         }
@@ -462,6 +449,66 @@ private func registerMemoryRoutes(_ app: Application) {
     }
 
     registerEpisodicDeleteRoutes(app)
+}
+
+/// Registers the memory search route.
+///
+/// Split from `registerMemoryRoutes` so the parent stays within the function
+/// body budget; search registers first so the remaining memory routes keep
+/// the parent's original registration order.
+/// - Parameter app: Application receiving the routes.
+private func registerMemorySearchRoute(_ app: Application) {
+    app.get(PathComponent.constant(ServerPaths.memory), PathComponent.constant(ServerPaths.memorySearch)) { req async throws -> MemorySearchResponse in
+        guard let query = req.query[String.self, at: "q"],
+              !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw Abort(.badRequest, reason: "q query parameter is required")
+        }
+        let limit = try parseQueryLimit(req, default: 10, min: 1, max: 50)
+        let context = req.application.runeWeaver
+        // Live recall budgets from the orchestrator so dashboard search honors
+        // the same clamped `[memory] recall_*` values chat turns inject with
+        // instead of default budgets.
+        let budgets = await context.orchestrator.budgets
+        // Same inference as chat auto-recall so both surfaces see the same windowed corpus.
+        let plan = MemoryQueryRouter.plan(for: query, currentDate: Date(), budgets: budgets)
+        // Chat fans out with the folded alias form, so the dashboard recalls
+        // with the same expanded query to keep one corpus.
+        let recallQuery = plan.expandedQuery.isEmpty ? query : plan.expandedQuery
+        // Embed best-effort so vector hits rank by cosine similarity while
+        // the response shape stays unchanged; cancellation propagates while
+        // other failures fall back to the keyword path, mirroring chat recall.
+        let embedding: [Float]?
+        do {
+            if let embedder = context.embedder {
+                embedding = try await embedder.embedQuery(recallQuery)
+            } else {
+                embedding = nil
+            }
+        } catch let error as CancellationError {
+            throw error
+        } catch {
+            embedding = nil
+        }
+        let recalled = try await context.memoryEngine.recall(
+            query: recallQuery,
+            embedding: embedding,
+            limit: limit,
+            since: plan.since,
+            until: plan.until,
+            budgets: budgets,
+            skipDocIndex: plan.skipDocIndex
+        )
+        // Mirror the chat post-recall live override so forced-live queries
+        // hide indexed chunks on both surfaces. The live check runs only when
+        // the plan keeps the index visible.
+        var hideIndexed = plan.skipDocIndex
+        if !hideIndexed {
+            hideIndexed = await LiveSearchOverride.shared.shouldUseLiveSearch(for: query)
+        }
+        let memories: [MemoryResult] = hideIndexed ? recalled.filter { $0.source != .docIndex } : recalled
+        return MemorySearchResponse(query: query, memories: memories)
+    }
 }
 
 /// Registers episodic recent listing plus bulk, session, and single-row delete routes.

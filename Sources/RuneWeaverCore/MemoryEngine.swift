@@ -815,6 +815,9 @@ extension MemoryEngine {
     public static func isStorableFact(_ content: String) -> Bool {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
+        // Reserved run-bookkeeping shapes stay framework-owned: accepting one
+        // would let an agent-authored write forge a scheduler run cursor.
+        guard !SchedulerRunBookkeeping.isReservedFactText(trimmed) else { return false }
         return containsAlphanumeric(trimmed)
     }
 
@@ -831,6 +834,12 @@ extension MemoryEngine {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw MemoryEngineError.semanticFailed("Fact must not be empty.")
+        }
+        // The storage boundary refuses reserved run-bookkeeping shapes too, so
+        // no engine write path — tool, REST, extraction, or import — can forge
+        // a scheduler run cursor.
+        guard !SchedulerRunBookkeeping.isReservedFactText(trimmed) else {
+            throw MemoryEngineError.semanticFailed("Fact must not restate framework run bookkeeping.")
         }
         guard containsAlphanumeric(trimmed) else {
             throw MemoryEngineError.semanticFailed("Fact must contain alphanumeric characters.")

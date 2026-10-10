@@ -200,8 +200,10 @@ public actor Orchestrator {
         memoryEngine
     }
 
-    /// Read-only recall budgets for tool-loop extensions.
-    var budgets: RecallBudgets {
+    /// Read-only recall budgets for tool-loop extensions and the dashboard search route.
+    /// Public so the server module reads the same clamped `[memory] recall_*`
+    /// values chat turns inject with instead of default budgets.
+    public var budgets: RecallBudgets {
         recallBudgets
     }
 
