@@ -351,6 +351,89 @@ struct RunApprovalLifecycleTests {
     }
 
     @Test
+    func `Approved scheduler resume advances the framework cursor`() async throws {
+        let args = #"{"text":"hi"}"#
+        let narrated = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "stub.write", argumentsJSON: args, callID: "call_sched_ok")
+        ])
+        let (context, sessionID, approvalID) = try await makeLifecycleContext(narrated: narrated, synthesis: "Scheduler done.")
+        let job = try await context.scheduler.create(NewSchedulerJob(name: "cursor job", schedule: "* * * * *", prompt: "Do work"))
+        let seed = Date(timeIntervalSince1970: 1_700_000_000)
+        await context.scheduler.recordSuccessfulRun(id: job.id, endedAt: seed)
+        let parked = await context.runs.append(
+            kind: "scheduler",
+            status: "awaiting_approval",
+            message: "Do gated work",
+            jobID: job.id,
+            sessionID: sessionID,
+            response: "Waiting for approval."
+        )
+        #expect(await context.approvals.decide(id: approvalID, approved: true) == true)
+        await resumeNarratedApproval(id: approvalID, approved: true, context: context)
+        let transitioned = await context.runs.entry(id: parked.id)
+        #expect(transitioned?.status == "ok")
+        #expect(transitioned?.kind == "scheduler")
+        // A parked-then-approved scheduler turn is a completion, so the
+        // framework cursor must move past the seeded watermark.
+        let advanced = try #require(await context.scheduler.job(id: job.id)?.lastSuccessfulRunEndedAt)
+        #expect(advanced > seed)
+    }
+
+    @Test
+    func `Denied scheduler resume leaves the framework cursor untouched`() async throws {
+        let args = #"{"text":"hi"}"#
+        let narrated = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "stub.write", argumentsJSON: args, callID: "call_sched_deny")
+        ])
+        let (context, sessionID, approvalID) = try await makeLifecycleContext(narrated: narrated, synthesis: "unused")
+        let job = try await context.scheduler.create(NewSchedulerJob(name: "denied job", schedule: "* * * * *", prompt: "Do work"))
+        let seed = Date(timeIntervalSince1970: 1_700_000_000)
+        await context.scheduler.recordSuccessfulRun(id: job.id, endedAt: seed)
+        let parked = await context.runs.append(
+            kind: "scheduler",
+            status: "awaiting_approval",
+            message: "Do gated work",
+            jobID: job.id,
+            sessionID: sessionID,
+            response: "Waiting for approval."
+        )
+        #expect(await context.approvals.decide(id: approvalID, approved: false) == true)
+        await resumeNarratedApproval(id: approvalID, approved: false, context: context)
+        let transitioned = await context.runs.entry(id: parked.id)
+        #expect(transitioned?.status == "denied")
+        // Denied turns never complete, so the next run must rescan the window.
+        #expect(await context.scheduler.job(id: job.id)?.lastSuccessfulRunEndedAt == seed)
+    }
+
+    @Test
+    func `Error scheduler resume leaves the framework cursor untouched`() async throws {
+        let args = #"{"text":"hi"}"#
+        let narrated = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "stub.write", argumentsJSON: args, callID: "call_sched_error")
+        ])
+        let (context, sessionID, approvalID) = try await makeLifecycleContext(narrated: narrated, synthesis: "unused")
+        let job = try await context.scheduler.create(NewSchedulerJob(name: "error job", schedule: "* * * * *", prompt: "Do work"))
+        let seed = Date(timeIntervalSince1970: 1_700_000_000)
+        await context.scheduler.recordSuccessfulRun(id: job.id, endedAt: seed)
+        let parked = await context.runs.append(
+            kind: "scheduler",
+            status: "awaiting_approval",
+            message: "Do gated work",
+            jobID: job.id,
+            sessionID: sessionID,
+            response: "Waiting for approval."
+        )
+        #expect(await context.approvals.decide(id: approvalID, approved: true) == true)
+        // Removing the tool forces the allowed resume onto the missing-tool
+        // path, which settles with an empty action list and error status.
+        await context.toolBus.unregister(toolNamed: "stub.write")
+        await resumeNarratedApproval(id: approvalID, approved: true, context: context)
+        let transitioned = await context.runs.entry(id: parked.id)
+        #expect(transitioned?.status == "error")
+        #expect(await context.scheduler.job(id: job.id)?.lastSuccessfulRunEndedAt == seed)
+    }
+
+    @Test
     func `Resolved status distinguishes allow error from deny`() {
         let okResponse = OrchestratorResponse(
             text: "done",

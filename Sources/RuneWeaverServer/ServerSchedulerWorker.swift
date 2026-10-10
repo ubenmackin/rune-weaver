@@ -22,6 +22,17 @@ private struct EmailSearchResponseEnvelope: Decodable {
     let messages: [MessageItem]
 }
 
+/// Whether a finished scheduler turn should advance the cursor.
+///
+/// Only clean completions advance the watermark; parked, budget-limited,
+/// failed, and cancelled turns keep the prior value so the next run rescans
+/// the same window instead of skipping work.
+extension OrchestratorResponse {
+    var shouldAdvanceSchedulerCursor: Bool {
+        !isParked && !isBudgetExceeded
+    }
+}
+
 /// ServerSchedulerWorker keeps cron, poll, and goal firing behind one single-flight worker so overlapping ticks skip together.
 ///
 /// In-process scheduler worker executing scheduled jobs inside `RuneWeaverServer`.
@@ -467,10 +478,11 @@ extension ServerSchedulerWorker {
             let requestedIterations = job.maxToolIterations ?? schedulerConfig.defaultMaxToolIterations
             let maxIterations = min(max(requestedIterations, 1), 100)
             let policy: ToolLimitPolicy = job.onToolLimit == "park" ? .park : .forceSynthesis
+            let effectivePrompt = await freshSchedulerRunPrompt(for: job)
             let runTask: Task<OrchestratorResponse, any Error> = Task {
                 try await orchestrator.process(
                     input: UserInput(
-                        text: job.prompt,
+                        text: effectivePrompt,
                         sessionID: sessionID,
                         source: "scheduler",
                         toolLimitPolicy: policy,
@@ -524,7 +536,8 @@ extension ServerSchedulerWorker {
         startTime: Date,
         reason: SchedulerFireReason
     ) async -> SchedulerRunResult {
-        let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+        let finishedAt = Date()
+        let durationMs = Int(finishedAt.timeIntervalSince(startTime) * 1000)
         let runStatus = if response.isParked {
             "awaiting_approval"
         } else if response.isBudgetExceeded {
@@ -541,6 +554,9 @@ extension ServerSchedulerWorker {
             durationMs: durationMs
         ) {
             await hub.broadcastRun(entry)
+        }
+        if response.shouldAdvanceSchedulerCursor {
+            await scheduler.recordSuccessfulRun(id: job.id, endedAt: finishedAt)
         }
 
         let short = ProactiveEvent.makePreview(response.text)
@@ -571,7 +587,7 @@ extension ServerSchedulerWorker {
             responseText: response.text,
             fireReason: reason,
             startedAt: startTime,
-            finishedAt: Date()
+            finishedAt: finishedAt
         )
     }
 
@@ -611,6 +627,7 @@ extension ServerSchedulerWorker {
         error: any Error
     ) async -> SchedulerRunResult {
         let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+        // Cancelled and failed turns keep the prior cursor by returning without recording.
         if error is CancellationError {
             let entry = await runs.update(
                 id: initialEntry.id,
@@ -659,6 +676,75 @@ extension ServerSchedulerWorker {
             startedAt: startTime,
             finishedAt: Date()
         )
+    }
+}
+
+// MARK: - Scheduler run cursor prompt
+
+extension ServerSchedulerWorker {
+    /// Framework-owned rule carried on every run prompt, cursor or not.
+    static let schedulerCursorRuleLine =
+        "Scan windows come from this cursor; never store run bookkeeping with memories.store."
+
+    /// Default-lookback sentence carried when no cursor exists yet.
+    static let schedulerCursorlessLookbackLine =
+        "No prior successful run; scan the default lookback window."
+
+    /// Verbatim configured window for cursorless first runs, so the agent
+    /// never has to guess the default lookback duration.
+    static func schedulerCursorlessWindowDetail(for job: SchedulerJob) -> String {
+        var parts: [String] = []
+        let schedule = job.schedule.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !schedule.isEmpty {
+            parts.append("schedule '\(schedule)'")
+        }
+        if let rule = job.pollRule {
+            parts.append("poll every \(rule.pollIntervalSeconds)s (account '\(rule.trimmedAccount)')")
+        }
+        guard !parts.isEmpty else {
+            return "Configured window: default lookback."
+        }
+        return "Configured window: \(parts.joined(separator: "; "))."
+    }
+
+    /// Verbatim timestamp shape injected alongside the cursor.
+    ///
+    /// `SchedulerRunBookkeeping` owns the shape because the migration's
+    /// persisted audit record prints the same instants from the store side;
+    /// this is the worker-facing name for that single formatter.
+    static func schedulerCursorTimestampString(from date: Date) -> String {
+        SchedulerRunBookkeeping.schedulerCursorTimestampString(from: date)
+    }
+
+    /// Builds the effective run prompt, always carrying the cursor rule.
+    ///
+    /// Cursorless first runs get the rule plus the default-lookback sentence
+    /// with the owning job's configured window verbatim and without a
+    /// timestamp, so the agent never re-improvises bookkeeping.
+    static func schedulerRunPrompt(for job: SchedulerJob) -> String {
+        guard let cursor = job.lastSuccessfulRunEndedAt else {
+            return job.prompt + "\n\n\(schedulerCursorlessLookbackLine)\n\(schedulerCursorlessWindowDetail(for: job))\n\(schedulerCursorRuleLine)"
+        }
+        let stamp = schedulerCursorTimestampString(from: cursor)
+        return job.prompt + "\n\nLast successful run ended: \(stamp)\n\(schedulerCursorRuleLine)"
+    }
+
+    /// Builds the effective prompt with the freshest stored cursor.
+    func freshSchedulerRunPrompt(for job: SchedulerJob) async -> String {
+        guard let fresh = await scheduler.job(id: job.id) else {
+            return Self.schedulerRunPrompt(for: job)
+        }
+        return Self.schedulerRunPrompt(for: fresh)
+    }
+
+    /// Migrates legacy email-report markers into job cursors at boot.
+    ///
+    /// Production routes the boot-tail sweep through this wrapper so the
+    /// caller can log and persist the audit record instead of discarding the
+    /// cursor jump; the sweep itself is one-shot behind a durable latch.
+    @discardableResult
+    func migrateEmailReportMarkers(memoryEngine: MemoryEngine) async -> SchedulerMarkerMigrationReport {
+        await scheduler.migrateEmailReportMarkers(memoryEngine: memoryEngine)
     }
 }
 

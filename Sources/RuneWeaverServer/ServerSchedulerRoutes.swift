@@ -254,6 +254,12 @@ private func recordResumedRun(
             totalTokens: resumed.totalTokens
         ) ?? awaiting
         await context.hub.broadcastRun(updated)
+        // A parked-then-approved scheduler turn is a completion, so advance the
+        // framework cursor exactly like the tick and manual paths. Denied, error,
+        // and still-parked outcomes keep the prior value so the next run rescans.
+        if finalStatus == "ok", let jobID = awaiting.jobID, awaiting.kind == "scheduler" {
+            await context.scheduler.recordSuccessfulRun(id: jobID)
+        }
         return
     }
     let startLabel = approved ? "Approved" : "Denied"
@@ -414,9 +420,15 @@ private func executeManualJobRun(
 ) async throws -> OrchestratorResponse {
     do {
         let policy: ToolLimitPolicy = job.onToolLimit == "park" ? .park : .forceSynthesis
+        // Manual runs carry the same framework cursor as automatic ticks so the
+        // agent never re-improvises memories.store bookkeeping; the job resolved
+        // at request start predates the single-flight lock, so the prompt is
+        // re-read from the freshest stored cursor under the lock, exactly like
+        // the automatic tick path, keeping both paths identical.
+        let effectivePrompt = await context.schedulerWorker.freshSchedulerRunPrompt(for: job)
         let response = try await context.orchestrator.process(
             input: UserInput(
-                text: job.prompt,
+                text: effectivePrompt,
                 sessionID: sessionID,
                 source: "scheduler",
                 toolLimitPolicy: policy,
@@ -427,7 +439,8 @@ private func executeManualJobRun(
             }
         )
         await broadcastStreamDone(for: response, sessionID: sessionID, hub: context.hub)
-        let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+        let finishedAt = Date()
+        let durationMs = Int(finishedAt.timeIntervalSince(startTime) * 1000)
         // Parked scheduler turns remain as awaiting_approval like chat turns, resolving through
         // the same inbox resume path in their session. Budget exceeded turns finish with
         // forced diagnostic synthesis and budget_exceeded status.
@@ -448,6 +461,9 @@ private func executeManualJobRun(
             durationMs: durationMs
         ) ?? initialEntry
         await context.hub.broadcastRun(entry)
+        if response.shouldAdvanceSchedulerCursor {
+            await context.scheduler.recordSuccessfulRun(id: job.id, endedAt: finishedAt)
+        }
         await context.runLock.release(id: job.id, name: job.name)
         return response
     } catch let error as CancellationError {

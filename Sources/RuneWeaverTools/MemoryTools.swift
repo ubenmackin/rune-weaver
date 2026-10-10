@@ -332,6 +332,15 @@ public struct RememberFactTool: Tool, Sendable {
         guard !text.isEmpty else {
             return .failure("Invalid memories.store arguments: 'text' must not be empty.", callID: input.callID)
         }
+        // The scheduler run cursor is framework-owned, so the trusted tool
+        // refuses the reserved marker shape outright: an injected store call
+        // must never be able to forge run bookkeeping.
+        guard !SchedulerRunBookkeeping.isReservedFactText(text) else {
+            return .failure(
+                "Invalid memories.store arguments: 'text' must not restate framework run bookkeeping.",
+                callID: input.callID
+            )
+        }
         guard MemoryEngine.isStorableFact(text) else {
             return .failure("Invalid memories.store arguments: 'text' must contain alphanumeric characters.", callID: input.callID)
         }

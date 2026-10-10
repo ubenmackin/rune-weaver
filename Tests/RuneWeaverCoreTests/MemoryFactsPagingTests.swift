@@ -88,6 +88,36 @@ struct MemoryFactsPagingTests {
     }
 
     @Test
+    func `Reserved run bookkeeping shapes are refused at the storage boundary`() async throws {
+        let (engine, base) = makeFactsPagingEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // The scheduler run cursor is framework-owned, so the boolean gate and
+        // the storage validator both refuse the reserved marker shape: no write
+        // path — tool, REST, extraction, or direct engine call — can forge one.
+        #expect(MemoryEngine.isStorableFact("Lighthouse keeper alias is Zephyr") == true)
+        #expect(MemoryEngine.isStorableFact("Email report last run: 2026-10-02T09:30:00Z") == false)
+        #expect(MemoryEngine.isStorableFact("  email_report_last run: 2026-10-02T09:30:00Z  ") == false)
+        #expect(MemoryEngine.isStorableFact("Discussing the email report from last run") == true)
+
+        do {
+            _ = try MemoryEngine.validatedFactText("Email report last run: 2026-10-02T09:30:00Z")
+            Issue.record("reserved run bookkeeping must be rejected by the storage validator")
+        } catch {
+            #expect(error is MemoryEngineError)
+        }
+        do {
+            _ = try await engine.storeProfileFact(content: "Email report last run: 2026-10-02T09:30:00Z", source: "chat")
+            Issue.record("reserved run bookkeeping must be rejected by the engine write path")
+        } catch {
+            #expect(error is MemoryEngineError)
+        }
+
+        let facts = await engine.allSemanticFacts()
+        #expect(facts.isEmpty)
+    }
+
+    @Test
     func `Offset paging walks the full match set`() async throws {
         let (engine, base) = makeFactsPagingEngine()
         defer { try? FileManager.default.removeItem(at: base) }

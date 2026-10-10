@@ -28,6 +28,11 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     public var pollIntervalSeconds: Int?
     /// Maximum hits fetched per poll (nil means `EmailPollRule/defaultLimit`).
     public var pollLimit: Int?
+    /// Owner-set flag marking this job as the owner of an email-report run
+    /// cursor. Set explicitly through the REST surface; prompt or name text is
+    /// never sniffed to infer it, because agent-writable text would otherwise
+    /// decide which jobs inherit a seeded cursor.
+    public var emailReportJob: Bool
     /// Maximum tool iterations before limit policy triggers, or nil to inherit default.
     public var maxToolIterations: Int?
     /// Action when tool limit is reached: "fail" (synthesize & budget_exceeded) or "park". Defaults to "fail".
@@ -36,6 +41,8 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     public var createdAt: Date
     /// When the job was last updated.
     public var updatedAt: Date
+    /// Framework-owned end of the last successful run, if any.
+    public var lastSuccessfulRunEndedAt: Date?
 
     /// Creates a scheduler job.
     public init(
@@ -49,10 +56,12 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         pollMailbox: String? = nil,
         pollIntervalSeconds: Int? = nil,
         pollLimit: Int? = nil,
+        emailReportJob: Bool = false,
         maxToolIterations: Int? = nil,
         onToolLimit: String? = nil,
         createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        lastSuccessfulRunEndedAt: Date? = nil
     ) {
         self.id = id
         self.name = name
@@ -64,10 +73,12 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         self.pollMailbox = pollMailbox
         self.pollIntervalSeconds = pollIntervalSeconds
         self.pollLimit = pollLimit.map(EmailPollRule.clampedLimit)
+        self.emailReportJob = emailReportJob
         self.maxToolIterations = maxToolIterations
         self.onToolLimit = onToolLimit
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.lastSuccessfulRunEndedAt = lastSuccessfulRunEndedAt
     }
 
     /// Whether the job has a cron trigger.
@@ -113,6 +124,9 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
     public var pollIntervalSeconds: Int?
     /// Maximum hits fetched per poll.
     public var pollLimit: Int?
+    /// Owner-set flag marking this job as the owner of an email-report run
+    /// cursor. Never inferred from job text.
+    public var emailReportJob: Bool?
     /// Maximum tool iterations before limit policy triggers, or nil to inherit default.
     public var maxToolIterations: Int?
     /// Action when tool limit is reached: "fail" (synthesize & budget_exceeded) or "park". Defaults to "fail".
@@ -129,6 +143,7 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
         pollMailbox: String? = nil,
         pollIntervalSeconds: Int? = nil,
         pollLimit: Int? = nil,
+        emailReportJob: Bool? = nil,
         maxToolIterations: Int? = nil,
         onToolLimit: String? = nil
     ) {
@@ -141,6 +156,7 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
         self.pollMailbox = pollMailbox
         self.pollIntervalSeconds = pollIntervalSeconds
         self.pollLimit = pollLimit
+        self.emailReportJob = emailReportJob
         self.maxToolIterations = maxToolIterations
         self.onToolLimit = onToolLimit
     }
@@ -168,6 +184,8 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
     /// New poll limit, if changed. Omitted (nil) leaves the limit
     /// alone; use `clearPoll: true` to clear it.
     public var pollLimit: Int?
+    /// New email-report flag, if changed. Omitted (nil) leaves the flag alone.
+    public var emailReportJob: Bool?
     /// When true, clears the whole poll trigger to nil before applying
     /// any non-nil poll fields in the same payload.
     public var clearPoll: Bool?
@@ -194,6 +212,7 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         pollIntervalSeconds: Int? = nil,
         pollLimit: Int? = nil,
         clearPoll: Bool? = nil,
+        emailReportJob: Bool? = nil,
         maxToolIterations: Int? = nil,
         onToolLimit: String? = nil,
         clearToolBudget: Bool? = nil
@@ -208,6 +227,7 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         self.pollIntervalSeconds = pollIntervalSeconds
         self.pollLimit = pollLimit
         self.clearPoll = clearPoll
+        self.emailReportJob = emailReportJob
         self.maxToolIterations = maxToolIterations
         self.onToolLimit = onToolLimit
         self.clearToolBudget = clearToolBudget
@@ -228,9 +248,21 @@ public actor SchedulerStore {
     public static let maxJobs = 100
 
     /// Jobs indexed by identifier.
-    private var jobs: [UUID: SchedulerJob] = [:]
+    ///
+    /// Module-internal rather than `private` because the one-shot marker
+    /// migration lives beside its latch table in
+    /// `SchedulerStoreMarkerMigration.swift` instead of in this actor body, so
+    /// `migrateEmailReportMarkers` reads and reseeds cursors against the live
+    /// registry rather than a snapshot of it.
+    var jobs: [UUID: SchedulerJob] = [:]
     /// Optional filesystem path for SQLite persistence.
     public let dbPath: String?
+    /// Process-local half of the one-shot marker-migration latch, covering
+    /// stores without a durable path. Durable stores read their flag from
+    /// `scheduler_marker_migrations` instead; see
+    /// `migrateEmailReportMarkers`. Module-internal because the migration
+    /// lives beside its latch table rather than in this actor body.
+    var markerMigrationConsumed = false
 
     /// Creates an empty store.
     /// - Parameter dbPath: Optional SQLite path for durable persistence.
@@ -275,6 +307,7 @@ public actor SchedulerStore {
             pollMailbox: normalizedMailbox,
             pollIntervalSeconds: input.pollIntervalSeconds,
             pollLimit: input.pollLimit.map(EmailPollRule.clampedLimit),
+            emailReportJob: input.emailReportJob ?? false,
             maxToolIterations: input.maxToolIterations,
             onToolLimit: normalizedOnToolLimit,
             createdAt: now,
@@ -353,6 +386,9 @@ public actor SchedulerStore {
         if let limit = input.pollLimit {
             existing.pollLimit = EmailPollRule.clampedLimit(limit)
         }
+        if let emailReportJob = input.emailReportJob {
+            existing.emailReportJob = emailReportJob
+        }
         if input.clearToolBudget == true {
             existing.maxToolIterations = nil
             existing.onToolLimit = nil
@@ -421,89 +457,20 @@ public actor SchedulerStore {
         jobs.count
     }
 
-    /// Validates required job fields plus trigger shape.
-    private static func validated(
-        name: String,
-        schedule: String,
-        prompt: String,
-        pollAccount: String? = nil,
-        pollQuery: String? = nil,
-        pollMailbox: String? = nil,
-        pollIntervalSeconds: Int? = nil,
-        pollLimit: Int? = nil,
-        maxToolIterations: Int? = nil,
-        onToolLimit: String? = nil
-    ) throws {
-        try validateToolBudget(maxToolIterations: maxToolIterations, onToolLimit: onToolLimit)
-        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw SchedulerStoreError.invalidField("name must not be empty")
+    /// Records the end of a successful run, advancing the framework-owned cursor.
+    public func recordSuccessfulRun(id: UUID, endedAt: Date = Date()) async {
+        guard var existing = jobs[id] else { return }
+        existing.lastSuccessfulRunEndedAt = endedAt
+        existing.updatedAt = endedAt
+        jobs[id] = existing
+        if let dbPath {
+            #if canImport(SQLite3)
+                let jobToWrite = existing
+                await SQLiteSerialIO.runUncancellable {
+                    SQLiteSchedulerJobStore.write(job: jobToWrite, dbPath: dbPath)
+                }
+            #endif
         }
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw SchedulerStoreError.invalidField("prompt must not be empty")
-        }
-        let trimmedAccount = pollAccount?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if trimmedAccount.isEmpty {
-            if pollQuery != nil {
-                throw SchedulerStoreError.invalidField("poll_query requires poll_account")
-            }
-            if pollMailbox != nil {
-                throw SchedulerStoreError.invalidField("poll_mailbox requires poll_account")
-            }
-            if pollIntervalSeconds != nil {
-                throw SchedulerStoreError.invalidField("poll_interval_seconds requires poll_account")
-            }
-            if pollLimit != nil {
-                throw SchedulerStoreError.invalidField("poll_limit requires poll_account")
-            }
-        }
-        let scheduleValue: String? = EmailPollRule.configSchedule(from: schedule)
-        let pollValue: EmailPollRule? = EmailPollRule.ruleForStoredFields(
-            pollAccount: pollAccount,
-            pollQuery: pollQuery,
-            pollMailbox: pollMailbox,
-            pollIntervalSeconds: pollIntervalSeconds,
-            pollLimit: pollLimit
-        )
-        let synthetic = SchedulerJobConfig(
-            name: name,
-            prompt: prompt,
-            enabled: true,
-            schedule: scheduleValue,
-            poll: pollValue
-        )
-        do {
-            try synthetic.validate()
-        } catch let error as SchedulerConfigError {
-            throw Self.mapSchedulerConfigError(error)
-        }
-    }
-
-    /// Validates the per-job tool budget carried on the REST path.
-    ///
-    /// The dashboard clamps these fields client-side, but direct REST callers
-    /// bypass it, so the store rejects out-of-range budgets here before they
-    /// persist or reach the worker. Nil inherits the section default.
-    private static func validateToolBudget(maxToolIterations: Int?, onToolLimit: String?) throws {
-        if let maxToolIterations, !(1 ... 100).contains(maxToolIterations) {
-            throw SchedulerStoreError.invalidField("max_tool_iterations must be between 1 and 100 (got \(maxToolIterations))")
-        }
-        if let onToolLimit, !["fail", "park"].contains(onToolLimit) {
-            throw SchedulerStoreError.invalidField("on_tool_limit must be 'fail' or 'park' (got '\(onToolLimit)')")
-        }
-    }
-
-    /// Maps shared scheduler validation to store errors.
-    private static func mapSchedulerConfigError(_ error: SchedulerConfigError) -> SchedulerStoreError {
-        .invalidField(error.displayDetail)
-    }
-
-    /// Normalizes an optional poll string (blank becomes nil).
-    /// - Parameter value: Raw value, if any.
-    /// - Returns: Trimmed value, or nil when blank.
-    private static func normalizedOptional(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Creates a store seeded from configuration without touching disk.
@@ -554,36 +521,6 @@ public actor SchedulerStore {
         #endif
     }
 
-    /// Seeds in-memory state from configuration.
-    private static func seedInMemory(from config: SchedulerConfig) -> [UUID: SchedulerJob] {
-        var seeded: [UUID: SchedulerJob] = [:]
-        var seen: Set<String> = []
-        for entry in config.jobs {
-            let trimmedName = normalizedSchedulerJobName(entry.name)
-            guard !seen.contains(trimmedName) else { continue }
-            seen.insert(trimmedName)
-            let job = SchedulerJob(from: entry)
-            seeded[job.id] = job
-        }
-        return seeded
-    }
-
-    /// Loads persisted jobs from the given SQLite database path.
-    public static func persistedJobs(from dbPath: String) async -> [SchedulerJob] {
-        #if canImport(SQLite3)
-            do {
-                return try await SQLiteSerialIO.run {
-                    SQLiteSchedulerJobStore.read(dbPath: dbPath)
-                }
-            } catch {
-                RuneWeaverLog.stores.error("SchedulerStore: persistedJobs failed reading from SQLite: \(error.localizedDescription)")
-                return []
-            }
-        #else
-            return []
-        #endif
-    }
-
     /// Replaces the runtime registry with `config.toml [[scheduler.jobs]]`.
     public func sync(from config: SchedulerConfig) {
         var byName: [String: SchedulerJob] = [:]
@@ -602,6 +539,10 @@ public actor SchedulerStore {
             if let existing = byName[trimmedName] {
                 var kept = SchedulerJob(from: entry, id: existing.id, createdAt: existing.createdAt)
                 kept.updatedAt = Date()
+                kept.lastSuccessfulRunEndedAt = existing.lastSuccessfulRunEndedAt
+                // The email-report flag is owner state with no config spelling,
+                // so a resync carries it forward like the run cursor.
+                kept.emailReportJob = existing.emailReportJob
                 fresh[kept.id] = kept
             } else {
                 let job = SchedulerJob(from: entry)
@@ -615,6 +556,10 @@ public actor SchedulerStore {
     public func toSchedulerConfig() async -> SchedulerConfig {
         await SchedulerConfig(jobs: list().map { $0.toJobConfig() })
     }
+
+    // The legacy email-report marker migration lives in
+    // `SchedulerStoreMarkerMigration.swift` beside its durable latch table, so
+    // this actor stays focused on CRUD and persistence.
 }
 
 extension SchedulerJob {
@@ -691,7 +636,9 @@ extension SchedulerJobConfig {
                     max_tool_iterations INTEGER,
                     on_tool_limit TEXT,
                     created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at REAL NOT NULL,
+                    last_successful_run_ended_at REAL,
+                    email_report_job INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_scheduler_jobs_name ON scheduler_jobs(name);
                 """,
@@ -705,6 +652,16 @@ extension SchedulerJobConfig {
             _ = try? SQLiteHelpers.exec(
                 handle: handle,
                 sql: "ALTER TABLE scheduler_jobs ADD COLUMN on_tool_limit TEXT;",
+                failure: { SchedulerDBError(message: $0) }
+            )
+            _ = try? SQLiteHelpers.exec(
+                handle: handle,
+                sql: "ALTER TABLE scheduler_jobs ADD COLUMN last_successful_run_ended_at REAL;",
+                failure: { SchedulerDBError(message: $0) }
+            )
+            _ = try? SQLiteHelpers.exec(
+                handle: handle,
+                sql: "ALTER TABLE scheduler_jobs ADD COLUMN email_report_job INTEGER NOT NULL DEFAULT 0;",
                 failure: { SchedulerDBError(message: $0) }
             )
             return handle
@@ -724,7 +681,7 @@ extension SchedulerJobConfig {
             let sql = """
             SELECT id, name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox,
                    poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit,
-                   created_at, updated_at
+                   created_at, updated_at, last_successful_run_ended_at, email_report_job
             FROM scheduler_jobs
             ORDER BY created_at ASC;
             """
@@ -743,6 +700,16 @@ extension SchedulerJobConfig {
 
                 let createdAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 12))
                 let updatedAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 13))
+                let cursor: Date?
+                if sqlite3_column_type(statement, 14) == SQLITE_NULL {
+                    cursor = nil
+                } else {
+                    let value = SQLiteHelpers.columnDouble(statement, index: 14)
+                    cursor = value == 0 ? nil : Date(timeIntervalSince1970: value)
+                }
+                // Rows written before the email-report flag existed decode as
+                // false, matching the column default.
+                let emailReportJob = (SQLiteHelpers.columnInt64(statement, index: 15) ?? 0) != 0
 
                 loaded.append(SchedulerJob(
                     id: id,
@@ -755,10 +722,12 @@ extension SchedulerJobConfig {
                     pollMailbox: row.pollMailbox,
                     pollIntervalSeconds: row.pollIntervalSeconds,
                     pollLimit: row.pollLimit,
+                    emailReportJob: emailReportJob,
                     maxToolIterations: row.maxToolIterations,
                     onToolLimit: row.onToolLimit,
                     createdAt: createdAt,
-                    updatedAt: updatedAt
+                    updatedAt: updatedAt,
+                    lastSuccessfulRunEndedAt: cursor
                 ))
             }
             return loaded
@@ -778,9 +747,10 @@ extension SchedulerJobConfig {
             let sql = """
             INSERT INTO scheduler_jobs(
                 id, name, schedule, prompt, enabled, poll_account, poll_query,
-                poll_mailbox, poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit, created_at, updated_at
+                poll_mailbox, poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit, created_at, updated_at,
+                last_successful_run_ended_at, email_report_job
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 schedule = excluded.schedule,
@@ -793,7 +763,9 @@ extension SchedulerJobConfig {
                 poll_limit = excluded.poll_limit,
                 max_tool_iterations = excluded.max_tool_iterations,
                 on_tool_limit = excluded.on_tool_limit,
-                updated_at = excluded.updated_at;
+                updated_at = excluded.updated_at,
+                last_successful_run_ended_at = excluded.last_successful_run_ended_at,
+                email_report_job = excluded.email_report_job;
             """
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
@@ -817,6 +789,12 @@ extension SchedulerJobConfig {
             SQLiteHelpers.bindText(statement, index: 12, value: job.onToolLimit)
             SQLiteHelpers.bindDouble(statement, index: 13, value: job.createdAt.timeIntervalSince1970)
             SQLiteHelpers.bindDouble(statement, index: 14, value: job.updatedAt.timeIntervalSince1970)
+            if let cursor = job.lastSuccessfulRunEndedAt {
+                SQLiteHelpers.bindDouble(statement, index: 15, value: cursor.timeIntervalSince1970)
+            } else {
+                sqlite3_bind_null(statement, 15)
+            }
+            SQLiteHelpers.bindInt64(statement, index: 16, value: job.emailReportJob ? 1 : 0)
 
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 let code = sqlite3_errcode(handle)
