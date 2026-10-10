@@ -201,6 +201,58 @@ describe("getSharedRecentRuns single-flight", () => {
     expect(vi.mocked(listRuns)).toHaveBeenCalledTimes(2);
   });
 
+  it("chains a fresh fetch when forceRefresh is requested while a flight is already dispatched", async () => {
+    const preCompletionRuns = makeRuns(10, "pre-completion");
+    let resolveFirst!: (value: { runs: RunLogEntry[]; count: number }) => void;
+    vi.mocked(listRuns).mockImplementationOnce(
+      () =>
+        new Promise<{ runs: RunLogEntry[]; count: number }>((resolve) => {
+          resolveFirst = resolve;
+        }),
+    );
+
+    // Initial background poll dispatches
+    const pollPromise = getSharedRecentRuns(10);
+    // Flush microtask to ensure flight is dispatched
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(vi.mocked(listRuns)).toHaveBeenCalledTimes(1);
+
+    // Run completes while poll is in-flight: RecentReports and WorkingNowStream request forceRefresh
+    const postCompletionRuns = [
+      makeRun("run-completed-1", "ok", "scheduler"),
+      ...preCompletionRuns,
+    ];
+    vi.mocked(listRuns).mockResolvedValueOnce({
+      runs: postCompletionRuns,
+      count: postCompletionRuns.length,
+    });
+
+    const refreshCaller1 = getSharedRecentRuns(25, { forceRefresh: true });
+    const refreshCaller2 = getSharedRecentRuns(30, { forceRefresh: true });
+
+    // Settle the initial in-flight poll with pre-completion data
+    resolveFirst({ runs: preCompletionRuns, count: preCompletionRuns.length });
+
+    const [pollResult, result1, result2] = await Promise.all([
+      pollPromise,
+      refreshCaller1,
+      refreshCaller2,
+    ]);
+
+    // Initial poll received the pre-completion data
+    expect(pollResult).toEqual(preCompletionRuns);
+
+    // Both forceRefresh callers waited and received the post-completion data
+    expect(result1).toHaveLength(11);
+    expect(result1[0].id).toBe("run-completed-1");
+    expect(result2).toHaveLength(11);
+    expect(result2[0].id).toBe("run-completed-1");
+
+    // Exactly 2 network calls were made in total: initial poll + 1 collapsed fresh refetch sized at 30
+    expect(vi.mocked(listRuns)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(listRuns)).toHaveBeenLastCalledWith(30);
+  });
+
   it("never caches failures and lets the next call retry", async () => {
     vi.mocked(listRuns).mockRejectedValueOnce(new Error("network down"));
     await expect(getSharedRecentRuns(25)).rejects.toThrow("network down");

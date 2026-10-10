@@ -2037,8 +2037,27 @@ export default function ChatView({
               ? toolActionCompletedAtMap(structured.actions)
               : undefined,
           );
-          setMessages(mapped);
-          messagesRef.current = mapped;
+          // A stale reload must never clobber a just-completed turn: when the
+          // server record is shorter while the live timeline's last message is
+          // a successful assistant reply the fetch missed, keep the rendered
+          // list. The decision is computed once from the tracked list and the
+          // result is assigned to state and the ref together, because the
+          // keep-prev path hands React the identical array — the [messages]
+          // sync effect never re-runs, so a ref still pointing at the shorter
+          // mapped list would stay truncated and a subsequently parked flight
+          // would persist the turn list missing its final turn.
+          const prevList = messagesRef.current;
+          const lastPrev = prevList[prevList.length - 1];
+          const lastMapped = mapped[mapped.length - 1];
+          const keep =
+            mapped.length < prevList.length &&
+            !!lastPrev &&
+            lastPrev.role === "assistant" &&
+            !lastPrev.isError &&
+            (!lastMapped || lastMapped.role !== "assistant");
+          const finalMessages = keep ? prevList : mapped;
+          setMessages(finalMessages);
+          messagesRef.current = finalMessages;
         }
       })
       .catch((failure) => {
@@ -3644,6 +3663,7 @@ export default function ChatView({
       setInFlightTurn(null);
       inFlightTurnRef.current = null;
       setPending(false);
+      pendingRef.current = false;
       if (isParked) {
         // Parked WS turns wait on inbox approval, not completion: the waiting
         // text above stays as the assistant reply while this refresh flips
@@ -4228,7 +4248,7 @@ export default function ChatView({
     // a slow persist never evicts a live turn. Only a settled row newer than
     // the turn start settles, so stale rows from prior turns never clear a
     // fresh prompt and session filtering keeps background turns untouched.
-    if (pendingRef.current && !cancelledRef.current && activeNorm) {
+    if (pendingRef.current && !cancelledRef.current && activeNorm && !isOpen()) {
       const liveTurnSID = turnSessionIDRef.current;
       const ownsActive =
         liveTurnSID == null ||

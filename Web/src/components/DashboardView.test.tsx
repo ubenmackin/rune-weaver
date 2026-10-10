@@ -606,6 +606,89 @@ describe("RecentReports", () => {
       expect(screen.getByText("•")).toBeInTheDocument();
     });
   });
+
+  it("renders cancelled and skipped reports with appropriate outcome badges", async () => {
+    const skippedRun: api.RunLogEntry = {
+      id: "run-skip-1",
+      jobID: "job-1",
+      kind: "scheduler",
+      status: "skipped",
+      message: "Skipped 'Inbox triage': already running",
+      timestamp: Date.now() - 10000,
+    };
+    const cancelledRun: api.RunLogEntry = {
+      id: "run-cancel-1",
+      kind: "goal",
+      status: "cancelled",
+      message: "Goal advancement aborted",
+      timestamp: Date.now() - 20000,
+    };
+    vi.mocked(api.listRuns).mockResolvedValue({
+      runs: [skippedRun, cancelledRun],
+      count: 2,
+    });
+
+    render(<RecentReports />);
+
+    await waitFor(() => {
+      expect(screen.getByText("SKIPPED")).toBeInTheDocument();
+      expect(screen.getByText("CANCELLED")).toBeInTheDocument();
+      expect(screen.getByText("Skipped 'Inbox triage': already running")).toBeInTheDocument();
+      expect(screen.getByText("Goal advancement aborted")).toBeInTheDocument();
+    });
+  });
+
+  it("refetches recent reports on visibilitychange", async () => {
+    vi.mocked(api.listRuns).mockResolvedValue({
+      runs: [mockCompletedRun],
+      count: 1,
+    });
+
+    render(<RecentReports />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Morning Inbox Triage")).toBeInTheDocument();
+    });
+
+    const newRun: api.RunLogEntry = {
+      id: "run-fresh-1",
+      kind: "index",
+      status: "ok",
+      message: "Indexed workspace files",
+      timestamp: Date.now(),
+    };
+    vi.mocked(api.listRuns).mockResolvedValue({
+      runs: [newRun, mockCompletedRun],
+      count: 2,
+    });
+
+    // Fire visibilitychange event
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(
+      document,
+      "visibilityState",
+    );
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      await waitFor(() => {
+        expect(screen.getByText("Indexed workspace files")).toBeInTheDocument();
+      });
+    } finally {
+      // The override must not leak into later cases: jsdom ships no own
+      // visibilityState descriptor (the accessor lives on the prototype), so
+      // an unremoved override would pin every visibility-gated refetch open
+      // for the rest of the file.
+      if (visibilityDescriptor) {
+        Object.defineProperty(document, "visibilityState", visibilityDescriptor);
+      } else {
+        delete (document as { visibilityState?: unknown }).visibilityState;
+      }
+    }
+  });
 });
 
 describe("DashboardView integration", () => {

@@ -8009,8 +8009,17 @@ button.ghost.staged-expand-all-btn {
   color: #f59e0b;
 }
 
+.report-outcome-badge.skipped {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+}
+
 .report-card.status-budget-exceeded {
   border-left: 3px solid #f59e0b;
+}
+
+.report-card.status-skipped {
+  border-left: 3px solid #94a3b8;
 }
 
 .report-kind-badge {

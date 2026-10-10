@@ -55,6 +55,15 @@ let inFlightLimit = 0;
 let inFlightDispatched = false;
 let inFlightEffectiveLimit = 0;
 
+// One queued fresh fetch scheduled when a caller asks for `forceRefresh` while
+// a flight is already in the network (`inFlightDispatched === true`). The
+// in-flight request was dispatched before the event that prompted the forced
+// refresh, so its response cannot be trusted to contain post-event data.
+// Callers requesting forceRefresh join this queued flight instead of absorbing
+// the pre-event response.
+let nextFlight: Promise<RunLogEntry[]> | null = null;
+let nextFlightLimit = 0;
+
 // Resets the cached payload and any pending flight. Test-only: inert in
 // production builds so prod callers can never wipe the shared payload; Vitest
 // runs with MODE=test, where the reset stays live between cases so one case's
@@ -68,6 +77,8 @@ export function clearSharedRecentRunsForTesting(): void {
   inFlightLimit = 0;
   inFlightDispatched = false;
   inFlightEffectiveLimit = 0;
+  nextFlight = null;
+  nextFlightLimit = 0;
 }
 
 // Returns the most recent runs, sliced to the caller's limit. Concurrent calls
@@ -86,23 +97,64 @@ export function getSharedRecentRuns(
   const forceRefresh = options?.forceRefresh === true;
   const now = Date.now();
 
-  // Fresh cache with a sufficient limit serves immediately. An insufficient
-  // limit falls through to a refetch: slicing a smaller payload would silently
-  // short a caller that asked for more rows than were ever fetched.
-  if (!forceRefresh && cachedRuns !== null && now - cachedAtMs < SHARED_RUNS_TTL_MS && cachedLimit >= requested) {
+  // Fresh cache with a sufficient limit serves immediately unless a forced
+  // refresh was requested or a forced refresh flight is already queued. An
+  // insufficient limit falls through to a refetch: slicing a smaller payload
+  // would silently short a caller that asked for more rows than were ever fetched.
+  if (
+    !forceRefresh &&
+    nextFlight === null &&
+    cachedRuns !== null &&
+    now - cachedAtMs < SHARED_RUNS_TTL_MS &&
+    cachedLimit >= requested
+  ) {
     return Promise.resolve(cachedRuns.slice(0, requested));
   }
 
-  // A pending fetch absorbs this caller. Bumping the tracked limit before the
-  // network starts lets a synchronously co-mounted widget that wants more rows
-  // widen the single request; a caller arriving after the request dispatched
-  // joins the flight and, when it wants more rows than the dispatched limit
-  // holds, refetches once the flight settles rather than slicing short with
-  // no error.
+  // If a forced refresh is already scheduled for after the current flight, join it.
+  if (nextFlight !== null) {
+    if (requested > nextFlightLimit) {
+      nextFlightLimit = requested;
+    }
+    return nextFlight.then((runs) => runs.slice(0, requested));
+  }
+
+  // A pending fetch absorbs this caller if not dispatched yet or if no forceRefresh is requested.
+  // Bumping the tracked limit before the network starts lets a synchronously co-mounted widget
+  // that wants more rows widen the single request.
   if (inFlight !== null) {
     if (!inFlightDispatched && requested > inFlightLimit) {
       inFlightLimit = requested;
     }
+
+    if (forceRefresh && inFlightDispatched) {
+      // The current in-flight request was already dispatched before this forceRefresh
+      // was requested. Queue a fresh fetch to run as soon as inFlight settles, so this
+      // caller receives post-event data rather than the pre-event response.
+      nextFlightLimit = Math.max(nextFlightLimit, requested);
+      const currentFlight = inFlight;
+      const queued = (async (): Promise<RunLogEntry[]> => {
+        try {
+          await currentFlight;
+        } catch {
+          // Failure of previous in-flight request does not cancel the forced retry.
+        }
+        const targetLimit = nextFlightLimit;
+        nextFlight = null;
+        nextFlightLimit = 0;
+        return getSharedRecentRuns(targetLimit, { forceRefresh: true });
+      })();
+      nextFlight = queued;
+      const clearNext = () => {
+        if (nextFlight === queued) {
+          nextFlight = null;
+          nextFlightLimit = 0;
+        }
+      };
+      queued.then(clearNext, clearNext);
+      return queued.then((runs) => runs.slice(0, requested));
+    }
+
     if (inFlightDispatched && requested > inFlightEffectiveLimit) {
       return inFlight.then(() => getSharedRecentRuns(requested));
     }
@@ -132,18 +184,15 @@ export function getSharedRecentRuns(
     return runs;
   })();
 
-  inFlight = flight;
-  // Clear the flight marker on settle without swallowing the outcome: failures
-  // must stay uncached and still reject for every attached caller, while the
-  // next call after a failure starts a fresh request.
   const clearFlight = () => {
-    if (inFlight === flight) {
+    if (inFlight === settledPromise) {
       inFlight = null;
       inFlightDispatched = false;
       inFlightEffectiveLimit = 0;
     }
   };
-  flight.then(clearFlight, clearFlight);
+  const settledPromise = flight.finally(clearFlight);
+  inFlight = settledPromise;
 
-  return flight.then((runs) => runs.slice(0, requested));
+  return settledPromise.then((runs) => runs.slice(0, requested));
 }

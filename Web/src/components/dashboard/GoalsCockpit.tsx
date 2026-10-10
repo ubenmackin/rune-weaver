@@ -51,17 +51,51 @@ export default function GoalsCockpit({
     fetchActiveGoals();
   }, [fetchActiveGoals, refreshTrigger]);
 
+  // Periodic tick for live goal advancement countdowns
+  const [, setCountTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCountTick((c) => c + 1);
+    }, 10000);
+    return () => clearInterval(timer);
+  }, []);
+
   const handleWSFrame = useCallback(
     (frame: WSIncomingFrame) => {
       const frameType = (frame as { type?: string }).type;
-      if (frameType === "goal_updated" || frameType === "run_completed") {
+      if (
+        frameType === "goal_updated" ||
+        frameType === "run_completed" ||
+        frameType === "run_started"
+      ) {
         fetchActiveGoals();
       }
     },
     [fetchActiveGoals],
   );
 
-  useSharedWebSocket(handleWSFrame);
+  const handleSocketOpen = useCallback(() => {
+    fetchActiveGoals();
+  }, [fetchActiveGoals]);
+
+  useSharedWebSocket(handleWSFrame, undefined, handleSocketOpen);
+
+  // Tab visibility resync ensures returning to the tab immediately refreshes goals
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        fetchActiveGoals();
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [fetchActiveGoals]);
+
+  // Periodic heartbeat polling keeps goals progress synchronized
+  useEffect(() => {
+    const interval = setInterval(fetchActiveGoals, 10000);
+    return () => clearInterval(interval);
+  }, [fetchActiveGoals]);
 
   async function handleAdvance(goal: Goal) {
     try {
