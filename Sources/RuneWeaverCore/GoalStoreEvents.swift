@@ -24,7 +24,7 @@ import Foundation
             case .paused: .paused
             case .needsInput: .needsInput
             case .achieved: .completed
-            case .abandoned: .note
+            case .abandoned, .unplanned: .note
             }
         }
 

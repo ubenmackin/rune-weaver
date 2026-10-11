@@ -5,269 +5,14 @@ import Foundation
     import SQLite3
 #endif
 
-/// Failures raised while parsing a cron-like schedule expression.
-public enum CronScheduleError: Error, Sendable, Equatable {
-    /// The expression has the wrong shape (not five fields or unknown shortcut).
-    case invalidExpression(String)
-    /// One field could not be parsed.
-    case invalidField(field: String, value: String)
-    /// A numeric value falls outside its allowed range.
-    case outOfRange(field: String, value: Int, range: String)
-}
-
-/// A five-field cron schedule (`minute hour day month weekday`).
-public struct CronSchedule: Sendable, Codable, Equatable {
-    /// Allowed minutes (`0-59`).
-    public let minutes: Set<Int>
-    /// Allowed hours (`0-23`).
-    public let hours: Set<Int>
-    /// Allowed days of month (`1-31`).
-    public let days: Set<Int>
-    /// Allowed months (`1-12`).
-    public let months: Set<Int>
-    /// Allowed weekdays (`0-6`, `0` is Sunday).
-    public let weekdays: Set<Int>
-
-    /// Creates a schedule from pre-validated sets.
-    public init(minutes: Set<Int>, hours: Set<Int>, days: Set<Int>, months: Set<Int>, weekdays: Set<Int>) {
-        self.minutes = minutes
-        self.hours = hours
-        self.days = days
-        self.months = months
-        self.weekdays = weekdays
-    }
-
-    /// Creates a schedule by parsing an expression.
-    /// - Parameter expression: Five-field cron text or `@` shortcut.
-    /// - Throws: ``CronScheduleError`` when the text is malformed.
-    public init(parsing expression: String) throws {
-        self = try Self.parse(expression)
-    }
-
-    /// Parses an expression into a schedule.
-    public static func parse(_ expression: String) throws -> CronSchedule {
-        let trimmed = expression.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw CronScheduleError.invalidExpression("schedule must not be empty")
-        }
-        if trimmed.hasPrefix("@") {
-            return try parseShortcut(trimmed)
-        }
-        let fields = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-        guard fields.count == 5 else {
-            throw CronScheduleError.invalidExpression(
-                "expected five fields 'minute hour day month weekday' (got \(fields.count) in '\(trimmed)')"
-            )
-        }
-        let minutes = try parseField(fields[0], range: 0 ... 59, field: "minute")
-        let hours = try parseField(fields[1], range: 0 ... 23, field: "hour")
-        let days = try parseField(fields[2], range: 1 ... 31, field: "day")
-        let months = try parseField(fields[3], range: 1 ... 12, field: "month")
-        let rawWeekdays = try parseField(fields[4], range: 0 ... 7, field: "weekday")
-        var weekdays = rawWeekdays
-        if weekdays.contains(7) {
-            weekdays.remove(7)
-            weekdays.insert(0)
-        }
-        return CronSchedule(minutes: minutes, hours: hours, days: days, months: months, weekdays: weekdays)
-    }
-
-    /// Whether an expression parses without throwing.
-    /// - Parameter expression: Candidate cron text or shortcut.
-    /// - Returns: True when parsing succeeds.
-    public static func isValid(_ expression: String) -> Bool {
-        (try? parse(expression)) != nil
-    }
-
-    /// Whether a date matches this schedule.
-    public func matches(_ date: Date, calendar: Calendar = .current) -> Bool {
-        let components = calendar.dateComponents([.minute, .hour, .day, .month, .weekday], from: date)
-        guard let minute = components.minute,
-              let hour = components.hour,
-              let day = components.day,
-              let month = components.month,
-              let weekday = components.weekday
-        else { return false }
-        let cronWeekday = (weekday - 1) % 7
-        guard minutes.contains(minute), hours.contains(hour), months.contains(month) else { return false }
-        let domUnrestricted = days == Set(1 ... 31)
-        let dowUnrestricted = weekdays == Set(0 ... 6)
-        if domUnrestricted, dowUnrestricted {
-            return true
-        }
-        if domUnrestricted {
-            return weekdays.contains(cronWeekday)
-        }
-        if dowUnrestricted {
-            return days.contains(day)
-        }
-        return days.contains(day) || weekdays.contains(cronWeekday)
-    }
-
-    /// Computes the next fire time strictly after a date.
-    public func nextFire(after date: Date, calendar: Calendar = .current) -> Date? {
-        let working = calendar
-        guard let secondZeroed = working.date(bySetting: .second, value: 0, of: date) else { return nil }
-        let nanoZeroed = working.date(bySetting: .nanosecond, value: 0, of: secondZeroed) ?? secondZeroed
-        let candidate: Date
-        if nanoZeroed <= date {
-            guard let advanced = working.date(byAdding: .minute, value: 1, to: nanoZeroed) else { return nil }
-            candidate = advanced
-        } else {
-            candidate = nanoZeroed
-        }
-        var cursor = candidate
-        for _ in 0 ..< 527_040 {
-            if matches(cursor, calendar: working) {
-                return cursor
-            }
-            guard let next = working.date(byAdding: .minute, value: 1, to: cursor) else { return nil }
-            cursor = next
-        }
-        return nil
-    }
-
-    /// Whether the schedule fires in a half-open check window.
-    public func isDue(at now: Date, lastCheck: Date, calendar: Calendar = .current) -> Bool {
-        guard let next = nextFire(after: lastCheck, calendar: calendar) else { return false }
-        return next <= now
-    }
-
-    /// Canonical display of the schedule (sorted lists, `*` for full ranges).
-    public var canonicalExpression: String {
-        let minute = Self.formatField(minutes, full: Set(0 ... 59))
-        let hour = Self.formatField(hours, full: Set(0 ... 23))
-        let day = Self.formatField(days, full: Set(1 ... 31))
-        let month = Self.formatField(months, full: Set(1 ... 12))
-        let weekday = Self.formatField(weekdays, full: Set(0 ... 6))
-        return "\(minute) \(hour) \(day) \(month) \(weekday)"
-    }
-
-    // MARK: - Private parsing
-
-    /// Parses an `@` shortcut into a schedule.
-    private static func parseShortcut(_ text: String) throws -> CronSchedule {
-        let lowered = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let expanded: String
-        switch lowered {
-        case "@yearly", "@annually":
-            expanded = "0 0 1 1 *"
-        case "@monthly":
-            expanded = "0 0 1 * *"
-        case "@weekly":
-            expanded = "0 0 * * 0"
-        case "@daily", "@midnight":
-            expanded = "0 0 * * *"
-        case "@hourly":
-            expanded = "0 * * * *"
-        case "@minutely", "@every_minute":
-            expanded = "* * * * *"
-        default:
-            throw CronScheduleError.invalidExpression("unknown schedule shortcut '\(text)'")
-        }
-        return try parse(expanded)
-    }
-
-    /// Parses one cron field into its allowed values.
-    private static func parseField(_ text: String, range: ClosedRange<Int>, field: String) throws -> Set<Int> {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw CronScheduleError.invalidField(field: field, value: text)
-        }
-        if trimmed == "*" {
-            return Set(range)
-        }
-        var values = Set<Int>()
-        let parts = trimmed.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
-        guard !parts.isEmpty else {
-            throw CronScheduleError.invalidField(field: field, value: text)
-        }
-        for part in parts {
-            let expanded = try parseListPart(part, range: range, field: field)
-            values.formUnion(expanded)
-        }
-        guard !values.isEmpty else {
-            throw CronScheduleError.invalidField(field: field, value: text)
-        }
-        return values
-    }
-
-    /// Parses one comma-separated list element.
-    private static func parseListPart(_ part: String, range: ClosedRange<Int>, field: String) throws -> Set<Int> {
-        let trimmed = part.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw CronScheduleError.invalidField(field: field, value: part)
-        }
-        if trimmed.contains("/") {
-            let sides = trimmed.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-            guard sides.count == 2 else {
-                throw CronScheduleError.invalidField(field: field, value: part)
-            }
-            guard let step = Int(sides[1].trimmingCharacters(in: .whitespaces)), step > 0 else {
-                throw CronScheduleError.invalidField(field: field, value: part)
-            }
-            let base = sides[0].trimmingCharacters(in: .whitespaces)
-            if base == "*" {
-                return Set(stride(from: range.lowerBound, through: range.upperBound, by: step))
-            }
-            if base.contains("-") {
-                let bounds = try parseRangeBounds(base, range: range, field: field)
-                return Set(stride(from: bounds.0, through: bounds.1, by: step))
-            }
-            guard let start = Int(base) else {
-                throw CronScheduleError.invalidField(field: field, value: part)
-            }
-            try checkRange(start, range: range, field: field)
-            return Set(stride(from: start, through: range.upperBound, by: step))
-        }
-        if trimmed.contains("-") {
-            let bounds = try parseRangeBounds(trimmed, range: range, field: field)
-            return Set(bounds.0 ... bounds.1)
-        }
-        guard let single = Int(trimmed) else {
-            throw CronScheduleError.invalidField(field: field, value: part)
-        }
-        try checkRange(single, range: range, field: field)
-        return [single]
-    }
-
-    /// Parses `low-high` range bounds.
-    private static func parseRangeBounds(_ text: String, range: ClosedRange<Int>, field: String) throws -> (Int, Int) {
-        let sides = text.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
-        guard sides.count == 2,
-              let low = Int(sides[0].trimmingCharacters(in: .whitespaces)),
-              let high = Int(sides[1].trimmingCharacters(in: .whitespaces))
-        else {
-            throw CronScheduleError.invalidField(field: field, value: text)
-        }
-        try checkRange(low, range: range, field: field)
-        try checkRange(high, range: range, field: field)
-        guard low <= high else {
-            throw CronScheduleError.invalidField(field: field, value: text)
-        }
-        return (low, high)
-    }
-
-    /// Validates one numeric value against its range.
-    private static func checkRange(_ value: Int, range: ClosedRange<Int>, field: String) throws {
-        guard range.contains(value) else {
-            throw CronScheduleError.outOfRange(field: field, value: value, range: "\(range.lowerBound)-\(range.upperBound)")
-        }
-    }
-
-    /// Formats one field set for display.
-    private static func formatField(_ values: Set<Int>, full: Set<Int>) -> String {
-        if values == full {
-            return "*"
-        }
-        return values.sorted().map(String.init).joined(separator: ",")
-    }
-}
-
 /// A poll-based email-arrival rule for scheduled jobs.
 public struct EmailPollRule: Sendable, Codable, Equatable {
     /// Default seconds between polls when no interval is supplied.
     public static let defaultPollIntervalSeconds = 300
+    /// Minimum seconds between polls. Shared bound for every poll-interval validation and clamp site.
+    public static let minPollIntervalSeconds = 60
+    /// Maximum seconds between polls. Shared bound for every poll-interval validation and clamp site.
+    public static let maxPollIntervalSeconds = 86400
     /// Default maximum hits fetched per poll when no limit is supplied.
     public static let defaultLimit = 10
     /// Minimum hits fetched per poll. Shared bound for every poll-limit clamp site.
@@ -280,7 +25,7 @@ public struct EmailPollRule: Sendable, Codable, Equatable {
     public var query: String
     /// Mailbox to search (nil means every selectable mailbox).
     public var mailbox: String?
-    /// Seconds between polls. Must be positive.
+    /// Seconds between polls (60...86400).
     public var pollIntervalSeconds: Int
     /// Maximum hits fetched per poll (clamped `minLimit...maxLimit`).
     public var limit: Int
@@ -303,6 +48,11 @@ public struct EmailPollRule: Sendable, Codable, Equatable {
     /// Clamps a poll limit to the shared `minLimit...maxLimit` bounds.
     public static func clampedLimit(_ value: Int) -> Int {
         min(max(value, minLimit), maxLimit)
+    }
+
+    /// Clamps a poll interval to the shared `minPollIntervalSeconds...maxPollIntervalSeconds` bounds.
+    public static func clampedPollIntervalSeconds(_ value: Int) -> Int {
+        min(max(value, minPollIntervalSeconds), maxPollIntervalSeconds)
     }
 
     /// Trimmed account nickname.
@@ -356,12 +106,14 @@ public enum SchedulerConfigError: Error, Sendable, Equatable {
     case duplicateName(job: String)
     /// A job prompt is blank.
     case emptyPrompt(job: String)
-    /// A job has neither a cron schedule nor a poll rule.
+    /// A job has neither a cron schedule nor an event/poll trigger.
     case missingTrigger(job: String)
     /// A cron expression does not parse.
     case invalidCron(job: String, expression: String, detail: String)
     /// A poll rule is malformed.
     case invalidPoll(job: String, detail: String)
+    /// An event rule is malformed.
+    case invalidRule(job: String, rule: String, detail: String)
 }
 
 extension SchedulerConfigError {
@@ -380,6 +132,8 @@ extension SchedulerConfigError {
         case let .invalidCron(job, _, _):
             job
         case let .invalidPoll(job, _):
+            job
+        case let .invalidRule(job, _, _):
             job
         }
     }
@@ -401,6 +155,8 @@ extension SchedulerConfigError {
             "schedule is not a valid cron expression: \(expression): \(detail)"
         case let .invalidPoll(_, detail):
             detail
+        case let .invalidRule(job, rule, detail):
+            "job '\(job)' rule '\(rule)' is invalid: \(detail)"
         }
     }
 
@@ -424,17 +180,37 @@ extension SchedulerConfigError {
                 "poll_interval_seconds"
             } else if detail.contains("poll_limit") {
                 "poll_limit"
+            } else if detail.contains("calendar_lead_time_minutes") {
+                "calendar_lead_time_minutes"
             } else if detail.contains("poll account") {
                 "poll_account"
             } else {
                 nil
             }
+        case .invalidRule:
+            "rules"
         }
     }
 }
 
 /// One `[[scheduler.jobs]]` entry: a named prompt plus its triggers.
 public struct SchedulerJobConfig: Sendable, Codable, Equatable {
+    /// Minimum calendar lead time in minutes. Shared bound for every lead-time validation and clamp site.
+    public static let minCalendarLeadTimeMinutes = 1
+    /// Maximum calendar lead time in minutes. Shared bound for every lead-time validation and clamp site.
+    public static let maxCalendarLeadTimeMinutes = 1440
+    /// Default calendar lead time when the stored job carries none.
+    public static let defaultCalendarLeadTimeMinutes = 15
+    /// Additive watcher columns for `scheduler_jobs`. Single owner of the
+    /// watcher migration text so direct-core reads and server persistence
+    /// cannot drift; both sites delegate through `applyWatcherColumnMigrations`.
+    public static let watcherColumnMigrationStatements: [String] = [
+        "ALTER TABLE scheduler_jobs ADD COLUMN watcher_source TEXT;",
+        "ALTER TABLE scheduler_jobs ADD COLUMN rules TEXT;",
+        "ALTER TABLE scheduler_jobs ADD COLUMN calendar_lead_time_minutes INTEGER;",
+        "ALTER TABLE scheduler_jobs ADD COLUMN calendar_names TEXT;"
+    ]
+
     /// Human-readable job name (e.g. `"morning digest"`).
     public var name: String
     /// Prompt executed when the job fires.
@@ -449,6 +225,14 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
     public var maxToolIterations: Int?
     /// Action when tool limit is reached: "fail" (synthesize & budget_exceeded) or "park". Defaults to "fail".
     public var onToolLimit: String?
+    /// Event watcher source (email, messages, or calendar), if the job has an event trigger.
+    public var watcherSource: EventWatcherSource?
+    /// Ordered event rules executed on incoming events.
+    public var rules: [EventRule]?
+    /// Lead time in minutes for calendar upcoming event trigger (1...1440). Defaults to 15.
+    public var calendarLeadTimeMinutes: Int?
+    /// Calendar names to watch for calendar upcoming event trigger.
+    public var calendarNames: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case name
@@ -458,6 +242,10 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
         case poll
         case maxToolIterations = "max_tool_iterations"
         case onToolLimit = "on_tool_limit"
+        case watcherSource = "watcher_source"
+        case rules
+        case calendarLeadTimeMinutes = "calendar_lead_time_minutes"
+        case calendarNames = "calendar_names"
     }
 
     /// Creates a job config.
@@ -468,7 +256,11 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
         schedule: String? = nil,
         poll: EmailPollRule? = nil,
         maxToolIterations: Int? = nil,
-        onToolLimit: String? = nil
+        onToolLimit: String? = nil,
+        watcherSource: EventWatcherSource? = nil,
+        rules: [EventRule]? = nil,
+        calendarLeadTimeMinutes: Int? = nil,
+        calendarNames: [String]? = nil
     ) {
         self.name = name
         self.prompt = prompt
@@ -477,6 +269,26 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
         self.poll = poll
         self.maxToolIterations = maxToolIterations
         self.onToolLimit = onToolLimit
+        self.watcherSource = watcherSource
+        self.rules = rules
+        self.calendarLeadTimeMinutes = calendarLeadTimeMinutes
+        self.calendarNames = calendarNames
+    }
+
+    /// Clamps a calendar lead time to the shared `minCalendarLeadTimeMinutes...maxCalendarLeadTimeMinutes` bounds.
+    public static func clampedCalendarLeadTimeMinutes(_ value: Int) -> Int {
+        min(max(value, minCalendarLeadTimeMinutes), maxCalendarLeadTimeMinutes)
+    }
+
+    /// Applies the additive watcher migrations through a caller-supplied exec.
+    ///
+    /// Each statement is best-effort idempotent (`ADD COLUMN` fails when the
+    /// column already exists), so callers ignore per-statement failures and
+    /// keep the shared text as the single source of truth.
+    public static func applyWatcherColumnMigrations(_ exec: (String) -> Void) {
+        for statement in watcherColumnMigrationStatements {
+            exec(statement)
+        }
     }
 
     /// Whether the job has a cron trigger.
@@ -488,6 +300,11 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
     /// Whether the job has a poll trigger.
     public var hasPollTrigger: Bool {
         poll != nil
+    }
+
+    /// Whether the job has an event watcher trigger.
+    public var hasWatcherTrigger: Bool {
+        watcherSource != nil
     }
 
     /// Parses the cron trigger, when present.
@@ -510,12 +327,16 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SchedulerConfigError.emptyName
         }
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw SchedulerConfigError.emptyPrompt(job: name)
+        let hasRules = !(rules ?? []).isEmpty
+        if !hasRules {
+            guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw SchedulerConfigError.emptyPrompt(job: name)
+            }
         }
         let hasCron = hasCronTrigger
         let hasPoll = hasPollTrigger
-        guard hasCron || hasPoll else {
+        let hasWatcher = hasWatcherTrigger
+        guard hasCron || hasPoll || hasWatcher else {
             throw SchedulerConfigError.missingTrigger(job: name)
         }
         if hasCron {
@@ -525,14 +346,63 @@ public struct SchedulerJobConfig: Sendable, Codable, Equatable {
             guard !poll.trimmedAccount.isEmpty else {
                 throw SchedulerConfigError.invalidPoll(job: name, detail: "poll account must not be empty")
             }
-            guard poll.pollIntervalSeconds > 0 else {
-                throw SchedulerConfigError.invalidPoll(job: name, detail: "poll_interval_seconds must be positive")
+            // Fail-closed polling cadence: faster than once a minute would
+            // turn every mailbox into a hot loop, while slower than a day
+            // starves arrival detection, so both edges reject.
+            let minInterval = EmailPollRule.minPollIntervalSeconds
+            let maxInterval = EmailPollRule.maxPollIntervalSeconds
+            guard (minInterval ... maxInterval).contains(poll.pollIntervalSeconds) else {
+                throw SchedulerConfigError.invalidPoll(
+                    job: name,
+                    detail: "poll_interval_seconds must be between \(minInterval) and \(maxInterval) (got \(poll.pollIntervalSeconds))"
+                )
             }
             guard (EmailPollRule.minLimit ... EmailPollRule.maxLimit).contains(poll.limit) else {
                 throw SchedulerConfigError.invalidPoll(
                     job: name,
                     detail: "poll_limit must be between \(EmailPollRule.minLimit) and \(EmailPollRule.maxLimit)"
                 )
+            }
+        }
+        // A collapsed or far-future calendar window either always fires or
+        // sweeps months of meetings, so the lead time rejects outside 1...1440.
+        if let leadTime = calendarLeadTimeMinutes {
+            let minLeadTime = Self.minCalendarLeadTimeMinutes
+            let maxLeadTime = Self.maxCalendarLeadTimeMinutes
+            guard (minLeadTime ... maxLeadTime).contains(leadTime) else {
+                throw SchedulerConfigError.invalidPoll(
+                    job: name,
+                    detail: "calendar_lead_time_minutes must be between \(minLeadTime) and \(maxLeadTime) (got \(leadTime))"
+                )
+            }
+        }
+        if let rules {
+            for rule in rules {
+                guard !rule.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw SchedulerConfigError.invalidRule(job: name, rule: rule.name, detail: "rule name must not be empty")
+                }
+                switch rule.action {
+                case let .agentPrompt(promptText):
+                    guard !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw SchedulerConfigError.invalidRule(job: name, rule: rule.name, detail: "prompt must not be empty")
+                    }
+                case let .directTool(toolName, _):
+                    let trimmedTool = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmedTool.isEmpty else {
+                        throw SchedulerConfigError.invalidRule(job: name, rule: rule.name, detail: "tool_name must not be empty")
+                    }
+                    // The zero-token path bypasses inference, so only the
+                    // narrowly-scoped mailbox and calendar mutations stay
+                    // eligible; anything else must run as a scoped agent turn.
+                    guard EventRuleAction.isAllowedDirectTool(trimmedTool) else {
+                        let allowedTools = EventRuleAction.allowedDirectToolNames.sorted().joined(separator: ", ")
+                        throw SchedulerConfigError.invalidRule(
+                            job: name,
+                            rule: rule.name,
+                            detail: "tool_name '\(trimmedTool)' is not allowed (must be one of \(allowedTools))"
+                        )
+                    }
+                }
             }
         }
     }
@@ -611,6 +481,10 @@ public enum SchedulerFireReason: Sendable, Equatable {
     case cron
     /// Previously unseen mail arrived.
     case emailArrived(account: String, count: Int)
+    /// Previously unseen message arrived.
+    case messagesArrived(count: Int)
+    /// Upcoming calendar event reached lead time window.
+    case calendarUpcoming(title: String, eventID: String)
 
     /// Human-readable reason for run logs.
     public var displayName: String {
@@ -619,6 +493,10 @@ public enum SchedulerFireReason: Sendable, Equatable {
             "cron"
         case let .emailArrived(account, count):
             "email(\(account),+\(count))"
+        case let .messagesArrived(count):
+            "messages(+\(count))"
+        case let .calendarUpcoming(title, _):
+            "calendar(\(title))"
         }
     }
 }
@@ -963,7 +841,9 @@ public actor SchedulerEngine {
             let key = normalizedSchedulerJobName(job.name)
             if let last = pollLastCheck[key] {
                 let elapsed = now.timeIntervalSince(last)
-                if elapsed < Double(max(1, rule.pollIntervalSeconds)) {
+                // Defensive clamp keeps hand-built configs that bypass
+                // validation from hot-looping the mailbox.
+                if elapsed < Double(EmailPollRule.clampedPollIntervalSeconds(rule.pollIntervalSeconds)) {
                     continue
                 }
             }
@@ -1207,9 +1087,19 @@ extension SchedulerJobConfig {
                 sql: "ALTER TABLE scheduler_jobs ADD COLUMN on_tool_limit TEXT;",
                 failure: { _ in LoadError() }
             )
+            // Watcher columns delegate to the single shared statement owner so
+            // server persistence and direct-core reads add identical columns.
+            SchedulerJobConfig.applyWatcherColumnMigrations { statement in
+                _ = try? SQLiteHelpers.exec(
+                    handle: handle,
+                    sql: statement,
+                    failure: { _ in LoadError() }
+                )
+            }
             let sql = """
             SELECT name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox,
-                   poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit
+                   poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit,
+                   watcher_source, rules, calendar_lead_time_minutes, calendar_names
             FROM scheduler_jobs
             ORDER BY created_at ASC;
             """
@@ -1223,6 +1113,19 @@ extension SchedulerJobConfig {
             var loaded: [SchedulerJobConfig] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 guard let row = SchedulerJobRow.decode(statement, base: 0) else { continue }
+                let watcherRaw = SQLiteHelpers.columnText(statement, index: 11)
+                let watcherSource = watcherRaw.flatMap { EventWatcherSource(rawValue: $0) }
+                let rulesRaw = SQLiteHelpers.columnText(statement, index: 12)
+                let rules: [EventRule]? = rulesRaw.flatMap { json in
+                    guard let data = json.data(using: .utf8) else { return nil }
+                    return try? JSONDecoder().decode([EventRule].self, from: data)
+                }
+                let leadTime = SQLiteHelpers.columnInt64(statement, index: 13).map { Int($0) }
+                let calNamesRaw = SQLiteHelpers.columnText(statement, index: 14)
+                let calendarNames: [String]? = calNamesRaw.flatMap { json in
+                    guard let data = json.data(using: .utf8) else { return nil }
+                    return try? JSONDecoder().decode([String].self, from: data)
+                }
                 loaded.append(SchedulerJobConfig(
                     name: row.name,
                     prompt: row.prompt,
@@ -1230,7 +1133,11 @@ extension SchedulerJobConfig {
                     schedule: row.configSchedule,
                     poll: row.makePollRule(),
                     maxToolIterations: row.maxToolIterations,
-                    onToolLimit: row.onToolLimit
+                    onToolLimit: row.onToolLimit,
+                    watcherSource: watcherSource,
+                    rules: rules,
+                    calendarLeadTimeMinutes: leadTime,
+                    calendarNames: calendarNames
                 ))
             }
             return loaded

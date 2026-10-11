@@ -314,6 +314,81 @@ describe("NeedsActionQueue", () => {
       expect(screen.getByText("branch: main, force: false")).toBeInTheDocument();
     });
   });
+
+  it("renders unplanned goal with UNPLANNED badge and triggers advance on Plan Goal click", async () => {
+    const user = userEvent.setup();
+    const mockUnplannedGoal: api.Goal = {
+      id: "goal-unplanned-1",
+      title: "Develop Crypto Trading Plan",
+      statement: "Seed account with $100 and double amount.",
+      status: "unplanned",
+      progress: { done: 0, total: 0 },
+      stepIntervalMinutes: 1440,
+      nextDueAt: null,
+      originSessionId: null,
+      createdAt: Date.now() - 1000,
+      updatedAt: Date.now() - 1000,
+    };
+
+    vi.mocked(api.listApprovals).mockResolvedValue({
+      approvals: [],
+      count: 0,
+    });
+    vi.mocked(api.listGoals).mockResolvedValue({
+      goals: [mockUnplannedGoal],
+      count: 1,
+    });
+    vi.mocked(api.advanceGoal).mockResolvedValue({
+      runID: "run-plan-1",
+      sessionID: "sess-plan-1",
+      goalId: "goal-unplanned-1",
+    });
+
+    render(<NeedsActionQueue />);
+
+    await waitFor(() => {
+      expect(screen.getByText("UNPLANNED")).toBeInTheDocument();
+      expect(screen.getByText("Goal Planning")).toBeInTheDocument();
+      expect(screen.getByText("Develop Crypto Trading Plan")).toBeInTheDocument();
+    });
+
+    const planBtn = screen.getByRole("button", { name: /Plan Develop Crypto Trading Plan/i });
+    expect(planBtn).toHaveTextContent("Plan Goal");
+    await user.click(planBtn);
+
+    expect(api.advanceGoal).toHaveBeenCalledWith("goal-unplanned-1");
+  });
+
+  it("does not render unplanned goal in Needs Action queue while actively planning", async () => {
+    const mockPlanningGoal: api.Goal = {
+      id: "goal-planning-1",
+      title: "Drafting Goal",
+      statement: "In progress",
+      status: "unplanned",
+      isPlanning: true,
+      progress: { done: 0, total: 0 },
+      stepIntervalMinutes: 1440,
+      nextDueAt: null,
+      originSessionId: null,
+      createdAt: Date.now() - 1000,
+      updatedAt: Date.now() - 1000,
+    };
+
+    vi.mocked(api.listApprovals).mockResolvedValue({
+      approvals: [],
+      count: 0,
+    });
+    vi.mocked(api.listGoals).mockResolvedValue({
+      goals: [mockPlanningGoal],
+      count: 1,
+    });
+
+    render(<NeedsActionQueue />);
+
+    await waitFor(() => {
+      expect(screen.getByText("All Caught Up")).toBeInTheDocument();
+    });
+  });
 });
 
 describe("WorkingNowStream", () => {

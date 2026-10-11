@@ -871,8 +871,9 @@ extension RuneWeaverConfig {
     /// Bounds keep steady pursuit steady: a sub-five-minute cadence would
     /// busy-loop the scheduler, a multi-week cadence reads as abandoned, and
     /// unbounded active goals or plan lengths would crowd execution context.
-    /// The planning timeout only needs to stay positive here; the engine
-    /// clamps it again at use so an unvalidated path never waits forever.
+    /// The planning timeout is fail-closed to `0...86400` with zero meaning
+    /// unlimited; the engine clamps it again at use so an unvalidated path
+    /// never waits beyond the shared upper bound.
     private func validateGoalsSection() throws {
         if goals.stepIntervalMinutes < GoalsConfig.minStepIntervalMinutes
             || goals.stepIntervalMinutes > GoalsConfig.maxStepIntervalMinutes
@@ -906,10 +907,12 @@ extension RuneWeaverConfig {
                 message: "must be between \(GoalsConfig.minTriggersPerGoalBound) and \(GoalsConfig.maxTriggersPerGoalBound) (got \(goals.maxTriggersPerGoal))"
             )
         }
-        if goals.planTimeoutSeconds < 1 {
+        if goals.planTimeoutSeconds < GoalsConfig.unlimitedPlanTimeoutSeconds
+            || goals.planTimeoutSeconds > GoalsConfig.maxPlanTimeoutSeconds
+        {
             throw ConfigError.validationError(
                 field: "goals.plan_timeout_seconds",
-                message: "must be positive (got \(goals.planTimeoutSeconds))"
+                message: "must be between \(GoalsConfig.unlimitedPlanTimeoutSeconds) and \(GoalsConfig.maxPlanTimeoutSeconds) (got \(goals.planTimeoutSeconds))"
             )
         }
         if goals.maxToolIterations < 1 || goals.maxToolIterations > 100 {
@@ -1059,7 +1062,7 @@ public extension GoalsConfig {
             stepIntervalMinutes: min(max(stepIntervalMinutes, Self.minStepIntervalMinutes), Self.maxStepIntervalMinutes),
             maxActiveGoals: min(max(maxActiveGoals, Self.minActiveGoalsBound), Self.maxActiveGoalsBound),
             maxStepsPerGoal: min(max(maxStepsPerGoal, Self.minStepsPerGoalBound), Self.maxStepsPerGoalBound),
-            planTimeoutSeconds: max(1, planTimeoutSeconds),
+            planTimeoutSeconds: min(max(planTimeoutSeconds, Self.unlimitedPlanTimeoutSeconds), Self.maxPlanTimeoutSeconds),
             maxTriggersPerGoal: min(max(maxTriggersPerGoal, Self.minTriggersPerGoalBound), Self.maxTriggersPerGoalBound),
             maxToolIterations: min(max(maxToolIterations, 1), 100),
             maxStepBudgetExceededRetries: min(max(maxStepBudgetExceededRetries, 1), 10)

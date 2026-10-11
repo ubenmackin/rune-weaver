@@ -42,7 +42,7 @@ extension RuneWeaverCore.WSGoalSnapshot {
     /// - Parameters:
     ///   - goal: Stored goal snapshot.
     ///   - steps: Full plan ordered by ordinal.
-    public init(goal: Goal, steps: [GoalStep]) {
+    public init(goal: Goal, steps: [GoalStep], isPlanning: Bool? = nil) {
         let done = steps.filter { $0.status == .done }.count
         self.init(
             id: goal.id,
@@ -54,7 +54,8 @@ extension RuneWeaverCore.WSGoalSnapshot {
             nextDueAt: goal.nextDueAt,
             originSessionID: goal.originSessionID,
             createdAt: goal.createdAt,
-            updatedAt: goal.updatedAt
+            updatedAt: goal.updatedAt,
+            isPlanning: isPlanning
         )
     }
 
@@ -598,15 +599,18 @@ public struct GoalsSummaryResponse: Content, Equatable {
     public let achieved: Int
     /// Goals dropped.
     public let abandoned: Int
+    /// Goals without a decomposed plan yet.
+    public let unplanned: Int
 
     /// Creates a summary response.
-    public init(total: Int, active: Int, paused: Int, needsInput: Int, achieved: Int, abandoned: Int) {
+    public init(total: Int, active: Int, paused: Int, needsInput: Int, achieved: Int, abandoned: Int, unplanned: Int = 0) {
         self.total = total
         self.active = active
         self.paused = paused
         self.needsInput = needsInput
         self.achieved = achieved
         self.abandoned = abandoned
+        self.unplanned = unplanned
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -617,6 +621,7 @@ public struct GoalsSummaryResponse: Content, Equatable {
         case needsInputSnake = "needs_input"
         case achieved
         case abandoned
+        case unplanned
         // `needsInputCount` is intentionally absent: historical payloads
         // carrying the duplicate decode by ignoring the unknown key, while
         // new payloads never encode it.
@@ -637,6 +642,7 @@ public struct GoalsSummaryResponse: Content, Equatable {
         }
         self.achieved = try container.decode(Int.self, forKey: .achieved)
         self.abandoned = try container.decode(Int.self, forKey: .abandoned)
+        self.unplanned = try container.decodeIfPresent(Int.self, forKey: .unplanned) ?? 0
     }
 
     /// Encodes under the canonical camelCase spellings without the retired duplicate.
@@ -649,6 +655,7 @@ public struct GoalsSummaryResponse: Content, Equatable {
         try container.encode(needsInput, forKey: .needsInput)
         try container.encode(achieved, forKey: .achieved)
         try container.encode(abandoned, forKey: .abandoned)
+        try container.encode(unplanned, forKey: .unplanned)
     }
 }
 

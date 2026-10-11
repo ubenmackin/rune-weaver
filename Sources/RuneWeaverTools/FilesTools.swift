@@ -681,9 +681,9 @@ public struct FilesGrepTool: Tool, Sendable {
         var matches: [FilesGrepMatch] = []
         var totalMatched = 0
 
-        /// Visits one candidate file: counts the visit, appends any hits, and emits
-        /// progress. Extracted so a single-file root and a walked directory share the
-        /// same counted path.
+        // Visits one candidate file: counts the visit, appends any hits, and emits
+        // progress. Extracted so a single-file root and a walked directory share the
+        // same counted path.
         func visit(_ fileURL: URL) async throws {
             scanned += 1
             let includesFile = args.trimmedInclude.map {

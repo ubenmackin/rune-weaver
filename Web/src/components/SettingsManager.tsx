@@ -2634,8 +2634,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       return "Invalid goals plan length: max steps per goal must be between 1 and 24.";
     }
     const planTimeoutNum = Number(goalsPlanTimeoutSeconds);
-    if (!Number.isInteger(planTimeoutNum) || planTimeoutNum < 1) {
-      return "Invalid goals planning timeout: plan timeout must be at least 1 second.";
+    if (!Number.isInteger(planTimeoutNum) || planTimeoutNum < 0 || planTimeoutNum > 86400) {
+      return "Invalid goals planning timeout: plan timeout must be between 0 (unlimited) and 86400 seconds.";
     }
     const triggersNum = Number(goalsMaxTriggersPerGoal);
     if (!Number.isInteger(triggersNum) || triggersNum < 0 || triggersNum > 32) {
@@ -5445,14 +5445,14 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                   id="goals-plan-timeout"
                   type="number"
                   className="input-field"
-                  min={1}
-                  max={600}
+                  min={0}
+                  max={86400}
                   step={1}
                   value={goalsPlanTimeoutSeconds}
                   onChange={(e) => setGoalsPlanTimeoutSeconds(e.target.value)}
                 />
                 <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
-                  Timeout in seconds for model goal decomposition planning. Default is {DEFAULT_GOALS_PLAN_TIMEOUT_SECONDS}s.
+                  Timeout in seconds for model goal decomposition planning (0 for unlimited). Default is 0 (unlimited).
                 </p>
               </div>
               <div className="form-group flex-1">

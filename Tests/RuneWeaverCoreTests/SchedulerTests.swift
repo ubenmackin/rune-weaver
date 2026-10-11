@@ -504,3 +504,153 @@ struct SchedulerConfigTests {
         }
     }
 }
+
+@Suite("Event Rule Models and Matching")
+struct EventRuleTests {
+    @Test
+    func `Email condition matches sender subject and content`() {
+        let condition = EventRuleCondition(
+            senderContains: ["@school.org", "teacher"],
+            subjectContains: ["Dismissal", "Homework"],
+            contentContains: ["Friday"]
+        )
+
+        // Matches when any configured criterion matches (matchAll: false default)
+        #expect(condition.matches(emailSender: "principal@school.org", emailSubject: "Newsletter", emailBody: "Hello"))
+        #expect(condition.matches(emailSender: "unknown@other.com", emailSubject: "Early Dismissal", emailBody: "Hello"))
+        #expect(condition.matches(emailSender: "unknown@other.com", emailSubject: "Meeting", emailBody: "See you Friday"))
+        #expect(!condition.matches(emailSender: "random@spam.com", emailSubject: "Buy now", emailBody: "Sale today"))
+
+        // matchAll: true requires all configured criteria to match
+        let strictCondition = EventRuleCondition(
+            senderContains: ["@school.org"],
+            subjectContains: ["Dismissal"],
+            matchAll: true
+        )
+        #expect(strictCondition.matches(emailSender: "principal@school.org", emailSubject: "Friday Dismissal", emailBody: ""))
+        #expect(!strictCondition.matches(emailSender: "principal@school.org", emailSubject: "Newsletter", emailBody: ""))
+        #expect(!strictCondition.matches(emailSender: "other@gmail.com", emailSubject: "Dismissal", emailBody: ""))
+
+        // Catch-all condition matches anything
+        let catchAll = EventRuleCondition()
+        #expect(catchAll.matches(emailSender: "anyone@any.com", emailSubject: "Any", emailBody: "Body"))
+    }
+
+    @Test
+    func `Messages condition matches sender content and group chat filter`() {
+        let directOnlyRule = EventRuleCondition(
+            senderContains: ["Mom", "+15551234567"],
+            groupChatFilter: .directOnly
+        )
+        #expect(directOnlyRule.matches(messageSender: "Mom", messageText: "Dinner ready", isGroupChat: false))
+        #expect(!directOnlyRule.matches(messageSender: "Mom", messageText: "Dinner ready", isGroupChat: true))
+        #expect(!directOnlyRule.matches(messageSender: "Dad", messageText: "Hi", isGroupChat: false))
+
+        let groupOnlyRule = EventRuleCondition(
+            contentContains: ["urgent"],
+            groupChatFilter: .groupOnly
+        )
+        #expect(groupOnlyRule.matches(messageSender: "Anyone", messageText: "This is URGENT please read", isGroupChat: true))
+        #expect(!groupOnlyRule.matches(messageSender: "Anyone", messageText: "This is URGENT please read", isGroupChat: false))
+        #expect(!groupOnlyRule.matches(messageSender: "Anyone", messageText: "Regular message", isGroupChat: true))
+    }
+
+    @Test
+    func `Calendar condition matches title location and excludes all day`() {
+        let prepRule = EventRuleCondition(
+            titleContains: ["1:1", "Sync", "Client"],
+            locationContains: ["Zoom"],
+            excludeAllDay: true
+        )
+
+        // Excludes all-day events even if title matches
+        #expect(!prepRule.matches(calendarTitle: "Client Holiday", calendarName: "Work", calendarLocation: "Zoom", calendarNotes: nil, isAllDay: true))
+
+        // Matches regular meeting
+        #expect(prepRule.matches(calendarTitle: "1:1 with Bob", calendarName: "Work", calendarLocation: "Zoom", calendarNotes: nil, isAllDay: false))
+        #expect(prepRule.matches(calendarTitle: "Project Sync", calendarName: "Work", calendarLocation: "Office", calendarNotes: nil, isAllDay: false))
+        #expect(!prepRule.matches(calendarTitle: "Lunch", calendarName: "Personal", calendarLocation: "Cafe", calendarNotes: nil, isAllDay: false))
+    }
+
+    @Test
+    func `EventRuleAction and EventRule Codable round trip`() throws {
+        let rule = EventRule(
+            id: UUID(),
+            name: "School Event Extractor",
+            enabled: true,
+            condition: EventRuleCondition(
+                senderContains: ["@school.org"],
+                subjectContains: ["Schedule"]
+            ),
+            action: .agentPrompt(prompt: "Add school dates to Calendar"),
+            stopProcessing: true
+        )
+
+        let data = try JSONEncoder().encode(rule)
+        let decoded = try JSONDecoder().decode(EventRule.self, from: data)
+
+        #expect(decoded.id == rule.id)
+        #expect(decoded.name == "School Event Extractor")
+        #expect(decoded.enabled == true)
+        #expect(decoded.stopProcessing == true)
+        #expect(decoded.condition.senderContains == ["@school.org"])
+        if case let .agentPrompt(promptText) = decoded.action {
+            #expect(promptText == "Add school dates to Calendar")
+        } else {
+            Issue.record("Expected agentPrompt action")
+        }
+
+        // Direct tool action round-trip
+        let directRule = EventRule(
+            name: "Archive Spam",
+            condition: EventRuleCondition(subjectContains: ["Unsubscribe"]),
+            action: .directTool(toolName: "email.move", argumentsJSON: "{\"mailbox\":\"Archive\"}")
+        )
+        let directData = try JSONEncoder().encode(directRule)
+        let directDecoded = try JSONDecoder().decode(EventRule.self, from: directData)
+        if case let .directTool(tool, args) = directDecoded.action {
+            #expect(tool == "email.move")
+            #expect(args.contains("Archive"))
+        } else {
+            Issue.record("Expected directTool action")
+        }
+    }
+
+    @Test
+    func `Job with rules and empty prompt validates successfully`() throws {
+        let rule = EventRule(
+            name: "Rule 1",
+            condition: EventRuleCondition(),
+            action: .agentPrompt(prompt: "Do work")
+        )
+        let job = SchedulerJobConfig(
+            name: "Multi-Rule Email Watcher",
+            prompt: "", // Prompt is empty because rules supply actions
+            enabled: true,
+            poll: EmailPollRule(account: "icloud"),
+            watcherSource: .email,
+            rules: [rule]
+        )
+        try job.validate()
+        #expect(job.hasWatcherTrigger == true)
+        #expect(job.rules?.count == 1)
+    }
+
+    @Test
+    func `Job with invalid rule fails validation`() {
+        let emptyNameRule = EventRule(
+            name: "",
+            condition: EventRuleCondition(),
+            action: .agentPrompt(prompt: "Valid prompt")
+        )
+        let job = SchedulerJobConfig(
+            name: "Broken Watcher",
+            prompt: "",
+            watcherSource: .messages,
+            rules: [emptyNameRule]
+        )
+        #expect(throws: SchedulerConfigError.self) {
+            try job.validate()
+        }
+    }
+}

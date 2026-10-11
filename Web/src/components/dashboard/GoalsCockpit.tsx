@@ -167,8 +167,8 @@ export default function GoalsCockpit({
                   >
                     {goal.title}
                   </h3>
-                  <span className={`status-pill ${statusTone}`}>
-                    {goalStatusLabel(goal.status)}
+                  <span className={`status-pill ${goal.isPlanning ? "running" : statusTone}`}>
+                    {goal.isPlanning ? "Drafting Plan" : goalStatusLabel(goal.status)}
                   </span>
                 </div>
 
@@ -189,7 +189,11 @@ export default function GoalsCockpit({
 
                 <div className="goal-cockpit-footer">
                   <span className="next-cadence-text text-xs muted">
-                    {nextAdvance ? `Next: ${nextAdvance}` : "Every interval"}
+                    {goal.isPlanning
+                      ? "Agent is drafting plan…"
+                      : nextAdvance
+                      ? `Next: ${nextAdvance}`
+                      : "Every interval"}
                   </span>
 
                   <div className="goal-cockpit-actions">
@@ -197,10 +201,24 @@ export default function GoalsCockpit({
                       type="button"
                       className="btn advance-btn"
                       onClick={() => handleAdvance(goal)}
-                      disabled={isBusy}
-                      aria-label={`Advance goal now: ${goal.title}`}
+                      disabled={isBusy || Boolean(goal.isPlanning)}
+                      aria-label={
+                        goal.status === "unplanned"
+                          ? `Plan goal: ${goal.title}`
+                          : `Advance goal now: ${goal.title}`
+                      }
                     >
-                      <span>{isBusy ? "Advancing…" : "Advance Now"}</span>
+                      <span>
+                        {isBusy
+                          ? goal.status === "unplanned"
+                            ? "Planning…"
+                            : "Advancing…"
+                          : goal.isPlanning
+                          ? "Planning…"
+                          : goal.status === "unplanned"
+                          ? "Plan Goal"
+                          : "Advance Now"}
+                      </span>
                     </button>
                   </div>
                 </div>

@@ -351,7 +351,7 @@ extension SecurityConfig: Codable {
 /// reused when the engine bumps `next_due_at` after a run; the remaining
 /// caps bound how many goals stay active at once, how long a decomposed
 /// plan may grow, and how long planning may wait on the model before the
-/// resilient fallback keeps the goal.
+/// goal settles to `unplanned` with empty steps plus an audit note.
 public struct GoalsConfig: Sendable, Equatable {
     /// Whether goal creation and advancement run at all. Off by default.
     public var enabled: Bool
@@ -361,7 +361,8 @@ public struct GoalsConfig: Sendable, Equatable {
     public var maxActiveGoals: Int
     /// Maximum steps in one decomposed plan. Bounds planning context.
     public var maxStepsPerGoal: Int
-    /// Seconds the planner waits on the model before falling back.
+    /// Seconds the planner waits on the model before settling to unplanned.
+    /// Zero means unlimited planning time; positive values bound to `maxPlanTimeoutSeconds`.
     public var planTimeoutSeconds: Int
     /// Maximum event triggers armed on one goal. Bounds trigger fan-out.
     public var maxTriggersPerGoal: Int
@@ -378,8 +379,13 @@ public struct GoalsConfig: Sendable, Equatable {
     public static let defaultMaxActiveGoals = 10
     /// Default plan length fits one screen of numbered steps.
     public static let defaultMaxStepsPerGoal = 12
-    /// Default planning budget waits out slow local models without stalling creation.
-    public static let defaultPlanTimeoutSeconds = 60
+    /// Default planning budget is 0 (unlimited) so local models can run to completion.
+    public static let defaultPlanTimeoutSeconds = 0
+    /// Zero means unlimited planning time, relying on cooperative cancellation.
+    public static let unlimitedPlanTimeoutSeconds = 0
+    /// Upper planning timeout bound (24h) before a stray digit holds planning open
+    /// beyond any plausible model round.
+    public static let maxPlanTimeoutSeconds = 86400
     /// Default tool iterations before budget limit triggers for a goal turn.
     public static let defaultMaxToolIterations = 35
     /// Default consecutive budget exceeded retries before escalating.

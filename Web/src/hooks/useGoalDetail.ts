@@ -182,13 +182,22 @@ export function useGoalDetail(
       onNotice?.(null);
       try {
         await advanceGoal(goal.id);
-        onNotice?.(`Working on "${goal.title}"…`);
+        onNotice?.(
+          goal.status === "unplanned"
+            ? `Drafting plan for "${goal.title}"…`
+            : `Working on "${goal.title}"…`,
+        );
         await reload();
       } catch (failure) {
         onError?.(
           failure instanceof ApiError && failure.status === 409
             ? goalAdvanceConflictMessage(goal.title)
-            : goalFailureMessage(failure, `Working on "${goal.title}" failed`),
+            : goalFailureMessage(
+                failure,
+                goal.status === "unplanned"
+                  ? `Planning "${goal.title}" failed`
+                  : `Working on "${goal.title}" failed`,
+              ),
         );
       } finally {
         setAdvancingGoalId(null);

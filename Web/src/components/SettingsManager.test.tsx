@@ -4674,6 +4674,50 @@ describe("SettingsManager persona pane", () => {
     });
   });
 
+  it("allows setting goals plan timeout to 0 for unlimited planning time", async () => {
+    const user = userEvent.setup();
+    const settingsWithGoals = {
+      ...PERSONA_SETTINGS,
+      goals: {
+        enabled: true,
+        step_interval_minutes: 1440,
+        max_active_goals: 3,
+        max_steps_per_goal: 8,
+        plan_timeout_seconds: 60,
+        max_triggers_per_goal: 4,
+      },
+    };
+    let sentPayload: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === "PUT") {
+          sentPayload = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return jsonResponse({ ...settingsWithGoals, ...sentPayload });
+        }
+        return jsonResponse(settingsWithGoals);
+      }),
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    await user.click(screen.getByRole("tab", { name: /^Goals$/i }));
+    const timeoutInput = screen.getByLabelText("Planning Timeout (seconds)");
+    expect(timeoutInput).toBeDefined();
+    await user.clear(timeoutInput);
+    await user.type(timeoutInput, "0");
+    await user.click(tabSaveButton());
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    const body = sentPayload as unknown as Record<string, unknown>;
+    expect((body["goals"] as Record<string, unknown>)["plan_timeout_seconds"]).toBe(0);
+    await waitFor(() => {
+      expect(screen.getByText("Settings saved.")).toBeDefined();
+    });
+  });
+
   it("keeps an unknown tab id on the current tab", async () => {
     stubPersonaFetch();
     // Fail-closed predicate directly: an unknown id never narrows to the tab

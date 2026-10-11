@@ -799,18 +799,19 @@ public actor GoalStore: GoalStoring {
             return updated
         }
 
-        /// Counts goals currently in the active state.
+        /// Counts goals currently in the active or unplanned state.
         static func activeGoalCount(dbPath: String) throws -> Int {
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return 0 }
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
             var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, "SELECT COUNT(*) FROM goals WHERE status = ?;", -1, &statement, nil) == SQLITE_OK else {
+            guard sqlite3_prepare_v2(handle, "SELECT COUNT(*) FROM goals WHERE status IN (?, ?);", -1, &statement, nil) == SQLITE_OK else {
                 throw GoalStoreError.persistenceFailed("Could not count active goals")
             }
             defer { sqlite3_finalize(statement) }
             bindText(statement, index: 1, value: GoalStatus.active.rawValue)
+            bindText(statement, index: 2, value: GoalStatus.unplanned.rawValue)
             guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
             return Int(sqlite3_column_int(statement, 0))
         }

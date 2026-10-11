@@ -459,9 +459,9 @@ step_interval_minutes = 1440
 max_active_goals = 10
 # Maximum steps in one decomposed plan (1-24, bounds planning context).
 max_steps_per_goal = 12
-# Seconds the planner waits on the model before the resilient single-step
-# fallback keeps the goal (must stay positive).
-plan_timeout_seconds = 60
+# Seconds the planner waits on the model; 0 means unlimited, otherwise 0-86400.
+# On timeout the goal settles to unplanned with empty steps.
+plan_timeout_seconds = 0
 # Maximum event triggers armed on one goal (0-32, 0 disables event wake-ups).
 max_triggers_per_goal = 8
 # Maximum tool loop iterations per goal turn before force-synthesis plus budget_exceeded (1-100). Always synthesizes; never parks.

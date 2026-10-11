@@ -98,6 +98,9 @@ func registerRunRoutes(_ app: Application) {
             _ = await context.activeTurns.cancel(sessionID: sessionID)
             await context.steeringQueue.clear(for: sessionID)
         }
+        if let goalID = row.goalID {
+            await context.goalEngine.cancelPlan(goalID: goalID)
+        }
         await context.hub.broadcastRun(updated)
         return RunCancelResponse(cancelled: true, scope: "run")
     }

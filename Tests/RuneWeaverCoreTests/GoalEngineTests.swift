@@ -118,7 +118,7 @@ struct GoalEngineTests {
         #expect(config.stepIntervalMinutes == 1440)
         #expect(config.maxActiveGoals == 10)
         #expect(config.maxStepsPerGoal == 12)
-        #expect(config.planTimeoutSeconds == 60)
+        #expect(config.planTimeoutSeconds == 0)
         #expect(RuneWeaverConfig.default.goals == GoalsConfig())
     }
 
@@ -256,20 +256,20 @@ struct GoalEngineTests {
     }
 
     @Test
-    func `Unusable output falls back to a single step with a note`() async throws {
+    func `Unusable output marks goal unplanned with a note`() async throws {
         let (path, base) = makeEngineDBPath()
         defer { try? FileManager.default.removeItem(at: base) }
         let llm = StubGoalLLM(texts: ["sorry, no plan today"])
         let (engine, store) = makeEngine(dbPath: path, llm: llm)
         let goal = makeEngineGoal(title: "Learn drums")
-        try await store.create(goal: goal, steps: [makeEngineStep(goalID: goal.id, ordinal: 0, title: "Planning in progress")])
+        try await store.create(goal: goal, steps: [])
 
         await engine.decompose(goal: goal)
 
         let steps = try await store.steps(goalID: goal.id)
-        #expect(steps.count == 1)
-        #expect(steps.first?.title.contains("Work toward") == true)
-        #expect(steps.first?.title.contains("Learn drums") == true)
+        #expect(steps.isEmpty)
+        let fresh = try await store.goal(id: goal.id)
+        #expect(fresh?.status == .unplanned)
         let kinds = try await store.events(goalID: goal.id).map(\.kind)
         #expect(kinds.contains(.note))
     }

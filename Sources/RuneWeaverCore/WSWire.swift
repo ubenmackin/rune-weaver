@@ -1082,6 +1082,8 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
     public let createdAt: Date
     /// When the goal row last changed.
     public let updatedAt: Date
+    /// Whether the agent is actively planning or drafting steps for this goal.
+    public let isPlanning: Bool?
 
     /// Creates a snapshot.
     public init(
@@ -1094,7 +1096,8 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
         nextDueAt: Date? = nil,
         originSessionID: UUID? = nil,
         createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        isPlanning: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -1106,6 +1109,7 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
         self.originSessionID = originSessionID
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.isPlanning = isPlanning
     }
 
     /// Coding keys for the snapshot.
@@ -1134,6 +1138,8 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
         case createdAt
         /// Last-change instant.
         case updatedAt
+        /// Active planning indicator.
+        case isPlanning
     }
 
     /// Decodes tolerantly across the origin-session spellings so payloads
@@ -1158,6 +1164,7 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
         self.originSessionID = originSessionID
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
         self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        self.isPlanning = try container.decodeIfPresent(Bool.self, forKey: .isPlanning)
     }
 
     /// Encodes under the canonical wire spellings so older decoders see no new key.
@@ -1174,6 +1181,7 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
         try container.encodeIfPresent(originSessionID, forKey: .originSessionId)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(isPlanning, forKey: .isPlanning)
     }
 }
 

@@ -9,8 +9,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  advanceGoal,
   decideApproval,
   goalNeedsInput,
+  isGoalUnplanned,
   listApprovals,
   listGoals,
   respondToQuestion,
@@ -43,6 +45,7 @@ export default function NeedsActionQueue({
   const [approvals, setApprovals] = useState<PermissionRequest[]>([]);
   const [blockedGoals, setBlockedGoals] = useState<Goal[]>([]);
   const [decidingId, setDecidingId] = useState<string | null>(null);
+  const [planningGoalId, setPlanningGoalId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fetchActionItems = useCallback(async () => {
@@ -54,12 +57,12 @@ export default function NeedsActionQueue({
       ]);
 
       setApprovals(approvalsRes.approvals || []);
-      // Single blocked-goal predicate shared with the greeting cluster so
-      // both surfaces agree on which statuses count as needing input.
-      const inputNeeded = (goalsRes.goals || []).filter((g) =>
-        goalNeedsInput(g.status),
+      // Single blocked-goal predicate shared with the greeting cluster:
+      // goals parked awaiting owner input OR unplanned goals not yet planning.
+      const actionGoals = (goalsRes.goals || []).filter(
+        (g) => goalNeedsInput(g.status) || (isGoalUnplanned(g.status) && !g.isPlanning),
       );
-      setBlockedGoals(inputNeeded);
+      setBlockedGoals(actionGoals);
     } catch (err) {
       console.warn("Failed to fetch needs-action items:", err);
     }
@@ -123,6 +126,19 @@ export default function NeedsActionQueue({
       setError(err instanceof Error ? err.message : "Failed to record response");
     } finally {
       setDecidingId(null);
+    }
+  }
+
+  async function handlePlanGoal(goalId: string) {
+    try {
+      setPlanningGoalId(goalId);
+      await advanceGoal(goalId);
+      await fetchActionItems();
+      onActionDecided?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to plan goal");
+    } finally {
+      setPlanningGoalId(null);
     }
   }
 
@@ -285,47 +301,71 @@ export default function NeedsActionQueue({
             );
           })}
 
-          {/* Blocked Goals Needing Input */}
-          {blockedGoals.map((goal) => (
-            <article key={goal.id} className="action-card goal-input-card">
-              <div className="action-card-header">
-                <div className="action-card-title-row">
-                  <span className="badge severity-badge severity-moderate">
-                    NEEDS INPUT
-                  </span>
-                  <span className="tool-name-badge">Goal Pursuit</span>
+          {/* Blocked Goals Needing Input or Unplanned */}
+          {blockedGoals.map((goal) => {
+            const isUnplanned = isGoalUnplanned(goal.status);
+            const isPlanningThis = planningGoalId === goal.id;
+            return (
+              <article
+                key={goal.id}
+                className={`action-card goal-input-card ${isUnplanned ? "goal-unplanned-card" : ""}`}
+              >
+                <div className="action-card-header">
+                  <div className="action-card-title-row">
+                    <span className="badge severity-badge severity-moderate">
+                      {isUnplanned ? "UNPLANNED" : "NEEDS INPUT"}
+                    </span>
+                    <span className="tool-name-badge">
+                      {isUnplanned ? "Goal Planning" : "Goal Pursuit"}
+                    </span>
+                  </div>
+                  {goal.originSessionId ? (
+                    <button
+                      type="button"
+                      className="btn-link open-session-link"
+                      onClick={() => onOpenSession?.(goal.originSessionId!)}
+                    >
+                      <MessageSquareIcon size={13} />
+                      <span>Open Thread</span>
+                    </button>
+                  ) : null}
                 </div>
-                {goal.originSessionId ? (
+
+                <div className="action-card-body">
+                  <h4 className="goal-action-title">{goal.title}</h4>
+                  <p className="action-card-desc">
+                    {goal.statement ||
+                      (isUnplanned
+                        ? "This goal has no plan yet. Let the agent break it down into actionable steps."
+                        : "This goal is paused waiting for operator guidance or configuration.")}
+                  </p>
+                </div>
+
+                <div className="action-card-buttons">
+                  {isUnplanned ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary plan-goal-btn"
+                      onClick={() => handlePlanGoal(goal.id)}
+                      disabled={isPlanningThis || Boolean(goal.isPlanning)}
+                      aria-label={`Plan ${goal.title}`}
+                    >
+                      <TargetIcon size={15} />
+                      <span>{isPlanningThis || goal.isPlanning ? "Planning…" : "Plan Goal"}</span>
+                    </button>
+                  ) : null}
                   <button
                     type="button"
-                    className="btn-link open-session-link"
-                    onClick={() => onOpenSession?.(goal.originSessionId!)}
+                    className={`btn ${isUnplanned ? "btn-secondary" : "btn-primary"} open-goal-btn`}
+                    onClick={() => onOpenGoals?.()}
                   >
-                    <MessageSquareIcon size={13} />
-                    <span>Open Thread</span>
+                    <TargetIcon size={15} />
+                    <span>Inspect Goal</span>
                   </button>
-                ) : null}
-              </div>
-
-              <div className="action-card-body">
-                <h4 className="goal-action-title">{goal.title}</h4>
-                <p className="action-card-desc">
-                  {goal.statement || "This goal is paused waiting for operator guidance or configuration."}
-                </p>
-              </div>
-
-              <div className="action-card-buttons">
-                <button
-                  type="button"
-                  className="btn btn-primary open-goal-btn"
-                  onClick={() => onOpenGoals?.()}
-                >
-                  <TargetIcon size={15} />
-                  <span>Inspect Goal</span>
-                </button>
-              </div>
-            </article>
-          ))}
+                </div>
+              </article>
+            );
+          })}
         </div>
       )}
     </section>
