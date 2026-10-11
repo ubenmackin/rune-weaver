@@ -124,7 +124,7 @@ Episodic memory, semantic memory vectors, and recall fan-out budgets.
 | `recall_threshold` | double | `0.1` | Minimum calibrated score for an injected recall hit (`0.0`–`1.0`). |
 | `recall_max_chars` | integer | `2000` | Maximum total characters for the injected recall block, header included (`200`–`16000`). |
 | `recall_per_hit_chars` | integer | `500` | Maximum characters kept per individual hit before ellipsis truncation (`100`–`2000`). |
-| `recall_doc_pool_multiplier` | integer | `4` | Extra vector candidates scanned per returned document page (`1`–`8`). |
+| `recall_doc_pool_multiplier` | integer | `4` | Widening factor for the document candidate pool: the pool widens to `page * multiplier`, the vector leg scans `min(max(pool * 10, 500), maxPerTierResults)` chunks from it, and the keyword leg reads at the same width. Inert at the default page size — it only moves the vector leg once `pool * 10` clears the 500-row floor (`1`–`8`). |
 | `recall_episodic_weight` | double | `0.25` | Weight mapping episodic rank scores onto the shared recall scale (`0.0`–`1.0`). |
 
 ```toml

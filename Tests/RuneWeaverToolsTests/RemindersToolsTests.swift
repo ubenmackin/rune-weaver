@@ -184,6 +184,17 @@ struct RemindersToolsTests {
     }
 
     @Test
+    func `Search description names reminders.search decisive for entity-plus-time questions`() {
+        let tool = RemindersSearchTool(gateway: StubRemindersGateway())
+        #expect(
+            tool.description.contains(
+                "For entity-plus-time questions about due items such as upcoming deadlines, "
+                    + "reminders.search is decisive; do not keep searching after it answers."
+            )
+        )
+    }
+
+    @Test
     func `Search decodes defaults and clamps`() throws {
         let defaults = try JSONDecoder().decode(RemindersSearchArgs.self, from: Data("{}".utf8))
         #expect(defaults.query == nil)

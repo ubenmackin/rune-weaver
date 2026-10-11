@@ -415,7 +415,8 @@ public struct CalendarSearchTool: Tool, Sendable {
             + "Empty or omitted query lists the window defined by since (inclusive) and until (exclusive) as YYYY-MM-DD or full ISO8601 datetimes. "
             + "Each event carries device-timezone startDisplay and endDisplay strings alongside ISO Zulu startDateISO and endDateISO. "
             + "Present startDisplay and endDisplay to the user and use startDateISO and endDateISO for sorting only. "
-            + "Returns matching events with opaque identifiers for follow-up update or delete."
+            + "Returns matching events with opaque identifiers for follow-up update or delete. "
+            + "For entity-plus-time questions about schedule such as next sessions, calendar.search is decisive; do not keep searching after it answers."
 
     public let inputSchema = JSONSchema(
         rawValue: """

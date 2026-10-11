@@ -1,10 +1,11 @@
 // Rune Weaver Core — Chunk rows and keyword search for the document index.
 //
 // Holds the chunk write path plus retrieval: chunk replacement per document,
-// FTS5 keyword search with a LIKE fallback for stemming gaps, newest-first
-// vector reads for the capped semantic pool, row decoding, FTS and LIKE
-// escaping, and little-endian Float32 embedding codecs. Document rows live in
-// `DocIndexStoreDocuments.swift` and schema plus maintenance live beside it.
+// FTS5 keyword search with a LIKE fallback for stemming gaps, event-time
+// vector reads (`mtime` desc, NULLs last) for the capped semantic pool, row
+// decoding, FTS and LIKE escaping, and little-endian Float32 embedding codecs.
+// Document rows live in `DocIndexStoreDocuments.swift` and schema plus
+// maintenance live beside it.
 
 import Foundation
 import os
@@ -110,6 +111,9 @@ import os
         /// before ranking: present bounds join chunks to their document and
         /// compare epoch seconds, so undated parents (NULL `mtime`) never
         /// match a bounded query while an unbounded query keeps today's rows.
+        /// A windowed read also lifts the row ceiling to the vector pool's
+        /// windowed maximum, so a dated keyword leg never reads narrower than
+        /// the vector leg beside it.
         static func searchKeyword(query: String, limit: Int, dbPath: String, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
             guard limit > 0 else { return [] }
             let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -118,7 +122,11 @@ import os
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
-            let clamped = SQLiteHelpers.sqliteLimit(min(limit, maxResults))
+            // Windowed reads share the vector pool's windowed ceiling so the
+            // keyword leg and the vector leg widen together; unbounded reads
+            // keep the plain per-read cap.
+            let maxLimit = (since != nil || until != nil) ? maxVectorWindowResults : maxResults
+            let clamped = SQLiteHelpers.sqliteLimit(min(limit, maxLimit))
             if since == nil, until == nil {
                 var statement: OpaquePointer?
                 let sql = """
@@ -281,13 +289,17 @@ import os
             return results
         }
 
-        /// Reads the newest chunks carrying an embedding, bounded by `limit`.
-        /// Newest-first ordering keeps the capped semantic pool over recent
-        /// writes; callers needing full-corpus recall must page the bound.
+        /// Reads chunks carrying an embedding, bounded by `limit`.
+        /// Event-time ordering keeps the capped semantic pool over recently
+        /// happening documents, never recently written rows; callers needing
+        /// full-corpus recall must page the bound.
         ///
         /// A dated window joins to `indexed_documents` so only chunks whose
         /// parent event time falls in `[since, until)` survive; NULL parents
-        /// stay excluded while unbounded reads keep today's newest-first rows.
+        /// — undated rows plus the orphan chunks the maintenance path still
+        /// counts — stay excluded there, while unbounded reads concatenate an
+        /// index-ordered dated leg with a rowid-ordered undated-plus-orphan
+        /// tail, keeping NULL event times last without sorting the full table.
         static func chunkVectors(limit: Int, dbPath: String, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
             guard limit > 0 else { return [] }
             let expanded = (dbPath as NSString).expandingTildeInPath
@@ -297,24 +309,57 @@ import os
             let maxLimit = (since != nil || until != nil) ? maxVectorWindowResults : maxResults
             let clamped = SQLiteHelpers.sqliteLimit(min(limit, maxLimit))
             if since == nil, until == nil {
-                let sql = "SELECT id, document_id, ordinal, chunk_text, embedding, is_vector FROM indexed_chunks "
-                    + "WHERE is_vector = 1 ORDER BY rowid DESC LIMIT ?;"
-                var statement: OpaquePointer?
-                guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                // The dated leg leads with `indexed_documents` so the `mtime`
+                // index supplies event-time order and stops after `limit`
+                // rows instead of sorting every vector chunk with its
+                // embedding payload. Orphan chunks (missing parent) and
+                // undated parents cannot ride that index, so a second
+                // rowid-ordered tail covers exactly those rows; dated rows
+                // always precede the tail, matching NULLS LAST without a
+                // full-table sort. Rowid breaks event-time ties so equal
+                // timestamps stay deterministic.
+                let datedSQL = "SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector FROM indexed_documents d "
+                    + "JOIN indexed_chunks c ON c.document_id = d.id "
+                    + "WHERE c.is_vector = 1 AND d.mtime IS NOT NULL ORDER BY d.mtime DESC, c.rowid DESC LIMIT ?;"
+                var datedStatement: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, datedSQL, -1, &datedStatement, nil) == SQLITE_OK else {
                     throw DocIndexError.persistenceFailed("Could not prepare vector read")
                 }
-                defer { sqlite3_finalize(statement) }
-                sqlite3_bind_int(statement, 1, clamped)
+                defer { sqlite3_finalize(datedStatement) }
+                sqlite3_bind_int(datedStatement, 1, clamped)
                 var results: [IndexedChunk] = []
-                while sqlite3_step(statement) == SQLITE_ROW {
-                    if let chunk = readChunk(statement) {
+                while sqlite3_step(datedStatement) == SQLITE_ROW {
+                    if let chunk = readChunk(datedStatement) {
+                        results.append(chunk)
+                    }
+                }
+                // A full dated leg already decides the caller's window, so the
+                // tail cannot change the returned rows.
+                let need = Int(clamped) - results.count
+                guard need > 0 else { return results }
+                // The tail covers only chunks no dated scan could see — a
+                // missing parent row or a NULL parent event time — in newest
+                // insertion order, so undated documents never crowd out dated
+                // ones yet stay candidates like the keyword path's table-only
+                // read.
+                let tailSQL = "SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector FROM indexed_chunks c "
+                    + "LEFT JOIN indexed_documents d ON d.id = c.document_id "
+                    + "WHERE c.is_vector = 1 AND (d.id IS NULL OR d.mtime IS NULL) ORDER BY c.rowid DESC LIMIT ?;"
+                var tailStatement: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, tailSQL, -1, &tailStatement, nil) == SQLITE_OK else {
+                    throw DocIndexError.persistenceFailed("Could not prepare vector read")
+                }
+                defer { sqlite3_finalize(tailStatement) }
+                sqlite3_bind_int(tailStatement, 1, SQLiteHelpers.sqliteLimit(need))
+                while sqlite3_step(tailStatement) == SQLITE_ROW {
+                    if let chunk = readChunk(tailStatement) {
                         results.append(chunk)
                     }
                 }
                 return results
             }
-            var sql = "SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector FROM indexed_chunks c "
-                + "JOIN indexed_documents d ON d.id = c.document_id "
+            var sql = "SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector FROM indexed_documents d "
+                + "JOIN indexed_chunks c ON c.document_id = d.id "
                 + "WHERE c.is_vector = 1"
             if since != nil {
                 sql += " AND d.mtime >= ?"
@@ -322,7 +367,12 @@ import os
             if until != nil {
                 sql += " AND d.mtime < ?"
             }
-            sql += " ORDER BY c.rowid DESC LIMIT ?;"
+            // Windowed reads keep their bounds; only the pool order changes to
+            // event time so recent happenings outrank recent writes. Leading
+            // with the parent lets the `mtime` index supply both the range
+            // and the order, and the bounds already exclude NULL event times.
+            // Rowid breaks event-time ties so equal timestamps stay deterministic.
+            sql += " ORDER BY d.mtime DESC, c.rowid DESC LIMIT ?;"
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 throw DocIndexError.persistenceFailed("Could not prepare vector read")

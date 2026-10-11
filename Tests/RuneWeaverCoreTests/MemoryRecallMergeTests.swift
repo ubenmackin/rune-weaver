@@ -503,4 +503,152 @@ struct MemoryRecallMergeTests {
         #expect(exact.count == 2)
         #expect(exact.first?.content.contains("notes.md") == true)
     }
+
+    @Test
+    func `Entity display name and whole-phrase bonuses seat the karate series above the birthday partial`() async throws {
+        let (engine, store, base) = makeKeywordCurveEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // The series parent is the named entity: its display name carries both
+        // salient tokens and its body carries the whole salient phrase, so it
+        // earns two structural bonuses on top of full overlap. The birthday doc
+        // matches only one salient token and the sixteen chatter docs match a
+        // single repeated token, so neither earns either bonus.
+        let filler = (0 ..< 120).map { "filler\($0)" }.joined(separator: " ")
+        try await storeKeywordCurveDoc(
+            in: store,
+            externalID: "karate-birthday-series",
+            text: "karate birthday cobra kai finale showdown celebration special retrospective \(filler)"
+        )
+        for index in 0 ..< 16 {
+            try await storeKeywordCurveDoc(
+                in: store,
+                externalID: "chatter-\(index)",
+                text: "karate karate karate drills session \(index) footwork kata"
+            )
+        }
+        try await storeKeywordCurveDoc(
+            in: store,
+            externalID: "birthday",
+            text: "birthday party cake candles celebration"
+        )
+
+        let budgets = RecallBudgets(
+            perTierLimit: 20,
+            autoLimit: 10,
+            threshold: 0.1,
+            maxChars: 4000,
+            perHitChars: 500,
+            docPoolMultiplier: 4
+        )
+        let fused = await engine.recallDocuments(query: "karate birthday", limit: 10, budgets: budgets)
+        #expect(fused.count >= 5)
+        guard let seriesIndex = fused.firstIndex(where: { $0.metadata["display_name"] == "karate-birthday-series" }) else {
+            Issue.record("Expected the karate-birthday series chunk in fused results")
+            return
+        }
+        guard let birthdayIndex = fused.firstIndex(where: { $0.content.contains("party cake") }) else {
+            Issue.record("Expected the partial birthday chunk in fused results")
+            return
+        }
+        // The series carries the entity name plus the contiguous phrase, so it
+        // outranks every partial match into the top five rather than only
+        // surviving the widened pool.
+        #expect(seriesIndex < 5)
+        #expect(seriesIndex < birthdayIndex)
+        for hit in fused {
+            #expect(hit.score >= 0 && hit.score <= 1)
+        }
+    }
+
+    @Test
+    func `Whole-phrase bonus outranks the same-token scattered match`() async throws {
+        let (engine, store, base) = makeKeywordCurveEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // Identical token counts and term frequencies keep the BM25 order equal
+        // for both targets, so they sit adjacent in the union and only the
+        // contiguous phrase separates them. Single-token decoys rank strictly
+        // below the two-token targets, which holds the recency gap between the
+        // targets small enough for the phrase bonus to decide.
+        try await storeKeywordCurveDoc(
+            in: store,
+            externalID: "phrase-contiguous",
+            text: "karate birthday cobra kai finale showdown celebration"
+        )
+        try await storeKeywordCurveDoc(
+            in: store,
+            externalID: "phrase-scattered",
+            text: "karate cobra kai birthday finale showdown celebration"
+        )
+        for index in 0 ..< 16 {
+            try await storeKeywordCurveDoc(
+                in: store,
+                externalID: "decoy-\(index)",
+                text: "karate chatter drill \(index) footwork kata"
+            )
+        }
+
+        let budgets = RecallBudgets(
+            perTierLimit: 20,
+            autoLimit: 10,
+            threshold: 0.1,
+            maxChars: 4000,
+            perHitChars: 500,
+            docPoolMultiplier: 4
+        )
+        let fused = await engine.recallDocuments(query: "karate birthday", limit: 10, budgets: budgets)
+        #expect(fused.count == 10)
+        guard let contiguousIndex = fused.firstIndex(where: { $0.metadata["display_name"] == "phrase-contiguous" }),
+              let scatteredIndex = fused.firstIndex(where: { $0.metadata["display_name"] == "phrase-scattered" })
+        else {
+            Issue.record("Expected both phrase fixtures in fused results")
+            return
+        }
+        // Neither display name is the queried entity, so the phrase bonus alone
+        // must lift the contiguous run over the token-identical scattered body.
+        #expect(contiguousIndex < scatteredIndex)
+    }
+
+    @Test
+    func `Non-entity associative query keeps its pre-bonus ordering and bounded scores`() async throws {
+        let (engine, store, base) = makeKeywordCurveEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // No display name holds both salient tokens, so the entity bonus is
+        // silent; the scattered body holds both tokens non-adjacently, so the
+        // phrase bonus is silent too. The ordering therefore rests on the
+        // unchanged blend: overlap first, then the recency prior.
+        try await storeKeywordCurveDoc(
+            in: store,
+            externalID: "series-scattered",
+            text: "karate cobra kai birthday finale showdown celebration"
+        )
+        try await storeKeywordCurveDoc(
+            in: store,
+            externalID: "birthday-partial",
+            text: "birthday party cake candles celebration"
+        )
+
+        let budgets = RecallBudgets(
+            perTierLimit: 20,
+            autoLimit: 10,
+            threshold: 0.1,
+            maxChars: 4000,
+            perHitChars: 500,
+            docPoolMultiplier: 4
+        )
+        let fused = await engine.recallDocuments(query: "karate birthday", limit: 10, budgets: budgets)
+        #expect(fused.count == 2)
+        #expect(fused.first?.metadata["display_name"] == "series-scattered")
+        #expect(fused.last?.metadata["display_name"] == "birthday-partial")
+
+        // With neither structural bonus firing, the two-doc field keeps the
+        // exact blend score it carried before the bonuses existed: full
+        // overlap for the scattered body, half overlap for the partial one.
+        let first = try #require(fused.first?.score)
+        let last = try #require(fused.last?.score)
+        #expect(abs(first - (0.3 + 1.6 / 61.0)) < 1e-6)
+        #expect(abs(last - (0.1 + 1.6 / 62.0)) < 1e-6)
+    }
 }

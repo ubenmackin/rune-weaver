@@ -3,10 +3,10 @@
 // Combines episodic, semantic, document-index, and profile hits onto one
 // calibrated scale so chat turns see files, mail, and facts together. The FTS5
 // keyword path and the cosine path over stored chunk embeddings are unioned
-// newest-first, reranked with token overlap, recency, and exact name bonuses,
-// and stamped with the MAX(indexed_at) watermark. Keyword-only fallback keeps
-// retrieval alive when embeddings are missing, and cancellation propagates
-// instead of degrading.
+// event-time-first, reranked with token overlap, recency, and exact name plus
+// display-name entity and contiguous-phrase bonuses, and stamped with the
+// MAX(indexed_at) watermark. Keyword-only fallback keeps retrieval alive when
+// embeddings are missing, and cancellation propagates instead of degrading.
 
 import Foundation
 
@@ -109,14 +109,16 @@ extension MemoryEngine {
     /// Recalls document-index chunks by unioning keyword and vector candidates.
     ///
     /// The FTS5 keyword path and the cosine path over stored chunk embeddings
-    /// are unioned newest-first, reciprocal-rank-fused (`rrf = 1/(60+rank)` per
-    /// list, summed when a chunk appears in both), then reranked with the
-    /// shared `0.6*max+0.2*overlap+0.1*recency+0.1*exact` blend plus the RRF
-    /// boost and calibrated by the doc-index tier weight. A missing query
-    /// embedding or a failed vector read still returns the keyword hits, so
-    /// retrieval never fails a turn. The vector scan is a bounded
-    /// newest-first pool widened by budgets, so recent writes stay visible at
-    /// scale while an old-but-relevant keyword hit still surfaces via union.
+    /// are reciprocal-rank-fused (`rrf = 1/(60+rank)` per list, summed when a
+    /// chunk appears in both), then reranked with the shared
+    /// `0.6*max+0.2*overlap+0.1*recency+0.1*exact+0.1*entity+0.1*phrase` blend
+    /// plus the RRF boost and calibrated by the doc-index tier weight. A
+    /// missing query embedding or a failed vector read still returns the
+    /// keyword hits, so retrieval never fails a turn. The vector scan is an
+    /// event-time-ordered pool (parent `mtime` desc, NULLs last) widened by
+    /// budgets, so recently happening documents stay visible at scale while
+    /// the keyword leg reads at the same width and an old-but-relevant
+    /// keyword hit still surfaces via union.
     /// - Parameters:
     ///   - query: Raw user query.
     ///   - embedding: Query embedding for the vector path, or nil for keyword-only.
@@ -139,25 +141,31 @@ extension MemoryEngine {
         let clampedBudgets = budgets.clamped()
         let clamped = min(min(limit, clampedBudgets.perTierLimit), Self.maxPerTierResults)
         guard clamped > 0 else { return [] }
-        // Widen the vector scan beyond the returned page so a strong semantic
-        // match is not crowded out by keyword hits. The store caps the pool to
-        // the newest rows, keeping recent writes visible at scale; the keyword
-        // union keeps an old-but-relevant hit recallable outside that pool.
-        // The dated window filters candidates before ranking so calibration,
-        // watermark, and per-tier caps stay unchanged.
+        // Widen both scans beyond the returned page so a strong match is not
+        // crowded out by common-name flooding. The vector pool already scans
+        // an order of magnitude past `pool` with a floor keeping small pages
+        // visible; the keyword pool now shares that width so a matching series
+        // survives chatter outnumbering it twenty-to-one. The dated window
+        // filters candidates before ranking so calibration, watermark, and
+        // per-tier caps stay unchanged.
         // `docPoolMultiplier` clamps to `1...8`, so the widened pool never
         // shrinks below `clamped` and needs no lower bound.
         let pool = min(clamped * clampedBudgets.docPoolMultiplier, Self.maxPerTierResults)
+        let vectorLimit = (since != nil || until != nil) ? DocIndexStore.maxVectorWindowResults : min(max(pool * 10, 500), Self.maxPerTierResults)
+        // Keyword reads at the vector width so flooding cannot starve it, and
+        // windowed reads lift the store clamp to the same
+        // `maxVectorWindowResults` ceiling the vector pool uses, so a dated
+        // keyword leg never reads narrower than the vector leg beside it.
+        let keywordLimit = vectorLimit
         let keyword: [IndexedChunk]
         do {
-            keyword = try await docIndexStore.searchKeyword(query: trimmed, limit: pool, since: since, until: until)
+            keyword = try await docIndexStore.searchKeyword(query: trimmed, limit: keywordLimit, since: since, until: until)
         } catch is CancellationError {
             return []
         } catch {
             RuneWeaverLog.memory.warning("MemoryEngine: searchKeyword failed: \(error.localizedDescription)")
             keyword = []
         }
-        let vectorLimit = (since != nil || until != nil) ? DocIndexStore.maxVectorWindowResults : min(max(pool * 10, 500), Self.maxPerTierResults)
         let vectors: [IndexedChunk]
         do {
             vectors = try await docIndexStore.chunkVectors(limit: vectorLimit, since: since, until: until)
@@ -189,12 +197,15 @@ extension MemoryEngine {
             RuneWeaverLog.memory.warning("MemoryEngine: docIndexStore.documents failed: \(error.localizedDescription)")
             documents = [:]
         }
-        let salient = Set(Tokenization.salientTokens(from: trimmed))
-        let effectiveQueryTokens = salient.isEmpty ? Tokenization.tokenize(trimmed) : salient
+        // One salient pass feeds both the overlap set and the phrase bonus, so
+        // the ordered run the rerank needs is never recomputed from the query.
+        let salient = Tokenization.salientTokens(from: trimmed)
+        let effectiveQueryTokens = salient.isEmpty ? Tokenization.tokenize(trimmed) : Set(salient)
         let ranked = Self.rankedDocIndexResults(
             candidates,
             query: trimmed,
             queryTokens: effectiveQueryTokens,
+            salient: salient,
             documents: documents,
             indexAsOf: stats?.indexAsOf,
             episodicWeight: clampedBudgets.episodicWeight
@@ -337,7 +348,11 @@ extension MemoryEngine {
         let keywordScore: Double
         /// Cosine similarity in `[0, 1]`, zero when vector-absent.
         let vectorScore: Double
-        /// Newest-first position in the union, driving the recency prior.
+        /// Position in the union, driving the recency prior.
+        ///
+        /// Vector-leg chunks precede keyword-only hits, so the position reads
+        /// event time (parent `mtime` desc, NULLs last) on the vector leg and
+        /// FTS rank order on the keyword leg rather than write order.
         let order: Int
         /// One-based keyword rank, nil when keyword-absent.
         let keywordRank: Int?
@@ -362,23 +377,40 @@ extension MemoryEngine {
     /// Exact name-or-path bonus in the doc-index rerank.
     private static let docIndexExactMatchWeight = 0.1
 
+    /// Display-name entity bonus in the doc-index rerank.
+    ///
+    /// Sits beside the exact-name bonus at the same fixed weight: a document
+    /// whose display name carries every salient query token is the entity the
+    /// user named, which is the same "pointed at this document" signal as an
+    /// in-body exact-name hit.
+    private static let docIndexEntityNameWeight = 0.1
+
+    /// Contiguous salient-phrase bonus in the doc-index rerank.
+    ///
+    /// Matches the exact-name weight: the whole salient run appearing as one
+    /// contiguous unit in the chunk is as strong a relevance signal as naming a
+    /// file, so it earns the same fixed bonus without touching the base curve.
+    private static let docIndexPhraseWeight = 0.1
+
     /// Reciprocal-rank score for one list rank, zero when absent.
     private static func rrfScore(rank: Int?) -> Double {
         guard let rank else { return 0 }
         return 1.0 / (docIndexRRFK + Double(rank))
     }
 
-    /// Unions keyword and vector candidates into one newest-first list.
+    /// Unions keyword and vector candidates into one list.
     ///
-    /// Vector chunks arrive newest-first from the bounded store pool, so they
-    /// keep that order before the keyword-only hits are appended. The resulting
-    /// position is the recency prior because both reads break ties toward newer rows.
-    /// The single fusion is an additive RRF boost: each present list contributes
-    /// `1/(60+rank)` (keyword rank from FTS order, vector rank from cosine order),
-    /// summed when a chunk appears in both, then added to the existing
-    /// `0.6*max+0.2*overlap+0.1*recency+0.1*exact` blend before tier calibration.
-    /// Keyword-only chunks outside the newest-first vector pool still union in,
-    /// so an old-but-relevant match survives a narrow pool.
+    /// Vector chunks arrive from the store pool in event-time order (parent
+    /// `mtime` desc, NULLs last, rowid breaking ties), so they keep that
+    /// order before the keyword-only hits are appended in FTS `rank` order
+    /// with rowid as the tie-break. The single fusion is an additive RRF
+    /// boost: each present list contributes `1/(60+rank)` (keyword rank from
+    /// FTS order, vector rank from cosine order), summed when a chunk appears
+    /// in both, then added to the
+    /// `0.6*max+0.2*overlap+0.1*recency+0.1*exact+0.1*entity+0.1*phrase`
+    /// blend before tier calibration. Keyword-only chunks outside the
+    /// event-time vector pool still union in, so an old-but-relevant match
+    /// survives a narrow pool.
     private static func docIndexCandidates(
         keyword: [IndexedChunk],
         vectors: [IndexedChunk],
@@ -457,10 +489,24 @@ extension MemoryEngine {
     /// `episodicWeight` threads through from the clamped recall budgets for
     /// call-site uniformity with the merged path; doc-index hits calibrate
     /// with the fixed doc-index tier weight.
+    ///
+    /// Beyond the `0.6*max+0.2*overlap+0.1*recency+0.1*exact+0.1*entity+0.1*phrase`
+    /// blend plus the RRF boost, two structural entity signals add fixed
+    /// bonuses measured off the already-fetched `documents` map: the parent
+    /// display name naming every salient query token, and the chunk carrying
+    /// the whole salient phrase contiguously. Each bonus is 0.1, matched to
+    /// the recency and exact weights, so the fused score stays clamped to
+    /// `[0, 1]` while the base curve, overlap, recency, exact, calibration,
+    /// and page size stay untouched.
+    ///
+    /// `salient` is the ordered salient token run the caller already derived
+    /// for its overlap set, threaded in so phrase contiguity is decided on the
+    /// caller's tokens instead of re-tokenizing the query per candidate.
     private static func rankedDocIndexResults(
         _ candidates: [DocIndexCandidate],
         query: String,
         queryTokens: Set<String>,
+        salient: [String],
         documents: [UUID: IndexedDocument] = [:],
         indexAsOf: Date?,
         episodicWeight: Double = episodicTierWeight
@@ -472,7 +518,11 @@ extension MemoryEngine {
             let overlap = docIndexOverlap(queryTokens: queryTokens, chunkText: candidate.chunk.text)
             let recency = docIndexRecency(order: candidate.order, total: total)
             let exact = hasExactNameOrPathMatch(query: query, chunkText: candidate.chunk.text) ? 1.0 : 0.0
+            let phrase = hasContiguousPhraseMatch(salient: salient, chunkText: candidate.chunk.text) ? 1.0 : 0.0
+            let displayName = documents[candidate.chunk.documentID]?.displayName
+            let entity = hasEntityNameMatch(queryTokens: queryTokens, displayName: displayName) ? 1.0 : 0.0
             let bonus = docIndexOverlapWeight * overlap + docIndexRecencyWeight * recency + docIndexExactMatchWeight * exact
+                + docIndexEntityNameWeight * entity + docIndexPhraseWeight * phrase
             let fused = min(max(base + bonus + candidate.rrf, 0.0), 1.0)
             var metadata: [String: String] = [
                 "id": candidate.chunk.id.uuidString,
@@ -520,7 +570,11 @@ extension MemoryEngine {
         return Double(queryTokens.intersection(chunkTokens).count) / Double(queryTokens.count)
     }
 
-    /// Newest-first recency prior for one union position, in `[0, 1]`.
+    /// Recency prior for one union position, in `[0, 1]`.
+    ///
+    /// Union position follows event time on the vector leg, so an earlier
+    /// position reads as a more recently happening document rather than a
+    /// more recently written row.
     private static func docIndexRecency(order: Int, total: Int) -> Double {
         guard total > 1 else { return 1 }
         return min(max(1.0 - Double(order) / Double(total - 1), 0.0), 1.0)
@@ -568,6 +622,47 @@ extension MemoryEngine {
         guard ext.contains(where: \.isLetter) else { return false }
         guard ext.allSatisfy({ $0.isLetter || $0.isNumber }) else { return false }
         return true
+    }
+
+    /// Whether a document's display name names the entity the query asks about.
+    ///
+    /// Display names carry extensions and separators (`report.pdf`,
+    /// `karate-birthday-series`), so containment is decided on the token sets
+    /// rather than a raw substring: every salient query token must appear in
+    /// the name. A single-token query already earns full overlap for any
+    /// chunk holding it, so requiring two or more tokens keeps this bonus an
+    /// entity signal instead of a second overlap term.
+    private static func hasEntityNameMatch(queryTokens: Set<String>, displayName: String?) -> Bool {
+        guard queryTokens.count > 1, let displayName else { return false }
+        return queryTokens.isSubset(of: Tokenization.tokenize(displayName))
+    }
+
+    /// Whether the chunk text carries every salient query token as one run.
+    ///
+    /// Matching runs on the tokenized sequence so punctuation, casing, and
+    /// inserted separators never break or fake contiguity; non-adjacent
+    /// occurrences earn nothing beyond ordinary overlap. Stop words the salient
+    /// tokenizer dropped stay in the chunk stream, so one sitting between the
+    /// matched tokens breaks the run and costs the bonus.
+    private static func hasContiguousPhraseMatch(salient: [String], chunkText: String) -> Bool {
+        guard salient.count > 1 else { return false }
+        let chunkTokens = chunkText.lowercased()
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+        guard chunkTokens.count >= salient.count else { return false }
+        let first = salient[0]
+        for start in 0 ... chunkTokens.count - salient.count {
+            guard chunkTokens[start] == first else { continue }
+            var matched = true
+            for offset in 1 ..< salient.count where chunkTokens[start + offset] != salient[offset] {
+                matched = false
+                break
+            }
+            if matched {
+                return true
+            }
+        }
+        return false
     }
 
     /// Deterministic doc-chunk order: document, then position within it, then id.
