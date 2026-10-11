@@ -260,3 +260,108 @@ describe("ScheduleWizardModal per-job tool budget", () => {
     );
   });
 });
+
+describe("ScheduleWizardModal event watcher triggers", () => {
+  it("creates a Messages Watcher with custom rules", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(async () => {});
+    render(
+      <ScheduleWizardModal
+        sectionDefault={25}
+        onSave={onSave}
+        onClose={() => {}}
+      />,
+    );
+    await user.type(screen.getByLabelText("Job Name"), "Messages Filter");
+    await user.click(screen.getByText("Messages Watcher"));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByText("Configure Messages Watcher");
+
+    // Add a rule
+    await user.click(screen.getByRole("button", { name: "+ Add Rule" }));
+    const ruleName = screen.getByLabelText("Rule Name");
+    await user.clear(ruleName);
+    await user.type(ruleName, "VIP Rule");
+
+    // Select group filter to directOnly
+    await user.selectOptions(screen.getByLabelText("Chat Scope"), "directOnly");
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByText(/Fallback Agent Prompt/);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByText("Review Schedule Details");
+    await user.click(screen.getByRole("button", { name: "Save Schedule" }));
+
+    await waitFor(() => {
+      expect(onSave).toHaveBeenCalledTimes(1);
+    });
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Messages Filter",
+        watcherSource: "messages",
+        schedule: "",
+        rules: expect.arrayContaining([
+          expect.objectContaining({
+            name: "VIP Rule",
+            condition: expect.objectContaining({
+              groupChatFilter: "directOnly",
+            }),
+          }),
+        ]),
+      }),
+      undefined,
+    );
+  });
+
+  it("creates a Calendar Watcher with lead time and rules", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(async () => {});
+    render(
+      <ScheduleWizardModal
+        sectionDefault={25}
+        onSave={onSave}
+        onClose={() => {}}
+      />,
+    );
+    await user.type(screen.getByLabelText("Job Name"), "Meeting Prep Watcher");
+    await user.click(screen.getByText("Calendar Watcher"));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByText("Configure Calendar Watcher");
+
+    // Change lead time
+    const leadTime = screen.getByLabelText("Meeting Lead Time");
+    await user.clear(leadTime);
+    await user.type(leadTime, "30");
+
+    // Add a rule
+    await user.click(screen.getByRole("button", { name: "+ Add Rule" }));
+    const calRuleName = screen.getByLabelText("Rule Name");
+    await user.clear(calRuleName);
+    await user.type(calRuleName, "1:1 Meeting Brief");
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByText(/Fallback Agent Prompt/);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByText("Review Schedule Details");
+    await user.click(screen.getByRole("button", { name: "Save Schedule" }));
+
+    await waitFor(() => {
+      expect(onSave).toHaveBeenCalledTimes(1);
+    });
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Meeting Prep Watcher",
+        watcherSource: "calendar",
+        calendarLeadTimeMinutes: 30,
+        schedule: "",
+        rules: expect.arrayContaining([
+          expect.objectContaining({
+            name: "1:1 Meeting Brief",
+          }),
+        ]),
+      }),
+      undefined,
+    );
+  });
+});
+

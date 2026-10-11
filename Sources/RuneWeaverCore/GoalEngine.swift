@@ -1,9 +1,10 @@
 // Rune Weaver Core — Long-horizon goal pursuit engine.
 //
 // Owns the lifecycle around durable goals: opt-in creation with an active-goal
-// cap, single-call plan decomposition with a resilient fallback so a goal is
-// never lost to flaky planning, per-run advancement prompts composed as user
-// text for composer cache stability, and due-date bookkeeping after each run.
+// cap, single-call plan decomposition settling to `unplanned` with empty steps
+// plus an audit note when planning is cancelled or unusable, per-run
+// advancement prompts composed as user text for composer cache stability, and
+// due-date bookkeeping after each run.
 // Persistence lives in GoalStore; the language provider is injected from the
 // same instance that serves chat turns so planning and execution share one
 // model posture. This engine never mints its own provider.
@@ -52,14 +53,18 @@ public actor GoalEngine {
     /// Stored instead of fire-and-forget so creation hands back trackable work:
     /// callers needing determinism await `waitForPendingPlan`, and shutdown
     /// paths can cancel through `cancelPendingPlans` instead of leaking a
-    /// detached task past the engine's lifetime.
-    private var planTasks: [UUID: Task<Void, Never>] = [:]
+    /// detached task past the engine's lifetime. Each entry carries its run ID
+    /// so a duplicate plan request returns the in-flight run instead of
+    /// overwriting and leaking the prior handle.
+    private var planTasks: [UUID: (runID: UUID, task: Task<Void, Never>)] = [:]
     /// Optional ideas engine refreshed when a goal reaches achieved.
     ///
     /// The natural "what next" moment is the completion of a goal, so the
     /// engine is injected rather than discovered; when absent, achievement
     /// simply records its events as before and no suggestion call is spent.
     private let ideasEngine: IdeasEngine?
+    /// Seam reporting planning lifecycle events to the audit log and socket hub.
+    private let reporter: any GoalPlanReporting
 
     /// Creates a goal engine over shared collaborators.
     /// - Parameters:
@@ -67,11 +72,19 @@ public actor GoalEngine {
     ///   - llm: Injected provider shared with chat turns.
     ///   - config: Pursuit policy.
     ///   - ideasEngine: Optional ideas engine refreshed on achievement.
-    public init(store: GoalStore, llm: any LLMProvider, config: GoalsConfig, ideasEngine: IdeasEngine? = nil) {
+    ///   - reporter: Reporting seam for plan runs.
+    public init(
+        store: GoalStore,
+        llm: any LLMProvider,
+        config: GoalsConfig,
+        ideasEngine: IdeasEngine? = nil,
+        reporter: any GoalPlanReporting = NullGoalPlanReporter()
+    ) {
         self.store = store
         self.llm = llm
         self.config = config.clamped()
         self.ideasEngine = ideasEngine
+        self.reporter = reporter
     }
 
     /// Dynamically updates the serving LLM provider without a restart.
@@ -94,9 +107,9 @@ public actor GoalEngine {
         config.maxTriggersPerGoal
     }
 
-    /// Creates a goal with a placeholder step and plans in the background.
+    /// Creates a goal in `unplanned` with empty steps and plans in the background.
     ///
-    /// The placeholder stays pending so the later decomposition swaps it out
+    /// The goal starts with no steps so the later decomposition fills the plan
     /// without touching finished history. The background plan is best-effort
     /// and idempotent: its task handle is tracked per goal, so callers needing
     /// determinism await `waitForPendingPlan` (or `decompose` explicitly)
@@ -134,23 +147,14 @@ public actor GoalEngine {
         let goal = Goal(
             title: title,
             statement: statement,
-            status: .active,
+            status: .unplanned,
             stepIntervalMinutes: interval,
             nextDueAt: now.addingTimeInterval(TimeInterval(interval * 60)),
             originSessionID: originSessionID,
             createdAt: now,
             updatedAt: now
         )
-        // Pending on purpose: the decomposer replaces only pending rows, so
-        // this marker disappears on first plan without disturbing later edits.
-        let placeholder = GoalStep(
-            goalID: goal.id,
-            ordinal: 0,
-            title: "Planning in progress",
-            status: .pending,
-            notes: "Decomposition pending"
-        )
-        try await store.create(goal: goal, steps: [placeholder])
+        try await store.create(goal: goal, steps: [])
         // Triggers are secondary to the goal itself: a store failure arming one
         // is logged rather than thrown, so a created goal is never reported as a
         // failure because an event wake-up could not be persisted. Blank kinds
@@ -177,14 +181,18 @@ public actor GoalEngine {
             }
         }
         let captured = goal
+        let runID = UUID()
         // Tracked, not detached: the handle lets deterministic callers await the
         // plan and shutdown paths cancel it, while creation still returns the
-        // snapshot without paying the planning timeout.
-        let planTask = Task {
-            await self.decompose(goal: captured)
-            await self.finishPlanTask(for: captured.id)
+        // snapshot immediately. Guarded so a duplicate never overwrites the
+        // in-flight handle.
+        if planTasks[goal.id] == nil {
+            let planTask = Task {
+                await self.decompose(goal: captured, runID: runID)
+                await self.finishPlanTask(for: captured.id)
+            }
+            planTasks[goal.id] = (runID: runID, task: planTask)
         }
-        planTasks[goal.id] = planTask
         return goal
     }
 
@@ -197,6 +205,45 @@ public actor GoalEngine {
         planTasks.removeValue(forKey: goalID)
     }
 
+    /// Reports whether a background planning task is currently in flight for the given goal.
+    /// - Parameter goalID: Goal identifier.
+    /// - Returns: True if decomposition is running right now.
+    public func isPlanning(goalID: UUID) -> Bool {
+        planTasks[goalID] != nil
+    }
+
+    /// Cancels the in-flight background plan task for one specific goal.
+    /// - Parameter goalID: Goal whose plan to cancel.
+    public func cancelPlan(goalID: UUID) {
+        if let entry = planTasks.removeValue(forKey: goalID) {
+            entry.task.cancel()
+        }
+    }
+
+    /// Launches a background decomposition task for an unplanned goal and returns its run ID.
+    ///
+    /// Single-flight inside the actor: when a plan is already in flight for the
+    /// goal, the existing run ID returns and no new task is created, so
+    /// concurrent `isPlanning` checks cannot overwrite and leak the prior
+    /// handle. Callers still check `isPlanning` first for the honest `409`;
+    /// this guard closes the check-then-act race.
+    /// - Parameter goal: Goal to plan for.
+    /// - Returns: Unique run ID for the planning turn, or the in-flight run ID when already planning.
+    @discardableResult
+    public func startPlanTask(for goal: Goal) -> UUID {
+        if let existing = planTasks[goal.id] {
+            return existing.runID
+        }
+        let runID = UUID()
+        let captured = goal
+        let planTask = Task {
+            await self.decompose(goal: captured, runID: runID)
+            await self.finishPlanTask(for: captured.id)
+        }
+        planTasks[goal.id] = (runID: runID, task: planTask)
+        return runID
+    }
+
     /// Awaits the background decomposition for one goal, when one is in flight.
     ///
     /// Creation returns immediately while planning lands shortly after; tests and
@@ -205,54 +252,58 @@ public actor GoalEngine {
     /// task surfaces here as an early return once the task observes it.
     /// - Parameter goalID: Goal whose plan to await.
     public func waitForPendingPlan(goalID: UUID) async {
-        if let task = planTasks[goalID] {
-            await task.value
+        if let entry = planTasks[goalID] {
+            await entry.task.value
         }
     }
 
     /// Cancels every in-flight background plan.
-    ///
-    /// Placeholders stay in place for an explicit `decompose` retry, so a
-    /// cancelled plan never loses the goal — it only delays the plan.
     public func cancelPendingPlans() {
-        for task in planTasks.values {
-            task.cancel()
+        for entry in planTasks.values {
+            entry.task.cancel()
         }
         planTasks.removeAll()
     }
 
     /// Decomposes one goal into a bounded plan with a single model call.
     ///
-    /// Parsing tolerates chatty wrappers: fences are stripped and the
-    /// outermost array wins, so prefixed prose or a trailing sign-off still
-    /// yields steps. Anything unusable falls back to one actionable step plus
-    /// a note, keeping the goal alive through local-model flakiness. Store
-    /// failures leave the placeholder in place for a later retry instead of
-    /// throwing the goal away.
-    /// - Parameter goal: Goal snapshot to plan for.
-    public func decompose(goal: Goal) async {
+    /// When planning succeeds, the steps are stored and the goal transitions
+    /// from `unplanned` to `active`. When cancelled or unusable, the goal
+    /// transitions into `unplanned` without dummy fallback steps so it remains
+    /// clear that no plan exists yet.
+    /// - Parameters:
+    ///   - goal: Goal snapshot to plan for.
+    ///   - runID: Run identifier for audit logging and broadcast.
+    public func decompose(goal: Goal, runID: UUID = UUID()) async {
+        let start = Date()
+        let runEvent = GoalPlanRunEvent(
+            id: runID,
+            goalID: goal.id,
+            goalTitle: goal.title,
+            status: "running",
+            message: "Drafting plan for \"\(goal.title)\"",
+            timestamp: start
+        )
+        await reporter.planStarted(runEvent)
+
         let maxSteps = config.maxStepsPerGoal
         let prompt = Self.decomposePrompt(for: goal, maxSteps: maxSteps)
         let rawText: String?
         do {
             rawText = try await collectPlanText(prompt: prompt)
         } catch is CancellationError {
-            // Preserve the placeholder for an explicit retry, so a cancelled
-            // plan only delays instead of losing the goal to the fallback.
+            await handlePlanningCancelled(goal: goal, runID: runID, start: start)
             return
         } catch {
-            // Non-cancellation collection failures still degrade to the
-            // fallback below; a concurrent cancellation preserves the
-            // placeholder instead.
             if Task.isCancelled {
+                await handlePlanningCancelled(goal: goal, runID: runID, start: start)
                 return
             }
-            await storeFallback(for: goal)
+            await handlePlanningFailed(goal: goal, runID: runID, start: start, errorMsg: error.localizedDescription)
             return
         }
-        // A nil or unusable reply after cancellation preserves the placeholder;
-        // only a genuine timeout or unusable output stores the fallback.
         if Task.isCancelled {
+            await handlePlanningCancelled(goal: goal, runID: runID, start: start)
             return
         }
         guard let rawText, !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -260,29 +311,82 @@ public actor GoalEngine {
               !titles.isEmpty
         else {
             if Task.isCancelled {
+                await handlePlanningCancelled(goal: goal, runID: runID, start: start)
                 return
             }
-            await storeFallback(for: goal)
+            await handlePlanningFailed(goal: goal, runID: runID, start: start, errorMsg: "Unusable model output")
             return
         }
         let steps = titles.enumerated().map { index, title in
             GoalStep(goalID: goal.id, ordinal: index, title: title, status: .pending)
         }
-        // replacePlan only swaps pending rows, so in-flight and finished work
-        // survives a replan while the creation placeholder disappears.
         do {
             try await store.replacePlan(goalID: goal.id, steps: steps)
+            try await store.setStatus(goalID: goal.id, status: .active)
         } catch {
             RuneWeaverLog.scheduler.error("GoalEngine: failed to persist plan for goal \(goal.id): \(error.localizedDescription)")
         }
+        let durationMs = Int(Date().timeIntervalSince(start) * 1000)
+        await reporter.planCompleted(GoalPlanRunEvent(
+            id: runID,
+            goalID: goal.id,
+            goalTitle: goal.title,
+            status: "ok",
+            message: "Drafting plan for \"\(goal.title)\"",
+            response: "Drafted plan with \(steps.count) steps.",
+            durationMs: durationMs,
+            timestamp: Date()
+        ))
+    }
+
+    private func handlePlanningCancelled(goal: Goal, runID: UUID, start: Date) async {
+        let durationMs = Int(Date().timeIntervalSince(start) * 1000)
+        try? await store.setStatus(goalID: goal.id, status: .unplanned)
+        _ = try? await store.appendEvent(
+            goalID: goal.id,
+            kind: .note,
+            message: "Planning cancelled by user."
+        )
+        await reporter.planCompleted(GoalPlanRunEvent(
+            id: runID,
+            goalID: goal.id,
+            goalTitle: goal.title,
+            status: "cancelled",
+            message: "Drafting plan for \"\(goal.title)\"",
+            response: "Planning cancelled.",
+            durationMs: durationMs,
+            timestamp: Date()
+        ))
+    }
+
+    private func handlePlanningFailed(goal: Goal, runID: UUID, start: Date, errorMsg: String) async {
+        let durationMs = Int(Date().timeIntervalSince(start) * 1000)
+        try? await store.setStatus(goalID: goal.id, status: .unplanned)
+        _ = try? await store.appendEvent(
+            goalID: goal.id,
+            kind: .note,
+            message: "Planning could not extract valid steps from model output. Goal marked unplanned."
+        )
+        await reporter.planCompleted(GoalPlanRunEvent(
+            id: runID,
+            goalID: goal.id,
+            goalTitle: goal.title,
+            status: "error",
+            message: "Drafting plan for \"\(goal.title)\"",
+            response: "Planning failed: \(errorMsg)",
+            durationMs: durationMs,
+            timestamp: Date()
+        ))
     }
 
     /// Decomposes one goal looked up by identifier.
     ///
     /// Convenience for callers holding only the identifier; unknown goals are
     /// a quiet no-op so scheduled retries never throw on a deleted goal.
-    /// - Parameter goalID: Identifier of the goal to plan for.
-    public func decompose(goalID: UUID) async {
+    /// - Parameters:
+    ///   - goalID: Identifier of the goal to plan for.
+    ///   - runID: Optional run identifier.
+    public func decompose(goalID: UUID, runID: UUID = UUID()) async {
         let goal: Goal?
         do {
             goal = try await store.goal(id: goalID)
@@ -293,7 +397,7 @@ public actor GoalEngine {
             return
         }
         guard let goal else { return }
-        await decompose(goal: goal)
+        await decompose(goal: goal, runID: runID)
     }
 
     /// Composes the per-run advancement prompt as user text.
@@ -338,9 +442,11 @@ public actor GoalEngine {
         lines.append("Do not rush later steps; leave them pending until their turn.")
         return lines.joined(separator: "\n")
     }
+}
 
-    // MARK: - Planning internals
+// MARK: - Planning Internals
 
+extension GoalEngine {
     /// Builds the single-shot decomposition instruction.
     ///
     /// The JSON-array demand is explicit and the step bound repeats in words
@@ -351,7 +457,8 @@ public actor GoalEngine {
             "Goal: \(goal.title)",
             "Statement: \(goal.statement)",
             "Reply with ONLY a JSON array of objects like [{\"title\": \"First step\"}, {\"title\": \"Second step\"}].",
-            "Each object must carry a \"title\" string. At most \(maxSteps) steps. No prose outside the array."
+            "Each object must carry a \"title\" string. At most \(maxSteps) steps. Be direct and concise. "
+                + "No commentary or markdown formatting outside the JSON array."
         ].joined(separator: "\n")
     }
 
@@ -364,7 +471,7 @@ public actor GoalEngine {
     /// - Parameters:
     ///   - raw: Raw model text.
     ///   - maxSteps: Upper bound on returned titles.
-    /// - Returns: Titles, or nil when nothing parseable remains.
+    ///   - Returns: Titles, or nil when nothing parseable remains.
     static func extractPlanTitles(from raw: String, maxSteps: Int) -> [String]? {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
@@ -409,13 +516,15 @@ public actor GoalEngine {
 
     /// Collects one planning reply under the configured timeout.
     ///
-    /// Exactly one chat call runs; the timeout wins the race and cancels the
-    /// collector so a hung backend cannot stall creation. Cancellation
-    /// propagates instead of degrading to the fallback, so a cancelled plan
-    /// keeps its placeholder for an explicit retry while timeouts still fall
-    /// back.
+    /// If planTimeoutSeconds is 0, planning runs with no artificial timeout,
+    /// relying instead on cooperative Task cancellation (e.g. user cancellation).
+    /// The timeout clamps to `0...maxPlanTimeoutSeconds` so an unvalidated
+    /// hand-built config never holds planning beyond the shared upper bound.
     private func collectPlanText(prompt: String) async throws -> String? {
-        let timeoutSeconds = max(1, config.planTimeoutSeconds)
+        let timeoutSeconds = min(max(config.planTimeoutSeconds, GoalsConfig.unlimitedPlanTimeoutSeconds), GoalsConfig.maxPlanTimeoutSeconds)
+        if timeoutSeconds == 0 {
+            return try await collectOnce(prompt: prompt)
+        }
         let timeoutNS = UInt64(timeoutSeconds) * 1_000_000_000
         return try await withThrowingTaskGroup(of: String?.self, returning: String?.self) { group in
             group.addTask {
@@ -427,8 +536,6 @@ public actor GoalEngine {
             }
             guard let first = try await group.next() else { return nil }
             group.cancelAll()
-            // A timeout win racing a cancellation must not store the fallback:
-            // surface cancellation so the placeholder survives for a retry.
             try Task.checkCancellation()
             return first
         }
@@ -437,9 +544,10 @@ public actor GoalEngine {
     /// Runs the single planning chat call and folds its stream to text.
     ///
     /// No tools travel because planning is pure text in, JSON out; a mid-
-    /// stream provider error degrades to nil so the caller falls back instead
-    /// of planning from a truncated fragment. Cancellation rethrows so the
-    /// caller preserves the placeholder instead of storing the fallback.
+    /// stream provider error degrades to nil so the caller settles to
+    /// `unplanned` instead of planning from a truncated fragment.
+    /// Cancellation rethrows so the caller preserves the `unplanned` empty
+    /// steps instead of storing a partial plan.
     private func collectOnce(prompt: String) async throws -> String? {
         let messages = [Message(role: .user, content: prompt)]
         let stream = llm.chat(messages: messages, tools: [])
@@ -460,37 +568,8 @@ public actor GoalEngine {
         } catch {
             return nil
         }
-        // The stream may finish just as cancellation lands; prefer the
-        // placeholder over a fallback built from a cancelled turn.
         try Task.checkCancellation()
         return text
-    }
-
-    /// Stores the resilient single-step fallback with its explanatory note.
-    ///
-    /// The step title names the goal so the fallback stays actionable in
-    /// listings, and the note records that planning output was unusable rather
-    /// than leaving future runs to guess why the plan is one step long.
-    private func storeFallback(for goal: Goal) async {
-        let step = GoalStep(
-            goalID: goal.id,
-            ordinal: 0,
-            title: "Work toward \(goal.title)",
-            status: .pending,
-            notes: "Planning fallback"
-        )
-        // Best-effort fallback persistence: failures leave the placeholder for
-        // a later retry, so results are logged on error.
-        do {
-            _ = try await store.replacePlan(goalID: goal.id, steps: [step])
-            _ = try await store.appendEvent(
-                goalID: goal.id,
-                kind: .note,
-                message: "Planning fell back to a single step after unusable model output."
-            )
-        } catch {
-            RuneWeaverLog.scheduler.warning("GoalEngine: failed to persist fallback plan for goal \(goal.id): \(error.localizedDescription)")
-        }
     }
 }
 

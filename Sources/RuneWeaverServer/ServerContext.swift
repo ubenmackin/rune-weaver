@@ -397,11 +397,13 @@ public final class ServerContext: Sendable {
             config: ideasConfig,
             memoryFacts: { await memoryEngine.getUserProfile().facts.map(\.content) }
         ) : nil)
+        let planReporter = ServerGoalPlanReporter(runs: runs, hub: hub)
         let resolvedEngine = goalEngine ?? GoalEngine(
             store: resolvedGoals,
             llm: servingLLM ?? DefaultGoalLLM(),
             config: goalsConfig,
-            ideasEngine: resolvedIdeasEngine
+            ideasEngine: resolvedIdeasEngine,
+            reporter: planReporter
         )
         self.goals = resolvedGoals
         self.goalEngine = resolvedEngine
@@ -558,7 +560,7 @@ public final class ServerContext: Sendable {
                         RuneWeaverLog.server.warning("ServerContext: plan-ready steps lookup failed for \(goalID): \(error.localizedDescription)")
                         freshSteps = []
                     }
-                    await hub.broadcastGoal(GoalDTO(goal: updated, steps: freshSteps))
+                    await hub.broadcastGoal(GoalDTO(goal: updated, steps: freshSteps, isPlanning: false))
                 }
             } catch is CancellationError {
                 return
@@ -689,7 +691,14 @@ extension ServerContext {
         } else {
             nil
         }
-        let goalEngine = GoalEngine(store: goalStore, llm: llm, config: config.goals, ideasEngine: ideasEngine)
+        let planReporter = ServerGoalPlanReporter(runs: durable.runs, hub: durable.hub)
+        let goalEngine = GoalEngine(
+            store: goalStore,
+            llm: llm,
+            config: config.goals,
+            ideasEngine: ideasEngine,
+            reporter: planReporter
+        )
         let pluginStack = await resolvePluginStack(episodesDBPath: config.episodesDBPath, pluginConfig: config.plugins, bus: bus)
         return ServerBootstrapServices(
             approvals: approvals,

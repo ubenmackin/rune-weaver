@@ -13,16 +13,7 @@ import RuneWeaverCore
 
 // swiftformat:disable docComments
 
-/// Internal decode envelope for `email.search` tool outputs.
-private struct EmailSearchResponseEnvelope: Decodable {
-    struct MessageItem: Decodable {
-        let id: String
-    }
-
-    let messages: [MessageItem]
-}
-
-/// Whether a finished scheduler turn should advance the cursor.
+// Whether a finished scheduler turn should advance the cursor.
 ///
 /// Only clean completions advance the watermark; parked, budget-limited,
 /// failed, and cancelled turns keep the prior value so the next run rescans
@@ -37,17 +28,17 @@ extension OrchestratorResponse {
 ///
 /// In-process scheduler worker executing scheduled jobs inside `RuneWeaverServer`.
 public actor ServerSchedulerWorker {
-    private let scheduler: SchedulerStore
+    let scheduler: SchedulerStore
     let runs: RunLogStore
     let hub: WSHub
-    private let runLock: SchedulerRunLock
+    let runLock: SchedulerRunLock
     let orchestrator: Orchestrator
     let conversations: ConversationManager
-    private let toolBus: ToolBus
+    let toolBus: ToolBus
     let approvals: ApprovalQueue?
     let notifier: (any SchedulerNotifier)?
     let logger: (@Sendable (String) async -> Void)?
-    private let pollChecker: (@Sendable (EmailPollRule) async -> [String])?
+    let pollChecker: (@Sendable (EmailPollRule) async -> [String])?
     private let indexCoordinator: IndexCoordinator?
     /// Durable goal registry backing due advancement, nil when goals are unwired.
     let goalStore: GoalStore?
@@ -84,8 +75,8 @@ public actor ServerSchedulerWorker {
     private let intervalSeconds: TimeInterval
     private var lastCheck: Date
     private var runningTask: Task<Void, Never>?
-    private var seenPollIDs: [UUID: Set<String>] = [:]
-    private var lastPollCheck: [UUID: Date] = [:]
+    var seenPollIDs: [UUID: Set<String>] = [:]
+    var lastPollCheck: [UUID: Date] = [:]
     private var isStarted = false
 
     /// Creates a server scheduler worker.
@@ -222,30 +213,21 @@ public actor ServerSchedulerWorker {
         lastPollCheck = lastPollCheck.filter { liveIDs.contains($0.key) }
 
         for job in jobs where job.enabled {
-            var isDue = false
-            var reason = SchedulerFireReason.cron
+            // 1. Evaluate Event Watcher trigger (Email, Messages, Calendar)
+            if job.isEventWatcher {
+                if let watcherResults = await evaluateEventWatcherJob(job: job, now: now) {
+                    results.append(contentsOf: watcherResults)
+                    continue
+                }
+            }
 
-            // 1. Evaluate Cron trigger
+            // 2. Evaluate Cron trigger
             if job.hasCronTrigger, let cron = try? CronSchedule.parse(job.schedule) {
                 if cron.isDue(at: now, lastCheck: windowStart) {
-                    isDue = true
-                    reason = .cron
+                    let outcome = await executeJob(job, reason: .cron)
+                    results.append(outcome)
                 }
             }
-
-            // 2. Evaluate Email Poll trigger if not already due
-            if !isDue, let rule = job.pollRule {
-                let pollDue = await evaluatePollRule(jobID: job.id, rule: rule, now: now)
-                if let arrivalCount = pollDue {
-                    isDue = true
-                    reason = .emailArrived(account: rule.trimmedAccount, count: arrivalCount)
-                }
-            }
-
-            guard isDue else { continue }
-
-            let outcome = await executeJob(job, reason: reason)
-            results.append(outcome)
         }
 
         // The nightly-or-catch-up index trigger rides the same tick: the
@@ -365,88 +347,18 @@ public actor ServerSchedulerWorker {
 
 // MARK: - Email Poll Evaluation
 
-/// Email poll rule evaluation helpers, extracted from the actor body to keep
-/// the type body length within lint bounds.
-extension ServerSchedulerWorker {
-    /// Evaluates a poll rule for a job, returning fresh unseen email count if due.
-    private func evaluatePollRule(jobID: UUID, rule: EmailPollRule, now: Date) async -> Int? {
-        if let last = lastPollCheck[jobID] {
-            let elapsed = now.timeIntervalSince(last)
-            if elapsed < Double(max(1, rule.pollIntervalSeconds)) {
-                return nil
-            }
-        }
-        lastPollCheck[jobID] = now
-
-        let messageIDs: [String] = if let customChecker = pollChecker {
-            await customChecker(rule)
-        } else {
-            await performToolBusPoll(rule: rule)
-        }
-
-        let currentSet = Set(messageIDs.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
-
-        // Initial observation establishes baseline without firing
-        guard let seen = seenPollIDs[jobID] else {
-            seenPollIDs[jobID] = currentSet
-            return nil
-        }
-
-        let fresh = currentSet.subtracting(seen)
-        seenPollIDs[jobID] = seen.union(currentSet)
-
-        return fresh.isEmpty ? nil : fresh.count
-    }
-
-    /// Performs `email.search` via `ToolBus` to check current message IDs.
-    private func performToolBusPoll(rule: EmailPollRule) async -> [String] {
-        var args: [String: Any] = [
-            "account": rule.trimmedAccount,
-            "query": rule.query,
-            "limit": rule.limit
-        ]
-        if let mailbox = rule.trimmedMailbox {
-            args["mailbox"] = mailbox
-        }
-        let data: Data
-        do {
-            data = try JSONSerialization.data(withJSONObject: args)
-        } catch {
-            await logger?("ServerSchedulerWorker: failed to serialize poll email.search args: \(error.localizedDescription)")
-            return []
-        }
-        guard let json = String(data: data, encoding: .utf8) else {
-            await logger?("ServerSchedulerWorker: failed to encode poll email.search args to UTF-8")
-            return []
-        }
-
-        let result = await toolBus.execute(
-            toolCall: ToolInput(toolName: "email.search", argumentsJSON: json),
-            context: ToolContext(conversationID: UUID())
-        )
-        guard !result.isError,
-              let contentData = result.content.data(using: .utf8)
-        else { return [] }
-
-        let envelope: EmailSearchResponseEnvelope
-        do {
-            envelope = try JSONDecoder().decode(EmailSearchResponseEnvelope.self, from: contentData)
-        } catch {
-            RuneWeaverLog.scheduler.warning("ServerSchedulerWorker: failed to decode EmailSearchResponseEnvelope: \(error.localizedDescription)")
-            return []
-        }
-
-        return envelope.messages.map(\.id)
-    }
-}
-
 // MARK: - Job Execution
 
 /// Job execution, skip, and failure helpers, extracted from the actor body to keep
 /// the type body length within lint bounds.
 extension ServerSchedulerWorker {
     /// Executes one scheduled job under single-flight locking, logging outcomes.
-    private func executeJob(_ job: SchedulerJob, reason: SchedulerFireReason) async -> SchedulerRunResult {
+    func executeJob(
+        _ job: SchedulerJob,
+        reason: SchedulerFireReason,
+        promptOverride: String? = nil,
+        ruleName: String? = nil
+    ) async -> SchedulerRunResult {
         let startTime = Date()
 
         guard await runLock.tryAcquire(id: job.id, name: job.name) else {
@@ -455,10 +367,15 @@ extension ServerSchedulerWorker {
 
         let sessionID = await makeSchedulerRunSession(job: job, startTime: startTime, conversations: conversations)
 
+        let initialMessage = if let ruleName {
+            "[\(ruleName)] \(promptOverride ?? job.prompt)"
+        } else {
+            promptOverride ?? job.prompt
+        }
         let initialEntry = await runs.append(
             kind: "scheduler",
             status: "running",
-            message: job.prompt,
+            message: initialMessage,
             jobID: job.id,
             sessionID: sessionID,
             durationMs: 0
@@ -478,7 +395,11 @@ extension ServerSchedulerWorker {
             let requestedIterations = job.maxToolIterations ?? schedulerConfig.defaultMaxToolIterations
             let maxIterations = min(max(requestedIterations, 1), 100)
             let policy: ToolLimitPolicy = job.onToolLimit == "park" ? .park : .forceSynthesis
-            let effectivePrompt = await freshSchedulerRunPrompt(for: job)
+            let effectivePrompt = if let promptOverride {
+                promptOverride + "\n\n" + Self.schedulerCursorRuleLine
+            } else {
+                await freshSchedulerRunPrompt(for: job)
+            }
             let runTask: Task<OrchestratorResponse, any Error> = Task {
                 try await orchestrator.process(
                     input: UserInput(
@@ -592,7 +513,7 @@ extension ServerSchedulerWorker {
     }
 
     /// Records an audit run entry for a scheduled job that skipped firing because it is already running.
-    private func recordJobSkipped(job: SchedulerJob, startTime: Date) async -> SchedulerRunResult {
+    func recordJobSkipped(job: SchedulerJob, startTime: Date) async -> SchedulerRunResult {
         let skipMsg = "Skipped '\(job.name)': already running"
         await logger?(skipMsg)
         // Skipped runs create no conversation, so the audit entry stays untagged
@@ -804,7 +725,7 @@ extension ServerSchedulerWorker {
                     return .goalAchieved
                 case .needsInput:
                     return .goalNeedsInput
-                case .active, .paused, .abandoned:
+                case .active, .paused, .abandoned, .unplanned:
                     break
                 }
             }

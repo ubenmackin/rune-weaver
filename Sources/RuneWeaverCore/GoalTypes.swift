@@ -26,6 +26,8 @@ public enum GoalStatus: String, Sendable, Codable, CaseIterable, Equatable {
     case achieved
     /// Dropped by the owner or engine; terminal.
     case abandoned
+    /// No decomposed plan yet; awaiting decomposition by the agent.
+    case unplanned
 }
 
 /// Lifecycle state for one ordered step within a goal plan.

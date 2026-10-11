@@ -331,6 +331,9 @@ struct GoalsAdvanceCommand: AsyncParsableCommand {
         case .paused:
             print(TerminalStyle.error("Goal '\(goal.title)' is paused; resume it before advancing."))
             throw ExitCode(1)
+        case .unplanned:
+            print(TerminalStyle.error("Goal '\(goal.title)' has no plan yet; run 'goals plan \(goal.id)' first."))
+            throw ExitCode(1)
         case .active, .needsInput:
             break
         }
@@ -710,7 +713,7 @@ enum GoalsCLIHelpers {
         let state: String = switch goal.status {
         case .active:
             TerminalStyle.success("●")
-        case .paused, .needsInput:
+        case .paused, .needsInput, .unplanned:
             TerminalStyle.tool("●")
         case .achieved, .abandoned:
             TerminalStyle.dim("○")

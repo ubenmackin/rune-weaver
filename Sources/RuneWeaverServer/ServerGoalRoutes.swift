@@ -43,7 +43,8 @@ func registerGoalRoutes(_ app: Application) {
 private func registerGoalListRoute(on goals: RoutesBuilder) {
     goals.get { req async throws -> GoalsListResponse in
         let filter = try parseGoalStatusFilter(req.query[String.self, at: "status"])
-        let stored = try await req.application.runeWeaver.goals.list(status: filter)
+        let context = req.application.runeWeaver
+        let stored = try await context.goals.list(status: filter)
         var dtos: [GoalDTO] = []
         dtos.reserveCapacity(stored.count)
         for goal in stored {
@@ -51,14 +52,15 @@ private func registerGoalListRoute(on goals: RoutesBuilder) {
             // plan degrades to empty progress instead of failing the list.
             let steps: [GoalStep]
             do {
-                steps = try await req.application.runeWeaver.goals.steps(goalID: goal.id)
+                steps = try await context.goals.steps(goalID: goal.id)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
                 req.logger.warning("ServerGoalRoutes: failed to load steps for goal \(goal.id): \(error.localizedDescription)")
                 steps = []
             }
-            dtos.append(GoalDTO(goal: goal, steps: steps))
+            let isPlanning = await context.goalEngine.isPlanning(goalID: goal.id)
+            dtos.append(GoalDTO(goal: goal, steps: steps, isPlanning: isPlanning))
         }
         return GoalsListResponse(goals: dtos)
     }
@@ -117,7 +119,7 @@ private func registerGoalCreateRoute(on goals: RoutesBuilder) {
             req.logger.warning("ServerGoalRoutes: failed to load events for goal \(goal.id): \(error.localizedDescription)")
             events = []
         }
-        let dto = GoalDTO(goal: goal, steps: steps)
+        let dto = GoalDTO(goal: goal, steps: steps, isPlanning: true)
         await context.hub.broadcastGoal(dto)
         // Planning lands shortly after creation on a tracked background task;
         // awaiting it here would stall the response, so a background task waits
@@ -146,6 +148,7 @@ private func registerGoalSummaryRoute(on goals: RoutesBuilder) {
         var needsInput = 0
         var achieved = 0
         var abandoned = 0
+        var unplanned = 0
         for goal in all {
             switch goal.status {
             case .active:
@@ -158,6 +161,8 @@ private func registerGoalSummaryRoute(on goals: RoutesBuilder) {
                 achieved += 1
             case .abandoned:
                 abandoned += 1
+            case .unplanned:
+                unplanned += 1
             }
         }
         return GoalsSummaryResponse(
@@ -166,7 +171,8 @@ private func registerGoalSummaryRoute(on goals: RoutesBuilder) {
             paused: paused,
             needsInput: needsInput,
             achieved: achieved,
-            abandoned: abandoned
+            abandoned: abandoned,
+            unplanned: unplanned
         )
     }
 }
@@ -199,8 +205,9 @@ private func registerGoalDetailRoute(on goals: RoutesBuilder) {
             triggers = []
         }
         let events = try await context.goals.events(goalID: id, limit: limit)
+        let isPlanning = await context.goalEngine.isPlanning(goalID: id)
         return GoalDetailResponse(
-            goal: GoalDTO(goal: goal, steps: steps),
+            goal: GoalDTO(goal: goal, steps: steps, isPlanning: isPlanning),
             steps: steps.map(GoalStepDTO.init),
             triggers: triggers,
             events: events.map(GoalEventDTO.init)
@@ -306,7 +313,8 @@ private func registerGoalPatchRoute(on goals: RoutesBuilder) {
             req.logger.warning("ServerGoalRoutes: failed to load events for goal \(id): \(error.localizedDescription)")
             events = []
         }
-        let dto = GoalDTO(goal: updated, steps: steps)
+        let isPlanning = await context.goalEngine.isPlanning(goalID: id)
+        let dto = GoalDTO(goal: updated, steps: steps, isPlanning: isPlanning)
         await context.hub.broadcastGoal(dto)
         return GoalDetailResponse(
             goal: dto,
@@ -351,7 +359,8 @@ private func registerGoalDeleteRoute(on goals: RoutesBuilder) {
                     req.logger.warning("ServerGoalRoutes: failed to load steps for goal \(id): \(error.localizedDescription)")
                     steps = []
                 }
-                await context.hub.broadcastGoal(GoalDTO(goal: updated, steps: steps))
+                let isPlanning = await context.goalEngine.isPlanning(goalID: id)
+                await context.hub.broadcastGoal(GoalDTO(goal: updated, steps: steps, isPlanning: isPlanning))
             }
         }
         return .noContent
@@ -370,8 +379,23 @@ private func registerGoalAdvanceRoute(on goals: RoutesBuilder) {
             throw Abort(.badRequest, reason: "id must be a UUID")
         }
         let context = req.application.runeWeaver
-        guard try await context.goals.goal(id: id) != nil else {
+        guard let goal = try await context.goals.goal(id: id) else {
             throw Abort(.notFound, reason: "Unknown goal \(raw)")
+        }
+        if goal.status == .unplanned {
+            if await context.goalEngine.isPlanning(goalID: id) {
+                throw Abort(.conflict, reason: "Goal \(raw) is already being planned")
+            }
+            let runID = await context.goalEngine.startPlanTask(for: goal)
+            let steps: [GoalStep]
+            do {
+                steps = try await context.goals.steps(goalID: id)
+            } catch {
+                steps = []
+            }
+            await context.hub.broadcastGoal(GoalDTO(goal: goal, steps: steps, isPlanning: true))
+            context.schedulePlanReadyBroadcast(goalID: id)
+            return GoalAdvanceResponse(runID: runID, sessionID: UUID(), goalID: id)
         }
         do {
             // The worker owns the single-flight lock, session, run row, and
@@ -449,7 +473,8 @@ private func registerGoalStepRoute(on goals: RoutesBuilder) {
         // Manual moves are progress boundaries: push the refreshed row so the
         // dashboard tally updates without refetching the plan.
         if let goal = try await context.goals.goal(id: goalID) {
-            await context.hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
+            let isPlanning = await context.goalEngine.isPlanning(goalID: goalID)
+            await context.hub.broadcastGoal(GoalDTO(goal: goal, steps: steps, isPlanning: isPlanning))
         }
         return GoalStepDTO(updated)
     }

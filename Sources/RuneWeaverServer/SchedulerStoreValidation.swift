@@ -22,14 +22,21 @@ extension SchedulerStore {
         pollIntervalSeconds: Int? = nil,
         pollLimit: Int? = nil,
         maxToolIterations: Int? = nil,
-        onToolLimit: String? = nil
+        onToolLimit: String? = nil,
+        watcherSource: EventWatcherSource? = nil,
+        rules: [EventRule]? = nil,
+        calendarLeadTimeMinutes: Int? = nil,
+        calendarNames: [String]? = nil
     ) throws {
         try validateToolBudget(maxToolIterations: maxToolIterations, onToolLimit: onToolLimit)
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SchedulerStoreError.invalidField("name must not be empty")
         }
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw SchedulerStoreError.invalidField("prompt must not be empty")
+        let hasRules = !(rules ?? []).isEmpty
+        if !hasRules {
+            guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw SchedulerStoreError.invalidField("prompt must not be empty")
+            }
         }
         let trimmedAccount = pollAccount?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if trimmedAccount.isEmpty {
@@ -39,11 +46,56 @@ extension SchedulerStore {
             if pollMailbox != nil {
                 throw SchedulerStoreError.invalidField("poll_mailbox requires poll_account")
             }
-            if pollIntervalSeconds != nil {
+            if pollIntervalSeconds != nil, watcherSource == nil {
                 throw SchedulerStoreError.invalidField("poll_interval_seconds requires poll_account")
             }
             if pollLimit != nil {
                 throw SchedulerStoreError.invalidField("poll_limit requires poll_account")
+            }
+        }
+        // Fail-closed bounds live here as well as in the shared config
+        // validation so the REST path rejects without depending on whether a
+        // watcher tick carries a poll account: messages and calendar watchers
+        // reuse the interval without an account, and the calendar window has
+        // no poll shape to carry its range.
+        if let interval = pollIntervalSeconds {
+            let minInterval = EmailPollRule.minPollIntervalSeconds
+            let maxInterval = EmailPollRule.maxPollIntervalSeconds
+            guard (minInterval ... maxInterval).contains(interval) else {
+                throw SchedulerStoreError.invalidField(
+                    "poll_interval_seconds must be between \(minInterval) and \(maxInterval) (got \(interval))"
+                )
+            }
+        }
+        if let leadTime = calendarLeadTimeMinutes {
+            let minLeadTime = SchedulerJobConfig.minCalendarLeadTimeMinutes
+            let maxLeadTime = SchedulerJobConfig.maxCalendarLeadTimeMinutes
+            guard (minLeadTime ... maxLeadTime).contains(leadTime) else {
+                throw SchedulerStoreError.invalidField(
+                    "calendar_lead_time_minutes must be between \(minLeadTime) and \(maxLeadTime) (got \(leadTime))"
+                )
+            }
+        }
+        // The zero-token path bypasses inference, so the store rejects unknown
+        // tools alongside the shared config validation; both gates share the
+        // single allowlist owner so they cannot drift.
+        if let rules {
+            for rule in rules {
+                if case let .directTool(toolName, _) = rule.action {
+                    let trimmedTool = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmedTool.isEmpty else {
+                        throw SchedulerStoreError.invalidField(
+                            "job '\(name)' rule '\(rule.name)' is invalid: tool_name must not be empty"
+                        )
+                    }
+                    guard EventRuleAction.isAllowedDirectTool(trimmedTool) else {
+                        let allowedTools = EventRuleAction.allowedDirectToolNames.sorted().joined(separator: ", ")
+                        throw SchedulerStoreError.invalidField(
+                            "job '\(name)' rule '\(rule.name)' is invalid: "
+                                + "tool_name '\(trimmedTool)' is not allowed (must be one of \(allowedTools))"
+                        )
+                    }
+                }
             }
         }
         let scheduleValue: String? = EmailPollRule.configSchedule(from: schedule)
@@ -59,7 +111,13 @@ extension SchedulerStore {
             prompt: prompt,
             enabled: true,
             schedule: scheduleValue,
-            poll: pollValue
+            poll: pollValue,
+            maxToolIterations: maxToolIterations,
+            onToolLimit: onToolLimit,
+            watcherSource: watcherSource,
+            rules: rules,
+            calendarLeadTimeMinutes: calendarLeadTimeMinutes,
+            calendarNames: calendarNames
         )
         do {
             try synthetic.validate()

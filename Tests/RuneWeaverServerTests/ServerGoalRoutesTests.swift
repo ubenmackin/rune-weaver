@@ -553,6 +553,33 @@ struct GoalRunsFilterTests {
     }
 
     @Test
+    func `Manual advance on unplanned goal triggers background planning`() async throws {
+        try await withGoalApp(answer: #"[{"title": "Step 1"}, {"title": "Step 2"}]"#) { app, context in
+            let now = Date()
+            let goal = Goal(
+                title: "Develop Plan",
+                statement: "Plan something complex",
+                status: .unplanned,
+                stepIntervalMinutes: 60,
+                nextDueAt: now,
+                createdAt: now,
+                updatedAt: now
+            )
+            try await context.goals.create(goal: goal, steps: [])
+            let response = try await goalRequest(app: app, method: .POST, path: "/goals/\(goal.id.uuidString)/advance")
+            #expect(response.status == .ok)
+            let receipt = try response.content.decode(GoalAdvanceResponse.self)
+            #expect(receipt.goalID == goal.id)
+            await context.goalEngine.waitForPendingPlan(goalID: goal.id)
+            let steps = try await context.goals.steps(goalID: goal.id)
+            #expect(steps.count == 2)
+            #expect(steps.map(\.title) == ["Step 1", "Step 2"])
+            let fresh = try await context.goals.goal(id: goal.id)
+            #expect(fresh?.status == .active)
+        }
+    }
+
+    @Test
     func `Patch step to done achieves goal when no actionable steps remain`() async throws {
         try await withGoalApp { app, context in
             let now = Date()

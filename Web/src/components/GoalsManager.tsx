@@ -707,33 +707,65 @@ export default function GoalsManager({
                   <div className="schedule-card-title-row">
                     <strong className="schedule-card-name">{goal.title}</strong>
                     <span
-                      className={`status-pill ${goalStatusTone(goal.status)}`}
+                      className={`status-pill ${
+                        goal.isPlanning
+                          ? "running"
+                          : goalStatusTone(goal.status)
+                      }`}
                     >
-                      {goalStatusLabel(goal.status).toUpperCase()}
+                      {goal.isPlanning
+                        ? "DRAFTING PLAN"
+                        : goalStatusLabel(goal.status).toUpperCase()}
                     </span>
                   </div>
                   <div className="schedule-card-details muted text-xs">
-                    <span>
-                      next work session {formatGoalNextAdvance(goal.status, goal.nextDueAt)}
-                    </span>
-                    <span> · {goalCadenceLabel(goal.stepIntervalMinutes)}</span>
-                    <span>
-                      {" "}
-                      · {goal.progress.done}/{goal.progress.total} steps
-                    </span>
+                    {goal.isPlanning ? (
+                      <span>Agent is drafting plan…</span>
+                    ) : (
+                      <>
+                        <span>
+                          next work session {formatGoalNextAdvance(goal.status, goal.nextDueAt)}
+                        </span>
+                        <span> · {goalCadenceLabel(goal.stepIntervalMinutes)}</span>
+                        <span>
+                          {" "}
+                          · {goal.progress.done}/{goal.progress.total} steps
+                        </span>
+                      </>
+                    )}
                   </div>
                 </div>
 
                 <div className="schedule-card-actions">
                   <button
                     type="button"
-                    className="ghost run-now-btn"
+                    className={`${goal.status === "unplanned" ? "primary" : "ghost"} run-now-btn`}
                     onClick={() => void advance(goal)}
-                    disabled={advancingGoalId === goal.id || isTerminal}
-                    title="Work on it now"
-                    aria-label="Work on it now"
+                    disabled={
+                      advancingGoalId === goal.id ||
+                      isTerminal ||
+                      Boolean(goal.isPlanning)
+                    }
+                    title={
+                      goal.isPlanning
+                        ? "Planning in progress"
+                        : goal.status === "unplanned"
+                        ? "Plan goal with agent"
+                        : "Work on it now"
+                    }
+                    aria-label={
+                      goal.isPlanning
+                        ? "Planning"
+                        : goal.status === "unplanned"
+                        ? "Plan Goal"
+                        : "Work on it now"
+                    }
                   >
-                    {advancingGoalId === goal.id ? "Working…" : "Work on it now"}
+                    {advancingGoalId === goal.id || goal.isPlanning
+                      ? "Planning…"
+                      : goal.status === "unplanned"
+                      ? "Plan Goal"
+                      : "Work on it now"}
                   </button>
 
                   <button
@@ -742,7 +774,12 @@ export default function GoalsManager({
                       goal.status === "active" ? "enabled" : "disabled"
                     }`}
                     onClick={() => void handleToggleStatus(goal)}
-                    disabled={togglingGoalId === goal.id || isTerminal}
+                    disabled={
+                      togglingGoalId === goal.id ||
+                      isTerminal ||
+                      goal.status === "unplanned" ||
+                      Boolean(goal.isPlanning)
+                    }
                     aria-label={goal.status === "active" ? "Pause" : "Resume"}
                   >
                     {togglingGoalId === goal.id
@@ -838,10 +875,30 @@ export default function GoalsManager({
                           gap: 6,
                         }}
                       >
-                        {detail.steps.length === 0 ? (
-                          <li className="muted text-xs">
-                            No plan drafted yet. The agent lands it shortly after
-                            creation.
+                        {goal.isPlanning ? (
+                          <li
+                            className="muted text-xs"
+                            style={{
+                              padding: "10px 12px",
+                              borderRadius: "6px",
+                              background: "rgba(59, 130, 246, 0.1)",
+                              border: "1px solid rgba(59, 130, 246, 0.2)",
+                              color: "var(--accent-blue, #60a5fa)",
+                            }}
+                          >
+                            Drafting plan… The agent is breaking down this goal into actionable steps.
+                          </li>
+                        ) : detail.steps.length === 0 ? (
+                          <li
+                            className="muted text-xs"
+                            style={{
+                              padding: "10px 12px",
+                              borderRadius: "6px",
+                              background: "rgba(255, 255, 255, 0.04)",
+                              border: "1px dashed rgba(255, 255, 255, 0.15)",
+                            }}
+                          >
+                            No plan drafted yet. Click &quot;Plan Goal&quot; above to have the agent generate actionable steps.
                           </li>
                         ) : (
                           detail.steps.map((step) => (

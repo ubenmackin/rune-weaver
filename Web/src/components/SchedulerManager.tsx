@@ -29,6 +29,8 @@ import RunDetailModal from "./RunDetailModal";
 import ScheduleWizardModal from "./ScheduleWizardModal";
 import Modal from "./Modal";
 import {
+  CalendarIcon,
+  ChatIcon,
   ClockIcon,
   CloseIcon,
   EditIcon,
@@ -271,7 +273,7 @@ export default function SchedulerManager() {
         <div>
           <h2>Schedules & Automated Jobs</h2>
           <p className="muted text-sm">
-            Create repeating cron schedules or email-triggered automated agent tasks.
+            Create repeating cron schedules or event-triggered automated tasks (Email, Messages, Calendar).
           </p>
         </div>
 
@@ -314,7 +316,7 @@ export default function SchedulerManager() {
         <div className="empty-state-box">
           <h3>No scheduled jobs yet</h3>
           <p className="muted">
-            Automate recurring digests, email watchers, and background analysis.
+            Automate recurring digests, event watchers (Email, Messages, Calendar), and background analysis.
           </p>
           <button
             type="button"
@@ -331,7 +333,9 @@ export default function SchedulerManager() {
 
       <div className="job-cards-list">
         {jobs.map((job) => {
-          const isPollJob = Boolean(job.pollAccount);
+          const watcherSource =
+            job.watcherSource || (job.pollAccount ? "email" : undefined);
+          const ruleCount = job.rules?.length ?? 0;
           const isExpanded = expandedRunsJobId === job.id;
           const runsForThisJob = jobRuns[job.id] || [];
           const effectiveBudget = schedulerJobEffectiveMaxToolIterations(
@@ -361,10 +365,23 @@ export default function SchedulerManager() {
                     <span className="schedule-card-state-text muted text-xs">
                       {job.enabled ? "enabled" : "disabled"}
                     </span>
-                    {isPollJob ? (
-                      <span className="trigger-badge poll">
+                    {watcherSource === "messages" ? (
+                      <span className="trigger-badge poll messages">
+                        <ChatIcon size={12} />
+                        <span>Messages Watcher{ruleCount > 0 ? ` (${ruleCount} rule${ruleCount === 1 ? "" : "s"})` : ""}</span>
+                      </span>
+                    ) : watcherSource === "calendar" ? (
+                      <span className="trigger-badge poll calendar">
+                        <CalendarIcon size={12} />
+                        <span>Calendar Watcher{ruleCount > 0 ? ` (${ruleCount} rule${ruleCount === 1 ? "" : "s"})` : ""}</span>
+                      </span>
+                    ) : watcherSource === "email" ? (
+                      <span className="trigger-badge poll email">
                         <MailIcon size={12} />
-                        <span>Email Watcher ({job.pollAccount})</span>
+                        <span>
+                          Email Watcher{job.pollAccount ? ` (${job.pollAccount})` : ""}
+                          {ruleCount > 0 ? ` · ${ruleCount} rule${ruleCount === 1 ? "" : "s"}` : ""}
+                        </span>
                       </span>
                     ) : (
                       // Single-line cron badge: the visible text truncates with
@@ -389,11 +406,23 @@ export default function SchedulerManager() {
                   </div>
 
                   <div className="schedule-card-details muted text-xs">
-                    {isPollJob ? (
+                    {watcherSource === "messages" ? (
                       <span>
-                        watches {job.pollAccount} · mailbox <code>{job.pollMailbox || "INBOX"}</code>{" "}
+                        watches Apple Messages every {job.pollIntervalSeconds || 300}s
+                        {ruleCount > 0 ? ` · ${ruleCount} rule${ruleCount === 1 ? "" : "s"} configured` : ""}
+                      </span>
+                    ) : watcherSource === "calendar" ? (
+                      <span>
+                        watches upcoming meetings ({job.calendarLeadTimeMinutes ?? 15}m lead time) every {job.pollIntervalSeconds || 300}s
+                        {job.calendarNames && job.calendarNames.length > 0 ? ` · [${job.calendarNames.join(", ")}]` : ""}
+                        {ruleCount > 0 ? ` · ${ruleCount} rule${ruleCount === 1 ? "" : "s"} configured` : ""}
+                      </span>
+                    ) : watcherSource === "email" ? (
+                      <span>
+                        watches {job.pollAccount || "email"} · mailbox <code>{job.pollMailbox || "INBOX"}</code>{" "}
                         every {job.pollIntervalSeconds || 300}s
                         {job.pollQuery ? ` · query "${job.pollQuery}"` : ""}
+                        {ruleCount > 0 ? ` · ${ruleCount} rule${ruleCount === 1 ? "" : "s"} configured` : ""}
                       </span>
                     ) : (
                       <span>Recurring time-based cron schedule</span>
@@ -457,7 +486,13 @@ export default function SchedulerManager() {
               {/* Prompt Preview */}
               <div className="schedule-card-prompt">
                 <span className="prompt-label">Task:</span>
-                <span className="prompt-text">{job.prompt}</span>
+                <span className="prompt-text">
+                  {job.prompt
+                    ? job.prompt
+                    : ruleCount > 0
+                      ? `${ruleCount} rule${ruleCount === 1 ? "" : "s"} configured (${job.rules?.map((r) => r.name).join(", ")})`
+                      : "No prompt specified"}
+                </span>
               </div>
 
               {/* Run History Toggle */}

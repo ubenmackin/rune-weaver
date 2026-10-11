@@ -43,6 +43,14 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     public var updatedAt: Date
     /// Framework-owned end of the last successful run, if any.
     public var lastSuccessfulRunEndedAt: Date?
+    /// Event watcher source (email, messages, or calendar), if configured.
+    public var watcherSource: EventWatcherSource?
+    /// Ordered event rules executed on incoming events.
+    public var rules: [EventRule]?
+    /// Lead time in minutes for calendar upcoming event trigger. Defaults to 15.
+    public var calendarLeadTimeMinutes: Int?
+    /// Calendar names to watch for calendar upcoming event trigger.
+    public var calendarNames: [String]?
 
     /// Creates a scheduler job.
     public init(
@@ -61,7 +69,11 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         onToolLimit: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
-        lastSuccessfulRunEndedAt: Date? = nil
+        lastSuccessfulRunEndedAt: Date? = nil,
+        watcherSource: EventWatcherSource? = nil,
+        rules: [EventRule]? = nil,
+        calendarLeadTimeMinutes: Int? = nil,
+        calendarNames: [String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -79,6 +91,10 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.lastSuccessfulRunEndedAt = lastSuccessfulRunEndedAt
+        self.watcherSource = watcherSource
+        self.rules = rules
+        self.calendarLeadTimeMinutes = calendarLeadTimeMinutes
+        self.calendarNames = calendarNames
     }
 
     /// Whether the job has a cron trigger.
@@ -90,6 +106,11 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     public var hasPollTrigger: Bool {
         guard let account = pollAccount else { return false }
         return !account.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Whether the job is an event watcher.
+    public var isEventWatcher: Bool {
+        watcherSource != nil || hasPollTrigger
     }
 
     /// Email poll rule for this job, when configured.
@@ -131,6 +152,14 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
     public var maxToolIterations: Int?
     /// Action when tool limit is reached: "fail" (synthesize & budget_exceeded) or "park". Defaults to "fail".
     public var onToolLimit: String?
+    /// Event watcher source (email, messages, or calendar).
+    public var watcherSource: EventWatcherSource?
+    /// Ordered event rules executed on incoming events.
+    public var rules: [EventRule]?
+    /// Lead time in minutes for calendar upcoming event trigger. Defaults to 15.
+    public var calendarLeadTimeMinutes: Int?
+    /// Calendar names to watch for calendar upcoming event trigger.
+    public var calendarNames: [String]?
 
     /// Creates a new-job payload.
     public init(
@@ -145,7 +174,11 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
         pollLimit: Int? = nil,
         emailReportJob: Bool? = nil,
         maxToolIterations: Int? = nil,
-        onToolLimit: String? = nil
+        onToolLimit: String? = nil,
+        watcherSource: EventWatcherSource? = nil,
+        rules: [EventRule]? = nil,
+        calendarLeadTimeMinutes: Int? = nil,
+        calendarNames: [String]? = nil
     ) {
         self.name = name
         self.schedule = schedule
@@ -159,6 +192,10 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
         self.emailReportJob = emailReportJob
         self.maxToolIterations = maxToolIterations
         self.onToolLimit = onToolLimit
+        self.watcherSource = watcherSource
+        self.rules = rules
+        self.calendarLeadTimeMinutes = calendarLeadTimeMinutes
+        self.calendarNames = calendarNames
     }
 }
 
@@ -199,6 +236,18 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
     /// When true, clears the whole tool budget to nil (inherit) before applying
     /// any non-nil budget fields in the same payload.
     public var clearToolBudget: Bool?
+    /// New event watcher source, if changed.
+    public var watcherSource: EventWatcherSource?
+    /// New event rules, if changed.
+    public var rules: [EventRule]?
+    /// New lead time in minutes for calendar watcher.
+    public var calendarLeadTimeMinutes: Int?
+    /// New calendar names for calendar watcher.
+    public var calendarNames: [String]?
+    /// When true, clears the event watcher source and settings.
+    public var clearWatcher: Bool?
+    /// When true, clears event rules.
+    public var clearRules: Bool?
 
     /// Creates an update payload.
     public init(
@@ -215,7 +264,13 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         emailReportJob: Bool? = nil,
         maxToolIterations: Int? = nil,
         onToolLimit: String? = nil,
-        clearToolBudget: Bool? = nil
+        clearToolBudget: Bool? = nil,
+        watcherSource: EventWatcherSource? = nil,
+        rules: [EventRule]? = nil,
+        calendarLeadTimeMinutes: Int? = nil,
+        calendarNames: [String]? = nil,
+        clearWatcher: Bool? = nil,
+        clearRules: Bool? = nil
     ) {
         self.name = name
         self.schedule = schedule
@@ -231,6 +286,12 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
         self.maxToolIterations = maxToolIterations
         self.onToolLimit = onToolLimit
         self.clearToolBudget = clearToolBudget
+        self.watcherSource = watcherSource
+        self.rules = rules
+        self.calendarLeadTimeMinutes = calendarLeadTimeMinutes
+        self.calendarNames = calendarNames
+        self.clearWatcher = clearWatcher
+        self.clearRules = clearRules
     }
 }
 
@@ -290,7 +351,11 @@ public actor SchedulerStore {
             pollIntervalSeconds: input.pollIntervalSeconds,
             pollLimit: input.pollLimit,
             maxToolIterations: input.maxToolIterations,
-            onToolLimit: normalizedOnToolLimit
+            onToolLimit: normalizedOnToolLimit,
+            watcherSource: input.watcherSource,
+            rules: input.rules,
+            calendarLeadTimeMinutes: input.calendarLeadTimeMinutes,
+            calendarNames: input.calendarNames
         )
         let trimmedName = normalizedSchedulerJobName(input.name)
         if jobs.values.contains(where: { $0.name == trimmedName }) {
@@ -311,7 +376,11 @@ public actor SchedulerStore {
             maxToolIterations: input.maxToolIterations,
             onToolLimit: normalizedOnToolLimit,
             createdAt: now,
-            updatedAt: now
+            updatedAt: now,
+            watcherSource: input.watcherSource,
+            rules: input.rules,
+            calendarLeadTimeMinutes: input.calendarLeadTimeMinutes,
+            calendarNames: input.calendarNames
         )
         jobs[job.id] = job
         if let dbPath {
@@ -352,13 +421,41 @@ public actor SchedulerStore {
             }
             existing.name = trimmedName
         }
+        Self.applyUpdates(to: &existing, from: input)
+        try Self.validated(
+            name: existing.name,
+            schedule: existing.schedule,
+            prompt: existing.prompt,
+            pollAccount: existing.pollAccount,
+            pollQuery: existing.pollQuery,
+            pollMailbox: existing.pollMailbox,
+            pollIntervalSeconds: existing.pollIntervalSeconds,
+            pollLimit: existing.pollLimit,
+            maxToolIterations: existing.maxToolIterations,
+            onToolLimit: existing.onToolLimit,
+            watcherSource: existing.watcherSource,
+            rules: existing.rules,
+            calendarLeadTimeMinutes: existing.calendarLeadTimeMinutes,
+            calendarNames: existing.calendarNames
+        )
+        existing.updatedAt = Date()
+        let updatedJob = existing
+        jobs[id] = updatedJob
+        if let dbPath {
+            #if canImport(SQLite3)
+                await SQLiteSerialIO.runUncancellable {
+                    SQLiteSchedulerJobStore.write(job: updatedJob, dbPath: dbPath)
+                }
+            #endif
+        }
+        return updatedJob
+    }
+
+    private static func applyUpdates(to existing: inout SchedulerJob, from input: UpdateSchedulerJob) {
         if let schedule = input.schedule {
             existing.schedule = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         if let prompt = input.prompt {
-            guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw SchedulerStoreError.invalidField("prompt must not be empty")
-            }
             existing.prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         if let enabled = input.enabled {
@@ -372,13 +469,13 @@ public actor SchedulerStore {
             existing.pollLimit = nil
         }
         if let pollAccount = input.pollAccount {
-            existing.pollAccount = Self.normalizedOptional(pollAccount)
+            existing.pollAccount = normalizedOptional(pollAccount)
         }
         if let pollQuery = input.pollQuery {
-            existing.pollQuery = Self.normalizedOptional(pollQuery)
+            existing.pollQuery = normalizedOptional(pollQuery)
         }
         if let pollMailbox = input.pollMailbox {
-            existing.pollMailbox = Self.normalizedOptional(pollMailbox)
+            existing.pollMailbox = normalizedOptional(pollMailbox)
         }
         if let interval = input.pollIntervalSeconds {
             existing.pollIntervalSeconds = interval
@@ -397,31 +494,28 @@ public actor SchedulerStore {
             existing.maxToolIterations = maxToolIterations
         }
         if let onToolLimit = input.onToolLimit {
-            existing.onToolLimit = Self.normalizedOptional(onToolLimit)
+            existing.onToolLimit = normalizedOptional(onToolLimit)
         }
-        try Self.validated(
-            name: existing.name,
-            schedule: existing.schedule,
-            prompt: existing.prompt,
-            pollAccount: existing.pollAccount,
-            pollQuery: existing.pollQuery,
-            pollMailbox: existing.pollMailbox,
-            pollIntervalSeconds: existing.pollIntervalSeconds,
-            pollLimit: existing.pollLimit,
-            maxToolIterations: existing.maxToolIterations,
-            onToolLimit: existing.onToolLimit
-        )
-        existing.updatedAt = Date()
-        let updatedJob = existing
-        jobs[id] = updatedJob
-        if let dbPath {
-            #if canImport(SQLite3)
-                await SQLiteSerialIO.runUncancellable {
-                    SQLiteSchedulerJobStore.write(job: updatedJob, dbPath: dbPath)
-                }
-            #endif
+        if input.clearWatcher == true {
+            existing.watcherSource = nil
+            existing.calendarLeadTimeMinutes = nil
+            existing.calendarNames = nil
         }
-        return updatedJob
+        if input.clearRules == true {
+            existing.rules = nil
+        }
+        if let watcherSource = input.watcherSource {
+            existing.watcherSource = watcherSource
+        }
+        if let rules = input.rules {
+            existing.rules = rules
+        }
+        if let calendarLeadTime = input.calendarLeadTimeMinutes {
+            existing.calendarLeadTimeMinutes = calendarLeadTime
+        }
+        if let calendarNames = input.calendarNames {
+            existing.calendarNames = calendarNames
+        }
     }
 
     /// Deletes one job. Unknown identifiers are a no-op.
@@ -582,7 +676,11 @@ extension SchedulerJob {
             maxToolIterations: config.maxToolIterations,
             onToolLimit: config.onToolLimit,
             createdAt: createdAt,
-            updatedAt: updatedAt
+            updatedAt: updatedAt,
+            watcherSource: config.watcherSource,
+            rules: config.rules,
+            calendarLeadTimeMinutes: config.calendarLeadTimeMinutes,
+            calendarNames: config.calendarNames
         )
     }
 
@@ -597,7 +695,11 @@ extension SchedulerJob {
             schedule: scheduleValue,
             poll: pollValue,
             maxToolIterations: maxToolIterations,
-            onToolLimit: onToolLimit
+            onToolLimit: onToolLimit,
+            watcherSource: watcherSource,
+            rules: rules,
+            calendarLeadTimeMinutes: calendarLeadTimeMinutes,
+            calendarNames: calendarNames
         )
     }
 }
@@ -664,6 +766,15 @@ extension SchedulerJobConfig {
                 sql: "ALTER TABLE scheduler_jobs ADD COLUMN email_report_job INTEGER NOT NULL DEFAULT 0;",
                 failure: { SchedulerDBError(message: $0) }
             )
+            // Watcher columns delegate to the Core-owned statement list so the
+            // additive migrations stay identical across persistence sites.
+            SchedulerJobConfig.applyWatcherColumnMigrations { statement in
+                _ = try? SQLiteHelpers.exec(
+                    handle: handle,
+                    sql: statement,
+                    failure: { SchedulerDBError(message: $0) }
+                )
+            }
             return handle
         }
 
@@ -681,7 +792,8 @@ extension SchedulerJobConfig {
             let sql = """
             SELECT id, name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox,
                    poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit,
-                   created_at, updated_at, last_successful_run_ended_at, email_report_job
+                   created_at, updated_at, last_successful_run_ended_at, email_report_job,
+                   watcher_source, rules, calendar_lead_time_minutes, calendar_names
             FROM scheduler_jobs
             ORDER BY created_at ASC;
             """
@@ -710,6 +822,19 @@ extension SchedulerJobConfig {
                 // Rows written before the email-report flag existed decode as
                 // false, matching the column default.
                 let emailReportJob = (SQLiteHelpers.columnInt64(statement, index: 15) ?? 0) != 0
+                let watcherRaw = SQLiteHelpers.columnText(statement, index: 16)
+                let watcherSource = watcherRaw.flatMap { EventWatcherSource(rawValue: $0) }
+                let rulesRaw = SQLiteHelpers.columnText(statement, index: 17)
+                let rules: [EventRule]? = rulesRaw.flatMap { json in
+                    guard let data = json.data(using: .utf8) else { return nil }
+                    return try? JSONDecoder().decode([EventRule].self, from: data)
+                }
+                let leadTime = SQLiteHelpers.columnInt64(statement, index: 18).map { Int($0) }
+                let calNamesRaw = SQLiteHelpers.columnText(statement, index: 19)
+                let calendarNames: [String]? = calNamesRaw.flatMap { json in
+                    guard let data = json.data(using: .utf8) else { return nil }
+                    return try? JSONDecoder().decode([String].self, from: data)
+                }
 
                 loaded.append(SchedulerJob(
                     id: id,
@@ -727,7 +852,11 @@ extension SchedulerJobConfig {
                     onToolLimit: row.onToolLimit,
                     createdAt: createdAt,
                     updatedAt: updatedAt,
-                    lastSuccessfulRunEndedAt: cursor
+                    lastSuccessfulRunEndedAt: cursor,
+                    watcherSource: watcherSource,
+                    rules: rules,
+                    calendarLeadTimeMinutes: leadTime,
+                    calendarNames: calendarNames
                 ))
             }
             return loaded
@@ -748,9 +877,9 @@ extension SchedulerJobConfig {
             INSERT INTO scheduler_jobs(
                 id, name, schedule, prompt, enabled, poll_account, poll_query,
                 poll_mailbox, poll_interval_seconds, poll_limit, max_tool_iterations, on_tool_limit, created_at, updated_at,
-                last_successful_run_ended_at, email_report_job
+                last_successful_run_ended_at, email_report_job, watcher_source, rules, calendar_lead_time_minutes, calendar_names
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 schedule = excluded.schedule,
@@ -765,7 +894,11 @@ extension SchedulerJobConfig {
                 on_tool_limit = excluded.on_tool_limit,
                 updated_at = excluded.updated_at,
                 last_successful_run_ended_at = excluded.last_successful_run_ended_at,
-                email_report_job = excluded.email_report_job;
+                email_report_job = excluded.email_report_job,
+                watcher_source = excluded.watcher_source,
+                rules = excluded.rules,
+                calendar_lead_time_minutes = excluded.calendar_lead_time_minutes,
+                calendar_names = excluded.calendar_names;
             """
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
@@ -795,6 +928,18 @@ extension SchedulerJobConfig {
                 sqlite3_bind_null(statement, 15)
             }
             SQLiteHelpers.bindInt64(statement, index: 16, value: job.emailReportJob ? 1 : 0)
+            SQLiteHelpers.bindText(statement, index: 17, value: job.watcherSource?.rawValue)
+            let rulesJSON = job.rules.flatMap { rules -> String? in
+                guard let data = try? JSONEncoder().encode(rules) else { return nil }
+                return String(data: data, encoding: .utf8)
+            }
+            SQLiteHelpers.bindText(statement, index: 18, value: rulesJSON)
+            SQLiteHelpers.bindInt64(statement, index: 19, value: job.calendarLeadTimeMinutes.map { Int64($0) })
+            let calNamesJSON = job.calendarNames.flatMap { names -> String? in
+                guard let data = try? JSONEncoder().encode(names) else { return nil }
+                return String(data: data, encoding: .utf8)
+            }
+            SQLiteHelpers.bindText(statement, index: 20, value: calNamesJSON)
 
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 let code = sqlite3_errcode(handle)

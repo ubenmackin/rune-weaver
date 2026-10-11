@@ -19,6 +19,7 @@ import type { ReactNode } from "react";
 import {
   goalNeedsInput,
   isActiveRunStatus,
+  isGoalUnplanned,
   listApprovals,
   listGoals,
   personaAssistantName,
@@ -158,8 +159,15 @@ function DashboardGreetingIdentity({
         const runs = Array.isArray(runRows) ? runRows : [];
         setApprovals(approvalRows);
         // Single blocked-goal predicate shared with the Needs Action queue so
-        // both surfaces agree on which statuses count as needing input.
-        setBlockedGoals(goalRows.filter((goal) => goalNeedsInput(goal.status)));
+        // both surfaces agree on which statuses count as needing input:
+        // goals parked awaiting owner input OR unplanned goals not yet planning.
+        setBlockedGoals(
+          goalRows.filter(
+            (goal) =>
+              goalNeedsInput(goal.status) ||
+              (isGoalUnplanned(goal.status) && !goal.isPlanning),
+          ),
+        );
         setAllGoalsCount(goalRows.length);
         setActiveRuns(runs.filter((run) => isActiveRunStatus(run.status)));
         setAllRunsCount(runs.length);

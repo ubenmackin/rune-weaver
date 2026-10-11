@@ -412,7 +412,7 @@ Steady pursuit of long-horizon autonomous goals. Off by default so stock install
 | `step_interval_minutes` | integer | `1440` | Default cadence hint stored on new goals (`5`–`20160` minutes, default 24h). |
 | `max_active_goals` | integer | `10` | Maximum goals in active state at once (`1`–`50`). |
 | `max_steps_per_goal` | integer | `12` | Maximum steps in one decomposed goal plan (`1`–`24`). |
-| `plan_timeout_seconds` | integer | `60` | Timeout in seconds for the planning model call before fallback. |
+| `plan_timeout_seconds` | integer | `0` | Timeout in seconds for the planning model call; `0` means unlimited, otherwise settle to unplanned with empty steps (`0`–`86400`). |
 | `max_triggers_per_goal` | integer | `8` | Maximum event triggers armed on one goal (`0`–`32`). |
 | `max_tool_iterations` | integer | `35` | Maximum tool loop iterations per goal turn before force-synthesis plus budget_exceeded (1-100). Always synthesizes; never parks. |
 
@@ -422,7 +422,7 @@ enabled = false
 step_interval_minutes = 1440
 max_active_goals = 10
 max_steps_per_goal = 12
-plan_timeout_seconds = 60
+plan_timeout_seconds = 0
 max_triggers_per_goal = 8
 ```
 
