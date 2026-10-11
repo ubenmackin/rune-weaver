@@ -83,8 +83,9 @@ struct IndexedRecallTests {
         let (engine, store, base) = makeIndexedRecallEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // Identical bodies and embeddings: only the newest-first recency prior
-        // separates them, so the later-inserted row must rank first.
+        // Identical bodies and embeddings: only the recency prior separates
+        // them. Both fixtures are undated, so the event-time pool falls back
+        // to its rowid tie-break and the later-inserted row must rank first.
         let older = try await storeChunk(in: store, externalID: "older", text: "identical body", embedding: [1.0, 0.0])
         let newer = try await storeChunk(in: store, externalID: "newer", text: "identical body", embedding: [1.0, 0.0])
 
@@ -141,8 +142,9 @@ struct IndexedRecallTests {
         let (engine, store, base) = makeIndexedRecallEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // The oldest vector shares no query tokens, so only the bounded
-        // newest-first pool can decide whether the recent write is seen.
+        // The query token matches both chunks, so the keyword leg sees either
+        // row; only the bounded vector pool decides which single chunk the
+        // cosine leg can hold.
         try await storeChunk(
             in: store,
             externalID: "old-vector",
@@ -157,7 +159,8 @@ struct IndexedRecallTests {
         )
 
         // A pool of one must hold the newest row; an oldest-first scan would
-        // return only the archaic entry here.
+        // return only the archaic entry here. Both fixtures are undated, so
+        // the pool's rowid tie-break stands in for event time.
         let newestOnly = try await store.chunkVectors(limit: 1)
         #expect(newestOnly.count == 1)
         #expect(newestOnly.first?.text.contains("recent") == true)
@@ -338,8 +341,10 @@ struct IndexedRecallTests {
         let (engine, store, base) = makeIndexedRecallEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // Old-but-relevant doc: unique keyword token, keyword-only so the
-        // newest-first vector pool of one can never hold it.
+        // Old-but-relevant doc: a unique keyword token and no embedding, so it
+        // never reaches the vector leg and can only surface through keywords.
+        // Every fixture is undated, so the vector leg falls back to the rowid
+        // tie-break and keeps the latest insertions at its head.
         try await storeChunk(in: store, externalID: "old-atlas", text: "ancient cartography atlas compassrose")
         // Newer vector docs share the query embedding axis but not the keyword.
         for index in 0 ..< 4 {
@@ -351,8 +356,9 @@ struct IndexedRecallTests {
             )
         }
 
-        // Narrow pool (multiplier 1, clamped 1 => pool 1): the vector read holds
-        // only the newest row, yet the keyword union must still surface the old atlas.
+        // Narrow budgets (multiplier 1) widen the pool to the page width only,
+        // so the vector leg holds the recent ledger rows while the keyword
+        // union must still surface the old atlas.
         let narrowBudgets = RecallBudgets(perTierLimit: 5, autoLimit: 5, maxChars: 2000, perHitChars: 500, docPoolMultiplier: 1)
         let narrow = await engine.recallDocuments(
             query: "cartography compassrose",
@@ -363,7 +369,8 @@ struct IndexedRecallTests {
         #expect(narrow.contains { $0.content.contains("ancient cartography") })
         #expect(narrow.contains { $0.content.contains("recent ledger") })
 
-        // Widened pool (multiplier 4): recent vectors stay visible alongside the old hit.
+        // Wide budgets (multiplier 4) over a query the atlas no longer
+        // matches: the recent ledger rows stay visible in the returned page.
         let wideBudgets = RecallBudgets(perTierLimit: 5, autoLimit: 5, maxChars: 2000, perHitChars: 500, docPoolMultiplier: 4)
         let wide = await engine.recallDocuments(
             query: "ledger",
@@ -492,5 +499,128 @@ struct IndexedRecallTests {
         #expect(!results.isEmpty)
         #expect(results.first?.metadata["document_id"] == targetDoc.id.uuidString)
         #expect(results.first?.content.contains("Truckee") == true)
+    }
+
+    @Test
+    func `Common-name flooding still seats the series chunk`() async throws {
+        let (engine, store, base) = makeIndexedRecallEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // One series row against twenty chatter rows, and the longest body of
+        // the lot, so the FTS rank order seats it last; it carries a
+        // distinctive token the rerank can score once a read wide enough
+        // holds it.
+        try await storeChunk(
+            in: store,
+            externalID: "series-starlight",
+            text: "riverdale starlight finale revelation extended director commentary with behind scenes notes and cast interviews"
+        )
+        for index in 0 ..< 20 {
+            try await storeChunk(
+                in: store,
+                externalID: "chatter-\(index)",
+                text: "riverdale chatter \(index)"
+            )
+        }
+
+        // The series chunk is the longest of the 21 rows, so FTS rank seats it
+        // after the shorter chatter rows and a narrow read of 20 drops it.
+        let narrow = try await store.searchKeyword(query: "riverdale", limit: 20)
+        #expect(narrow.count == 20)
+        #expect(!narrow.contains { $0.text.contains("starlight") })
+        // A wide read holds all 21 rows — the width the keyword leg now shares
+        // with the vector pool — so the series is never starved by the flood.
+        let wide = try await store.searchKeyword(query: "riverdale", limit: 500)
+        #expect(wide.count == 21)
+        #expect(wide.contains { $0.text.contains("starlight") })
+
+        // Series-specific query seats the series in the final page of five.
+        let seated = await engine.recallDocuments(query: "riverdale starlight", limit: 5)
+        #expect(seated.contains { $0.content.contains("starlight") })
+        #expect(seated.count <= 5)
+    }
+
+    @Test
+    func `Unbounded vector reads return event-time order with NULLs last`() async throws {
+        let (_, store, base) = makeIndexedRecallEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let recentEvent = Date(timeIntervalSince1970: 1_700_000_000)
+        let oldEvent = Date(timeIntervalSince1970: 1_500_000_000)
+        // Insertion order disagrees with event order so rowid order would
+        // return the old happening first; event order must return the recent
+        // happening first with the undated parent last.
+        let recent = try await storeChunk(
+            in: store,
+            externalID: "recent-happening",
+            text: "recent happening vector",
+            embedding: [1.0, 0.0],
+            mtime: recentEvent
+        )
+        try await storeChunk(
+            in: store,
+            externalID: "undated",
+            text: "undated vector",
+            embedding: [1.0, 0.0],
+            mtime: nil
+        )
+        let old = try await storeChunk(
+            in: store,
+            externalID: "old-happening",
+            text: "old happening vector",
+            embedding: [1.0, 0.0],
+            mtime: oldEvent
+        )
+
+        let vectors = try await store.chunkVectors(limit: 10)
+        #expect(vectors.count == 3)
+        #expect(vectors[0].documentID == recent.id)
+        #expect(vectors[1].documentID == old.id)
+        #expect(vectors[2].text.contains("undated") == true)
+    }
+
+    @Test
+    func `Windowed vector reads keep bounds while ordering by event time`() async throws {
+        let (_, store, base) = makeIndexedRecallEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let window = try TemporalFilter.parse(since: "2026-07-01", until: "2026-08-01")
+        let earlyJuly = try #require(TemporalFilter.parse(since: "2026-07-05", until: nil).since)
+        let lateJuly = try #require(TemporalFilter.parse(since: "2026-07-25", until: nil).since)
+        let june = try #require(TemporalFilter.parse(since: "2026-06-15", until: nil).since)
+        let august = try #require(TemporalFilter.parse(since: "2026-08-10", until: nil).since)
+
+        // Scrambled insertion order proves the pool follows event time, not write order.
+        try await storeChunk(in: store, externalID: "june", text: "june vector", embedding: [1.0, 0.0], mtime: june)
+        let late = try await storeChunk(in: store, externalID: "late-july", text: "late july vector", embedding: [1.0, 0.0], mtime: lateJuly)
+        try await storeChunk(in: store, externalID: "undated-window", text: "undated vector", embedding: [1.0, 0.0], mtime: nil)
+        let early = try await storeChunk(in: store, externalID: "early-july", text: "early july vector", embedding: [1.0, 0.0], mtime: earlyJuly)
+        try await storeChunk(in: store, externalID: "august", text: "august vector", embedding: [1.0, 0.0], mtime: august)
+
+        let inside = try await store.chunkVectors(limit: 10000, since: window.since, until: window.until)
+        #expect(inside.count == 2)
+        #expect(inside[0].documentID == late.id)
+        #expect(inside[1].documentID == early.id)
+    }
+
+    @Test
+    func `Wide keyword pool keeps final page at five`() async throws {
+        let (engine, store, base) = makeIndexedRecallEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        try await storeChunk(
+            in: store,
+            externalID: "series-page",
+            text: "riverdale starlight finale revelation extended director commentary with behind scenes notes and cast interviews"
+        )
+        for index in 0 ..< 20 {
+            try await storeChunk(in: store, externalID: "page-chatter-\(index)", text: "riverdale chatter \(index)")
+        }
+
+        // The widened read holds the flooding, yet the returned page stays five.
+        let page = await engine.recallDocuments(query: "riverdale starlight", limit: 5)
+        #expect(page.count == 5)
+        #expect(page.allSatisfy { $0.source == .docIndex })
+        #expect(page.contains { $0.content.contains("starlight") })
     }
 }

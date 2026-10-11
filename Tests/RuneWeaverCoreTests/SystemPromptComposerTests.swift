@@ -158,6 +158,20 @@ struct SystemPromptComposerTests {
     }
 
     @Test
+    func `Entity-plus-time ruling travels verbatim in both chat and scheduled prompts`() {
+        let tools: [any Tool] = [ComposerReadStub()]
+        let ruling = "For entity-plus-time questions such as next sessions or upcoming deadlines, "
+            + "live calendar.search and reminders.search results are decisive; "
+            + "do not keep searching after they answer."
+
+        let prompt = SystemPromptComposer.compose(tools: tools, supportsVision: true, currentDate: "2026-09-19")
+        #expect(prompt.contains(ruling))
+
+        let scheduled = SystemPromptComposer.composeScheduled(tools: tools, supportsVision: true, currentDate: "2026-09-19")
+        #expect(scheduled.contains(ruling))
+    }
+
+    @Test
     func `Vision schema filter strips screenshot options when vision is disabled`() {
         let rawWithScreenshot = """
         {

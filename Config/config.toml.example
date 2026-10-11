@@ -137,7 +137,7 @@ embedding_backend = "apple"
 # recall_threshold = 0.1  # Min calibrated score for an injected hit (0.0-1.0).
 # recall_max_chars = 2000  # Max chars for the injected recall block, header included (200-16000).
 # recall_per_hit_chars = 500  # Max chars kept per hit before ellipsis truncation (100-2000).
-# recall_doc_pool_multiplier = 4  # Extra vector candidates scanned per returned document page (1-8).
+# recall_doc_pool_multiplier = 4  # Scales the widened candidate pool (clamped * value); the vector leg reads pool*10 with a 500-row floor and the keyword leg mirrors that width (1-8).
 # recall_episodic_weight = 0.25  # Weight mapping episodic rank onto the shared recall scale (0.0-1.0).
 
 [voice]

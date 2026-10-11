@@ -478,7 +478,10 @@ public enum SystemPromptComposer {
             "- The local document index is current as of last night. "
                 + "For today, this-morning, latest, unread, just-arrived, next, or upcoming questions prefer "
                 + "live email.search, files.grep, calendar.search, and reminders.search over indexed results; "
-                + "the \(LiveSearchGuidance.forceLiveFlagName) flag forces the live path."
+                + "the \(LiveSearchGuidance.forceLiveFlagName) flag forces the live path. "
+                + "For entity-plus-time questions such as next sessions or upcoming deadlines, "
+                + "live calendar.search and reminders.search results are decisive; "
+                + "do not keep searching after they answer."
         )
         lines.append("")
         lines.append("Current date: \(currentDate)")

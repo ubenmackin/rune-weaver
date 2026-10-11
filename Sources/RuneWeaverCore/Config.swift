@@ -336,10 +336,12 @@ public struct LLMConfig: Sendable, Codable, Equatable {
 ///
 /// Single source for the budgets-aware auto-recall path: per-tier fetch caps,
 /// the auto injection cap, the calibrated score floor, the total and per-hit
-/// char budgets, the document pool widening factor, and the episodic tier
-/// weight. The budgets-aware `MemoryEngine` overloads read only this struct
-/// on the auto path; the `automaticRecallLimit/threshold/maxChars` statics
-/// remain as defaults for the legacy threshold-based overloads.
+/// char budgets, the document candidate-pool widening factor, scaled by the
+/// vector leg's own read width and mirrored by the keyword leg, and the
+/// episodic tier weight. The budgets-aware
+/// `MemoryEngine` overloads read only this struct on the auto path; the
+/// `automaticRecallLimit/threshold/maxChars` statics remain as defaults for
+/// the legacy threshold-based overloads.
 public struct RecallBudgets: Sendable, Codable, Equatable {
     /// Maximum hits fetched per tier before merging. Clamped `1...50`.
     public var perTierLimit: Int
@@ -351,7 +353,10 @@ public struct RecallBudgets: Sendable, Codable, Equatable {
     public var maxChars: Int
     /// Maximum characters kept per hit before ellipsis truncation. Clamped `100...2000`.
     public var perHitChars: Int
-    /// Extra vector candidates scanned per returned document page. Clamped `1...8`.
+    /// Widening factor for the document candidate pool beyond the returned
+    /// page: the vector leg scans `pool * 10` with a 500-row floor and the
+    /// keyword leg reads that same width, so the multiplier only moves the
+    /// vector leg once `pool * 10` clears 500. Clamped `1...8`.
     public var docPoolMultiplier: Int
     /// Weight mapping episodic rank scores onto the shared recall scale. Clamped `0...1`.
     public var episodicWeight: Double
@@ -377,7 +382,8 @@ public struct RecallBudgets: Sendable, Codable, Equatable {
     public static let defaultMaxChars = 2000
     /// Default maximum characters kept per hit before truncation.
     public static let defaultPerHitChars = 500
-    /// Default extra vector candidates scanned per returned document page.
+    /// Default widening factor for the document candidate pool, mirrored in
+    /// width by the keyword leg.
     public static let defaultDocPoolMultiplier = 4
     /// Default weight mapping episodic rank scores onto the shared recall scale.
     public static let defaultEpisodicWeight = 0.25

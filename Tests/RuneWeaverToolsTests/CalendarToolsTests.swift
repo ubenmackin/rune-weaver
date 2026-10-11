@@ -243,6 +243,17 @@ struct CalendarToolsTests {
     }
 
     @Test
+    func `Search description names calendar.search decisive for entity-plus-time questions`() {
+        let tool = CalendarSearchTool(gateway: MockCalendarGateway())
+        #expect(
+            tool.description.contains(
+                "For entity-plus-time questions about schedule such as next sessions, "
+                    + "calendar.search is decisive; do not keep searching after it answers."
+            )
+        )
+    }
+
+    @Test
     func `Search decodes defaults and clamps`() throws {
         let defaults = try JSONDecoder().decode(CalendarSearchArgs.self, from: Data("{}".utf8))
         #expect(defaults.limit == CalendarSearchArgs.defaultLimit)

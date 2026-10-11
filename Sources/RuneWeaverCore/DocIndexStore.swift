@@ -329,13 +329,15 @@ public actor DocIndexStore {
     }
 
     /// Reads chunks that carry an embedding for the semantic path, optionally restricted to a dated window.
-    /// The store returns the newest vector chunks first, bounded by `limit`,
-    /// so a capped pool favors recent writes over the oldest rows.
+    /// Event-time ordering keeps the capped pool over recently happening
+    /// documents — parent `mtime` descending with NULLs last — never recently
+    /// written rows, so a bounded pool favors recent event time over the oldest
+    /// rows.
     /// - Parameters:
     ///   - limit: Maximum chunks returned.
     ///   - since: Inclusive lower bound on `indexed_documents.mtime`, or nil for unbounded.
     ///   - until: Exclusive upper bound on `indexed_documents.mtime`, or nil for unbounded.
-    /// - Returns: Vector chunks, newest first.
+    /// - Returns: Vector chunks, parent event time (`mtime`) descending with NULLs last.
     public func chunkVectors(limit: Int = 100, since: Date? = nil, until: Date? = nil) async throws -> [IndexedChunk] {
         let dbPath = self.dbPath
         // Canonicalize the dated window through the shared temporal type so
@@ -795,7 +797,8 @@ enum DocIndexStoreIO {
         #endif
     }
 
-    /// Reads the newest chunks that carry an embedding, bounded by `limit`.
+    /// Reads the chunks that carry an embedding with the most recent parent
+    /// event time — `mtime` descending with NULLs last — bounded by `limit`.
     ///
     /// The dated window rides the shared temporal type so since stays
     /// inclusive and until stays exclusive by construction.
@@ -1029,6 +1032,7 @@ enum DocIndexStoreIO {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_indexed_documents_source_external
             ON indexed_documents(source, external_id);
         CREATE INDEX IF NOT EXISTS idx_indexed_documents_indexed_at ON indexed_documents(indexed_at);
+        CREATE INDEX IF NOT EXISTS idx_indexed_documents_mtime ON indexed_documents(mtime);
         CREATE INDEX IF NOT EXISTS idx_indexed_documents_last_seen ON indexed_documents(last_seen_run);
         CREATE INDEX IF NOT EXISTS idx_indexed_chunks_document ON indexed_chunks(document_id);
         CREATE INDEX IF NOT EXISTS idx_indexed_chunks_vector ON indexed_chunks(is_vector);

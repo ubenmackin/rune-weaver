@@ -51,7 +51,11 @@ public struct SettingsResponse: Content, Equatable {
     public let memoryRecallMaxChars: Int
     /// Maximum characters kept per hit before ellipsis truncation (`[memory] recall_per_hit_chars`).
     public let memoryRecallPerHitChars: Int
-    /// Extra vector candidates scanned per returned document page (`[memory] recall_doc_pool_multiplier`).
+    /// Widening factor for the document candidate pool (`[memory] recall_doc_pool_multiplier`):
+    /// `pool = clamped * multiplier` drives the vector leg's read width
+    /// `min(max(pool * 10, 500), maxPerTierResults)` and the keyword leg mirrors it.
+    /// Inert at the default page size — it moves the vector leg only once
+    /// `pool * 10` clears the 500-row floor.
     public let memoryRecallDocPoolMultiplier: Int
     /// Weight mapping episodic rank scores onto the shared recall scale (`[memory] recall_episodic_weight`).
     public let memoryRecallEpisodicWeight: Double

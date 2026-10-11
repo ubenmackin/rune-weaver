@@ -345,6 +345,29 @@ private func updateIndexedChunkText(atPath path: String, chunkID: UUID, text: St
     #endif
 }
 
+/// Removes one document row through raw SQL, leaving its chunks orphaned.
+///
+/// The probe connection leaves `foreign_keys` at SQLite's default off, so the
+/// parent row disappears without `ON DELETE CASCADE` taking its chunks — the
+/// exact state a pragma-off writer, a legacy file, or a manual edit leaves
+/// behind for the recall paths to reckon with.
+/// - Parameters:
+///   - path: Database file path.
+///   - documentID: Document row to remove.
+private func deleteIndexedDocumentRow(atPath path: String, documentID: UUID) throws {
+    #if canImport(SQLite3)
+        let handle = try openIndexProbe(atPath: path)
+        defer { sqlite3_close(handle) }
+        let sql = "DELETE FROM indexed_documents WHERE id = '\(documentID.uuidString)';"
+        var message: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(handle, sql, nil, nil, &message) == SQLITE_OK else {
+            let detail = message.map { String(cString: $0) } ?? "unknown"
+            sqlite3_free(message)
+            throw LegacyIndexError.failed(detail)
+        }
+    #endif
+}
+
 /// Reads the schema-change counter without running any store ensure.
 ///
 /// A second open that issues zero DDL writes leaves this value unchanged,
@@ -582,7 +605,7 @@ struct DocIndexStoreTests {
     }
 
     @Test
-    func `Vector pool returns the newest chunks first`() async throws {
+    func `Vector pool orders by event time with a rowid tie-break`() async throws {
         let (path, base) = makeIndexPath()
         defer { try? FileManager.default.removeItem(at: base) }
         let store = DocIndexStore(dbPath: path)
@@ -597,8 +620,11 @@ struct DocIndexStoreTests {
             chunks: [IndexedChunk(documentID: newer.id, ordinal: 0, text: "newer vector", embedding: [0.0, 1.0])]
         )
 
-        // The bounded pool favors recent writes so the semantic path keeps
-        // seeing new documents at scale instead of the oldest rows.
+        // Pool order is event time — the parent `mtime` descending with NULL
+        // parents last — so the bounded semantic pool favors recently happening
+        // documents at scale instead of recently written rows. These fixtures
+        // carry no `mtime`, so the rowid tie-break decides and the latest
+        // insertion leads, which is what the capped reads below pin down.
         let newestOnly = try await store.chunkVectors(limit: 1)
         #expect(newestOnly.count == 1)
         #expect(newestOnly.first?.documentID == newer.id)
@@ -606,6 +632,60 @@ struct DocIndexStoreTests {
         #expect(both.count == 2)
         #expect(both.first?.documentID == newer.id)
         #expect(both.last?.documentID == older.id)
+    }
+
+    @Test
+    func `Orphan chunks stay semantic candidates in the unbounded vector read`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let recent = try await store.upsertDocument(IndexedDocument(
+            source: .files,
+            externalID: "orphan-recent",
+            displayName: "Recent",
+            mtime: Date(timeIntervalSince1970: 9000),
+            contentHash: "hash-orphan-recent"
+        ))
+        _ = try await store.upsertChunks(
+            documentID: recent.id,
+            chunks: [IndexedChunk(documentID: recent.id, ordinal: 0, text: "recent vector", embedding: [1.0, 0.0])]
+        )
+        let stale = try await store.upsertDocument(IndexedDocument(
+            source: .files,
+            externalID: "orphan-stale",
+            displayName: "Stale",
+            mtime: Date(timeIntervalSince1970: 1000),
+            contentHash: "hash-orphan-stale"
+        ))
+        _ = try await store.upsertChunks(
+            documentID: stale.id,
+            chunks: [IndexedChunk(documentID: stale.id, ordinal: 0, text: "stale vector", embedding: [0.0, 1.0])]
+        )
+        let doomed = try await store.upsertDocument(IndexedDocument(
+            source: .files,
+            externalID: "orphan-doomed",
+            displayName: "Doomed",
+            mtime: Date(timeIntervalSince1970: 5000),
+            contentHash: "hash-orphan-doomed"
+        ))
+        let orphanChunk = IndexedChunk(documentID: doomed.id, ordinal: 0, text: "orphan vector", embedding: [1.0, 1.0])
+        _ = try await store.upsertChunks(documentID: doomed.id, chunks: [orphanChunk])
+
+        // Dropping the parent row without the cascade strands its chunk, so the
+        // recall path must still treat that chunk as a candidate.
+        try deleteIndexedDocumentRow(atPath: path, documentID: doomed.id)
+
+        // The unbounded read left-joins the parent to reach `mtime`, so a chunk
+        // whose document row is missing stays a semantic candidate; its NULL
+        // event time sorts last behind every dated parent, so undated rows
+        // never crowd out recently happening documents.
+        let pool = try await store.chunkVectors(limit: 10)
+        #expect(pool.count == 3)
+        #expect(pool.first?.documentID == recent.id)
+        #expect(pool[1].documentID == stale.id)
+        #expect(pool.last?.id == orphanChunk.id)
+        #expect(pool.last?.documentID == doomed.id)
+        #expect(pool.last?.text == "orphan vector")
     }
 
     @Test

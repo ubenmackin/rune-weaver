@@ -400,7 +400,8 @@ public struct RemindersSearchTool: Tool, Sendable {
             + "Use when the user asks about reminders, to-dos, or due items. "
             + "Empty or omitted query lists the window defined by since (inclusive) and until (exclusive) as YYYY-MM-DD or full ISO8601 datetimes. "
             + "With reminderID fetches one verbatim. "
-            + "Returns matching reminders with opaque identifiers for update and delete."
+            + "Returns matching reminders with opaque identifiers for update and delete. "
+            + "For entity-plus-time questions about due items such as upcoming deadlines, reminders.search is decisive; do not keep searching after it answers."
 
     public let inputSchema = JSONSchema(
         rawValue: """
