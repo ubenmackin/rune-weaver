@@ -104,9 +104,18 @@ public actor SteeringQueue {
 
     /// Clears any pending steering messages for a session.
     /// - Parameter sessionID: Target session.
-    public func clear(for sessionID: UUID) {
+    public func clear(sessionID: UUID) {
         pending.removeValue(forKey: sessionID)
         pendingOrder.removeAll(where: { $0 == sessionID })
+    }
+
+    /// Clears any pending steering messages for a session.
+    ///
+    /// Session-keyed spelling kept for existing callers; the brake clears
+    /// steering through ``clear(sessionID:)`` so both spellings share one body.
+    /// - Parameter sessionID: Target session.
+    public func clear(for sessionID: UUID) {
+        clear(sessionID: sessionID)
     }
 
     /// Drops one copy of a just-enqueued steering text for a session.

@@ -34,17 +34,29 @@ With your permission, Rune Weaver can see your screen, analyze visual layouts, a
 ### Multi-Agent Swarms
 When you have a large research task, Rune Weaver can fan out parallel background worker agents to explore multiple angles simultaneously and synthesize the results back to you.
 
+### Always-On Health, Quietly Green
+Rune Weaver keeps a private checkup running on itself — its memory ledger, its security policy, and its built-in safeguards. When everything passes, the System Pulse simply reads "Operational" and stays out of your way. When something needs attention, the dashboard shows a short, plain-language reason and a single to-do in your Approvals inbox — never a flood of alerts. It only returns to green after a fresh, passing check, never merely because time passed.
+
+### A Brake for Odd Behavior
+If your assistant ever starts acting unlike itself — an unusual burst of activity, repeated refused requests, or work in the middle of the night — Rune Weaver gently applies the brakes. Running work pauses, and you receive one plain card in your Approvals inbox explaining what it noticed (counts only — never your messages, files, or prompts). You then choose: resume, or keep things paused. It never approves anything on its own, never acts without you, and never resets itself on a timer.
+
+### Instant Answers to Repeated Questions
+Ask the same thing twice, and the second answer returns instantly — Rune Weaver keeps answers it produced entirely on its own right on your Mac. Anything that touched a tool, needed your approval, or sent a message is never replayed from memory, and stored answers are cleared the moment your notes, goals, or settings change.
+
+### Send Later, Exactly as Approved
+Approve an email or message now and schedule it for later. Rune Weaver stores the exact approved message, recipient, and time — then sends precisely those bytes when the moment arrives, checking again that everything is still safe. Change your mind? Cancelling or editing needs a fresh approval, so what goes out is always exactly what you agreed to.
+
 ---
 
 ## The Experience
 
 - **Menu Bar Companion**: Lives quietly in your Mac's menu bar. One click opens the dashboard, displays system health, or lets you adjust privacy settings.
 - **Web Dashboard**: A responsive, clean dashboard designed for macOS Safari, iPad, or mobile. Features:
-  - **Chat**: Fluid streaming conversation with tool-call transparency.
-  - **Approvals Inbox**: Fast, one-click reviews for pending actions and file diffs.
-  - **Work & Goals**: Track active projects, milestones, and scheduled background tasks.
+  - **System Pulse**: One glance tells you everything is healthy. Green reads "Operational" and stays quiet; yellow reads "Degraded" and opens a short Details list; red reads "Needs action" with **Open inbox**, **Re-check**, and **Open Policy** buttons — and only turns green again after a fresh passing check.
+  - **Chat**: Fluid streaming conversation with tool-call transparency — and repeated questions answered instantly.
+  - **Approvals Inbox**: Fast, one-click reviews for pending actions and file diffs, including the plain-language brake card whenever the behavior brake pauses work for your review.
+  - **Work & Goals**: Track active projects, milestones, and scheduled background tasks — including approved messages waiting for their send time.
   - **Memory Explorer**: Search and manage what your assistant remembers about you.
-- **Terminal CLI**: Prefer the command line? Run `rune-weaver chat`, check health with `rune-weaver status`, or manage goals directly from your favorite terminal.
 
 ---
 

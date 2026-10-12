@@ -117,6 +117,20 @@ public actor EpisodeStore {
         }
     }
 
+    /// Every episode across all sessions in canonical verification order.
+    ///
+    /// Chronological sequence with a stable identifier tie-break: the
+    /// sovereign verifier recomputes the ledger hash chain in exactly this
+    /// order, so the canonical sort — not insertion chance — is what makes a
+    /// re-verification reproducible. The read is uncapped; the verification
+    /// bounds live on the sovereign copy, not on the primary read.
+    public func orderedEpisodesForVerification() async throws -> [Episode] {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run {
+            try EpisodeStoreIO.orderedAll(dbPath: dbPath)
+        }
+    }
+
     /// Full-text search over episode content, optionally restricted to a dated window.
     public func search(query: String, limit: Int = 10, since: Date? = nil, until: Date? = nil) async throws -> [Episode] {
         guard limit > 0 else { return [] }
@@ -298,6 +312,26 @@ enum EpisodeStoreIO {
             return try SQLiteEpisodeStore.recent(dbPath: dbPath, limit: limit)
         #else
             return try JSONEpisodeStore.recent(dbPath: dbPath, limit: limit)
+        #endif
+    }
+
+    /// Every episode across all sessions in canonical verification order.
+    /// - Parameter dbPath: SQLite path (or JSON sidecar anchor).
+    /// - Returns: Episodes in canonical sequence order.
+    static func orderedAll(dbPath: String) throws -> [Episode] {
+        #if canImport(SQLite3)
+            return try SQLiteEpisodeStore.orderedAll(dbPath: dbPath)
+        #else
+            // The JSON fallback has no server-side ordering, so the full read
+            // re-sorts into the same canonical sequence the SQLite path gets
+            // from ORDER BY: timestamp first, stable identifier on ties.
+            let all = try JSONEpisodeStore.episodes(olderThan: .distantFuture, dbPath: dbPath)
+            return all.sorted {
+                if $0.timestamp != $1.timestamp {
+                    return $0.timestamp < $1.timestamp
+                }
+                return $0.id.uuidString < $1.id.uuidString
+            }
         #endif
     }
 
@@ -713,6 +747,33 @@ enum EpisodeStoreIO {
             }
             defer { sqlite3_finalize(statement) }
             sqlite3_bind_int(statement, 1, SQLiteHelpers.sqliteLimit(limit))
+            var results: [Episode] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let episode = readEpisode(statement) {
+                    results.append(episode)
+                }
+            }
+            return results
+        }
+
+        /// Every episode across all sessions in canonical verification order.
+        ///
+        /// Timestamp ascending with an identifier tie-break so equal
+        /// timestamps cannot reorder between reads: the sovereign chain hash
+        /// depends on this exact sequence, and a stable order is what makes
+        /// re-verification reproducible across processes and restarts.
+        static func orderedAll(dbPath: String) throws -> [Episode] {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return [] }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            var statement: OpaquePointer?
+            let sql = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes "
+                + "ORDER BY timestamp ASC, id ASC;"
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw EpisodeStoreError.persistenceFailed("Could not prepare ordered verification read")
+            }
+            defer { sqlite3_finalize(statement) }
             var results: [Episode] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 if let episode = readEpisode(statement) {

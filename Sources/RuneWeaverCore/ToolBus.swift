@@ -254,6 +254,15 @@ public actor ToolBus {
     private var approvalHandler: ToolApprovalHandler?
     /// Graduated-trust gate consulted before the approval handler.
     private let permissionGate: PermissionGate?
+    /// Trusted-tool anomaly watchdog counting executions and denials.
+    ///
+    /// Wired by the serving process so every production tool call contributes
+    /// its outcome category; nil keeps direct-core and test buses silent.
+    /// Executions report only for `trusted`-level tools, while denials and
+    /// egress-supervisor refusals report regardless of level so gated writes
+    /// and supervised reads still feed the denial and firewall rules.
+    /// Dry-run previews never count.
+    private var watchdog: BehaviorWatchdog?
     /// In-flight tool call slots indexed by owning session and correlation identifier.
     /// A per-call cancel stops exactly one entry here while its owning turn keeps
     /// running, making this registry the single place that maps a wire `callID`
@@ -285,6 +294,52 @@ public actor ToolBus {
     /// - Parameter handler: New handler, or nil to deny all `requiresApproval` calls.
     public func setApprovalHandler(_ handler: ToolApprovalHandler?) {
         approvalHandler = handler
+    }
+
+    /// Sets or clears the trusted-tool anomaly watchdog.
+    /// - Parameter watchdog: Watchdog receiving outcome counts, or nil to detach.
+    public func setWatchdog(_ watchdog: BehaviorWatchdog?) {
+        self.watchdog = watchdog
+    }
+
+    /// Records one trusted-tool observation as a count, never content.
+    ///
+    /// Executions count only for `trusted` tools so reads and gated writes
+    /// never enter the rate baseline, while denials and egress-supervisor
+    /// refusals count regardless of level so the denial and firewall rules
+    /// observe gated writes and supervised reads too.
+    private func recordWatchdog(tool: any Tool, sessionID: UUID, outcome: WatchdogOutcome) async {
+        if outcome == .executed {
+            guard tool.permissionLevel == .trusted else { return }
+        }
+        await watchdog?.ingest(toolName: tool.name, sessionID: sessionID, outcome: outcome)
+    }
+
+    /// Records one egress-supervisor refusal as a firewall-blocked count.
+    ///
+    /// The supervisor lives inside the tools, so refusals surface here as
+    /// error content rather than a typed verdict; tools that already know
+    /// the refusal can file it directly through this seam instead.
+    /// - Parameters:
+    ///   - toolName: Tool whose request the supervisor refused.
+    ///   - sessionID: Session the refusal belongs to.
+    public func recordFirewallBlocked(toolName: String, sessionID: UUID) async {
+        await watchdog?.ingest(toolName: toolName, sessionID: sessionID, outcome: .firewallBlocked)
+    }
+
+    /// Whether error content describes an egress-supervisor refusal.
+    ///
+    /// Matches the supervisor's closed refusal vocabulary — policy
+    /// violations, SSRF denials, and the supervisor attribution the tools
+    /// log — so a refusal is counted as firewall-blocked rather than a
+    /// plain execution.
+    /// - Parameter content: Tool error content to inspect.
+    /// - Returns: True when the content names a supervisor refusal.
+    private static func isFirewallBlockedContent(_ content: String) -> Bool {
+        let lower = content.lowercased()
+        return lower.contains("egress supervisor")
+            || lower.contains("security policy violation")
+            || lower.contains("ssrf denied")
     }
 
     /// Sets or clears the approval hook with a handler that ignores invocation context.
@@ -440,6 +495,11 @@ public actor ToolBus {
         case let .authorized(isApproved):
             approved = isApproved
         case let .denied(denial):
+            // A denied trusted call still counts: the denial spike rule fires
+            // on exactly this signal. Dry runs never count; nothing executed.
+            if !context.dryRun {
+                await recordWatchdog(tool: tool, sessionID: context.sessionID, outcome: .denied)
+            }
             return denial
         }
         let baseContext: ToolContext = if approved {
@@ -453,7 +513,18 @@ public actor ToolBus {
             context
         }
         let effectiveContext = progressContext(for: effectiveCall, base: baseContext)
-        return await runRegisteredTool(tool: tool, call: effectiveCall, context: effectiveContext)
+        let result = await runRegisteredTool(tool: tool, call: effectiveCall, context: effectiveContext)
+        // Count the execution outcome; dry-run previews never count. An
+        // egress-supervisor refusal files as firewall-blocked so the
+        // firewall rule observes it instead of a plain execution.
+        if !context.dryRun {
+            if result.isError, Self.isFirewallBlockedContent(result.content) {
+                await recordWatchdog(tool: tool, sessionID: context.sessionID, outcome: .firewallBlocked)
+            } else {
+                await recordWatchdog(tool: tool, sessionID: context.sessionID, outcome: .executed)
+            }
+        }
+        return result
     }
 
     private enum PermissionOutcome {

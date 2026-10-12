@@ -26,6 +26,8 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
     public let replyToId: String?
     /// Optional mailbox holding the replied-to message (omitted means INBOX).
     public let mailbox: String?
+    /// Optional fire time requesting a deterministic scheduled send; nil sends immediately.
+    public let scheduleAt: Date?
 
     /// Memberwise initializer.
     public init(
@@ -39,7 +41,8 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
         bodyHtml: String? = nil,
         attachmentPaths: [String]? = nil,
         replyToId: String? = nil,
-        mailbox: String? = nil
+        mailbox: String? = nil,
+        scheduleAt: Date? = nil
     ) {
         self.account = account
         self.to = to
@@ -51,6 +54,7 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
         self.attachmentPaths = attachmentPaths
         self.replyToId = replyToId
         self.mailbox = mailbox
+        self.scheduleAt = scheduleAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -67,6 +71,7 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
         case mailbox
         case folder
         case body
+        case scheduleAt
     }
 
     /// Decodes arguments; `folder` and `body` are compatibility-only aliases kept out of strict schema,
@@ -91,6 +96,7 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
         } else {
             mailbox = try container.decodeIfPresent(String.self, forKey: .folder)
         }
+        scheduleAt = try ScheduledSendTimeValidation.decodeScheduleAt(from: container, forKey: .scheduleAt)
     }
 
     /// Trimmed account nickname.
@@ -108,6 +114,18 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
     /// Trimmed mailbox, or nil when omitted or blank (meaning INBOX).
     public var trimmedMailbox: String? {
         EmailMailboxNormalization.trimmed(mailbox)
+    }
+
+    /// Validates the optional fire time and returns the minute-aligned instant to store.
+    ///
+    /// Bounds and alignment are shared with `messages.send` and the scheduler
+    /// store through ``ScheduledSendTimeValidation``, so a requested schedule can
+    /// never disagree with the validation its deterministic replay runs.
+    /// - Parameter now: Reference instant the bounds are measured from.
+    /// - Returns: The validated fire time, or nil when the send is immediate.
+    public func validateScheduleAt(now: Date = Date()) throws -> Date? {
+        guard let scheduleAt else { return nil }
+        return try ScheduledSendTimeValidation.validateScheduleAt(scheduleAt, now: now)
     }
 }
 
@@ -426,6 +444,84 @@ public enum EmailSendValidation: Sendable {
     }
 }
 
+/// Fail-closed validation for delayed-send fire times, shared by `email.send`,
+/// `messages.send`, and the scheduler's scheduled-send store.
+///
+/// One implementation owns the wire bounds so a requested schedule and the
+/// deterministic replay that later fires it can never disagree: the tool
+/// validates at admission, the store validates at booking, and the fire worker
+/// sends exactly the bytes the validated fire time approved.
+public enum ScheduledSendTimeValidation: Sendable {
+    /// Earliest lead time a fire time may carry, so a booked send is never
+    /// effectively immediate and the owner always has time to cancel.
+    public static let minimumLeadSeconds: TimeInterval = 5 * 60
+    /// Latest horizon a fire time may carry, bounding how far out a send parks.
+    public static let maximumHorizonSeconds: TimeInterval = 365 * 24 * 60 * 60
+
+    /// Validates one requested fire time and returns the minute-aligned instant to store.
+    ///
+    /// The scheduling surface picks a date plus a time, so fire times carry
+    /// minute granularity and sub-minute precision is truncated: the stored
+    /// instant is exactly what the owner previewed. Bounds fail closed — a past
+    /// or near-term date would fire before review, and a far-future date would
+    /// park a send past the horizon.
+    /// - Parameters:
+    ///   - scheduleAt: Requested fire time.
+    ///   - now: Reference instant the bounds are measured from.
+    /// - Returns: The validated fire time aligned to the minute.
+    public static func validateScheduleAt(_ scheduleAt: Date, now: Date = Date()) throws -> Date {
+        guard scheduleAt.timeIntervalSince(now) >= minimumLeadSeconds else {
+            throw EmailIMAPError.validationFailed("Invalid scheduleAt: the fire time must be at least 5 minutes in the future")
+        }
+        guard scheduleAt.timeIntervalSince(now) <= maximumHorizonSeconds else {
+            throw EmailIMAPError.validationFailed("Invalid scheduleAt: the fire time must be at most 365 days in the future")
+        }
+        // Floor alignment keeps negative epochs on minute boundaries too, so a
+        // pre-1970 fire time would align the same way as a present-day one.
+        let epoch = scheduleAt.timeIntervalSince1970
+        return Date(timeIntervalSince1970: epoch - epoch.truncatingRemainder(dividingBy: 60))
+    }
+
+    /// Decodes a fire time from wire JSON, accepting an epoch-seconds number or an ISO-8601 string.
+    ///
+    /// The two shapes cover both callers of the wire contract: engines mint
+    /// epoch numbers while the scheduling surface sends the ISO-8601 string its
+    /// timezone picker composes. A blank string reads as omitted so a cleared
+    /// field decodes as no schedule; any other non-date shape throws rather
+    /// than decoding as a silently dropped fire time.
+    /// - Parameters:
+    ///   - container: Keyed container holding the arguments.
+    ///   - key: Key carrying the fire time.
+    /// - Returns: Decoded fire time, or nil when absent, null, or blank.
+    public static func decodeScheduleAt<K: CodingKey>(
+        from container: KeyedDecodingContainer<K>,
+        forKey key: K
+    ) throws -> Date? {
+        // The try? probe lets either accepted shape reach its own branch: a
+        // string falls through to the ISO parse instead of failing the number
+        // decode, and a genuinely malformed value still throws below.
+        if let seconds = try? container.decodeIfPresent(Double.self, forKey: key) {
+            return Date(timeIntervalSince1970: seconds)
+        }
+        guard let raw = try container.decodeIfPresent(String.self, forKey: key) else {
+            return nil
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let parsed = SharedDateFormatters.isoWithFractionalSecondsDate(from: trimmed)
+            ?? SharedDateFormatters.isoInternetTimeDate(from: trimmed)
+        {
+            return parsed
+        }
+        throw DecodingError.dataCorrupted(
+            DecodingError.Context(
+                codingPath: container.codingPath,
+                debugDescription: "scheduleAt must be an epoch-seconds number or an ISO-8601 datetime"
+            )
+        )
+    }
+}
+
 /// Approval-gated `email.send` tool over SMTP.
 public struct EmailSendTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
@@ -435,6 +531,8 @@ public struct EmailSendTool: Tool, Sendable {
         "Sends an email via SMTP through the configured account. "
             + "Use when the user asks to send or compose mail. "
             + "From always defaults to the account username with no From override; sends immediately on approval with no scheduled or delayed send. "
+            + "For a delayed send, request a scheduled send through the Schedules surface instead of passing scheduleAt: "
+            + "the schedule stores the exact approved bytes and fires them once at the approved time. "
             + "Markdown or plain text in bodyText is standard and is automatically rendered into styled HTML with a plain-text fallback; "
             + "raw bodyHtml is optional for custom HTML overrides; "
             + "attachments must be workspace-guarded absolute paths, and replyToId threads a reply. "
@@ -458,11 +556,19 @@ public struct EmailSendTool: Tool, Sendable {
                 + #""attachmentPaths":{"type":"array","description":"Optional workspace-guarded "#
                 + #"absolute attachment paths (10 MB each, 25 MB total)","items":{"type":"string"}},"replyToId":{"type":"string","description":"Optional "#
                 + #"IMAP id of the message being replied to"},"mailbox":{"type":"string","description":"Mailbox holding the replied-to "#
-                + #"message (omitted means INBOX)"}}"#
+                + #"message (omitted means INBOX)"},"scheduleAt":{"type":["number","string"],"description":"Optional fire time "#
+                + #"for a scheduled send as epoch seconds or an ISO-8601 datetime (5 minutes to 365 days out, minute-aligned). "#
+                + #"A scheduled send is filed through the Schedules surface; email.send itself still sends immediately on approval."}}"#
                 + #","required":["account","to","subject"],"additionalProperties":false}"#
         )
     /// Gated: sending leaves the machine and always prompts without a trust grant.
     public let permissionLevel = PermissionLevel.requiresApproval
+
+    /// Fail-closed refusal for a delayed-send request: this tool never delays.
+    private static let scheduledSendRefusalNote =
+        "A scheduleAt fire time requests a scheduled send, and email.send always sends immediately on approval. "
+            + "Book the send through the Schedules surface (`POST /scheduler/sends`) so the approved bytes are "
+            + "stored and fired exactly once at the requested time."
 
     /// Configured mail accounts.
     private let emailConfig: EmailConfig
@@ -486,6 +592,15 @@ public struct EmailSendTool: Tool, Sendable {
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         do {
             let args = try decodedArgs(from: input)
+            // A fire time makes this a scheduled send, which the deterministic
+            // scheduler owns: an approval on this tool sends immediately, so
+            // honoring the schedule here would silently drop the requested fire
+            // time. Validate the bounds first so a past or out-of-horizon date
+            // is answered with its own reason, then refuse with guidance.
+            if args.scheduleAt != nil {
+                _ = try args.validateScheduleAt()
+                return .failure(Self.scheduledSendRefusalNote, callID: input.callID)
+            }
             let target = try validatedTarget(from: args)
             let account = try resolvedAccount(named: target.accountName)
             let credentials = try await EmailCredentialResolver.resolvedCredentials(for: account)

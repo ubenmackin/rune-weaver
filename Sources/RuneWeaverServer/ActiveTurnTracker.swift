@@ -222,6 +222,14 @@ public actor ActiveTurnTracker {
     private static let maxPendingCancels = 500
 }
 
+// MARK: - Behavior Watchdog Brake Parking
+
+/// The tracker is the production owner of behavior-brake parking: the watchdog
+/// reads the running roster through this seam and parks every turn through it,
+/// reusing the identical cooperative cancel contract the REST and WebSocket
+/// cancel paths already run.
+extension ActiveTurnTracker: TurnParking {}
+
 /// Bridges a tracker cancel action to a chat task created just after registration.
 final class TurnTaskBox: Sendable {
     private struct State: Sendable {

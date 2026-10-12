@@ -293,6 +293,18 @@ public final class ServerContext: Sendable {
     public let agentRunLock: AgentToolRunLock
     /// Owner persona configured at boot.
     public let persona: PersonaConfig
+    /// Trusted-tool anomaly watchdog counting executions and denials.
+    ///
+    /// Owned here so the tool bus, the health probe, and the approvals resume
+    /// path share one brake: the bus ingests at the trusted-tool boundary,
+    /// the probe evaluates on cadence, and resume clears through the inbox.
+    public let watchdog: BehaviorWatchdog
+    /// Sovereign ledger verifier proving the episode history unedited.
+    ///
+    /// Recomputes its chain from the memory engine's primary episode store;
+    /// ceremonies record into the system pulse on the boot, nightly, and
+    /// on-demand cadences, and re-attestation stays an explicit act.
+    public let sovereignLedger: SovereignLedger
 
     /// Creates a server context.
     /// The `steeringQueue` must be the identical instance handed to
@@ -364,7 +376,9 @@ public final class ServerContext: Sendable {
         workspaceStore: WorkspaceStore? = nil,
         agentTools: AgentToolStore? = nil,
         agentRunLock: AgentToolRunLock? = nil,
-        persona: PersonaConfig = PersonaConfig()
+        persona: PersonaConfig = PersonaConfig(),
+        watchdog: BehaviorWatchdog? = nil,
+        sovereignLedger: SovereignLedger? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -482,13 +496,87 @@ public final class ServerContext: Sendable {
         self.workspaceStore = resolvedWorkspace
         self.agentTools = agentTools ?? AgentToolStore(dbPath: defaultDBPath, workspaceStore: resolvedWorkspace)
         self.agentRunLock = agentRunLock ?? AgentToolRunLock()
-        // Fail fast when the context would enqueue through a different queue than
-        // the turn loop dequeues through; such a pair accepts steering yet never
-        // delivers it, so surface the wiring mistake at construction.
+        Self.requireMatchingSteeringQueue(orchestrator: orchestrator, steeringQueue: steeringQueue)
+        // Verified-pulse collaborators resolve through the helpers below so the
+        // body stays within the type-length budget; behavior is unchanged.
+        self.watchdog = Self.resolveWatchdog(watchdog: watchdog, approvals: approvals, steeringQueue: steeringQueue, activeTurns: activeTurns)
+        self.sovereignLedger = Self.resolveLedger(sovereignLedger, dbPath: defaultDBPath)
+        wireVerifiedPulse(goalEngine: resolvedEngine)
+    }
+
+    // MARK: - Verified-Pulse Construction Wiring
+
+    /// Fails fast when the context would enqueue through a different queue
+    /// than the turn loop dequeues through; such a pair accepts steering yet
+    /// never delivers it, so the wiring mistake surfaces at construction.
+    /// - Parameters:
+    ///   - orchestrator: Turn loop owning the dequeue side.
+    ///   - steeringQueue: Queue the routes enqueue through.
+    private static func requireMatchingSteeringQueue(orchestrator: Orchestrator, steeringQueue: SteeringQueue) {
         precondition(
             orchestrator.sharedSteeringQueue == nil || orchestrator.sharedSteeringQueue === steeringQueue,
             "ServerContext steeringQueue must be identical instance handed to orchestrator"
         )
+    }
+
+    /// Resolves the behavior watchdog: a hand-built instance wins untouched
+    /// for tests, while production boots count from the first tool call with
+    /// parking through the shared turn tracker and filing into the shared
+    /// inbox.
+    /// - Parameters:
+    ///   - watchdog: Injected instance, or nil to build the production one.
+    ///   - approvals: Inbox the brake card files into.
+    ///   - steeringQueue: Steering the brake clears for every parked session.
+    ///   - activeTurns: Tracker the brake parks every running turn through.
+    /// - Returns: The watchdog this context owns.
+    private static func resolveWatchdog(
+        watchdog: BehaviorWatchdog?,
+        approvals: ApprovalQueue,
+        steeringQueue: SteeringQueue,
+        activeTurns: ActiveTurnTracker
+    ) -> BehaviorWatchdog {
+        watchdog ?? BehaviorWatchdog(
+            approvalQueue: approvals,
+            steeringQueue: steeringQueue,
+            turnParking: activeTurns
+        )
+    }
+
+    /// Resolves the sovereign ledger over the primary episode ledger file, so
+    /// the copy corroborates live truth; an injected instance wins untouched
+    /// for tests.
+    /// - Parameters:
+    ///   - ledger: Injected instance, or nil to build over `dbPath`.
+    ///   - dbPath: Episode ledger file the ceremony recomputes from.
+    /// - Returns: The ledger this context owns.
+    private static func resolveLedger(_ ledger: SovereignLedger?, dbPath: String) -> SovereignLedger {
+        ledger ?? SovereignLedger(episodeStore: EpisodeStore(dbPath: dbPath))
+    }
+
+    /// Fans the shared semantic answer cache out to the goal engine, the
+    /// policy store, and the tool bus, so goal changes, policy changes, and
+    /// trusted-tool outcomes all land without a restart. The production
+    /// `make` path awaits the async form before serving so early tool calls
+    /// cannot miss watchdog counts and goal/policy changes cannot miss
+    /// invalidation; the synchronous wrapper keeps direct-init callers wired
+    /// best-effort.
+    /// - Parameter goalEngine: Engine cleared on every goal mutation.
+    private func wireVerifiedPulse(goalEngine: GoalEngine) {
+        Task {
+            await wireVerifiedPulseAsync(goalEngine: goalEngine)
+        }
+    }
+
+    /// Awaitable verified-pulse wiring for the serving path.
+    ///
+    /// Idempotent with the detached wrapper above, so `make` awaiting it
+    /// after construction closes the wiring race before the first turn.
+    /// - Parameter goalEngine: Engine cleared on every goal mutation.
+    func wireVerifiedPulseAsync(goalEngine: GoalEngine) async {
+        let sharedCache = await memoryEngine.answerCache
+        await goalEngine.setAnswerCache(sharedCache)
+        await policyStore.setAnswerCache(sharedCache)
+        await toolBus.setWatchdog(watchdog)
     }
 
     /// Reapplies every persisted tool toggle onto the live bus.
@@ -950,7 +1038,9 @@ extension ServerContext {
         workspaceStore: WorkspaceStore? = nil,
         agentTools: AgentToolStore? = nil,
         agentRunLock: AgentToolRunLock? = nil,
-        persona: PersonaConfig = PersonaConfig()
+        persona: PersonaConfig = PersonaConfig(),
+        watchdog: BehaviorWatchdog? = nil,
+        sovereignLedger: SovereignLedger? = nil
     ) async throws -> ServerContext {
         // Resolve the one store for this process before any tool registers:
         // an injected store is authoritative, while the factory default is
@@ -1004,6 +1094,12 @@ extension ServerContext {
         // and the CLI observe one registry; an injected store wins untouched
         // for tests that hand-build an isolated registry.
         let resolvedAgentTools = agentTools ?? AgentToolStore(dbPath: dbPath, workspaceStore: resolvedWorkspaceStore)
+        // The sovereign ceremony recomputes from the configured episode ledger
+        // file, so a custom path still corroborates live truth; an injected
+        // instance wins untouched for tests.
+        let resolvedSovereignLedger = sovereignLedger ?? SovereignLedger(
+            episodeStore: EpisodeStore(dbPath: dbPath)
+        )
         // Execution engines build before tool registration so the fan-out
         // engine can ride the live orchestrator into the fanout.run tool;
         // engine construction is side-effect free, so the earlier position
@@ -1063,8 +1159,13 @@ extension ServerContext {
             fanOut: engines.fanOutEngine, policyStore: resolvedPolicyStore, egressSupervisor: egressSupervisor,
             mediaConfig: toolConfigs.media, llmServerURLs: toolConfigs.llmServerURLs,
             workspaceConfig: workspaceConfig, workspaceStore: resolvedWorkspaceStore,
-            agentTools: resolvedAgentTools, agentRunLock: agentRunLock, persona: persona
+            agentTools: resolvedAgentTools, agentRunLock: agentRunLock, persona: persona,
+            watchdog: watchdog, sovereignLedger: resolvedSovereignLedger
         )
+        // Await the verified-pulse wiring before serving so early tool calls
+        // observe watchdog counts and goal/policy changes invalidate the
+        // shared answer cache from the first turn.
+        await context.wireVerifiedPulseAsync(goalEngine: services.goalEngine)
         await finalizeServerContext(context, containersConfig: containersConfig, onApprovalRequested: onApprovalRequested)
         return context
     }

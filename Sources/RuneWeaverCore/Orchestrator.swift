@@ -287,24 +287,18 @@ public actor Orchestrator {
             await conversations.append(Message(role: .user, content: text), to: sessionID)
             pendingEpisodic.append((text, .user))
 
-            if let earlyResponse = try await rememberEarlyResponse(
+            // Turns that answer before the model loop — an explicit remember
+            // request, then a repeated pure question served from the semantic
+            // answer cache — share one resolution plus one epilogue below.
+            if let earlyResponse = try await earlyTurnResponse(
                 text: text,
                 source: input.source,
                 sessionID: sessionID,
                 pendingEpisodic: &pendingEpisodic,
-                onEvent: onEvent
+                onEvent: onEvent,
+                didEmitRecallDiagnostics: &didEmitRecallDiagnostics
             ) {
-                // Remember turns bypass recall but still emit one zero-hit line
-                // so every turn carries exactly one diagnostics entry. The skip
-                // flag mirrors the recall path (freshness plus store presence)
-                // so a freshness query logs the same flag here as on a full turn.
-                let earlyDiagnostics = RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))
-                RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(earlyDiagnostics))")
-                didEmitRecallDiagnostics = true
-                try Task.checkCancellation()
-                await flushEpisodic(pendingEpisodic, sessionID: sessionID)
-                await permissionGate?.clearTaskGrants(for: sessionID)
-                return Self.responseWithRecall(earlyResponse, diagnostics: earlyDiagnostics)
+                return earlyResponse
             }
 
             let (request, turnWarnings) = try await prepareTurnLoopRequest(
@@ -321,6 +315,15 @@ public actor Orchestrator {
                 let finalNote = await storeFinalAssistantText(finalText, reasoning: reasoning, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
                 try Task.checkCancellation()
                 await flushEpisodic(pendingEpisodic, sessionID: sessionID)
+                // A finished turn that ran no tools is pure Q&A, so its answer
+                // files for the next identical question. The parked branch
+                // returned earlier, which is what keeps approvals out.
+                await storeAnswerCacheIfPure(
+                    query: text,
+                    source: input.source,
+                    finalText: finalText,
+                    executedToolCalls: toolActions.count
+                )
                 let cumulativeTokens = accumulateSessionTokens(loopBilled, for: sessionID)
                 await permissionGate?.clearTaskGrants(for: sessionID)
                 // Nil when suppressed text persisted no note so equality stays deterministic
@@ -360,6 +363,57 @@ public actor Orchestrator {
             )
             throw error
         }
+    }
+
+    /// Resolves a turn that answers before the model loop, if one applies.
+    ///
+    /// An explicit remember request wins over a cached answer, and a repeated
+    /// pure question hit in the semantic answer cache comes second; both bypass
+    /// the loop because their text is already known. Excluded turns — tool
+    /// turns, approvals, sends, parked turns, background sources, and voice
+    /// prompts — fall through because the cache owner files nothing they could
+    /// match, so a nil result here is the fail-closed default that continues
+    /// into the full loop.
+    ///
+    /// The shared epilogue exists because both paths complete a turn the same
+    /// way: one zero-hit diagnostics line so every turn carries exactly one
+    /// entry (with the freshness-plus-store skip flag a full recall turn logs),
+    /// a cancellation checkpoint, the episodic flush, and the task-grant clear.
+    /// Splitting the two paths would duplicate that sequence twice and let it
+    /// drift between remember turns and cached turns.
+    private func earlyTurnResponse(
+        text: String,
+        source: String,
+        sessionID: UUID,
+        pendingEpisodic: inout [(content: String, role: Message.Role)],
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)?,
+        didEmitRecallDiagnostics: inout Bool
+    ) async throws -> OrchestratorResponse? {
+        let earlyResponse: OrchestratorResponse? = if let remembered = try await rememberEarlyResponse(
+            text: text,
+            source: source,
+            sessionID: sessionID,
+            pendingEpisodic: &pendingEpisodic,
+            onEvent: onEvent
+        ) {
+            remembered
+        } else {
+            await answerCacheEarlyResponse(
+                text: text,
+                source: source,
+                sessionID: sessionID,
+                pendingEpisodic: &pendingEpisodic,
+                onEvent: onEvent
+            )
+        }
+        guard let earlyResponse else { return nil }
+        let diagnostics = RecallDiagnostics.zero(skippedDocIndex: earlyRecallSkip(for: text))
+        RuneWeaverLog.memory.info("\(Self.recallDiagnosticsLogLine(diagnostics))")
+        didEmitRecallDiagnostics = true
+        try Task.checkCancellation()
+        await flushEpisodic(pendingEpisodic, sessionID: sessionID)
+        await permissionGate?.clearTaskGrants(for: sessionID)
+        return Self.responseWithRecall(earlyResponse, diagnostics: diagnostics)
     }
 
     private func resolveTurnRecall(
@@ -506,13 +560,15 @@ extension Orchestrator {
     }
 
     /// Whether a turn source runs detached from interactive chat.
-    /// Scheduler and goal turns share the background system prompt and the
-    /// parked-resume background branch so future detached sources extend in
-    /// one place instead of scattering string matches across the loop.
+    /// Scheduler, goal, and fan-out turns share the background system prompt
+    /// and the parked-resume background branch so future detached sources
+    /// extend in one place instead of scattering string matches across the
+    /// loop. The semantic answer cache delegates here too, so the background
+    /// exclusion cannot drift between the prompt owner and the cache owner.
     /// - Parameter source: Turn or session source label, nil when untagged.
     /// - Returns: True for known background sources.
     public static func isBackgroundSource(_ source: String?) -> Bool {
-        source == "scheduler" || source == "goal"
+        source == "scheduler" || source == "goal" || source == "fanout" || source == "fanout_worker"
     }
 
     /// Returns a copy of a turn response carrying the content-free recall summary.
@@ -715,6 +771,79 @@ extension Orchestrator {
             sessionTokens: sessionTokensBySession[sessionID],
             warnings: rememberWarnings,
             completedAt: persistedAcknowledgement.createdAt.timeIntervalSince1970
+        )
+    }
+
+    /// Returns a cached answer response for a repeated pure question, if one hits.
+    ///
+    /// The single delegation point into the semantic answer cache: keying,
+    /// similarity, threshold, expiry, and every exclusion rule live in the
+    /// owner, so this helper only decides whether the turn may consult it and
+    /// shapes the response. An excluded turn — a tool turn, approval, send,
+    /// parked turn, background source, or voice prompt — falls through to the
+    /// full loop because the owner holds nothing it could match, and a miss
+    /// falls through the same way. Parked state resolves from the live parked
+    /// session here so a session awaiting an inbox decision never serves a
+    /// replay instead of resuming.
+    private func answerCacheEarlyResponse(
+        text: String,
+        source: String,
+        sessionID: UUID,
+        pendingEpisodic: inout [(content: String, role: Message.Role)],
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+    ) async -> OrchestratorResponse? {
+        let isParked = isSessionParked(sessionID)
+        guard !SemanticAnswerCache.isExcludedTurn(source: source, executedToolCalls: 0, isParked: isParked) else { return nil }
+        // A cached pure answer must never preempt recall or live freshness:
+        // the lookup runs before the recall slot, so a freshness query would
+        // otherwise hit a stale pure answer and skip the live tools the
+        // router plan would have required. The plan owns the skip verdict
+        // and delegates to the shared freshness guidance in one place, and
+        // the forced-live override joins it so an operator-forced live path
+        // bypasses the cache exactly like the recall it governs.
+        guard !MemoryQueryRouter.plan(for: text, currentDate: Date()).skipDocIndex else {
+            return nil
+        }
+        if await LiveSearchOverride.shared.shouldUseLiveSearch(for: text) {
+            return nil
+        }
+        guard let cached = await memoryEngine?.cachedAnswer(
+            for: SemanticAnswerCache.normalizedQuery(text),
+            persona: persona.canonicalCacheString,
+            modelID: llm.modelInfo.name
+        ) else {
+            return nil
+        }
+        let note = Message(role: .assistant, content: cached.text)
+        // Stamp from the stored instant so the live response and the history reload share one time.
+        let persisted = await conversations.append(note, to: sessionID)
+        pendingEpisodic.append((cached.text, .assistant))
+        await onEvent?(.textDelta(cached.text))
+        return OrchestratorResponse(
+            text: cached.text,
+            sessionID: sessionID,
+            toolActions: [],
+            sessionTokens: sessionTokensBySession[sessionID],
+            completedAt: persisted.createdAt.timeIntervalSince1970
+        )
+    }
+
+    /// Files one pure Q&A answer so the next identical question hits the cache.
+    ///
+    /// The owner refuses the turn through the same exclusion rule the lookup
+    /// consults — tool turns, approvals, sends, parked turns, background
+    /// sources, and voice prompts never store, and therefore never hit — so
+    /// this helper forwards the turn's shape and nothing else. Blank text is
+    /// skipped here because the turn already refused to persist it, keeping
+    /// history and the cache in agreement.
+    private func storeAnswerCacheIfPure(query: String, source: String, finalText: String, executedToolCalls: Int, isParked: Bool = false) async {
+        guard !SemanticAnswerCache.isExcludedTurn(source: source, executedToolCalls: executedToolCalls, isParked: isParked) else { return }
+        guard OrchestratorToolLoop.shouldStoreAssistantText(finalText) else { return }
+        await memoryEngine?.cacheAnswer(
+            finalText,
+            for: SemanticAnswerCache.normalizedQuery(query),
+            persona: persona.canonicalCacheString,
+            modelID: llm.modelInfo.name
         )
     }
 

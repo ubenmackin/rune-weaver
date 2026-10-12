@@ -230,6 +230,21 @@ public actor ServerSchedulerWorker {
             }
         }
 
+        // Scheduled sends ride the same tick but take no orchestrator turn:
+        // each due send claims exactly once and replays the approved bytes, so
+        // a slow fire never stacks a second replay on the next tick.
+        do {
+            try await fireDueScheduledSends(now: now)
+        } catch is CancellationError {
+            // Cancellation stops further scheduled sends this tick and is
+            // preserved for the outer loop; the claimed row stays `sending`
+            // until its replay settles or a later boot reconciles it, so
+            // nothing double-sends.
+            await logger?("Scheduled send fire cancelled.")
+        } catch {
+            await logger?("Scheduled send fire failed: \(error.localizedDescription)")
+        }
+
         // The nightly-or-catch-up index trigger rides the same tick: the
         // coordinator selects `.nightly` at the nightly hour and `.catchUp`
         // for a later same-day launch, while a disabled or already-run

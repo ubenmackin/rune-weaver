@@ -167,11 +167,14 @@ public struct MessagesSendArgs: Sendable, Equatable, Decodable {
     /// Original display name the recipient handle was resolved from, when the
     /// caller resolved a name first; nil for a directly supplied handle.
     public let resolvedFrom: String?
+    /// Optional fire time requesting a deterministic scheduled send; nil sends immediately.
+    public let scheduleAt: Date?
 
-    public init(recipient: String, text: String, resolvedFrom: String? = nil) {
+    public init(recipient: String, text: String, resolvedFrom: String? = nil, scheduleAt: Date? = nil) {
         self.recipient = recipient
         self.text = text
         self.resolvedFrom = resolvedFrom
+        self.scheduleAt = scheduleAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -180,6 +183,7 @@ public struct MessagesSendArgs: Sendable, Equatable, Decodable {
         case text
         case message
         case resolvedFrom
+        case scheduleAt
     }
 
     /// Decodes send args; `to` and `message` are compatibility-only aliases kept out of the strict schema,
@@ -224,11 +228,25 @@ public struct MessagesSendArgs: Sendable, Equatable, Decodable {
             )
         }
         let resolvedFrom = rawResolvedFrom?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scheduleAt = try ScheduledSendTimeValidation.decodeScheduleAt(from: container, forKey: .scheduleAt)
         self.init(
             recipient: recipientVal,
             text: textVal,
-            resolvedFrom: (resolvedFrom?.isEmpty ?? true) ? nil : resolvedFrom
+            resolvedFrom: (resolvedFrom?.isEmpty ?? true) ? nil : resolvedFrom,
+            scheduleAt: scheduleAt
         )
+    }
+
+    /// Validates the optional fire time and returns the minute-aligned instant to store.
+    ///
+    /// Bounds and alignment are shared with `email.send` and the scheduler
+    /// store through ``ScheduledSendTimeValidation``, so a requested schedule
+    /// can never disagree with the validation its deterministic replay runs.
+    /// - Parameter now: Reference instant the bounds are measured from.
+    /// - Returns: The validated fire time, or nil when the send is immediate.
+    public func validateScheduleAt(now: Date = Date()) throws -> Date? {
+        guard let scheduleAt else { return nil }
+        return try ScheduledSendTimeValidation.validateScheduleAt(scheduleAt, now: now)
     }
 }
 
@@ -658,7 +676,9 @@ public struct MessagesSendTool: Tool, Sendable {
     public let name = "messages.send"
     public let description =
         "Sends a text message or iMessage to a recipient phone number or email using macOS Messages. "
-            + "Requires operator approval. Use when the user explicitly instructs to send or reply to a message."
+            + "Requires operator approval. Use when the user explicitly instructs to send or reply to a message. "
+            + "For a delayed send, request a scheduled send through the Schedules surface instead of passing scheduleAt: "
+            + "the schedule stores the exact approved bytes and fires them once at the approved time."
 
     public let inputSchema = JSONSchema(
         rawValue: #"{"type":"object","properties":{"recipient":{"type":"string","description":"Recipient phone number or email handle. It MUST be a handle "#
@@ -666,7 +686,10 @@ public struct MessagesSendTool: Tool, Sendable {
             + #"resolvedFrom); passing a display name always fails."},"#
             + #""text":{"type":"string","description":"Message text to send"},"#
             + #""resolvedFrom":{"type":"string","description":"Optional original display name when recipient "#
-            + #"was resolved from a name; remembered for future lookups."}},"#
+            + #"was resolved from a name; remembered for future lookups."},"#
+            + #""scheduleAt":{"type":["number","string"],"description":"Optional fire time for a scheduled send as epoch seconds "#
+            + #"or an ISO-8601 datetime (5 minutes to 365 days out, minute-aligned). A scheduled send is filed through the "#
+            + #"Schedules surface; messages.send itself still sends immediately on approval."}},"#
             + #""required":["recipient","text"],"additionalProperties":false}"#
     )
 
@@ -701,6 +724,20 @@ public struct MessagesSendTool: Tool, Sendable {
             args = try JSONDecoder().decode(MessagesSendArgs.self, from: Data(input.argumentsJSON.utf8))
         } catch {
             return .failure("Invalid messages.send arguments: expected {\"recipient\": \"...\", \"text\": \"...\"}.", callID: input.callID)
+        }
+
+        // A fire time makes this a scheduled send, which the deterministic
+        // scheduler owns: an approval on this tool sends immediately, so
+        // honoring the schedule here would silently drop the requested fire
+        // time. Validate the bounds first so a past or out-of-horizon date is
+        // answered with its own reason, then refuse with guidance.
+        if args.scheduleAt != nil {
+            do {
+                _ = try args.validateScheduleAt()
+            } catch {
+                return .failure(error.localizedDescription, callID: input.callID)
+            }
+            return .failure(Self.scheduledSendRefusalNote, callID: input.callID)
         }
 
         let recipient = args.recipient.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -793,6 +830,12 @@ public struct MessagesSendTool: Tool, Sendable {
     /// Candidate budget for a name refusal: enough to show alternatives,
     /// small enough that the refusal stays one actionable paragraph.
     private static let candidateLimit = 5
+
+    /// Fail-closed refusal for a delayed-send request: this tool never delays.
+    private static let scheduledSendRefusalNote =
+        "A scheduleAt fire time requests a scheduled send, and messages.send always sends immediately on approval. "
+            + "Book the send through the Schedules surface (`POST /scheduler/sends`) so the approved bytes are "
+            + "stored and fired exactly once at the requested time."
 
     /// Refuses a name-shaped recipient with an exact handle to retry.
     ///

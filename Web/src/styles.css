@@ -7742,6 +7742,11 @@ button.ghost.staged-expand-all-btn {
   animation: dashboardPulse 1.6s ease-in-out infinite;
 }
 
+.pulse-indicator.status-red {
+  background: var(--status-red);
+  animation: dashboardPulse 1.6s ease-in-out infinite;
+}
+
 @keyframes dashboardPulse {
   0%, 100% {
     opacity: 1;
@@ -7796,6 +7801,68 @@ button.ghost.staged-expand-all-btn {
 .system-pulse-card .status-pill.pill-amber {
   background: rgba(245, 158, 11, 0.15);
   color: #fbbf24;
+}
+
+.system-pulse-card .status-pill.pill-red {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+
+/* Degraded-state disclosure carrying the bounded pulse reasons. */
+.pulse-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.pulse-reasons {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Fail-closed action row: inbox plus re-verify plus policy. Shaped like the
+ * needs-action buttons so the red state reads as one family with the inbox. */
+.pulse-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pulse-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--border-color);
+  background: var(--bg-subtle);
+  color: var(--text-main);
+}
+
+.pulse-actions .btn:hover {
+  background: var(--border-color);
+}
+
+.pulse-actions .btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.pulse-actions .pulse-inbox-btn {
+  background: var(--status-red);
+  border-color: transparent;
+  color: #ffffff;
+}
+
+.pulse-actions .pulse-inbox-btn:hover {
+  background: var(--status-red);
+  filter: brightness(1.1);
 }
 
 .btn-staged-pill {

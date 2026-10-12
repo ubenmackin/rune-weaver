@@ -590,9 +590,9 @@ struct ServerDTOTests {
     }
 
     @Test
-    func `Health defaults to ok`() {
+    func `Health defaults to green`() {
         let health = HealthResponse()
-        #expect(health.status == "ok")
+        #expect(health.status == "green")
         #expect(health.version == ServerPaths.apiVersion)
     }
 
