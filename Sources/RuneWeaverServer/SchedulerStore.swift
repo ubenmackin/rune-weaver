@@ -307,6 +307,8 @@ public enum SchedulerStoreError: Error, Sendable, Equatable {
 public actor SchedulerStore {
     /// Maximum jobs kept in the store to bound memory and avoid unbounded resource consumption.
     public static let maxJobs = 100
+    /// Maximum scheduled sends kept pending (queued or sending) at once.
+    public static let maxPendingSends = 200
 
     /// Jobs indexed by identifier.
     ///
@@ -316,6 +318,10 @@ public actor SchedulerStore {
     /// `migrateEmailReportMarkers` reads and reseeds cursors against the live
     /// registry rather than a snapshot of it.
     var jobs: [UUID: SchedulerJob] = [:]
+    /// Approved scheduled sends awaiting deterministic replay, indexed by
+    /// identifier; owned by `SchedulerStoreScheduledSends.swift` beside the
+    /// job registry so one actor holds both.
+    var scheduledSends: [UUID: ScheduledSend] = [:]
     /// Optional filesystem path for SQLite persistence.
     public let dbPath: String?
     /// Process-local half of the one-shot marker-migration latch, covering
@@ -587,6 +593,9 @@ public actor SchedulerStore {
             return
         }
         #if canImport(SQLite3)
+            // Sends reload first so a boot that fails reading jobs still
+            // reports the whole persisted picture.
+            await bootstrapScheduledSends()
             let existing: [SchedulerJob]
             do {
                 existing = try await SQLiteSerialIO.run {

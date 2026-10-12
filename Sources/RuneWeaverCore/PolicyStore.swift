@@ -119,6 +119,22 @@ public actor PolicyStore {
     /// Monotonic mutation generation counter tracking state revisions.
     private var generation: UInt64 = 0
 
+    /// Shared semantic answer cache cleared on every committed policy change,
+    /// so a pure answer cached under the prior posture never replays after a
+    /// policy rewrite. Nil keeps the store standalone for direct-core callers.
+    private var answerCache: SemanticAnswerCache?
+
+    /// Wires the shared semantic answer cache for policy-change invalidation.
+    /// - Parameter cache: Cache cleared on every committed policy mutation, or nil to detach.
+    public func setAnswerCache(_ cache: SemanticAnswerCache?) {
+        answerCache = cache
+    }
+
+    /// Clears the shared semantic answer cache after a committed policy change.
+    private func invalidateAnswerCache() async {
+        await answerCache?.invalidateOnMemoryWrite()
+    }
+
     /// Returns the current mutation generation counter.
     public func currentGeneration() -> UInt64 {
         generation
@@ -234,7 +250,7 @@ public actor PolicyStore {
     /// - Parameter policy: Proposed new policy.
     /// - Returns: Empty array on success, or invariant violation descriptions on failure.
     @discardableResult
-    public func update(_ policy: SecurityPolicy) -> [String] {
+    public func update(_ policy: SecurityPolicy) async -> [String] {
         let violations = PolicyInvariantVerifier.verify(policy)
         guard violations.isEmpty else {
             return violations
@@ -242,6 +258,10 @@ public actor PolicyStore {
         current = policy
         verifiedPolicy = policy
         generation &+= 1
+        // A committed policy change can rewrite future pure answers; clear
+        // before returning so no turn can hit a stale entry between commit
+        // and an unstructured clear.
+        await invalidateAnswerCache()
         return []
     }
 
@@ -328,7 +348,7 @@ public actor PolicyStore {
     /// - Throws: `PolicyInvariantError` when invariants fail, concurrency conflict occurs,
     ///   or the bytes do not round-trip; filesystem errors propagate unchanged.
     @discardableResult
-    public func replace(_ policy: SecurityPolicy, expectedGeneration: UInt64? = nil) throws -> SecurityPolicy {
+    public func replace(_ policy: SecurityPolicy, expectedGeneration: UInt64? = nil) async throws -> SecurityPolicy {
         if let expected = expectedGeneration, expected != generation {
             throw PolicyInvariantError.invariantViolations([
                 "Concurrent modification: policy was changed by another request (expected generation \(expected), current \(generation))."
@@ -347,6 +367,7 @@ public actor PolicyStore {
         loadedFromDisk = true
         generation &+= 1
         lastLoadDiagnostics = ["Policy updated successfully from \(fileURL.path)."]
+        await invalidateAnswerCache()
         return policy
     }
 
@@ -357,7 +378,7 @@ public actor PolicyStore {
     /// leaves memory and file agreeing instead of diverging with memory
     /// mutated while the file stayed behind.
     @discardableResult
-    public func appendAllowedDomain(_ domain: String) throws -> SecurityPolicy {
+    public func appendAllowedDomain(_ domain: String) async throws -> SecurityPolicy {
         try Self.validateDomainEntry(domain)
         let updated = current.appendingAllowedDomain(domain)
         let violations = PolicyInvariantVerifier.verify(updated)
@@ -371,6 +392,7 @@ public actor PolicyStore {
         current = updated
         verifiedPolicy = updated
         generation &+= 1
+        await invalidateAnswerCache()
         return updated
     }
 
@@ -380,7 +402,7 @@ public actor PolicyStore {
     /// keeps a throwing write from leaving an unpersisted policy masquerading
     /// as applied.
     @discardableResult
-    public func appendBlockedDomain(_ domain: String) throws -> SecurityPolicy {
+    public func appendBlockedDomain(_ domain: String) async throws -> SecurityPolicy {
         try Self.validateDomainEntry(domain)
         let updated = current.appendingBlockedDomain(domain)
         let violations = PolicyInvariantVerifier.verify(updated)
@@ -394,6 +416,7 @@ public actor PolicyStore {
         current = updated
         verifiedPolicy = updated
         generation &+= 1
+        await invalidateAnswerCache()
         return updated
     }
 
@@ -405,7 +428,7 @@ public actor PolicyStore {
     /// corrupt `policy.toml` is never overwritten with safe-default plus service
     /// hosts and laundered into a verified snapshot.
     @discardableResult
-    public func ensureServiceDomainsAllowed(urlsOrHosts: [String]) -> SecurityPolicy {
+    public func ensureServiceDomainsAllowed(urlsOrHosts: [String]) async -> SecurityPolicy {
         // `load()` leaves `verifiedPolicy` nil when the operator's file is
         // unreadable, unparseable, or invariant-violating. Writing here would
         // manufacture an accepted posture from an unaccepted file, void the
@@ -451,6 +474,7 @@ public actor PolicyStore {
             current = updatedPolicy
             verifiedPolicy = updatedPolicy
             generation &+= 1
+            await invalidateAnswerCache()
         } catch {
             // Best effort write
             RuneWeaverLog.stores.error("PolicyStore: failed to persist updated security policy to '\(fileURL.path)': \(error.localizedDescription)")

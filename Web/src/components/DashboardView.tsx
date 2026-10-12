@@ -444,6 +444,8 @@ export default function DashboardView({
             stagedFilesCount={stagedFilesCount}
             onOpenStagedDrawer={onOpenStagedDrawer}
             onOpenSettings={() => onSelectTab("settings")}
+            onOpenInbox={() => onSelectTab("approvals")}
+            onOpenPolicy={() => onSelectTab("settings")}
           />
 
           <GoalsCockpit

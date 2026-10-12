@@ -65,6 +65,10 @@ public actor GoalEngine {
     private let ideasEngine: IdeasEngine?
     /// Seam reporting planning lifecycle events to the audit log and socket hub.
     private let reporter: any GoalPlanReporting
+    /// Shared semantic answer cache cleared on every goal mutation, so a pure
+    /// answer cached before a plan, status, or trigger change never replays
+    /// stale text. Nil keeps the engine standalone for direct-core callers.
+    private var answerCache: SemanticAnswerCache?
 
     /// Creates a goal engine over shared collaborators.
     /// - Parameters:
@@ -85,6 +89,18 @@ public actor GoalEngine {
         self.config = config.clamped()
         self.ideasEngine = ideasEngine
         self.reporter = reporter
+    }
+
+    /// Wires the shared semantic answer cache for goal-change invalidation.
+    /// - Parameter cache: Cache cleared on every goal mutation, or nil to detach.
+    public func setAnswerCache(_ cache: SemanticAnswerCache?) {
+        answerCache = cache
+    }
+
+    /// Clears the shared semantic answer cache because a goal change can
+    /// rewrite future pure answers.
+    private func invalidateAnswerCache() async {
+        await answerCache?.invalidateOnMemoryWrite()
     }
 
     /// Dynamically updates the serving LLM provider without a restart.
@@ -155,6 +171,9 @@ public actor GoalEngine {
             updatedAt: now
         )
         try await store.create(goal: goal, steps: [])
+        // A new goal rewrites future pure answers, so cached text from before
+        // it must not survive the mutation.
+        await invalidateAnswerCache()
         // Triggers are secondary to the goal itself: a store failure arming one
         // is logged rather than thrown, so a created goal is never reported as a
         // failure because an event wake-up could not be persisted. Blank kinds
@@ -323,6 +342,7 @@ public actor GoalEngine {
         do {
             try await store.replacePlan(goalID: goal.id, steps: steps)
             try await store.setStatus(goalID: goal.id, status: .active)
+            await invalidateAnswerCache()
         } catch {
             RuneWeaverLog.scheduler.error("GoalEngine: failed to persist plan for goal \(goal.id): \(error.localizedDescription)")
         }
@@ -597,6 +617,7 @@ extension GoalEngine {
         let bumped = Date().addingTimeInterval(TimeInterval(goal.stepIntervalMinutes * 60))
         try await store.markAdvanced(goalID: goalID, nextDueAt: bumped)
         try await store.appendEvent(goalID: goalID, kind: .note, message: "Advanced by run \(runID.uuidString).")
+        await invalidateAnswerCache()
         return generated
     }
 
@@ -612,6 +633,7 @@ extension GoalEngine {
         let next = try await store.nextActionableStep(goalID: goalID)
         if next == nil {
             try await store.setStatus(goalID: goalID, status: .achieved)
+            await invalidateAnswerCache()
             return await ideasEngine?.generate() ?? []
         }
         return nil
@@ -672,26 +694,31 @@ extension GoalEngine {
         if !trimmed.isEmpty {
             try await store.appendEvent(goalID: goalID, kind: .needsInput, message: trimmed)
         }
+        await invalidateAnswerCache()
     }
 
     /// Pauses pursuit of a goal.
     public func pause(goalID: UUID) async throws {
         try await store.setStatus(goalID: goalID, status: .paused)
+        await invalidateAnswerCache()
     }
 
     /// Resumes a paused or parked goal back to active.
     public func resume(goalID: UUID) async throws {
         try await store.setStatus(goalID: goalID, status: .active)
+        await invalidateAnswerCache()
     }
 
     /// Abandons a goal; the terminal note preserves why it was dropped.
     public func abandon(goalID: UUID) async throws {
         try await store.setStatus(goalID: goalID, status: .abandoned)
+        await invalidateAnswerCache()
     }
 
     /// Deletes a goal with its steps and events.
     public func delete(goalID: UUID) async throws {
         try await store.delete(goalID: goalID)
+        await invalidateAnswerCache()
     }
 }
 

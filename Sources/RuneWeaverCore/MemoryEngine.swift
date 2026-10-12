@@ -191,6 +191,7 @@ public enum MirrorFailurePolicy: Sendable, Equatable {
 public actor MemoryEngine {
     /// Episodic conversation-history store.
     private let episodeStore: EpisodeStore
+
     /// Semantic fact/vector store.
     private let vectorStore: VectorStore
     /// Durable document index for hybrid keyword/vector recall, when configured.
@@ -205,6 +206,16 @@ public actor MemoryEngine {
     var profile: UserProfile
     /// JSON file backing the profile, if configured.
     private let profilePath: String?
+    /// Semantic answer cache for repeated pure Q&A turns.
+    ///
+    /// The engine owns the instance so the turn path delegates through one
+    /// memory-owned seam instead of a second cache implementation, and every
+    /// durable memory write clears it through
+    /// ``SemanticAnswerCache/invalidateOnMemoryWrite()``. The routine episodic
+    /// turn mirror deliberately does not invalidate: mirrors land on every
+    /// turn, so treating them as writes would keep a repeated question from
+    /// ever hitting.
+    public let answerCache: SemanticAnswerCache
     /// Maximum results fetched per tier before merging.
     ///
     /// Internal so recall extensions share one per-tier cap with the episodic
@@ -221,12 +232,17 @@ public actor MemoryEngine {
         vectorStore: VectorStore,
         docIndexStore: DocIndexStore? = nil,
         profilePath: String? = nil,
-        initialProfile: UserProfile? = nil
+        initialProfile: UserProfile? = nil,
+        answerCache: SemanticAnswerCache? = nil
     ) {
         self.episodeStore = episodeStore
         self.vectorStore = vectorStore
         self.docIndexStore = docIndexStore
         self.profilePath = profilePath
+        // The cache always exists and always starts empty, so the answer-cache
+        // path has no disabled state to resurrect after boot; a caller holding
+        // a cache wired to its embeddings producer injects it here.
+        self.answerCache = answerCache ?? SemanticAnswerCache()
         if let initialProfile {
             self.profile = initialProfile
         } else if let profilePath, let loaded = Self.loadProfileBestEffort(path: profilePath) {
@@ -575,6 +591,9 @@ public actor MemoryEngine {
                 lastConfirmed: Date()
             )
             upsertProfileFact(fact)
+            // A durable fact write can change future answers, so pure answers
+            // cached before it must not replay alongside it.
+            await answerCache.invalidateOnMemoryWrite()
             return fact
         } catch let error as VectorStoreError {
             throw MemoryEngineError.semanticFailed(String(describing: error))
@@ -584,7 +603,11 @@ public actor MemoryEngine {
     }
 
     /// Records a preference, then persists the profile.
-    public func setPreference(_ preference: Preference) {
+    ///
+    /// Async because the durable write clears the semantic answer cache: a new
+    /// preference rewrites future answers, so cached pure answers must not
+    /// survive it.
+    public func setPreference(_ preference: Preference) async {
         if Self.isSingleValuePreferenceKey(preference.key) {
             profile.preferences.removeAll { $0.key == preference.key }
         } else {
@@ -592,16 +615,22 @@ public actor MemoryEngine {
         }
         profile.preferences.append(preference)
         touchProfile()
+        await answerCache.invalidateOnMemoryWrite()
     }
 
     /// Removes a preference by key and value.
-    public func removePreference(key: String, value: String) {
+    /// Async so the durable write clears the semantic answer cache like every
+    /// other profile mutation.
+    public func removePreference(key: String, value: String) async {
         profile.preferences.removeAll { $0.key == key && $0.value == value }
         touchProfile()
+        await answerCache.invalidateOnMemoryWrite()
     }
 
     /// Confirms a profile fact, refreshing its confidence and timestamp.
-    public func confirmFact(id: UUID, confidence: Double = 1.0) {
+    /// Async so the durable write clears the semantic answer cache like every
+    /// other profile mutation.
+    public func confirmFact(id: UUID, confidence: Double = 1.0) async {
         guard let index = profile.facts.firstIndex(where: { $0.id == id }) else { return }
         let clamped = min(max(confidence, 0.0), 1.0)
         let existing = profile.facts[index]
@@ -613,12 +642,16 @@ public actor MemoryEngine {
             lastConfirmed: Date()
         )
         touchProfile()
+        await answerCache.invalidateOnMemoryWrite()
     }
 
     /// Removes a profile fact without touching the vector store.
-    public func removeProfileFact(id: UUID) {
+    /// Async so the durable write clears the semantic answer cache like every
+    /// other profile mutation.
+    public func removeProfileFact(id: UUID) async {
         profile.facts.removeAll { $0.id == id }
         touchProfile()
+        await answerCache.invalidateOnMemoryWrite()
     }
 
     /// Removes a profile fact and its semantic row best-effort.
@@ -632,6 +665,7 @@ public actor MemoryEngine {
         }
         profile.facts.removeAll { $0.id == id }
         touchProfile()
+        await answerCache.invalidateOnMemoryWrite()
     }
 
     /// Removes a profile fact and its semantic row, reporting failures.
@@ -645,6 +679,7 @@ public actor MemoryEngine {
         }
         profile.facts.removeAll { $0.id == id }
         touchProfile()
+        await answerCache.invalidateOnMemoryWrite()
     }
 }
 
@@ -688,7 +723,7 @@ extension MemoryEngine {
         var created: [UserFact] = []
         for sentence in sentences {
             if let preference = Self.extractPreference(from: sentence) {
-                setPreference(preference)
+                await setPreference(preference)
             }
             guard Self.isFactLike(sentence) else { continue }
             guard Self.isStorableFact(sentence) else { continue }
@@ -1222,5 +1257,44 @@ extension MemoryEngine {
             }
         }
         return nil
+    }
+}
+
+// MARK: - MemoryEngine Semantic Answer Cache Delegation
+
+extension MemoryEngine {
+    /// Cached answer for one repeated pure question, or nil on a miss.
+    ///
+    /// Pure delegation to the cache owner: keying, similarity, threshold,
+    /// expiry, and every exclusion rule live there, so the engine adds no
+    /// second implementation. An empty or blank query yields nil without a
+    /// failure, matching the recall contract that a cache problem can never
+    /// fail a turn.
+    /// - Parameters:
+    ///   - normalizedQuery: Query text in normalized cache-key form.
+    ///   - persona: Assistant persona identity the answer was composed under.
+    ///   - modelID: Serving model identifier.
+    /// - Returns: The cached answer, or nil when nothing matches.
+    public func cachedAnswer(for normalizedQuery: String, persona: String, modelID: String) async -> CachedAnswer? {
+        await answerCache.lookup(normalizedQuery: normalizedQuery, persona: persona, modelID: modelID)
+    }
+
+    /// Files one pure Q&A answer so the next identical question hits the cache.
+    ///
+    /// Delegates to the cache owner, which refuses blank queries and answers
+    /// past its character budget instead of truncating, so a later hit always
+    /// replays complete text.
+    /// - Parameters:
+    ///   - text: Final assistant text from a pure turn.
+    ///   - normalizedQuery: Query text in normalized cache-key form.
+    ///   - persona: Assistant persona identity the answer was composed under.
+    ///   - modelID: Serving model identifier.
+    public func cacheAnswer(_ text: String, for normalizedQuery: String, persona: String, modelID: String) async {
+        await answerCache.storeAnswer(
+            normalizedQuery: normalizedQuery,
+            persona: persona,
+            modelID: modelID,
+            answer: CachedAnswer(text: text)
+        )
     }
 }

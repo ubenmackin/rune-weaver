@@ -98,6 +98,12 @@ final class BrowserWarmupLifecycle: LifecycleHandler {
 /// posture: the bind policy and the gate must agree, so a context that claims
 /// auth without a verifier (or the reverse) fails closed instead of silently
 /// serving an unauthenticated or unenforced surface.
+///
+/// The periodic security probe suite wires here too: it runs at serve boot
+/// with a fail-closed refusal on a critical verifier failure, after every
+/// committed policy write through the policy-write middleware, and on the
+/// nightly cadence through its own lifecycle loop. The per-tool path stays
+/// untouched, so tool latency never carries probe cost.
 /// - Parameters:
 ///   - app: Application receiving configuration.
 ///   - context: Shared engine collaborators.
@@ -120,6 +126,15 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext, auth
     app.lifecycle.use(ServerSchedulerLifecycle(worker: context.schedulerWorker))
     app.lifecycle.use(SandboxCleanupLifecycle(scheduler: context.sandboxCleanup, config: context.containersConfig, approvals: context.approvals))
     app.lifecycle.use(BrowserWarmupLifecycle())
+    // Boot and nightly cadence for the security probe suite. Both record
+    // into the verified pulse; boot additionally refuses to serve when a
+    // fail-closed verifier fails.
+    app.lifecycle.use(SecurityProbeBootLifecycle())
+    app.lifecycle.use(SecurityProbeNightlyLifecycle())
+    // Registered before the route middleware so the suite observes the
+    // committed response every inner producer recorded; only a successful
+    // policy write triggers a re-run, so previews and refused saves stay quiet.
+    app.middleware.use(SecurityProbePolicyWriteMiddleware())
     app.runeWeaver = context
     app.runeWeaverAuth = resolvedAuth
     registerRuneWeaverRoutes(app)
@@ -170,6 +185,8 @@ public func registerRuneWeaverRoutes(_ app: Application) {
     registerApprovalRoutes(app)
     registerSchedulerCRUDRoutes(app)
     registerSchedulerRunRoute(app)
+    registerScheduledSendRoutes(app)
+    registerSovereignReattestRoute(app)
     registerRunRoutes(app)
     registerGoalRoutes(app)
     registerIdeaRoutes(app)
@@ -306,9 +323,436 @@ private func registerAuthSessionRoutes(_ app: Application, auth: ServerAuth) {
     }
 }
 
+/// Storage key for the verified system-pulse snapshot actor.
+private struct SystemHealthSnapshotKey: StorageKey {
+    /// Stored pulse actor type.
+    typealias Value = SystemHealthSnapshot
+}
+
+/// Storage key for the shared last-served pulse change gate.
+private struct HealthPulseLastServedKey: StorageKey {
+    /// Stored change gate type.
+    typealias Value = HealthPulseLastServed
+}
+
+/// Storage key for the recorded probe-report hash gate.
+private struct SecurityProbeGateKey: StorageKey {
+    /// Stored probe-report gate type.
+    typealias Value = SecurityProbeGate
+}
+
+extension Application {
+    /// Verified system-pulse snapshot actor for the health route.
+    ///
+    /// Installed once at route registration against the serving policy
+    /// store, so serve boot and direct route registration share one pulse
+    /// path. A missing entry degrades to an ephemeral actor over the
+    /// current context instead of failing the probe.
+    var systemHealthSnapshot: SystemHealthSnapshot {
+        get {
+            if let pulse = storage[SystemHealthSnapshotKey.self] {
+                return pulse
+            }
+            return SystemHealthSnapshot(policyStore: runeWeaver.policyStore)
+        }
+        set {
+            storage[SystemHealthSnapshotKey.self] = newValue
+        }
+    }
+
+    /// Shared change gate so the health route and every probe path publish a
+    /// pulse only when the value actually moved.
+    ///
+    /// The health route installs one instance at registration and the probe
+    /// sink adopts it, so a boot or nightly probe that produces an unchanged
+    /// verdict never re-fans a steady-state pulse.
+    var healthPulseLastServed: HealthPulseLastServed {
+        get {
+            if let gate = storage[HealthPulseLastServedKey.self] {
+                return gate
+            }
+            return HealthPulseLastServed()
+        }
+        set {
+            storage[HealthPulseLastServedKey.self] = newValue
+        }
+    }
+
+    /// Recorded probe-report hash gate.
+    ///
+    /// The suite's "changed" signal is the report hash compare: a run whose
+    /// posture matches the last recorded one re-asserts the same verdict, so
+    /// the recorder stays quiet instead of rewriting identical outcomes.
+    var securityProbeGate: SecurityProbeGate {
+        get {
+            if let gate = storage[SecurityProbeGateKey.self] {
+                return gate
+            }
+            return SecurityProbeGate()
+        }
+        set {
+            storage[SecurityProbeGateKey.self] = newValue
+        }
+    }
+}
+
+/// Locked last-served pulse value suppressing identical rebroadcasts.
+///
+/// Shared by the health route and every security probe path: each compares
+/// its fresh snapshot against the last served one by deep value equality
+/// and publishes only on change, so steady-state polling plus a repeated
+/// nightly pass never re-fan an identical pulse to live dashboards.
+final class HealthPulseLastServed: Sendable {
+    /// Last served snapshot, nil before the first probe.
+    private let box: OSAllocatedUnfairLock<HealthSnapshotValue?>
+
+    /// Creates an empty gate.
+    init() {
+        box = OSAllocatedUnfairLock(initialState: nil)
+    }
+
+    /// Atomically records `fresh` when it differs from the last served value.
+    /// - Parameter fresh: Snapshot just built for this probe.
+    /// - Returns: True when `fresh` differs and must be published plus served.
+    func updateIfChanged(_ fresh: HealthSnapshotValue) -> Bool {
+        box.withLock { current in
+            guard current != fresh else { return false }
+            current = fresh
+            return true
+        }
+    }
+}
+
+/// Public pulse projection pushed over the socket hub on change.
+///
+/// Carries the operational signal only: tips stay on the authenticated REST
+/// path, so the push never discloses digests to a surface the probe itself
+/// would redact. Dashboards refetch the full shape on receipt.
+private struct HealthPulseUpdatedFrame: Encodable {
+    /// Always `"health_updated"`.
+    let type = "health_updated"
+    /// Closed pulse status.
+    let status: String
+    /// Last explicit ledger verification as Unix seconds, when stamped.
+    let ledgerVerifiedAt: Double?
+    /// Whether the live policy verifies.
+    let policyVerified: Bool?
+    /// Collapsed probe verdict, when any probe has reported.
+    let probeVerdict: String?
+    /// Bounded backing reasons for a non-green status.
+    let degradedReasons: [String]?
+}
+
+/// Publishes a changed pulse value to live dashboards, best-effort.
+///
+/// Shared with the sovereign ceremony path so both publishers fan out through
+/// one encoding instead of drifting into parallel frame shapes.
+/// - Parameters:
+///   - value: Snapshot that differed from the last served one.
+///   - hub: Socket hub fanning out to dashboards.
+func publishHealthPulse(_ value: HealthSnapshotValue, hub: WSHub) async {
+    let frame = HealthPulseUpdatedFrame(
+        status: value.status.rawValue,
+        ledgerVerifiedAt: value.ledgerVerifiedAt?.timeIntervalSince1970,
+        policyVerified: value.policyVerified,
+        probeVerdict: value.probeVerdict?.rawValue,
+        degradedReasons: value.degradedReasons.isEmpty ? nil : value.degradedReasons
+    )
+    guard let data = try? JSONEncoder().encode(frame),
+          let text = String(data: data, encoding: .utf8)
+    else { return }
+    await hub.broadcast(text: text)
+}
+
+// MARK: - Security Probe Wiring
+
+/// Collaborators one security probe run records through.
+///
+/// Held as explicit values rather than the application so a retained
+/// background loop never captures the application itself.
+struct SecurityProbeSink: Sendable {
+    /// Tool name the inbox item carries for a fail-closed probe posture.
+    static let inboxToolName = "security.probe"
+
+    /// Pulse actor receiving the suite outcomes.
+    let pulse: SystemHealthSnapshot
+    /// Hub fanning a changed pulse out to live dashboards.
+    let hub: WSHub
+    /// Report-hash gate deciding whether the posture moved.
+    let gate: SecurityProbeGate
+    /// Change gate deciding whether to publish.
+    let lastServed: HealthPulseLastServed
+    /// Inbox a fail-closed posture parks an item in, nil when unwired.
+    let approvals: ApprovalQueue?
+    /// Trusted-tool anomaly watchdog evaluated on the same cadence.
+    let watchdog: BehaviorWatchdog?
+}
+
+/// Recorded probe-report hash gate suppressing identical re-records.
+final class SecurityProbeGate: Sendable {
+    /// Last recorded report hash, nil before the first run.
+    private let box: OSAllocatedUnfairLock<String?>
+
+    init() {
+        box = OSAllocatedUnfairLock(initialState: nil)
+    }
+
+    /// Records the report hash when it differs from the last one.
+    /// - Parameter report: Report about to be recorded.
+    /// - Returns: True when the hash moved and the posture must be recorded.
+    func shouldRecord(_ report: ProbeReport) -> Bool {
+        box.withLock { current in
+            guard current != report.hash else { return false }
+            current = report.hash
+            return true
+        }
+    }
+}
+
+/// Resolves the probe sink for an application, seeding application storage
+/// on first use so every probe path records into one pulse.
+///
+/// Serve installs the pulse and the last-served gate at route registration;
+/// a direct route registration that never did still converges here instead
+/// of recording into an actor no route serves.
+/// - Parameter app: Application owning the pulse plus the gates.
+/// - Returns: The sink every probe path records through.
+func securityProbeSink(app: Application) -> SecurityProbeSink {
+    let pulse: SystemHealthSnapshot
+    if let stored = app.storage[SystemHealthSnapshotKey.self] {
+        pulse = stored
+    } else {
+        pulse = SystemHealthSnapshot(policyStore: app.runeWeaver.policyStore)
+        app.systemHealthSnapshot = pulse
+    }
+    let lastServed: HealthPulseLastServed
+    if let stored = app.storage[HealthPulseLastServedKey.self] {
+        lastServed = stored
+    } else {
+        lastServed = HealthPulseLastServed()
+        app.healthPulseLastServed = lastServed
+    }
+    let gate: SecurityProbeGate
+    if let stored = app.storage[SecurityProbeGateKey.self] {
+        gate = stored
+    } else {
+        gate = SecurityProbeGate()
+        app.securityProbeGate = gate
+    }
+    return SecurityProbeSink(
+        pulse: pulse,
+        hub: app.runeWeaver.hub,
+        gate: gate,
+        lastServed: lastServed,
+        approvals: app.runeWeaver.approvals,
+        watchdog: app.runeWeaver.watchdog
+    )
+}
+
+/// Runs the periodic security probe suite, records it into the pulse, and
+/// publishes a moved verdict.
+///
+/// The report-hash gate keeps an unchanged posture quiet — a nightly pass on
+/// a healthy machine re-asserts the same verdict instead of re-broadcasting
+/// a steady-state pulse — while a moved posture records and publishes, so
+/// the dashboard clears red only on a fresh passing snapshot. A fail-closed
+/// posture parks one bounded inbox item so the owner learns about it through
+/// the approvals surface; the item is gated by the same hash compare, so a
+/// persistent failure parks one item instead of one per run. Log lines carry
+/// verifier names and counts only, never outcome detail, following the
+/// content-free logging convention.
+/// - Parameters:
+///   - sink: Pulse, hub, inbox, and gates the run records through.
+///   - reason: Trigger label for the log line.
+/// - Returns: The report the run produced.
+@discardableResult
+func runSecurityProbes(sink: SecurityProbeSink, reason: String) async -> ProbeReport {
+    let report = await SecurityProbeSuite.runAll()
+    // The watchdog evaluates on the same periodic cadence — boot, policy
+    // writes, nightly, and on-demand — never per tool call, so its brake
+    // posture fuses into the pulse alongside the verifier suite.
+    if let watchdog = sink.watchdog {
+        _ = await watchdog.evaluate()
+        await sink.pulse.recordWatchdogHealth(watchdog.health())
+    }
+    guard sink.gate.shouldRecord(report) else {
+        RuneWeaverLog.server.debug("Security probe suite (\(reason)): posture unchanged.")
+        return report
+    }
+    await sink.pulse.recordProbes(report)
+    let value = await sink.pulse.snapshot()
+    if sink.lastServed.updateIfChanged(value) {
+        await publishHealthPulse(value, hub: sink.hub)
+    }
+    let failed = report.probes.filter { !$0.passed }.map(\.name).sorted()
+    let critical = report.probes
+        .filter { !$0.passed && $0.failClosed }
+        .map(\.name)
+        .sorted()
+    if let approvals = sink.approvals, !critical.isEmpty {
+        // The parked item carries no decision to make: deciding it stores no
+        // grant, so the inbox is a surfacing channel for a fail-closed
+        // posture, not a second gate the owner must re-run.
+        await approvals.enqueue(
+            toolName: SecurityProbeSink.inboxToolName,
+            description: "Security probes failed: \(critical.joined(separator: ", ")). "
+                + "The system pulse stays fail-closed until a passing re-check.",
+            input: ToolInput(toolName: SecurityProbeSink.inboxToolName, argumentsJSON: "{}")
+        )
+    }
+    if !critical.isEmpty {
+        RuneWeaverLog.server.warning("Security probe suite (\(reason)): fail-closed verifiers failed (\(critical.joined(separator: ", "))).")
+    } else if !failed.isEmpty {
+        RuneWeaverLog.server.info("Security probe suite (\(reason)): \(failed.joined(separator: ", ")) failed.")
+    } else {
+        RuneWeaverLog.server.info("Security probe suite (\(reason)): all \(report.probes.count) verifiers passed.")
+    }
+    return report
+}
+
+/// Lifecycle hook running the security probe suite at serve boot.
+///
+/// Fail-closed: a critical verifier failure (traversal, symlink escape, or
+/// replay) throws, so the boot aborts instead of serving an engine that
+/// cannot prove containment. Non-critical failures record into the pulse
+/// and surface on the dashboard without blocking the bind.
+final class SecurityProbeBootLifecycle: LifecycleHandler {
+    func didBootAsync(_ app: Application) async throws {
+        let report = await runSecurityProbes(sink: securityProbeSink(app: app), reason: "boot")
+        // The sovereign ceremony runs at boot on the same cadence: a recorded
+        // mismatch parks the pulse red without blocking the bind, so history
+        // truth is corroborated from the first snapshot.
+        _ = await runSovereignCeremony(sink: sovereignCeremonySink(app: app), reason: "boot")
+        guard !report.failedCritical else {
+            let critical = report.probes
+                .filter { !$0.passed && $0.failClosed }
+                .map(\.name)
+                .sorted()
+            throw SecurityProbeBootError(critical: critical)
+        }
+    }
+}
+
+/// Boot refusal naming the fail-closed verifiers that failed.
+private struct SecurityProbeBootError: Error, CustomStringConvertible {
+    /// Verifier names that failed fail-closed at boot.
+    let critical: [String]
+
+    var description: String {
+        "Serve boot refused: critical security probes failed (\(critical.joined(separator: ", ")))."
+    }
+}
+
+/// Lifecycle hook running the security probe suite on the nightly cadence.
+///
+/// Rides its own loop rather than the scheduler worker tick so the cadence
+/// owns one single-flight: a retained task cancelled on shutdown, sleeping
+/// the nightly interval between runs. A passing run whose report hash
+/// matches the boot posture stays quiet; only a moved posture records.
+final class SecurityProbeNightlyLifecycle: LifecycleHandler {
+    /// Nightly cadence window between suite runs.
+    static let intervalSeconds: TimeInterval = 24 * 60 * 60
+
+    /// Retained loop task so shutdown cancels it instead of leaving a
+    /// sleeping task alive past the server, mirroring the browser warmup
+    /// flight. Guarded by a lock because boot and shutdown arrive on
+    /// different executors.
+    private let loopState: OSAllocatedUnfairLock<Task<Void, Never>?>
+
+    init() {
+        loopState = OSAllocatedUnfairLock(initialState: nil)
+    }
+
+    func didBootAsync(_ app: Application) async throws {
+        // Resolve the sink once while isolated to the boot context so the
+        // retained loop captures only Sendable collaborators.
+        let sink = securityProbeSink(app: app)
+        let sovereignSink = sovereignCeremonySink(app: app)
+        loopState.withLock { current in
+            current?.cancel()
+            current = Task(priority: .background) {
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(for: .seconds(Self.intervalSeconds))
+                    } catch {
+                        break
+                    }
+                    if Task.isCancelled {
+                        break
+                    }
+                    _ = await runSecurityProbes(sink: sink, reason: "nightly")
+                    _ = await runSovereignCeremony(sink: sovereignSink, reason: "nightly")
+                }
+            }
+        }
+    }
+
+    func shutdownAsync(_: Application) async {
+        loopState.withLock { current in
+            current?.cancel()
+            current = nil
+        }
+    }
+}
+
+/// Middleware running the security probe suite after a committed policy write.
+///
+/// The two committing paths — `PUT /settings/policy` and the on-demand
+/// `POST /settings/policy/recheck-local/apply` — land live with no restart,
+/// so the suite re-runs once the write committed and records the fresh
+/// posture. Preview and verify paths write nothing, a refused save leaves
+/// the prior posture standing, and neither triggers a run.
+final class SecurityProbePolicyWriteMiddleware: AsyncMiddleware, Sendable {
+    /// Creates the middleware.
+    init() {}
+
+    func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
+        let response = try await next.respond(to: request)
+        guard Self.isPolicyWrite(request), (200 ..< 300).contains(Int(response.status.code)) else {
+            return response
+        }
+        _ = await runSecurityProbes(sink: securityProbeSink(app: request.application), reason: "policy-write")
+        return response
+    }
+
+    /// Whether a request is one of the committing policy write paths.
+    /// - Parameter request: Inbound request that produced a response.
+    /// - Returns: True for the PUT and the re-check apply writes.
+    static func isPolicyWrite(_ request: Request) -> Bool {
+        var path = request.url.path
+        while path.hasSuffix("/") {
+            path = String(path.dropLast())
+        }
+        switch (request.method, path) {
+        case (.PUT, "/\(ServerPaths.settings)/\(ServerPaths.policy)"):
+            return true
+        case (.POST, "/\(ServerPaths.settings)/\(ServerPaths.policy)/\(ServerPaths.recheckLocalApply)"):
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 /// Registers the health probe route.
 /// - Parameter app: Application receiving the route.
 private func registerHealthRoute(_ app: Application) {
+    // Boot the verified pulse once per registration against the serving
+    // policy store, then build the boot snapshot eagerly: serve boot (via
+    // configureRuneWeaver) and direct route registration converge here, and
+    // the first dashboard poll compares against a boot value instead of nil.
+    // The snapshot reads the live store on every probe, so policy writes
+    // surface with no restart plus no watcher.
+    let pulse = SystemHealthSnapshot(policyStore: app.runeWeaver.policyStore)
+    app.systemHealthSnapshot = pulse
+    let lastServed = HealthPulseLastServed()
+    // Adopt the same gate into application storage so boot and periodic
+    // probe runs share this route's change gate instead of holding a second
+    // one, keeping one publish path per pulse value.
+    app.healthPulseLastServed = lastServed
+    // Structured warm inheriting boot priority so the boot snapshot builds
+    // without ever delaying or failing registration; never awaited here.
+    Task(priority: .utility) { _ = await pulse.snapshot() }
     app.get(PathComponent.constant(ServerPaths.health)) { req async throws -> Response in
         let modelInfo = await req.application.runeWeaver.orchestrator.modelInfo
         let searchURL = req.application.runeWeaver.browserConfig.searxngURL
@@ -327,7 +771,34 @@ private func registerHealthRoute(_ app: Application) {
         // absent keys by keeping its file snapshot, so omission degrades the
         // banner instead of breaking the probe.
         let disclosesBind = req.runeWeaverAuthenticated
+        // Record this probe's subsystem outcome before snapshotting so the
+        // served verdict always reflects the probe just run: a down search
+        // degrades (it never failed closed), and a recovered one clears on
+        // the next passing cycle when its entry is overwritten. Read through
+        // application storage so a replaced test actor takes effect.
+        let pulse = req.application.systemHealthSnapshot
+        await pulse.recordProbes([HealthProbeOutcome(
+            name: "search",
+            passed: searchReachable,
+            detail: searchReachable ? nil : "Search service is unreachable."
+        )])
+        // The watchdog evaluates on the serving cadence too: the trailing
+        // window reads live state, so a spike engages the brake without a
+        // restart and the pulse fuses the latest posture on every probe.
+        let watchdog = req.application.runeWeaver.watchdog
+        _ = await watchdog.evaluate()
+        await pulse.recordWatchdogHealth(watchdog.health())
+        let pulseValue = await pulse.snapshot()
+        // Publish only on deep change against the last served value so
+        // steady-state polling never re-fans an identical pulse.
+        if lastServed.updateIfChanged(pulseValue) {
+            await publishHealthPulse(pulseValue, hub: req.application.runeWeaver.hub)
+        }
+        // Tips ride the authenticated projection only, mirroring the bind
+        // keys: an unauthenticated probe learns the verdict plus the reasons
+        // but never the digests.
         let health = HealthResponse(
+            status: pulseValue.status.rawValue,
             engine: req.application.runeWeaver.memoryEngineDescription,
             model: modelInfo.name,
             provider: modelInfo.provider,
@@ -339,7 +810,13 @@ private func registerHealthRoute(_ app: Application) {
             searchStartedAt: searchProgress.map(\.startedAt.timeIntervalSince1970),
             serverHostname: disclosesBind ? liveConfig.hostname : nil,
             serverPort: disclosesBind ? liveConfig.port : nil,
-            serverAllowedHosts: disclosesBind ? liveConfig.allowedHosts : nil
+            serverAllowedHosts: disclosesBind ? liveConfig.allowedHosts : nil,
+            ledgerTip: disclosesBind ? pulseValue.ledgerTip : nil,
+            ledgerVerifiedAt: pulseValue.ledgerVerifiedAt?.timeIntervalSince1970,
+            policyHash: disclosesBind ? pulseValue.policyHash : nil,
+            policyVerified: pulseValue.policyVerified,
+            probeVerdict: pulseValue.probeVerdict?.rawValue,
+            degradedReasons: pulseValue.degradedReasons.isEmpty ? nil : pulseValue.degradedReasons
         )
         // Advertise the authoritative turn cap alongside the JSON body so the
         // dashboard prefers the server value over its fallback constant; a
@@ -751,6 +1228,13 @@ private func registerApprovalRoutes(_ app: Application) {
             )
             guard resolved else {
                 throw Abort(.notFound, reason: "Unknown approval \(raw)")
+            }
+            // The brake clears only on an explicit owner Resume: approving the
+            // brake card releases every parked turn with fresh counters, while
+            // denying it leaves the park exactly as the owner left it.
+            if pending?.toolName == BehaviorWatchdog.brakeCardToolName, effectiveApproved {
+                await context.watchdog.resume()
+                await req.application.systemHealthSnapshot.recordWatchdogHealth(context.watchdog.health())
             }
             // Durable approvals create a stored grant inside `decide`, so
             // dashboards need a refresh signal; one-shot approvals store

@@ -49,6 +49,20 @@ export interface HealthResponse {
   // keys are absent when idle; absent means no Start is in flight.
   searchStage?: string | null;
   searchStartedAt?: number | null;
+  // Verified system-pulse fields from the engine snapshot. Optional because older engines predate
+  // the pulse; absent means unknown and the card falls back to its legacy reading. Tips
+  // (ledgerTip, policyHash) are owner-private: an unauthenticated probe omits them while the
+  // status, verdict, and reasons stay on every projection so degraded dashboards still disclose.
+  ledgerTip?: string | null;
+  // Last explicit ledger verification as Unix seconds, mirroring searchStartedAt. Absent until
+  // an explicit verification is stamped.
+  ledgerVerifiedAt?: number | null;
+  policyHash?: string | null;
+  policyVerified?: boolean;
+  // Collapsed probe verdict ("pass", "degraded", or "fail"). Absent before any probe reports.
+  probeVerdict?: string | null;
+  // Bounded backing reasons for a non-green status, driving the card disclosure.
+  degradedReasons?: string[];
   // Authoritative turn cap advertised by the engine on GET /health. Optional because older
   // engines predate the advertisement and because getHealth injects it from the response
   // header when the JSON body carries none; absent degrades to MAX_CONCURRENT_CHAT_TURNS.
@@ -1380,6 +1394,42 @@ export interface SchedulerJobsResponse {
   count: number;
 }
 
+// Booked delayed send row mirrored from the engine `ScheduledSend` contract:
+// the stored bytes, recipient, and fire time are immutable once booked, and
+// the fire worker replays them exactly once with re-validation.
+export interface ScheduledSend {
+  id: string;
+  channel: "email" | "messages";
+  status: "queued" | "sending" | "sent" | "cancelled" | "failed";
+  account?: string | null;
+  recipient: string;
+  subject?: string | null;
+  bodyText?: string | null;
+  bodyHtml?: string | null;
+  fireAt: string;
+  createdAt: string;
+  updatedAt: string;
+  settledAt?: string | null;
+  failureReason?: string | null;
+}
+
+export interface ScheduledSendsResponse {
+  sends: ScheduledSend[];
+  count: number;
+}
+
+export interface NewScheduledSendInput {
+  channel: "email" | "messages";
+  account?: string | null;
+  recipient: string;
+  subject?: string | null;
+  bodyText?: string | null;
+  bodyHtml?: string | null;
+  // Approved fire time as epoch seconds; the engine minute-aligns it within
+  // its lead-time and horizon bounds.
+  fireAt: number;
+}
+
 export interface NewSchedulerJobInput {
   name: string;
   schedule: string;
@@ -2288,6 +2338,32 @@ export function runJobNow(id: string): Promise<OrchestratorResponse> {
     `/scheduler/jobs/${encodeURIComponent(id)}/run`,
     { method: "POST", body: JSON.stringify({}) },
   ).then((response) => validateTurnResponse(response, "Invalid job run response"));
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled sends (Schedules surface)
+// ---------------------------------------------------------------------------
+
+// Booked delayed sends mirror the engine byte-immutable contract: booking
+// stores the exact bytes, recipient, and fire time at the approval moment,
+// and the fire worker replays them exactly once with re-validation.
+export function listScheduledSends(): Promise<ScheduledSendsResponse> {
+  return fetchJson<ScheduledSendsResponse>(`/scheduler/sends`);
+}
+
+export function bookScheduledSend(
+  input: NewScheduledSendInput,
+): Promise<ScheduledSend> {
+  return fetchJson<ScheduledSend>("/scheduler/sends", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function cancelScheduledSend(id: string): Promise<ScheduledSend> {
+  return fetchJson<ScheduledSend>(`/scheduler/sends/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 // ---------------------------------------------------------------------------
