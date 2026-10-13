@@ -41,6 +41,22 @@ Rules:
 - Keep secrets out of descriptions, schemas, logs, and errors. Resolve them at execution time.
 - Add unit tests under `Tests/<Target>Tests/` that cover the handler, bad input, and registration.
 
+## Wire and Configuration Casing
+
+Rune Weaver enforces a strict single-casing model across layers:
+
+| Layer | Casing | Rule |
+|---|---|---|
+| `config.toml` & `policy.toml` on disk | `snake_case` | Hand-written TOML parsers; user files on disk keep working |
+| Swift & TypeScript in-memory models | `camelCase` | Standard language idiomatic casing |
+| HTTP REST & WebSocket wire APIs | `camelCase` only | Single spelling per field on the wire; no snake_case aliases accepted or emitted |
+
+Guidelines:
+- Never add `snake_case` CodingKeys or aliases to Server DTOs or WebSocket wire frames.
+- New fields must use `camelCase` on the wire and `snake_case` in disk TOML.
+- Wire convention: use `memoryMb` (lowercase 'b') and `quotaMB` (uppercase 'MB').
+- Contract tests in `Tests/RuneWeaverServerTests/WireCasingContractTests.swift` and `Web/src/wireCasing.test.ts` continuously enforce that no snake_case keys are emitted over the wire.
+
 ## Style
 
 Every new source and test file starts with a header comment that states its purpose and role. Write comments that explain why, not what. Never reference task IDs, session IDs, or plan artifacts in code or comments.

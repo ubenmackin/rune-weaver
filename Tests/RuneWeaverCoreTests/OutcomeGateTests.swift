@@ -352,7 +352,7 @@ struct OutcomeGateTests {
         #expect(!text.contains("\"goalID\""))
         #expect(!text.contains("\"goal_id\""))
 
-        for alias in ["goalId", "goalID", "goal_id"] {
+        for alias in ["goalId", "goalID"] {
             let aliased = text.replacingOccurrences(of: "\"goalId\"", with: "\"\(alias)\"")
             let decoded = try JSONDecoder().decode(WSProactiveMessageFrame.self, from: Data(aliased.utf8))
             #expect(decoded.goalID == goalID)
@@ -372,7 +372,6 @@ struct OutcomeGateTests {
         let canonicalData = try JSONEncoder().encode(canonicalFrame)
         var dict = try #require(try JSONSerialization.jsonObject(with: canonicalData) as? [String: Any])
         dict["goalID"] = legacyID.uuidString
-        dict["goal_id"] = legacyID.uuidString
         let merged = try JSONSerialization.data(withJSONObject: dict)
         let mergedDecoded = try JSONDecoder().decode(WSProactiveMessageFrame.self, from: merged)
         #expect(mergedDecoded.goalID == canonicalID)

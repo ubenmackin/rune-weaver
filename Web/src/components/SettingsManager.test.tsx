@@ -87,17 +87,17 @@ const mockSettings = {
     mlx: {
       enabled: true,
       model: "gemma-4-9b",
-      server_url: "http://localhost:8080",
-      api_style: "openai",
-      context_length: 32000,
+      serverURL: "http://localhost:8080",
+      apiStyle: "openai",
+      contextLength: 32000,
     },
     openrouter: {
       enabled: true,
       model: "anthropic/claude-3.5-sonnet",
-      server_url: "https://openrouter.ai/api/v1",
-      api_key_env: "OPENROUTER_API_KEY",
-      api_style: "openai",
-      context_length: 128000,
+      serverURL: "https://openrouter.ai/api/v1",
+      apiKeyEnv: "OPENROUTER_API_KEY",
+      apiStyle: "openai",
+      contextLength: 128000,
     },
   },
   memoryVectorDBPath: "memory/vectors",
@@ -108,9 +108,9 @@ const mockSettings = {
   voiceWhisperModel: "base.en",
   voiceTTSProvider: "system",
   containers: {
-    memory_mb: DEFAULT_CONTAINERS_MEMORY_MB,
-    max_concurrent: DEFAULT_CONTAINERS_MAX_CONCURRENT,
-    ttl_minutes: DEFAULT_CONTAINERS_TTL_MINUTES,
+    memoryMb: DEFAULT_CONTAINERS_MEMORY_MB,
+    maxConcurrent: DEFAULT_CONTAINERS_MAX_CONCURRENT,
+    ttlMinutes: DEFAULT_CONTAINERS_TTL_MINUTES,
   },
   emailAccounts: [
     {
@@ -927,9 +927,9 @@ describe("SettingsManager", () => {
     const containersPatch = sentPayload?.["containers"] as
       | Record<string, unknown>
       | undefined;
-    expect(containersPatch?.["memory_mb"]).toBe(1024);
-    expect(containersPatch?.["max_concurrent"]).toBe(7);
-    expect(containersPatch?.["ttl_minutes"]).toBe(90);
+    expect(containersPatch?.["memoryMb"]).toBe(1024);
+    expect(containersPatch?.["maxConcurrent"]).toBe(7);
+    expect(containersPatch?.["ttlMinutes"]).toBe(90);
     // Replaced sandbox keys must never reach the engine; the section
     // replaced them with no compatibility alias, so sending them would look
     // saved without persisting.
@@ -972,7 +972,7 @@ describe("SettingsManager", () => {
       expect(
         screen.getByText(
           new RegExp(
-            `memory_mb must be between ${CONTAINERS_MEMORY_MIN_MB} and ${CONTAINERS_MEMORY_MAX_MB}`,
+            `memoryMb must be between ${CONTAINERS_MEMORY_MIN_MB} and ${CONTAINERS_MEMORY_MAX_MB}`,
             "i",
           ),
         )
@@ -1319,7 +1319,7 @@ describe("SettingsManager", () => {
             maxToolIterations: 12,
             schedulerMaxToolIterations: 30,
             goals: {
-              max_tool_iterations: 40,
+              maxToolIterations: 40,
             },
           });
         }
@@ -1387,12 +1387,12 @@ describe("SettingsManager", () => {
           ...mockSettings,
           goals: {
             enabled: true,
-            step_interval_minutes: 1440,
-            max_active_goals: 10,
-            max_steps_per_goal: 8,
-            plan_timeout_seconds: 120,
-            max_triggers_per_goal: 4,
-            max_tool_iterations: 47,
+            stepIntervalMinutes: 1440,
+            maxActiveGoals: 10,
+            maxStepsPerGoal: 8,
+            planTimeoutSeconds: 120,
+            maxTriggersPerGoal: 4,
+            maxToolIterations: 47,
           },
         });
       }),
@@ -1496,7 +1496,7 @@ describe("SettingsManager", () => {
     expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
   });
 
-  it("retires the homelab allowed origins editor in favor of the Policy tab pointer", async () => {
+  it("retires the homelab allowed origins editor in favor of the Access tab pointer", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -1550,7 +1550,7 @@ describe("SettingsManager", () => {
     await user.click((await screen.findAllByRole("button", { name: /^Configure$/ }))[0]);
 
     // The legacy editor is gone even though the server still returns the
-    // wire-compat field, and the compact pointer names the Policy tab.
+    // wire-compat field, and the compact pointer names the Access tab.
     expect(screen.queryByLabelText(/Allowed Origins \(one per line\)/i)).toBeNull();
     expect(screen.queryByText(/Homelab Allowed Origins/i)).toBeNull();
     expect(screen.queryByText(/SSRF guard reads that list/i)).toBeNull();
@@ -1559,7 +1559,7 @@ describe("SettingsManager", () => {
     ).toBeDefined();
     expect(
       screen.getByText(
-        /Domain allow\/deny rules and local network access are managed under the Policy tab\./i
+        /Domain allow\/deny rules and local network access are managed under the Access tab\./i
       )
     ).toBeDefined();
 
@@ -1571,11 +1571,11 @@ describe("SettingsManager", () => {
     ).toBeNull();
     expect(screen.queryByText(/Email servers.*automatically trusted/i)).toBeNull();
 
-    // The pointer navigates to the Policy tab and closes the modal.
+    // The pointer navigates to the Access tab and closes the modal.
     await user.click(screen.getByRole("button", { name: /Manage Security Policy/i }));
     await waitFor(() => {
       expect(
-        screen.getByRole("tab", { name: /^Policy$/i }).getAttribute("aria-selected")
+        screen.getByRole("tab", { name: /^Access$/i }).getAttribute("aria-selected")
       ).toBe("true");
     });
     expect(
@@ -2173,9 +2173,9 @@ describe("SettingsManager", () => {
       unknown
     >;
     expect(desktop).toBeDefined();
-    expect(desktop).toHaveProperty("max_image_dimension");
-    expect(desktop).toHaveProperty("jpeg_quality");
-    expect(desktop).toHaveProperty("blocked_apps");
+    expect(desktop).toHaveProperty("maxImageDimension");
+    expect(desktop).toHaveProperty("jpegQuality");
+    expect(desktop).toHaveProperty("blockedApps");
     expect(desktop).not.toHaveProperty("screen_capture_enabled");
     expect(desktop).not.toHaveProperty("control_enabled");
   });
@@ -2272,9 +2272,9 @@ describe("SettingsManager", () => {
       string,
       unknown
     >;
-    expect(desktop.blocked_apps).toEqual(["Terminal", "1Password"]);
-    expect(desktop).toHaveProperty("max_image_dimension");
-    expect(desktop).toHaveProperty("jpeg_quality");
+    expect(desktop.blockedApps).toEqual(["Terminal", "1Password"]);
+    expect(desktop).toHaveProperty("maxImageDimension");
+    expect(desktop).toHaveProperty("jpegQuality");
     expect(desktop).not.toHaveProperty("screen_capture_enabled");
     expect(desktop).not.toHaveProperty("control_enabled");
   });
@@ -2468,13 +2468,16 @@ describe("SettingsManager", () => {
     await user.click(toolsTabBtn);
 
     // Only the media row earns a header button: the server hasConfig flag is
-    // the sole authority, so email and files rows without a flagged tool stay
-    // clean even though their sections still render with bulk toggles.
+    // the sole authority, so email rows without a flagged tool stay clean even
+    // though their section still renders with bulk toggles. Files rows carry
+    // no category of their own anymore and land in Other Tools.
     await waitFor(() => {
       expect(screen.getByText("Media & Streaming")).toBeDefined();
     });
     expect(screen.getByText("Email & Mailboxes")).toBeDefined();
-    expect(screen.getByText("Files & Workspace")).toBeDefined();
+    expect(screen.queryByText("Files & Workspace")).toBeNull();
+    expect(screen.getByText("Other Tools")).toBeDefined();
+    expect(screen.getByText("files.read")).toBeDefined();
     const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
     expect(configureButtons.length).toBe(1);
     expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
@@ -2595,7 +2598,7 @@ describe("SettingsManager", () => {
     expect(screen.getByText("browser.navigate")).toBeDefined();
   });
 
-  it("routes bash.exec to the Bash & Shell category with its own pill and Configure", async () => {
+  it("routes bash.exec to Other Tools with no category Configure", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -2646,31 +2649,25 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    // Bash groups under its own section rather than falling through to
-    // Other Tools, with a dedicated pill beside the email pill.
+    // Bash has no category of its own: the row falls through to Other Tools
+    // beside the email section, with no Bash pill left behind.
     await waitFor(() => {
-      expect(screen.getByText("Bash & Shell")).toBeDefined();
+      expect(screen.getByText("Other Tools")).toBeDefined();
     });
+    expect(screen.queryByText("Bash & Shell")).toBeNull();
     expect(screen.getByText("Email & Mailboxes")).toBeDefined();
-    expect(screen.queryByText("Other Tools")).toBeNull();
-    expect(document.querySelectorAll(".tool-category-section").length).toBe(2);
     expect(screen.getByText("bash.exec")).toBeDefined();
-    expect(document.querySelectorAll(".tools-category-pill").length).toBe(3);
+    expect(document.querySelectorAll(".tool-category-section").length).toBe(2);
     const pillsBar = document.querySelector(".tools-category-pills");
     expect(pillsBar).not.toBeNull();
-    expect(within(pillsBar as HTMLElement).getByText("Bash")).toBeDefined();
+    expect(within(pillsBar as HTMLElement).queryByText("Bash")).toBeNull();
+    expect(within(pillsBar as HTMLElement).getByText("Other")).toBeDefined();
     expect(within(pillsBar as HTMLElement).getByText("Email")).toBeDefined();
-    // Only the bash row earns a header button: the server hasConfig flag is
-    // the sole authority, so the email section stays clean.
-    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
-    expect(configureButtons.length).toBe(1);
-    expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
-    expect(configureButtons[0].closest(".builtin-tool-card")).toBeNull();
-    await user.click(configureButtons[0]);
-
-    // Header Configure opens the Bash editor, never the fallback.
-    expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
-    expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
+    // Even with a stale hasConfig flag, the Other Tools header earns no
+    // Configure: the Bash & Shell editor lives on the Access surface, so no
+    // dangling button can open a deleted modal from a moved editor.
+    expect(screen.queryByRole("button", { name: /^Configure$/ })).toBeNull();
+    expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
   });
 
   it("saves the Security Files & Access section through the shared files payload", async () => {
@@ -2766,256 +2763,6 @@ describe("SettingsManager", () => {
     expect(sentPayload?.["filesRequireApprovalOnDeny"]).toBe(true);
   });
 
-  it("saves the Bash & Shell modal with the ordered bash payload", async () => {
-    const user = userEvent.setup();
-    const mockTools = [
-      {
-        name: "bash.exec",
-        description: "Run shell commands",
-        permissionLevel: "requiresApproval",
-        inputSchema: "{}",
-        isEnabled: true,
-        isBuiltIn: true,
-        pluginID: null,
-        source: "builtin",
-        integrityStatus: "valid",
-        hasConfig: true,
-      },
-    ];
-    const settingsWithBash = {
-      ...mockSettings,
-      bash: {
-        enabled: true,
-        default_action: "ask",
-        rules: [{ pattern: "*", action: "ask" }],
-        timeout_seconds: 30,
-        allow_network: false,
-        sandbox_mode: "strictContainer",
-        host_allow_patterns: ["xcodebuild*", "codesign*"],
-      },
-    };
-    let sentPayload: Record<string, unknown> | null = null;
-    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const urlStr = String(url);
-      if (init?.method === "PUT") {
-        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
-        return jsonResponse({
-          ...settingsWithBash,
-          ...sentPayload,
-        });
-      }
-      if (urlStr.includes("/tools")) {
-        return jsonResponse({ tools: mockTools });
-      }
-      if (urlStr.includes("/plugins")) {
-        return jsonResponse({ plugins: [] });
-      }
-      return jsonResponse(settingsWithBash);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<SettingsManager />);
-
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
-    });
-
-    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
-    await user.click(toolsTabBtn);
-
-    await waitFor(() => {
-      expect(screen.getByText("Bash & Shell")).toBeDefined();
-    });
-    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
-    expect(configureButtons.length).toBe(1);
-    await user.click(configureButtons[0]);
-
-    // The Bash modal carries the shell policy plus the confinement editors:
-    // execution tier dropdown with three tiers and the host allowlist.
-    expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
-    expect(screen.getByLabelText(/Default action/i)).toBeDefined();
-    expect(screen.getByLabelText(/Timeout \(seconds\)/i)).toBeDefined();
-    expect(screen.getByLabelText(/Execution tier/i)).toBeDefined();
-    expect(screen.getByLabelText(/Host allow patterns/i)).toBeDefined();
-    expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
-
-    // Fresh snapshot matches the stored confinement: tier plus allowlist seed
-    // from the engine defaults.
-    expect(
-      (screen.getByLabelText(/Execution tier/i) as HTMLSelectElement).value,
-    ).toBe("strictContainer");
-    expect(
-      (screen.getByLabelText(/Host allow patterns/i) as HTMLTextAreaElement)
-        .value,
-    ).toContain("xcodebuild*");
-    expect(screen.getByText(/Empty list blocks host execution entirely/i)).toBeDefined();
-
-    // Unedited save sends a changed-only empty patch so stored values survive.
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
-
-    await waitFor(() => {
-      expect(sentPayload).not.toBeNull();
-    });
-    const bash = (sentPayload as unknown as Record<string, unknown>)["bash"] as Record<
-      string,
-      unknown
-    >;
-    expect(bash).toBeDefined();
-    expect(bash).toEqual({});
-  });
-
-  it("pins the bash textarea contract with ordered last-match rules", async () => {
-    const user = userEvent.setup();
-    const mockTools = [
-      {
-        name: "bash.exec",
-        description: "Run shell commands",
-        permissionLevel: "requiresApproval",
-        inputSchema: "{}",
-        isEnabled: true,
-        isBuiltIn: true,
-        pluginID: null,
-        source: "builtin",
-        integrityStatus: "valid",
-        hasConfig: true,
-      },
-    ];
-    const settingsWithBash = {
-      ...mockSettings,
-      bash: {
-        enabled: true,
-        default_action: "deny",
-        rules: [
-          { pattern: "*", action: "deny" },
-          { pattern: "swiftformat *", action: "allow" },
-        ],
-        timeout_seconds: 30,
-        allow_network: false,
-        sandbox_mode: "strictContainer",
-        host_allow_patterns: ["xcodebuild*", "codesign*"],
-      },
-    };
-    let sentPayload: Record<string, unknown> | null = null;
-    let putCount = 0;
-    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const urlStr = String(url);
-      if (init?.method === "PUT") {
-        putCount += 1;
-        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
-        return jsonResponse({
-          ...settingsWithBash,
-          ...sentPayload,
-        });
-      }
-      if (urlStr.includes("/tools")) {
-        return jsonResponse({ tools: mockTools });
-      }
-      if (urlStr.includes("/plugins")) {
-        return jsonResponse({ plugins: [] });
-      }
-      return jsonResponse(settingsWithBash);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<SettingsManager />);
-
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
-    });
-
-    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
-    await user.click(toolsTabBtn);
-
-    await waitFor(() => {
-      expect(screen.getByText("Bash & Shell")).toBeDefined();
-    });
-    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
-    expect(configureButtons.length).toBe(1);
-    await user.click(configureButtons[0]);
-    expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
-
-    // Pinned by accessible label as a single textarea with the opencode
-    // fixture rendered in order: catch-all first, specifics after.
-    const rulesTextarea = screen.getByLabelText(
-      /Rules, one per line/i
-    ) as HTMLTextAreaElement;
-    expect(rulesTextarea.tagName).toBe("TEXTAREA");
-    expect(rulesTextarea.placeholder).toContain("* = deny");
-    expect(rulesTextarea.value).toContain("* = deny");
-    expect(rulesTextarea.value).toContain("swiftformat * = allow");
-    // Format hint pins the `pattern = action` line shape with the closed
-    // allow/ask/deny set and the top-to-bottom last-match-wins order.
-    expect(screen.getByText(/pattern = action/i)).toBeDefined();
-    expect(screen.getByText(/last matching rule wins/i)).toBeDefined();
-    // Live count follows the parsed textarea rows.
-    expect(screen.getByText(/2 rules/i)).toBeDefined();
-
-    // No row model exists for bash rules: there are no per-rule inputs or
-    // remove buttons, only the one textarea.
-    expect(screen.queryByLabelText(/Rule 1/i)).toBeNull();
-    expect(screen.queryByRole("button", { name: /Remove.*rule/i })).toBeNull();
-    expect(screen.getAllByLabelText(/Rules, one per line/i).length).toBe(1);
-
-    // Add Rule focuses the editor for keyboard flow without altering the
-    // parsed count by itself.
-    await user.click(screen.getByRole("button", { name: /Add Rule/i }));
-    await waitFor(() => {
-      expect(document.activeElement).toBe(rulesTextarea);
-    });
-    expect(rulesTextarea.value.endsWith("\n")).toBe(true);
-    expect(screen.getByText(/2 rules/i)).toBeDefined();
-
-    // Blank lines and surrounding whitespace collapse on save with order
-    // preserved top-to-bottom; the wire shape is an ordered rule array.
-    // Malformed lines reject first with their editor line number and never
-    // reach the network, so the ordered save below runs from a clean form.
-    const editedTextarea = screen.getByLabelText(
-      /Rules, one per line/i
-    ) as HTMLTextAreaElement;
-    await user.clear(editedTextarea);
-    await user.type(editedTextarea, "* = deny\nnot a rule");
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
-    await waitFor(() => {
-      expect(screen.getByText(/Line 2/i)).toBeDefined();
-    });
-    expect(putCount).toBe(0);
-
-    // An unknown action on the right also rejects with its line number.
-    // The Line 2 matcher disambiguates the validation error from the
-    // format hint, which also mentions the allow/ask/deny set.
-    await user.clear(editedTextarea);
-    await user.type(editedTextarea, "* = deny\nswiftformat * = maybe");
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
-    await waitFor(() => {
-      expect(screen.getByText(/Line 2/i)).toBeDefined();
-    });
-    expect(
-      screen.getByText(/Line 2: action must be allow, ask, or deny/i)
-    ).toBeDefined();
-    expect(putCount).toBe(0);
-
-    // Ordered save runs last: blanks collapse and order is preserved
-    // top-to-bottom as a changed-only patch carrying only the edited rules.
-    await user.clear(editedTextarea);
-    await user.type(editedTextarea, "  * = allow  \n\nswiftformat * = allow\n   \n");
-    expect(screen.getByText(/2 rules/i)).toBeDefined();
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
-
-    await waitFor(() => {
-      expect(sentPayload).not.toBeNull();
-    });
-    const bash = (sentPayload as unknown as Record<string, unknown>)["bash"] as Record<
-      string,
-      unknown
-    >;
-    expect(bash["rules"]).toEqual([
-      { pattern: "*", action: "allow" },
-      { pattern: "swiftformat *", action: "allow" },
-    ]);
-    expect(bash["sandbox_mode"]).toBeUndefined();
-    expect(bash["host_allow_patterns"]).toBeUndefined();
-  });
-
   it("keeps Files & Access in the Security pane", async () => {
     const user = userEvent.setup();
     const settingsWithFiles = {
@@ -3052,7 +2799,7 @@ describe("SettingsManager", () => {
     expect(screen.getByTestId("containers-machine-image")).toBeDefined();
   });
 
-  it("keeps bash.exec out of Other Tools", async () => {
+  it("lands bash.exec in Other Tools beside unknown prefixes", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -3103,31 +2850,26 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    // Bash lands in its own section while the unknown prefix falls through
-    // to Other Tools; neither section borrows the other's tool.
+    // Bash routes to the same Other Tools section as the unknown prefix —
+    // one section, no Bash pill, no borrowed section boundary between them.
     await waitFor(() => {
-      expect(screen.getByText("Bash & Shell")).toBeDefined();
+      expect(screen.getByText("Other Tools")).toBeDefined();
     });
-    expect(screen.getByText("Other Tools")).toBeDefined();
-    expect(document.querySelectorAll(".tool-category-section").length).toBe(2);
+    expect(screen.queryByText("Bash & Shell")).toBeNull();
+    expect(document.querySelectorAll(".tool-category-section").length).toBe(1);
     const pillsBar = document.querySelector(".tools-category-pills");
     expect(pillsBar).not.toBeNull();
-    expect(within(pillsBar as HTMLElement).getByText("Bash")).toBeDefined();
+    expect(within(pillsBar as HTMLElement).queryByText("Bash")).toBeNull();
     expect(within(pillsBar as HTMLElement).getByText("Other")).toBeDefined();
     const sections = Array.from(document.querySelectorAll(".tool-category-section"));
-    const bashSection = sections.find((section) =>
-      section.textContent?.includes("Bash & Shell")
-    );
     const otherSection = sections.find((section) =>
       section.textContent?.includes("Other Tools")
     );
-    expect(bashSection?.textContent).toContain("bash.exec");
-    expect(bashSection?.textContent).not.toContain("custom.widget");
+    expect(otherSection?.textContent).toContain("bash.exec");
     expect(otherSection?.textContent).toContain("custom.widget");
-    expect(otherSection?.textContent).not.toContain("bash.exec");
   });
 
-  it("routes colliding external names to Other while keeping builtin bash.exec in Bash", () => {
+  it("routes colliding external names and builtin bash and files tools to Other", () => {
     const builtinBash = {
       name: "bash.exec",
       description: "Run shell commands",
@@ -3162,206 +2904,24 @@ describe("SettingsManager", () => {
       source: "plugin",
       integrityStatus: "valid",
     };
-    // Builtin shell entry stays in its section even with the provenance gate.
-    expect(getToolCategory(builtinBash)).toBe("bash");
+    // Builtin shell entry routes to Other with the provenance gate: its policy
+    // editor lives on the Access surface, so the row carries only the
+    // enablement toggle here.
+    expect(getToolCategory(builtinBash)).toBe("other");
     // External names never join builtin sections regardless of prefix.
     expect(getToolCategory(pluginBashEvil)).toBe("other");
     expect(getToolCategory(pluginFilesEvil)).toBe("other");
     // String fallback has no provenance, so only exact known builtin names
-    // resolve; colliding or unknown names fall through to Other.
-    expect(getToolCategory("bash.exec")).toBe("bash");
-    expect(getToolCategory("files.read")).toBe("files");
+    // resolve; bash and files builtins join the external fallthrough in Other
+    // and colliding or unknown names fall through there too.
+    expect(getToolCategory("bash.exec")).toBe("other");
+    expect(getToolCategory("files.read")).toBe("other");
     // api.* collapses into browser-web like browser.* and web.*, so the removed
     // dead API category entry can never strand a pill or section.
     expect(getToolCategory("api.request")).toBe("browser-web");
     expect(getToolCategory("bash.evil")).toBe("other");
     expect(getToolCategory("files.evil")).toBe("other");
     expect(getToolCategory("custom.widget")).toBe("other");
-  });
-
-  it("rejects an empty bash rule list before any network write", async () => {
-    const user = userEvent.setup();
-    const mockTools = [
-      {
-        name: "bash.exec",
-        description: "Run shell commands",
-        permissionLevel: "requiresApproval",
-        inputSchema: "{}",
-        isEnabled: true,
-        isBuiltIn: true,
-        pluginID: null,
-        source: "builtin",
-        integrityStatus: "valid",
-        hasConfig: true,
-      },
-    ];
-    const settingsWithBash = {
-      ...mockSettings,
-      bash: {
-        enabled: true,
-        default_action: "ask",
-        rules: [{ pattern: "*", action: "ask" }],
-        timeout_seconds: 30,
-        allow_network: false,
-      },
-    };
-    let putCount = 0;
-    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const urlStr = String(url);
-      if (init?.method === "PUT") {
-        putCount += 1;
-        const sent = JSON.parse(init.body as string) as Record<string, unknown>;
-        return jsonResponse({
-          ...settingsWithBash,
-          ...sent,
-        });
-      }
-      if (urlStr.includes("/tools")) {
-        return jsonResponse({ tools: mockTools });
-      }
-      if (urlStr.includes("/plugins")) {
-        return jsonResponse({ plugins: [] });
-      }
-      return jsonResponse(settingsWithBash);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<SettingsManager />);
-
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
-    });
-
-    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
-    await user.click(toolsTabBtn);
-
-    await waitFor(() => {
-      expect(screen.getByText("Bash & Shell")).toBeDefined();
-    });
-    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
-    expect(configureButtons.length).toBe(1);
-    await user.click(configureButtons[0]);
-    expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
-
-    // Clearing the textarea leaves an empty list, which must fail closed
-    // instead of falling through to the default action.
-    const bashTextarea = screen.getByLabelText(
-      /Rules, one per line/i
-    ) as HTMLTextAreaElement;
-    await user.clear(bashTextarea);
-    expect(screen.getByText(/0 rules/i)).toBeDefined();
-
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
-
-    await waitFor(() => {
-      expect(screen.getByText(/Invalid bash rules/i)).toBeDefined();
-    });
-    expect(screen.getByText(/At least one rule is required/i)).toBeDefined();
-    expect(putCount).toBe(0);
-  });
-
-  it("reads camelCase bash aliases while sending snake_case keys", async () => {
-    const user = userEvent.setup();
-    const mockTools = [
-      {
-        name: "bash.exec",
-        description: "Run shell commands",
-        permissionLevel: "requiresApproval",
-        inputSchema: "{}",
-        isEnabled: true,
-        isBuiltIn: true,
-        pluginID: null,
-        source: "builtin",
-        integrityStatus: "valid",
-        hasConfig: true,
-      },
-    ];
-    const settingsWithCamelBash = {
-      ...mockSettings,
-      bash: {
-        enabled: true,
-        defaultAction: "deny",
-        rules: [{ pattern: "git *", action: "allow" }],
-        timeoutSeconds: 45,
-        allowNetwork: true,
-        sandboxMode: "machineScoped",
-        hostAllowPatterns: ["xcodebuild*"],
-      },
-    };
-    let sentPayload: Record<string, unknown> | null = null;
-    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const urlStr = String(url);
-      if (init?.method === "PUT") {
-        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
-        return jsonResponse({
-          ...settingsWithCamelBash,
-          ...sentPayload,
-        });
-      }
-      if (urlStr.includes("/tools")) {
-        return jsonResponse({ tools: mockTools });
-      }
-      if (urlStr.includes("/plugins")) {
-        return jsonResponse({ plugins: [] });
-      }
-      return jsonResponse(settingsWithCamelBash);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<SettingsManager />);
-
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
-    });
-
-    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
-    await user.click(toolsTabBtn);
-
-    await waitFor(() => {
-      expect(screen.getByText("Bash & Shell")).toBeDefined();
-    });
-    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
-    expect(configureButtons.length).toBe(1);
-    await user.click(configureButtons[0]);
-    expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
-
-    // Camel aliases populate the same fields as the snake keys, with rules
-    // serialized as `pattern = action` lines preserving order. Confinement
-    // reads the camel aliases too.
-    const defaultSelect = screen.getByLabelText(/Default action/i) as HTMLSelectElement;
-    expect(defaultSelect.value).toBe("deny");
-    expect(screen.getByDisplayValue("45")).toBeDefined();
-    expect(screen.getByDisplayValue("git * = allow")).toBeDefined();
-    expect(
-      (screen.getByLabelText(/Execution tier/i) as HTMLSelectElement).value,
-    ).toBe("machineScoped");
-    expect(
-      (screen.getByLabelText(/Host allow patterns/i) as HTMLTextAreaElement)
-        .value,
-    ).toContain("xcodebuild*");
-
-    // Editing one knob sends a changed-only snake_case patch: only the edited
-    // timeout travels while untouched camel-populated values stay omitted.
-    const timeoutInput = screen.getByLabelText(/Timeout \(seconds\)/i) as HTMLInputElement;
-    await user.clear(timeoutInput);
-    await user.type(timeoutInput, "46");
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
-
-    await waitFor(() => {
-      expect(sentPayload).not.toBeNull();
-    });
-    const bash = (sentPayload as unknown as Record<string, unknown>)["bash"] as Record<
-      string,
-      unknown
-    >;
-    expect(bash).toBeDefined();
-    expect(bash["timeout_seconds"]).toBe(46);
-    expect(bash["timeoutSeconds"]).toBeUndefined();
-    expect(bash["default_action"]).toBeUndefined();
-    expect(bash["allow_network"]).toBeUndefined();
-    expect(bash["rules"]).toBeUndefined();
-    expect(bash["sandbox_mode"]).toBeUndefined();
-    expect(bash["host_allow_patterns"]).toBeUndefined();
   });
 
   it("edits allowed roots via the Security textarea with live count, reset, and array payload", async () => {
@@ -3530,9 +3090,9 @@ describe("SettingsManager", () => {
     const settingsWithFanout = {
       ...mockSettings,
       fanout: {
-        max_workers: 4,
-        worker_timeout_seconds: 300,
-        full_tools: false,
+        maxWorkers: 4,
+        workerTimeoutSeconds: 300,
+        fullTools: false,
       },
     };
     vi.stubGlobal(
@@ -3648,9 +3208,9 @@ describe("SettingsManager", () => {
     const settingsWithFanout = {
       ...mockSettings,
       fanout: {
-        max_workers: 4,
-        worker_timeout_seconds: 300,
-        full_tools: false,
+        maxWorkers: 4,
+        workerTimeoutSeconds: 300,
+        fullTools: false,
       },
     };
     let sentPayload: Record<string, unknown> | null = null;
@@ -3710,11 +3270,11 @@ describe("SettingsManager", () => {
       unknown
     >;
     expect(fanout).toBeDefined();
-    expect(fanout["max_workers"]).toBe(2);
-    expect(fanout["worker_timeout_seconds"]).toBe(0);
+    expect(fanout["maxWorkers"]).toBe(2);
+    expect(fanout["workerTimeoutSeconds"]).toBe(0);
     // Untouched toggle stays omitted so the stored value survives; the modal
     // never carries an enablement key.
-    expect(fanout).not.toHaveProperty("full_tools");
+    expect(fanout).not.toHaveProperty("fullTools");
     expect(fanout).not.toHaveProperty("enabled");
     await waitFor(() => {
       expect(screen.getByText(/Fan-out settings saved/i)).toBeDefined();
@@ -3740,9 +3300,9 @@ describe("SettingsManager", () => {
     const settingsWithFanout = {
       ...mockSettings,
       fanout: {
-        max_workers: 4,
-        worker_timeout_seconds: 300,
-        full_tools: false,
+        maxWorkers: 4,
+        workerTimeoutSeconds: 300,
+        fullTools: false,
       },
     };
     let sentPayload: Record<string, unknown> | null = null;
@@ -3802,8 +3362,8 @@ describe("SettingsManager", () => {
       string,
       unknown
     >;
-    expect(fanout).toEqual({ max_workers: 6, full_tools: true });
-    expect(fanout).not.toHaveProperty("worker_timeout_seconds");
+    expect(fanout).toEqual({ maxWorkers: 6, fullTools: true });
+    expect(fanout).not.toHaveProperty("workerTimeoutSeconds");
     expect(fanout).not.toHaveProperty("enabled");
   });
 
@@ -3826,12 +3386,12 @@ describe("SettingsManager", () => {
     const settingsWithFanout = {
       ...mockSettings,
       fanout: {
-        max_workers: 4,
-        worker_timeout_seconds: 300,
-        full_tools: false,
+        maxWorkers: 4,
+        workerTimeoutSeconds: 300,
+        fullTools: false,
       },
     };
-    const serverReason = "fanout.max_workers must be between 1 and 8 (got 99)";
+    const serverReason = "fanout.maxWorkers must be between 1 and 8 (got 99)";
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlStr = String(url);
       if (init?.method === "PUT") {
@@ -3904,7 +3464,7 @@ describe("SettingsManager", () => {
     expect(getToolCategory("fanout.evil")).toBe("other");
   });
 
-  it("opens the Files write-mode editor from Tools while access rules stay in Security", async () => {
+  it("routes files tools to Other Tools with no Configure anywhere in Tools", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -3944,31 +3504,19 @@ describe("SettingsManager", () => {
         hasConfig: true,
       },
     ];
-    const settingsWithFiles = {
-      ...mockSettings,
-      filesDenyPatterns: [".env*"],
-      filesAllowRoots: ["~"],
-      filesRequireApprovalOnDeny: true,
-      filesWriteMode: "model",
-    };
-    let sentPayload: Record<string, unknown> | null = null;
-    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const urlStr = String(url);
-      if (init?.method === "PUT") {
-        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
-        // Merge the write-mode change like the engine does so the reloaded
-        // form reflects the saved posture.
-        return jsonResponse({ ...settingsWithFiles, ...sentPayload });
-      }
-      if (urlStr.includes("/tools")) {
-        return jsonResponse({ tools: mockTools });
-      }
-      if (urlStr.includes("/plugins")) {
-        return jsonResponse({ plugins: [] });
-      }
-      return jsonResponse(settingsWithFiles);
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: mockTools });
+        }
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
 
     render(<SettingsManager />);
 
@@ -3976,79 +3524,38 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Tools owns the Files & Workspace category; files.write's hasConfig flag
-    // earns the category header one Configure button with no per-card buttons,
-    // while files.read and files.grep report no settings surface.
+    // The Files & Workspace category is gone from Tools: no section header,
+    // no write-posture hint paragraph, and all three files rows land in the
+    // single Other Tools section — files.write included, despite its stale
+    // hasConfig flag, because its editor lives on the Access surface.
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
     await waitFor(() => {
-      expect(screen.getByText("Files & Workspace")).toBeDefined();
+      expect(screen.getByText("Other Tools")).toBeDefined();
     });
+    expect(screen.queryByText("Files & Workspace")).toBeNull();
+    expect(screen.queryByText(/Write posture and write-path rules are edited under Security/i)).toBeNull();
     expect(screen.getByText("files.write")).toBeDefined();
     expect(screen.getByText("files.read")).toBeDefined();
     expect(screen.getByText("files.grep")).toBeDefined();
-    expect(screen.getByText(/Write review mode is configured above/i)).toBeDefined();
-    const configureButtons = screen.getAllByRole("button", { name: /^Configure$/ });
-    expect(configureButtons.length).toBe(1);
-    expect(configureButtons[0].getAttribute("title")).toBe("Configure Files & Workspace");
-    expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
-    expect(configureButtons[0].closest(".builtin-tool-card")).toBeNull();
+    expect(document.querySelectorAll(".tool-category-section").length).toBe(1);
+    // No header Configure renders at all — the stale flag cannot dangle a
+    // button for an editor that moved — and no per-card control either.
+    expect(screen.queryByRole("button", { name: /^Configure$/ })).toBeNull();
     expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
-    // No inline access-rule editors live in Tools: the roots and deny textareas
-    // stay in Security, which is the single access-policy editor.
-    expect(screen.queryByLabelText(/Allowed roots, one per line/i)).toBeNull();
-    expect(screen.queryByLabelText(/Deny patterns, one per line/i)).toBeNull();
 
-    // The write-mode editor names all three postures and explains what each
-    // enforces before anything is saved.
-    await user.click(configureButtons[0]);
-    expect(
-      screen.getByRole("heading", { name: /Configure Files & Workspace/i })
-    ).toBeDefined();
-    expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
-    expect(screen.getByLabelText(/Let the model decide/i)).toBeDefined();
-    expect(screen.getByLabelText(/Always stage for review/i)).toBeDefined();
-    expect(screen.getByLabelText(/Always write live/i)).toBeDefined();
-    expect(screen.getByText(/live in Security -> Files & Access/i)).toBeDefined();
-
-    // Saving the staged posture sends only filesWriteMode, so the access rules
-    // keep their Security-owned values.
-    await user.click(screen.getByLabelText(/Always stage for review/i));
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
-
-    await waitFor(() => {
-      expect(sentPayload).not.toBeNull();
-    });
-    expect(sentPayload?.["filesWriteMode"]).toBe("staged");
-    expect(sentPayload).not.toHaveProperty("filesAllowRoots");
-    expect(sentPayload).not.toHaveProperty("filesDenyPatterns");
-    expect(sentPayload).not.toHaveProperty("filesRequireApprovalOnDeny");
-    await waitFor(() => {
-      expect(screen.getByText(/File write settings saved/i)).toBeDefined();
-    });
-    // Close explicitly: the success tick is timing-based, so Cancel owns the
-    // deterministic exit before the Security pane is opened.
-    await user.click(screen.getByRole("button", { name: /^Cancel$/ }));
-
-    // The pointer target renders in Security as the single Files & Access editor.
-    // The header scope note states the sharing boundary once directly under
-    // the heading with no consumer note.
-    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
-    await user.click(securityTabBtn);
-    await waitFor(() => {
-      expect(screen.getByText("Files & Access")).toBeDefined();
-    });
-    expect(screen.getByLabelText(/Allowed roots, one per line/i)).toBeDefined();
-    expect(screen.getByText(/Allow roots bound/i)).toBeDefined();
-    expect(screen.getByText(/do not affect index coverage/i)).toBeDefined();
-    expect(screen.queryByTestId("files-consumer-note")).toBeNull();
+    // No inline write-posture editors ride the rows: the posture radios stay
+    // on the Access surface beside this pane, so opening Tools never writes.
+    expect(screen.queryByLabelText(/Let the model decide/i)).toBeNull();
+    expect(screen.queryByLabelText(/Always stage for review/i)).toBeNull();
+    expect(screen.queryByLabelText(/Always write live/i)).toBeNull();
   });
 });
 
-// Declarative security policy (policy.toml) tab: the structured network plus
-// credentials editor lives on its own Policy tab outside the shared config
-// form, so coverage pins the tab wiring, the structured fetch shape, and the
-// absence of the retired raw-text contract.
+// Structured security policy (policy.toml) surface: the network plus
+// credentials editor lives on the Access tab's Network and Credentials rail
+// sections outside the shared config form, so coverage pins the tab wiring,
+// the structured fetch shape, and the absence of the retired raw-text contract.
 const structuredPolicyPayload = {
   policy: {
     version: 1,
@@ -4070,15 +3577,16 @@ const structuredPolicyPayload = {
   violations: [],
 };
 
-describe("SettingsManager policy tab", () => {
+describe("SettingsManager access tab", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     clearAuthToken();
     resetSharedRunsForTesting();
   });
 
-  // Routes the settings shell plus the structured policy fetch so each case
-  // overrides only the response it exercises; unrelated boot probes stay benign.
+  // Routes the settings shell, the Rules section the Access tab lands on, and
+  // the structured policy fetch so each case overrides only the response it
+  // exercises; unrelated boot probes stay benign.
   function stubPolicyTabFetch(
     policyResponse: (init?: RequestInit) => Response | Promise<Response>
   ) {
@@ -4087,6 +3595,9 @@ describe("SettingsManager policy tab", () => {
         const urlStr = String(url);
         if (urlStr === "/settings/policy") {
           return policyResponse(init);
+        }
+        if (urlStr === "/approvals/rules") {
+          return jsonResponse({ rules: [], count: 0 });
         }
         if (urlStr.includes("/tools")) {
           return jsonResponse({ tools: [] });
@@ -4101,13 +3612,19 @@ describe("SettingsManager policy tab", () => {
     return fetchMock;
   }
 
-  async function openPolicyTab() {
+  async function openAccessPane() {
     const user = userEvent.setup();
     render(<SettingsManager />);
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    await user.click(screen.getByRole("tab", { name: "Policy" }));
+    await user.click(screen.getByRole("tab", { name: "Access" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("access-pane")).toBeDefined();
+    });
+    // The structured policy editor hides behind the rail's Network section;
+    // the Credentials entry mounts the same surface on its own sub-tab.
+    await user.click(screen.getByTestId("access-rail-network"));
     await waitFor(() => {
       expect(screen.getByTestId("policy-pane")).toBeDefined();
     });
@@ -4116,7 +3633,7 @@ describe("SettingsManager policy tab", () => {
 
   it("renders the structured pane on its own tab with no raw editor and no Verify button", async () => {
     const fetchMock = stubPolicyTabFetch(() => jsonResponse(structuredPolicyPayload));
-    const user = await openPolicyTab();
+    const user = await openAccessPane();
 
     // Structured network editors own the egress posture: mode select plus one
     // textarea per domain list.
@@ -4166,7 +3683,7 @@ describe("SettingsManager policy tab", () => {
       }
       return jsonResponse(structuredPolicyPayload);
     });
-    const user = await openPolicyTab();
+    const user = await openAccessPane();
 
     await waitFor(() => {
       expect(screen.getByTestId("policy-save")).toBeDefined();
@@ -4193,7 +3710,7 @@ describe("SettingsManager policy tab", () => {
 
   it("reports a failed structured load in the pane error banner", async () => {
     stubPolicyTabFetch(() => jsonResponse({ reason: "policy file unreadable" }, 500));
-    await openPolicyTab();
+    await openAccessPane();
 
     await waitFor(() => {
       expect(screen.getByTestId("policy-error")).toBeDefined();
@@ -4226,19 +3743,19 @@ describe("bash defaults and bounds contract", () => {
     expect(DEFAULT_BASH_ALLOW_NETWORK).toBe(false);
     expect(DEFAULT_BASH_RULES).toEqual([{ pattern: "*", action: "ask" }]);
     expect(DEFAULT_BASH_CONFIG.enabled).toBe(DEFAULT_BASH_ENABLED);
-    expect(DEFAULT_BASH_CONFIG.default_action).toBe(DEFAULT_BASH_DEFAULT_ACTION);
-    expect(DEFAULT_BASH_CONFIG.timeout_seconds).toBe(DEFAULT_BASH_TIMEOUT_SECONDS);
-    expect(DEFAULT_BASH_CONFIG.cpu_seconds).toBe(DEFAULT_BASH_CPU_SECONDS);
-    expect(DEFAULT_BASH_CONFIG.memory_mb).toBe(DEFAULT_BASH_MEMORY_MB);
-    expect(DEFAULT_BASH_CONFIG.allow_network).toBe(DEFAULT_BASH_ALLOW_NETWORK);
+    expect(DEFAULT_BASH_CONFIG.defaultAction).toBe(DEFAULT_BASH_DEFAULT_ACTION);
+    expect(DEFAULT_BASH_CONFIG.timeoutSeconds).toBe(DEFAULT_BASH_TIMEOUT_SECONDS);
+    expect(DEFAULT_BASH_CONFIG.cpuSeconds).toBe(DEFAULT_BASH_CPU_SECONDS);
+    expect(DEFAULT_BASH_CONFIG.memoryMb).toBe(DEFAULT_BASH_MEMORY_MB);
+    expect(DEFAULT_BASH_CONFIG.allowNetwork).toBe(DEFAULT_BASH_ALLOW_NETWORK);
     expect(DEFAULT_BASH_CONFIG.rules).toEqual(DEFAULT_BASH_RULES);
     expect(DEFAULT_BASH_SANDBOX_MODE).toBe("strictContainer");
     expect(DEFAULT_BASH_HOST_ALLOW_PATTERNS).toEqual([
       "xcodebuild*",
       "codesign*",
     ]);
-    expect(DEFAULT_BASH_CONFIG.sandbox_mode).toBe(DEFAULT_BASH_SANDBOX_MODE);
-    expect(DEFAULT_BASH_CONFIG.host_allow_patterns).toEqual(
+    expect(DEFAULT_BASH_CONFIG.sandboxMode).toBe(DEFAULT_BASH_SANDBOX_MODE);
+    expect(DEFAULT_BASH_CONFIG.hostAllowPatterns).toEqual(
       DEFAULT_BASH_HOST_ALLOW_PATTERNS
     );
     expect([...BASH_SANDBOX_MODES]).toEqual([
@@ -4267,9 +3784,9 @@ describe("bash defaults and bounds contract", () => {
     expect(DEFAULT_WORKSPACE_QUOTA_MB).toBe(500);
     expect(DEFAULT_WORKSPACE_QUOTA_FILES).toBe(10000);
     expect(DEFAULT_WORKSPACE_TMP_TTL_DAYS).toBe(7);
-    expect(DEFAULT_WORKSPACE_CONFIG.quota_mb).toBe(DEFAULT_WORKSPACE_QUOTA_MB);
-    expect(DEFAULT_WORKSPACE_CONFIG.quota_files).toBe(DEFAULT_WORKSPACE_QUOTA_FILES);
-    expect(DEFAULT_WORKSPACE_CONFIG.tmp_ttl_days).toBe(DEFAULT_WORKSPACE_TMP_TTL_DAYS);
+    expect(DEFAULT_WORKSPACE_CONFIG.quotaMB).toBe(DEFAULT_WORKSPACE_QUOTA_MB);
+    expect(DEFAULT_WORKSPACE_CONFIG.quotaFiles).toBe(DEFAULT_WORKSPACE_QUOTA_FILES);
+    expect(DEFAULT_WORKSPACE_CONFIG.tmpTTLDays).toBe(DEFAULT_WORKSPACE_TMP_TTL_DAYS);
     expect(WORKSPACE_QUOTA_MB_MIN).toBe(10);
     expect(WORKSPACE_QUOTA_MB_MAX).toBe(10240);
     expect(WORKSPACE_QUOTA_FILES_MIN).toBe(100);
@@ -4284,10 +3801,10 @@ describe("SettingsManager persona pane", () => {
   const PERSONA_SETTINGS = {
     ...mockSettings,
     persona: {
-      assistant_name: "Zephyra",
+      assistantName: "Zephyra",
       tone: "concise",
       style: STYLE_TEXT,
-      user_name: "Kupan",
+      userName: "Kupan",
       avatar: "rose",
     },
   };
@@ -4387,7 +3904,7 @@ describe("SettingsManager persona pane", () => {
     expect(tabSaveButton()).toBeDefined();
     // Every settings read republishes the persona into the shared store so
     // the profile block and chat header mirror this pane without a reload.
-    expect(peekPersonaSignals().persona?.assistant_name).toBe("Zephyra");
+    expect(peekPersonaSignals().persona?.assistantName).toBe("Zephyra");
   });
 
   it("saves exactly one request carrying only the persona delta", async () => {
@@ -4405,13 +3922,13 @@ describe("SettingsManager persona pane", () => {
     // The partial-patch contract: the wire carries the single changed key
     // only — no tone, style, user name, or avatar, and nothing outside the
     // persona section.
-    expect(putBodies[0]).toEqual({ persona: { assistant_name: "Vex" } });
+    expect(putBodies[0]).toEqual({ persona: { assistantName: "Vex" } });
     await waitFor(() => {
       expect(screen.getByText(/Persona saved/)).toBeDefined();
     });
     // The saved identity publishes live so the nav and chat header re-render
     // with the new name without waiting for an engine reload.
-    expect(peekPersonaSignals().persona?.assistant_name).toBe("Vex");
+    expect(peekPersonaSignals().persona?.assistantName).toBe("Vex");
   });
 
   it("maps a server 400 to the shared tab-form error banner", async () => {
@@ -4539,19 +4056,54 @@ describe("SettingsManager persona pane", () => {
     const tabs = screen.getAllByRole("tab");
     expect(tabs.length).toBe(13);
     const labels = tabs.map((tab) => tab.textContent ?? "");
-    expect(labels[0]).toMatch(/LLM Providers/);
-    expect(labels[1]).toMatch(/Persona/);
-    expect(labels[2]).toMatch(/Goals/);
-    expect(labels[3]).toMatch(/Engine and Logs/);
-    expect(labels[4]).toMatch(/Tools and Runes/);
-    expect(labels[5]).toMatch(/^Security/);
-    expect(labels[6]).toMatch(/^Policy/);
+    expect(labels[0]).toMatch(/^Access$/);
+    expect(labels[1]).toMatch(/LLM Providers/);
+    expect(labels[2]).toMatch(/Persona/);
+    expect(labels[3]).toMatch(/Goals/);
+    expect(labels[4]).toMatch(/Engine and Logs/);
+    expect(labels[5]).toMatch(/Tools and Runes/);
+    expect(labels[6]).toMatch(/^Security/);
     expect(labels[7]).toMatch(/Memory and Storage/);
     expect(labels[8]).toMatch(/^Voice/);
     expect(labels[9]).toMatch(/^Web/);
     expect(labels[10]).toMatch(/Email Accounts/);
     expect(labels[11]).toMatch(/Network/);
     expect(labels[12]).toMatch(/Indexing/);
+    // Access absorbed the retired Policy tab: no Policy entry remains in the
+    // rail and Access leads the promotion order.
+    expect(labels.join("|")).not.toMatch(/Policy/);
+  });
+
+  it("finds the Access pane from capability words in the section finder", async () => {
+    stubPersonaFetch();
+    const user = userEvent.setup();
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const finder = screen.getByTestId("settings-nav-search") as HTMLInputElement;
+    // "bash" names an editor behind the Access rail, not the tab label, and
+    // only Access matches it among the inactive tabs.
+    await user.type(finder, "bash");
+    expect(screen.getByRole("tab", { name: "Access" })).toBeDefined();
+    expect(screen.queryByRole("tab", { name: /^Voice$/i })).toBeNull();
+    expect(screen.queryByRole("tab", { name: /Engine and Logs/i })).toBeNull();
+    // The active tab never hides from its own query, so the selection state
+    // stays intact while the finder narrows the list.
+    expect(screen.getByRole("tab", { name: /LLM Providers/i })).toBeDefined();
+    // "policy" — the vocabulary owners still reach for — surfaces Access too.
+    await user.clear(finder);
+    await user.type(finder, "policy");
+    expect(screen.getByRole("tab", { name: "Access" })).toBeDefined();
+    expect(screen.queryByRole("tab", { name: /^Voice$/i })).toBeNull();
+    // A starved query shows the empty-state note while the active row stays
+    // as context, and clearing restores the full list.
+    await user.clear(finder);
+    await user.type(finder, "zzz-no-such-section");
+    expect(screen.getByTestId("settings-nav-empty")).toBeDefined();
+    expect(screen.getByRole("tab", { name: /LLM Providers/i })).toBeDefined();
+    await user.clear(finder);
+    expect(screen.getAllByRole("tab").length).toBe(13);
   });
 
   it("renders moved blocks only in their own tabs and never in engine", async () => {
@@ -4561,14 +4113,14 @@ describe("SettingsManager persona pane", () => {
         ...PERSONA_SETTINGS,
         goals: {
           enabled: true,
-          step_interval_minutes: 1440,
-          max_active_goals: 3,
-          max_steps_per_goal: 8,
-          plan_timeout_seconds: 120,
-          max_triggers_per_goal: 4,
+          stepIntervalMinutes: 1440,
+          maxActiveGoals: 3,
+          maxStepsPerGoal: 8,
+          planTimeoutSeconds: 120,
+          maxTriggersPerGoal: 4,
         },
-        ideas: { enabled: false, max_per_cycle: 3, timeout_seconds: 60 },
-        proactive: { mode: "all", judge_timeout_seconds: 20 },
+        ideas: { enabled: false, maxPerCycle: 3, timeout_seconds: 60 },
+        proactive: { mode: "all", judgeTimeoutSeconds: 20 },
       },
     });
     render(<SettingsManager />);
@@ -4632,14 +4184,14 @@ describe("SettingsManager persona pane", () => {
       ...PERSONA_SETTINGS,
       goals: {
         enabled: true,
-        step_interval_minutes: 1440,
-        max_active_goals: 3,
-        max_steps_per_goal: 8,
-        plan_timeout_seconds: 120,
-        max_triggers_per_goal: 4,
+        stepIntervalMinutes: 1440,
+        maxActiveGoals: 3,
+        maxStepsPerGoal: 8,
+        planTimeoutSeconds: 120,
+        maxTriggersPerGoal: 4,
       },
-      ideas: { enabled: false, max_per_cycle: 3, timeout_seconds: 60 },
-      proactive: { mode: "all", judge_timeout_seconds: 20 },
+      ideas: { enabled: false, maxPerCycle: 3, timeout_seconds: 60 },
+      proactive: { mode: "all", judgeTimeoutSeconds: 20 },
     };
     let sentPayload: Record<string, unknown> | null = null;
     vi.stubGlobal(
@@ -4680,11 +4232,11 @@ describe("SettingsManager persona pane", () => {
       ...PERSONA_SETTINGS,
       goals: {
         enabled: true,
-        step_interval_minutes: 1440,
-        max_active_goals: 3,
-        max_steps_per_goal: 8,
-        plan_timeout_seconds: 60,
-        max_triggers_per_goal: 4,
+        stepIntervalMinutes: 1440,
+        maxActiveGoals: 3,
+        maxStepsPerGoal: 8,
+        planTimeoutSeconds: 60,
+        maxTriggersPerGoal: 4,
       },
     };
     let sentPayload: Record<string, unknown> | null = null;
@@ -4712,7 +4264,7 @@ describe("SettingsManager persona pane", () => {
       expect(sentPayload).not.toBeNull();
     });
     const body = sentPayload as unknown as Record<string, unknown>;
-    expect((body["goals"] as Record<string, unknown>)["plan_timeout_seconds"]).toBe(0);
+    expect((body["goals"] as Record<string, unknown>)["planTimeoutSeconds"]).toBe(0);
     await waitFor(() => {
       expect(screen.getByText("Settings saved.")).toBeDefined();
     });
@@ -4722,8 +4274,12 @@ describe("SettingsManager persona pane", () => {
     stubPersonaFetch();
     // Fail-closed predicate directly: an unknown id never narrows to the tab
     // vocabulary, so selection keeps the current tab instead of blanking.
+    // "access" joined the vocabulary when it absorbed the Policy tab, whose id
+    // left it at the same time.
     expect(isSettingsTab("bogus-tab")).toBe(false);
     expect(isSettingsTab("providers")).toBe(true);
+    expect(isSettingsTab("access")).toBe(true);
+    expect(isSettingsTab("policy")).toBe(false);
     expect(isSettingsTab(null)).toBe(false);
     render(<SettingsManager />);
     await waitFor(() => {
@@ -4987,168 +4543,9 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
     return { puts, getPutCount: () => putCount };
   }
 
-  async function openBashModal(user: ReturnType<typeof userEvent.setup>) {
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
-    });
-    await user.click(screen.getByRole("tab", { name: /Tools and Runes/i }));
-    await waitFor(() => {
-      expect(screen.getByText("Bash & Shell")).toBeDefined();
-    });
-    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
-    await user.click(configureButtons[0]);
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
-    });
-  }
-
   beforeEach(() => {
     vi.unstubAllGlobals();
     resetSharedRunsForTesting();
-  });
-
-  it("renders current cpu and memory values with server-clamped inputs", async () => {
-    const user = userEvent.setup();
-    const settingsWithBounds = {
-      ...mockSettings,
-      bash: {
-        enabled: true,
-        default_action: "ask",
-        rules: [{ pattern: "*", action: "ask" }],
-        timeout_seconds: 30,
-        cpu_seconds: 60,
-        memory_mb: 512,
-        allow_network: false,
-      },
-    };
-    stubBoundFetch(settingsWithBounds);
-    render(<SettingsManager />);
-    await openBashModal(user);
-
-    // Stored bounds round-trip into the form directly under the timeout.
-    const cpuInput = screen.getByLabelText(/CPU seconds/i) as HTMLInputElement;
-    const memoryInput = screen.getByLabelText(/Memory \(MB\)/i) as HTMLInputElement;
-    expect(cpuInput.value).toBe("60");
-    expect(memoryInput.value).toBe("512");
-    // Inputs clamp to the engine bounds so the form agrees with the server 400.
-    expect(cpuInput.min).toBe(String(BASH_CPU_MIN_SECONDS));
-    expect(cpuInput.max).toBe(String(BASH_CPU_MAX_SECONDS));
-    expect(cpuInput.step).toBe("1");
-    expect(memoryInput.min).toBe(String(BASH_MEMORY_MIN_MB));
-    expect(memoryInput.max).toBe(String(BASH_MEMORY_MAX_MB));
-    expect(memoryInput.step).toBe("1");
-    // One-line hints name the non-obvious bound semantics.
-    expect(screen.getByText(/wall-clock may exceed CPU time for sleeping processes/i)).toBeDefined();
-    expect(screen.getByText(/best-effort ulimit bound/i)).toBeDefined();
-  });
-
-  it("saves edited bounds through one modal PATCH carrying the bash delta", async () => {
-    const user = userEvent.setup();
-    const settingsWithBounds = {
-      ...mockSettings,
-      bash: {
-        enabled: true,
-        default_action: "ask",
-        rules: [{ pattern: "*", action: "ask" }],
-        timeout_seconds: 30,
-        cpu_seconds: 60,
-        memory_mb: 512,
-        allow_network: false,
-      },
-    };
-    const { puts, getPutCount } = stubBoundFetch(settingsWithBounds);
-    render(<SettingsManager />);
-    await openBashModal(user);
-
-    // Editing only the resource budgets keeps the save to one modal request.
-    const cpuInput = screen.getByLabelText(/CPU seconds/i) as HTMLInputElement;
-    await user.clear(cpuInput);
-    await user.type(cpuInput, "90");
-    const memoryInput = screen.getByLabelText(/Memory \(MB\)/i) as HTMLInputElement;
-    await user.clear(memoryInput);
-    await user.type(memoryInput, "2048");
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
-
-    await waitFor(() => {
-      expect(getPutCount()).toBe(1);
-    });
-    // The modal save travels alone: only the bash section rides the PUT, and
-    // the edited budgets arrive on the snake_case keys the file persists as a
-    // changed-only patch with untouched values omitted.
-    expect(Object.keys(puts[0])).toEqual(["bash"]);
-    const bash = puts[0]["bash"] as Record<string, unknown>;
-    expect(bash["cpu_seconds"]).toBe(90);
-    expect(bash["memory_mb"]).toBe(2048);
-    expect(bash["timeout_seconds"]).toBeUndefined();
-    expect(bash["sandbox_mode"]).toBeUndefined();
-    expect(bash["host_allow_patterns"]).toBeUndefined();
-    await waitFor(() => {
-      expect(screen.getByText(/Bash settings saved/i)).toBeDefined();
-    });
-  });
-
-  it("maps a server 400 to the bash modal error path without closing", async () => {
-    const user = userEvent.setup();
-    const settingsWithBounds = {
-      ...mockSettings,
-      bash: {
-        enabled: true,
-        default_action: "ask",
-        rules: [{ pattern: "*", action: "ask" }],
-        timeout_seconds: 30,
-        cpu_seconds: 60,
-        memory_mb: 512,
-        allow_network: false,
-      },
-    };
-    const serverReason = "bash.cpu_seconds must be between 1 and 3600 (got 9999)";
-    stubBoundFetch(settingsWithBounds, () => jsonResponse({ reason: serverReason }, 400));
-    render(<SettingsManager />);
-    await openBashModal(user);
-
-    const cpuInput = screen.getByLabelText(/CPU seconds/i) as HTMLInputElement;
-    await user.clear(cpuInput);
-    await user.type(cpuInput, "3600");
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
-
-    // The honest server message surfaces in the modal while the editor stays
-    // open for repair instead of closing on a generic failure.
-    await waitFor(() => {
-      expect(screen.getByText(serverReason)).toBeDefined();
-    });
-    expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
-    expect(screen.queryByText(/Bash settings saved/i)).toBeNull();
-  });
-
-  it("rejects an out-of-range cpu budget before any network write", async () => {
-    const user = userEvent.setup();
-    const settingsWithBounds = {
-      ...mockSettings,
-      bash: {
-        enabled: true,
-        default_action: "ask",
-        rules: [{ pattern: "*", action: "ask" }],
-        timeout_seconds: 30,
-        cpu_seconds: 60,
-        memory_mb: 512,
-        allow_network: false,
-      },
-    };
-    const { getPutCount } = stubBoundFetch(settingsWithBounds);
-    render(<SettingsManager />);
-    await openBashModal(user);
-
-    // A zero CPU budget would kill every command instantly, so the form fails
-    // closed with the bound instead of returning a server 400.
-    const cpuInput = screen.getByLabelText(/CPU seconds/i) as HTMLInputElement;
-    await user.clear(cpuInput);
-    await user.type(cpuInput, "0");
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
-
-    await waitFor(() => {
-      expect(screen.getByText(/Invalid bash CPU budget/i)).toBeDefined();
-    });
-    expect(getPutCount()).toBe(0);
   });
 
   it("renders editable workspace quotas beside read-only usage bars", async () => {
@@ -5161,10 +4558,10 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
         rules: [{ pattern: "*", action: "ask" }],
         timeout_seconds: 30,
         cpu_seconds: 60,
-        memory_mb: 512,
+        memoryMb: 512,
         allow_network: false,
       },
-      workspace: { quota_mb: 500, quota_files: 10000, tmp_ttl_days: 7 },
+      workspace: { quotaMB: 500, quotaFiles: 10000, tmpTTLDays: 7 },
     };
     stubBoundFetch(settingsWithWorkspace);
     render(<SettingsManager />);
@@ -5186,7 +4583,7 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
     expect((screen.getByLabelText(/Max files/i) as HTMLInputElement).value).toBe("10000");
     expect((screen.getByLabelText(/Tmp TTL \(days\)/i) as HTMLInputElement).value).toBe("7");
     // The config-file-only pointer is gone; retention now notes its prune timing.
-    expect(screen.queryByText(/edit \[workspace\] quota_mb \/ quota_files in the config file/i)).toBeNull();
+    expect(screen.queryByText(/edit \[workspace\] quotaMB \/ quotaFiles in the config file/i)).toBeNull();
     expect(screen.getByText(/TTL applies on next prune/i)).toBeDefined();
   });
 
@@ -5200,10 +4597,10 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
         rules: [{ pattern: "*", action: "ask" }],
         timeout_seconds: 30,
         cpu_seconds: 60,
-        memory_mb: 512,
+        memoryMb: 512,
         allow_network: false,
       },
-      workspace: { quota_mb: 500, quota_files: 10000, tmp_ttl_days: 7 },
+      workspace: { quotaMB: 500, quotaFiles: 10000, tmpTTLDays: 7 },
     };
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlStr = String(url);
@@ -5245,7 +4642,7 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
     const putCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit)?.method === "PUT");
     const sent = JSON.parse(String((putCall?.[1] as RequestInit)?.body)) as Record<string, unknown>;
     const workspace = sent["workspace"] as Record<string, unknown>;
-    expect(workspace).toEqual({ quota_mb: 600, quota_files: 10000, tmp_ttl_days: 7 });
+    expect(workspace).toEqual({ quotaMB: 600, quotaFiles: 10000, tmpTTLDays: 7 });
     await waitFor(() => {
       expect(screen.getByText("Settings saved.")).toBeDefined();
     });
@@ -5255,7 +4652,7 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
     const user = userEvent.setup();
     const settingsWithWorkspace = {
       ...mockSettings,
-      workspace: { quota_mb: 500, quota_files: 10000, tmp_ttl_days: 7 },
+      workspace: { quotaMB: 500, quotaFiles: 10000, tmpTTLDays: 7 },
     };
     let putCount = 0;
     vi.stubGlobal(
@@ -5339,185 +4736,6 @@ describe("bash sandbox copy and tiers", () => {
     expect(BASH_SANDBOX_COPY.host).toBe(
       "Runs on your Mac as you with full access to your files.",
     );
-  });
-});
-
-describe("SettingsManager bash tier modal copy", () => {
-  const bashToolRow = {
-    name: "bash.exec",
-    description: "Run shell commands",
-    permissionLevel: "requiresApproval",
-    inputSchema: "{}",
-    isEnabled: true,
-    isBuiltIn: true,
-    pluginID: null,
-    source: "builtin",
-    integrityStatus: "valid",
-    hasConfig: true,
-  };
-  const usagePayload = {
-    bytes: 12 * 1024 * 1024,
-    files: 120,
-    truncated: false,
-    quotaMB: 500,
-    quotaFiles: 10000,
-  };
-
-  function stubBashFetch(settings: Record<string, unknown>) {
-    const fetchMock = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
-      const urlStr = String(url);
-      if (urlStr === "/workspace/machine") {
-        return jsonResponse({ exists: true, running: true, image: "alpine:latest", configMatch: true });
-      }
-      if (urlStr === "/workspace/usage") return jsonResponse(usagePayload);
-      if (urlStr === "/agent-tools") return jsonResponse({ tools: [], count: 0 });
-      if (urlStr.includes("/tools") && !urlStr.includes("agent-tools")) {
-        return jsonResponse({ tools: [bashToolRow] });
-      }
-      if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });
-      return jsonResponse(settings);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    return fetchMock;
-  }
-
-  async function openBashModal(user: ReturnType<typeof userEvent.setup>) {
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
-    });
-    await user.click(screen.getByRole("tab", { name: /Tools and Runes/i }));
-    await waitFor(() => {
-      expect(screen.getByText("Bash & Shell")).toBeDefined();
-    });
-    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
-    await user.click(configureButtons[0]);
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
-    });
-  }
-
-  beforeEach(() => {
-    vi.unstubAllGlobals();
-    resetSharedRunsForTesting();
-  });
-
-  it("renders human-readable tier labels with raw values preserved", async () => {
-    const user = userEvent.setup();
-    const settingsWithBash = {
-      ...mockSettings,
-      bash: {
-        enabled: true,
-        default_action: "ask",
-        rules: [{ pattern: "*", action: "ask" }],
-        timeout_seconds: 30,
-        cpu_seconds: 60,
-        memory_mb: 512,
-        allow_network: false,
-        sandbox_mode: "strictContainer",
-        host_allow_patterns: ["xcodebuild*", "codesign*"],
-      },
-    };
-    stubBashFetch(settingsWithBash);
-    render(<SettingsManager />);
-    await openBashModal(user);
-
-    const tierSelect = screen.getByLabelText(/Execution tier/i) as HTMLSelectElement;
-    const options = Array.from(tierSelect.querySelectorAll("option"));
-    expect(options.map((option) => option.textContent)).toEqual([
-      "Temporary container",
-      "Workspace machine",
-      "On this Mac",
-    ]);
-    expect(options.map((option) => option.value)).toEqual([
-      "strictContainer",
-      "machineScoped",
-      "hostSeatbelt",
-    ]);
-    expect(tierSelect.value).toBe("strictContainer");
-  });
-
-  it("shows per-tier help plus scope and keeps the blob absent", async () => {
-    const user = userEvent.setup();
-    const settingsWithBash = {
-      ...mockSettings,
-      bash: {
-        enabled: true,
-        default_action: "ask",
-        rules: [{ pattern: "*", action: "ask" }],
-        timeout_seconds: 30,
-        cpu_seconds: 60,
-        memory_mb: 512,
-        allow_network: false,
-        sandbox_mode: "strictContainer",
-        host_allow_patterns: ["xcodebuild*", "codesign*"],
-      },
-    };
-    stubBashFetch(settingsWithBash);
-    render(<SettingsManager />);
-    await openBashModal(user);
-
-    const tierSelect = screen.getByLabelText(/Execution tier/i) as HTMLSelectElement;
-    expect(screen.getByTestId("bash-sandbox-help").textContent).toBe(
-      "Runs in a temporary container with no internet access. Nothing is kept after the run.",
-    );
-    expect(screen.getByTestId("bash-sandbox-scope").textContent).toBe(
-      "Scope: fresh workspace scratch, deleted at turn end.",
-    );
-    expect(screen.queryByText(/Tiers:/)).toBeNull();
-    expect(document.body.textContent).not.toContain("stay isolated");
-
-    await user.selectOptions(tierSelect, "machineScoped");
-    expect(screen.getByTestId("bash-sandbox-help").textContent).toBe(
-      "Runs in a persistent workspace machine with no internet access. Workspace files persist across runs.",
-    );
-    expect(screen.getByTestId("bash-sandbox-scope").textContent).toBe(
-      "Scope: full workspace, kept across runs.",
-    );
-
-    await user.selectOptions(tierSelect, "hostSeatbelt");
-    expect(screen.getByTestId("bash-sandbox-help").textContent).toBe(
-      "Runs on your Mac as you with full access to your files.",
-    );
-    expect(screen.getByTestId("bash-sandbox-scope").textContent).toBe(
-      "Scope: your entire Mac, running as you.",
-    );
-    expect(screen.queryByText(/Tiers:/)).toBeNull();
-  });
-
-  it("keeps numeric limits collapsed in Advanced with policy visible", async () => {
-    const user = userEvent.setup();
-    const settingsWithBash = {
-      ...mockSettings,
-      bash: {
-        enabled: true,
-        default_action: "ask",
-        rules: [{ pattern: "*", action: "ask" }],
-        timeout_seconds: 30,
-        cpu_seconds: 60,
-        memory_mb: 512,
-        allow_network: false,
-        sandbox_mode: "strictContainer",
-        host_allow_patterns: ["xcodebuild*", "codesign*"],
-      },
-    };
-    stubBashFetch(settingsWithBash);
-    render(<SettingsManager />);
-    await openBashModal(user);
-
-    const advanced = screen.getByTestId("bash-advanced-details");
-    expect(advanced).not.toBeNull();
-    expect((advanced as HTMLDetailsElement).open).toBe(false);
-    expect(within(advanced as HTMLElement).getByText("Advanced")).toBeDefined();
-    expect((advanced as HTMLElement).textContent).toContain("Advanced");
-    const advancedScope = advanced as HTMLElement;
-    expect(within(advancedScope).getByLabelText(/Timeout \(seconds\)/i)).toBeDefined();
-    expect(within(advancedScope).getByLabelText(/CPU seconds/i)).toBeDefined();
-    expect(within(advancedScope).getByLabelText(/Memory \(MB\)/i)).toBeDefined();
-    expect(screen.getByLabelText(/Execution tier/i)).toBeDefined();
-    expect(screen.getByLabelText(/Host allow patterns/i)).toBeDefined();
-    expect(screen.getByLabelText(/Allow network access/i)).toBeDefined();
-    expect(screen.getByLabelText(/Default action/i)).toBeDefined();
-    expect(screen.getByLabelText(/Rules, one per line/i)).toBeDefined();
   });
 });
 

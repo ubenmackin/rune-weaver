@@ -72,52 +72,6 @@ public struct PersonaUpdate: Content, Sendable, Equatable {
         self.userName = config.userName
         self.avatar = config.avatar.rawValue
     }
-
-    private enum CodingKeys: String, CodingKey {
-        case assistantName = "assistant_name"
-        case assistantNameCamel = "assistantName"
-        case tone
-        case style
-        case userName = "user_name"
-        case userNameCamel = "userName"
-        case avatar
-    }
-
-    /// Decodes a partial persona patch accepting snake_case and camelCase
-    /// aliases.
-    ///
-    /// Snake_case stays canonical so the wire shape mirrors the `[persona]`
-    /// TOML keys and a round-trip never depends on a second spelling; the
-    /// camelCase spellings mirror the dashboard contract and fall back only
-    /// when the snake key is absent. When both arrive the snake value wins so
-    /// the two contracts cannot fork the stored persona.
-    /// - Parameter decoder: Decoder carrying the patch.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let snakeName = try container.decodeIfPresent(String.self, forKey: .assistantName)
-        let camelName = try container.decodeIfPresent(String.self, forKey: .assistantNameCamel)
-        assistantName = snakeName ?? camelName
-        tone = try container.decodeIfPresent(String.self, forKey: .tone)
-        style = try container.decodeIfPresent(String.self, forKey: .style)
-        let snakeUser = try container.decodeIfPresent(String.self, forKey: .userName)
-        let camelUser = try container.decodeIfPresent(String.self, forKey: .userNameCamel)
-        userName = snakeUser ?? camelUser
-        avatar = try container.decodeIfPresent(String.self, forKey: .avatar)
-    }
-
-    /// Encodes a partial persona patch using canonical snake_case keys.
-    ///
-    /// CamelCase aliases decode but never encode so saved payloads keep the
-    /// file shape, matching the goals and proactive patches.
-    /// - Parameter encoder: Encoder receiving the patch.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(assistantName, forKey: .assistantName)
-        try container.encodeIfPresent(tone, forKey: .tone)
-        try container.encodeIfPresent(style, forKey: .style)
-        try container.encodeIfPresent(userName, forKey: .userName)
-        try container.encodeIfPresent(avatar, forKey: .avatar)
-    }
 }
 
 extension UpdateSettingsRequest {

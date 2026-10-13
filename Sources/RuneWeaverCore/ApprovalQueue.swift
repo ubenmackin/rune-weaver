@@ -103,13 +103,14 @@ public actor ApprovalQueue {
         toolName: String,
         description: String = "",
         input: ToolInput,
+        sessionID: UUID? = nil,
         intent: String? = nil,
         assessment: ImpactAssessment? = nil,
         egressHost: String? = nil,
         bashConfig: BashConfig? = nil,
         workspaceRoot: URL? = nil
     ) -> PermissionRequest {
-        let effectiveEgressHost = egressHost ?? Self.extractEgressHost(toolName: toolName, argumentsJSON: input.argumentsJSON)
+        let effectiveEgressHost = egressHost
         let sandboxSummary = Self.stampedSandboxSummary(
             toolName: toolName,
             argumentsJSON: input.argumentsJSON,
@@ -120,6 +121,7 @@ public actor ApprovalQueue {
             toolName: toolName,
             description: description,
             input: input,
+            sessionID: sessionID,
             intent: intent,
             assessment: assessment,
             egressHost: effectiveEgressHost,
@@ -328,10 +330,18 @@ public actor ApprovalQueue {
     ///   - id: Request identifier.
     ///   - approved: Whether the request was approved.
     ///   - duration: Trust duration tier. Defaults to `.thisTime`.
-    ///   - widen: When true and duration is not `.thisTime`, grants tool-wide trust matching any target.
+    ///   - scope: How wide a durable decision reaches. Nil derives the
+    ///     request's own scope: an egress-shaped request resolves to the
+    ///     host it parked on, every other request to the descriptor
+    ///     target the gate derives for the next identical call.
     /// - Returns: True when the request was pending and resolved.
     @discardableResult
-    public func decide(id: UUID, approved: Bool, duration: TrustDuration = .thisTime, widen: Bool = false) async -> Bool {
+    public func decide(
+        id: UUID,
+        approved: Bool,
+        duration: TrustDuration = .thisTime,
+        scope: AccessScope? = nil
+    ) async -> Bool {
         // Cancel the enrichment child first so a model result landing in the
         // gap cannot resurrect the entry or rebroadcast after the decision.
         enrichmentTasks.removeValue(forKey: id)?.cancel()
@@ -339,12 +349,13 @@ public actor ApprovalQueue {
             return false
         }
         let wasTimedOut = timedOutIDs.remove(id) != nil
-        // Continuation and question approvals resume a single parked batch, so they stay
-        // one-shot: coerce any durable or widened tier back to thisTime so a
-        // direct decide call cannot mint a dead forever grant for engine.continue or question.ask.
-        let isOneShotTool = request.toolName == "engine.continue" || request.toolName == "question.ask"
+        // Continuation, question, desktop resume, and brake approvals resolve a
+        // single parked batch rather than gating a repeatable call, so they stay
+        // one-shot: coerce any durable tier back to thisTime so a direct decide
+        // call cannot mint a dead row. `behavior.brake` is not an executable
+        // tool, so a durable vote on it would only store a rule no call can hit.
+        let isOneShotTool = Self.oneShotToolNames.contains(request.toolName)
         let effectiveDuration: TrustDuration = isOneShotTool ? .thisTime : duration
-        let effectiveWiden: Bool = isOneShotTool ? false : widen
         let decision = ApprovalQueueDecision(approved: approved, duration: effectiveDuration)
         timeoutTasks.removeValue(forKey: id)?.cancel()
         if let waiter = waiters.removeValue(forKey: id) {
@@ -353,32 +364,39 @@ public actor ApprovalQueue {
             earlyDecisions[id] = decision
         }
         if approved, effectiveDuration != .thisTime {
-            // The durable grant must store the same descriptor the gate derives
-            // for the next call, so narrow grants route through the shared
-            // tool-aware derivation instead of a generic target extraction that
-            // would not match `browser.act` or `api.request`. An empty target is
-            // the widen scope and covers every target for the tool; the gate's
-            // grant path enforces the never-shorten invariant for that scope, so
-            // a shorter decision here cannot truncate an existing tool-wide
-            // grant and both widen entry points agree on the same trust floor.
-            let descriptor = effectiveWiden
-                ? ActionDescriptor(toolName: request.toolName, target: "")
-                : ActionDescriptor.descriptor(for: request.input, toolName: request.toolName)
+            let resolvedScope = scope ?? Self.derivedScope(for: request)
             // A durable `messages.send` grant must key on the canonical handle
-            // the owner is authorizing, so approving a request whose recipient
-            // is a display name can never mint trust, and there is no tool-wide
-            // send scope for a widen decision to promote. Admission refuses
-            // name-shaped sends before filing on the orchestrator path; this
-            // guard keeps the invariant for every other filing path (headless
-            // bus handlers, direct enqueue), and the gate refuses invalid send
-            // descriptors defensively beneath it. The approved call still fails
-            // closed at execution when the arguments are malformed.
-            if request.toolName == "messages.send",
-               effectiveWiden || ActionDescriptor.messagesRecipientHandle(from: request.input) == nil
-            {
+            // or recipient set the owner is authorizing, so approving a request
+            // whose recipient is a display name can never mint trust, and there
+            // is no tool-wide send scope. Admission refuses name-shaped sends
+            // before filing on the orchestrator path; this guard keeps the
+            // invariant for every other filing path (headless bus handlers,
+            // direct enqueue), and the gate refuses invalid send scopes
+            // defensively beneath it. The approved call still fails closed at
+            // execution when the arguments are malformed.
+            if request.toolName == "messages.send", !resolvedScope.isMintableSendScope {
                 return true
             }
-            await permissionGate?.grantTrust(for: descriptor, duration: effectiveDuration, sessionID: request.sessionID)
+            // The durable mint routes through the shared grant boundary with
+            // the resolved scope, so the never-shorten invariant and scope
+            // canonicalization apply exactly as they do on every other mint
+            // entry point.
+            await permissionGate?.grant(
+                resolvedScope,
+                toolName: request.toolName,
+                duration: effectiveDuration,
+                sessionID: request.sessionID
+            )
+        } else if !approved, effectiveDuration == .forever {
+            // An explicit durable denial is the only owner decision that mints
+            // a deny rule: it outranks every allow decision and never expires,
+            // so the denied call fails closed on every later repeat.
+            let resolvedScope = scope ?? Self.derivedScope(for: request)
+            await permissionGate?.denyRule(
+                resolvedScope,
+                toolName: request.toolName,
+                reason: "Denied by owner decision on \(request.toolName)."
+            )
         }
         return true
     }
@@ -507,6 +525,38 @@ public actor ApprovalQueue {
             return false
         }
     }
+}
+
+// MARK: - Decision Scope Derivation
+
+extension ApprovalQueue {
+    /// Scope a decision resolves to when the caller supplies none.
+    ///
+    /// Egress-shaped requests (a parked unlisted host) resolve to that host, so
+    /// a durable egress decision reaches exactly the domain the call dialed.
+    /// Every other request resolves to the descriptor target the gate derives
+    /// for the next identical call, which keeps a narrow grant covering the
+    /// repeat instead of re-prompting; an empty target is the malformed-call
+    /// signature and stores nothing rather than widening to tool-wide.
+    /// - Parameter request: Pending request the decision resolves.
+    /// - Returns: Scope the decision reaches.
+    private static func derivedScope(for request: PermissionRequest) -> AccessScope {
+        if let egressHost = request.egressHost {
+            return .domain(host: egressHost, subdomains: false)
+        }
+        return .exactTarget(ActionDescriptor.descriptor(for: request.input, toolName: request.toolName).target)
+    }
+
+    /// Tools whose decision resolves one parked batch instead of gating a
+    /// repeatable call, so a durable tier on them is meaningless: the tier
+    /// coerces to thisTime and no rule is minted. `behavior.brake` is not an
+    /// executable tool at all, so a durable vote would only store a dead row.
+    private static let oneShotToolNames: Set<String> = [
+        "engine.continue",
+        "question.ask",
+        "desktop.resume",
+        "behavior.brake"
+    ]
 }
 
 // MARK: - Bash Sandbox Copy Wiring

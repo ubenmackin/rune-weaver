@@ -475,11 +475,158 @@ public struct FilesWriteTool: Tool, Sendable {
     /// Exact envelope sentence when an explicit staged request loses to a forced live setting.
     private static let requestedStagedOverrideNote = " Requested 'staged' mode was overridden by the owner setting files.write_mode = 'live'."
 
+    /// Exact envelope sentence when the write-path policy forces staged against
+    /// the configured `live` setting.
+    private static let policyOverridesConfiguredLiveNote =
+        " Owner setting files.write_mode = 'live' was overridden by write path policy: this write is staged for review."
+
+    /// Exact envelope sentence when the write-path policy forces staged against
+    /// an explicit live request under the model posture.
+    private static let policyOverridesRequestedLiveNote =
+        " Requested 'live' mode was overridden by write path policy: this write is staged for review."
+
+    /// Exact envelope sentence when the write-path policy forces live against
+    /// the configured `staged` setting.
+    private static let policyOverridesConfiguredStagedNote =
+        " Owner setting files.write_mode = 'staged' was overridden by write path policy: this write is applied live."
+
+    /// Exact envelope sentence when the write-path policy forces live against
+    /// an explicit staged request under the model posture.
+    private static let policyOverridesRequestedStagedNote =
+        " Requested 'staged' mode was overridden by write path policy: this write is applied live."
+
     /// Refusal sentence when the review ledger cannot answer, so a live write
     /// has no reliable rollback point to promise.
     private static let unreadableLedgerRefusal = "Could not read the review ledger; live write refused without a reliable rollback point."
 
-    /// Resolves the posture the call must actually use.
+    /// Outcome of the write-path posture gate every call runs first.
+    private enum PostureGate {
+        /// The call may proceed in this resolved posture.
+        case proceed(EffectiveWriteMode)
+        /// The policy refused the call; the associated output is the failure.
+        case refused(ToolOutput)
+    }
+
+    /// Runs the write-path posture gate ahead of mode resolution.
+    ///
+    /// `WritePathPolicy.classify` is the single owner of write posture, so
+    /// this gate only interprets its decision: a deny posture refuses the
+    /// call naming the policy reason with no file content, an ask posture
+    /// waits on a recorded decide and fails closed without one, and a stage
+    /// or live posture forces the mode the call actually uses. Only the
+    /// model posture, whose schema promises staged or live, fails closed on
+    /// an unknown mode: a forced posture accepts and ignores any stale value.
+    /// - Parameters:
+    ///   - rawPath: Trimmed caller-supplied live path.
+    ///   - args: Decoded call arguments carrying the requested mode.
+    ///   - approved: True when a recorded decide authorizes an ask posture.
+    ///   - callID: Tool call identifier echoed on refusals.
+    /// - Returns: The posture to execute in, or the caller-facing refusal.
+    private func resolvePosture(
+        rawPath: String,
+        args: FilesWriteArgs,
+        approved: Bool,
+        callID: String
+    ) -> PostureGate {
+        let requestedMode = args.mode.lowercased()
+        let decision = WritePathPolicy.classify(
+            path: rawPath,
+            filesConfig: filesConfig,
+            requestedMode: args.mode,
+            homeDirectoryURL: homeDirectoryURL
+        )
+        if decision.posture == .deny {
+            // The reason names policy only, and the refusal lands before any
+            // read, staging copy, or live write: nothing on disk moves and
+            // no file content enters the envelope.
+            return .refused(FilesReadHelpers.deniedOutput(
+                resolvedPath: decision.resolvedPath,
+                reason: decision.reason,
+                requiresApproval: false,
+                callID: callID
+            ))
+        }
+        if filesConfig.writeMode == .model {
+            // Fail closed on mode typos: an unknown mode must not silently
+            // inherit the safe staged posture when the schema promises only
+            // staged or live.
+            guard requestedMode == "staged" || requestedMode == "live" else {
+                return .refused(.failure(
+                    "Invalid files.write arguments: 'mode' must be 'staged' or 'live'.",
+                    callID: callID
+                ))
+            }
+        }
+        if decision.posture == .ask, !approved {
+            // A parked approval never self-approves: only a recorded decide
+            // authorizes the write, so a missing approval fails closed with
+            // nothing on disk touched.
+            return .refused(FilesReadHelpers.deniedOutput(
+                resolvedPath: decision.resolvedPath,
+                reason: decision.reason,
+                requiresApproval: true,
+                callID: callID
+            ))
+        }
+        // Policy, then owner settings, then the model-authored request; the
+        // resolved posture carries any override sentence to every envelope
+        // branch so a forced outcome stays honest.
+        return .proceed(Self.resolveEffectiveMode(
+            posture: decision.posture,
+            requestedMode: requestedMode,
+            modeExplicit: args.modeExplicit,
+            configuredMode: filesConfig.writeMode
+        ))
+    }
+
+    /// Resolves the posture the call must actually use, layering the
+    /// write-path decision over the configured mode and the per-call request.
+    ///
+    /// The policy decision outranks both: a stage or live posture forces the
+    /// call into it, and a contradicting `write_mode` or explicit request is
+    /// not rejected — the forced posture wins and the envelope names the
+    /// override so the outcome stays honest. An approved ask decides nothing
+    /// about the mode, so it resolves exactly as the configured mode plus
+    /// request always did. An omitted mode is not a contradiction — it
+    /// defaults to staged — so it never earns the override sentence.
+    private static func resolveEffectiveMode(
+        posture: FilesWritePathPosture,
+        requestedMode: String,
+        modeExplicit: Bool,
+        configuredMode: FilesWriteMode
+    ) -> EffectiveWriteMode {
+        let configured = resolveEffectiveMode(
+            requestedMode: requestedMode,
+            modeExplicit: modeExplicit,
+            configuredMode: configuredMode
+        )
+        switch posture {
+        case .stage:
+            // The staged posture already won: keep the configured note when
+            // the owner setting itself forced it, otherwise name whichever
+            // authority asked for live and lost to the rule.
+            if configured.isStaged {
+                return configured
+            }
+            let liveLoser = configuredMode == .live
+                ? policyOverridesConfiguredLiveNote
+                : policyOverridesRequestedLiveNote
+            return EffectiveWriteMode(isStaged: true, overrideNote: liveLoser)
+        case .live:
+            if !configured.isStaged {
+                return configured
+            }
+            let stagedLoser = configuredMode == .staged
+                ? policyOverridesConfiguredStagedNote
+                : policyOverridesRequestedStagedNote
+            return EffectiveWriteMode(isStaged: false, overrideNote: stagedLoser)
+        case .ask, .deny:
+            return configured
+        }
+    }
+
+    /// Resolves the posture the configured `write_mode` plus the per-call
+    /// request decide, before any write-path rule is layered on.
     ///
     /// Owner settings outrank the model's per-call request. A contradicting
     /// explicit request is not rejected: the forced posture wins and the
@@ -541,24 +688,14 @@ public struct FilesWriteTool: Tool, Sendable {
             return .failure("Invalid files.write arguments: 'path' must not be empty.", callID: input.callID)
         }
 
-        // Owner settings outrank the model-authored request; the resolved
-        // posture carries any override sentence to every envelope branch.
-        // Resolution runs before validation because only the model posture,
-        // whose schema promises staged or live, fails closed on an unknown
-        // mode: a forced posture accepts and ignores any stale value.
-        let requestedMode = args.mode.lowercased()
-        let effectiveMode = Self.resolveEffectiveMode(
-            requestedMode: requestedMode,
-            modeExplicit: args.modeExplicit,
-            configuredMode: filesConfig.writeMode
-        )
-        if filesConfig.writeMode == .model {
-            // Fail closed on mode typos: an unknown mode must not silently
-            // inherit the safe staged posture when the schema promises only
-            // staged or live.
-            guard requestedMode == "staged" || requestedMode == "live" else {
-                return .failure("Invalid files.write arguments: 'mode' must be 'staged' or 'live'.", callID: input.callID)
-            }
+        // The write-path policy owns posture, so every call passes its gate
+        // before mode resolution and before any disk access.
+        let effectiveMode: EffectiveWriteMode
+        switch resolvePosture(rawPath: rawPath, args: args, approved: context.approved, callID: input.callID) {
+        case let .proceed(mode):
+            effectiveMode = mode
+        case let .refused(output):
+            return output
         }
 
         // Every derived path is vetted before any disk access; a refusal comes

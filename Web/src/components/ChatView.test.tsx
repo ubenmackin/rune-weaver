@@ -592,6 +592,48 @@ describe("ChatView", () => {
     });
     expect(screen.getAllByText(/streamed fallback text/)).toHaveLength(1);
   });
+
+  it("shows the active session's ephemeral trust below the input box", async () => {
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.startsWith("/approvals/session-trust")) {
+        return jsonResponse({
+          sessionID: "sess-trust-chat",
+          grants: [
+            {
+              toolName: "email.send",
+              scope: { kind: "exactTarget", target: "bob@x.com" },
+              duration: "forSession",
+              grantedAt: "2026-01-01T00:00:00Z",
+              expiresAt: null,
+            },
+          ],
+          count: 1,
+        });
+      }
+      return jsonResponse({ sessions: [], count: 0 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ephemeral-trust-chip")).toBeInTheDocument();
+    });
+    // One compact line per live trust, named by lifetime only.
+    expect(
+      screen.getByTestId("ephemeral-trust-chip").textContent,
+    ).toContain("email.send to bob@x.com — rest of this session");
+    // The chip rides inside the footer below the input row, so it stays
+    // attached to the composer it explains.
+    const footer = document.querySelector<HTMLElement>(".chat-footer-box");
+    expect(footer).not.toBeNull();
+    const children = Array.from(footer?.children ?? []);
+    const inputRowIndex = children.findIndex((child) =>
+      child.querySelector("#chat-message-prompt"),
+    );
+    const chipIndex = children.indexOf(screen.getByTestId("ephemeral-trust-chip"));
+    expect(inputRowIndex).toBeGreaterThanOrEqual(0);
+    expect(chipIndex).toBeGreaterThan(inputRowIndex);
+  });
 });
 
 describe("reconstructMessages with structured tool actions", () => {
@@ -1554,7 +1596,7 @@ describe("Inline session approval banner", () => {
     });
   });
 
-  it("chevron menu Allow with all targets passes widen: true", async () => {
+  it("chevron menu Allow with all targets passes tool-wide scope", async () => {
     const user = userEvent.setup();
     const { decideCalls } = stubApprovalsFetch([approval()]);
     render(<ChatView />);
@@ -1574,7 +1616,7 @@ describe("Inline session approval banner", () => {
     expect(JSON.parse(decideCalls[0].body)).toMatchObject({
       approved: true,
       duration: "oneHour",
-      widen: true,
+      scope: { kind: "tool" },
     });
   });
 
@@ -4531,10 +4573,10 @@ describe("ChatView persona header", () => {
 
   it("shows the persona name as text identity with no avatar image", async () => {
     publishPersonaFromSettings({
-      assistant_name: "Zephyra",
+      assistantName: "Zephyra",
       tone: "concise",
       style: "",
-      user_name: "",
+      userName: "",
       avatar: "cyan",
     });
     render(<ChatView />);

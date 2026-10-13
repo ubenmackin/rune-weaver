@@ -26,7 +26,7 @@ struct LlamaPrefixReuseMirrorTests {
     }
 
     @Test
-    func `File shape uses snake keys and round-trips`() throws {
+    func `ProviderConfig shape uses camelCase keys and round-trips`() throws {
         let original = ProviderConfig(
             enabled: true,
             model: "local-model",
@@ -37,10 +37,10 @@ struct LlamaPrefixReuseMirrorTests {
         )
         let data = try JSONEncoder().encode(original)
         let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-        #expect(json["slot_count"] as? Int == 4)
-        #expect(json["cache_prompt"] as? Bool == false)
-        #expect(json["slotCount"] == nil)
-        #expect(json["cachePrompt"] == nil)
+        #expect(json["slotCount"] as? Int == 4)
+        #expect(json["cachePrompt"] as? Bool == false)
+        #expect(json["slot_count"] == nil)
+        #expect(json["cache_prompt"] == nil)
 
         let decoded = try JSONDecoder().decode(ProviderConfig.self, from: data)
         #expect(decoded == original)

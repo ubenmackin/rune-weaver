@@ -1,6 +1,7 @@
 // Rune Weaver LLM — OpenAI-compatible provider streaming and tool definitions.
 
 import Foundation
+import os
 import RuneWeaverCore
 
 /// A function-style tool description sent to the model.
@@ -771,16 +772,19 @@ public enum LlamaCppSlot: Sendable {
     }
 }
 
+private struct StreamingTaskState {
+    var task: URLSessionTask?
+    var isCancelled: Bool = false
+}
+
 /// Task delegate capturing the URLSessionTask so cancellation immediately terminates the socket.
-final class StreamingTaskDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    private let lock = NSLock()
-    private var task: URLSessionTask?
-    private var isCancelled = false
+final class StreamingTaskDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+    private let state = OSAllocatedUnfairLock(initialState: StreamingTaskState())
 
     func urlSession(_: URLSession, didCreateTask task: URLSessionTask) {
-        let shouldCancel: Bool = lock.withLock {
-            self.task = task
-            return self.isCancelled
+        let shouldCancel: Bool = state.withLock { taskState -> Bool in
+            taskState.task = task
+            return taskState.isCancelled
         }
         if shouldCancel {
             task.cancel()
@@ -788,9 +792,9 @@ final class StreamingTaskDelegate: NSObject, URLSessionTaskDelegate, @unchecked 
     }
 
     func cancel() {
-        let taskToCancel: URLSessionTask? = lock.withLock {
-            self.isCancelled = true
-            return self.task
+        let taskToCancel: URLSessionTask? = state.withLock { taskState -> URLSessionTask? in
+            taskState.isCancelled = true
+            return taskState.task
         }
         taskToCancel?.cancel()
     }

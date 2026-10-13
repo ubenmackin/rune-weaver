@@ -1,4 +1,14 @@
-// Rune Weaver Tests — PermissionGate SQLite persistence, startup cleanup, and periodic reaper.
+// Rune Weaver Tests — PermissionGate rule persistence, lifecycle administration, and the legacy carry-forward.
+//
+// Pins the durable half of the rule model: durable rules save, load, and survive
+// a restart with their tool, scope, action, and usage counters; expired allow
+// rules prune from memory and from storage while deny rules never age out and
+// are removed only by an explicit revoke; widening and re-arming preserve rule
+// identity, creation time, and usage counters while recomputing only the
+// lifetime; usage counters attribute to the covering rule and round-trip; and a
+// legacy `trust_grants` row allows exactly the call it covered before the rule
+// model existed. Ephemeral task and session grants stay in memory, never
+// persist, and die on the lifecycle signal that ends them.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -7,27 +17,44 @@ import Testing
     import SQLite3
 #endif
 
-@Suite("PermissionGate Persistence & Reaper Tests")
-struct PermissionGatePersistenceTests {
-    private func temporaryDBPath() -> String {
+/// Raw SQLite fixtures for the rule-persistence suites.
+///
+/// The store opens and closes per call exactly as production does, so the
+/// helpers mirror its busy timeout instead of surfacing a transient write lock
+/// as a failed fixture.
+private enum RulePersistenceTestSupport {
+    /// Builds an isolated database path under the temporary directory.
+    static func temporaryDBPath() -> String {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("test-trust-\(UUID().uuidString).db")
+            .appendingPathComponent("test-rules-\(UUID().uuidString).db")
             .path
     }
 
-    /// Counts every row in `trust_grants`, including expired rows.
-    private func rawTrustGrantRowCount(dbPath: String) -> Int {
+    /// Executes one raw statement so fixture tables predate the store.
+    @discardableResult
+    static func execRaw(dbPath: String, sql: String) -> Bool {
         #if canImport(SQLite3)
-            let path = (dbPath as NSString).expandingTildeInPath
+            let expanded = (dbPath as NSString).expandingTildeInPath
             var handle: OpaquePointer?
-            let status = path.withCString { sqlite3_open($0, &handle) }
-            guard status == SQLITE_OK, let handle else { return -1 }
+            guard expanded.withCString({ sqlite3_open($0, &handle) }) == SQLITE_OK, let handle else { return false }
             defer { sqlite3_close(handle) }
-            // Mirror the production busy_timeout so a transient reaper/store
-            // write lock waits instead of surfacing as a false -1.
+            _ = sqlite3_busy_timeout(handle, 5000)
+            return sql.withCString { sqlite3_exec(handle, $0, nil, nil, nil) } == SQLITE_OK
+        #else
+            return false
+        #endif
+    }
+
+    /// Counts rows in a fixture table so a prune proves physical deletion.
+    static func rawRowCount(dbPath: String, table: String) -> Int {
+        #if canImport(SQLite3)
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            var handle: OpaquePointer?
+            guard expanded.withCString({ sqlite3_open($0, &handle) }) == SQLITE_OK, let handle else { return -1 }
+            defer { sqlite3_close(handle) }
             _ = sqlite3_busy_timeout(handle, 5000)
             var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, "SELECT COUNT(*) FROM trust_grants;", -1, &statement, nil) == SQLITE_OK,
+            guard sqlite3_prepare_v2(handle, "SELECT COUNT(*) FROM \(table);", -1, &statement, nil) == SQLITE_OK,
                   let statement
             else { return -1 }
             defer { sqlite3_finalize(statement) }
@@ -38,951 +65,701 @@ struct PermissionGatePersistenceTests {
         #endif
     }
 
-    @Test
-    func `SQLiteTrustStore saves and loads active grants`() async throws {
-        let dbPath = temporaryDBPath()
-        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+    /// Backdates one rule's expiry so a row lapses while the gate is live.
+    ///
+    /// Every durable tier outlasts a test, so the fixture advances the stored row
+    /// the way a clock change would and leaves the reaper to prove it sweeps the
+    /// database rather than only filtering on read.
+    @discardableResult
+    static func backdateExpiry(dbPath: String, id: UUID, expiresAt: Date) -> Bool {
+        let sql = "UPDATE access_rules SET expires_at = \(expiresAt.timeIntervalSince1970) WHERE id = '\(id.uuidString)';"
+        return execRaw(dbPath: dbPath, sql: sql)
+    }
+}
 
-        let store = SQLiteTrustStore(dbPath: dbPath)
-        let grantForever = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "alice@example.com"),
-            grantedAt: Date(),
-            expiresAt: nil,
-            duration: .forever
-        )
-        let grantTimed = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "file.write", target: "/tmp/test.txt"),
-            grantedAt: Date(),
-            expiresAt: Date().addingTimeInterval(3600),
-            duration: .oneHour
-        )
+/// Probe tool standing in for a gated tool on the decision path.
+private struct GateProbeTool: Tool, Sendable {
+    /// Tool name the gate branches and scopes on.
+    let name: String
+    /// Trust level the probe declares; approval-gated by default.
+    let permissionLevel: PermissionLevel = .requiresApproval
 
-        try await store.save([grantForever, grantTimed])
-
-        let loaded = try await store.load()
-        #expect(loaded.count == 2)
-        #expect(loaded.contains { $0.actionDescriptor.toolName == "email.send" && $0.actionDescriptor.target == "alice@example.com" && $0.expiresAt == nil })
-        #expect(loaded.contains { $0.actionDescriptor.toolName == "file.write" && $0.actionDescriptor.target == "/tmp/test.txt" && $0.expiresAt != nil })
+    /// Summary shown in approval prompts.
+    var description: String {
+        "Probe for \(name)."
     }
 
+    /// Accepts any object; the gate reads only the fields it names.
+    var inputSchema: JSONSchema {
+        .emptyObject
+    }
+
+    /// The probe never executes; the verdict is the assertion target.
+    func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+        .success("probe-ok", callID: input.callID)
+    }
+}
+
+@Suite("PermissionGate Persistence & Reaper Tests")
+struct PermissionGatePersistenceTests {
+    // MARK: - Save and load
+
     @Test
-    func `PermissionGate bootstrap prunes expired grants on startup`() async throws {
-        let dbPath = temporaryDBPath()
+    func `a second gate sees the durable rules the first saved, deny rows included`() async throws {
+        let dbPath = RulePersistenceTestSupport.temporaryDBPath()
         defer { try? FileManager.default.removeItem(atPath: dbPath) }
 
-        let store = SQLiteTrustStore(dbPath: dbPath)
+        let store = SQLiteAccessRuleStore(dbPath: dbPath)
+        let gate = await PermissionGate.load(ruleStore: store)
+        // A path scope stores its canonical spelling, so assert against what the
+        // canonicalizer resolves rather than the raw input.
+        let notesPrefix = try #require(AccessScope.canonicalPathPrefix("/tmp/notes"))
+        #expect(await gate.grant(.toolWide, toolName: "email.send", duration: .forever))
+        #expect(await gate.grant(.recipientSet(["a@x.com", "b@x.com"]), toolName: "email.send", duration: .oneDay))
+        #expect(await gate.grant(.exactTarget("dr.smith@clinic.com"), toolName: "email.send", duration: .oneHour))
+        #expect(await gate.grant(.pathPrefix(notesPrefix), toolName: "files.write", duration: .oneHour))
+        await gate.denyRule(.domain(host: "example.com", subdomains: false), toolName: "api.request", reason: "owner refused this host")
 
-        // Seed 1 forever grant, 1 active grant, and 1 expired grant
+        let stored = try await store.load()
+        #expect(stored.count == 5)
+        #expect(stored.contains {
+            $0.action == .deny && $0.toolName == "api.request"
+                && $0.scope == .domain(host: "example.com", subdomains: false)
+                && $0.expiresAt == nil && $0.reason == "owner refused this host"
+        })
+
+        // A second gate over the same file reads exactly the same rule set, so a
+        // durable decision survives a restart instead of re-prompting.
+        let reloaded = await PermissionGate.load(ruleStore: store)
+        let reloadedRules = await reloaded.activeRules()
+        #expect(reloadedRules.count == 5)
+        let reloadedIDs = reloadedRules.map(\.id).sorted { $0.uuidString < $1.uuidString }
+        let storedIDs = stored.map(\.id).sorted { $0.uuidString < $1.uuidString }
+        #expect(reloadedIDs == storedIDs)
+        #expect(reloadedRules.contains { $0.scope == .recipientSet(["a@x.com", "b@x.com"]) })
+        #expect(reloadedRules.contains { $0.scope == .pathPrefix(notesPrefix) })
+        #expect(reloadedRules.contains { $0.action == .deny })
+
+        // The gate's live view keeps both the tool-wide and exact-target
+        // allows beside the richer scopes and the deny row.
+        let liveRules = await gate.activeRules()
+        #expect(liveRules.count == 5)
+        #expect(liveRules.contains { $0.toolName == "email.send" && $0.scope == .toolWide })
+        #expect(liveRules.contains { $0.toolName == "email.send" && $0.scope == .exactTarget("dr.smith@clinic.com") })
+        #expect(liveRules.contains { $0.action == .deny && $0.toolName == "api.request" })
+    }
+
+    // MARK: - Prune on startup
+
+    @Test
+    func `bootstrap prunes expired allows from memory and never lets them allow`() async throws {
         let now = Date()
-        let grantForever = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "alice@example.com"),
+        let expired = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .exactTarget("gone@example.com"),
+            action: .allow,
+            grantedAt: now.addingTimeInterval(-7200),
+            duration: .oneHour
+        ))
+        // A `messages.send` tool-wide row is the pre-invariant spelling: it can
+        // never cover a real send, so bootstrap drops it instead of lingering as
+        // trust nobody can exercise.
+        let legacyWideSend = try #require(AccessRule(
+            toolName: "messages.send",
+            scope: .toolWide,
+            action: .allow,
             grantedAt: now,
-            expiresAt: nil,
             duration: .forever
-        )
-        let grantActive = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "bob@example.com"),
+        ))
+        let standingDeny = try #require(AccessRule(
+            toolName: "stub.write",
+            scope: .toolWide,
+            action: .deny,
             grantedAt: now,
-            expiresAt: now.addingTimeInterval(600),
-            duration: .fiveMinutes
-        )
-        let grantExpired = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "charlie@example.com"),
-            grantedAt: now.addingTimeInterval(-600),
-            expiresAt: now.addingTimeInterval(-10),
-            duration: .fiveMinutes
-        )
+            reason: "owner refused writes"
+        ))
+        let live = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .exactTarget("a@x.com"),
+            action: .allow,
+            grantedAt: now,
+            duration: .forever
+        ))
 
-        try await store.save([grantForever, grantActive, grantExpired])
+        let store = InMemoryAccessRuleStore(rules: [expired, legacyWideSend, standingDeny, live])
+        let gate = await PermissionGate.load(ruleStore: store)
 
-        // Boot a new PermissionGate instance against the same database
-        let gate = await PermissionGate.load(store: store)
+        let rules = await gate.activeRules()
+        #expect(rules.count == 2)
+        #expect(rules.contains { $0.id == standingDeny.id })
+        #expect(rules.contains { $0.id == live.id })
+        #expect(rules.contains { $0.id == expired.id } == false)
+        #expect(rules.contains { $0.id == legacyWideSend.id } == false)
 
-        let active = await gate.activeGrants()
-        #expect(active.count == 2)
-        #expect(await gate.isTrusted(ActionDescriptor(toolName: "email.send", target: "alice@example.com")))
-        #expect(await gate.isTrusted(ActionDescriptor(toolName: "email.send", target: "bob@example.com")))
-        #expect(await gate.isTrusted(ActionDescriptor(toolName: "email.send", target: "charlie@example.com")) == false)
-
-        // Confirm expired grant was physically removed from SQLite on startup
-        let rawLoaded = try await store.load()
-        #expect(rawLoaded.count == 2)
-        #expect(rawLoaded.contains { $0.actionDescriptor.target == "charlie@example.com" } == false)
+        // The lapsed rule never allows, even the exact call it once covered.
+        let covered = ToolInput(toolName: "email.send", argumentsJSON: #"{"to":"a@x.com"}"#)
+        #expect(await gate.checkPermission(toolCall: covered, tool: GateProbeTool(name: "email.send")) == .allowed)
+        let lapsed = ToolInput(toolName: "email.send", argumentsJSON: #"{"to":"gone@example.com"}"#)
+        guard case .requiresApproval = await gate.checkPermission(toolCall: lapsed, tool: GateProbeTool(name: "email.send")) else {
+            Issue.record("Expected the pruned rule to park again instead of allowing")
+            return
+        }
+        // The dropped send row cannot cover the handle the owner would approve.
+        let send = ToolInput(toolName: "messages.send", argumentsJSON: #"{"recipient":"+15551234567","text":"hi"}"#)
+        guard case .requiresApproval = await gate.checkPermission(toolCall: send, tool: GateProbeTool(name: "messages.send")) else {
+            Issue.record("Expected the unusable tool-wide send row to park again")
+            return
+        }
     }
 
     @Test
-    func `PermissionGate periodic cleanup reaper purges expired grants`() async throws {
-        let dbPath = temporaryDBPath()
+    func `bootstrap prunes expired rows from storage while deny rows survive`() async throws {
+        let dbPath = RulePersistenceTestSupport.temporaryDBPath()
         defer { try? FileManager.default.removeItem(atPath: dbPath) }
 
-        let store = SQLiteTrustStore(dbPath: dbPath)
-        let gate = await PermissionGate.load(store: store)
+        let store = SQLiteAccessRuleStore(dbPath: dbPath)
+        let now = Date()
+        let expiredAllow = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .toolWide,
+            action: .allow,
+            grantedAt: now.addingTimeInterval(-7200),
+            duration: .oneHour
+        ))
+        let standingDeny = try #require(AccessRule(
+            toolName: "stub.write",
+            scope: .toolWide,
+            action: .deny,
+            grantedAt: now,
+            reason: "owner refused writes"
+        ))
+        let durableAllow = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .toolWide,
+            action: .allow,
+            grantedAt: now,
+            duration: .oneDay
+        ))
+        try await store.save([expiredAllow, standingDeny, durableAllow])
+        #expect(RulePersistenceTestSupport.rawRowCount(dbPath: dbPath, table: "access_rules") == 3)
 
-        // Add a forever grant and a very short-lived grant (expires in 0.05s)
-        await gate.grantTrust(
-            for: ActionDescriptor(toolName: "email.send", target: "safe@example.com"),
+        _ = await PermissionGate.load(ruleStore: store)
+
+        // Startup prunes the store itself, not just the in-memory mirror, while a
+        // standing refusal has no expiry to lapse.
+        let stored = try await store.load()
+        #expect(stored.count == 2)
+        #expect(stored.contains { $0.id == standingDeny.id })
+        #expect(stored.contains { $0.id == durableAllow.id })
+        #expect(RulePersistenceTestSupport.rawRowCount(dbPath: dbPath, table: "access_rules") == 2)
+    }
+
+    // MARK: - Periodic reaper
+
+    @Test
+    func `the periodic reaper sweeps a row that lapses while the gate is live`() async throws {
+        let dbPath = RulePersistenceTestSupport.temporaryDBPath()
+        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+
+        let store = SQLiteAccessRuleStore(dbPath: dbPath)
+        let now = Date()
+        let standing = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .toolWide,
+            action: .allow,
+            grantedAt: now,
             duration: .forever
-        )
-        // Manually save an expired grant to simulate time passing while reaper runs
-        let expiredGrant = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "file.delete", target: "/tmp/stale.txt"),
-            grantedAt: Date().addingTimeInterval(-10),
-            expiresAt: Date().addingTimeInterval(-1),
-            duration: .fiveMinutes
-        )
-        var allGrants = await gate.activeGrants()
-        allGrants.append(expiredGrant)
-        try await store.save(allGrants)
+        ))
+        let lapsing = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .exactTarget("stale@example.com"),
+            action: .allow,
+            grantedAt: now,
+            duration: .oneHour
+        ))
+        try await store.save([standing, lapsing])
+        let gate = await PermissionGate.load(ruleStore: store)
+        #expect(await gate.activeRules().count == 2)
 
-        // The filtered load hides the expired row, so confirm it is
-        // physically present before the reaper runs.
-        #expect(rawTrustGrantRowCount(dbPath: dbPath) == 2)
+        // A row can lapse while the process runs, so backdate the stored expiry
+        // and prove the reaper removes it from the database rather than leaving
+        // it to resurrect on the next boot.
+        #expect(RulePersistenceTestSupport.backdateExpiry(dbPath: dbPath, id: lapsing.id, expiresAt: now.addingTimeInterval(-60)))
+        #expect(RulePersistenceTestSupport.rawRowCount(dbPath: dbPath, table: "access_rules") == 2)
 
-        // Start reaper with 0.05s cadence
         await gate.startPeriodicCleanup(intervalSeconds: 0.05)
-
-        // Wait slightly for reaper to tick
-        try await Task.sleep(nanoseconds: 150_000_000) // 0.15s
-
+        try await Task.sleep(nanoseconds: 250_000_000)
         await gate.stopPeriodicCleanup()
 
-        // Verify expired grant was purged by the reaper
-        let activeAfter = await gate.activeGrants()
-        #expect(activeAfter.count == 1)
-        #expect(activeAfter[0].actionDescriptor.target == "safe@example.com")
-
-        let storedGrants = try await store.load()
-        #expect(storedGrants.count == 1)
-        #expect(storedGrants[0].actionDescriptor.target == "safe@example.com")
-
-        // A filtered load would pass even without the reaper, so assert
-        // the raw row count to prove physical deletion happened.
-        #expect(rawTrustGrantRowCount(dbPath: dbPath) == 1)
+        let stored = try await store.load()
+        #expect(stored.map(\.id) == [standing.id])
+        #expect(RulePersistenceTestSupport.rawRowCount(dbPath: dbPath, table: "access_rules") == 1)
     }
 
+    // MARK: - Grant, revoke, usage
+
     @Test
-    func `PermissionGate grantTrust and revokeTrust update persistent storage`() async throws {
-        let dbPath = temporaryDBPath()
+    func `grant plus revoke rewrite the stored rule set`() async throws {
+        let dbPath = RulePersistenceTestSupport.temporaryDBPath()
         defer { try? FileManager.default.removeItem(atPath: dbPath) }
 
-        let store = SQLiteTrustStore(dbPath: dbPath)
-        let gate = await PermissionGate.load(store: store)
+        let store = SQLiteAccessRuleStore(dbPath: dbPath)
+        let gate = await PermissionGate.load(ruleStore: store)
+        let descriptor = ActionDescriptor(toolName: "email.send", target: "persist@example.com")
+        #expect(await gate.grantTrust(for: descriptor, duration: .oneHour))
 
-        await gate.grantTrust(
-            for: ActionDescriptor(toolName: "email.send", target: "persist@example.com"),
-            duration: .oneHour
-        )
-
-        // grantTrust awaits persistence, so storage already reflects the new grant.
-        var stored = try await store.load()
+        // `grantTrust` awaits persistence, so storage already carries the rule.
+        let stored = try await store.load()
+        let saved = try #require(stored.first)
         #expect(stored.count == 1)
-        #expect(stored[0].actionDescriptor.target == "persist@example.com")
+        #expect(saved.toolName == "email.send")
+        #expect(saved.scope == .exactTarget("persist@example.com"))
+        #expect(saved.action == .allow)
+        #expect(saved.duration == .oneHour)
+        #expect(saved.expiresAt != nil)
 
-        // Revoke trust
-        await gate.revokeTrust(for: ActionDescriptor(toolName: "email.send", target: "persist@example.com"))
+        // Revoking removes exactly one rule and reports the miss next time so a
+        // route can stay 404 instead of rewriting anything.
+        #expect(await gate.revokeRule(id: saved.id))
+        #expect(try await store.load().isEmpty)
+        #expect(await gate.revokeRule(id: saved.id) == false)
+        #expect(await gate.isTrusted(descriptor) == false)
 
-        // revokeTrust awaits persistence, so storage already reflects the removal.
-        stored = try await store.load()
-        #expect(stored.isEmpty)
+        // Future calls park again rather than reading as trusted.
+        let call = ToolInput(toolName: "email.send", argumentsJSON: #"{"to":"persist@example.com"}"#)
+        guard case .requiresApproval = await gate.checkPermission(toolCall: call, tool: GateProbeTool(name: "email.send")) else {
+            Issue.record("Expected a revoked rule to park again")
+            return
+        }
     }
 
     @Test
-    func `Fresh grants start unused with zero count and nil stamp`() async throws {
-        let dbPath = temporaryDBPath()
+    func `fresh rules start unused and the zero baseline survives the round trip`() async {
+        let dbPath = RulePersistenceTestSupport.temporaryDBPath()
         defer { try? FileManager.default.removeItem(atPath: dbPath) }
 
-        let store = SQLiteTrustStore(dbPath: dbPath)
-        let gate = await PermissionGate.load(store: store)
-        let descriptor = ActionDescriptor(toolName: "email.send", target: "fresh@example.com")
-        await gate.grantTrust(for: descriptor, duration: .oneHour)
+        let store = SQLiteAccessRuleStore(dbPath: dbPath)
+        let gate = await PermissionGate.load(ruleStore: store)
+        #expect(await gate.grantTrust(for: ActionDescriptor(toolName: "email.send", target: "fresh@example.com"), duration: .oneHour))
 
         // A replacement lifetime must not inherit prior counters, so fresh rows
         // prove the zero baseline instead of assuming it.
-        let live = await gate.activeGrants()
+        let live = await gate.activeRules()
         #expect(live.count == 1)
         #expect(live.first?.useCount == 0)
         #expect(live.first?.lastUsedAt == nil)
 
-        // The zero baseline must survive the durable round-trip, not just memory.
-        let stored = try await store.load()
-        #expect(stored.count == 1)
-        #expect(stored.first?.useCount == 0)
-        #expect(stored.first?.lastUsedAt == nil)
-    }
-
-    @Test
-    func `recordUse increments and stamps time and survives save plus load`() async {
-        let dbPath = temporaryDBPath()
-        defer { try? FileManager.default.removeItem(atPath: dbPath) }
-
-        let store = SQLiteTrustStore(dbPath: dbPath)
-        let gate = await PermissionGate.load(store: store)
-        let descriptor = ActionDescriptor(toolName: "email.send", target: "used@example.com")
-        await gate.grantTrust(for: descriptor, duration: .oneHour)
-
-        // Each covered call bumps the counter and refreshes the stamp so the
-        // dashboard can prove liveness instead of guessing from grant age.
-        await gate.recordUse(for: descriptor)
-        await gate.recordUse(for: descriptor)
-        await gate.recordUse(for: descriptor)
-
-        let live = await gate.activeGrants()
-        #expect(live.count == 1)
-        #expect(live.first?.useCount == 3)
-        #expect(live.first?.lastUsedAt != nil)
-
-        // Reload on the same file to prove the counters are durable, not just
-        // resident in the granting gate instance.
-        let reloaded = await PermissionGate.load(store: store)
-        let restored = await reloaded.activeGrants()
+        let reloaded = await PermissionGate.load(ruleStore: store)
+        let restored = await reloaded.activeRules()
         #expect(restored.count == 1)
-        #expect(restored.first?.useCount == 3)
-        #expect(restored.first?.lastUsedAt != nil)
-        // SQLite REAL loses sub-millisecond precision, so compare with 1ms tolerance.
-        if let liveStamp = live.first?.lastUsedAt, let restoredStamp = restored.first?.lastUsedAt {
-            #expect(abs(liveStamp.timeIntervalSince(restoredStamp)) < 0.001)
-        } else {
-            Issue.record("Expected lastUsedAt on both live and restored grants")
-        }
+        #expect(restored.first?.useCount == 0)
+        #expect(restored.first?.lastUsedAt == nil)
     }
 
     @Test
-    func `Legacy SQLite rows without counter columns load as unused`() async throws {
-        let dbPath = temporaryDBPath()
+    func `recordUse attributes to the covering rule and survives a reload`() async throws {
+        let dbPath = RulePersistenceTestSupport.temporaryDBPath()
         defer { try? FileManager.default.removeItem(atPath: dbPath) }
 
-        #if canImport(SQLite3)
-            // Hand-build a pre-counters database so the guarded migration path
-            // is exercised: the loader must default counters instead of
-            // failing the whole grant list.
-            let expanded = (dbPath as NSString).expandingTildeInPath
-            var rawHandle: OpaquePointer?
-            guard expanded.withCString({ sqlite3_open($0, &rawHandle) }) == SQLITE_OK,
-                  let rawHandle
-            else {
-                Issue.record("Could not open legacy database")
-                return
-            }
-            let createLegacy = """
-            CREATE TABLE trust_grants (
-                id TEXT PRIMARY KEY,
-                tool_name TEXT NOT NULL,
-                target TEXT NOT NULL,
-                granted_at REAL NOT NULL,
-                expires_at REAL,
-                duration TEXT NOT NULL
-            );
-            """
-            guard sqlite3_exec(rawHandle, createLegacy, nil, nil, nil) == SQLITE_OK else {
-                sqlite3_close(rawHandle)
-                Issue.record("Could not create legacy trust_grants table")
-                return
-            }
-            let legacyID = UUID().uuidString
-            let nowSeconds = Date().timeIntervalSince1970
-            let insertLegacy = "INSERT INTO trust_grants (id, tool_name, target, granted_at, expires_at, duration) VALUES ('\(legacyID)', 'email.send', 'legacy@example.com', \(nowSeconds), NULL, 'forever');"
-            guard sqlite3_exec(rawHandle, insertLegacy, nil, nil, nil) == SQLITE_OK else {
-                sqlite3_close(rawHandle)
-                Issue.record("Could not insert legacy trust row")
-                return
-            }
-            sqlite3_close(rawHandle)
+        let store = SQLiteAccessRuleStore(dbPath: dbPath)
+        let gate = await PermissionGate.load(ruleStore: store)
+        let descriptor = ActionDescriptor(toolName: "email.send", target: "used@example.com")
+        #expect(await gate.grantTrust(for: descriptor, duration: .forever))
+        #expect(await gate.grant(.toolWide, toolName: "bash.exec", duration: .forever))
 
-            let store = SQLiteTrustStore(dbPath: dbPath)
-            let loaded = try await store.load()
-            #expect(loaded.count == 1)
-            #expect(loaded.first?.actionDescriptor.target == "legacy@example.com")
-            // Missing columns mean the grant was never observed in use.
-            #expect(loaded.first?.useCount == 0)
-            #expect(loaded.first?.lastUsedAt == nil)
-        #endif
-    }
+        // Each covered call bumps the counter on the rule that allowed it: the
+        // exact rule when one exists, the tool-wide fallback otherwise, so the
+        // dashboard can prove liveness instead of guessing from rule age.
+        let narrowScope = PermissionGate.scope(for: descriptor)
+        await gate.recordUse(scope: narrowScope, toolName: "email.send")
+        await gate.recordUse(scope: narrowScope, toolName: "email.send")
+        await gate.recordUse(scope: .exactTarget("ls ~/notes"), toolName: "bash.exec")
 
-    @Test
-    func `Legacy JSON without usage counters decodes as unused`() throws {
-        // File rows written before tracking carry no counter keys; decoding
-        // must treat the absence as untouched rather than corrupt.
-        let full = TrustGrant(
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "legacy@example.com"),
-            grantedAt: Date(),
-            expiresAt: nil,
-            duration: .forever,
-            useCount: 3,
-            lastUsedAt: Date()
-        )
-        let encoded = try JSONEncoder().encode(full)
-        guard var dict = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
-            Issue.record("Could not decode grant JSON for legacy shaping")
+        let live = await gate.activeRules()
+        let usedNarrow = try #require(live.first { $0.toolName == "email.send" })
+        let usedWide = try #require(live.first { $0.toolName == "bash.exec" })
+        #expect(usedNarrow.useCount == 2)
+        #expect(usedNarrow.lastUsedAt != nil)
+        #expect(usedWide.useCount == 1)
+        #expect(usedWide.lastUsedAt != nil)
+
+        // The counters are durable, not just resident in the granting instance.
+        let reloaded = await PermissionGate.load(ruleStore: store)
+        let restored = await reloaded.activeRules()
+        let restoredNarrow = try #require(restored.first { $0.toolName == "email.send" })
+        let restoredWide = try #require(restored.first { $0.toolName == "bash.exec" })
+        #expect(restoredNarrow.useCount == 2)
+        #expect(restoredWide.useCount == 1)
+        // SQLite REAL loses sub-millisecond precision, so compare with a tolerance.
+        guard let liveStamp = usedNarrow.lastUsedAt, let restoredStamp = restoredNarrow.lastUsedAt else {
+            Issue.record("Expected lastUsedAt on both live and restored rules")
             return
         }
-        dict.removeValue(forKey: "useCount")
-        dict.removeValue(forKey: "lastUsedAt")
-        let legacyData = try JSONSerialization.data(withJSONObject: dict)
-        let decoded = try JSONDecoder().decode(TrustGrant.self, from: legacyData)
-        #expect(decoded.useCount == 0)
-        #expect(decoded.lastUsedAt == nil)
+        #expect(abs(liveStamp.timeIntervalSince(restoredStamp)) < 0.001)
     }
 
-    @Test
-    func `revokeGrant after use removes grant and future checks park again`() async {
-        struct UsageProbeTool: Tool, Sendable {
-            let name = "email.send"
-            let description = "Send email."
-            let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
-            let permissionLevel = PermissionLevel.requiresApproval
-            func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
-                .success("probe-ok", callID: input.callID)
-            }
-        }
+    // MARK: - Legacy carry-forward
 
-        let gate = PermissionGate()
-        let descriptor = ActionDescriptor(toolName: "email.send", target: "bob@example.com")
-        await gate.grantTrust(for: descriptor, duration: .oneHour)
-        await gate.recordUse(for: descriptor)
-        #expect(await gate.isTrusted(descriptor) == true)
-        let before = await gate.activeGrants()
-        #expect(before.first?.useCount == 1)
-        #expect(before.first?.lastUsedAt != nil)
-        guard let id = before.first(where: { $0.actionDescriptor == descriptor })?.id else {
-            Issue.record("Expected granted row before revoke")
+    @Test
+    func `legacy trust_grants rows allow exactly the calls they covered`() async throws {
+        let dbPath = RulePersistenceTestSupport.temporaryDBPath()
+        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+
+        // A database from before the rule model existed: three legacy grants,
+        // one of which carries a blank target that no rule may reproduce.
+        let now = Date().timeIntervalSince1970
+        let legacyTable = """
+        CREATE TABLE trust_grants (
+            id TEXT PRIMARY KEY,
+            tool_name TEXT NOT NULL,
+            target TEXT NOT NULL,
+            granted_at REAL NOT NULL,
+            expires_at REAL,
+            duration TEXT NOT NULL
+        );
+        INSERT INTO trust_grants (id, tool_name, target, granted_at, expires_at, duration) VALUES
+            ('AAAAAAAA-0000-0000-0000-000000000001', 'email.send', 'a@x.com', \(now), NULL, 'forever'),
+            ('AAAAAAAA-0000-0000-0000-000000000002', 'messages.send', '+15551234567', \(now), NULL, 'forever'),
+            ('AAAAAAAA-0000-0000-0000-000000000003', 'email.send', '   ', \(now), NULL, 'forever');
+        """
+        #expect(RulePersistenceTestSupport.execRaw(dbPath: dbPath, sql: legacyTable))
+
+        // Boot carries the legacy table forward before anything reads rules.
+        let store = SQLiteAccessRuleStore(dbPath: dbPath)
+        let gate = await PermissionGate.load(ruleStore: store)
+
+        // Every carried row is an exact-target rule: the only scope that
+        // reproduces pre-migration grant matching byte-for-byte.
+        let rules = await gate.activeRules()
+        #expect(rules.count == 2)
+        #expect(rules.allSatisfy { $0.action == .allow })
+        let email = try #require(rules.first { $0.toolName == "email.send" })
+        #expect(email.scope == .exactTarget("a@x.com"))
+        #expect(email.duration == .forever)
+        let messages = try #require(rules.first { $0.toolName == "messages.send" })
+        #expect(messages.scope == .exactTarget("+15551234567"))
+
+        // The call the owner approved still runs, and a near miss still parks.
+        let covered = ToolInput(toolName: "email.send", argumentsJSON: #"{"to":["a@x.com"]}"#)
+        #expect(await gate.checkPermission(toolCall: covered, tool: GateProbeTool(name: "email.send")) == .allowed)
+        let nearMiss = ToolInput(toolName: "email.send", argumentsJSON: #"{"to":"b@x.com"}"#)
+        guard case .requiresApproval = await gate.checkPermission(toolCall: nearMiss, tool: GateProbeTool(name: "email.send")) else {
+            Issue.record("Expected a near-miss recipient to park after migration")
             return
         }
-
-        // Stage a pending approval so the revoke can prove it touches only
-        // future gate verdicts: the inbox entry must survive the revoke.
-        let queue = ApprovalQueue(permissionGate: gate)
-        let pending = await queue.enqueue(
-            toolName: "email.send",
-            description: "Send email.",
-            input: ToolInput(toolName: "email.send", argumentsJSON: #"{"to":"other@example.com"}"#)
-        )
-        #expect(await queue.count() == 1)
-
-        // Revocation drops the row and returns gating to ask-every-time.
-        #expect(await gate.revokeGrant(id: id) == true)
-        #expect(await gate.isTrusted(descriptor) == false)
-        #expect(await gate.activeGrants().contains { $0.id == id } == false)
-
-        // The pending waiter is untouched: revoke is future-only with no
-        // running-task or waiter cancellation path.
-        #expect(await queue.count() == 1)
-        #expect(await queue.request(id: pending.id)?.toolName == "email.send")
-
-        // A future call for the revoked scope parks again instead of passing
-        // or denying outright.
-        let futureCall = ToolInput(toolName: "email.send", argumentsJSON: #"{"to":"bob@example.com"}"#)
-        let verdict = await gate.checkPermission(toolCall: futureCall, tool: UsageProbeTool())
-        guard case .requiresApproval = verdict else {
-            Issue.record("Expected future check to park again after revoke, got \(verdict)")
-            return
-        }
-    }
-
-    @Test
-    func `revokeGrant on already-expired grant reports no match`() async {
-        let now = Date()
-        let expired = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "gone@example.com"),
-            grantedAt: now.addingTimeInterval(-7200),
-            expiresAt: now.addingTimeInterval(-60),
-            duration: .fiveMinutes
-        )
-        // Bootstrap prunes the lapsed row, so the identifier is already gone
-        // before revoke runs; the miss must report false so the route can stay 404.
-        let store = InMemoryTrustStore(grants: [expired])
-        let gate = await PermissionGate.load(store: store)
-        #expect(await gate.activeGrants().isEmpty == true)
-        #expect(await gate.revokeGrant(id: expired.id) == false)
-    }
-
-    @Test
-    func `widenGrant promotes target-specific grant to tool-wide grant`() async {
-        let gate = PermissionGate()
-        let targetDescriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
-        await gate.grantTrust(for: targetDescriptor, duration: .oneHour)
-        await gate.recordUse(for: targetDescriptor)
-
-        guard let grant = await gate.activeGrants().first(where: { $0.actionDescriptor == targetDescriptor }) else {
-            Issue.record("Expected active grant")
-            return
-        }
-        #expect(grant.actionDescriptor.target == "alice@example.com")
-        #expect(grant.useCount == 1)
-
-        // Widening promotes target to empty while preserving ID and useCount
-        let widened = await gate.widenGrant(id: grant.id)
-        #expect(widened == .widened)
-
-        let active = await gate.activeGrants()
-        #expect(active.count == 1)
-        let widenedGrant = active[0]
-        #expect(widenedGrant.id == grant.id)
-        #expect(widenedGrant.actionDescriptor.target.isEmpty == true)
-        #expect(widenedGrant.duration == .oneHour)
-        #expect(widenedGrant.useCount == 1)
-
-        // Tool-wide grant now matches other targets for email.send
-        let bobDescriptor = ActionDescriptor(toolName: "email.send", target: "bob@example.com")
-        #expect(await gate.isTrusted(bobDescriptor) == true)
-
-        // Repeat widen on already empty target reports success (idempotent)
-        #expect(await gate.widenGrant(id: grant.id) == .widened)
-
-        // Widening a non-existent ID reports notFound, never notWidenable
-        #expect(await gate.widenGrant(id: UUID()) == .notFound)
-    }
-
-    @Test
-    func `widenGrant distinguishes notFound from notWidenable`() async {
-        let gate = PermissionGate()
-        let widenable = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
-        let send = ActionDescriptor(toolName: "messages.send", target: "+15551234567")
-        await gate.grantTrust(for: widenable, duration: .oneHour)
-        await gate.grantTrust(for: send, duration: .oneHour)
-
-        let staged = await gate.activeGrants()
-        guard let widenableID = staged.first(where: { $0.actionDescriptor == widenable })?.id,
-              let sendID = staged.first(where: { $0.actionDescriptor == send })?.id
-        else {
-            Issue.record("Expected both grants before widening")
+        // The canonical handle keeps covering the respelled recipient.
+        let respelled = ToolInput(toolName: "messages.send", argumentsJSON: #"{"recipient":"+1 (555) 123-4567","text":"hi"}"#)
+        #expect(await gate.checkPermission(toolCall: respelled, tool: GateProbeTool(name: "messages.send")) == .allowed)
+        let displayName = ToolInput(toolName: "messages.send", argumentsJSON: #"{"recipient":"Rebecca Mackin","text":"hi"}"#)
+        guard case .requiresApproval = await gate.checkPermission(toolCall: displayName, tool: GateProbeTool(name: "messages.send")) else {
+            Issue.record("Expected a display-name recipient to park after migration")
             return
         }
 
-        // The three outcomes must stay distinct: a missing id is notFound, a
-        // live send grant is notWidenable with the honest reason, and a regular
-        // targeted grant promotes. Collapsing the middle case into notFound is
-        // what made the route report a listed grant as unknown.
-        #expect(await gate.widenGrant(id: UUID()) == .notFound)
-        #expect(
-            await gate.widenGrant(id: sendID)
-                == .notWidenable(reason: GrantWidenOutcome.messagesSendRefusal)
-        )
-        #expect(await gate.widenGrant(id: widenableID) == .widened)
+        // The blank target is the malformed-call signature, so it never became
+        // the tool-wide trust the old empty target implied.
+        #expect(await gate.isTrusted(ActionDescriptor(toolName: "email.send")) == false)
 
-        let active = await gate.activeGrants()
-        #expect(active.contains { $0.actionDescriptor == send })
-        #expect(active.contains { $0.actionDescriptor == ActionDescriptor(toolName: "email.send") })
+        // Copy-forward only: the legacy ledger survives with every row.
+        #expect(RulePersistenceTestSupport.rawRowCount(dbPath: dbPath, table: "trust_grants") == 3)
     }
 
-    @Test
-    func `widenGrant after a prior widen re-resolves the target and preserves other grants`() async {
-        let gate = PermissionGate()
-        let first = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
-        let second = ActionDescriptor(toolName: "email.send", target: "bob@example.com")
-        let unrelated = ActionDescriptor(toolName: "file.write", target: "/tmp/report.txt")
-        // The first grant is deliberately short-lived and the second forever, so
-        // the second promotion strictly outlives the first and takes the
-        // promote path rather than the keep-covering early return.
-        await gate.grantTrust(for: first, duration: .fiveMinutes)
-        await gate.grantTrust(for: second, duration: .forever)
-        await gate.grantTrust(for: unrelated, duration: .forever)
-        await gate.recordUse(for: first)
-        await gate.recordUse(for: second)
-        await gate.recordUse(for: second)
-
-        let staged = await gate.activeGrants()
-        guard let firstID = staged.first(where: { $0.actionDescriptor == first })?.id,
-              let secondID = staged.first(where: { $0.actionDescriptor == second })?.id
-        else {
-            Issue.record("Expected both narrow grants before widening")
-            return
-        }
-
-        // Widening the first grant drops a tool-wide row that sits ahead of the
-        // second grant, so the second widen must find its slot again by
-        // identity. Reusing the stale index would overwrite the unrelated grant
-        // that follows instead of the intended one.
-        #expect(await gate.widenGrant(id: firstID) == .widened)
-        #expect(await gate.widenGrant(id: secondID) == .widened)
-
-        let active = await gate.activeGrants()
-        let emailGrants = active.filter { $0.actionDescriptor.toolName == "email.send" }
-        #expect(emailGrants.count == 1)
-        #expect(emailGrants[0].id == secondID)
-        #expect(emailGrants[0].actionDescriptor.target.isEmpty == true)
-        #expect(emailGrants[0].useCount == 2)
-
-        guard let fileGrant = active.first(where: { $0.actionDescriptor.toolName == "file.write" }) else {
-            Issue.record("Unrelated grant was corrupted or dropped")
-            return
-        }
-        #expect(fileGrant.actionDescriptor == unrelated)
-        #expect(fileGrant.useCount == 0)
-    }
+    // MARK: - Widen
 
     @Test
-    func `widenGrant with the target last does not read past the end`() async {
-        let gate = PermissionGate()
-        let first = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
-        let second = ActionDescriptor(toolName: "email.send", target: "bob@example.com")
-        await gate.grantTrust(for: first, duration: .oneHour)
-        await gate.grantTrust(for: second, duration: .oneHour)
+    func `widenGrant promotes an exact-target rule and keeps identity and counters`() async throws {
+        let store = InMemoryAccessRuleStore()
+        let gate = await PermissionGate.load(ruleStore: store)
+        let descriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        #expect(await gate.grantTrust(for: descriptor, duration: .oneHour))
+        await gate.recordUse(scope: PermissionGate.scope(for: descriptor), toolName: descriptor.toolName)
 
-        let staged = await gate.activeGrants()
-        guard let firstID = staged.first(where: { $0.actionDescriptor == first })?.id,
-              let secondID = staged.first(where: { $0.actionDescriptor == second })?.id
-        else {
-            Issue.record("Expected both narrow grants before widening")
-            return
-        }
-
-        #expect(await gate.widenGrant(id: firstID) == .widened)
-        // The target now sits last, and the dedupe removes the widened grant
-        // ahead of it; resolving by identity keeps the write in range rather
-        // than trapping on the stale slot.
-        #expect(await gate.widenGrant(id: secondID) == .widened)
-
-        let active = await gate.activeGrants()
-        #expect(active.count == 1)
-        #expect(active[0].id == secondID)
-        #expect(active[0].actionDescriptor.toolName == "email.send")
-        #expect(active[0].actionDescriptor.target.isEmpty == true)
-        #expect(await gate.isTrusted(first) == true)
-    }
-
-    @Test
-    func `widenGrant dedupes a pre-existing tool-wide grant for the same tool`() async {
-        let gate = PermissionGate()
-        let narrow = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
-        let toolWide = ActionDescriptor(toolName: "email.send", target: "")
-        // The narrow grant is granted last with a longer tier, so it strictly
-        // outlives the tool-wide row. Dedupe must keep the promoted row's
-        // identity and counters instead of collapsing them into the shorter
-        // tool-wide grant, which would enshrine a trust reduction.
-        await gate.grantTrust(for: toolWide, duration: .fiveMinutes)
-        await gate.grantTrust(for: narrow, duration: .oneHour)
-        await gate.recordUse(for: narrow)
-
-        let staged = await gate.activeGrants()
-        guard let narrowID = staged.first(where: { $0.actionDescriptor == narrow })?.id else {
-            Issue.record("Expected the narrow grant")
-            return
-        }
-        #expect(staged.contains { $0.actionDescriptor == toolWide } == true)
-
-        // Promoting the narrow grant must collapse the overlapping tool-wide
-        // row rather than leave two rows covering the same tool, while keeping
-        // the narrow grant's identity and usage counters.
-        #expect(await gate.widenGrant(id: narrowID) == .widened)
-
-        let active = await gate.activeGrants()
-        #expect(active.count == 1)
-        #expect(active[0].id == narrowID)
-        #expect(active[0].actionDescriptor.target.isEmpty == true)
-        #expect(active[0].useCount == 1)
-    }
-
-    @Test
-    func `widenGrant never shortens a longer-lived tool-wide grant`() async {
-        let gate = PermissionGate()
-        let toolWide = ActionDescriptor(toolName: "email.send", target: "")
-        let narrow = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
-        // The durable forever grant must survive a widen of the short-lived
-        // narrow grant: promoting the narrow row would replace forever with
-        // five minutes and re-prompt every email after the window, dropping
-        // trust the user already granted.
-        await gate.grantTrust(for: toolWide, duration: .forever)
-        await gate.recordUse(for: toolWide)
-        await gate.grantTrust(for: narrow, duration: .fiveMinutes)
-
-        let staged = await gate.activeGrants()
-        guard let narrowID = staged.first(where: { $0.actionDescriptor == narrow })?.id,
-              let toolWideGrant = staged.first(where: { $0.actionDescriptor == toolWide })
-        else {
-            Issue.record("Expected both the narrow and tool-wide grants")
-            return
-        }
-
-        #expect(await gate.widenGrant(id: narrowID) == .widened)
-
-        let active = await gate.activeGrants()
-        #expect(active.count == 1)
-        #expect(active[0].id == toolWideGrant.id)
-        #expect(active[0].actionDescriptor.target.isEmpty == true)
-        #expect(active[0].duration == .forever)
-        #expect(active[0].expiresAt == nil)
-        #expect(active[0].useCount == 1)
-        #expect(active.contains { $0.id == narrowID } == false)
-    }
-
-    @Test
-    func `widenGrant keeps an equal-tier tool-wide grant that expires later`() async {
-        let now = Date()
-        // Equal nominal tiers still diverge on effective expiry when the
-        // tool-wide grant was installed later. The longer-lived tool-wide grant
-        // must survive so the promote does not truncate trust to the narrow
-        // grant's earlier expiry.
-        let narrow = TrustGrant(
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "alice@example.com"),
-            grantedAt: now.addingTimeInterval(-240),
-            expiresAt: now.addingTimeInterval(120),
-            duration: .oneHour
-        )
-        let toolWide = TrustGrant(
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: ""),
-            grantedAt: now.addingTimeInterval(-60),
-            expiresAt: now.addingTimeInterval(300),
-            duration: .oneHour
-        )
-        let store = InMemoryTrustStore(grants: [narrow, toolWide])
-        let gate = await PermissionGate.load(store: store)
+        let staged = await gate.activeRules()
+        let narrow = try #require(staged.first)
+        #expect(narrow.scope == .exactTarget("alice@example.com"))
+        #expect(narrow.useCount == 1)
 
         #expect(await gate.widenGrant(id: narrow.id) == .widened)
 
-        let active = await gate.activeGrants()
+        // Identity, creation time, and counters survive the promotion, and the
+        // widened row is the only row the store now holds.
+        let active = await gate.activeRules()
+        #expect(active.count == 1)
+        let widened = try #require(active.first)
+        #expect(widened.id == narrow.id)
+        #expect(widened.scope == .toolWide)
+        #expect(widened.duration == .oneHour)
+        #expect(widened.grantedAt == narrow.grantedAt)
+        #expect(widened.useCount == 1)
+        #expect(try await store.load() == active)
+
+        // Tool-wide coverage now reaches a recipient the narrow rule never matched.
+        #expect(await gate.isTrusted(ActionDescriptor(toolName: "email.send", target: "bob@example.com")))
+
+        // A second widen is idempotent success rather than a second row.
+        #expect(await gate.widenGrant(id: narrow.id) == .widened)
+        #expect(await gate.activeRules().count == 1)
+    }
+
+    @Test
+    func `widenGrant distinguishes notFound from notWidenable and never promotes a deny`() async throws {
+        let gate = await PermissionGate.load(ruleStore: InMemoryAccessRuleStore())
+        let widenable = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        let send = ActionDescriptor(toolName: "messages.send", target: "+15551234567")
+        #expect(await gate.grantTrust(for: widenable, duration: .oneHour))
+        #expect(await gate.grantTrust(for: send, duration: .oneHour))
+        await gate.denyRule(.exactTarget("blocked@example.com"), toolName: "email.send", reason: "owner refused this recipient")
+
+        let staged = await gate.activeRules()
+        let widenableID = staged.first { $0.toolName == "email.send" && $0.scope == .exactTarget("alice@example.com") }?.id
+        let sendID = staged.first { $0.toolName == "messages.send" && $0.scope == .exactTarget("+15551234567") }?.id
+        let denyID = staged.first { $0.toolName == "email.send" && $0.action == .deny }?.id
+
+        // The three outcomes stay distinct: a missing id is notFound, a live send
+        // grant is notWidenable with the honest reason, and a refusal is not
+        // trust to promote so it reports notFound rather than losing its scope.
+        #expect(await gate.widenGrant(id: UUID()) == .notFound)
+        #expect(
+            try await gate.widenGrant(id: #require(sendID))
+                == .notWidenable(reason: GrantWidenOutcome.messagesSendRefusal)
+        )
+        #expect(try await gate.widenGrant(id: #require(denyID)) == .notFound)
+        #expect(try await gate.widenGrant(id: #require(widenableID)) == .widened)
+
+        let active = await gate.activeRules()
+        #expect(active.contains { $0.id == sendID && $0.scope == .exactTarget("+15551234567") })
+        #expect(active.contains { $0.id == denyID && $0.action == .deny })
+        #expect(active.contains { $0.id == widenableID && $0.scope == .toolWide })
+    }
+
+    @Test
+    func `widenGrant never shortens a longer-lived tool-wide rule`() async throws {
+        let now = Date()
+        let toolWide = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .toolWide,
+            action: .allow,
+            grantedAt: now,
+            duration: .forever
+        ))
+        let narrow = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .exactTarget("alice@example.com"),
+            action: .allow,
+            grantedAt: now,
+            duration: .fiveMinutes
+        ))
+        let store = InMemoryAccessRuleStore(rules: [toolWide, narrow])
+        let gate = await PermissionGate.load(ruleStore: store)
+
+        // Promoting the short-lived narrow row would replace forever trust with
+        // five minutes, so the covering tool-wide rule is kept instead.
+        #expect(await gate.widenGrant(id: narrow.id) == .widened)
+
+        let active = await gate.activeRules()
         #expect(active.count == 1)
         #expect(active[0].id == toolWide.id)
-        #expect(active[0].actionDescriptor.target.isEmpty == true)
+        #expect(active[0].scope == .toolWide)
+        #expect(active[0].duration == .forever)
+        #expect(active[0].expiresAt == nil)
+        #expect(await gate.isTrusted(ActionDescriptor(toolName: "email.send", target: "bob@example.com")))
+    }
+
+    @Test
+    func `widenGrant keeps a covering tool-wide rule that expires later`() async throws {
+        let now = Date()
+        // Equal nominal tiers still diverge on effective expiry, so the
+        // longer-lived tool-wide rule must survive rather than be truncated to
+        // the narrow rule's earlier expiry.
+        let toolWide = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .toolWide,
+            action: .allow,
+            grantedAt: now,
+            duration: .fiveMinutes
+        ))
+        let narrow = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .exactTarget("alice@example.com"),
+            action: .allow,
+            grantedAt: now.addingTimeInterval(-3300),
+            duration: .oneHour
+        ))
+        let store = InMemoryAccessRuleStore(rules: [toolWide, narrow])
+        let gate = await PermissionGate.load(ruleStore: store)
+
+        #expect(await gate.widenGrant(id: narrow.id) == .widened)
+
+        let active = await gate.activeRules()
+        #expect(active.count == 1)
+        #expect(active[0].id == toolWide.id)
         #expect(active[0].expiresAt == toolWide.expiresAt)
         #expect(active.contains { $0.id == narrow.id } == false)
     }
 
-    @Test
-    func `widenGrant keeps a lower-tier tool-wide grant that expires later`() async {
-        let now = Date()
-        // The covering tool-wide grant carries a lower nominal tier yet expires
-        // later because the narrow grant sits near the end of its longer tier.
-        // Effective expiry alone must decide the survivor so the wider grant is
-        // not truncated to the narrow grant's earlier expiry.
-        let narrow = TrustGrant(
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "alice@example.com"),
-            grantedAt: now.addingTimeInterval(-86280),
-            expiresAt: now.addingTimeInterval(120),
-            duration: .oneDay
-        )
-        let toolWide = TrustGrant(
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: ""),
-            grantedAt: now,
-            expiresAt: now.addingTimeInterval(300),
-            duration: .fiveMinutes
-        )
-        let store = InMemoryTrustStore(grants: [narrow, toolWide])
-        let gate = await PermissionGate.load(store: store)
-
-        #expect(await gate.widenGrant(id: narrow.id) == .widened)
-
-        let active = await gate.activeGrants()
-        #expect(active.count == 1)
-        #expect(active[0].id == toolWide.id)
-        #expect(active[0].actionDescriptor.target.isEmpty == true)
-        #expect(active[0].expiresAt == toolWide.expiresAt)
-    }
+    // MARK: - Re-arm
 
     @Test
-    func `ApprovalQueue widen decision never replaces a longer-lived tool-wide grant`() async {
-        let gate = PermissionGate()
-        let queue = ApprovalQueue(permissionGate: gate)
-        let toolWide = ActionDescriptor(toolName: "api.request", target: "")
-        // A durable forever grant must survive a widen decision that asks for a
-        // shorter tier: the decision path shares the gate's never-shorten
-        // invariant, so choosing "allow for all targets" for five minutes
-        // cannot collapse the tool-wide forever trust to a five-minute window.
-        await gate.grantTrust(for: toolWide, duration: .forever)
-        await gate.recordUse(for: toolWide)
-        guard let foreverID = await gate.activeGrants().first(where: { $0.actionDescriptor == toolWide })?.id else {
-            Issue.record("Expected a tool-wide forever grant")
-            return
-        }
-
-        let request = await queue.enqueue(
-            toolName: "api.request",
-            description: "API call",
-            input: ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://api.example.com/data"}"#)
-        )
-        #expect(await queue.decide(id: request.id, approved: true, duration: .fiveMinutes, widen: true) == true)
-
-        let active = await gate.activeGrants()
-        #expect(active.count == 1)
-        #expect(active[0].id == foreverID)
-        #expect(active[0].duration == .forever)
-        #expect(active[0].expiresAt == nil)
-        #expect(active[0].useCount == 1)
-    }
-
-    @Test
-    func `ApprovalQueue decide with widen creates tool-wide grant`() async {
-        let gate = PermissionGate()
-        let queue = ApprovalQueue(permissionGate: gate)
-        let request = await queue.enqueue(
-            toolName: "api.request",
-            description: "API call",
-            input: ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://api.example.com/data"}"#)
-        )
-
-        let decided = await queue.decide(id: request.id, approved: true, duration: .oneHour, widen: true)
-        #expect(decided == true)
-
-        let active = await gate.activeGrants()
-        #expect(active.count == 1)
-        #expect(active[0].actionDescriptor.toolName == "api.request")
-        #expect(active[0].actionDescriptor.target.isEmpty == true)
-
-        // Another URL for api.request is now trusted
-        let otherDescriptor = ActionDescriptor(toolName: "api.request", target: "https://other.com/api")
-        #expect(await gate.isTrusted(otherDescriptor) == true)
-    }
-
-    @Test
-    func `ApprovalQueue this-time widen never persists a grant`() async {
-        // A this-time decision is one-shot by definition: even a caller that
-        // mistakenly passes widen must not convert it into a tool-wide durable
-        // grant, or a single approval would silently widen trust forever.
-        let gate = PermissionGate()
-        let queue = ApprovalQueue(permissionGate: gate)
-        let request = await queue.enqueue(
-            toolName: "api.request",
-            description: "API call",
-            input: ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://api.example.com/data"}"#)
-        )
-
-        let decided = await queue.decide(id: request.id, approved: true, duration: .thisTime, widen: true)
-        #expect(decided == true)
-
-        #expect(await gate.activeGrants().isEmpty == true)
-        let otherDescriptor = ActionDescriptor(toolName: "api.request", target: "https://other.com/api")
-        #expect(await gate.isTrusted(otherDescriptor) == false)
-    }
-
-    @Test
-    func `Tool-wide files write grant never covers the protected policy control file`() async {
-        struct PolicyWriteProbeTool: Tool, Sendable {
-            let name = "files.write"
-            let description = "Write file."
-            let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
-            let permissionLevel = PermissionLevel.requiresApproval
-            func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
-                .success("probe-ok", callID: input.callID)
-            }
-        }
-
-        // A tool-wide grant covers every target for its tool, but protected
-        // engine state is checked before trust is consulted, so even an
-        // approved or widened files.write cannot replace the egress policy.
-        let gate = PermissionGate()
-        await gate.grantTrust(for: ActionDescriptor(toolName: "files.write"), duration: .forever)
-        #expect(await gate.isTrusted(ActionDescriptor(toolName: "files.write")) == true)
-
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let call = ToolInput(
-            toolName: "files.write",
-            argumentsJSON: "{\"path\":\"\(home)/.runeweaver/policy.toml\",\"content\":\"[network]\"}"
-        )
-        let decision = await gate.checkPermission(toolCall: call, tool: PolicyWriteProbeTool())
-        guard case let .denied(reason) = decision else {
-            Issue.record("Expected denied decision, got \(decision)")
-            return
-        }
-        #expect(reason.contains("protected Rune Weaver engine files"))
-    }
-
-    @Test
-    func `rearmGrant preserves identity, counters, and creation time while recomputing expiry`() async {
+    func `rearmGrant preserves identity and counters while recomputing expiry`() async throws {
         let gate = PermissionGate()
         let descriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
-        await gate.grantTrust(for: descriptor, duration: .oneHour)
-        await gate.recordUse(for: descriptor)
-        await gate.recordUse(for: descriptor)
+        #expect(await gate.grantTrust(for: descriptor, duration: .oneHour))
+        await gate.recordUse(scope: PermissionGate.scope(for: descriptor), toolName: descriptor.toolName)
+        await gate.recordUse(scope: PermissionGate.scope(for: descriptor), toolName: descriptor.toolName)
 
-        guard let before = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor }) else {
-            Issue.record("Expected active grant before re-arm")
-            return
-        }
+        let before = try #require(await gate.activeRules().first)
         #expect(before.useCount == 2)
-        #expect(before.lastUsedAt != nil)
-        let beforeGrantedAt = before.grantedAt
-        let beforeLastUsed = before.lastUsedAt
+        let grantedAt = before.grantedAt
+        let lastUsedAt = before.lastUsedAt
 
         // Re-arming rewrites only the tier and its expiry from confirmation
-        // time: identity, scope, creation time, and liveness counters survive
-        // so dashboards keep proving exercised trust across the change.
+        // time: identity, scope, creation time, and liveness counters survive so
+        // the dashboard keeps proving exercised trust across the change.
         #expect(await gate.rearmGrant(id: before.id, duration: .oneDay) == .rearmed)
 
-        let active = await gate.activeGrants()
+        let active = await gate.activeRules()
         #expect(active.count == 1)
-        guard let rearmed = active.first(where: { $0.id == before.id }) else {
-            Issue.record("Expected the same grant row after re-arm")
-            return
-        }
+        let rearmed = try #require(active.first)
         #expect(rearmed.id == before.id)
-        #expect(rearmed.actionDescriptor == descriptor)
-        #expect(rearmed.grantedAt == beforeGrantedAt)
+        #expect(rearmed.toolName == descriptor.toolName)
+        #expect(rearmed.scope == PermissionGate.scope(for: descriptor))
+        #expect(rearmed.grantedAt == grantedAt)
         #expect(rearmed.useCount == 2)
-        #expect(rearmed.lastUsedAt == beforeLastUsed)
+        #expect(rearmed.lastUsedAt == lastUsedAt)
         #expect(rearmed.duration == .oneDay)
-        // Expiry is recomputed from now rather than carried from the original
-        // grant date, so a longer tier extends trust instead of preserving it.
-        #expect(rearmed.expiresAt != nil)
         if let expiresAt = rearmed.expiresAt {
+            // Expiry is recomputed from now rather than carried from the
+            // original grant date, so a longer tier extends trust.
             #expect(expiresAt > Date())
+        } else {
+            Issue.record("Expected a dated tier to carry an expiry")
         }
 
-        // Re-arming to the never-expiring tier clears expiry while still
-        // keeping the same row and counters rather than minting a second row.
+        // The never-expiring tier clears expiry on the same row.
         #expect(await gate.rearmGrant(id: before.id, duration: .forever) == .rearmed)
-        let foreverActive = await gate.activeGrants()
-        #expect(foreverActive.count == 1)
-        guard let foreverGrant = foreverActive.first(where: { $0.id == before.id }) else {
-            Issue.record("Expected the same grant row after forever re-arm")
-            return
-        }
-        #expect(foreverGrant.duration == .forever)
-        #expect(foreverGrant.expiresAt == nil)
-        #expect(foreverGrant.grantedAt == beforeGrantedAt)
-        #expect(foreverGrant.useCount == 2)
-        #expect(foreverGrant.lastUsedAt == beforeLastUsed)
+        let standing = await gate.activeRules()
+        #expect(standing.count == 1)
+        #expect(standing[0].duration == .forever)
+        #expect(standing[0].expiresAt == nil)
+        #expect(standing[0].useCount == 2)
     }
 
     @Test
-    func `rearmGrant on expired grant reports notFound`() async {
+    func `rearmGrant reports notFound for an expired rule and invalidDuration for a one-shot tier`() async throws {
         let now = Date()
-        let expired = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "gone@example.com"),
+        let expired = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .exactTarget("gone@example.com"),
+            action: .allow,
             grantedAt: now.addingTimeInterval(-7200),
-            expiresAt: now.addingTimeInterval(-60),
-            duration: .fiveMinutes
-        )
+            duration: .oneHour
+        ))
         // Bootstrap prunes the lapsed row, so the identifier is already gone
-        // before re-arm runs; the miss must report notFound so the route can
-        // stay 404 rather than reading as a tier refusal.
-        let store = InMemoryTrustStore(grants: [expired])
-        let gate = await PermissionGate.load(store: store)
-        #expect(await gate.activeGrants().isEmpty == true)
+        // before re-arm runs and the miss must read as unknown, not a tier error.
+        let store = InMemoryAccessRuleStore(rules: [expired])
+        let gate = await PermissionGate.load(ruleStore: store)
+        #expect(await gate.activeRules().isEmpty == true)
         #expect(await gate.rearmGrant(id: expired.id, duration: .oneHour) == .notFound)
         #expect(await gate.rearmGrant(id: UUID(), duration: .oneHour) == .notFound)
-    }
 
-    @Test
-    func `rearmGrant with thisTime reports invalidDuration and keeps the grant`() async {
-        let gate = PermissionGate()
+        // One-shot and ephemeral tiers have no lifetime to recompute: the
+        // refusal names the tier and leaves the live rule untouched.
         let descriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
-        await gate.grantTrust(for: descriptor, duration: .oneHour)
-        guard let id = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor })?.id else {
-            Issue.record("Expected active grant before re-arm")
-            return
+        #expect(await gate.grantTrust(for: descriptor, duration: .oneHour))
+        let liveID = try #require(await gate.activeRules().first?.id)
+        for tier in [TrustDuration.thisTime, .forTask, .forSession] {
+            #expect(await gate.rearmGrant(id: liveID, duration: tier) == .invalidDuration(reason: GrantRearmOutcome.thisTimeRefusal))
         }
-
-        // One-shot approvals store no row, so there is no lifetime to extend.
-        // The refusal must name the tier rather than reading as unknown, and
-        // the live grant must survive unchanged for a later durable re-arm.
-        #expect(
-            await gate.rearmGrant(id: id, duration: .thisTime)
-                == .invalidDuration(reason: GrantRearmOutcome.thisTimeRefusal)
-        )
-        let active = await gate.activeGrants()
+        let active = await gate.activeRules()
         #expect(active.count == 1)
-        #expect(active.first?.duration == .oneHour)
-        #expect(active.first?.actionDescriptor == descriptor)
+        #expect(active[0].duration == .oneHour)
         #expect(await gate.isTrusted(descriptor) == true)
     }
 
+    // MARK: - Deny lifecycle
+
     @Test
-    func `forTask and forSession scoped grants isolate to session and lifecycle`() async throws {
-        let store = InMemoryTrustStore()
-        let gate = PermissionGate(store: store)
+    func `deny rules never age out and are removed only by an explicit revoke`() async throws {
+        let dbPath = RulePersistenceTestSupport.temporaryDBPath()
+        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+
+        let store = SQLiteAccessRuleStore(dbPath: dbPath)
+        let gate = await PermissionGate.load(ruleStore: store)
+        await gate.denyRule(.toolWide, toolName: "stub.write", reason: "owner refused writes")
+
+        let deny = try #require(await gate.activeRules().first)
+        #expect(deny.action == .deny)
+        #expect(deny.duration == nil)
+        #expect(deny.expiresAt == nil)
+        #expect(deny.reason == "owner refused writes")
+
+        // A durable allow minted afterwards cannot evict the refusal that already
+        // covers the scope, and the refusal still wins the check.
+        #expect(await gate.grant(.toolWide, toolName: "stub.write", duration: .oneHour))
+        #expect(await gate.activeRules().count == 2)
+        let call = ToolInput(toolName: "stub.write", argumentsJSON: #"{"path":"/tmp/notes.md"}"#)
+        guard case let .denied(reason) = await gate.checkPermission(toolCall: call, tool: GateProbeTool(name: "stub.write")) else {
+            Issue.record("Expected the deny rule to outrank the allow rule")
+            return
+        }
+        #expect(reason.contains("Denied by rule"))
+
+        // Neither an explicit prune nor the periodic reaper can lapse a refusal
+        // into the allow decision underneath it.
+        await gate.pruneExpiredAndPersist()
+        await gate.startPeriodicCleanup(intervalSeconds: 0.05)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        await gate.stopPeriodicCleanup()
+        #expect(await gate.activeRules().contains { $0.id == deny.id })
+
+        // Only an explicit revoke removes it; the allow row survives it.
+        #expect(await gate.revokeRule(id: deny.id))
+        #expect(await gate.activeRules().count == 1)
+        #expect(await gate.revokeRule(id: deny.id) == false)
+        #expect(RulePersistenceTestSupport.rawRowCount(dbPath: dbPath, table: "access_rules") == 1)
+
+        // With the refusal gone the surviving allow covers the call, which is
+        // what proves the revoke removed the denial rather than the trust.
+        #expect(await gate.checkPermission(toolCall: call, tool: GateProbeTool(name: "stub.write")) == .allowed)
+    }
+
+    // MARK: - Ephemeral grants
+
+    @Test
+    func `forTask and forSession grants stay in memory, never persist, and clear on lifecycle`() async throws {
+        let store = InMemoryAccessRuleStore()
+        let gate = await PermissionGate.load(ruleStore: store)
         let sessionA = UUID()
         let sessionB = UUID()
-        let taskDesc = ActionDescriptor(toolName: "files.write", target: "/tmp/scoped.txt")
-        let sessionDesc = ActionDescriptor(toolName: "bash.exec", target: "")
+        let taskDescriptor = ActionDescriptor(toolName: "files.write", target: "/tmp/scoped.txt")
+        let sessionDescriptor = ActionDescriptor(toolName: "bash.exec")
 
-        // Initially untrusted
-        #expect(await gate.isTrusted(taskDesc, sessionID: sessionA) == false)
-        #expect(await gate.isTrusted(taskDesc, sessionID: sessionB) == false)
+        #expect(await gate.isTrusted(taskDescriptor, sessionID: sessionA) == false)
+        #expect(await gate.isTrusted(taskDescriptor, sessionID: sessionB) == false)
 
-        // Grant taskDesc for sessionA
-        await gate.grantTrust(for: taskDesc, duration: .forTask, sessionID: sessionA)
-        #expect(await gate.isTrusted(taskDesc, sessionID: sessionA) == true)
-        #expect(await gate.isTrusted(taskDesc, sessionID: sessionB) == false)
-        #expect(await gate.isTrusted(taskDesc) == false)
+        #expect(await gate.grantTrust(for: taskDescriptor, duration: .forTask, sessionID: sessionA))
+        #expect(await gate.grantTrust(for: sessionDescriptor, duration: .forSession, sessionID: sessionA))
 
-        // Ephemeral grants do not persist to store
-        #expect(try await store.load().isEmpty == true)
-        #expect(await gate.activeGrants().isEmpty == true)
+        // Ephemeral trust never persists and never reads as a durable rule.
+        #expect(try await store.load().isEmpty)
+        #expect(await gate.activeRules().isEmpty)
 
-        // Grant sessionDesc for sessionA
-        await gate.grantTrust(for: sessionDesc, duration: .forSession, sessionID: sessionA)
-        #expect(await gate.isTrusted(sessionDesc, sessionID: sessionA) == true)
+        // Trust isolates by session and is unscoped without one.
+        #expect(await gate.isTrusted(taskDescriptor, sessionID: sessionA) == true)
+        #expect(await gate.isTrusted(taskDescriptor, sessionID: sessionB) == false)
+        #expect(await gate.isTrusted(taskDescriptor) == false)
+        #expect(await gate.isTrusted(sessionDescriptor, sessionID: sessionA) == true)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "bash.exec", target: "ls"), sessionID: sessionA) == true)
-        #expect(await gate.isTrusted(sessionDesc, sessionID: sessionB) == false)
+        #expect(await gate.isTrusted(sessionDescriptor, sessionID: sessionB) == false)
 
-        // Clearing task grants drops taskDesc but preserves sessionDesc
+        // The task tier ends at the turn boundary; the session tier survives it.
         await gate.clearTaskGrants(for: sessionA)
-        #expect(await gate.isTrusted(taskDesc, sessionID: sessionA) == false)
-        #expect(await gate.isTrusted(sessionDesc, sessionID: sessionA) == true)
+        #expect(await gate.isTrusted(taskDescriptor, sessionID: sessionA) == false)
+        #expect(await gate.isTrusted(sessionDescriptor, sessionID: sessionA) == true)
 
-        // Clearing session grants drops sessionDesc
+        // The session tier dies with the conversation that approved it.
         await gate.clearSessionGrants(for: sessionA)
-        #expect(await gate.isTrusted(sessionDesc, sessionID: sessionA) == false)
-    }
-}
-
-/// Smoke-test contract for the permission gate consulting shell rules before parking.
-@Suite("Bash Smoke Gate Contract")
-struct BashSmokeGateContractTests {
-    /// Probe tool standing in for `bash.exec` on the gate path.
-    private struct SmokeBashTool: Tool, Sendable {
-        /// Canonical shell tool name the gate branches on.
-        let name = "bash.exec"
-        /// Human-readable summary shown in approval prompts.
-        let description = "Smoke-test shell probe."
-        /// Accepts any object; the gate reads only the command field.
-        let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
-        /// Shell execution always parks unless a rule allows or denies first.
-        let permissionLevel = PermissionLevel.requiresApproval
-        /// Probe never executes; the gate verdict is the assertion target.
-        func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
-            .success("smoke-ok", callID: input.callID)
-        }
-    }
-
-    /// Gate wired to the smoke-test shell policy.
-    private func makeSmokeGate() async -> PermissionGate {
-        let gate = PermissionGate()
-        await gate.updateBashConfig(BashGateTestSupport.smokeBashConfig())
-        return gate
-    }
-
-    /// Allowed echo runs with no prompt.
-    @Test
-    func `echo Hello World is allowed without prompting`() async {
-        let gate = await makeSmokeGate()
-        let call = ToolInput(toolName: "bash.exec", argumentsJSON: #"{"command":"echo Hello World"}"#)
-        let verdict = await gate.checkPermission(toolCall: call, tool: SmokeBashTool())
-        guard case .allowed = verdict else {
-            Issue.record("Expected echo Hello World to be allowed, got \(verdict)")
-            return
-        }
-    }
-
-    /// Unlisted touch parks for approval.
-    @Test
-    func `touch parks for approval`() async {
-        let gate = await makeSmokeGate()
-        let call = ToolInput(toolName: "bash.exec", argumentsJSON: #"{"command":"touch ~/helloWorld.txt"}"#)
-        let verdict = await gate.checkPermission(toolCall: call, tool: SmokeBashTool())
-        guard case .requiresApproval = verdict else {
-            Issue.record("Expected touch ~/helloWorld.txt to require approval, got \(verdict)")
-            return
-        }
-    }
-
-    /// Denied rm refuses without prompting.
-    @Test
-    func `rm is denied without prompting`() async {
-        let gate = await makeSmokeGate()
-        let call = ToolInput(toolName: "bash.exec", argumentsJSON: #"{"command":"rm ~/helloWorld.txt"}"#)
-        let verdict = await gate.checkPermission(toolCall: call, tool: SmokeBashTool())
-        guard case let .denied(reason) = verdict else {
-            Issue.record("Expected rm ~/helloWorld.txt to be denied, got \(verdict)")
-            return
-        }
-        #expect(!reason.isEmpty)
+        #expect(await gate.isTrusted(sessionDescriptor, sessionID: sessionA) == false)
+        #expect(await gate.ephemeralGrants(sessionID: sessionA).isEmpty)
     }
 }

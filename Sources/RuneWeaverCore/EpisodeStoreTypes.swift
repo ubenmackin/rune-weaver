@@ -124,6 +124,8 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
         case trustGrants
         /// Execution audit log shared by chat turns, scheduler runs, and goal advancements.
         case runLogs
+        /// Durable access rules replacing graduated-trust grants.
+        case accessRules
 
         /// Fixed `PRAGMA` statement for the table.
         package var pragmaSQL: String {
@@ -132,6 +134,7 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
             case .messages: "PRAGMA table_info(messages);"
             case .trustGrants: "PRAGMA table_info(trust_grants);"
             case .runLogs: "PRAGMA table_info(run_logs);"
+            case .accessRules: "PRAGMA table_info(access_rules);"
             }
         }
     }

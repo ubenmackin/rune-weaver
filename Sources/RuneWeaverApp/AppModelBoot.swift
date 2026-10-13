@@ -120,12 +120,16 @@ extension AppModel {
         config: RuneWeaverConfig
     ) async -> (PermissionGate, String) {
         let episodesDB = (config.memory.episodesDBPath as NSString).expandingTildeInPath
-        let trustStore = SQLiteTrustStore(dbPath: episodesDB)
+        let ruleStore = SQLiteAccessRuleStore(dbPath: episodesDB)
         let permissionGate = await PermissionGate.load(
-            store: trustStore,
+            ruleStore: ruleStore,
             pluginsDir: URL(fileURLWithPath: (config.plugins.pluginsDir as NSString).expandingTildeInPath)
         )
         await permissionGate.updateBashConfig(config.bash)
+        // The write posture is decided ahead of the tool, so the live `[files]`
+        // policy reaches the gate here: a saved write mode or path rule changes
+        // which writes stage, apply live, or park.
+        await permissionGate.updateFilesConfig(config.files)
         await permissionGate.startPeriodicCleanup()
         let previewBus = ToolBus(permissionGate: permissionGate)
         // Capabilities in the shared ships-disabled set arrive disabled here like
@@ -275,7 +279,7 @@ extension AppModel {
             pluginConfig: pipeline.config.plugins,
             notifier: notificationManager,
             onApprovalRequested: { [weak self] req in
-                await self?.notificationManager.postApprovalNotification(req)
+                await self?.notificationManager.postApprovalAttention(req)
                 await self?.refreshPendingApprovals()
             },
             containersConfig: pipeline.config.containers,

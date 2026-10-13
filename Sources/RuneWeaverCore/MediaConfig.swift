@@ -54,9 +54,9 @@ public struct ArrInstanceConfig: Sendable, Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case enabled
         case url
-        case apiKeyEnv = "api_key_env"
-        case defaultQualityProfile = "default_quality_profile"
-        case defaultRootFolder = "default_root_folder"
+        case apiKeyEnv
+        case defaultQualityProfile
+        case defaultRootFolder
     }
 
     /// Stock Sonarr entry: enabled with no URL (unconfigured until set) and the
@@ -171,7 +171,7 @@ public struct MediaConfig: Sendable, Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case sonarr
         case radarr
-        case timeoutSeconds = "timeout_seconds"
+        case timeoutSeconds
     }
 
     public init(from decoder: Decoder) throws {

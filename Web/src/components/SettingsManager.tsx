@@ -108,29 +108,6 @@ import {
   type PersonaSettingsUpdate,
   formatBlockedAppsText,
   parseBlockedAppsText,
-  BASH_CPU_MAX_SECONDS,
-  BASH_CPU_MIN_SECONDS,
-  BASH_HOST_ALLOW_PATTERNS_MAX,
-  BASH_MEMORY_MAX_MB,
-  BASH_MEMORY_MIN_MB,
-  BASH_PERMISSION_ACTIONS,
-  BASH_SANDBOX_MODES,
-  BASH_SANDBOX_TIERS,
-  BASH_TIMEOUT_MAX_SECONDS,
-  BASH_TIMEOUT_MIN_SECONDS,
-  DEFAULT_BASH_CONFIG,
-  DEFAULT_BASH_CPU_SECONDS,
-  DEFAULT_BASH_HOST_ALLOW_PATTERNS,
-  DEFAULT_BASH_HOST_ALLOW_PATTERNS_TEXT,
-  DEFAULT_BASH_MEMORY_MB,
-  DEFAULT_BASH_RULES_TEXT,
-  DEFAULT_BASH_SANDBOX_MODE,
-  bashSandboxSummary,
-  formatHostAllowPatternsText,
-  parseHostAllowPatternsText,
-  parseHostAllowPatternsUncapped,
-  validateBashSandboxMode,
-  validateHostAllowPatterns,
   DEFAULT_FANOUT_FULL_TOOLS,
   DEFAULT_FANOUT_MAX_WORKERS,
   DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS,
@@ -141,11 +118,6 @@ import {
   WORKSPACE_QUOTA_MB_MIN,
   WORKSPACE_TMP_TTL_MAX_DAYS,
   WORKSPACE_TMP_TTL_MIN_DAYS,
-  formatBashRulesText,
-  parseBashRulesText,
-  type BashConfigData,
-  type BashRuleData,
-  type BashSettingsUpdate,
   type ContainersConfigData,
   type ContainersSettingsUpdate,
   type DesktopConfigData,
@@ -192,7 +164,6 @@ import {
   ChatIcon,
   CheckIcon,
   CloseIcon,
-  FolderIcon,
   GlobeIcon,
   KeyIcon,
   MailIcon,
@@ -215,7 +186,7 @@ import Modal from "./Modal";
 import { StoreSecretModal } from "./StoreSecretModal";
 import RuneMarketplaceModal from "./RuneMarketplaceModal";
 import { IndexPolicyPanel } from "./IndexingPanel";
-import { PolicyPane } from "./PolicyPane";
+import AccessPane from "./AccessPane";
 import {
   PersonaAvatar,
   publishPersonaFromSettings,
@@ -226,51 +197,26 @@ import { useToastStack } from "../hooks/useToastStack";
 import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
 import { useIsMobile } from "../hooks/useIsMobile";
 
-// Local terminal glyph for the Bash & Shell tool category. Stays local to
-// this pane to avoid touching the shared icon set. Matches
-// the shared stroke style so the pill icon agrees with sibling categories.
-function TerminalIcon(props: { size?: number; className?: string }) {
-  const { size = 16, className = "" } = props;
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden="true"
-    >
-      <polyline points="4 17 10 11 4 5" />
-      <line x1="12" x2="20" y1="19" y2="19" />
-    </svg>
-  );
-}
-
-// Vertical navigation keeps every category visible without horizontal scrolling; Security
-// owns container governance plus Files & Access (allow roots, deny patterns, approval on deny)
-// plus access management, while the Tools Files category surfaces only the files.write
-// write review mode, so Security stays the single access-policy home and the sidebar
-// stays within the width budget as settings grow. The `search` id stays verbatim while the pane displays as Web: the search* API aliases and
-// the /search/* health routes are keyed to that id, so only the label moves. The `network` pane
-// owns the [server] bind (hostname, port, allowed_hosts) plus the restart banner.
-// The `policy` pane owns the declarative policy.toml editor outside the shared
-// config form, following the indexing panel precedent, so policy writes apply
-// live with no restart and never share the config save path.
+// Vertical navigation keeps every category visible without horizontal scrolling; Access leads
+// because it is the owner "what the agent may do" home — standing rules, Bash & Shell, Network,
+// Credentials, and Files write posture all live on its section rail, and the policy.toml editor
+// is reached through its Network sub-tabs, so no separate Policy tab remains. Security keeps
+// container governance plus the Files & Access guard (allow roots, deny patterns, approval on
+// deny) plus token rotation. The `search` id stays verbatim while the pane displays as Web: the
+// search* API aliases and the /search/* health routes are keyed to that id, so only the label
+// moves. The `network` pane owns the [server] bind (hostname, port, allowed_hosts) plus the
+// restart banner.
 // Persona and goals sit beside providers because the owner reaches for identity
 // and durable pursuit as often as model routing; engine keeps only its own
 // knobs plus the background interruption policy so each surface stays scannable.
 type SettingsTab =
+  | "access"
   | "providers"
   | "persona"
   | "goals"
   | "engine"
   | "tools"
   | "security"
-  | "policy"
   | "memory"
   | "voice"
   | "search"
@@ -282,13 +228,13 @@ type SettingsTab =
 // current tab instead of blanking the content pane, so drifted callers can
 // never strand the form without a visible section.
 const SETTINGS_TABS: readonly SettingsTab[] = [
+  "access",
   "providers",
   "persona",
   "goals",
   "engine",
   "tools",
   "security",
-  "policy",
   "memory",
   "voice",
   "search",
@@ -296,6 +242,34 @@ const SETTINGS_TABS: readonly SettingsTab[] = [
   "network",
   "indexing",
 ];
+
+// Section-finder index behind the sidenav search: each tab matches its own
+// label plus the capability words owners reach for, so one query discovers the
+// pane wherever its knob actually lives. Access carries the section names the
+// approvals inbox and owner vocabulary use (rules, bash, network, credentials,
+// files) because those editors live behind the pane, not on the tab itself.
+const SETTINGS_TAB_KEYWORDS: Record<SettingsTab, string> = {
+  access:
+    "access rules permissions allow deny standing bash shell commands network domains egress credentials keys files write posture policy sandbox review",
+  providers: "llm providers models api keys routing fallback",
+  persona: "persona identity tone style avatar assistant name",
+  goals: "goals pursuit cadence plan steps triggers",
+  engine: "engine logs name compaction tool rounds proactive ideas interruption",
+  tools: "tools runes plugins builtin agents workspace promoted scripts marketplace",
+  security: "security containers sandbox files allow roots deny approval blocked paths token rotation",
+  memory: "memory storage vectors episodes embeddings recall",
+  voice: "voice whisper speech stt tts",
+  search: "web search searxng browser timeouts fetch",
+  email: "email accounts imap smtp mailboxes",
+  network: "network server hostname port bind allowed hosts restart",
+  indexing: "indexing index documents status",
+};
+
+// Matches one tab against the trimmed lowercase section-finder query.
+function matchesSettingsTab(tab: SettingsTab, query: string): boolean {
+  if (!query) return true;
+  return SETTINGS_TAB_KEYWORDS[tab].includes(query);
+}
 
 // Narrows an unknown tab id to the known vocabulary without throwing, so
 // selection stays fail-closed on drifted or persisted values.
@@ -337,14 +311,15 @@ interface ToolCategoryMeta {
 // splitting them stranded web.fetch away from the timeout UI its calls need.
 // The browser-web id is the sole grouping for both prefixes, so pills, search
 // filtering, and bulk toggles stay in lockstep and any future browser.* or
-// web.* tool lands here without a second pill or section.
+// web.* tool lands here without a second pill or section. Bash and files have
+// no category: their policy editors live on the Access surface beside this
+// pane, so their rows fall through to Other Tools carrying only the enablement
+// toggle and no category-level Configure can dangle behind a moved editor.
 const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
   { id: "desktop", name: "Desktop & Automation", description: "Screen capture, OCR, and approval-gated mouse/keyboard control", icon: MonitorIcon },
   { id: "messages", name: "Messages & SMS", description: "Search, read, and send macOS iMessages and text messages", icon: MessageSquareIcon },
   { id: "email", name: "Email & Mailboxes", description: "IMAP search, message read, attachment inspection, and drafts", icon: MailIcon },
   { id: "browser-web", name: "Browser, Web & API", description: "Web search, page fetch, browser automation, and API requests", icon: GlobeIcon },
-  { id: "bash", name: "Bash & Shell", description: "Sandboxed shell execution with per-command approval policy", icon: TerminalIcon },
-  { id: "files", name: "Files & Workspace", description: "File write review mode; allow and deny rules remain under Security", icon: FolderIcon },
   { id: "memories", name: "Long-Term Memory", description: "Episodic and profile memory store and recall", icon: MemoryIcon },
   { id: "goal", name: "Autonomous Goals", description: "Multi-turn goal planning, tracking, and execution", icon: TargetIcon },
   { id: "fanout", name: "Fan-Out Workers", description: "Concurrent worker turns for parallel subtasks", icon: WrenchIcon },
@@ -357,8 +332,10 @@ const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
 // into browser-web so the single Browser, Web & API editor owns all three.
 // External plugin tools stay in Other regardless of name prefix, so a
 // colliding bash.evil or files.evil never joins a builtin section; only builtin
-// names route by prefix. Bare names without a dot (including the
-// remember_fact/recall_memories aliases) fall through to their explicit
+// names route by prefix. Bash and files builtins route to Other because
+// their policy editors live on the Access surface, leaving the enablement
+// toggle as the row's only control here. Bare names without a dot (including
+// the remember_fact/recall_memories aliases) fall through to their explicit
 // branches or to other, so a future unprefixed tool never joins a category by
 // accident.
 const KNOWN_BUILTIN_TOOL_CATEGORIES: Record<string, string> = {
@@ -377,12 +354,6 @@ const KNOWN_BUILTIN_TOOL_CATEGORIES: Record<string, string> = {
   "browser.act": "browser-web",
   "web.search": "browser-web",
   "web.fetch": "browser-web",
-  "bash.exec": "bash",
-  "files.read": "files",
-  "files.grep": "files",
-  "files.glob": "files",
-  "files.list": "files",
-  "files.write": "files",
   "memories.store": "memories",
   "memories.recall": "memories",
   "goal.create": "goal",
@@ -397,14 +368,14 @@ const KNOWN_BUILTIN_TOOL_CATEGORIES: Record<string, string> = {
 // Routes a builtin tool name by prefix. Callers must gate on provenance
 // first; this helper alone cannot tell bash.exec apart from bash.evil.
 // Browser, web, and api prefixes share one section so any future api.* tool
-// lands with the same Browser, Web & API editor without a second pill.
+// lands with the same Browser, Web & API editor without a second pill. Bash
+// and files prefixes stay unrouted: their policy editors live on the Access
+// surface, so the rows land in Other with only the enablement toggle.
 function resolveBuiltinCategoryByName(toolName: string): string {
   if (toolName.startsWith("desktop.")) return "desktop";
   if (toolName.startsWith("messages.")) return "messages";
   if (toolName.startsWith("email.")) return "email";
   if (toolName.startsWith("browser.") || toolName.startsWith("web.") || toolName.startsWith("api.")) return "browser-web";
-  if (toolName === "bash.exec" || toolName.startsWith("bash.")) return "bash";
-  if (toolName.startsWith("files.")) return "files";
   if (toolName.startsWith("memories.")) return "memories";
   if (toolName.startsWith("goal.")) return "goal";
   if (toolName.startsWith("fanout.")) return "fanout";
@@ -428,14 +399,16 @@ export function getToolCategory(tool: ToolInfo | string): string {
 }
 
 // One Configure entry per integration surface keeps a single modal per editor:
-// desktop, media, fanout, browser-web, bash, and files each own one existing
-// modal, so the header button opens that editor whenever any rendered tool in
-// the category reports hasConfig. The Files category's Configure opens the
-// files.write write-mode editor while Security remains the single
-// access-policy editor for allow roots, deny patterns, and approval on deny.
-// The server hasConfig flag is the sole authority — a null key or
-// no flagged tool hides the button, which keeps unconfigurable categories
-// clean and avoids stale per-tool buttons when new tools gain editors later.
+// desktop, media, fanout, and browser-web each own one existing modal, so the
+// header button opens that editor whenever any rendered tool in the category
+// reports hasConfig. Bash and files have no entry: their editors live on the
+// Access surface, their rows fall through to Other Tools, and the server no
+// longer flags either configurable, so no category header can dangle a
+// Configure for a moved editor. Security stays the single config-form editor
+// for allow roots, deny patterns, and approval on deny. The server hasConfig
+// flag is the sole authority — a null key or no flagged tool hides the button,
+// which keeps unconfigurable categories clean and avoids stale per-tool
+// buttons when new tools gain editors later.
 // Edge case: a filtered view with zero flagged tools in a configurable
 // category still hides Configure, so search never offers a dead editor.
 function getCategoryConfigKey(categoryId: string): string | null {
@@ -443,57 +416,7 @@ function getCategoryConfigKey(categoryId: string): string | null {
   if (categoryId === "media") return "media.arr";
   if (categoryId === "fanout") return "fanout.run";
   if (categoryId === "browser-web") return "browser.navigate";
-  if (categoryId === "bash") return "bash.exec";
-  if (categoryId === "files") return "files.write";
   return null;
-}
-
-// Closed write-mode vocabulary for files.write ([files] write_mode). The engine
-// stays the validator of record: it rejects anything outside this set, so the
-// editor only ever surfaces these three postures and a drifted loaded value
-// normalizes back to the model posture instead of opening on an unknown radio.
-type FilesWriteMode = "model" | "staged" | "live";
-
-const DEFAULT_FILES_WRITE_MODE: FilesWriteMode = "model";
-
-interface FilesWriteModeOption {
-  value: FilesWriteMode;
-  label: string;
-  description: string;
-}
-
-// Option copy explains the enforcement each posture applies, pinned to the
-// server's contract: `model` keeps per-call mode selection with an omitted mode
-// defaulting to staged review, `staged` forces every write through Staged
-// Changes, and `live` writes immediately leaving a `.rune_backup_` rollback copy.
-const FILES_WRITE_MODE_OPTIONS: readonly FilesWriteModeOption[] = [
-  {
-    value: "model",
-    label: "Let the model decide",
-    description:
-      "The agent picks staged or live per call; omitted mode defaults to staged review.",
-  },
-  {
-    value: "staged",
-    label: "Always stage for review",
-    description:
-      "Every write waits in Staged Changes; live writes are disabled.",
-  },
-  {
-    value: "live",
-    label: "Always write live",
-    description:
-      "Writes apply immediately with a .rune_backup_ rollback copy; review staging is disabled.",
-  },
-];
-
-// Normalizes a loaded or raw write-mode value into the closed editor
-// vocabulary. Older engines omit the key and a hand-edited config can carry
-// casing, so the editor falls back to the model posture rather than rendering
-// an unknown selection.
-function normalizeFilesWriteMode(value: string | undefined | null): FilesWriteMode {
-  const normalized = (value ?? "").trim().toLowerCase();
-  return normalized === "staged" || normalized === "live" ? normalized : DEFAULT_FILES_WRITE_MODE;
 }
 
 interface ProviderEntry {
@@ -731,6 +654,11 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // the form keeps the screen on first paint; desktop renders the same sidenav
   // inline via stylesheet alone, so this flag only moves the handheld drawer.
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  // Section-finder query for the sidenav. Blank shows every tab; a non-blank
+  // query keeps only tabs whose label or keyword index matches, so one word
+  // ("bash", "rules", "credentials") surfaces the Access pane whose editors
+  // live behind the pane rather than on the tab label itself.
+  const [settingsNavQuery, setSettingsNavQuery] = useState("");
   // Trigger that opens the settings drawer. Dismissals return focus here so
   // keyboard users land back on the control that opened the drawer instead of
   // losing focus to the document body.
@@ -811,13 +739,13 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // cleared field surfaces a range error instead of silently keeping the
   // stored value; the images are pinned in code and never editable here.
   const [containersMemoryMB, setContainersMemoryMB] = useState<number | string>(
-    DEFAULT_CONTAINERS_CONFIG.memory_mb
+    DEFAULT_CONTAINERS_CONFIG.memoryMb
   );
   const [containersMaxConcurrent, setContainersMaxConcurrent] = useState<number | string>(
-    DEFAULT_CONTAINERS_CONFIG.max_concurrent
+    DEFAULT_CONTAINERS_CONFIG.maxConcurrent
   );
   const [containersTTLMinutes, setContainersTTLMinutes] = useState<number | string>(
-    DEFAULT_CONTAINERS_CONFIG.ttl_minutes
+    DEFAULT_CONTAINERS_CONFIG.ttlMinutes
   );
   // Blocked-paths editor holds raw textarea text (one glob per line) so blank lines survive editing
   // and only collapse on save; the parsed count drives the live badge while an emptied editor
@@ -832,20 +760,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     formatAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS)
   );
   const [filesRequireApprovalOnDeny, setFilesRequireApprovalOnDeny] = useState(true);
-  // files.write posture ([files] write_mode) for the Tools -> Files & Workspace
-  // write-mode editor. The draft holds a closed-set value only: a load outside
-  // `model|staged|live` normalizes back to the model posture, and access rules
-  // (allow roots, deny patterns, approval on deny) stay owned by Security.
-  const [filesWriteModeDraft, setFilesWriteModeDraft] = useState<FilesWriteMode>(
-    DEFAULT_FILES_WRITE_MODE
-  );
-  const [filesSaveLoading, setFilesSaveLoading] = useState(false);
-  const [filesModalError, setFilesModalError] = useState<string | null>(null);
-  // Short-lived success-then-close timer for the Files & Workspace modal: held
-  // in a ref (not bare setTimeout) so unmount or a second save clears the
-  // pending tick instead of firing setState on an unmounted pane or closing a
-  // fresh edit.
-  const filesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Form-local reset confirmations: resetting only rewrites the in-progress
   // form and never persists until Save, so the modal must state counts and
   // the until-Save nature explicitly.
@@ -1005,7 +919,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   );
 
   // Single probe list for every Keychain-backed name so the status map drives
-  // all badges: email password envs, provider api_key_envs, and the Sonarr /
+  // all badges: email password envs, provider apiKeyEnvs, and the Sonarr /
   // Radarr apiKeyEnv names. Media names come from the live form plus the last
   // loaded settings so a custom name stays probed before and after populate.
   const relevantSecretKeys = React.useMemo(() => {
@@ -1017,7 +931,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       }
     }
     for (const item of providersList) {
-      const keyEnv = (item.config.api_key_env || item.config.apiKeyEnv || "").trim();
+      const keyEnv = (item.config.apiKeyEnv || item.config.apiKeyEnv || "").trim();
       if (keyEnv) {
         keys.add(keyEnv);
       }
@@ -1031,7 +945,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       keys.add(radarrEnv);
     }
     const storedSonarrEnv = (
-      settings?.media?.sonarr?.api_key_env ||
+      settings?.media?.sonarr?.apiKeyEnv ||
       settings?.media?.sonarr?.apiKeyEnv ||
       ""
     ).trim();
@@ -1039,7 +953,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       keys.add(storedSonarrEnv);
     }
     const storedRadarrEnv = (
-      settings?.media?.radarr?.api_key_env ||
+      settings?.media?.radarr?.apiKeyEnv ||
       settings?.media?.radarr?.apiKeyEnv ||
       ""
     ).trim();
@@ -1117,74 +1031,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // (not bare setTimeout) so unmount or a second save clears the pending tick
   // instead of firing setState on an unmounted pane or closing a fresh edit.
   const desktopSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Sandboxed shell execution ([bash]): per-command approval policy for
-  // bash.exec. Rules stay ordered top-to-bottom last-match-wins so the list
-  // order is the policy; the modal and the full-save share one payload helper
-  // below so both stay symmetric. The fresh form seeds from the combined
-  // bash default so the editor matches the engine boundary before the first
-  // settings fetch.
-  const [bashEnabled, setBashEnabled] = useState<boolean>(DEFAULT_BASH_CONFIG.enabled);
-  const [bashDefaultAction, setBashDefaultAction] = useState<string>(
-    DEFAULT_BASH_CONFIG.default_action
-  );
-  // Bash rules editor holds raw textarea text (one `pattern = action` per
-  // line) so blank lines survive editing and only collapse on save; the
-  // parsed count drives the live badge while copy and paste of rule sets
-  // works through this text.
-  const [bashRulesText, setBashRulesText] = useState<string>(
-    DEFAULT_BASH_RULES_TEXT
-  );
-  const [bashTimeoutSeconds, setBashTimeoutSeconds] = useState<number | string>(
-    DEFAULT_BASH_CONFIG.timeout_seconds
-  );
-  // Resource budgets bound each shell turn beside the wall-clock timeout: CPU
-  // seconds cap compute via `ulimit -t` while memory megabytes cap address
-  // space via `ulimit -v`. Numeric inputs hold raw text (including empty) so a
-  // cleared field surfaces a range error instead of silently keeping stale.
-  // The fresh form seeds from the combined bash default so the editor matches
-  // the engine boundary before the first settings fetch.
-  const [bashCpuSeconds, setBashCpuSeconds] = useState<number | string>(
-    DEFAULT_BASH_CPU_SECONDS
-  );
-  const [bashMemoryMB, setBashMemoryMB] = useState<number | string>(
-    DEFAULT_BASH_MEMORY_MB
-  );
-  const [bashAllowNetwork, setBashAllowNetwork] = useState<boolean>(
-    DEFAULT_BASH_CONFIG.allow_network
-  );
-  const [bashSandboxMode, setBashSandboxMode] = useState<string>(
-    DEFAULT_BASH_SANDBOX_MODE
-  );
-  const [bashHostAllowPatternsText, setBashHostAllowPatternsText] =
-    useState<string>(DEFAULT_BASH_HOST_ALLOW_PATTERNS_TEXT);
-  const [bashSaved, setBashSaved] = useState(false);
-  const bashLoadedRef = useRef<{
-    enabled: boolean;
-    default_action: string;
-    rulesText: string;
-    timeout_seconds: number;
-    cpu_seconds: number;
-    memory_mb: number;
-    allow_network: boolean;
-    sandbox_mode: string;
-    host_allow_patterns: string[];
-  }>({
-    enabled: DEFAULT_BASH_CONFIG.enabled,
-    default_action: DEFAULT_BASH_CONFIG.default_action,
-    rulesText: DEFAULT_BASH_RULES_TEXT,
-    timeout_seconds: DEFAULT_BASH_CONFIG.timeout_seconds,
-    cpu_seconds: DEFAULT_BASH_CPU_SECONDS,
-    memory_mb: DEFAULT_BASH_MEMORY_MB,
-    allow_network: DEFAULT_BASH_CONFIG.allow_network,
-    sandbox_mode: DEFAULT_BASH_SANDBOX_MODE,
-    host_allow_patterns: [...DEFAULT_BASH_HOST_ALLOW_PATTERNS],
-  });
-  const [bashSaveLoading, setBashSaveLoading] = useState(false);
-  const [bashModalError, setBashModalError] = useState<string | null>(null);
-  // Short-lived success-then-close timer for the bash modal: held in a ref
-  // (not bare setTimeout) so unmount or a second save clears the pending tick
-  // instead of firing setState on an unmounted pane or closing a fresh edit.
-  const bashSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Parallel worker fan-out ([fanout]): swarm knobs for fanout.run. Number
   // inputs hold raw text (including empty) so clearing a field saves the
   // modal default instead of preserving the stale value; the toggle stays a
@@ -1204,9 +1050,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // operator never touches stays omitted so the stored value survives, while a
   // cleared numeric field sends the modal default as an explicit change.
   const fanoutLoadedRef = useRef<FanoutConfigData>({
-    max_workers: DEFAULT_FANOUT_MAX_WORKERS,
-    worker_timeout_seconds: DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS,
-    full_tools: DEFAULT_FANOUT_FULL_TOOLS,
+    maxWorkers: DEFAULT_FANOUT_MAX_WORKERS,
+    workerTimeoutSeconds: DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS,
+    fullTools: DEFAULT_FANOUT_FULL_TOOLS,
   });
   const [fanoutSaveLoading, setFanoutSaveLoading] = useState(false);
   const [fanoutModalError, setFanoutModalError] = useState<string | null>(null);
@@ -1214,10 +1060,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // (not bare setTimeout) so unmount or a second save clears the pending tick
   // instead of firing setState on an unmounted pane or closing a fresh edit.
   const fanoutSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Direct handle to the bash rules editor so Add Rule can return keyboard
-  // focus without a document-wide lookup that breaks with multiple instances
-  // or strict-mode remounts.
-  const bashRulesTextareaRef = useRef<HTMLTextAreaElement>(null);
   // Steady long-horizon pursuit ([goals]): enablement plus the cadence hint
   // stored on each new goal and the active-goal cap bounding scheduler
   // fan-out. Planning bounds stay file-owned. The fresh form seeds from the
@@ -1330,13 +1172,13 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // the combined workspace default so the editors match the engine boundary
   // before the first settings fetch.
   const [workspaceQuotaMB, setWorkspaceQuotaMB] = useState<number | string>(
-    DEFAULT_WORKSPACE_CONFIG.quota_mb
+    DEFAULT_WORKSPACE_CONFIG.quotaMB
   );
   const [workspaceQuotaFiles, setWorkspaceQuotaFiles] = useState<number | string>(
-    DEFAULT_WORKSPACE_CONFIG.quota_files
+    DEFAULT_WORKSPACE_CONFIG.quotaFiles
   );
   const [workspaceTmpTTLDays, setWorkspaceTmpTTLDays] = useState<number | string>(
-    DEFAULT_WORKSPACE_CONFIG.tmp_ttl_days
+    DEFAULT_WORKSPACE_CONFIG.tmpTTLDays
   );
   const [pruningWorkspace, setPruningWorkspace] = useState(false);
   const [pendingPruneWorkspace, setPendingPruneWorkspace] = useState(false);
@@ -2077,39 +1919,37 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // without [media] leave the form defaults untouched.
   const populateMediaSettings = useCallback(
     (media: MediaConfigData | undefined | null) => {
-      if (media?.timeout_seconds !== undefined || media?.timeoutSeconds !== undefined) {
+      if (media?.timeoutSeconds !== undefined) {
         setMediaTimeoutSeconds(
-          media.timeout_seconds ?? media.timeoutSeconds ?? DEFAULT_MEDIA_TIMEOUT_SECONDS
+          media.timeoutSeconds ?? DEFAULT_MEDIA_TIMEOUT_SECONDS
         );
       }
       if (media?.sonarr) {
         setSonarrEnabled(media.sonarr.enabled ?? true);
         setSonarrUrl(media.sonarr.url ?? "");
         setSonarrApiKeyEnv(
-          media.sonarr.api_key_env || media.sonarr.apiKeyEnv || "SONARR_API_KEY"
+          media.sonarr.apiKeyEnv || "SONARR_API_KEY"
         );
         setSonarrDefaultQuality(
-          media.sonarr.default_quality_profile ||
-            media.sonarr.defaultQualityProfile ||
+          media.sonarr.defaultQualityProfile ||
             ""
         );
         setSonarrDefaultRoot(
-          media.sonarr.default_root_folder || media.sonarr.defaultRootFolder || ""
+          media.sonarr.defaultRootFolder || ""
         );
       }
       if (media?.radarr) {
         setRadarrEnabled(media.radarr.enabled ?? true);
         setRadarrUrl(media.radarr.url ?? "");
         setRadarrApiKeyEnv(
-          media.radarr.api_key_env || media.radarr.apiKeyEnv || "RADARR_API_KEY"
+          media.radarr.apiKeyEnv || "RADARR_API_KEY"
         );
         setRadarrDefaultQuality(
-          media.radarr.default_quality_profile ||
-            media.radarr.defaultQualityProfile ||
+          media.radarr.defaultQualityProfile ||
             ""
         );
         setRadarrDefaultRoot(
-          media.radarr.default_root_folder || media.radarr.defaultRootFolder || ""
+          media.radarr.defaultRootFolder || ""
         );
       }
     },
@@ -2127,31 +1967,29 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const buildMediaPayload = useCallback(
     (): MediaConfigData => {
       const storedSonarrEnv =
-        settings?.media?.sonarr?.api_key_env?.trim() ||
         settings?.media?.sonarr?.apiKeyEnv?.trim() ||
         "";
       const storedRadarrEnv =
-        settings?.media?.radarr?.api_key_env?.trim() ||
         settings?.media?.radarr?.apiKeyEnv?.trim() ||
         "";
       const timeoutSec = typeof mediaTimeoutSeconds === "string" ? parseInt(mediaTimeoutSeconds, 10) : mediaTimeoutSeconds;
       return {
-        timeout_seconds: isNaN(timeoutSec) || timeoutSec <= 0 ? DEFAULT_MEDIA_TIMEOUT_SECONDS : timeoutSec,
+        timeoutSeconds: isNaN(timeoutSec) || timeoutSec <= 0 ? DEFAULT_MEDIA_TIMEOUT_SECONDS : timeoutSec,
         sonarr: {
           enabled: sonarrEnabled,
           url: sonarrUrl.trim(),
-          api_key_env:
+          apiKeyEnv:
             sonarrApiKeyEnv.trim() || storedSonarrEnv || "SONARR_API_KEY",
-          default_quality_profile: sonarrDefaultQuality.trim(),
-          default_root_folder: sonarrDefaultRoot.trim(),
+          defaultQualityProfile: sonarrDefaultQuality.trim(),
+          defaultRootFolder: sonarrDefaultRoot.trim(),
         },
         radarr: {
           enabled: radarrEnabled,
           url: radarrUrl.trim(),
-          api_key_env:
+          apiKeyEnv:
             radarrApiKeyEnv.trim() || storedRadarrEnv || "RADARR_API_KEY",
-          default_quality_profile: radarrDefaultQuality.trim(),
-          default_root_folder: radarrDefaultRoot.trim(),
+          defaultQualityProfile: radarrDefaultQuality.trim(),
+          defaultRootFolder: radarrDefaultRoot.trim(),
         },
       };
     },
@@ -2178,14 +2016,14 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const populateDesktopSettings = useCallback(
     (desktop: DesktopConfigData | undefined | null) => {
       if (!desktop) return;
-      if (typeof desktop.max_image_dimension === "number") {
-        setDesktopMaxImageDimension(desktop.max_image_dimension);
+      if (typeof desktop.maxImageDimension === "number") {
+        setDesktopMaxImageDimension(desktop.maxImageDimension);
       }
-      if (typeof desktop.jpeg_quality === "number") {
-        setDesktopJpegQuality(desktop.jpeg_quality);
+      if (typeof desktop.jpegQuality === "number") {
+        setDesktopJpegQuality(desktop.jpegQuality);
       }
-      if (Array.isArray(desktop.blocked_apps)) {
-        setDesktopBlockedAppsText(formatBlockedAppsText(desktop.blocked_apps));
+      if (Array.isArray(desktop.blockedApps)) {
+        setDesktopBlockedAppsText(formatBlockedAppsText(desktop.blockedApps));
       }
     },
     []
@@ -2202,9 +2040,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const buildDesktopPayload = useCallback(
     (): DesktopSettingsUpdate => {
       return {
-        max_image_dimension: Number(desktopMaxImageDimension),
-        jpeg_quality: Number(desktopJpegQuality),
-        blocked_apps: parseBlockedAppsText(desktopBlockedAppsText),
+        maxImageDimension: Number(desktopMaxImageDimension),
+        jpegQuality: Number(desktopJpegQuality),
+        blockedApps: parseBlockedAppsText(desktopBlockedAppsText),
       };
     },
     [
@@ -2214,250 +2052,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     ]
   );
 
-  // Copies one settings fetch into the bash policy fields, tolerating both
-  // snake_case and camelCase DTO aliases and an absent [bash] section from
-  // older engines by keeping the form defaults. Only overwrites sections the
-  // engine returns so older engines without bash leave the form untouched.
-  // Rules arrive as an ordered array and render through the shared textarea
-  // codec so line order survives the round trip. Resource bounds follow the
-  // same dual spelling as the timeout so file-configured CPU and memory values
-  // survive a dashboard PUT instead of resetting to the fresh-form defaults.
-  // Confinement follows the same dual spelling: the tier reads either key and
-  // the allowlist reads either list, seeding the snapshot that drives the
-  // changed-only modal patch.
-  const populateBashSettings = useCallback(
-    (bash: BashConfigData | undefined | null) => {
-      if (!bash) return;
-      const next = { ...bashLoadedRef.current };
-      if (typeof bash.enabled === "boolean") {
-        setBashEnabled(bash.enabled);
-        next.enabled = bash.enabled;
-      }
-      const defaultAction =
-        (typeof bash.default_action === "string" && bash.default_action.trim()
-          ? bash.default_action.trim().toLowerCase()
-          : "") ||
-        (typeof bash.defaultAction === "string" && bash.defaultAction.trim()
-          ? bash.defaultAction.trim().toLowerCase()
-          : "");
-      if (defaultAction) {
-        setBashDefaultAction(defaultAction);
-        next.default_action = defaultAction;
-      }
-      if (Array.isArray(bash.rules)) {
-        const normalized: BashRuleData[] = bash.rules.map((rule) => ({
-          pattern: typeof rule.pattern === "string" ? rule.pattern : "",
-          action:
-            typeof rule.action === "string" && rule.action.trim()
-              ? rule.action.trim().toLowerCase()
-              : "ask",
-        }));
-        const text = formatBashRulesText(normalized);
-        setBashRulesText(text);
-        next.rulesText = text;
-      }
-      const timeout =
-        typeof bash.timeout_seconds === "number"
-          ? bash.timeout_seconds
-          : typeof bash.timeoutSeconds === "number"
-            ? bash.timeoutSeconds
-            : null;
-      if (timeout !== null) {
-        setBashTimeoutSeconds(timeout);
-        next.timeout_seconds = timeout;
-      }
-      const cpu =
-        typeof bash.cpu_seconds === "number"
-          ? bash.cpu_seconds
-          : typeof bash.cpuSeconds === "number"
-            ? bash.cpuSeconds
-            : null;
-      if (cpu !== null) {
-        setBashCpuSeconds(cpu);
-        next.cpu_seconds = cpu;
-      }
-      const memory =
-        typeof bash.memory_mb === "number"
-          ? bash.memory_mb
-          : typeof bash.memoryMb === "number"
-            ? bash.memoryMb
-            : null;
-      if (memory !== null) {
-        setBashMemoryMB(memory);
-        next.memory_mb = memory;
-      }
-      if (typeof bash.allow_network === "boolean") {
-        setBashAllowNetwork(bash.allow_network);
-        next.allow_network = bash.allow_network;
-      } else if (typeof bash.allowNetwork === "boolean") {
-        setBashAllowNetwork(bash.allowNetwork);
-        next.allow_network = bash.allowNetwork;
-      }
-      const rawMode =
-        (typeof bash.sandbox_mode === "string" && bash.sandbox_mode.trim()
-          ? bash.sandbox_mode.trim()
-          : "") ||
-        (typeof bash.sandboxMode === "string" && bash.sandboxMode.trim()
-          ? bash.sandboxMode.trim()
-          : "");
-      if (
-        rawMode &&
-        (BASH_SANDBOX_MODES as readonly string[]).includes(rawMode)
-      ) {
-        setBashSandboxMode(rawMode);
-        next.sandbox_mode = rawMode;
-      }
-      const rawPatterns = Array.isArray(bash.host_allow_patterns)
-        ? bash.host_allow_patterns
-        : Array.isArray(bash.hostAllowPatterns)
-          ? bash.hostAllowPatterns
-          : null;
-      if (rawPatterns !== null) {
-        const filtered = rawPatterns.filter(
-          (entry): entry is string => typeof entry === "string",
-        );
-        const normalized = parseHostAllowPatternsText(
-          formatHostAllowPatternsText(filtered),
-        );
-        setBashHostAllowPatternsText(
-          formatHostAllowPatternsText(normalized),
-        );
-        next.host_allow_patterns = [...normalized];
-      }
-      bashLoadedRef.current = next;
-      setBashSaved(false);
-    },
-    []
-  );
-
-  // Builds the changed-only [bash] patch shared by the Configure modal and
-  // the full-settings save: a field matching its last-loaded value stays
-  // omitted so the stored value survives, while an emptied allowlist sends
-  // an explicit empty list. Only snake_case keys travel; camelCase aliases
-  // decode but never encode.
-  const buildBashPatch = useCallback((): BashSettingsUpdate => {
-    const patch: BashSettingsUpdate = {};
-    const loaded = bashLoadedRef.current;
-    if (bashEnabled !== loaded.enabled) {
-      patch.enabled = bashEnabled;
-    }
-    const nextAction = bashDefaultAction.trim().toLowerCase();
-    if (nextAction !== loaded.default_action) {
-      patch.default_action = nextAction;
-    }
-    try {
-      const currentRules = parseBashRulesText(bashRulesText);
-      const loadedRules = parseBashRulesText(loaded.rulesText);
-      const rulesChanged =
-        currentRules.length !== loadedRules.length ||
-        currentRules.some(
-          (rule, index) =>
-            rule.pattern !== loadedRules[index]?.pattern ||
-            rule.action !== loadedRules[index]?.action,
-        );
-      if (rulesChanged) {
-        patch.rules = currentRules;
-      }
-    } catch {
-      // Malformed rules never reach the patch: validation reports the line
-      // number before any network write.
-    }
-    const timeoutNum = Number(bashTimeoutSeconds);
-    if (timeoutNum !== loaded.timeout_seconds) {
-      patch.timeout_seconds = timeoutNum;
-    }
-    const cpuNum = Number(bashCpuSeconds);
-    if (cpuNum !== loaded.cpu_seconds) {
-      patch.cpu_seconds = cpuNum;
-    }
-    const memoryNum = Number(bashMemoryMB);
-    if (memoryNum !== loaded.memory_mb) {
-      patch.memory_mb = memoryNum;
-    }
-    if (bashAllowNetwork !== loaded.allow_network) {
-      patch.allow_network = bashAllowNetwork;
-    }
-    const nextMode = bashSandboxMode.trim();
-    if (nextMode !== loaded.sandbox_mode) {
-      patch.sandbox_mode = nextMode;
-    }
-    const currentPatterns = parseHostAllowPatternsText(
-      bashHostAllowPatternsText,
-    );
-    if (
-      currentPatterns.length !== loaded.host_allow_patterns.length ||
-      currentPatterns.some(
-        (entry, index) => entry !== loaded.host_allow_patterns[index],
-      )
-    ) {
-      patch.host_allow_patterns = [...currentPatterns];
-    }
-    return patch;
-  }, [
-    bashEnabled,
-    bashDefaultAction,
-    bashRulesText,
-    bashTimeoutSeconds,
-    bashCpuSeconds,
-    bashMemoryMB,
-    bashAllowNetwork,
-    bashSandboxMode,
-    bashHostAllowPatternsText,
-  ]);
-
-  // Shared bash validation for the full-save and modal-save paths so both
-  // reject a bad default action, a malformed rule line, an empty rule list,
-  // or an out-of-range timeout before any network write with one message.
-  // Rules parse through the shared parseBashRulesText codec so the modal and
-  // the full-save reject the same shapes with textarea line numbers. An empty
-  // list is rejected because an absent key would reload as the default
-  // catch-all instead of the saved empty. Resource bounds mirror the engine
-  // clamps so a zero CPU budget or a tiny memory budget fails in the form
-  // instead of returning a server 400 from load validation. Confinement
-  // mirrors BashConfig.validateHostAllowPatterns plus the closed tier set so
-  // an over-limit, blank, overlong, control-char, or TOML-breaking pattern
-  // fails in the form with the same field the server 400 names.
-  const validateBashFields = useCallback((): string | null => {
-    const normalizedAction = bashDefaultAction.trim().toLowerCase();
-    if (!(BASH_PERMISSION_ACTIONS as readonly string[]).includes(normalizedAction)) {
-      return 'Invalid bash default action: must be allow, ask, or deny.';
-    }
-    let parsed: BashRuleData[];
-    try {
-      parsed = parseBashRulesText(bashRulesText);
-    } catch (err) {
-      return err instanceof Error ? err.message : "Invalid bash rules.";
-    }
-    if (parsed.length === 0) {
-      return "Invalid bash rules: at least one rule is required.";
-    }
-    const timeoutNum = Number(bashTimeoutSeconds);
-    if (!Number.isInteger(timeoutNum) || timeoutNum < BASH_TIMEOUT_MIN_SECONDS || timeoutNum > BASH_TIMEOUT_MAX_SECONDS) {
-      return `Invalid bash timeout: timeout must be between ${BASH_TIMEOUT_MIN_SECONDS} and ${BASH_TIMEOUT_MAX_SECONDS} seconds.`;
-    }
-    const cpuNum = Number(bashCpuSeconds);
-    if (!Number.isInteger(cpuNum) || cpuNum < BASH_CPU_MIN_SECONDS || cpuNum > BASH_CPU_MAX_SECONDS) {
-      return `Invalid bash CPU budget: CPU time must be between ${BASH_CPU_MIN_SECONDS} and ${BASH_CPU_MAX_SECONDS} seconds.`;
-    }
-    const memoryNum = Number(bashMemoryMB);
-    if (!Number.isInteger(memoryNum) || memoryNum < BASH_MEMORY_MIN_MB || memoryNum > BASH_MEMORY_MAX_MB) {
-      return `Invalid bash memory budget: memory must be between ${BASH_MEMORY_MIN_MB} and ${BASH_MEMORY_MAX_MB} MB.`;
-    }
-    const tierError = validateBashSandboxMode(bashSandboxMode);
-    if (tierError) {
-      return tierError;
-    }
-    const uncapped = parseHostAllowPatternsUncapped(bashHostAllowPatternsText);
-    if (uncapped.length > BASH_HOST_ALLOW_PATTERNS_MAX) {
-      return `Invalid bash host allow patterns: must contain at most ${BASH_HOST_ALLOW_PATTERNS_MAX} entries (got ${uncapped.length}).`;
-    }
-    const patternsError = validateHostAllowPatterns(uncapped);
-    if (patternsError) {
-      return patternsError;
-    }
-    return null;
-  }, [bashDefaultAction, bashRulesText, bashTimeoutSeconds, bashCpuSeconds, bashMemoryMB, bashSandboxMode, bashHostAllowPatternsText]);
-
   // Copies one settings fetch into the fan-out knob fields, tolerating an
   // absent [fanout] section from older engines by keeping the modal defaults.
   // Only overwrites keys the engine returns so a stored value always wins over
@@ -2466,17 +2060,17 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const populateFanoutSettings = useCallback(
     (fanout: FanoutConfigData | undefined | null) => {
       const next: FanoutConfigData = { ...fanoutLoadedRef.current };
-      if (typeof fanout?.max_workers === "number") {
-        setFanoutMaxWorkers(fanout.max_workers);
-        next.max_workers = fanout.max_workers;
+      if (typeof fanout?.maxWorkers === "number") {
+        setFanoutMaxWorkers(fanout.maxWorkers);
+        next.maxWorkers = fanout.maxWorkers;
       }
-      if (typeof fanout?.worker_timeout_seconds === "number") {
-        setFanoutWorkerTimeoutSeconds(fanout.worker_timeout_seconds);
-        next.worker_timeout_seconds = fanout.worker_timeout_seconds;
+      if (typeof fanout?.workerTimeoutSeconds === "number") {
+        setFanoutWorkerTimeoutSeconds(fanout.workerTimeoutSeconds);
+        next.workerTimeoutSeconds = fanout.workerTimeoutSeconds;
       }
-      if (typeof fanout?.full_tools === "boolean") {
-        setFanoutFullTools(fanout.full_tools);
-        next.full_tools = fanout.full_tools;
+      if (typeof fanout?.fullTools === "boolean") {
+        setFanoutFullTools(fanout.fullTools);
+        next.fullTools = fanout.fullTools;
       }
       fanoutLoadedRef.current = next;
     },
@@ -2494,13 +2088,13 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       const loaded = fanoutLoadedRef.current;
       const maxRaw = typeof fanoutMaxWorkers === "string" ? fanoutMaxWorkers.trim() : fanoutMaxWorkers;
       if (maxRaw === "") {
-        if (loaded.max_workers !== DEFAULT_FANOUT_MAX_WORKERS) {
-          patch.max_workers = DEFAULT_FANOUT_MAX_WORKERS;
+        if (loaded.maxWorkers !== DEFAULT_FANOUT_MAX_WORKERS) {
+          patch.maxWorkers = DEFAULT_FANOUT_MAX_WORKERS;
         }
       } else {
         const maxNum = Number(maxRaw);
-        if (maxNum !== loaded.max_workers) {
-          patch.max_workers = maxNum;
+        if (maxNum !== loaded.maxWorkers) {
+          patch.maxWorkers = maxNum;
         }
       }
       const timeoutRaw =
@@ -2508,17 +2102,17 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
           ? fanoutWorkerTimeoutSeconds.trim()
           : fanoutWorkerTimeoutSeconds;
       if (timeoutRaw === "") {
-        if (loaded.worker_timeout_seconds !== DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS) {
-          patch.worker_timeout_seconds = DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS;
+        if (loaded.workerTimeoutSeconds !== DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS) {
+          patch.workerTimeoutSeconds = DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS;
         }
       } else {
         const timeoutNum = Number(timeoutRaw);
-        if (timeoutNum !== loaded.worker_timeout_seconds) {
-          patch.worker_timeout_seconds = timeoutNum;
+        if (timeoutNum !== loaded.workerTimeoutSeconds) {
+          patch.workerTimeoutSeconds = timeoutNum;
         }
       }
-      if (fanoutFullTools !== loaded.full_tools) {
-        patch.full_tools = fanoutFullTools;
+      if (fanoutFullTools !== loaded.fullTools) {
+        patch.fullTools = fanoutFullTools;
       }
       return patch;
     },
@@ -2535,23 +2129,23 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       if (typeof goals.enabled === "boolean") {
         setGoalsEnabled(goals.enabled);
       }
-      const stepInterval = goals.step_interval_minutes ?? goals.stepIntervalMinutes;
+      const stepInterval = goals.stepIntervalMinutes;
       if (typeof stepInterval === "number") {
         setGoalsStepIntervalMinutes(stepInterval);
       }
-      const maxActive = goals.max_active_goals ?? goals.maxActiveGoals;
+      const maxActive = goals.maxActiveGoals;
       if (typeof maxActive === "number") {
         setGoalsMaxActiveGoals(maxActive);
       }
-      const maxSteps = goals.max_steps_per_goal ?? goals.maxStepsPerGoal;
+      const maxSteps = goals.maxStepsPerGoal;
       if (typeof maxSteps === "number") {
         setGoalsMaxStepsPerGoal(maxSteps);
       }
-      const planTimeout = goals.plan_timeout_seconds ?? goals.planTimeoutSeconds;
+      const planTimeout = goals.planTimeoutSeconds;
       if (typeof planTimeout === "number") {
         setGoalsPlanTimeoutSeconds(planTimeout);
       }
-      const maxTriggers = goals.max_triggers_per_goal ?? goals.maxTriggersPerGoal;
+      const maxTriggers = goals.maxTriggersPerGoal;
       if (typeof maxTriggers === "number") {
         setGoalsMaxTriggersPerGoal(maxTriggers);
       }
@@ -2568,11 +2162,11 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       if (typeof ideas.enabled === "boolean") {
         setIdeasEnabled(ideas.enabled);
       }
-      const maxCycle = ideas.max_per_cycle ?? ideas.maxPerCycle;
+      const maxCycle = ideas.maxPerCycle;
       if (typeof maxCycle === "number") {
         setIdeasMaxPerCycle(maxCycle);
       }
-      const timeout = ideas.timeout_seconds ?? ideas.timeoutSeconds;
+      const timeout = ideas.timeoutSeconds;
       if (typeof timeout === "number") {
         setIdeasTimeoutSeconds(timeout);
       }
@@ -2584,15 +2178,13 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const buildIdeasPayload = useCallback((): IdeasSettingsUpdate => {
     return {
       enabled: ideasEnabled,
-      max_per_cycle: Number(ideasMaxPerCycle),
-      timeout_seconds: Number(ideasTimeoutSeconds),
+      maxPerCycle: Number(ideasMaxPerCycle),
+      timeoutSeconds: Number(ideasTimeoutSeconds),
     };
   }, [ideasEnabled, ideasMaxPerCycle, ideasTimeoutSeconds]);
 
   // Builds the [goals] delta from the pursuit form fields so the
-  // full-settings save shares one shape with future modal saves. Sends the
-  // snake_case keys the engine persists; the engine also accepts the camelCase
-  // aliases, so either spelling writes while reads accept both.
+  // full-settings save shares one shape with future modal saves.
   // Numeric fields preserve the raw input (including empty/invalid) so the
   // page validation surfaces range errors instead of silently coercing back
   // to defaults.
@@ -2600,11 +2192,11 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     (): GoalsSettingsUpdate => {
       return {
         enabled: goalsEnabled,
-        step_interval_minutes: Number(goalsStepIntervalMinutes),
-        max_active_goals: Number(goalsMaxActiveGoals),
-        max_steps_per_goal: Number(goalsMaxStepsPerGoal),
-        plan_timeout_seconds: Number(goalsPlanTimeoutSeconds),
-        max_triggers_per_goal: Number(goalsMaxTriggersPerGoal),
+        stepIntervalMinutes: Number(goalsStepIntervalMinutes),
+        maxActiveGoals: Number(goalsMaxActiveGoals),
+        maxStepsPerGoal: Number(goalsMaxStepsPerGoal),
+        planTimeoutSeconds: Number(goalsPlanTimeoutSeconds),
+        maxTriggersPerGoal: Number(goalsMaxTriggersPerGoal),
       };
     },
     [
@@ -2678,8 +2270,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
           setProactiveMode(canonical);
         }
       }
-      if (typeof proactive.judge_timeout_seconds === "number") {
-        setProactiveJudgeTimeoutSeconds(proactive.judge_timeout_seconds);
+      if (typeof proactive.judgeTimeoutSeconds === "number") {
+        setProactiveJudgeTimeoutSeconds(proactive.judgeTimeoutSeconds);
       }
     },
     []
@@ -2694,7 +2286,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     (): ProactiveSettingsUpdate => {
       return {
         mode: normalizeProactiveMode(proactiveMode),
-        judge_timeout_seconds: Number(proactiveJudgeTimeoutSeconds),
+        judgeTimeoutSeconds: Number(proactiveJudgeTimeoutSeconds),
       };
     },
     [proactiveMode, proactiveJudgeTimeoutSeconds]
@@ -2748,7 +2340,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     const loadedName = personaAssistantName(loaded) ?? "";
     const nextName = personaAssistantNameDraft.trim();
     if (nextName !== loadedName) {
-      delta.assistant_name = nextName;
+      delta.assistantName = nextName;
     }
     const loadedTone = canonicalPersonaTone(loaded.tone);
     if (personaToneDraft !== loadedTone) {
@@ -2760,7 +2352,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     const loadedUserName = personaUserName(loaded);
     const nextUserName = personaUserNameDraft.trim();
     if (nextUserName !== loadedUserName) {
-      delta.user_name = nextUserName;
+      delta.userName = nextUserName;
     }
     const loadedAvatar = canonicalPersonaAvatarColor(loaded.avatar);
     if (personaAvatarDraft !== loadedAvatar) {
@@ -2864,8 +2456,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     (workspace: WorkspaceConfigData | undefined | null) => {
       if (!workspace) return;
       const quotaMB =
-        typeof workspace.quota_mb === "number"
-          ? workspace.quota_mb
+        typeof workspace.quotaMB === "number"
+          ? workspace.quotaMB
           : typeof workspace.quotaMB === "number"
             ? workspace.quotaMB
             : null;
@@ -2873,8 +2465,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         setWorkspaceQuotaMB(quotaMB);
       }
       const quotaFiles =
-        typeof workspace.quota_files === "number"
-          ? workspace.quota_files
+        typeof workspace.quotaFiles === "number"
+          ? workspace.quotaFiles
           : typeof workspace.quotaFiles === "number"
             ? workspace.quotaFiles
             : null;
@@ -2882,8 +2474,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         setWorkspaceQuotaFiles(quotaFiles);
       }
       const tmpTTL =
-        typeof workspace.tmp_ttl_days === "number"
-          ? workspace.tmp_ttl_days
+        typeof workspace.tmpTTLDays === "number"
+          ? workspace.tmpTTLDays
           : typeof workspace.tmpTTLDays === "number"
             ? workspace.tmpTTLDays
             : null;
@@ -2903,9 +2495,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const buildWorkspacePayload = useCallback(
     (): WorkspaceSettingsUpdate => {
       return {
-        quota_mb: Number(workspaceQuotaMB),
-        quota_files: Number(workspaceQuotaFiles),
-        tmp_ttl_days: Number(workspaceTmpTTLDays),
+        quotaMB: Number(workspaceQuotaMB),
+        quotaFiles: Number(workspaceQuotaFiles),
+        tmpTTLDays: Number(workspaceTmpTTLDays),
       };
     },
     [workspaceQuotaMB, workspaceQuotaFiles, workspaceTmpTTLDays]
@@ -2940,8 +2532,8 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     (containers: ContainersConfigData | undefined | null) => {
       if (!containers) return;
       const memoryMB =
-        typeof containers.memory_mb === "number"
-          ? containers.memory_mb
+        typeof containers.memoryMb === "number"
+          ? containers.memoryMb
           : typeof containers.memoryMb === "number"
             ? containers.memoryMb
             : null;
@@ -2949,20 +2541,16 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         setContainersMemoryMB(memoryMB);
       }
       const maxConcurrent =
-        typeof containers.max_concurrent === "number"
-          ? containers.max_concurrent
-          : typeof containers.maxConcurrent === "number"
-            ? containers.maxConcurrent
-            : null;
+        typeof containers.maxConcurrent === "number"
+          ? containers.maxConcurrent
+          : null;
       if (maxConcurrent !== null) {
         setContainersMaxConcurrent(maxConcurrent);
       }
       const ttlMinutes =
-        typeof containers.ttl_minutes === "number"
-          ? containers.ttl_minutes
-          : typeof containers.ttlMinutes === "number"
-            ? containers.ttlMinutes
-            : null;
+        typeof containers.ttlMinutes === "number"
+          ? containers.ttlMinutes
+          : null;
       if (ttlMinutes !== null) {
         setContainersTTLMinutes(ttlMinutes);
       }
@@ -2971,17 +2559,15 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   );
 
   // Builds the [containers] delta from the Security-tab knob editors so the
-  // page save persists the three knobs through one PUT. Sends the snake_case
-  // keys the engine persists; reads accept both spellings so a
-  // file-configured knob survives the round trip. Numeric fields preserve
-  // the raw input so validation surfaces range errors instead of silently
+  // page save persists the three knobs through one PUT.
+  // Numeric fields preserve the raw input so validation surfaces range errors instead of silently
   // coercing back to defaults.
   const buildContainersPatch = useCallback(
     (): ContainersSettingsUpdate => {
       return {
-        memory_mb: Number(containersMemoryMB),
-        max_concurrent: Number(containersMaxConcurrent),
-        ttl_minutes: Number(containersTTLMinutes),
+        memoryMb: Number(containersMemoryMB),
+        maxConcurrent: Number(containersMaxConcurrent),
+        ttlMinutes: Number(containersTTLMinutes),
       };
     },
     [containersMemoryMB, containersMaxConcurrent, containersTTLMinutes]
@@ -2995,7 +2581,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const validateContainersFields = useCallback((): string | null => {
     const memoryNum = Number(containersMemoryMB);
     if (!Number.isInteger(memoryNum) || memoryNum < CONTAINERS_MEMORY_MIN_MB || memoryNum > CONTAINERS_MEMORY_MAX_MB) {
-      return `Invalid containers memory: memory_mb must be between ${CONTAINERS_MEMORY_MIN_MB} and ${CONTAINERS_MEMORY_MAX_MB} MB.`;
+      return `Invalid containers memory: memoryMb must be between ${CONTAINERS_MEMORY_MIN_MB} and ${CONTAINERS_MEMORY_MAX_MB} MB.`;
     }
     const maxConcurrentNum = Number(containersMaxConcurrent);
     if (!Number.isInteger(maxConcurrentNum) || maxConcurrentNum < CONTAINERS_MAX_CONCURRENT_MIN || maxConcurrentNum > CONTAINERS_MAX_CONCURRENT_MAX) {
@@ -3026,24 +2612,14 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         config: {
           enabled: cfg.enabled ?? true,
           model: cfg.model ?? "",
-          server_url: cfg.server_url || cfg.serverURL || "",
-          serverURL: cfg.server_url || cfg.serverURL || "",
-          api_key_env: cfg.api_key_env || cfg.apiKeyEnv || "",
-          apiKeyEnv: cfg.api_key_env || cfg.apiKeyEnv || "",
-          provider_type: cfg.provider_type || cfg.providerType || "",
-          providerType: cfg.provider_type || cfg.providerType || "",
-          api_style: cfg.api_style || cfg.apiStyle || "",
-          apiStyle: cfg.api_style || cfg.apiStyle || "",
-          context_length: cfg.context_length ?? cfg.contextLength,
-          contextLength: cfg.context_length ?? cfg.contextLength,
-          // Prefix-reuse knobs use nullish coalescing (not ||) so an explicit false cache hint
-          // survives the load instead of collapsing to unset and being stripped on save.
-          slot_count: cfg.slot_count ?? cfg.slotCount,
-          slotCount: cfg.slot_count ?? cfg.slotCount,
-          cache_prompt: cfg.cache_prompt ?? cfg.cachePrompt,
-          cachePrompt: cfg.cache_prompt ?? cfg.cachePrompt,
-          supports_vision: cfg.supports_vision ?? cfg.supportsVision,
-          supportsVision: cfg.supports_vision ?? cfg.supportsVision,
+          serverURL: cfg.serverURL || "",
+          apiKeyEnv: cfg.apiKeyEnv || "",
+          providerType: cfg.providerType || "",
+          apiStyle: cfg.apiStyle || "",
+          contextLength: cfg.contextLength,
+          slotCount: cfg.slotCount,
+          cachePrompt: cfg.cachePrompt,
+          supportsVision: cfg.supportsVision,
         },
       })
     );
@@ -3052,10 +2628,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     setFilesDenyText(formatDenyPatternsText(data.filesDenyPatterns));
     setFilesAllowRootsText(formatAllowRootsText(data.filesAllowRoots));
     setFilesRequireApprovalOnDeny(data.filesRequireApprovalOnDeny ?? true);
-    // Normalize the loaded write posture through the closed set so an older
-    // engine omitting the key or a drifted value opens the editor on the model
-    // posture instead of leaving an unknown radio selection.
-    setFilesWriteModeDraft(normalizeFilesWriteMode(data.filesWriteMode));
     setMemoryVectorDBPath(data.memoryVectorDBPath);
     setMemoryEpisodesDBPath(data.memoryEpisodesDBPath);
     setMemoryEmbeddingModel(data.memoryEmbeddingModel);
@@ -3103,9 +2675,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     // Desktop fields share one helper so load and save stay symmetric; an
     // absent [desktop] keeps the form defaults instead of blanking the modal.
     populateDesktopSettings(data.desktop);
-    // Bash fields share one helper so load and save stay symmetric; an
-    // absent [bash] keeps the form defaults instead of blanking the modal.
-    populateBashSettings(data.bash);
     // Goals fields share one helper so load and save stay symmetric; an
     // absent [goals] keeps the form defaults instead of blanking the pane.
     populateGoalsSettings(data.goals);
@@ -3179,7 +2748,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       prev ?? { hostname: fileBindHostname, port: fileBindPort, allowedHosts: fileBindHosts }
     );
     setServerRestartRequired(Boolean(data.requiresRestart));
-  }, [populateMediaSettings, populateDesktopSettings, populateBashSettings, populateGoalsSettings, populateIdeasSettings, populateProactiveSettings, populatePersonaSettings, populateFanoutSettings, populateWorkspaceSettings]);
+  }, [populateMediaSettings, populateDesktopSettings, populateGoalsSettings, populateIdeasSettings, populateProactiveSettings, populatePersonaSettings, populateFanoutSettings, populateWorkspaceSettings]);
 
   // Reconciles the boot snapshot from /health when the engine advertises its
   // live bind. Older engines omit the keys, in which case the pre-save file
@@ -3331,16 +2900,14 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     return () => clearInterval(timer);
   }, [activeTab, settings, liveServerBind, serverRestartRequired, refreshBootBind]);
 
-  // Unmount must never leave the browser provision poll or media/desktop/bash/fanout/files tick
+  // Unmount must never leave the browser provision poll or media/desktop/fanout tick
   // running behind a closed pane.
   useEffect(() => {
     const pollRef = browserTimerRef;
     const mediaRef = mediaSaveTimerRef;
     const browserSaveRef = browserSaveTimerRef;
     const desktopSaveRef = desktopSaveTimerRef;
-    const bashSaveRef = bashSaveTimerRef;
     const fanoutSaveRef = fanoutSaveTimerRef;
-    const filesSaveRef = filesSaveTimerRef;
     return () => {
       if (pollRef.current !== null) {
         clearInterval(pollRef.current);
@@ -3358,17 +2925,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         clearTimeout(desktopSaveRef.current);
         desktopSaveRef.current = null;
       }
-      if (bashSaveRef.current !== null) {
-        clearTimeout(bashSaveRef.current);
-        bashSaveRef.current = null;
-      }
       if (fanoutSaveRef.current !== null) {
         clearTimeout(fanoutSaveRef.current);
         fanoutSaveRef.current = null;
-      }
-      if (filesSaveRef.current !== null) {
-        clearTimeout(filesSaveRef.current);
-        filesSaveRef.current = null;
       }
     };
   }, []);
@@ -3449,14 +3008,14 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     for (const entry of providersList) {
       const trimmedName = entry.name.trim();
       if (!trimmedName) continue;
-      const sUrl = entry.config.server_url || entry.config.serverURL;
-      const kEnv = entry.config.api_key_env || entry.config.apiKeyEnv;
-      const pType = entry.config.provider_type || entry.config.providerType;
-      const aStyle = entry.config.api_style || entry.config.apiStyle;
-      // Absent context_length means backend-default (nil), so only send a Number when the user
+      const sUrl = entry.config.serverURL || entry.config.serverURL;
+      const kEnv = entry.config.apiKeyEnv || entry.config.apiKeyEnv;
+      const pType = entry.config.providerType || entry.config.providerType;
+      const aStyle = entry.config.apiStyle || entry.config.apiStyle;
+      // Absent contextLength means backend-default (nil), so only send a Number when the user
       // entered a value; empty stays omitted. Present values fail closed on non-positive or non-
       // integer input instead of coercing to the backend default, mirroring Config+Validation.
-      const cLenRaw = entry.config.context_length ?? entry.config.contextLength;
+      const cLenRaw = entry.config.contextLength ?? entry.config.contextLength;
       if (
         cLenRaw !== undefined &&
         cLenRaw !== null &&
@@ -3466,7 +3025,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         if (!Number.isInteger(cLenCheck) || cLenCheck <= 0) {
           const label = trimmedName || "(unnamed)";
           setError(
-            `Invalid context_length for provider "${label}": context_length must be a positive integer.`
+            `Invalid contextLength for provider "${label}": contextLength must be a positive integer.`
           );
           setSaving(false);
           return;
@@ -3478,10 +3037,10 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
           : Number(cLenRaw);
       const cLen =
         cLenNum === undefined || Number.isNaN(cLenNum) ? undefined : cLenNum;
-      // Absent slot_count keeps server auto-assignment (nil), so only send a Number when the user
+      // Absent slotCount keeps server auto-assignment (nil), so only send a Number when the user
       // entered a value; empty stays omitted. Present values fail closed on non-positive or non-
       // integer input instead of pinning an out-of-range id, mirroring Config+Validation.
-      const slotRaw = entry.config.slot_count ?? entry.config.slotCount;
+      const slotRaw = entry.config.slotCount ?? entry.config.slotCount;
       if (
         slotRaw !== undefined &&
         slotRaw !== null &&
@@ -3491,7 +3050,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         if (!Number.isInteger(slotCheck) || slotCheck <= 0) {
           const label = trimmedName || "(unnamed)";
           setError(
-            `Invalid slot_count for provider "${label}": slot_count must be a positive integer.`
+            `Invalid slotCount for provider "${label}": slotCount must be a positive integer.`
           );
           setSaving(false);
           return;
@@ -3506,7 +3065,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       // Tri-state cache hint: unset omits both keys (always-on default), while explicit true/false
       // dual-writes so an intentionally disabled hint survives the PUT instead of resetting to nil.
       // Nullish coalescing preserves false; string forms from the select normalize to booleans.
-      const cacheRaw = entry.config.cache_prompt ?? entry.config.cachePrompt;
+      const cacheRaw = entry.config.cachePrompt ?? entry.config.cachePrompt;
       let cache: boolean | undefined;
       if (
         cacheRaw === undefined ||
@@ -3520,17 +3079,17 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         cache = false;
       } else {
         // Unrecognized cache values fail closed rather than coercing via Boolean(), which would
-        // silently treat 0/"maybe" as enabled. Mirrors slot_count validation above.
+        // silently treat 0/"maybe" as enabled. Mirrors slotCount validation above.
         const label = trimmedName || "(unnamed)";
         setError(
-          `Invalid cache_prompt for provider "${label}": cache_prompt must be true, false, or empty (unset).`
+          `Invalid cachePrompt for provider "${label}": cachePrompt must be true, false, or empty (unset).`
         );
         setSaving(false);
         return;
       }
 
       const visionRaw =
-        entry.config.supports_vision ?? entry.config.supportsVision;
+        entry.config.supportsVision ?? entry.config.supportsVision;
       let vision: boolean | undefined;
       if (
         visionRaw === undefined ||
@@ -3545,7 +3104,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       } else {
         const label = trimmedName || "(unnamed)";
         setError(
-          `Invalid supports_vision for provider "${label}": supports_vision must be true, false, or empty (unset).`
+          `Invalid supportsVision for provider "${label}": supportsVision must be true, false, or empty (unset).`
         );
         setSaving(false);
         return;
@@ -3554,21 +3113,13 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       providersMap[trimmedName] = {
         enabled: entry.config.enabled,
         model: entry.config.model?.trim() || undefined,
-        server_url: sUrl?.trim() || undefined,
         serverURL: sUrl?.trim() || undefined,
-        api_key_env: kEnv?.trim() || undefined,
         apiKeyEnv: kEnv?.trim() || undefined,
-        provider_type: pType?.trim() || undefined,
         providerType: pType?.trim() || undefined,
-        api_style: aStyle?.trim() || undefined,
         apiStyle: aStyle?.trim() || undefined,
-        context_length: cLen != null ? Number(cLen) : undefined,
         contextLength: cLen != null ? Number(cLen) : undefined,
-        slot_count: slot != null ? Number(slot) : undefined,
         slotCount: slot != null ? Number(slot) : undefined,
-        cache_prompt: cache,
         cachePrompt: cache,
-        supports_vision: vision,
         supportsVision: vision,
       };
     }
@@ -3580,16 +3131,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     const filesValidationError = validateFilesFields();
     if (filesValidationError) {
       setError(filesValidationError);
-      setSaving(false);
-      return;
-    }
-    // Bash policy shares its validation helper so the full-save and the Tools
-    // Bash modal reject the same shapes before any network write. Mirrors
-    // BashSettingsUpdate.apply(to:) bounds (allow|ask|deny, at least one rule,
-    // 1-3600 timeout, 1-3600 CPU, 64-8192 memory).
-    const bashValidationError = validateBashFields();
-    if (bashValidationError) {
-      setError(bashValidationError);
       setSaving(false);
       return;
     }
@@ -3636,9 +3177,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       return;
     }
 
-    // Reassemble email accounts array, preserving optional SMTP overrides. Blank smtp_host
-    // collapses to omitted (derived fallback) and blank smtp_port omits so auto tries 587 then 465;
-    // smtp_security defaults to auto when blank or unknown.
+    // Reassemble email accounts array, preserving optional SMTP overrides. Blank smtpHost
+    // collapses to omitted (derived fallback) and blank smtpPort omits so auto tries 587 then 465;
+    // smtpSecurity defaults to auto when blank or unknown.
     for (const entry of emailAccountsList) {
       const trimmedName = entry.account.name.trim();
       const trimmedHost = entry.account.host.trim();
@@ -3666,7 +3207,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         setSaving(false);
         return;
       }
-      const rawSmtpPort = entry.account.smtp_port ?? entry.account.smtpPort;
+      const rawSmtpPort = entry.account.smtpPort ?? entry.account.smtpPort;
       if (
         rawSmtpPort !== undefined &&
         rawSmtpPort !== null &&
@@ -3676,7 +3217,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         const allowedSmtpPorts = [25, 465, 587, 2525];
         if (!Number.isInteger(smtpNum) || !allowedSmtpPorts.includes(smtpNum)) {
           setError(
-            `Invalid SMTP port for email account "${label}": smtp_port must be one of 25, 465, 587, 2525 (got ${String(rawSmtpPort).trim()}).`
+            `Invalid SMTP port for email account "${label}": smtpPort must be one of 25, 465, 587, 2525 (got ${String(rawSmtpPort).trim()}).`
           );
           setSaving(false);
           return;
@@ -3792,14 +3333,14 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       return;
     }
     const emailAccounts: EmailAccountData[] = emailAccountsList.map((entry) => {
-      const rawHost = entry.account.smtp_host ?? entry.account.smtpHost ?? "";
+      const rawHost = entry.account.smtpHost ?? entry.account.smtpHost ?? "";
       const trimmedSmtpHost = String(rawHost).trim();
-      const rawPort = entry.account.smtp_port ?? entry.account.smtpPort;
+      const rawPort = entry.account.smtpPort ?? entry.account.smtpPort;
       const portNum =
         rawPort === undefined || rawPort === null || (rawPort as unknown) === ""
           ? undefined
           : Number(rawPort);
-      const rawSecurity = entry.account.smtp_security ?? entry.account.smtpSecurity ?? "";
+      const rawSecurity = entry.account.smtpSecurity ?? entry.account.smtpSecurity ?? "";
       const trimmedSecurity = String(rawSecurity).trim().toLowerCase();
       const security =
         trimmedSecurity === "ssl" || trimmedSecurity === "starttls" ? trimmedSecurity : undefined;
@@ -3811,15 +3352,15 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         username: entry.account.username.trim(),
       };
       if (trimmedSmtpHost) {
-        rebuilt.smtp_host = trimmedSmtpHost;
+        rebuilt.smtpHost = trimmedSmtpHost;
         rebuilt.smtpHost = trimmedSmtpHost;
       }
       if (portNum !== undefined && Number.isInteger(portNum) && portNum >= 1 && portNum <= 65535) {
-        rebuilt.smtp_port = portNum;
+        rebuilt.smtpPort = portNum;
         rebuilt.smtpPort = portNum;
       }
       if (security) {
-        rebuilt.smtp_security = security;
+        rebuilt.smtpSecurity = security;
         rebuilt.smtpSecurity = security;
       }
       return rebuilt;
@@ -3901,7 +3442,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         pluginsAutoRescan,
         media: buildMediaPayload(),
         desktop: buildDesktopPayload(),
-        bash: buildBashPatch(),
         workspace: buildWorkspacePayload(),
         goals: buildGoalsPayload(),
         proactive: buildProactivePayload(),
@@ -4108,42 +3648,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   };
 
-  // Saves the changed-only [bash] patch for the Bash & Shell modal through
-  // PUT /settings, mirroring the fan-out save shape so unsaved edits in other
-  // tabs survive. Only edited keys travel as snake_case so stored values
-  // survive; an emptied allowlist sends an explicit empty list. Client
-  // validation reports inline without closing while a server 400 lands in the
-  // modal error path without closing. Confinement applies live, so success
-  // shows the saved banner with no restart banner.
-  const handleSaveBashConfig = async (): Promise<void> => {
-    const validationError = validateBashFields();
-    if (validationError) {
-      setBashModalError(validationError);
-      return;
-    }
-    setBashSaveLoading(true);
-    setBashModalError(null);
-    try {
-      const updated = await updateSettings({ bash: buildBashPatch() });
-      populateForm(updated);
-      setBashSaved(true);
-      if (bashSaveTimerRef.current !== null) {
-        clearTimeout(bashSaveTimerRef.current);
-        bashSaveTimerRef.current = null;
-      }
-      bashSaveTimerRef.current = setTimeout(() => {
-        bashSaveTimerRef.current = null;
-        setConfiguringToolName(null);
-      }, 1000);
-    } catch (err) {
-      setBashModalError(
-        err instanceof ApiError ? err.message : "Failed to save bash settings",
-      );
-    } finally {
-      setBashSaveLoading(false);
-    }
-  };
-
   // Saves the changed-only [fanout] delta for the fan-out modal through PUT
   // /settings, mirroring the media-only save shape so unsaved edits in other
   // tabs survive. Only knobs travel here — enablement lives in the tool-state
@@ -4176,51 +3680,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   };
 
-  // Saves the [files] write_mode posture for the Files & Workspace modal through
-  // PUT /settings, mirroring the fan-out save shape so unsaved edits in other
-  // tabs survive. Only the closed-set posture travels — access rules stay under
-  // Security, so this payload never carries allow or deny keys — and the server
-  // re-validates, with the honest message surfacing in the modal on failure.
-  const handleSaveFilesWriteConfig = async () => {
-    setFilesSaveLoading(true);
-    setFilesModalError(null);
-    try {
-      const updated = await updateSettings({
-        filesWriteMode: filesWriteModeDraft,
-      });
-      populateForm(updated);
-      pushSuccessToast("File write settings saved!");
-      // Re-arm the close tick through the ref so a repeat save replaces the
-      // pending tick and unmount clears it instead of leaking.
-      if (filesSaveTimerRef.current !== null) {
-        clearTimeout(filesSaveTimerRef.current);
-        filesSaveTimerRef.current = null;
-      }
-      filesSaveTimerRef.current = setTimeout(() => {
-        filesSaveTimerRef.current = null;
-        setConfiguringToolName(null);
-      }, 1000);
-    } catch (err) {
-      setFilesModalError(err instanceof ApiError ? err.message : "Failed to save file write settings");
-    } finally {
-      setFilesSaveLoading(false);
-    }
-  };
-
-  // Bash rules editing is a single textarea (small-screen friendly for long
-  // rule sets, and copy and paste of rule sets works through this text); Add
-  // Rule focuses the editor for keyboard flow.
-  const handleFocusBashRules = () => {
-    // No row model exists for the textarea, so Add focuses the editor for
-    // keyboard flow; ensure a trailing newline exists so typed rules start
-    // on a fresh line without altering the parsed count by itself.
-    setBashRulesText((prev) => {
-      if (!prev) return prev;
-      return prev.endsWith("\n") ? prev : `${prev}\n`;
-    });
-    bashRulesTextareaRef.current?.focus();
-  };
-
   // Provider CRUD helpers
   const handleAddProvider = () => {
     const id = `new-p-${Date.now()}`;
@@ -4233,21 +3692,13 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         config: {
           enabled: true,
           model: "",
-          server_url: "",
           serverURL: "",
-          api_key_env: "",
           apiKeyEnv: "",
-          provider_type: "",
           providerType: "",
-          api_style: "",
           apiStyle: "",
-          context_length: undefined,
           contextLength: undefined,
-          slot_count: undefined,
           slotCount: undefined,
-          cache_prompt: undefined,
           cachePrompt: undefined,
-          supports_vision: undefined,
           supportsVision: undefined,
         },
       },
@@ -4292,8 +3743,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     // Resolve the vision tri-state before touching list state so unexpected
     // values block the edit instead of collapsing to false inside the updater.
     let visionNext: boolean | undefined = undefined;
-    const isVisionField =
-      field === "supports_vision" || field === "supportsVision";
+    const isVisionField = field === "supportsVision";
     if (isVisionField) {
       if (val === "" || val === undefined) {
         visionNext = undefined;
@@ -4306,7 +3756,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
           (providersList.find((item) => item.id === id)?.name ?? "").trim() ||
           "(unnamed)";
         setError(
-          `Invalid supports_vision for provider "${label}": supports_vision must be true, false, or empty (unset).`
+          `Invalid supportsVision for provider "${label}": supportsVision must be true, false, or empty (unset).`
         );
         return;
       }
@@ -4315,59 +3765,23 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       prev.map((item) => {
         if (item.id === id) {
           const updated = { ...item.config, [field]: val };
-          // Keep aliases synchronized
-          if (field === "server_url") updated.serverURL = val as string;
-          if (field === "serverURL") updated.server_url = val as string;
-          if (field === "api_key_env") updated.apiKeyEnv = val as string;
-          if (field === "apiKeyEnv") updated.api_key_env = val as string;
-          if (field === "provider_type") updated.providerType = val as string;
-          if (field === "providerType") updated.provider_type = val as string;
-          if (field === "api_style") updated.apiStyle = val as string;
-          if (field === "apiStyle") updated.api_style = val as string;
-          // An empty context-length input means backend-default (nil), so clear both aliases. Non-
-          // empty values (including NaN from invalid input) are preserved on both aliases so
-          // handleSave can fail closed instead of silently falling back to the backend default.
-          if (field === "context_length") {
-            const next =
-              val === "" || val === undefined ? undefined : Number(val);
-            updated.context_length = next as unknown as number | undefined;
-            updated.contextLength = next as unknown as number | undefined;
-          }
+          if (field === "serverURL") updated.serverURL = val as string;
+          if (field === "apiKeyEnv") updated.apiKeyEnv = val as string;
+          if (field === "providerType") updated.providerType = val as string;
+          if (field === "apiStyle") updated.apiStyle = val as string;
+          // An empty context-length input means backend-default (nil)
           if (field === "contextLength") {
             const next =
               val === "" || val === undefined ? undefined : Number(val);
-            updated.context_length = next as unknown as number | undefined;
             updated.contextLength = next as unknown as number | undefined;
           }
-          // An empty slot input means server auto-assign (nil), so clear both aliases. Non-empty
-          // values (including NaN from invalid input) are preserved on both aliases so handleSave
-          // can fail closed instead of pinning an out-of-range id.
-          if (field === "slot_count") {
-            const next =
-              val === "" || val === undefined ? undefined : Number(val);
-            updated.slot_count = next as unknown as number | undefined;
-            updated.slotCount = next as unknown as number | undefined;
-          }
+          // An empty slot input means server auto-assign (nil)
           if (field === "slotCount") {
             const next =
               val === "" || val === undefined ? undefined : Number(val);
-            updated.slot_count = next as unknown as number | undefined;
             updated.slotCount = next as unknown as number | undefined;
           }
-          // Tri-state cache hint: empty means unset (always-on default), otherwise normalize the
-          // select strings to booleans on both aliases so an explicit false survives the PUT.
-          if (field === "cache_prompt") {
-            const next =
-              val === "" || val === undefined
-                ? undefined
-                : val === true || val === "true"
-                  ? true
-                  : val === false || val === "false"
-                    ? false
-                    : (val as unknown as boolean | undefined);
-            updated.cache_prompt = next;
-            updated.cachePrompt = next;
-          }
+          // Tri-state cache hint: empty means unset (always-on default)
           if (field === "cachePrompt") {
             const next =
               val === "" || val === undefined
@@ -4377,11 +3791,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                   : val === false || val === "false"
                     ? false
                     : (val as unknown as boolean | undefined);
-            updated.cache_prompt = next;
             updated.cachePrompt = next;
           }
-          if (field === "supports_vision" || field === "supportsVision") {
-            updated.supports_vision = visionNext;
+          if (field === "supportsVision") {
             updated.supportsVision = visionNext;
           }
           return { ...item, config: updated };
@@ -4422,26 +3834,15 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     setEmailAccountsList((prev) =>
       prev.map((item) => {
         if (item.id === id) {
-          // Keep snake and camel aliases synchronized so saves round-trip
-          // regardless of which key the engine echoes back.
-          const next = { ...item.account } as EmailAccountData & Record<string, unknown>;
+          const next = { ...item.account };
           if (field === "port") {
-            // Preserve the raw numeric value (including 0/NaN from empty input)
-            // so handleSave validation surfaces Invalid port 1-65535 instead
-            // of silently coercing back to 993.
-            (next as EmailAccountData).port = Number(val);
-          } else if (field === "smtp_port" || field === "smtpPort") {
-            // Preserve the raw numeric value (including 0/NaN from invalid
-            // input) so handleSave validation surfaces Invalid SMTP port
-            // 1-65535 instead of silently omitting back to the 587/465 fallback.
+            next.port = Number(val);
+          } else if (field === "smtpPort") {
             const num = val === "" || val === undefined ? undefined : Number(val);
-            next.smtp_port = num as unknown as number | undefined;
             next.smtpPort = num as unknown as number | undefined;
-          } else if (field === "smtp_host" || field === "smtpHost") {
-            next.smtp_host = val as string;
+          } else if (field === "smtpHost") {
             next.smtpHost = val as string;
-          } else if (field === "smtp_security" || field === "smtpSecurity") {
-            next.smtp_security = val as string;
+          } else if (field === "smtpSecurity") {
             next.smtpSecurity = val as string;
           } else {
             (next as Record<string, unknown>)[field] = val;
@@ -4490,20 +3891,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // Live parsed allowed-hosts entries share the same single-source pattern:
   // the badge and the save path read from the raw textarea text.
   const serverAllowedHostsCount = parseServerAllowedHostsText(serverAllowedHostsText).length;
-  // Live parsed bash rule entries share the same single-source pattern: the
-  // badge and the save path read from the raw textarea text. A malformed line
-  // still counts as a non-blank row so the badge stays honest until
-  // validation reports the line number.
-  const bashRuleCount = (() => {
-    try {
-      return parseBashRulesText(bashRulesText).length;
-    } catch {
-      return bashRulesText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean).length;
-    }
-  })();
   const serverAllowedHostsError = validateServerAllowedHosts(
     parseServerAllowedHostsText(serverAllowedHostsText),
   );
@@ -4531,6 +3918,14 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     serverFilePortForBadge !== serverBootPortForBadge ||
     !areServerAllowedHostsEqual(serverFileHostsForBadge, serverBootHostsForBadge);
   const serverRestartVisible = serverRestartRequired || serverFileDiffersFromBootForBadge;
+
+  // Section-finder visibility: a tab shows when its keyword index matches the
+  // trimmed query or when it is the active tab, so narrowing the list never
+  // hides the pane the owner is already looking at. A blank query keeps the
+  // full list.
+  const settingsNavFilter = settingsNavQuery.trim().toLowerCase();
+  const navTabVisible = (tab: SettingsTab) =>
+    activeTab === tab || matchesSettingsTab(tab, settingsNavFilter);
 
   if (loading && !settings) {
     return (
@@ -4596,7 +3991,10 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       {/* Vertical sidenav: stacked categories beside the content pane so every
           section stays visible without horizontal scrolling. On handheld
           widths the same list becomes a fixed drawer above a dim backdrop,
-          mirroring the chat history drawer interaction. */}
+          mirroring the chat history drawer interaction. A section finder above
+          the tabs narrows the list by label or keyword so every pane — Access
+          especially, whose editors live behind its rail — stays reachable with
+          one word. */}
       <div className="settings-layout">
         {settingsMenuOpen ? (
           <button
@@ -4607,197 +4005,245 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
             onClick={handleSettingsBackdropClick}
           />
         ) : null}
-        <nav
-          className={`settings-sidenav${settingsMenuOpen ? " open" : ""}`}
-          aria-label="Settings categories"
-          role="tablist"
+        <div
+          className={`settings-nav-column${settingsMenuOpen ? " open" : ""}`}
         >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "providers"}
-            className={`settings-tab-btn ${activeTab === "providers" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("providers")}
+          <div className="settings-nav-search-wrapper">
+            <SearchIcon size={14} className="settings-nav-search-icon" />
+            <input
+              type="search"
+              className="settings-nav-search-input"
+              data-testid="settings-nav-search"
+              aria-label="Search settings sections"
+              placeholder="Search settings sections…"
+              value={settingsNavQuery}
+              onChange={(e) => setSettingsNavQuery(e.target.value)}
+            />
+          </div>
+          <nav
+            className="settings-sidenav"
+            aria-label="Settings categories"
+            role="tablist"
           >
-            <ChatIcon size={16} />
-            <span>LLM Providers</span>
-          </button>
+          {navTabVisible("access") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "access"}
+              className={`settings-tab-btn ${activeTab === "access" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("access")}
+            >
+              <KeyIcon size={16} />
+              <span>Access</span>
+            </button>
+          ) : null}
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "persona"}
-            className={`settings-tab-btn ${activeTab === "persona" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("persona")}
-          >
-            <UserIcon size={16} />
-            <span>Persona</span>
-          </button>
+          {navTabVisible("providers") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "providers"}
+              className={`settings-tab-btn ${activeTab === "providers" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("providers")}
+            >
+              <ChatIcon size={16} />
+              <span>LLM Providers</span>
+            </button>
+          ) : null}
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "goals"}
-            className={`settings-tab-btn ${activeTab === "goals" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("goals")}
-          >
-            <TargetIcon size={16} />
-            <span>Goals</span>
-          </button>
+          {navTabVisible("persona") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "persona"}
+              className={`settings-tab-btn ${activeTab === "persona" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("persona")}
+            >
+              <UserIcon size={16} />
+              <span>Persona</span>
+            </button>
+          ) : null}
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "engine"}
-            className={`settings-tab-btn ${activeTab === "engine" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("engine")}
-          >
-            <SettingsIcon size={16} />
-            <span>Engine and Logs</span>
-          </button>
+          {navTabVisible("goals") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "goals"}
+              className={`settings-tab-btn ${activeTab === "goals" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("goals")}
+            >
+              <TargetIcon size={16} />
+              <span>Goals</span>
+            </button>
+          ) : null}
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "tools"}
-            className={`settings-tab-btn ${activeTab === "tools" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("tools")}
-          >
-            <WrenchIcon size={16} />
-            <span>Tools and Runes</span>
-            {/* Pending and tampered counts stay on the nav item so review and
-                quarantine signals remain visible without opening the pane. */}
-            {pendingCount > 0 && (
-              <span
-                className="settings-tab-badge"
-                style={{ backgroundColor: "#ed8936", color: "#ffffff" }}
-                title={`${pendingCount} runes pending human review`}
-              >
-                {pendingCount}
-              </span>
-            )}
-            {tamperedCount > 0 && (
-              <span
-                className="settings-tab-badge"
-                style={{ backgroundColor: "#f56565", color: "#ffffff" }}
-                title={`${tamperedCount} runes modified since approval`}
-              >
-                {tamperedCount}
-              </span>
-            )}
-          </button>
+          {navTabVisible("engine") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "engine"}
+              className={`settings-tab-btn ${activeTab === "engine" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("engine")}
+            >
+              <SettingsIcon size={16} />
+              <span>Engine and Logs</span>
+            </button>
+          ) : null}
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "security"}
-            className={`settings-tab-btn ${activeTab === "security" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("security")}
-          >
-            <ApprovalsIcon size={16} />
-            <span>Security</span>
-          </button>
+          {navTabVisible("tools") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "tools"}
+              className={`settings-tab-btn ${activeTab === "tools" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("tools")}
+            >
+              <WrenchIcon size={16} />
+              <span>Tools and Runes</span>
+              {/* Pending and tampered counts stay on the nav item so review and
+                  quarantine signals remain visible without opening the pane. */}
+              {pendingCount > 0 && (
+                <span
+                  className="settings-tab-badge"
+                  style={{ backgroundColor: "#ed8936", color: "#ffffff" }}
+                  title={`${pendingCount} runes pending human review`}
+                >
+                  {pendingCount}
+                </span>
+              )}
+              {tamperedCount > 0 && (
+                <span
+                  className="settings-tab-badge"
+                  style={{ backgroundColor: "#f56565", color: "#ffffff" }}
+                  title={`${tamperedCount} runes modified since approval`}
+                >
+                  {tamperedCount}
+                </span>
+              )}
+            </button>
+          ) : null}
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "policy"}
-            className={`settings-tab-btn ${activeTab === "policy" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("policy")}
-          >
-            <ApprovalsIcon size={16} />
-            <span>Policy</span>
-          </button>
+          {navTabVisible("security") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "security"}
+              className={`settings-tab-btn ${activeTab === "security" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("security")}
+            >
+              <ApprovalsIcon size={16} />
+              <span>Security</span>
+            </button>
+          ) : null}
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "memory"}
-            className={`settings-tab-btn ${activeTab === "memory" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("memory")}
-          >
-            <MemoryIcon size={16} />
-            <span>Memory and Storage</span>
-          </button>
+          {navTabVisible("memory") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "memory"}
+              className={`settings-tab-btn ${activeTab === "memory" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("memory")}
+            >
+              <MemoryIcon size={16} />
+              <span>Memory and Storage</span>
+            </button>
+          ) : null}
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "voice"}
-            className={`settings-tab-btn ${activeTab === "voice" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("voice")}
-          >
-            <MicIcon size={16} />
-            <span>Voice</span>
-          </button>
+          {navTabVisible("voice") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "voice"}
+              className={`settings-tab-btn ${activeTab === "voice" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("voice")}
+            >
+              <MicIcon size={16} />
+              <span>Voice</span>
+            </button>
+          ) : null}
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "search"}
-            className={`settings-tab-btn ${activeTab === "search" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("search")}
-          >
-            <SearchIcon size={16} />
-            <span>Web</span>
-          </button>
+          {navTabVisible("search") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "search"}
+              className={`settings-tab-btn ${activeTab === "search" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("search")}
+            >
+              <SearchIcon size={16} />
+              <span>Web</span>
+            </button>
+          ) : null}
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "email"}
-            className={`settings-tab-btn ${activeTab === "email" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("email")}
-          >
-            <MailIcon size={16} />
-            <span>Email Accounts</span>
-          </button>
+          {navTabVisible("email") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "email"}
+              className={`settings-tab-btn ${activeTab === "email" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("email")}
+            >
+              <MailIcon size={16} />
+              <span>Email Accounts</span>
+            </button>
+          ) : null}
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "network"}
-            className={`settings-tab-btn ${activeTab === "network" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("network")}
-          >
-            <SettingsIcon size={16} />
-            <span>Network</span>
-            {serverRestartVisible ? (
-              <span
-                className="settings-tab-badge"
-                style={{ backgroundColor: "#ed8936", color: "#ffffff" }}
-                title="Network changes need a restart"
-              >
-                !
-              </span>
-            ) : null}
-          </button>
+          {navTabVisible("network") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "network"}
+              className={`settings-tab-btn ${activeTab === "network" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("network")}
+            >
+              <SettingsIcon size={16} />
+              <span>Network</span>
+              {serverRestartVisible ? (
+                <span
+                  className="settings-tab-badge"
+                  style={{ backgroundColor: "#ed8936", color: "#ffffff" }}
+                  title="Network changes need a restart"
+                >
+                  !
+                </span>
+              ) : null}
+            </button>
+          ) : null}
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "indexing"}
-            className={`settings-tab-btn ${activeTab === "indexing" ? "active" : ""}`}
-            onClick={() => selectSettingsTab("indexing")}
-          >
-            <MemoryIcon size={16} />
-            <span>Indexing</span>
-          </button>
-        </nav>
+          {navTabVisible("indexing") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "indexing"}
+              className={`settings-tab-btn ${activeTab === "indexing" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("indexing")}
+            >
+              <MemoryIcon size={16} />
+              <span>Indexing</span>
+            </button>
+          ) : null}
+
+          {/* Starved queries keep the active row visible as context (a
+              selected tab may never leave its own list), so this note — not a
+              blank rail — explains that nothing matched the query itself. */}
+          {settingsNavFilter &&
+          SETTINGS_TABS.every((tab) => !matchesSettingsTab(tab, settingsNavFilter)) ? (
+            <p className="muted text-sm" data-testid="settings-nav-empty" style={{ padding: "8px 6px", margin: 0 }}>
+              No settings sections match.
+            </p>
+          ) : null}
+          </nav>
+        </div>
 
         <div className="settings-content">
-          {/* The indexing pane hosts the index policy form, which uses the
-              shared save control (settings-footer with a primary-button
-              save-button) while still patching only the [index] section, so it
-              renders outside the shared settings form and its own controls
-              never submit the unrelated config values. Status cards, charts,
-              and run controls live on the Memory → Index Status tab instead.
-              The policy pane follows the same precedent: it owns its structured
-              policy save outside the shared config form so policy writes apply
-              live with no restart and never share the config save path. */}
+          {/* Access owns the owner "what the agent may do" surface: standing
+              rules, Bash & Shell, Network, Credentials, and Files write
+              posture on its section rail, each saving live outside the shared
+              config form — the indexing panel precedent, so policy writes never
+              share the config save path. */}
+          {activeTab === "access" ? <AccessPane /> : null}
           {activeTab === "indexing" ? <IndexPolicyPanel /> : null}
-          {activeTab === "policy" ? <PolicyPane /> : null}
-          {activeTab !== "indexing" && activeTab !== "policy" ? (
+          {activeTab !== "access" && activeTab !== "indexing" ? (
           <form onSubmit={handleSave} className="settings-form">
         {/* TAB 1: LLM Providers */}
         {activeTab === "providers" && (
@@ -4861,7 +4307,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                 // Preserve the raw backend value so aliases like llama-cpp /
                 // llama_cpp or an absent type do not render as a blank row.
                 const rawProviderType =
-                  entry.provider_type || entry.providerType || "";
+                  entry.providerType || entry.providerType || "";
                 const knownProviderTypes = [
                   "",
                   "custom",
@@ -4949,7 +4395,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                             onChange={(e) =>
                               handleProviderFieldChange(
                                 item.id,
-                                "provider_type",
+                                "providerType",
                                 e.target.value
                               )
                             }
@@ -4980,11 +4426,11 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                             id={`style-${item.id}`}
                             type="text"
                             className="input-field"
-                            value={entry.api_style || entry.apiStyle || ""}
+                            value={entry.apiStyle || entry.apiStyle || ""}
                             onChange={(e) =>
                               handleProviderFieldChange(
                                 item.id,
-                                "api_style",
+                                "apiStyle",
                                 e.target.value
                               )
                             }
@@ -4999,11 +4445,11 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                           id={`server-${item.id}`}
                           type="text"
                           className="input-field"
-                          value={entry.server_url || entry.serverURL || ""}
+                          value={entry.serverURL || entry.serverURL || ""}
                           onChange={(e) =>
                             handleProviderFieldChange(
                               item.id,
-                              "server_url",
+                              "serverURL",
                               e.target.value
                             )
                           }
@@ -5015,7 +4461,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "4px", flexWrap: "wrap", gap: "6px" }}>
                           <label htmlFor={`keyenv-${item.id}`}>API Key Env Var</label>
                           {(() => {
-                            const keyEnv = (entry.api_key_env || entry.apiKeyEnv || "").trim();
+                            const keyEnv = (entry.apiKeyEnv || entry.apiKeyEnv || "").trim();
                             if (!keyEnv) return null;
                             const isStored = !!secretStatus[keyEnv];
                             return (
@@ -5046,11 +4492,11 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                           id={`keyenv-${item.id}`}
                           type="text"
                           className="input-field"
-                          value={entry.api_key_env || entry.apiKeyEnv || ""}
+                          value={entry.apiKeyEnv || entry.apiKeyEnv || ""}
                           onChange={(e) =>
                             handleProviderFieldChange(
                               item.id,
-                              "api_key_env",
+                              "apiKeyEnv",
                               e.target.value
                             )
                           }
@@ -5066,12 +4512,12 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                           min="1000"
                           step="1000"
                           className="input-field"
-                          value={entry.context_length ?? entry.contextLength ?? ""}
+                          value={entry.contextLength ?? entry.contextLength ?? ""}
                           onChange={(e) => {
                             const raw = e.target.value;
                             handleProviderFieldChange(
                               item.id,
-                              "context_length",
+                              "contextLength",
                               raw === "" ? undefined : Number(raw)
                             );
                           }}
@@ -5091,12 +4537,12 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                             min="1"
                             step="1"
                             className="input-field"
-                            value={entry.slot_count ?? entry.slotCount ?? ""}
+                            value={entry.slotCount ?? entry.slotCount ?? ""}
                             onChange={(e) => {
                               const raw = e.target.value;
                               handleProviderFieldChange(
                                 item.id,
-                                "slot_count",
+                                "slotCount",
                                 raw === "" ? undefined : Number(raw)
                               );
                             }}
@@ -5110,16 +4556,16 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                             id={`cache-${item.id}`}
                             className="input-field"
                             value={
-                              (entry.cache_prompt ?? entry.cachePrompt) === undefined
+                              (entry.cachePrompt ?? entry.cachePrompt) === undefined
                                 ? ""
-                                : (entry.cache_prompt ?? entry.cachePrompt)
+                                : (entry.cachePrompt ?? entry.cachePrompt)
                                   ? "true"
                                   : "false"
                             }
                             onChange={(e) =>
                               handleProviderFieldChange(
                                 item.id,
-                                "cache_prompt",
+                                "cachePrompt",
                                 e.target.value === "" ? undefined : e.target.value === "true"
                               )
                             }
@@ -5137,9 +4583,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                           id={`vision-${item.id}`}
                           className="input-field"
                           value={
-                            (entry.supports_vision ?? entry.supportsVision) === undefined
+                            (entry.supportsVision ?? entry.supportsVision) === undefined
                               ? ""
-                              : (entry.supports_vision ?? entry.supportsVision)
+                              : (entry.supportsVision ?? entry.supportsVision)
                                 ? "true"
                                 : "false"
                           }
@@ -5151,7 +4597,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                             if (raw === "") {
                               handleProviderFieldChange(
                                 item.id,
-                                "supports_vision",
+                                "supportsVision",
                                 undefined
                               );
                               return;
@@ -5159,7 +4605,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                             if (raw === "true") {
                               handleProviderFieldChange(
                                 item.id,
-                                "supports_vision",
+                                "supportsVision",
                                 true
                               );
                               return;
@@ -5167,7 +4613,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                             if (raw === "false") {
                               handleProviderFieldChange(
                                 item.id,
-                                "supports_vision",
+                                "supportsVision",
                                 false
                               );
                               return;
@@ -5175,7 +4621,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                             const label =
                               (item.name ?? "").trim() || "(unnamed)";
                             setError(
-                              `Invalid supports_vision for provider "${label}": supports_vision must be true, false, or empty (unset).`
+                              `Invalid supportsVision for provider "${label}": supportsVision must be true, false, or empty (unset).`
                             );
                           }}
                         >
@@ -6252,13 +5698,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                         ? "Configure Desktop Integration"
                         : categoryConfigKey === "media.arr"
                           ? "Configure Sonarr & Radarr"
-                          : categoryConfigKey === "bash.exec"
-                            ? "Configure Bash & Shell"
-                            : categoryConfigKey === "fanout.run"
-                              ? "Configure Parallel Fan-Out"
-                              : categoryConfigKey === "files.write"
-                                ? "Configure Files & Workspace"
-                                : "Configure Browser & Web Automation";
+                          : categoryConfigKey === "fanout.run"
+                            ? "Configure Parallel Fan-Out"
+                            : "Configure Browser & Web Automation";
 
                     return (
                       <section key={cat.id} className="tool-category-section">
@@ -6292,15 +5734,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                                   setMediaModalError(null);
                                   setBrowserModalError(null);
                                   setDesktopModalError(null);
-                                  setBashModalError(null);
-                                  setBashSaved(false);
                                   setFanoutModalError(null);
-                                  setFilesModalError(null);
-                                  // Re-seed the draft from the last loaded settings so a
-                                  // cancelled edit never reopens as a stale selection.
-                                  setFilesWriteModeDraft(
-                                    normalizeFilesWriteMode(settings?.filesWriteMode)
-                                  );
                                   setConfiguringToolName(categoryConfigKey);
                                 }}
                                 style={{ padding: "4px 8px", fontSize: "0.78rem" }}
@@ -6311,11 +5745,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                             ) : null}
                           </div>
                         </div>
-                        {cat.id === "files" ? (
-                          <p className="settings-section-hint" style={{ margin: "0 0 12px 0" }}>
-                            Write review mode is configured above; allow and deny rules are managed under Security
-                          </p>
-                        ) : null}
 
                         <div className="builtin-tools-grid">
                           {cat.tools.map((tool) => {
@@ -7578,9 +7007,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                             id={`email-smtp-host-${item.id}`}
                             type="text"
                             className="input-field"
-                            value={acc.smtp_host ?? acc.smtpHost ?? ""}
+                            value={acc.smtpHost ?? acc.smtpHost ?? ""}
                             onChange={(e) =>
-                              handleEmailFieldChange(item.id, "smtp_host", e.target.value)
+                              handleEmailFieldChange(item.id, "smtpHost", e.target.value)
                             }
                             placeholder="Blank means derived host"
                           />
@@ -7594,11 +7023,11 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                             id={`email-smtp-port-${item.id}`}
                             type="number"
                             className="input-field"
-                            value={acc.smtp_port ?? acc.smtpPort ?? ""}
+                            value={acc.smtpPort ?? acc.smtpPort ?? ""}
                             onChange={(e) =>
                               handleEmailFieldChange(
                                 item.id,
-                                "smtp_port",
+                                "smtpPort",
                                 e.target.value === "" ? "" : Number(e.target.value)
                               )
                             }
@@ -7613,9 +7042,9 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                           <select
                             id={`email-smtp-security-${item.id}`}
                             className="input-field"
-                            value={acc.smtp_security ?? acc.smtpSecurity ?? "auto"}
+                            value={acc.smtpSecurity ?? acc.smtpSecurity ?? "auto"}
                             onChange={(e) =>
-                              handleEmailFieldChange(item.id, "smtp_security", e.target.value)
+                              handleEmailFieldChange(item.id, "smtpSecurity", e.target.value)
                             }
                           >
                             <option value="auto">Auto (STARTTLS then SSL)</option>
@@ -8272,7 +7701,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       ) : null}
 
       {/* Browser, Web, and API tools configuration modal (browser.navigate, browser.act, web.fetch, web.search, api.request).
-          Configures automation and request timeouts; domain allow/deny rules and local network access live on the Policy tab. */}
+          Configures automation and request timeouts; domain allow/deny rules and local network access live on the Access tab. */}
       {configuringToolName === "browser.navigate" ||
       configuringToolName === "browser.act" ||
       configuringToolName === "web.fetch" ||
@@ -8351,15 +7780,16 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
               </div>
             </div>
 
-            {/* Security Policy pointer: domain allow/deny rules and local
-                network access live on the Policy tab, so this modal keeps only
+            {/* Security Policy pointer: domain allow/deny rules, local
+                network access, and credentials live on the Access tab's
+                Network and Credentials sections, so this modal keeps only
                 a compact pointer to that surface. */}
             <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px" }}>
                 <div>
                   <h4 style={{ margin: "0 0 6px 0", fontSize: "0.88rem" }}>Security &amp; Network Policy</h4>
                   <p className="muted text-sm" style={{ margin: 0 }}>
-                    Domain allow/deny rules and local network access are managed under the Policy tab.
+                    Domain allow/deny rules and local network access are managed under the Access tab.
                   </p>
                 </div>
                 <button
@@ -8367,7 +7797,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                   className="ghost"
                   style={{ whiteSpace: "nowrap", fontSize: "0.8rem", padding: "6px 10px" }}
                   onClick={() => {
-                    setActiveTab("policy");
+                    setActiveTab("access");
                     setConfiguringToolName(null);
                   }}
                 >
@@ -8796,301 +8226,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
             </button>
           </div>
         </Modal>
-      ) : configuringToolName === "bash.exec" ||
-          (typeof configuringToolName === "string" &&
-            configuringToolName.startsWith("bash.")) ? (
-        <Modal
-          label="Configure Bash & Shell"
-          onClose={() => {
-            if (!bashSaveLoading) setConfiguringToolName(null);
-          }}
-          containerClassName="modal-container"
-        >
-          <div className="modal-header">
-            <h3>Configure Bash & Shell</h3>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={() => {
-                if (!bashSaveLoading) setConfiguringToolName(null);
-              }}
-              disabled={bashSaveLoading}
-              aria-label="Close"
-            >
-              <CloseIcon size={16} />
-            </button>
-          </div>
-          <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
-            {bashModalError && (
-              <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-                <AlertTriangleIcon size={16} />
-                <span>{bashModalError}</span>
-              </div>
-            )}
-            {bashSaved && (
-              <div
-                data-testid="bash-saved"
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: "6px",
-                  backgroundColor: "rgba(16, 185, 129, 0.15)",
-                  color: "#10b981",
-                  fontSize: "0.85rem",
-                  marginBottom: "12px",
-                }}
-              >
-                Bash settings saved. Changes apply immediately with no restart.
-              </div>
-            )}
-
-            <p className="muted text-sm" style={{ marginBottom: "16px" }}>
-              Sandboxed shell execution with per-command approval policy. Rules evaluate
-              top-to-bottom last-match-wins; the default action applies when no rule matches.
-            </p>
-
-            <p className="muted text-sm" style={{ marginBottom: "16px" }}>
-              Default working directory is the engine home with an optional per-call override inside allowed roots, confined by the execution tier below.
-            </p>
-
-            <div className="form-group checkbox-group" style={{ marginBottom: "12px" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
-                <input
-                  id="bash-enabled"
-                  type="checkbox"
-                  checked={bashEnabled}
-                  onChange={(e) => {
-                    setBashEnabled(e.target.checked);
-                    setBashSaved(false);
-                  }}
-                />
-                <span>Enabled</span>
-              </label>
-              <span className="form-group-hint">
-                When off, the shell tool refuses every command without dialing.
-              </span>
-            </div>
-
-            <div className="form-group" style={{ marginBottom: "12px" }}>
-              <label htmlFor="bash-default-action" style={{ fontSize: "0.82rem" }}>Default action</label>
-              <select
-                id="bash-default-action"
-                className="input-field"
-                value={bashDefaultAction}
-                onChange={(e) => {
-                  setBashDefaultAction(e.target.value);
-                  setBashSaved(false);
-                }}
-              >
-                {BASH_PERMISSION_ACTIONS.map((action) => (
-                  <option key={action} value={action}>
-                    {action.charAt(0).toUpperCase() + action.slice(1)}
-                  </option>
-                ))}
-              </select>
-              <span className="form-group-hint">
-                Action when no rule matches, top-to-bottom last-match-wins otherwise.
-              </span>
-            </div>
-
-            <div className="form-group" style={{ marginBottom: "12px" }}>
-              <label htmlFor="bash-sandbox-mode" style={{ fontSize: "0.82rem" }}>Execution tier</label>
-              <select
-                id="bash-sandbox-mode"
-                className="input-field"
-                aria-label="Execution tier"
-                value={bashSandboxMode}
-                onChange={(e) => {
-                  setBashSandboxMode(e.target.value);
-                  setBashSaved(false);
-                }}
-              >
-                {BASH_SANDBOX_TIERS.map((tier) => (
-                  <option key={tier.value} value={tier.value}>
-                    {tier.label}
-                  </option>
-                ))}
-              </select>
-              <span className="form-group-hint" data-testid="bash-sandbox-help">
-                {bashSandboxSummary(bashSandboxMode, bashAllowNetwork)}
-              </span>
-              <span className="form-group-hint" data-testid="bash-sandbox-scope">
-                {BASH_SANDBOX_TIERS.find((tier) => tier.value === bashSandboxMode)?.scope ?? ""}
-              </span>
-            </div>
-
-            <div className="form-group" style={{ marginBottom: "12px" }}>
-              <label htmlFor="bash-host-allow-patterns" style={{ fontSize: "0.82rem" }}>Host allow patterns</label>
-              <textarea
-                id="bash-host-allow-patterns"
-                className="input-field"
-                aria-label="Host allow patterns"
-                value={bashHostAllowPatternsText}
-                onChange={(e) => {
-                  setBashHostAllowPatternsText(e.target.value);
-                  setBashSaved(false);
-                }}
-                placeholder={"xcodebuild*\ncodesign*"}
-                rows={4}
-              />
-              <span className="form-group-hint">
-                One pattern per line gating {BASH_SANDBOX_TIERS.find((tier) => tier.value === "hostSeatbelt")?.label ?? "On this Mac"} execution. Empty list blocks host execution entirely.
-              </span>
-            </div>
-
-            <div className="settings-subsection-header" style={{ marginTop: "16px" }}>
-              <div className="settings-section-title-group">
-                <h4 style={{ margin: "0 0 4px 0" }}>Rules</h4>
-                <p className="settings-section-hint">
-                  Ordered top-to-bottom, last match wins. Patterns match the command line.
-                </p>
-              </div>
-              <div className="row">
-                <button
-                  type="button"
-                  className="ghost icon-text-btn"
-                  onClick={handleFocusBashRules}
-                >
-                  <PlusIcon size={14} />
-                  <span>Add Rule</span>
-                </button>
-              </div>
-            </div>
-            <div className="form-group" style={{ marginTop: "8px" }}>
-              <label htmlFor="bash-rules-textarea">
-                Rules, one per line{" "}
-                <span className="muted text-sm">
-                  ({bashRuleCount} {bashRuleCount === 1 ? "rule" : "rules"})
-                </span>
-              </label>
-              <textarea
-                id="bash-rules-textarea"
-                ref={bashRulesTextareaRef}
-                className="input-field bash-rules-textarea"
-                aria-label="Rules, one per line"
-                value={bashRulesText}
-                onChange={(e) => {
-                  setBashRulesText(e.target.value);
-                  setBashSaved(false);
-                }}
-                placeholder={"* = deny\ngit status = allow\nnpm test = allow"}
-                rows={8}
-              />
-              <span className="form-group-hint">
-                One rule per line as `pattern = action` (allow, ask, or deny). Blank lines are
-                ignored. Rules evaluate top-to-bottom; the last matching rule wins
-                (last-match-wins). Put the catch-all first and specifics after.
-              </span>
-            </div>
-
-            <details data-testid="bash-advanced-details" style={{ marginTop: "16px", marginBottom: "12px" }}>
-              <summary style={{ cursor: "pointer", fontSize: "0.82rem" }}>Advanced</summary>
-              <div className="form-group" style={{ marginTop: "12px", marginBottom: "12px" }}>
-                <label htmlFor="bash-timeout" style={{ fontSize: "0.82rem" }}>Timeout (seconds)</label>
-                <input
-                  id="bash-timeout"
-                  type="number"
-                  min={BASH_TIMEOUT_MIN_SECONDS}
-                  max={BASH_TIMEOUT_MAX_SECONDS}
-                  step={1}
-                  className="input-field"
-                  value={bashTimeoutSeconds}
-                  onChange={(e) => {
-                    setBashTimeoutSeconds(
-                      e.target.value === "" ? "" : Number(e.target.value)
-                    );
-                    setBashSaved(false);
-                  }}
-                  placeholder="30"
-                />
-                <span className="form-group-hint">
-                  Default execution timeout in seconds (1 to 3600).
-                </span>
-              </div>
-
-              <div className="form-group" style={{ marginBottom: "12px" }}>
-                <label htmlFor="bash-cpu-seconds" style={{ fontSize: "0.82rem" }}>CPU seconds</label>
-                <input
-                  id="bash-cpu-seconds"
-                  type="number"
-                  min={BASH_CPU_MIN_SECONDS}
-                  max={BASH_CPU_MAX_SECONDS}
-                  step={1}
-                  className="input-field"
-                  value={bashCpuSeconds}
-                  onChange={(e) => {
-                    setBashCpuSeconds(
-                      e.target.value === "" ? "" : Number(e.target.value)
-                    );
-                    setBashSaved(false);
-                  }}
-                  placeholder="120"
-                />
-                <span className="form-group-hint">
-                  CPU time budget in seconds; wall-clock may exceed CPU time for sleeping processes.
-                </span>
-              </div>
-
-              <div className="form-group" style={{ marginBottom: "12px" }}>
-                <label htmlFor="bash-memory-mb" style={{ fontSize: "0.82rem" }}>Memory (MB)</label>
-                <input
-                  id="bash-memory-mb"
-                  type="number"
-                  min={BASH_MEMORY_MIN_MB}
-                  max={BASH_MEMORY_MAX_MB}
-                  step={1}
-                  className="input-field"
-                  value={bashMemoryMB}
-                  onChange={(e) => {
-                    setBashMemoryMB(
-                      e.target.value === "" ? "" : Number(e.target.value)
-                    );
-                    setBashSaved(false);
-                  }}
-                  placeholder="1024"
-                />
-                <span className="form-group-hint">
-                  Address-space budget in MB as a best-effort ulimit bound.
-                </span>
-              </div>
-            </details>
-
-            <div className="form-group checkbox-group">
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
-                <input
-                  id="bash-allow-network"
-                  type="checkbox"
-                  checked={bashAllowNetwork}
-                  onChange={(e) => {
-                    setBashAllowNetwork(e.target.checked);
-                    setBashSaved(false);
-                  }}
-                />
-                <span>Allow network access</span>
-              </label>
-              <span className="form-group-hint">
-                When on, sandboxed commands may reach the network; otherwise they run isolated.
-              </span>
-            </div>
-          </div>
-          <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => setConfiguringToolName(null)}
-              disabled={bashSaveLoading}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="primary"
-              onClick={() => void handleSaveBashConfig()}
-              disabled={bashSaveLoading}
-            >
-              {bashSaveLoading ? "Saving…" : "Save Configuration"}
-            </button>
-          </div>
-        </Modal>
       ) : configuringToolName === "fanout.run" ||
           (typeof configuringToolName === "string" &&
             configuringToolName.startsWith("fanout.")) ? (
@@ -9204,89 +8339,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
               disabled={fanoutSaveLoading}
             >
               {fanoutSaveLoading ? "Saving…" : "Save Configuration"}
-            </button>
-          </div>
-        </Modal>
-      ) : configuringToolName === "files.write" ? (
-        <Modal
-          label="Configure Files & Workspace"
-          onClose={() => {
-            if (!filesSaveLoading) setConfiguringToolName(null);
-          }}
-          containerClassName="modal-container"
-        >
-          <div className="modal-header">
-            <h3>Configure Files & Workspace</h3>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={() => {
-                if (!filesSaveLoading) setConfiguringToolName(null);
-              }}
-              disabled={filesSaveLoading}
-              aria-label="Close"
-            >
-              <CloseIcon size={16} />
-            </button>
-          </div>
-          <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
-            {filesModalError && (
-              <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-                <AlertTriangleIcon size={16} />
-                <span>{filesModalError}</span>
-              </div>
-            )}
-
-            <p className="muted text-sm" style={{ marginBottom: "16px" }}>
-              Choose how <code>files.write</code> handles every write. Changes
-              apply live without a restart.
-            </p>
-
-            {/* The radio group surfaces only the closed model|staged|live set;
-                the server re-validates the same vocabulary on save. */}
-            <div className="form-group" role="radiogroup" aria-label="Files write mode" style={{ marginBottom: 0 }}>
-              {FILES_WRITE_MODE_OPTIONS.map((option) => (
-                <label
-                  key={option.value}
-                  className="toggle-label"
-                  style={{ display: "flex", alignItems: "flex-start", gap: "8px", marginBottom: "10px", cursor: "pointer" }}
-                >
-                  <input
-                    type="radio"
-                    name="filesWriteMode"
-                    value={option.value}
-                    checked={filesWriteModeDraft === option.value}
-                    onChange={() => setFilesWriteModeDraft(option.value)}
-                  />
-                  <span style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-                    <span>{option.label}</span>
-                    <span className="muted text-sm">{option.description}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-
-            <p className="form-group-hint" style={{ marginTop: "14px", display: "block" }}>
-              Access rules (allow roots, deny patterns, approval on deny) live
-              in Security -&gt; Files & Access.
-            </p>
-          </div>
-          <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => setConfiguringToolName(null)}
-              disabled={filesSaveLoading}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="primary"
-              onClick={() => void handleSaveFilesWriteConfig()}
-              disabled={filesSaveLoading}
-            >
-              {filesSaveLoading ? "Saving…" : "Save Configuration"}
             </button>
           </div>
         </Modal>

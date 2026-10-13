@@ -978,6 +978,10 @@ extension ServerContext {
             llmServerURLs: toolConfigs.llmServerURLs
         )
         await permissionGate.setEgressEvaluator(egressSupervisor)
+        // Durable egress allows and task grants live in the gate, so the
+        // supervisor consults them during validation and a covered next call
+        // stays auto-approved at execution as well as at the gate.
+        await egressSupervisor.setPermissionGate(permissionGate)
         return egressSupervisor
     }
 
@@ -1050,6 +1054,10 @@ extension ServerContext {
             injected: policyStore
         )
         await permissionGate.updateBashConfig(bashConfig)
+        // The gate owns the write posture ahead of the tool, so the served
+        // `[files]` policy reaches it here: a `write_mode` change then behaves
+        // identically in the verdict and in the tool that executes the call.
+        await permissionGate.updateFilesConfig(filesConfig)
         // Scratch workspace boots beside the other durable stores so a fresh
         // boot creates the 0700 root and clears expired `tmp/` before any
         // shell turn runs; failures stay best-effort with a log because the
@@ -1172,7 +1180,7 @@ extension ServerContext {
 
     /// Ephemeral fallback context used if Application.runeWeaver is queried before configuration.
     public static let fallbackUnconfigured: ServerContext = {
-        let gate = PermissionGate(store: InMemoryTrustStore())
+        let gate = PermissionGate(ruleStore: InMemoryAccessRuleStore())
         let bus = ToolBus(permissionGate: gate)
         let conv = ConversationManager()
         let mem = MemoryEngine(config: MemoryConfig())

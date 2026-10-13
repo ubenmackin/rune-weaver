@@ -293,7 +293,7 @@ struct StructuredParkTests {
         let queue = ApprovalQueue(permissionGate: gate)
         let bus = ToolBus(permissionGate: gate)
         await bus.register(tool: makeStructuredGatedTool(name: "stub.write", output: "must not run"))
-        await gate.deny(ActionDescriptor(toolName: "stub.write"), reason: "blocked for test")
+        await gate.denyRule(.toolWide, toolName: "stub.write", reason: "blocked for test")
         let gated = ToolInput(toolName: "stub.write", argumentsJSON: #"{"path":"/tmp/a"}"#, callID: "call_struct_denied")
         let llm = StructuredParkLLM(rounds: [
             StructuredParkRound("", [gated]),
@@ -589,7 +589,7 @@ extension StructuredParkTests {
 
         #expect(response.isParked == false)
         #expect(await queue.count() == 0)
-        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await gate.activeRules().isEmpty == true)
         #expect(await orchestrator.parkedNarratedApprovals.isEmpty == true)
         #expect(gateway.sentRecipients.isEmpty)
         #expect(resolver.queries == ["Rebecca"])
@@ -639,7 +639,7 @@ extension StructuredParkTests {
 
         #expect(response.isParked == false)
         #expect(await queue.count() == 0)
-        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await gate.activeRules().isEmpty == true)
         #expect(gateway.sentRecipients.isEmpty)
         let action = try #require(response.toolActions.first { $0.callID == "call_narrated_send_name" })
         #expect(action.result?.isError == true)
@@ -842,8 +842,10 @@ extension StructuredParkTests {
         #expect(await queue.decide(id: pending.id, approved: true, duration: .oneHour) == true)
 
         let canonical = ActionDescriptor(toolName: "messages.send", target: "+15551234567")
-        let grants = await gate.activeGrants()
-        #expect(grants.map(\.actionDescriptor) == [canonical])
+        let rules = await gate.activeRules()
+        #expect(rules.count == 1)
+        #expect(rules.first?.toolName == canonical.toolName)
+        #expect(rules.first?.scope == .exactTarget(canonical.target))
         let liveTool = try #require(await bus.tool(named: "messages.send"))
         #expect(ActionDescriptor.descriptor(for: call, tool: liveTool) == canonical)
         // A differently spelled call for the same number derives the identical
@@ -925,7 +927,7 @@ extension StructuredParkTests {
         #expect(result.isError == true)
         #expect(result.content.contains("is a display name, not a phone number or email"))
         #expect(await handlerCalls.count == 0)
-        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await gate.activeRules().isEmpty == true)
         #expect(gateway.sentRecipients.isEmpty)
         #expect(resolver.queries == ["Rebecca"])
     }
@@ -961,7 +963,7 @@ extension StructuredParkTests {
             #expect(result.content.contains("Invalid messages.send arguments"))
         }
         #expect(await handlerCalls.count == 2)
-        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await gate.activeRules().isEmpty == true)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "messages.send")) == false)
         #expect(gateway.sentRecipients.isEmpty)
     }
@@ -1002,7 +1004,7 @@ extension StructuredParkTests {
             #expect(result.content.contains("Invalid messages.send arguments"))
         }
         #expect(await handlerCalls.count == 2)
-        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await gate.activeRules().isEmpty == true)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "messages.send", target: "+15551234567")) == false)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "messages.send")) == false)
         #expect(gateway.sentRecipients.isEmpty)
@@ -1032,7 +1034,10 @@ extension StructuredParkTests {
         #expect(result.isError == false)
         #expect(await handlerCalls.count == 1)
         let canonical = ActionDescriptor(toolName: "messages.send", target: "+15551234567")
-        #expect(await gate.activeGrants().map(\.actionDescriptor) == [canonical])
+        let rules = await gate.activeRules()
+        #expect(rules.count == 1)
+        #expect(rules.first?.toolName == canonical.toolName)
+        #expect(rules.first?.scope == .exactTarget(canonical.target))
 
         // A differently spelled variant of the same number derives the identical
         // canonical target and never prompts again.

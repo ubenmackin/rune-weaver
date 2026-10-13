@@ -50,9 +50,9 @@ public struct ArrSettingsUpdate: Content, Equatable {
     private enum CodingKeys: String, CodingKey {
         case enabled
         case url
-        case apiKeyEnv = "api_key_env"
-        case defaultQualityProfile = "default_quality_profile"
-        case defaultRootFolder = "default_root_folder"
+        case apiKeyEnv
+        case defaultQualityProfile
+        case defaultRootFolder
     }
 }
 
@@ -86,29 +86,6 @@ public struct MediaSettingsUpdate: Content, Equatable {
         self.sonarr = SonarrSettingsUpdate(config.sonarr)
         self.radarr = RadarrSettingsUpdate(config.radarr)
         self.timeoutSeconds = config.timeoutSeconds
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case sonarr
-        case radarr
-        case timeoutSeconds = "timeout_seconds"
-        case timeoutSecondsCamel = "timeoutSeconds"
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        sonarr = try container.decodeIfPresent(SonarrSettingsUpdate.self, forKey: .sonarr)
-        radarr = try container.decodeIfPresent(RadarrSettingsUpdate.self, forKey: .radarr)
-        let snakeTimeout = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
-        let camelTimeout = try container.decodeIfPresent(Int.self, forKey: .timeoutSecondsCamel)
-        timeoutSeconds = snakeTimeout ?? camelTimeout
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(sonarr, forKey: .sonarr)
-        try container.encodeIfPresent(radarr, forKey: .radarr)
-        try container.encodeIfPresent(timeoutSeconds, forKey: .timeoutSeconds)
     }
 }
 

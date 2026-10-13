@@ -70,62 +70,6 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
         self.planTimeoutSeconds = config.planTimeoutSeconds
         self.maxTriggersPerGoal = config.maxTriggersPerGoal
     }
-
-    private enum CodingKeys: String, CodingKey {
-        case enabled
-        case stepIntervalMinutes = "step_interval_minutes"
-        case stepIntervalMinutesCamel = "stepIntervalMinutes"
-        case maxActiveGoals = "max_active_goals"
-        case maxActiveGoalsCamel = "maxActiveGoals"
-        case maxStepsPerGoal = "max_steps_per_goal"
-        case maxStepsPerGoalCamel = "maxStepsPerGoal"
-        case planTimeoutSeconds = "plan_timeout_seconds"
-        case planTimeoutSecondsCamel = "planTimeoutSeconds"
-        case maxTriggersPerGoal = "max_triggers_per_goal"
-        case maxTriggersPerGoalCamel = "maxTriggersPerGoal"
-    }
-
-    /// Decodes a partial goals patch accepting snake_case and camelCase aliases.
-    ///
-    /// Snake_case stays canonical so persisted files round-trip unchanged; the
-    /// camelCase spellings mirror the dashboard contract and fall back only
-    /// when the snake key is absent. When both spellings arrive the snake value
-    /// wins so the two contracts cannot fork the stored policy.
-    /// - Parameter decoder: Decoder carrying the patch.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
-        let snakeInterval = try container.decodeIfPresent(Int.self, forKey: .stepIntervalMinutes)
-        let camelInterval = try container.decodeIfPresent(Int.self, forKey: .stepIntervalMinutesCamel)
-        stepIntervalMinutes = snakeInterval ?? camelInterval
-        let snakeCap = try container.decodeIfPresent(Int.self, forKey: .maxActiveGoals)
-        let camelCap = try container.decodeIfPresent(Int.self, forKey: .maxActiveGoalsCamel)
-        maxActiveGoals = snakeCap ?? camelCap
-        let snakeSteps = try container.decodeIfPresent(Int.self, forKey: .maxStepsPerGoal)
-        let camelSteps = try container.decodeIfPresent(Int.self, forKey: .maxStepsPerGoalCamel)
-        maxStepsPerGoal = snakeSteps ?? camelSteps
-        let snakeTimeout = try container.decodeIfPresent(Int.self, forKey: .planTimeoutSeconds)
-        let camelTimeout = try container.decodeIfPresent(Int.self, forKey: .planTimeoutSecondsCamel)
-        planTimeoutSeconds = snakeTimeout ?? camelTimeout
-        let snakeTriggerCap = try container.decodeIfPresent(Int.self, forKey: .maxTriggersPerGoal)
-        let camelTriggerCap = try container.decodeIfPresent(Int.self, forKey: .maxTriggersPerGoalCamel)
-        maxTriggersPerGoal = snakeTriggerCap ?? camelTriggerCap
-    }
-
-    /// Encodes a partial goals patch using canonical snake_case keys.
-    ///
-    /// CamelCase aliases decode but never encode so saved payloads keep the
-    /// file shape and a round-trip never invents a second spelling.
-    /// - Parameter encoder: Encoder receiving the patch.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(enabled, forKey: .enabled)
-        try container.encodeIfPresent(stepIntervalMinutes, forKey: .stepIntervalMinutes)
-        try container.encodeIfPresent(maxActiveGoals, forKey: .maxActiveGoals)
-        try container.encodeIfPresent(maxStepsPerGoal, forKey: .maxStepsPerGoal)
-        try container.encodeIfPresent(planTimeoutSeconds, forKey: .planTimeoutSeconds)
-        try container.encodeIfPresent(maxTriggersPerGoal, forKey: .maxTriggersPerGoal)
-    }
 }
 
 /// Partial `[proactive]` patch for `PUT /settings`.
@@ -159,33 +103,6 @@ public struct ProactiveUpdate: Content, Sendable, Equatable {
     public init(_ config: ProactiveConfig) {
         self.mode = config.mode.rawValue
         self.judgeTimeoutSeconds = config.judgeTimeoutSeconds
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case mode
-        case judgeTimeoutSeconds = "judge_timeout_seconds"
-        case judgeTimeoutSecondsCamel = "judgeTimeoutSeconds"
-    }
-
-    /// Decodes a partial proactive patch accepting both timeout spellings.
-    ///
-    /// Snake_case stays canonical; the camelCase spelling mirrors the
-    /// dashboard contract and falls back only when the snake key is absent.
-    /// - Parameter decoder: Decoder carrying the patch.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        mode = try container.decodeIfPresent(String.self, forKey: .mode)
-        let snakeTimeout = try container.decodeIfPresent(Int.self, forKey: .judgeTimeoutSeconds)
-        let camelTimeout = try container.decodeIfPresent(Int.self, forKey: .judgeTimeoutSecondsCamel)
-        judgeTimeoutSeconds = snakeTimeout ?? camelTimeout
-    }
-
-    /// Encodes a partial proactive patch using canonical snake_case keys.
-    /// - Parameter encoder: Encoder receiving the patch.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(mode, forKey: .mode)
-        try container.encodeIfPresent(judgeTimeoutSeconds, forKey: .judgeTimeoutSeconds)
     }
 }
 

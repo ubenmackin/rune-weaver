@@ -9,22 +9,26 @@ import UserNotifications
 
 /// Category identifiers for native notifications.
 public enum NotificationCategories {
-    public static let approvalRequest = "APPROVAL_REQUEST"
     public static let schedulerRun = "SCHEDULER_RUN"
 }
 
 /// Action identifiers for native notifications.
 public enum NotificationActions {
-    public static let approve = "APPROVE_ACTION"
-    public static let deny = "DENY_ACTION"
     public static let openDashboard = "OPEN_DASHBOARD_ACTION"
 }
 
-/// Coordinates system notifications and actionable buttons on macOS.
+/// User-info marker that distinguishes an approval-attention notification,
+/// whose tap opens the dashboard inbox, from a scheduler notification, whose
+/// tap opens the dashboard.
+private let approvalAttentionInboxKey = "opens_approval_inbox"
+
+/// Coordinates system notifications on macOS.
 @MainActor
 public final class AppNotificationManager: NSObject, UNUserNotificationCenterDelegate, SchedulerNotifier {
-    /// Handler invoked when an approval decision is made from a notification action.
-    public var onApprovalDecision: (@MainActor @Sendable (UUID, Bool) async -> Void)?
+    /// Handler invoked when an approval-attention notification is tapped. The
+    /// notification carries no decision affordance, so the tap only deep-links
+    /// to the dashboard inbox where the request can be decided.
+    public var onOpenInbox: (@MainActor @Sendable () -> Void)?
 
     /// Handler invoked to open the web dashboard in the default browser.
     public var onOpenDashboard: (@MainActor @Sendable () -> Void)?
@@ -46,25 +50,11 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
         }
     }
 
-    /// Registers the interactive notification categories and actions.
-    private func registerCategories(center: UNUserNotificationCenter) {
-        let approveAction = UNNotificationAction(
-            identifier: NotificationActions.approve,
-            title: "Approve",
-            options: []
-        )
-        let denyAction = UNNotificationAction(
-            identifier: NotificationActions.deny,
-            title: "Deny",
-            options: [.destructive]
-        )
-        let approvalCategory = UNNotificationCategory(
-            identifier: NotificationCategories.approvalRequest,
-            actions: [approveAction, denyAction],
-            intentIdentifiers: [],
-            options: []
-        )
-
+    /// The interactive categories registered with the notification center.
+    /// Internal so the notification-surface test can pin that only the
+    /// scheduler category survives and that no approval category with
+    /// action buttons exists.
+    func notificationCategories() -> Set<UNNotificationCategory> {
         let openDashboardAction = UNNotificationAction(
             identifier: NotificationActions.openDashboard,
             title: "Open Dashboard",
@@ -76,21 +66,23 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
             intentIdentifiers: [],
             options: []
         )
-
-        center.setNotificationCategories([approvalCategory, schedulerCategory])
+        return [schedulerCategory]
     }
 
-    /// Posts a native interactive notification for a pending tool approval request.
-    public func postApprovalNotification(_ request: PermissionRequest) async {
-        let content = UNMutableNotificationContent()
-        content.title = "Action Requires Approval"
-        content.subtitle = request.toolName
-        content.body = request.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "Tool call '\(request.toolName)' requires your approval to proceed."
-            : request.description
-        content.sound = .default
-        content.categoryIdentifier = NotificationCategories.approvalRequest
-        content.userInfo = ["approval_id": request.id.uuidString]
+    /// Registers the interactive notification categories and actions.
+    private func registerCategories(center: UNUserNotificationCenter) {
+        center.setNotificationCategories(notificationCategories())
+    }
+
+    /// Posts an informational notification for a pending approval request.
+    ///
+    /// The payload names only the tool and its severity: the request
+    /// description and its arguments stay off the notification surface, and the
+    /// notification carries no category and no actions, so no decision can
+    /// originate here. The tap deep-links to the dashboard inbox through the
+    /// existing open path.
+    public func postApprovalAttention(_ request: PermissionRequest) async {
+        let content = approvalAttentionContent(request)
 
         let notificationRequest = UNNotificationRequest(
             identifier: request.id.uuidString,
@@ -101,8 +93,32 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
         do {
             try await UNUserNotificationCenter.current().add(notificationRequest)
         } catch {
-            print("[AppNotificationManager] Failed to post approval notification: \(error.localizedDescription)")
+            print("[AppNotificationManager] Failed to post approval attention notification: \(error.localizedDescription)")
         }
+    }
+
+    /// Builds the informational payload for a pending approval request.
+    /// Internal so the notification-surface test can pin the payload shape
+    /// without touching the live notification center.
+    func approvalAttentionContent(_ request: PermissionRequest) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        content.title = "Action Requires Attention"
+        content.subtitle = request.toolName
+        content.body = Self.attentionBody(severity: request.assessment?.severity)
+        content.sound = .default
+        // Routed, not answered: the marker carries no request content, only the
+        // destination the tap opens.
+        content.userInfo = [approvalAttentionInboxKey: true]
+        return content
+    }
+
+    /// Body copy for an approval-attention notification. Names only the
+    /// evaluated severity and points at the one place a decision can be made;
+    /// an engine-filed request that has not been enriched yet reports unknown
+    /// rather than inventing a severity.
+    private static func attentionBody(severity: ImpactSeverity?) -> String {
+        let label = severity?.rawValue ?? "unknown"
+        return "Severity: \(label). Decide in the dashboard Inbox."
     }
 
     /// Posts a scheduler job completion notification (satisfies ``SchedulerNotifier``).
@@ -142,22 +158,19 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
         withCompletionHandler completionHandler: @escaping @Sendable () -> Void
     ) {
         let action = response.actionIdentifier
-        let approvalID = (response.notification.request.content.userInfo["approval_id"] as? String).flatMap(UUID.init(uuidString:))
+        let opensInbox = (response.notification.request.content.userInfo[approvalAttentionInboxKey] as? Bool) ?? false
         Task {
-            await self.handleNotificationAction(action: action, approvalID: approvalID)
+            await self.handleNotificationAction(action: action, opensInbox: opensInbox)
             completionHandler()
         }
     }
 
-    private func handleNotificationAction(action: String, approvalID: UUID?) async {
-        if let id = approvalID {
-            if action == NotificationActions.approve {
-                await onApprovalDecision?(id, true)
-            } else if action == NotificationActions.deny {
-                await onApprovalDecision?(id, false)
-            } else {
-                onOpenDashboard?()
-            }
+    private func handleNotificationAction(action: String, opensInbox: Bool) async {
+        if opensInbox {
+            // Approval notifications carry no actions, so every tap is the
+            // default one: it deep-links to the dashboard inbox rather than
+            // deciding the request natively.
+            onOpenInbox?()
         } else if action == NotificationActions.openDashboard || action == UNNotificationDefaultActionIdentifier {
             onOpenDashboard?()
         }

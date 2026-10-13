@@ -658,11 +658,11 @@ export function resolveIndexWorkersValue(
 // or out-of-range values degrade to null so callers apply the engine default
 // instead of rendering a drifted figure.
 export function resolveIndexVectorCapValue(
-  data: { max_vector_chunks_per_document?: unknown } | null | undefined,
+  data: { maxVectorChunksPerDocument?: unknown } | null | undefined,
 ): number | null {
   if (!data || typeof data !== "object") return null;
-  const candidate = (data as { max_vector_chunks_per_document?: unknown })
-    .max_vector_chunks_per_document;
+  const candidate = (data as { maxVectorChunksPerDocument?: unknown })
+    .maxVectorChunksPerDocument;
   if (typeof candidate !== "number" || !Number.isFinite(candidate)) return null;
   if (candidate < 1) return null;
   return Math.floor(candidate);
@@ -887,13 +887,13 @@ export function findOutsideIndexRoots(
 }
 
 // Always-skipped names from the index settings payload: the engine's
-// `always_skipped` array populated from the walker's prune list. Non-string
+// `alwaysSkipped` array populated from the walker's prune list. Non-string
 // entries degrade to skipped so a drifted payload never renders a blank row,
 // and a missing field degrades to empty so older engines without the field
 // render generic copy without inventing names.
 export function resolveAlwaysSkipped(index: unknown): string[] {
   if (!index || typeof index !== "object") return [];
-  const raw = (index as { always_skipped?: unknown }).always_skipped;
+  const raw = (index as { alwaysSkipped?: unknown }).alwaysSkipped;
   if (!Array.isArray(raw)) return [];
   return raw.filter(
     (entry): entry is string =>
@@ -2818,18 +2818,18 @@ export function IndexPolicyPanel() {
           exclude: Array.isArray(index.exclude)
             ? index.exclude
             : DEFAULT_INDEX_CONFIG.exclude,
-          mailbox_deny: Array.isArray(
-            (index as IndexConfigData).mailbox_deny,
+          mailboxDeny: Array.isArray(
+            (index as IndexConfigData).mailboxDeny,
           )
-            ? ((index as IndexConfigData).mailbox_deny as string[])
+            ? ((index as IndexConfigData).mailboxDeny as string[])
             : [...DEFAULT_INDEX_MAILBOX_DENY],
           // Read-only walker list: kept when the engine sends an array so the
           // detail block names exactly what the next run will skip, otherwise
           // left absent so older engines render generic copy without names.
-          always_skipped: Array.isArray(
-            (index as IndexConfigData).always_skipped,
+          alwaysSkipped: Array.isArray(
+            (index as IndexConfigData).alwaysSkipped,
           )
-            ? (index as IndexConfigData).always_skipped
+            ? (index as IndexConfigData).alwaysSkipped
             : undefined,
           effort: normalizeIndexEffortPreset(
             (index as IndexConfigData).effort ?? DEFAULT_INDEX_CONFIG.effort,
@@ -2840,22 +2840,22 @@ export function IndexPolicyPanel() {
           workers:
             resolveIndexWorkersValue(index as IndexConfigData) ??
             DEFAULT_INDEX_WORKERS,
-          thermal_backoff:
-            typeof (index as IndexConfigData).thermal_backoff === "boolean"
-              ? (index as IndexConfigData).thermal_backoff
-              : DEFAULT_INDEX_CONFIG.thermal_backoff,
-          pause_on_battery:
-            typeof (index as IndexConfigData).pause_on_battery === "boolean"
-              ? (index as IndexConfigData).pause_on_battery
-              : DEFAULT_INDEX_CONFIG.pause_on_battery,
-          max_vector_chunks_per_document:
+          thermalBackoff:
+            typeof (index as IndexConfigData).thermalBackoff === "boolean"
+              ? (index as IndexConfigData).thermalBackoff
+              : DEFAULT_INDEX_CONFIG.thermalBackoff,
+          pauseOnBattery:
+            typeof (index as IndexConfigData).pauseOnBattery === "boolean"
+              ? (index as IndexConfigData).pauseOnBattery
+              : DEFAULT_INDEX_CONFIG.pauseOnBattery,
+          maxVectorChunksPerDocument:
             resolveIndexVectorCapValue(index as IndexConfigData) ??
-            (DEFAULT_INDEX_CONFIG.max_vector_chunks_per_document as number),
+            (DEFAULT_INDEX_CONFIG.maxVectorChunksPerDocument as number),
         };
         setConfig(merged);
         setExcludeText(merged.exclude.join("\n"));
         setMailboxDenyText(
-          formatMailboxDenyText(merged.mailbox_deny),
+          formatMailboxDenyText(merged.mailboxDeny),
         );
         // Seed the roots textarea from the loaded `config.roots` so edits
         // start from stored truth and reload without TOML hand-edits.
@@ -2907,7 +2907,7 @@ export function IndexPolicyPanel() {
     const workers = effort === "custom" ? customWorkers : 0;
     const vectorCap =
       resolveIndexVectorCapValue(config) ??
-      (DEFAULT_INDEX_CONFIG.max_vector_chunks_per_document as number);
+      (DEFAULT_INDEX_CONFIG.maxVectorChunksPerDocument as number);
     const saved = await updateSettings({
       index: {
         enabled: config.enabled,
@@ -2918,19 +2918,19 @@ export function IndexPolicyPanel() {
         reminders: config.reminders,
         roots,
         exclude,
-        max_file_mb: config.max_file_mb,
-        mail_vector_window: config.mail_vector_window,
-        icloud_evicted: config.icloud_evicted,
-        describe_images_with_llm: config.describe_images_with_llm,
-        nightly_budget: config.nightly_budget,
-        db_path: config.db_path.trim(),
+        maxFileMB: config.maxFileMB,
+        mailVectorWindow: config.mailVectorWindow,
+        iCloudEvicted: config.iCloudEvicted,
+        describeImagesWithLLM: config.describeImagesWithLLM,
+        nightlyBudget: config.nightlyBudget,
+        dbPath: config.dbPath.trim(),
         effort,
         workers,
-        thermal_backoff: config.thermal_backoff ?? DEFAULT_INDEX_THERMAL_BACKOFF,
-        pause_on_battery:
-          config.pause_on_battery ?? DEFAULT_INDEX_PAUSE_ON_BATTERY,
-        max_vector_chunks_per_document: vectorCap,
-        mailbox_deny: mailboxDeny,
+        thermalBackoff: config.thermalBackoff ?? DEFAULT_INDEX_THERMAL_BACKOFF,
+        pauseOnBattery:
+          config.pauseOnBattery ?? DEFAULT_INDEX_PAUSE_ON_BATTERY,
+        maxVectorChunksPerDocument: vectorCap,
+        mailboxDeny: mailboxDeny,
       },
     });
     const index = saved?.index;
@@ -2942,22 +2942,22 @@ export function IndexPolicyPanel() {
         exclude: Array.isArray(index.exclude)
           ? index.exclude
           : DEFAULT_INDEX_CONFIG.exclude,
-        mailbox_deny: Array.isArray(
-          (index as IndexConfigData).mailbox_deny,
+        mailboxDeny: Array.isArray(
+          (index as IndexConfigData).mailboxDeny,
         )
-          ? ((index as IndexConfigData).mailbox_deny as string[])
+          ? ((index as IndexConfigData).mailboxDeny as string[])
           : [...DEFAULT_INDEX_MAILBOX_DENY],
-        always_skipped: Array.isArray(
-          (index as IndexConfigData).always_skipped,
+        alwaysSkipped: Array.isArray(
+          (index as IndexConfigData).alwaysSkipped,
         )
-          ? (index as IndexConfigData).always_skipped
+          ? (index as IndexConfigData).alwaysSkipped
           : undefined,
       };
       if (mountedRef.current) {
         setConfig(merged);
         setExcludeText(merged.exclude.join("\n"));
         setMailboxDenyText(
-          formatMailboxDenyText(merged.mailbox_deny),
+          formatMailboxDenyText(merged.mailboxDeny),
         );
         // Keep the textarea synced to the saved echo so save-plus-reload
         // stays honest without TOML hand-edits.
@@ -3145,7 +3145,7 @@ export function IndexPolicyPanel() {
   // never fails the save.
   const vectorCap =
     resolveIndexVectorCapValue(config) ??
-    (DEFAULT_INDEX_CONFIG.max_vector_chunks_per_document as number);
+    (DEFAULT_INDEX_CONFIG.maxVectorChunksPerDocument as number);
   const vectorCapMax = 4096;
   // Root-scoped coverage plus the walker prune list: the subtitle reads the
   // live roots textarea so it names exactly what the next run will cover with
@@ -3173,7 +3173,7 @@ export function IndexPolicyPanel() {
             className="muted text-xs"
             data-testid="index-always-skipped-block"
           >
-            {/* Walker prune list renders solely from the `always_skipped`
+            {/* Walker prune list renders solely from the `alwaysSkipped`
                 payload so the copy cannot drift from
                 FilesIndexer.alwaysSkippedPatterns. The file-access deny list
                 stays generic and never enumerates patterns here. */}
@@ -3392,9 +3392,9 @@ export function IndexPolicyPanel() {
           <label className="toggle-label">
             <input
               type="checkbox"
-              checked={config.thermal_backoff ?? DEFAULT_INDEX_THERMAL_BACKOFF}
+              checked={config.thermalBackoff ?? DEFAULT_INDEX_THERMAL_BACKOFF}
               onChange={(event) =>
-                updateConfig({ thermal_backoff: event.target.checked })
+                updateConfig({ thermalBackoff: event.target.checked })
               }
             />
             <span>Thermal backoff</span>
@@ -3402,9 +3402,9 @@ export function IndexPolicyPanel() {
           <label className="toggle-label">
             <input
               type="checkbox"
-              checked={config.pause_on_battery ?? DEFAULT_INDEX_PAUSE_ON_BATTERY}
+              checked={config.pauseOnBattery ?? DEFAULT_INDEX_PAUSE_ON_BATTERY}
               onChange={(event) =>
-                updateConfig({ pause_on_battery: event.target.checked })
+                updateConfig({ pauseOnBattery: event.target.checked })
               }
             />
             <span>Pause on battery</span>
@@ -3427,7 +3427,7 @@ export function IndexPolicyPanel() {
               disabled={vectorCap <= 1}
               onClick={() =>
                 updateConfig({
-                  max_vector_chunks_per_document: Math.max(1, vectorCap - 1),
+                  maxVectorChunksPerDocument: Math.max(1, vectorCap - 1),
                 })
               }
             >
@@ -3444,7 +3444,7 @@ export function IndexPolicyPanel() {
                 const parsed = Number(event.target.value);
                 if (!Number.isFinite(parsed)) return;
                 updateConfig({
-                  max_vector_chunks_per_document: Math.min(
+                  maxVectorChunksPerDocument: Math.min(
                     vectorCapMax,
                     Math.max(1, Math.floor(parsed)),
                   ),
@@ -3458,7 +3458,7 @@ export function IndexPolicyPanel() {
               disabled={vectorCap >= vectorCapMax}
               onClick={() =>
                 updateConfig({
-                  max_vector_chunks_per_document: Math.min(
+                  maxVectorChunksPerDocument: Math.min(
                     vectorCapMax,
                     vectorCap + 1,
                   ),
@@ -3508,9 +3508,9 @@ export function IndexPolicyPanel() {
             <select
               id="index-mail-window"
               className="input-field"
-              value={config.mail_vector_window}
+              value={config.mailVectorWindow}
               onChange={(event) =>
-                updateConfig({ mail_vector_window: event.target.value })
+                updateConfig({ mailVectorWindow: event.target.value })
               }
             >
               {INDEX_MAIL_VECTOR_WINDOWS.map((window) => (
@@ -3526,9 +3526,9 @@ export function IndexPolicyPanel() {
             <select
               id="index-icloud"
               className="input-field"
-              value={config.icloud_evicted}
+              value={config.iCloudEvicted}
               onChange={(event) =>
-                updateConfig({ icloud_evicted: event.target.value })
+                updateConfig({ iCloudEvicted: event.target.value })
               }
             >
               {INDEX_ICLOUD_EVICTIONS.map((policy) => (
@@ -3541,15 +3541,15 @@ export function IndexPolicyPanel() {
         </div>
 
         <p className="muted text-sm index-attachment-cap">
-          Attachment / file size cap: {config.max_file_mb} MB per file.
+          Attachment / file size cap: {config.maxFileMB} MB per file.
         </p>
 
         <label className="toggle-label">
           <input
             type="checkbox"
-            checked={config.describe_images_with_llm}
+            checked={config.describeImagesWithLLM}
             onChange={(event) =>
-              updateConfig({ describe_images_with_llm: event.target.checked })
+              updateConfig({ describeImagesWithLLM: event.target.checked })
             }
           />
           <span>Describe images with the language model</span>

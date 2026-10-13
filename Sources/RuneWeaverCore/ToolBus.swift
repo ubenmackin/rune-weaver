@@ -277,8 +277,8 @@ public actor ToolBus {
     public let uncertainTracker: UncertainActionTracker
 
     /// Creates a bus.
-    /// Labeling posture lives with the turn owner (`Orchestrator` /
-    /// `ChatTurnContext`), never here: the bus carries no `SecurityConfig`
+    /// Labeling posture lives with the turn owner (`Orchestrator` and the
+    /// surfaces driving it), never here: the bus carries no `SecurityConfig`
     /// copy so the two can never diverge silently.
     public init(
         approvalHandler: ToolApprovalHandler? = nil,
@@ -441,11 +441,6 @@ public actor ToolBus {
         return tools[target]
     }
 
-    /// Records graduated trust for an action via the attached gate.
-    public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration, sessionID: UUID? = nil) async {
-        await permissionGate?.grantTrust(for: descriptor, duration: duration, sessionID: sessionID)
-    }
-
     /// Executes a tool call with permission checking.
     public func execute(toolCall: ToolInput, context: ToolContext) async -> ToolResult {
         let resolvedName = aliases[toolCall.toolName] ?? toolCall.toolName
@@ -570,16 +565,16 @@ public actor ToolBus {
             if let gate = permissionGate {
                 switch await gate.checkPermission(toolCall: call, tool: tool, sessionID: context.sessionID) {
                 case .allowed:
-                    // Attribute this run to the covering grant so later review
+                    // Attribute this run to the covering rule so later review
                     // can see which trust is actually exercised. Persistence
                     // stays best-effort inside the gate, so a store failure
                     // never blocks the already-authorized tool call. Dry-run
                     // previews never execute, so they leave counters alone.
-                    // The covering grant is the authorization, so propagate it
+                    // The covering rule is the authorization, so propagate it
                     // into the tool context for non-dry-run calls.
                     if !context.dryRun {
                         let descriptor = ActionDescriptor.descriptor(for: call, tool: tool)
-                        await gate.recordUse(for: descriptor)
+                        await gate.recordUse(scope: PermissionGate.scope(for: descriptor), toolName: descriptor.toolName)
                         approved = true
                     }
                 case let .denied(reason):

@@ -47,32 +47,6 @@ public struct IdeasUpdate: Content, Sendable, Equatable {
         self.maxPerCycle = config.maxPerCycle
         self.timeoutSeconds = config.timeoutSeconds
     }
-
-    private enum CodingKeys: String, CodingKey {
-        case enabled
-        case maxPerCycle = "max_per_cycle"
-        case maxPerCycleCamel = "maxPerCycle"
-        case timeoutSeconds = "timeout_seconds"
-        case timeoutSecondsCamel = "timeoutSeconds"
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
-        let snakeMax = try container.decodeIfPresent(Int.self, forKey: .maxPerCycle)
-        let camelMax = try container.decodeIfPresent(Int.self, forKey: .maxPerCycleCamel)
-        maxPerCycle = snakeMax ?? camelMax
-        let snakeTimeout = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
-        let camelTimeout = try container.decodeIfPresent(Int.self, forKey: .timeoutSecondsCamel)
-        timeoutSeconds = snakeTimeout ?? camelTimeout
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(enabled, forKey: .enabled)
-        try container.encodeIfPresent(maxPerCycle, forKey: .maxPerCycle)
-        try container.encodeIfPresent(timeoutSeconds, forKey: .timeoutSeconds)
-    }
 }
 
 extension UpdateSettingsRequest {
@@ -164,7 +138,6 @@ public struct IdeaDTO: Content, Sendable, Equatable {
         case body
         case goalId
         case goalID
-        case goalSnake = "goal_id"
         case status
         case createdAt
         case updatedAt
@@ -189,7 +162,7 @@ public struct IdeaDTO: Content, Sendable, Equatable {
         }
         self.title = rawTitle
         self.body = try container.decode(String.self, forKey: .body)
-        self.goalID = BrowserNavigateWire.decodeFirst(container, keys: [.goalId, .goalID, .goalSnake])
+        self.goalID = BrowserNavigateWire.decodeFirst(container, keys: [.goalId, .goalID])
         self.status = try container.decode(String.self, forKey: .status)
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
         self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)

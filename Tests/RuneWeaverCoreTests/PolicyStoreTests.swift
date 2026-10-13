@@ -189,11 +189,13 @@ struct PolicyStoreTests {
     }
 
     @Test
-    func `Serialized policy points editors at the Policy tab`() {
-        // The dashboard editor lives on the dedicated Policy tab, so the
-        // seeded guidance line must not send operators to the retired tab.
+    func `Serialized policy points editors at Settings Access`() {
+        // The declarative policy editors live on Settings -> Access (Network
+        // and Credentials), so the seeded guidance line must not send
+        // operators to the deleted Policy tab.
         let toml = PolicyStore.serialize(.safeDefault)
-        #expect(toml.contains("Policy tab"))
+        #expect(toml.contains("Settings -> Access (Network/Credentials)"))
+        #expect(!toml.contains("Policy tab"))
         #expect(!toml.contains("Security tab"))
     }
 

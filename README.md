@@ -54,7 +54,8 @@ Approve an email or message now and schedule it for later. Rune Weaver stores th
 - **Web Dashboard**: A responsive, clean dashboard designed for macOS Safari, iPad, or mobile. Features:
   - **System Pulse**: One glance tells you everything is healthy. Green reads "Operational" and stays quiet; yellow reads "Degraded" and opens a short Details list; red reads "Needs action" with **Open inbox**, **Re-check**, and **Open Policy** buttons — and only turns green again after a fresh passing check.
   - **Chat**: Fluid streaming conversation with tool-call transparency — and repeated questions answered instantly.
-  - **Approvals Inbox**: Fast, one-click reviews for pending actions and file diffs, including the plain-language brake card whenever the behavior brake pauses work for your review.
+  - **Approvals Inbox**: Fast, one-click reviews for pending actions and file diffs, including the plain-language brake card whenever the behavior brake pauses work for your review. Every pending request renders as its own decidable card, grouped by the chat session that filed it, so a parked turn always reads beside the conversation it came from.
+  - **Standing Rules**: Standing rules are managed in Settings → Access, whose five sections (Rules, Bash & Shell, Network, Credentials, and Files) gather every persistent "what the agent may do" decision in one pane.
   - **Work & Goals**: Track active projects, milestones, and scheduled background tasks — including approved messages waiting for their send time.
   - **Memory Explorer**: Search and manage what your assistant remembers about you.
 
@@ -71,6 +72,17 @@ Everything you need is bundled inside the app download. You do **not** need Xcod
 3. **Launch**: Open Rune Weaver from Applications or Spotlight. A rune icon will appear in your menu bar.
 4. **Permissions**: On first launch, the Permissions setup window guides you through enabling Accessibility, Screen Recording (for desktop perception), and Full Disk Access (for Apple Messages indexing).
 5. **Start Chatting**: Click the menu bar icon, choose **Open Web Dashboard**, and start exploring!
+
+---
+
+## Command Surface
+
+The terminal stays intentionally small: `rune-weaver serve` starts the engine, and the web dashboard it serves is the everyday surface for chat, goals, memory, and approvals.
+
+- `rune-weaver serve` — Start the engine service (REST, WebSocket, and the web dashboard). Loopback by default; LAN binds require owner auth.
+- `rune-weaver status` — Show system status: LLM providers, search, memory stats, and active tools.
+- `rune-weaver auth` — Manage the single-owner bearer token that guards non-loopback access: generate, rotate, or check it (only a fingerprint prefix is ever shown).
+- `rune-weaver policy verify` — Formally verify the declarative security policy: credential confinement, rule-shadow prevention, and local-exemption safety.
 
 ---
 

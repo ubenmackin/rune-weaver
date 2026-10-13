@@ -79,6 +79,14 @@ public actor OutboundEgressSupervisor {
     /// would leave it spendable without bound.
     private var oneShotIssuedAt: [UUID?: Date] = [:]
 
+    /// Permission gate consulted for covering domain allow rules and ephemeral grants.
+    ///
+    /// Durable egress allows live as gate rules (the whole record, with no
+    /// policy write), so the supervisor honors them here instead of parking a
+    /// call the gate already trusts. Wired after construction so the
+    /// choke-point stays buildable without a gate in tests.
+    private var permissionGate: PermissionGate?
+
     /// One session's interactive grants with their issue time for TTL eviction.
     private struct SessionGrant: Sendable {
         var domains: Set<String>
@@ -168,6 +176,17 @@ public actor OutboundEgressSupervisor {
         llmServerURLs = urls
     }
 
+    /// Wires the permission gate whose covering domain allows authorize egress.
+    ///
+    /// Durable egress allows and task grants live in the gate, so the
+    /// supervisor consults them after the policy plus session and one-shot
+    /// grants and before reporting unlisted. Blocked hosts still deny first,
+    /// so wiring never softens a refusal.
+    /// - Parameter gate: Gate owning the durable and ephemeral allow state, or nil to unwire.
+    public func setPermissionGate(_ gate: PermissionGate?) {
+        permissionGate = gate
+    }
+
     /// Grants egress permission to a domain for the duration of a session.
     public func allowDomainForSession(sessionID: UUID, domain: String) {
         evictStaleSessionGrants()
@@ -206,6 +225,48 @@ public actor OutboundEgressSupervisor {
         sessionAllowedDomains.removeValue(forKey: sessionID)
         oneShotAllowedDomains.removeValue(forKey: sessionID)
         oneShotIssuedAt.removeValue(forKey: sessionID)
+    }
+
+    /// Reports the interactive grants the given session can still spend.
+    ///
+    /// A pure projection of the grant tables the gates consume — no new
+    /// state and no mutation: a one-shot domain already spent by an earlier
+    /// hop no longer appears, while session grants live until the session
+    /// clears or they age out. Session-less one-shot grants ride along
+    /// because any session may spend them.
+    /// - Parameter sessionID: Session to report; nil reports the grants filed
+    ///   without a session, which is all a session-less caller can spend.
+    /// - Returns: Canonical, sorted grant domains for the session.
+    public func activeGrants(sessionID: UUID?) async -> EgressGrantSummary {
+        let sessionDomains: [String] = if let sessionID {
+            sessionAllowedDomains[sessionID]?.domains.sorted() ?? []
+        } else {
+            []
+        }
+        var oneShot = oneShotAllowedDomains[nil] ?? []
+        if let sessionID {
+            oneShot.formUnion(oneShotAllowedDomains[sessionID] ?? [])
+        }
+        return EgressGrantSummary(sessionDomains: sessionDomains, oneShotDomains: oneShot.sorted())
+    }
+
+    /// Snapshot of one session's spendable interactive grants.
+    ///
+    /// Read-only view over the supervisor's live grant tables for display or
+    /// diagnostics; granting, spending, and clearing stay the only mutation
+    /// paths. Domains are canonical hosts, sorted so summaries compare
+    /// deterministically.
+    public struct EgressGrantSummary: Sendable, Equatable {
+        /// Domains granted for the life of the reported session.
+        public let sessionDomains: [String]
+        /// Unspent one-shot domains spendable by the reported session,
+        /// including any filed without a session.
+        public let oneShotDomains: [String]
+
+        public init(sessionDomains: [String], oneShotDomains: [String]) {
+            self.sessionDomains = sessionDomains
+            self.oneShotDomains = oneShotDomains
+        }
     }
 
     /// Result of a successful egress verification. Contains wire-ready headers
@@ -300,7 +361,7 @@ public actor OutboundEgressSupervisor {
             return .denied("Invalid URL: missing host component.")
         }
         let canonicalHost = SensitiveAddressNormalization.normalizedHost(host)
-        if let verdict = networkGateVerdict(policy: policy, host: host, canonicalHost: canonicalHost, sessionID: sessionID) {
+        if let verdict = await networkGateVerdict(policy: policy, host: host, canonicalHost: canonicalHost, sessionID: sessionID) {
             return verdict
         }
         let binding = bindingGateContext(policy: policy, headers: headers, url: url, method: method, host: host)
@@ -377,6 +438,14 @@ public actor OutboundEgressSupervisor {
                 break
             }
             if let sessionID, sessionAllowedDomains[sessionID]?.domains.contains(canonicalHost) == true {
+                break
+            }
+            // A covering domain allow in the gate authorizes the read: durable
+            // egress allows and task grants live there, so honoring them here
+            // keeps a covered next call from re-parking at execution.
+            if let gate = permissionGate,
+               await gate.egressAllowCovers(host: canonicalHost, toolName: nil, sessionID: sessionID)
+            {
                 break
             }
             return reason
@@ -471,7 +540,7 @@ extension OutboundEgressSupervisor {
         host: String,
         canonicalHost: String,
         sessionID: UUID?
-    ) -> EgressVerdict? {
+    ) async -> EgressVerdict? {
         switch policy.network.hostStatus(for: host) {
         case let .explicitlyBlocked(reason):
             return .denied(reason)
@@ -483,6 +552,14 @@ extension OutboundEgressSupervisor {
                 return nil
             }
             if let sessionID, sessionAllowedDomains[sessionID]?.domains.contains(canonicalHost) == true {
+                return nil
+            }
+            // A covering domain allow in the gate authorizes the hop: durable
+            // egress allows and task grants live there, so honoring them here
+            // keeps a covered next call from re-parking at execution.
+            if let gate = permissionGate,
+               await gate.egressAllowCovers(host: canonicalHost, toolName: nil, sessionID: sessionID)
+            {
                 return nil
             }
             return .unlistedDomain(host: host, reason: reason)
@@ -808,6 +885,14 @@ extension OutboundEgressSupervisor: EgressPolicyEvaluator {
                 return .allowed
             }
             if let sessionID, sessionAllowedDomains[sessionID]?.domains.contains(canonicalHost) == true {
+                return .allowed
+            }
+            // A covering domain allow in the gate authorizes the host: durable
+            // egress allows and task grants live there, so honoring them here
+            // keeps the next identical call from re-parking at the gate.
+            if let gate = permissionGate,
+               await gate.egressAllowCovers(host: canonicalHost, toolName: nil, sessionID: sessionID)
+            {
                 return .allowed
             }
             return .unlisted(reason)

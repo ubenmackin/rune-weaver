@@ -1093,233 +1093,6 @@ private func registerEpisodicDeleteRoutes(_ app: Application) {
     }
 }
 
-/// Applies network egress decision side effects to the supervisor and policy store.
-///
-/// Fail-closed: returns false when the grant cannot be honored (missing host,
-/// wildcard-shaped host, session-less `allowSession`, missing supervisor, or a
-/// rejected policy write), and the caller must deny the tool call instead of
-/// approving it.
-/// Allow tiers accept exact canonical hosts only: a wildcard pattern (`*.com`)
-/// is matched as covering every destination it names, so one approval click
-/// could otherwise persist unbounded egress and defeat deny-by-default.
-/// Wildcard entries stay addable solely through the explicit policy editor.
-/// The context holds the supervisor as optional only for fallback and test
-/// doubles; production `ServerContext.make` always injects a verified
-/// supervisor or throws at boot, so a nil supervisor here means a
-/// non-production context and must deny rather than approve supervisor-less.
-/// REST and WebSocket triage share this handler so tier-to-side-effect mapping
-/// cannot drift between transports.
-/// - Returns: True when the side effects applied (or no persistence was needed).
-func applyEgressDecision(
-    tier: EgressDecisionTier,
-    pending: PermissionRequest?,
-    context: ServerContext
-) async -> Bool {
-    let resolvedHost = pending?.egressHost ?? ApprovalQueue.extractEgressHost(
-        toolName: pending?.toolName ?? "",
-        argumentsJSON: pending?.input.argumentsJSON ?? ""
-    )
-    guard let host = resolvedHost, !host.isEmpty else { return false }
-    // The host can be model-filled, so a star shape is an attacker-controlled
-    // pattern rather than a legitimate target. Deny tiers stay untouched:
-    // blocking a wildcard only tightens the posture, while allowing one does
-    // the opposite. Fail closed so the pattern is never approved and never
-    // written to policy.toml.
-    let isAllowTier = tier == .allowOnce || tier == .allowSession || tier == .alwaysAllow
-    if isAllowTier, AllowedOriginPattern.classifyWildcard(host.lowercased()) != .none {
-        return false
-    }
-    switch tier {
-    case .allowOnce:
-        guard let supervisor = context.egressSupervisor else { return false }
-        await supervisor.allowDomainOnce(domain: host, sessionID: pending?.sessionID)
-        return true
-    case .allowSession:
-        guard let sessionID = pending?.sessionID else { return false }
-        guard let supervisor = context.egressSupervisor else { return false }
-        await supervisor.allowDomainForSession(sessionID: sessionID, domain: host)
-        return true
-    case .alwaysAllow:
-        do {
-            try await context.policyStore.appendAllowedDomain(host)
-        } catch {
-            return false
-        }
-        await context.hub.broadcastTrustGrantsChanged()
-        return true
-    case .deny:
-        return true
-    case .denyAlways:
-        do {
-            try await context.policyStore.appendBlockedDomain(host)
-        } catch {
-            return false
-        }
-        await context.hub.broadcastTrustGrantsChanged()
-        return true
-    }
-}
-
-/// Registers approvals list plus decision routes.
-/// Durable trust-grants routes live in the dedicated grants file alongside
-/// their change broadcast; both sets register on the same paths.
-/// - Parameter app: Application receiving the routes.
-private func registerApprovalRoutes(_ app: Application) {
-    app.get(PathComponent.constant(ServerPaths.approvals)) { req async throws -> ApprovalsResponse in
-        let pending = await req.application.runeWeaver.approvals.list()
-        if let limit = try parseQueryLimit(req, min: 1, max: 100) {
-            return ApprovalsResponse(approvals: Array(pending.prefix(limit)))
-        }
-        return ApprovalsResponse(approvals: pending)
-    }
-
-    registerTrustGrantsRoutes(app)
-    registerQuestionResponseRoute(app)
-
-    app
-        .post(PathComponent.constant(ServerPaths.approvals), PathComponent.parameter("id"),
-              PathComponent.constant(ServerPaths.decide))
-        { req async throws -> ApprovalDecisionResponse in
-            guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-                throw Abort(.badRequest, reason: "id must be a UUID")
-            }
-            let body = try req.content.decode(ApprovalDecisionRequest.self)
-            let context = req.application.runeWeaver
-            // Capture the tagged session before resolving: `decide` removes
-            // the pending entry, so the resume path would otherwise lose
-            // which conversation to continue.
-            let pending = await context.approvals.request(id: id)
-            // Operator choices ride the answer-bearing path so an approval
-            // without a choice cannot synthesize an empty acknowledgement.
-            if pending?.toolName == "question.ask" {
-                throw Abort(.badRequest, reason: "Use /respond for question.ask")
-            }
-            let effectiveApproved: Bool
-            if let egressDecision = body.egressDecision {
-                // Persistence or grant failures never approve a run the
-                // policy did not record: allow tiers surface an error while
-                // deny tiers stand denied.
-                let applied = await applyEgressDecision(tier: egressDecision, pending: pending, context: context)
-                switch egressDecision {
-                case .allowOnce, .allowSession, .alwaysAllow:
-                    guard applied else {
-                        throw Abort(.unprocessableEntity, reason: "Egress decision could not be applied for this approval")
-                    }
-                    effectiveApproved = true
-                case .deny:
-                    effectiveApproved = false
-                case .denyAlways:
-                    // A dropped blocklist write must surface instead of
-                    // resolving as a one-time deny: the next identical call
-                    // would otherwise re-park instead of auto-denying.
-                    guard applied else {
-                        throw Abort(.unprocessableEntity, reason: "Egress decision could not be applied for this approval")
-                    }
-                    effectiveApproved = false
-                }
-            } else {
-                effectiveApproved = body.approved
-            }
-            let resolved = await context.approvals.decide(
-                id: id,
-                approved: effectiveApproved,
-                duration: body.resolvedDuration,
-                widen: body.resolvedWiden
-            )
-            guard resolved else {
-                throw Abort(.notFound, reason: "Unknown approval \(raw)")
-            }
-            // The brake clears only on an explicit owner Resume: approving the
-            // brake card releases every parked turn with fresh counters, while
-            // denying it leaves the park exactly as the owner left it.
-            if pending?.toolName == BehaviorWatchdog.brakeCardToolName, effectiveApproved {
-                await context.watchdog.resume()
-                await req.application.systemHealthSnapshot.recordWatchdogHealth(context.watchdog.health())
-            }
-            // Durable approvals create a stored grant inside `decide`, so
-            // dashboards need a refresh signal; one-shot approvals store
-            // nothing and leave the grants list untouched. Continuation
-            // approvals stay one-shot inside `decide` (coerced to thisTime
-            // with no stored grant), so a durable vote on engine.continue
-            // must not fire a refresh when nothing changed.
-            if effectiveApproved, body.resolvedDuration != .thisTime, pending?.toolName != "engine.continue", pending?.toolName != "question.ask" {
-                await context.hub.broadcastTrustGrantsChanged()
-            }
-            if pending?.sessionID != nil {
-                Task {
-                    await resumeNarratedApproval(
-                        id: id,
-                        approved: effectiveApproved,
-                        context: context,
-                        sessionID: pending?.sessionID,
-                        decidedCallID: pending?.input.callID
-                    )
-                }
-            }
-            return ApprovalDecisionResponse(id: id, approved: effectiveApproved, duration: body.resolvedDuration)
-        }
-}
-
-/// Registers operator question response route for human-in-the-loop choices.
-/// - Parameter app: Application receiving the routes.
-private func registerQuestionResponseRoute(_ app: Application) {
-    app
-        .post(PathComponent.constant(ServerPaths.approvals), PathComponent.parameter("id"),
-              PathComponent.constant(ServerPaths.respond))
-        { req async throws -> ApprovalDecisionResponse in
-            guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-                throw Abort(.badRequest, reason: "id must be a UUID")
-            }
-            let body = try req.content.decode(QuestionResponseRequest.self)
-            let context = req.application.runeWeaver
-            let pending = await context.approvals.request(id: id)
-            guard let pending else {
-                throw Abort(.notFound, reason: "Unknown approval \(raw)")
-            }
-            // The response path resumes with an operator choice, so only
-            // question approvals resolve here; other tools keep decide's
-            // egress and grant handling instead of bypassing it.
-            guard pending.toolName == "question.ask" else {
-                throw Abort(.badRequest, reason: "Use /decide for non-question approvals")
-            }
-            let isCancelled = body.cancelled == true
-            if !isCancelled {
-                let trimmedAnswer = (body.answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmedAnswer.isEmpty else {
-                    throw Abort(.badRequest, reason: "Answer must not be empty unless cancelled")
-                }
-                // Matches the persona style bound so history and synthesis
-                // cannot be blown up with unbounded operator text.
-                guard trimmedAnswer.count <= 2000 else {
-                    throw Abort(.badRequest, reason: "Answer must be at most 2000 characters")
-                }
-            }
-            let approved = !isCancelled
-            let resolved = await context.approvals.decide(
-                id: id,
-                approved: approved,
-                duration: .thisTime,
-                widen: false
-            )
-            guard resolved else {
-                throw Abort(.notFound, reason: "Unknown approval \(raw)")
-            }
-            if pending.sessionID != nil {
-                Task {
-                    await resumeNarratedApproval(
-                        id: id,
-                        approved: approved,
-                        answer: body.answer,
-                        context: context,
-                        sessionID: pending.sessionID,
-                        decidedCallID: pending.input.callID
-                    )
-                }
-            }
-            return ApprovalDecisionResponse(id: id, approved: approved, duration: .thisTime)
-        }
-}
-
 /// Registers the managed browser Python lifecycle routes backing browser settings.
 /// Thin HTTP adapters over `PlaywrightPythonEnsurer`: health reports the
 /// effective interpreter plus the live provision stage so the dashboard can
@@ -1403,7 +1176,10 @@ private func registerWebSocketRoute(_ app: Application) {
             // still be answered after the swap.
             let generation = req.runeWeaverTokenGeneration
             let (stream, continuation) = AsyncStream<String>.makeStream()
-            let connectionTask = Task { [box, context, connectionID, stream, connectionTasks, generation, auth, continuation] in
+            // The verified pulse rides in so a brake decision records its
+            // watchdog health into the same actor the health route serves.
+            let pulse = req.application.systemHealthSnapshot
+            let connectionTask = Task { [box, context, connectionID, stream, connectionTasks, generation, auth, continuation, pulse] in
                 // Register bound to the upgrade generation, then re-validate it
                 // immediately: the middleware authenticates and `onUpgrade`
                 // registers on separate hops, so a rotation can land in between.
@@ -1436,7 +1212,13 @@ private func registerWebSocketRoute(_ app: Application) {
                     if await webSocketGenerationIsRetired(auth: auth, generation: generation) {
                         break
                     }
-                    await handleWebSocketText(text, connectionID: connectionID, context: context, connectionTasks: connectionTasks)
+                    await handleWebSocketText(
+                        text,
+                        connectionID: connectionID,
+                        context: context,
+                        connectionTasks: connectionTasks,
+                        pulse: pulse
+                    )
                     if Task.isCancelled {
                         break
                     }

@@ -69,6 +69,9 @@ public struct SettingsResponse: Content, Equatable {
     public let filesRequireApprovalOnDeny: Bool
     /// Forced `files.write` posture from `[files] write_mode` (`model`, `staged`, or `live`).
     public let filesWriteMode: String
+    /// Per-path write postures from `[files] write_path_rules`, evaluated above
+    /// the global write mode with the longest matching rule winning.
+    public let filesWritePathRules: [FilesWritePathRule]
     public let browserSearxngURL: String
     public let browserSearchTimeoutSeconds: Int
     public let browserMaxResults: Int
@@ -145,6 +148,7 @@ public struct SettingsResponse: Content, Equatable {
         self.filesAllowRoots = config.files.allowRoots
         self.filesRequireApprovalOnDeny = config.files.requireApprovalOnDeny
         self.filesWriteMode = config.files.writeMode.rawValue
+        self.filesWritePathRules = config.files.writePathRules
         self.browserSearxngURL = config.browser.searxngURL
         self.browserSearchTimeoutSeconds = config.browser.searchTimeoutSeconds
         self.browserMaxResults = config.browser.maxResults
@@ -202,6 +206,7 @@ public struct SettingsResponse: Content, Equatable {
         case filesAllowRoots
         case filesRequireApprovalOnDeny
         case filesWriteMode
+        case filesWritePathRules
         case browserSearxngURL
         case browserSearchTimeoutSeconds
         case browserMaxResults
@@ -275,6 +280,8 @@ public struct SettingsResponse: Content, Equatable {
         filesAllowRoots = try container.decodeIfPresent([String].self, forKey: .filesAllowRoots) ?? []
         filesRequireApprovalOnDeny = try container.decodeIfPresent(Bool.self, forKey: .filesRequireApprovalOnDeny) ?? true
         filesWriteMode = try container.decodeIfPresent(String.self, forKey: .filesWriteMode) ?? "model"
+        filesWritePathRules = try container.decodeIfPresent([FilesWritePathRule].self, forKey: .filesWritePathRules)
+            ?? FilesWritePathRule.defaultRules
         browserSearxngURL = try container.decodeIfPresent(String.self, forKey: .browserSearxngURL) ?? ""
         browserSearchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .browserSearchTimeoutSeconds) ?? 10
         browserMaxResults = try container.decodeIfPresent(Int.self, forKey: .browserMaxResults) ?? 10
@@ -341,6 +348,7 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(filesAllowRoots, forKey: .filesAllowRoots)
         try container.encode(filesRequireApprovalOnDeny, forKey: .filesRequireApprovalOnDeny)
         try container.encode(filesWriteMode, forKey: .filesWriteMode)
+        try container.encode(filesWritePathRules, forKey: .filesWritePathRules)
         try container.encode(browserSearxngURL, forKey: .browserSearxngURL)
         try container.encode(browserSearchTimeoutSeconds, forKey: .browserSearchTimeoutSeconds)
         try container.encode(browserMaxResults, forKey: .browserMaxResults)
@@ -410,6 +418,10 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let filesRequireApprovalOnDeny: Bool?
     /// Forced `files.write` posture override (`model`, `staged`, or `live`). Nil preserves the stored value.
     public let filesWriteMode: String?
+    /// Per-path write posture patch for `[files] write_path_rules`. A present
+    /// list replaces the stored rules wholesale, including an explicit empty
+    /// one that opts every path out; nil preserves the stored entries.
+    public let filesWritePathRules: [FilesWritePathRule]?
     public let browserSearxngURL: String?
     public let browserSearchTimeoutSeconds: Int?
     public let browserMaxResults: Int?
@@ -475,6 +487,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         filesAllowRoots: [String]? = nil,
         filesRequireApprovalOnDeny: Bool? = nil,
         filesWriteMode: String? = nil,
+        filesWritePathRules: [FilesWritePathRule]? = nil,
         browserSearxngURL: String? = nil,
         browserSearchTimeoutSeconds: Int? = nil,
         browserMaxResults: Int? = nil,
@@ -527,6 +540,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.filesAllowRoots = filesAllowRoots
         self.filesRequireApprovalOnDeny = filesRequireApprovalOnDeny
         self.filesWriteMode = filesWriteMode
+        self.filesWritePathRules = filesWritePathRules
         self.browserSearxngURL = browserSearxngURL
         self.browserSearchTimeoutSeconds = browserSearchTimeoutSeconds
         self.browserMaxResults = browserMaxResults
@@ -563,6 +577,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         case voiceSTTProvider, voiceWhisperModel, voiceTTSProvider
         case containers
         case filesDenyPatterns, filesAllowRoots, filesRequireApprovalOnDeny, filesWriteMode
+        case filesWritePathRules
         case browserSearxngURL, browserSearchTimeoutSeconds, browserMaxResults
         case browserTimeoutSeconds, browserFetchTimeoutSeconds
         case searchSearxngURL, searchTimeoutSeconds, searchMaxResults
@@ -602,6 +617,9 @@ public struct UpdateSettingsRequest: Content, Equatable {
         filesAllowRoots = try container.decodeIfPresent([String].self, forKey: .filesAllowRoots)
         filesRequireApprovalOnDeny = try container.decodeIfPresent(Bool.self, forKey: .filesRequireApprovalOnDeny)
         filesWriteMode = try container.decodeIfPresent(String.self, forKey: .filesWriteMode)
+        // A closed-set posture fails the strict decode here, so a typo stays a
+        // caller 400 naming the entry rather than silently defaulting it.
+        filesWritePathRules = try container.decodeIfPresent([FilesWritePathRule].self, forKey: .filesWritePathRules)
         browserSearxngURL = try container.decodeIfPresent(String.self, forKey: .browserSearxngURL)
         browserSearchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .browserSearchTimeoutSeconds)
         browserMaxResults = try container.decodeIfPresent(Int.self, forKey: .browserMaxResults)
@@ -670,44 +688,9 @@ public struct ContainersSettingsUpdate: Content, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case memoryMB = "memory_mb"
-        case memoryMBCamel = "memoryMb"
-        case maxConcurrent = "max_concurrent"
-        case maxConcurrentCamel = "maxConcurrent"
-        case ttlMinutes = "ttl_minutes"
-        case ttlMinutesCamel = "ttlMinutes"
-    }
-
-    /// Decodes a partial containers patch accepting snake_case and camelCase aliases.
-    ///
-    /// Snake_case stays canonical so persisted files round-trip unchanged; the
-    /// camelCase spellings mirror the dashboard contract and fall back only
-    /// when the snake key is absent. When both spellings arrive the snake value
-    /// wins so the two contracts cannot fork the stored policy.
-    /// - Parameter decoder: Decoder carrying the patch.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let snakeMemory = try container.decodeIfPresent(Int.self, forKey: .memoryMB)
-        let camelMemory = try container.decodeIfPresent(Int.self, forKey: .memoryMBCamel)
-        memoryMB = snakeMemory ?? camelMemory
-        let snakeMax = try container.decodeIfPresent(Int.self, forKey: .maxConcurrent)
-        let camelMax = try container.decodeIfPresent(Int.self, forKey: .maxConcurrentCamel)
-        maxConcurrent = snakeMax ?? camelMax
-        let snakeTTL = try container.decodeIfPresent(Int.self, forKey: .ttlMinutes)
-        let camelTTL = try container.decodeIfPresent(Int.self, forKey: .ttlMinutesCamel)
-        ttlMinutes = snakeTTL ?? camelTTL
-    }
-
-    /// Encodes a partial containers patch using canonical snake_case keys.
-    ///
-    /// CamelCase aliases decode but never encode so saved payloads keep the
-    /// file shape and a round-trip never invents a second spelling.
-    /// - Parameter encoder: Encoder receiving the patch.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(memoryMB, forKey: .memoryMB)
-        try container.encodeIfPresent(maxConcurrent, forKey: .maxConcurrent)
-        try container.encodeIfPresent(ttlMinutes, forKey: .ttlMinutes)
+        case memoryMB = "memoryMb"
+        case maxConcurrent
+        case ttlMinutes
     }
 
     /// Merges this patch onto the stored policy, preserving every field the
@@ -923,6 +906,49 @@ extension UpdateSettingsRequest {
             // value throws before the merge reaches the persisted file.
             files.writeMode = try RuneWeaverConfig.validateFilesWriteMode(filesWriteMode)
         }
+        if let filesWritePathRules {
+            // The list and each path stay bounded exactly as the config
+            // document bounds them, so a settings PUT refuses a policy the
+            // TOML load would refuse instead of persisting an unbounded rule
+            // set the write-path classifier would have to fan out over.
+            files.writePathRules = try Self.validatedWritePathRules(filesWritePathRules)
+        }
+    }
+
+    /// Validates one `write_path_rules` patch against the bounds the config
+    /// document enforces.
+    ///
+    /// Mirrors `FilesWritePathRule.maxRuleCount` and
+    /// `FilesWritePathRule.maxPathLength` so the PUT path and the file-load
+    /// path refuse the same list with the same field and message; paths store
+    /// trimmed so a padded entry never reads as a longer prefix than it names.
+    /// - Parameter rules: Raw rules from the request.
+    /// - Returns: The validated rules in stored spelling.
+    /// - Throws: `ConfigError.validationError` on an over-long list, a blank
+    ///   path, or an over-bound path.
+    private static func validatedWritePathRules(_ rules: [FilesWritePathRule]) throws -> [FilesWritePathRule] {
+        guard rules.count <= FilesWritePathRule.maxRuleCount else {
+            throw ConfigError.validationError(
+                field: "files.write_paths",
+                message: "must contain at most \(FilesWritePathRule.maxRuleCount) entries (got \(rules.count))"
+            )
+        }
+        var validated: [FilesWritePathRule] = []
+        validated.reserveCapacity(rules.count)
+        for rule in rules {
+            let trimmedPath = rule.path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedPath.isEmpty else {
+                throw ConfigError.validationError(field: "files.write_paths.path", message: "must not be empty")
+            }
+            guard trimmedPath.count <= FilesWritePathRule.maxPathLength else {
+                throw ConfigError.validationError(
+                    field: "files.write_paths.path",
+                    message: "must be at most \(FilesWritePathRule.maxPathLength) characters (got \(trimmedPath.count))"
+                )
+            }
+            validated.append(FilesWritePathRule(path: trimmedPath, posture: rule.posture))
+        }
+        return validated
     }
 
     private func applyBrowser(to browser: inout BrowserConfig) {
@@ -1028,6 +1054,14 @@ extension UpdateSettingsRequest {
         memoryRecallPerTierLimit != nil || memoryRecallAutoLimit != nil || memoryRecallThreshold != nil
             || memoryRecallMaxChars != nil || memoryRecallPerHitChars != nil
             || memoryRecallDocPoolMultiplier != nil || memoryRecallEpisodicWeight != nil
+    }
+
+    /// Whether this request carries any `[files]` key, including the per-path
+    /// write rules. The settings route uses this to apply the saved policy to
+    /// the live gate and rebuild the file tools without a restart.
+    public var carriesFilesPatch: Bool {
+        filesDenyPatterns != nil || filesAllowRoots != nil || filesRequireApprovalOnDeny != nil
+            || filesWriteMode != nil || filesWritePathRules != nil
     }
 
     /// Whether a hostname binds loopback only. Non-loopback binds need a

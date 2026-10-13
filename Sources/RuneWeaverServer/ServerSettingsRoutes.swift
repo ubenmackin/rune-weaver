@@ -645,11 +645,14 @@ private func reloadLiveDesktopTools(body: UpdateSettingsRequest, config: RuneWea
 ///     rebuild instead of churning them on every full-form save.
 private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext, bashChanged: Bool, containersChanged: Bool) async {
     let hasBashPatch = bashChanged
-    let hasFilesPatch = body.filesDenyPatterns != nil || body.filesAllowRoots != nil || body.filesRequireApprovalOnDeny != nil || body.filesWriteMode != nil
+    let hasFilesPatch = body.carriesFilesPatch
     let hasWorkspacePatch = body.workspace.map { !$0.isEmpty } ?? false
     let hasContainersPatch = containersChanged
     guard hasBashPatch || hasFilesPatch || hasWorkspacePatch || hasContainersPatch else { return }
     context.setBashFiles(bash: config.bash, files: config.files)
+    // Snapshot the swapped pair once so the gate update and the tool rebuilds
+    // below observe the same fresh policies a concurrent turn cannot interleave.
+    let live = context.bashFilesSnapshot()
     if hasContainersPatch {
         context.containersConfig = config.containers
         await StrictTurnRegistry.shared.applyContainersConfig(config.containers)
@@ -658,11 +661,16 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
     if hasBashPatch {
         await context.permissionGate.updateBashConfig(config.bash)
     }
+    if hasFilesPatch {
+        // The gate reads the write posture before the tool runs, so the saved
+        // `[files]` section has to reach it here or a live `write_mode` would
+        // keep classifying under the policy the boot loaded.
+        await context.permissionGate.updateFilesConfig(live.files)
+    }
     if hasWorkspacePatch {
         await context.workspaceStore.updateConfig(config.workspace)
         await context.permissionGate.updateWorkspaceRoot(context.workspaceStore.root())
     }
-    let live = context.bashFilesSnapshot()
     if hasFilesPatch {
         // The rebuilt write tool keeps the same supersede propagation hook so
         // a saved `write_mode` cannot silently drop the `file_superseded`

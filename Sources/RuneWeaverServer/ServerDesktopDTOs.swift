@@ -46,9 +46,9 @@ public struct DesktopSettingsUpdate: Content, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case maxImageDimension = "max_image_dimension"
-        case jpegQuality = "jpeg_quality"
-        case blockedApps = "blocked_apps"
+        case maxImageDimension
+        case jpegQuality
+        case blockedApps
     }
 }
 

@@ -100,7 +100,7 @@ struct ApprovalTargetMatchingTests {
     }
 
     @Test
-    func `thisTime approval records no trust even when widen is requested`() async {
+    func `thisTime approval records no trust even when a scope is requested`() async {
         let gate = PermissionGate()
         let queue = ApprovalQueue(permissionGate: gate)
         let call = ToolInput(
@@ -113,10 +113,11 @@ struct ApprovalTargetMatchingTests {
             input: call
         )
 
-        // A one-shot decision must stay one-shot: the widen flag never overrides
-        // the thisTime guard, so no grant is minted and the next call parks again.
-        #expect(await queue.decide(id: request.id, approved: true, duration: .thisTime, widen: true) == true)
-        #expect(await gate.activeGrants().isEmpty == true)
+        // A one-shot decision must stay one-shot: the requested scope never
+        // overrides the thisTime guard, so no rule is minted and the next call
+        // parks again.
+        #expect(await queue.decide(id: request.id, approved: true, duration: .thisTime, scope: .toolWide) == true)
+        #expect(await gate.activeRules().isEmpty == true)
 
         let verdict = await gate.checkPermission(toolCall: call, tool: ApiRequestProbeTool())
         guard case .requiresApproval = verdict else {
@@ -168,11 +169,11 @@ struct ApprovalTargetMatchingTests {
         // defensive guard so a directly enqueued request can never key a grant
         // on a display name even when the owner chooses a durable tier.
         #expect(await queue.decide(id: request.id, approved: true, duration: .forever) == true)
-        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await gate.activeRules().isEmpty == true)
     }
 
     @Test
-    func `messages.send widen decision mints no grant`() async {
+    func `messages.send tool-wide decision mints no grant`() async {
         let gate = PermissionGate()
         let queue = ApprovalQueue(permissionGate: gate)
         let call = ToolInput(toolName: "messages.send", argumentsJSON: #"{"recipient":"+15551234567","text":"Hi"}"#)
@@ -182,10 +183,10 @@ struct ApprovalTargetMatchingTests {
             input: call
         )
 
-        // There is no tool-wide send scope: even an explicit widen decision
+        // There is no tool-wide send scope: even an explicit tool-wide decision
         // stores nothing, while the approved call itself still proceeds.
-        #expect(await queue.decide(id: request.id, approved: true, duration: .forever, widen: true) == true)
-        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await queue.decide(id: request.id, approved: true, duration: .forever, scope: .toolWide) == true)
+        #expect(await gate.activeRules().isEmpty == true)
     }
 
     @Test
@@ -208,7 +209,7 @@ struct ApprovalTargetMatchingTests {
             await gate.grantTrust(for: descriptor, duration: .forever)
         }
 
-        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await gate.activeRules().isEmpty == true)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "messages.send")) == false)
 
         // A later handle-shaped send still parks instead of riding a stored
@@ -258,7 +259,7 @@ struct ApprovalTargetMatchingTests {
             #expect(result.isError == false)
         }
         #expect(await handlerCalls.count == 2)
-        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await gate.activeRules().isEmpty == true)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "messages.send", target: "+15551234567")) == false)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "messages.send")) == false)
 
@@ -270,7 +271,7 @@ struct ApprovalTargetMatchingTests {
 
     @Test
     func `CLI-style durable approval stores only the canonical handle grant`() async {
-        // Reproduces `ChatCommand.configureApprovalHandler` without the REPL:
+        // Reproduces the CLI's durable-approval handler without the REPL:
         // the handler derives the descriptor from the call and mints it straight
         // through the gate. Malformed and name-shaped calls must leave the grant
         // list empty; a handle-shaped call must store exactly its canonical
@@ -297,7 +298,7 @@ struct ApprovalTargetMatchingTests {
             )
             #expect(result.isError == false)
         }
-        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await gate.activeRules().isEmpty == true)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "messages.send")) == false)
         #expect(await handlerCalls.count == 3)
 
@@ -305,7 +306,10 @@ struct ApprovalTargetMatchingTests {
         let approved = await bus.execute(toolCall: handle, context: ToolContext(conversationID: UUID()))
         #expect(approved.isError == false)
         let canonical = ActionDescriptor(toolName: "messages.send", target: "+15551234567")
-        #expect(await gate.activeGrants().map(\.actionDescriptor) == [canonical])
+        let rules = await gate.activeRules()
+        #expect(rules.count == 1)
+        #expect(rules.first?.toolName == canonical.toolName)
+        #expect(rules.first?.scope == .exactTarget(canonical.target))
         #expect(await handlerCalls.count == 4)
 
         let respelled = ToolInput(toolName: "messages.send", argumentsJSON: #"{"recipient":"+15551234567","text":"again"}"#)
@@ -315,20 +319,21 @@ struct ApprovalTargetMatchingTests {
     }
 
     @Test
-    func `legacy tool-wide messages.send grant is dropped and never covers a send`() async {
-        // A row written before the per-recipient invariant may carry the empty
-        // target. It is dropped at load and, even if it survived, an empty send
-        // target is an invalid descriptor rather than a tool-wide scope, so it
-        // can never authorize a send.
-        let legacy = TrustGrant(
-            actionDescriptor: ActionDescriptor(toolName: "messages.send", target: ""),
+    func `legacy tool-wide messages.send rule is dropped and never covers a send`() async throws {
+        // A row written before the per-recipient invariant may carry the
+        // tool-wide scope. It is dropped at load and, even if it survived, a
+        // tool-wide send scope is an invalid rule shape rather than a scope
+        // that can authorize a send.
+        let legacy = try #require(AccessRule(
+            toolName: "messages.send",
+            scope: .toolWide,
+            action: .allow,
             grantedAt: Date(),
-            expiresAt: nil,
             duration: .forever
-        )
-        let store = InMemoryTrustStore(grants: [legacy])
-        let gate = await PermissionGate.load(store: store)
-        #expect(await gate.activeGrants().isEmpty == true)
+        ))
+        let store = InMemoryAccessRuleStore(rules: [legacy])
+        let gate = await PermissionGate.load(ruleStore: store)
+        #expect(await gate.activeRules().isEmpty == true)
 
         let tool = MessagesSendProbeTool()
         let handle = ToolInput(toolName: "messages.send", argumentsJSON: #"{"recipient":"+15551234567","text":"Hi"}"#)
@@ -344,7 +349,7 @@ struct ApprovalTargetMatchingTests {
         let gate = PermissionGate()
         let canonical = ActionDescriptor(toolName: "messages.send", target: "+15551234567")
         await gate.grantTrust(for: canonical, duration: .forever)
-        guard let grant = await gate.activeGrants().first else {
+        guard let rule = await gate.activeRules().first else {
             Issue.record("Expected the canonical send grant")
             return
         }
@@ -354,10 +359,13 @@ struct ApprovalTargetMatchingTests {
         // as approved. The outcome is `notWidenable`, never `notFound`, so the
         // widen route cannot misreport the live grant as unknown.
         #expect(
-            await gate.widenGrant(id: grant.id)
+            await gate.widenGrant(id: rule.id)
                 == .notWidenable(reason: GrantWidenOutcome.messagesSendRefusal)
         )
-        #expect(await gate.activeGrants().map(\.actionDescriptor) == [canonical])
+        let survivor = await gate.activeRules()
+        #expect(survivor.count == 1)
+        #expect(survivor.first?.toolName == canonical.toolName)
+        #expect(survivor.first?.scope == .exactTarget(canonical.target))
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "messages.send")) == false)
     }
 

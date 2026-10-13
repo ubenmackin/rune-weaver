@@ -415,8 +415,8 @@ struct FilesAccessGuardTests {
         // the engine-owned set a subset of the defaults means a config copied
         // from the shipped example (and its web mirror) can never drift below
         // the guard's floor without a test failing here.
-        #expect(FilesAccessGuard.alwaysDenyPatterns.isEmpty == false)
-        for pattern in FilesAccessGuard.alwaysDenyPatterns {
+        #expect(WritePathPolicy.alwaysDenyPatterns.isEmpty == false)
+        for pattern in WritePathPolicy.alwaysDenyPatterns {
             #expect(
                 FilesConfig.defaultDenyPatterns.contains(pattern),
                 "Missing shipped default for \(pattern)"

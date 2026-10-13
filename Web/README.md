@@ -10,7 +10,7 @@ Static web dashboard for the Rune Weaver engine:
   - **Runs**: `RunLogViewer` and `RunDetailModal` with hierarchical fan-out worker swarm tracking and granular worker cancellation.
 - **Memory Browser**: Search and manage episodic conversation history and semantic profile facts.
 - **Index Status**: `IndexingPanel` with cold-boot fast/slow split, content breakdown (files, mail, messages), and maintenance tools (prune, reset, reclaim).
-- **Security Policy**: `PolicyPane` for managing declarative egress allowlists, homelab local exemptions, and SSRF loopback protections in `policy.toml`.
+- **Security Policy**: `AccessNetworkSection` and `AccessCredentialsSection` for managing declarative egress allowlists, homelab local exemptions, and SSRF loopback protections in `policy.toml`.
 - **Settings**: `SettingsManager` with in-page search, tool toggles, media integrations (Sonarr/Radarr), goals, proactivity, secrets management, and access token rotation.
 - **Owner Auth**: `LoginView` providing single-owner bearer token login and sliding 24h durable session cookies (`rw_session`) for remote or non-loopback binds.
 

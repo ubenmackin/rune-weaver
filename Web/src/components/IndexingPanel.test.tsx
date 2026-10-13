@@ -87,12 +87,12 @@ const indexConfig = {
   messages: false,
   roots: ["~"],
   exclude: [".git", "node_modules"],
-  max_file_mb: 20,
-  mail_vector_window: "2y",
-  icloud_evicted: "skip",
-  describe_images_with_llm: false,
-  nightly_budget: 0,
-  db_path: "~/.runeweaver/index.db",
+  maxFileMB: 20,
+  mailVectorWindow: "2y",
+  iCloudEvicted: "skip",
+  describeImagesWithLLM: false,
+  nightlyBudget: 0,
+  dbPath: "~/.runeweaver/index.db",
 };
 
 const statusPayload = {
@@ -1016,7 +1016,7 @@ describe("IndexingPanel", () => {
     expect(patch?.enabled).toBe(true);
     expect(patch?.mail).toBe(true);
     expect(patch?.exclude).toEqual([".git", "node_modules"]);
-    expect(patch?.mail_vector_window).toBe("2y");
+    expect(patch?.mailVectorWindow).toBe("2y");
     // Presets derive workers on the engine so they must save 0; only custom
     // carries an explicit count, otherwise the engine rejects with 400.
     expect(patch?.effort).toBe("balanced");
@@ -1024,18 +1024,18 @@ describe("IndexingPanel", () => {
     // The capped vector path stays configurable: the save carries the
     // per-document cap (fixture omits it so it degrades to the engine
     // default) alongside the [index]-only patch.
-    expect(patch?.max_vector_chunks_per_document).toBe(
+    expect(patch?.maxVectorChunksPerDocument).toBe(
       DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT,
     );
     // The Trash-class denylist rides the same save path: the fixture omits
     // it so it degrades to the engine default instead of failing.
-    expect(patch?.mailbox_deny).toEqual(["Trash", "Junk", "Spam", "Deleted*"]);
+    expect(patch?.mailboxDeny).toEqual(["Trash", "Junk", "Spam", "Deleted*"]);
   });
 
   it("edits denied mailboxes through its own textarea on the save path", async () => {
     const user = userEvent.setup();
     const { fetchMock, calls } = stubFetch({
-      settings: { ...indexConfig, mailbox_deny: ["Trash", "Junk"] },
+      settings: { ...indexConfig, mailboxDeny: ["Trash", "Junk"] },
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -1063,7 +1063,7 @@ describe("IndexingPanel", () => {
     );
     expect(put).toBeDefined();
     const patch = (put?.body as { index?: Record<string, unknown> })?.index;
-    expect(patch?.mailbox_deny).toEqual(["Trash", "Archive*"]);
+    expect(patch?.mailboxDeny).toEqual(["Trash", "Archive*"]);
   });
 
   it("restarts the running scan on policy save", async () => {
@@ -1262,7 +1262,7 @@ describe("IndexingPanel", () => {
     }
     // The Trash-class denylist mirrors IndexConfig.defaultMailboxDeny so the
     // fresh form and the back-compat fallback cannot drift.
-    expect(DEFAULT_INDEX_CONFIG.mailbox_deny).toEqual([
+    expect(DEFAULT_INDEX_CONFIG.mailboxDeny).toEqual([
       "Trash",
       "Junk",
       "Spam",
@@ -3060,7 +3060,7 @@ describe("IndexingPanel effort control", () => {
     expect(resolveIndexWorkersValue({ workers: 6 })).toBe(6);
     expect(resolveIndexWorkersValue({})).toBeNull();
     expect(resolveIndexWorkersValue(null)).toBeNull();
-    expect(resolveIndexVectorCapValue({ max_vector_chunks_per_document: 64 })).toBe(64);
+    expect(resolveIndexVectorCapValue({ maxVectorChunksPerDocument: 64 })).toBe(64);
     expect(resolveIndexVectorCapValue({})).toBeNull();
   });
 
@@ -3166,7 +3166,7 @@ describe("IndexPolicyPanel index scope", () => {
       "Nothing outside the configured roots is ever scanned.",
     );
     expect(formatIndexScopeRoots([])).toBe("no configured roots");
-    expect(resolveAlwaysSkipped({ always_skipped: ["Music", ".git"] })).toEqual([
+    expect(resolveAlwaysSkipped({ alwaysSkipped: ["Music", ".git"] })).toEqual([
       "Music",
       ".git",
     ]);
@@ -3179,7 +3179,7 @@ describe("IndexPolicyPanel index scope", () => {
       settings: {
         ...indexConfig,
         roots: ["~/Documents", "~/Code"],
-        always_skipped: ["Music", "Pictures", ".git"],
+        alwaysSkipped: ["Music", "Pictures", ".git"],
       },
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -3200,7 +3200,7 @@ describe("IndexPolicyPanel index scope", () => {
 
   it("names the home directory for the default root", async () => {
     const { fetchMock } = stubFetch({
-      settings: { ...indexConfig, roots: ["~"], always_skipped: ["Music", ".git"] },
+      settings: { ...indexConfig, roots: ["~"], alwaysSkipped: ["Music", ".git"] },
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -3215,14 +3215,14 @@ describe("IndexPolicyPanel index scope", () => {
   });
 
   it("renders the always-skipped names from the payload rather than a literal", async () => {
-    // Sentinel names prove the list renders from `always_skipped` data, while
+    // Sentinel names prove the list renders from `alwaysSkipped` data, while
     // the outer block carries no hardcoded walker names so the copy cannot
     // drift from FilesIndexer.alwaysSkippedPatterns.
     const { fetchMock } = stubFetch({
       settings: {
         ...indexConfig,
         roots: ["~"],
-        always_skipped: ["SentinelSkipAlpha", "SentinelSkipBeta"],
+        alwaysSkipped: ["SentinelSkipAlpha", "SentinelSkipBeta"],
       },
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -3886,7 +3886,7 @@ describe("IndexPolicyPanel index roots editor", () => {
     expect(patch?.roots).toEqual(["~/Documents", "~/Code"]);
     // Exclude and mailbox deny editors ride the same save untouched.
     expect(patch?.exclude).toEqual([".git", "node_modules"]);
-    expect(patch?.mailbox_deny).toEqual(["Trash", "Junk", "Spam", "Deleted*"]);
+    expect(patch?.mailboxDeny).toEqual(["Trash", "Junk", "Spam", "Deleted*"]);
   });
 
   it("names live roots in the subtitle without the hardcoded home copy", async () => {

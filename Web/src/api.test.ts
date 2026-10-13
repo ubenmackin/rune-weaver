@@ -8,11 +8,11 @@ import {
   authenticateWithToken,
   cancelChat,
   canonicalRestartHost,
-  changeDurationGrant,
   clearAuthToken,
   clearEpisodes,
   concurrentTurnsBusyMessage,
   createJob,
+  createRule,
   decideApproval,
   DEFAULT_CONTAINERS_MAX_CONCURRENT,
   DEFAULT_CONTAINERS_MEMORY_MB,
@@ -37,6 +37,7 @@ import {
   goalProgressPercent,
   goalStatusLabel,
   goalStatusTone,
+  isAccessScope,
   isAuthenticatedHealth,
   isGoalNeedsInputProactive,
   isSessionAuthenticated,
@@ -44,7 +45,7 @@ import {
   listJobs,
   listRecentEpisodes,
   listRuns,
-  listTrustGrants,
+  listRules,
   MAX_CONCURRENT_CHAT_TURNS,
   MAX_CONCURRENT_CHAT_TURNS_HEADER,
   normalizeServerAllowedHost,
@@ -55,13 +56,15 @@ import {
   parseToolProgress,
   placeholderCallIDsInText,
   postChat,
+  rearmRule,
   resolveMaxConcurrentChatTurns,
-  revokeTrustGrant,
+  revokeRule,
   rotateToken,
   runJobNow,
   RUN_LOG_POLL_LIMIT,
   RUN_POLL_INTERVAL_MS,
   searchMemory,
+  sessionTrust,
   setAuthToken,
   storeFact,
   storeSecret,
@@ -71,6 +74,7 @@ import {
   updateJob,
   validateServerAllowedHost,
   validateServerHostname,
+  widenRule,
   acceptIdea,
   dismissIdea,
   getIdeasSummary,
@@ -85,6 +89,7 @@ import {
   goalsMaxToolIterations,
   schedulerMaxToolIterations,
   schedulerJobEffectiveMaxToolIterations,
+  type AccessScopeDTO,
 } from "./api";
 import { jsonResponse } from "./test-utils/http";
 
@@ -156,7 +161,7 @@ describe("dashboard api client", () => {
     expect(JSON.parse(blankInit.body as string)).not.toHaveProperty("reason");
   });
 
-  it("lists approvals and decides with durations", async () => {
+  it("lists approvals and decides with the single payload", async () => {
     const fetchMock = vi
       .fn(async (input: string, init?: RequestInit) => {
         if (input === "/approvals") {
@@ -172,10 +177,163 @@ describe("dashboard api client", () => {
     expect(decided.duration).toBe("oneHour");
     const [path, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(path).toBe("/approvals/a1/decide");
-    expect(JSON.parse(init.body as string)).toMatchObject({
+    // The body carries exactly {approved, duration, scope}: the legacy widen
+    // and egressDecision keys are gone, so one decision never smuggles a
+    // second trust instruction the engine would have to reconcile.
+    expect(JSON.parse(init.body as string)).toEqual({
       approved: true,
       duration: "oneHour",
     });
+  });
+
+  it("decides with a tool-wide scope", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ id: "a1", approved: true, duration: "forever" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await decideApproval("a1", true, "forever", { kind: "tool" });
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(path).toBe("/approvals/a1/decide");
+    expect(JSON.parse(init.body as string)).toEqual({
+      approved: true,
+      duration: "forever",
+      scope: { kind: "tool" },
+    });
+  });
+
+  it("decides with a domain scope for an egress host", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ id: "a2", approved: true, duration: "forever" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await decideApproval("a2", true, "forever", {
+      kind: "domain",
+      host: "api.example.com",
+    });
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(JSON.parse(init.body as string)).toEqual({
+      approved: true,
+      duration: "forever",
+      scope: { kind: "domain", host: "api.example.com" },
+    });
+  });
+
+  it("decides with an exact target scope naming a canonical handle", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ id: "a3", approved: true, duration: "oneHour" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await decideApproval("a3", true, "oneHour", {
+      kind: "exactTarget",
+      target: "+15551234567",
+    });
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(JSON.parse(init.body as string)).toEqual({
+      approved: true,
+      duration: "oneHour",
+      scope: { kind: "exactTarget", target: "+15551234567" },
+    });
+  });
+
+  it("decides with a recipient set scope", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ id: "a4", approved: true, duration: "oneDay" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await decideApproval("a4", true, "oneDay", {
+      kind: "recipientSet",
+      handles: ["+15551234567", "mom@example.com"],
+    });
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(JSON.parse(init.body as string)).toEqual({
+      approved: true,
+      duration: "oneDay",
+      scope: {
+        kind: "recipientSet",
+        handles: ["+15551234567", "mom@example.com"],
+      },
+    });
+  });
+
+  it("denies this time with no stored scope", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ id: "a5", approved: false, duration: "thisTime" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await decideApproval("a5", false, "thisTime");
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(path).toBe("/approvals/a5/decide");
+    // A one-shot denial stores nothing, so the payload names no scope at all
+    // rather than sending a null the engine would have to interpret.
+    expect(JSON.parse(init.body as string)).toEqual({
+      approved: false,
+      duration: "thisTime",
+    });
+  });
+
+  it("refuses a malformed scope before the wire", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ id: "a1", approved: true, duration: "forever" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const malformed: Array<unknown> = [
+      { kind: "domain" },
+      { kind: "domain", host: "  " },
+      { kind: "exactTarget" },
+      { kind: "exactTarget", target: 7 },
+      { kind: "recipientSet", handles: [] },
+      { kind: "recipientSet", handles: ["+15551234567", " "] },
+      { kind: "widenAll" },
+      "tool",
+    ];
+    for (const scope of malformed) {
+      await expect(
+        decideApproval("a1", true, "forever", scope as AccessScopeDTO),
+      ).rejects.toBeInstanceOf(ApiError);
+    }
+    // The guard runs before fetch, so a malformed scope never reaches the
+    // engine and no decision is recorded from a drifted DTO.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed access scopes in the guard", () => {
+    // Every well-formed kind passes with only its per-kind fields.
+    expect(isAccessScope({ kind: "tool" })).toBe(true);
+    expect(isAccessScope({ kind: "exactTarget", target: "a@b.com" })).toBe(
+      true,
+    );
+    expect(
+      isAccessScope({ kind: "recipientSet", handles: ["+15551234567"] }),
+    ).toBe(true);
+    expect(isAccessScope({ kind: "domain", host: "example.com" })).toBe(true);
+    // Unknown kinds, missing or blank fields, wrong field types, and an empty
+    // handle set all fail closed.
+    expect(isAccessScope({ kind: "widenAll" })).toBe(false);
+    expect(isAccessScope({ kind: "domain" })).toBe(false);
+    expect(isAccessScope({ kind: "domain", host: "" })).toBe(false);
+    expect(isAccessScope({ kind: "exactTarget", target: 7 })).toBe(false);
+    expect(isAccessScope({ kind: "recipientSet", handles: [] })).toBe(false);
+    expect(isAccessScope({ kind: "recipientSet", handles: "one" })).toBe(false);
+    expect(isAccessScope({ kind: "recipientSet" })).toBe(false);
+    expect(isAccessScope({ kind: 7 })).toBe(false);
+    expect(isAccessScope([{ kind: "tool" }])).toBe(false);
+    expect(isAccessScope("tool")).toBe(false);
+    expect(isAccessScope(null)).toBe(false);
   });
 
   it("searches memory and manages facts", async () => {
@@ -593,16 +751,17 @@ describe("dashboard api client", () => {
     });
   });
 
-  it("lists trust grants from the grants endpoint", async () => {
+  it("lists durable rules from the rules endpoint", async () => {
     const now = new Date().toISOString();
     const future = new Date(Date.now() + 3600_000).toISOString();
     const fetchMock = vi.fn(async () =>
       jsonResponse({
-        grants: [
+        rules: [
           {
             id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             toolName: "email.send",
-            target: "alice@example.com",
+            scope: { kind: "exactTarget", target: "alice@example.com" },
+            effect: "allow",
             grantedAt: now,
             expiresAt: future,
             duration: "oneHour",
@@ -611,8 +770,9 @@ describe("dashboard api client", () => {
           },
           {
             id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-            toolName: "file.write",
-            target: "",
+            toolName: "api.request",
+            scope: { kind: "domain", host: "blocked.example.com" },
+            effect: "deny",
             grantedAt: now,
             expiresAt: null,
             duration: "forever",
@@ -624,35 +784,45 @@ describe("dashboard api client", () => {
       }),
     );
     vi.stubGlobal("fetch", fetchMock);
-    const listed = await listTrustGrants();
+    const listed = await listRules();
     expect(listed.count).toBe(2);
-    expect(listed.grants[0].toolName).toBe("email.send");
-    // Forever grants keep a null expiry through the client so the inbox can
+    expect(listed.rules[0].toolName).toBe("email.send");
+    // The scope rides the same DTO the decision path sends, so one vocabulary
+    // describes what every rule covers.
+    expect(listed.rules[0].scope).toEqual({
+      kind: "exactTarget",
+      target: "alice@example.com",
+    });
+    // A `forever` refusal mints a deny rule that rides the same list as an
+    // allow rule, distinguished only by its effect.
+    expect(listed.rules[1].effect).toBe("deny");
+    // Forever rules keep a null expiry through the client so the inbox can
     // branch on never-expires without sentinel-date comparisons.
-    expect(listed.grants[1].expiresAt).toBeNull();
+    expect(listed.rules[1].expiresAt).toBeNull();
     // Usage counters ride the same payload so the inbox proves liveness
     // without re-deriving it from run history.
-    expect(listed.grants[0].useCount).toBe(3);
-    expect(listed.grants[0].lastUsedAt).toBe(now);
-    // Untouched grants encode the zero baseline explicitly rather than
+    expect(listed.rules[0].useCount).toBe(3);
+    expect(listed.rules[0].lastUsedAt).toBe(now);
+    // Untouched rules encode the zero baseline explicitly rather than
     // omitting the fields.
-    expect(listed.grants[1].useCount).toBe(0);
-    expect(listed.grants[1].lastUsedAt).toBeNull();
+    expect(listed.rules[1].useCount).toBe(0);
+    expect(listed.rules[1].lastUsedAt).toBeNull();
     const [path] = fetchMock.mock.calls[0] as unknown as [string];
-    expect(path).toBe("/approvals/grants");
+    expect(path).toBe("/approvals/rules");
     expect(path.startsWith("http")).toBe(false);
   });
 
-  it("tolerates legacy trust grants without usage fields", async () => {
+  it("tolerates legacy rules without usage fields", async () => {
     const now = new Date().toISOString();
     const future = new Date(Date.now() + 3600_000).toISOString();
     const fetchMock = vi.fn(async () =>
       jsonResponse({
-        grants: [
+        rules: [
           {
             id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             toolName: "email.send",
-            target: "legacy@example.com",
+            scope: { kind: "exactTarget", target: "legacy@example.com" },
+            effect: "allow",
             grantedAt: now,
             expiresAt: future,
             duration: "oneHour",
@@ -662,56 +832,78 @@ describe("dashboard api client", () => {
       }),
     );
     vi.stubGlobal("fetch", fetchMock);
-    const listed = await listTrustGrants();
+    const listed = await listRules();
     expect(listed.count).toBe(1);
     // Rows minted before tracking carry no counter keys; the client must pass
     // them through as missing so the inbox degrades to untouched.
-    expect(listed.grants[0].useCount).toBeUndefined();
-    expect(listed.grants[0].lastUsedAt).toBeUndefined();
-    expect(listed.grants[0].toolName).toBe("email.send");
+    expect(listed.rules[0].useCount).toBeUndefined();
+    expect(listed.rules[0].lastUsedAt).toBeUndefined();
+    expect(listed.rules[0].toolName).toBe("email.send");
   });
 
-  it("revokes a trust grant with an encoded DELETE", async () => {
+  it("revokes a rule with an encoded DELETE", async () => {
     const seen: Array<{ path: string; method?: string }> = [];
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
       seen.push({ path: input, method: init?.method });
       return new Response(null, { status: 204 });
     });
     vi.stubGlobal("fetch", fetchMock);
-    await revokeTrustGrant("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
-    expect(seen[0].path).toBe("/approvals/grants/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    await revokeRule("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    expect(seen[0].path).toBe(
+      "/approvals/rules/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    );
     expect(seen[0].method).toBe("DELETE");
     // Identifiers travel encoded so reserved characters never split the route.
-    await revokeTrustGrant("a/b c");
-    expect(seen[1].path).toBe("/approvals/grants/a%2Fb%20c");
+    await revokeRule("a/b c");
+    expect(seen[1].path).toBe("/approvals/rules/a%2Fb%20c");
     expect(seen[1].method).toBe("DELETE");
   });
 
-  it("surfaces trust grant failures as ApiError", async () => {
-    // A revoked-elsewhere grant reports 404 with the engine reason so the
+  it("widens a rule with a POST to the widen subpath", async () => {
+    const seen: Array<{ path: string; method?: string }> = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      seen.push({ path: input, method: init?.method });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await widenRule("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    expect(seen[0].path).toBe(
+      "/approvals/rules/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/widen",
+    );
+    expect(seen[0].method).toBe("POST");
+    // The widen route takes no body: the engine recomputes the tool-wide scope
+    // from the stored rule identity, so the client only names the rule.
+    // Identifiers travel encoded so reserved characters never split the route.
+    await widenRule("a/b c");
+    expect(seen[1].path).toBe("/approvals/rules/a%2Fb%20c/widen");
+    expect(seen[1].method).toBe("POST");
+  });
+
+  it("surfaces rule failures as ApiError", async () => {
+    // A revoked-elsewhere rule reports 404 with the engine reason so the
     // inbox can explain the row already lapsed instead of retrying blindly.
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        new Response(JSON.stringify({ reason: "Unknown grant abc" }), {
+        new Response(JSON.stringify({ reason: "Unknown rule abc" }), {
           status: 404,
           headers: { "Content-Type": "application/json" },
         }),
       ),
     );
-    const missing = await revokeTrustGrant("abc").catch((error: unknown) => error);
+    const missing = await revokeRule("abc").catch((error: unknown) => error);
     expect(missing).toBeInstanceOf(ApiError);
     expect((missing as ApiError).status).toBe(404);
-    expect((missing as ApiError).message).toContain("Unknown grant abc");
+    expect((missing as ApiError).message).toContain("Unknown rule abc");
     // Transport failures surface with status 0 so callers can distinguish
-    // an unreachable engine from a rejected grant id.
+    // an unreachable engine from a rejected rule id.
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
         throw new TypeError("boom");
       }),
     );
-    const offline = await listTrustGrants().catch((error: unknown) => error);
+    const offline = await listRules().catch((error: unknown) => error);
     expect(offline).toBeInstanceOf(ApiError);
     expect((offline as ApiError).status).toBe(0);
   });
@@ -723,11 +915,12 @@ describe("dashboard api client", () => {
     const nowSeconds = Math.floor(Date.now() / 1000);
     const fetchMock = vi.fn(async () =>
       jsonResponse({
-        grants: [
+        rules: [
           {
             id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             toolName: "email.send",
-            target: "numeric@example.com",
+            scope: { kind: "exactTarget", target: "numeric@example.com" },
+            effect: "allow",
             grantedAt: nowSeconds,
             expiresAt: nowSeconds + 3600,
             duration: "oneHour",
@@ -737,7 +930,8 @@ describe("dashboard api client", () => {
           {
             id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
             toolName: "email.send",
-            target: "untouched@example.com",
+            scope: { kind: "exactTarget", target: "untouched@example.com" },
+            effect: "allow",
             grantedAt: nowSeconds,
             expiresAt: null,
             duration: "forever",
@@ -749,34 +943,34 @@ describe("dashboard api client", () => {
       }),
     );
     vi.stubGlobal("fetch", fetchMock);
-    const listed = await listTrustGrants();
-    expect(listed.grants[0].useCount).toBe(1);
-    expect(listed.grants[0].lastUsedAt).toBe(nowSeconds);
-    expect(listed.grants[1].useCount).toBe(0);
-    expect(listed.grants[1].lastUsedAt).toBeNull();
+    const listed = await listRules();
+    expect(listed.rules[0].useCount).toBe(1);
+    expect(listed.rules[0].lastUsedAt).toBe(nowSeconds);
+    expect(listed.rules[1].useCount).toBe(0);
+    expect(listed.rules[1].lastUsedAt).toBeNull();
   });
 
   it("reports already-expired revokes as notFound without retry", async () => {
-    // An already-lapsed grant stays 404 with the engine reason so the inbox
+    // An already-lapsed rule stays 404 with the engine reason so the inbox
     // explains the row expired instead of treating it as a transport error.
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        new Response(JSON.stringify({ reason: "Unknown grant lapsed-id" }), {
+        new Response(JSON.stringify({ reason: "Unknown rule lapsed-id" }), {
           status: 404,
           headers: { "Content-Type": "application/json" },
         }),
       ),
     );
-    const lapsed = await revokeTrustGrant("lapsed-id").catch((error: unknown) => error);
+    const lapsed = await revokeRule("lapsed-id").catch((error: unknown) => error);
     expect(lapsed).toBeInstanceOf(ApiError);
     expect((lapsed as ApiError).status).toBe(404);
-    expect((lapsed as ApiError).message).toContain("Unknown grant lapsed-id");
+    expect((lapsed as ApiError).message).toContain("Unknown rule lapsed-id");
   });
 
-  it("re-arms a grant with PATCH path, method, and duration body", async () => {
+  it("re-arms a rule with PATCH path, method, and duration body", async () => {
     // The re-arm keeps identity and counters server-side, so the client only
-    // sends the replacement tier; the route stays the grant resource with a
+    // sends the replacement tier; the route stays the rule resource with a
     // PATCH verb rather than a sub-action path.
     const seen: Array<{ path: string; method?: string; body?: string }> = [];
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
@@ -788,47 +982,41 @@ describe("dashboard api client", () => {
       return new Response(null, { status: 204 });
     });
     vi.stubGlobal("fetch", fetchMock);
-    await changeDurationGrant(
-      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-      "oneHour",
-    );
+    await rearmRule("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "oneHour");
     expect(seen[0].path).toBe(
-      "/approvals/grants/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "/approvals/rules/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
     );
     expect(seen[0].method).toBe("PATCH");
     expect(JSON.parse(seen[0].body ?? "")).toEqual({ duration: "oneHour" });
     // Identifiers travel encoded so reserved characters never split the route.
-    await changeDurationGrant("a/b c", "forever");
-    expect(seen[1].path).toBe("/approvals/grants/a%2Fb%20c");
+    await rearmRule("a/b c", "forever");
+    expect(seen[1].path).toBe("/approvals/rules/a%2Fb%20c");
     expect(seen[1].method).toBe("PATCH");
     expect(JSON.parse(seen[1].body ?? "")).toEqual({ duration: "forever" });
     // Every durable tier round-trips through the same body shape so the modal
     // can offer all four without per-tier branching.
-    await changeDurationGrant(
-      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-      "oneDay",
-    );
+    await rearmRule("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "oneDay");
     expect(JSON.parse(seen[2].body ?? "")).toEqual({ duration: "oneDay" });
   });
 
   it("surfaces re-arm failures as ApiError", async () => {
-    // A lapsed grant reports 404 with the engine reason so the duration modal
+    // A lapsed rule reports 404 with the engine reason so the duration modal
     // can explain the row is gone instead of retrying blindly.
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        new Response(JSON.stringify({ reason: "Unknown grant abc" }), {
+        new Response(JSON.stringify({ reason: "Unknown rule abc" }), {
           status: 404,
           headers: { "Content-Type": "application/json" },
         }),
       ),
     );
-    const missing = await changeDurationGrant("abc", "oneHour").catch(
+    const missing = await rearmRule("abc", "oneHour").catch(
       (error: unknown) => error,
     );
     expect(missing).toBeInstanceOf(ApiError);
     expect((missing as ApiError).status).toBe(404);
-    expect((missing as ApiError).message).toContain("Unknown grant abc");
+    expect((missing as ApiError).message).toContain("Unknown rule abc");
     // Transport failures surface with status 0 so callers can distinguish
     // an unreachable engine from a rejected duration tier.
     vi.stubGlobal(
@@ -837,11 +1025,132 @@ describe("dashboard api client", () => {
         throw new TypeError("boom");
       }),
     );
-    const offline = await changeDurationGrant("abc", "oneHour").catch(
+    const offline = await rearmRule("abc", "oneHour").catch(
       (error: unknown) => error,
     );
     expect(offline).toBeInstanceOf(ApiError);
     expect((offline as ApiError).status).toBe(0);
+  });
+
+  it("creates a rule with the tool, effect, scope, and tier payload", async () => {
+    const now = new Date().toISOString();
+    const seen: Array<{ path: string; method?: string; body?: string }> = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      seen.push({
+        path: input,
+        method: init?.method,
+        body: init?.body ? String(init.body) : undefined,
+      });
+      return jsonResponse({
+        id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+        toolName: "email.send",
+        scope: { kind: "exactTarget", target: "new@example.com" },
+        effect: "allow",
+        grantedAt: now,
+        expiresAt: null,
+        duration: "forever",
+        useCount: 0,
+        lastUsedAt: null,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const created = await createRule({
+      tool: "email.send",
+      effect: "allow",
+      scope: { kind: "exactTarget", target: "new@example.com" },
+      duration: "forever",
+    });
+    expect(created.id).toBe("cccccccc-cccc-cccc-cccc-cccccccccccc");
+    expect(seen[0].path).toBe("/approvals/rules");
+    expect(seen[0].method).toBe("POST");
+    // The payload names the whole rule: a deny rule rides the same shape with
+    // effect flipped, so the create form never needs a second endpoint.
+    expect(JSON.parse(seen[0].body ?? "")).toEqual({
+      tool: "email.send",
+      effect: "allow",
+      scope: { kind: "exactTarget", target: "new@example.com" },
+      duration: "forever",
+    });
+  });
+
+  it("refuses a malformed rule creation before the wire", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ id: "cccccccc-cccc-cccc-cccc-cccccccccccc" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const malformed: Array<unknown> = [
+      {
+        tool: "",
+        effect: "allow",
+        scope: { kind: "tool" },
+        duration: "forever",
+      },
+      {
+        tool: "email.send",
+        effect: "trust",
+        scope: { kind: "tool" },
+        duration: "forever",
+      },
+      {
+        tool: "email.send",
+        effect: "allow",
+        scope: { kind: "domain" },
+        duration: "forever",
+      },
+      {
+        tool: "email.send",
+        effect: "allow",
+        scope: { kind: "tool" },
+        duration: "nextWeek",
+      },
+      { effect: "allow", scope: { kind: "tool" }, duration: "forever" },
+    ];
+    for (const input of malformed) {
+      await expect(
+        createRule(input as Parameters<typeof createRule>[0]),
+      ).rejects.toBeInstanceOf(ApiError);
+    }
+    // The validator runs before fetch, so a half-described rule never reaches
+    // the engine to be stored.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reads ephemeral session trust with an encoded session id", async () => {
+    const now = new Date().toISOString();
+    const seen: string[] = [];
+    const fetchMock = vi.fn(async (input: string) => {
+      seen.push(input);
+      return jsonResponse({
+        sessionID: "s1",
+        grants: [
+          {
+            toolName: "email.send",
+            scope: { kind: "exactTarget", target: "alice@example.com" },
+            duration: "forSession",
+            grantedAt: now,
+            expiresAt: null,
+            useCount: 0,
+            lastUsedAt: null,
+          },
+        ],
+        count: 1,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const trust = await sessionTrust("s1");
+    expect(trust.count).toBe(1);
+    // Ephemeral grants ride the thisTime/forTask/forSession tiers, so a
+    // session-scoped allow shows up here without ever entering the durable
+    // rule store.
+    expect(trust.grants[0].duration).toBe("forSession");
+    expect(trust.grants[0].scope).toEqual({
+      kind: "exactTarget",
+      target: "alice@example.com",
+    });
+    expect(seen[0]).toBe("/approvals/session-trust?sessionID=s1");
+    // Identifiers travel encoded so reserved characters never split the query.
+    await sessionTrust("s/1 2");
+    expect(seen[1]).toBe("/approvals/session-trust?sessionID=s%2F1%202");
   });
 
   it("throws ApiError with status on failure", async () => {
@@ -1515,12 +1824,12 @@ describe("goal client and helpers", () => {
     });
   });
 
-  it("accepts the legacy origin spelling and defaults absent fields", () => {
+  it("accepts originSessionId and defaults absent fields", () => {
     const snapshot = parseGoalSnapshot({
       id: "goal-1",
       title: "field guide",
       status: "paused",
-      origin_session_id: "legacy-session",
+      originSessionId: "legacy-session",
     });
     expect(snapshot?.originSessionId).toBe("legacy-session");
     expect(snapshot?.progress).toEqual({ done: 0, total: 0 });
@@ -1705,7 +2014,7 @@ describe("goal client and helpers", () => {
         kind: "tip",
         title: "Hydrate",
         status: "proposed",
-        goal_id: "  goal-2  ",
+        goalId: "  goal-2  ",
       })?.goalId,
     ).toBe("goal-2");
     expect(
@@ -1842,34 +2151,30 @@ describe("tool-round budget readers", () => {
     expect(TOOL_ROUNDS_MAX).toBe(100);
   });
 
-  it("prefers snake_case over camelCase with fallback to the goals default", () => {
+  it("reads camelCase maxToolIterations with fallback to the goals default", () => {
     expect(
       goalsMaxToolIterations({
         ...goalsBase,
-        max_tool_iterations: 40,
         maxToolIterations: 50,
       }),
-    ).toBe(40);
-    expect(goalsMaxToolIterations({ ...goalsBase, maxToolIterations: 50 })).toBe(
-      50,
-    );
+    ).toBe(50);
     expect(goalsMaxToolIterations(undefined)).toBe(35);
     expect(goalsMaxToolIterations(null)).toBe(35);
     expect(goalsMaxToolIterations({ ...goalsBase })).toBe(35);
   });
 
   it("clamps goal budgets into 1-100 with floor", () => {
-    expect(goalsMaxToolIterations({ ...goalsBase, max_tool_iterations: 0 })).toBe(
+    expect(goalsMaxToolIterations({ ...goalsBase, maxToolIterations: 0 })).toBe(
       1,
     );
     expect(
-      goalsMaxToolIterations({ ...goalsBase, max_tool_iterations: 200 }),
+      goalsMaxToolIterations({ ...goalsBase, maxToolIterations: 200 }),
     ).toBe(100);
     expect(
-      goalsMaxToolIterations({ ...goalsBase, max_tool_iterations: 10.9 }),
+      goalsMaxToolIterations({ ...goalsBase, maxToolIterations: 10.9 }),
     ).toBe(10);
     expect(
-      goalsMaxToolIterations({ ...goalsBase, max_tool_iterations: Number.NaN }),
+      goalsMaxToolIterations({ ...goalsBase, maxToolIterations: Number.NaN }),
     ).toBe(35);
   });
 

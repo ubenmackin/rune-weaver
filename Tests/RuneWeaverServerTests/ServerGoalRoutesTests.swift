@@ -675,11 +675,9 @@ struct GoalSettingsMergeTests {
     }
 
     @Test
-    func `GoalsUpdate alias decode prefers snake and encodes canonical`() throws {
-        // The dashboard may send either spelling; snake stays canonical so a
-        // payload carrying both cannot fork the stored policy.
+    func `GoalsUpdate decodes and encodes camelCase`() throws {
         let payload = """
-        {"enabled": true, "step_interval_minutes": 60, "stepIntervalMinutes": 120, "max_active_goals": 5, "maxActiveGoals": 9}
+        {"enabled": true, "stepIntervalMinutes": 60, "maxActiveGoals": 5}
         """.data(using: .utf8)!
         let decoded = try JSONDecoder().decode(GoalsUpdate.self, from: payload)
         #expect(decoded.enabled == true)
@@ -688,18 +686,16 @@ struct GoalSettingsMergeTests {
 
         let encoded = try JSONEncoder().encode(GoalsUpdate(enabled: true, stepIntervalMinutes: 60, maxActiveGoals: 5))
         let text = try #require(String(data: encoded, encoding: .utf8))
-        #expect(text.contains("step_interval_minutes"))
-        #expect(text.contains("max_active_goals"))
-        #expect(!text.contains("stepIntervalMinutes"))
-        #expect(!text.contains("maxActiveGoals"))
+        #expect(text.contains("stepIntervalMinutes"))
+        #expect(text.contains("maxActiveGoals"))
+        #expect(!text.contains("step_interval_minutes"))
+        #expect(!text.contains("max_active_goals"))
     }
 
     @Test
-    func `ProactiveUpdate alias decode prefers snake and encodes canonical`() throws {
-        // Same dual-alias contract for the judge budget: camelCase reads but
-        // never writes, so saved payloads keep the file shape.
+    func `ProactiveUpdate decodes and encodes camelCase`() throws {
         let payload = """
-        {"mode": "guarded", "judge_timeout_seconds": 20, "judgeTimeoutSeconds": 40}
+        {"mode": "guarded", "judgeTimeoutSeconds": 20}
         """.data(using: .utf8)!
         let decoded = try JSONDecoder().decode(ProactiveUpdate.self, from: payload)
         #expect(decoded.mode == "guarded")
@@ -707,8 +703,8 @@ struct GoalSettingsMergeTests {
 
         let encoded = try JSONEncoder().encode(ProactiveUpdate(mode: "guarded", judgeTimeoutSeconds: 20))
         let text = try #require(String(data: encoded, encoding: .utf8))
-        #expect(text.contains("judge_timeout_seconds"))
-        #expect(!text.contains("judgeTimeoutSeconds"))
+        #expect(text.contains("judgeTimeoutSeconds"))
+        #expect(!text.contains("judge_timeout_seconds"))
     }
 }
 
@@ -716,7 +712,7 @@ struct GoalSettingsMergeTests {
 struct GoalWSTolerantDecodeTests {
     @Test
     func `Snapshot tolerantly decodes origin aliases`() throws {
-        // Pushes written under any of the three historical origin keys land on
+        // Pushes written under either of the camelCase origin keys land on
         // the one snapshot field instead of failing the live update.
         let id = UUID()
         let origin = UUID()
@@ -737,7 +733,7 @@ struct GoalWSTolerantDecodeTests {
         let text = try #require(String(data: data, encoding: .utf8))
         #expect(text.contains("originSessionId"))
 
-        for alias in ["originSessionId", "originSessionID", "origin_session_id"] {
+        for alias in ["originSessionId", "originSessionID"] {
             let aliased = text.replacingOccurrences(of: "\"originSessionId\"", with: "\"\(alias)\"")
             let decoded = try JSONDecoder().decode(WSGoalSnapshot.self, from: Data(aliased.utf8))
             #expect(decoded.originSessionID == origin)
@@ -767,7 +763,6 @@ struct GoalWSTolerantDecodeTests {
         let data = try JSONEncoder().encode(snapshot)
         var dict = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         dict["originSessionID"] = legacyID.uuidString
-        dict["origin_session_id"] = legacyID.uuidString
         let merged = try JSONSerialization.data(withJSONObject: dict)
         let decoded = try JSONDecoder().decode(WSGoalSnapshot.self, from: merged)
         #expect(decoded.originSessionID == canonicalID)

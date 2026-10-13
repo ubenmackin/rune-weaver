@@ -1,1162 +1,900 @@
-// Rune Weaver Dashboard — Component tests for ApprovalsInbox listing and decisions.
+// Rune Weaver Dashboard — Component tests for ApprovalsInbox grouping,
+// ordering, per-card decisions, and the dedicated brake branch.
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ApprovalsInbox from "./ApprovalsInbox";
 import { jsonResponse } from "../test-utils/http";
+import { isRecord } from "../typeGuards";
 
-const pending = {
-  approvals: [
-    {
-      id: "11111111-1111-1111-1111-111111111111",
-      toolName: "email.send",
-      description: "Send email",
-      input: {
-        toolName: "email.send",
-        argumentsJSON: '{"to":"a@example.com"}',
-        callID: "call-1",
-      },
-      suggestedDurations: ["thisTime", "oneHour"],
+interface StubOptions {
+  approvals?: unknown[];
+  sessions?: Array<{ id: string; title: string }>;
+  onCall?: (path: string, init?: RequestInit) => void;
+  // Short-circuits the default response so a test can hold one decision in
+  // flight without holding the reads.
+  respond?: (
+    path: string,
+    init?: RequestInit,
+  ) => Response | Promise<Response> | null;
+}
+
+// Answers the two reads the inbox makes (pending approvals plus session
+// titles) and records every call so decision payloads stay assertable.
+function stubEngine(options: StubOptions = {}) {
+  const approvals = options.approvals ?? [];
+  const sessions = options.sessions ?? [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit) => {
+      const path = String(input);
+      options.onCall?.(path, init);
+      const override = options.respond?.(path, init);
+      if (override != null) return override;
+      if (init?.method === "POST" && path.includes("/decide")) {
+        return jsonResponse({
+          id: path.split("/")[2],
+          approved: true,
+          duration: "thisTime",
+        });
+      }
+      if (init?.method === "POST" && path.includes("/respond")) {
+        return jsonResponse({
+          id: path.split("/")[2],
+          approved: true,
+          duration: "thisTime",
+        });
+      }
+      if (path === "/sessions") {
+        return jsonResponse({ sessions, count: sessions.length });
+      }
+      return jsonResponse({ approvals, count: approvals.length });
+    }),
+  );
+}
+
+function pendingRequest(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const toolName =
+    (typeof overrides.toolName === "string" && overrides.toolName) ||
+    (isRecord(overrides.input) &&
+      typeof overrides.input.toolName === "string" &&
+      overrides.input.toolName) ||
+    "email.send";
+  return {
+    id: "req-1",
+    description: "Send email",
+    input: {
+      toolName,
+      argumentsJSON: '{"to":"a@example.com"}',
+      callID: "call-1",
     },
-  ],
-  count: 1,
-};
+    suggestedDurations: ["thisTime", "oneHour"],
+    ...overrides,
+    toolName,
+  };
+}
+
+// Group headers in rendered order.
+function groupTitles(container: HTMLElement): string[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(".approvals-group-header"),
+  ).map((node) => node.textContent ?? "");
+}
+
+// Approval card ids in rendered order; question cards carry their own test id
+// and stay out of this list.
+function cardIDs(container: HTMLElement): string[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      '[data-testid^="approval-card-"]',
+    ),
+  ).map((node) => node.getAttribute("data-testid")?.replace("approval-card-", "") ?? "");
+}
 
 describe("ApprovalsInbox", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("renders pending approvals with allow and deny", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        // Active grants load alongside pending; keep this pending-only suite
-        // deterministic by answering the grants endpoint as empty.
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        return jsonResponse(pending);
-      }),
-    );
+  it("renders pending approvals with allow, deny, and the standing-rules deep link", async () => {
+    stubEngine({ approvals: [pendingRequest()] });
     render(<ApprovalsInbox />);
     await waitFor(() => {
       expect(screen.getByText("email.send")).toBeInTheDocument();
     });
-    expect(
-      screen.getByRole("button", { name: "Allow" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
     expect(screen.getByText("1 pending")).toBeInTheDocument();
+    // Standing rules live in Settings → Access, so the inbox links there
+    // instead of managing grants itself.
+    const link = screen.getByRole("link", { name: "Manage standing rules" });
+    expect(link).toHaveAttribute("href", "#settings?access=rules");
   });
 
-  it("allows with a duration and removes the row", async () => {
-    const user = userEvent.setup();
-    const calls: Array<{ path: string; body: string }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (input === "/approvals") {
-          return jsonResponse(pending);
-        }
-        // Grants refetch after decide; answer empty without polluting the
-        // decide-call assertions below.
-        if (input.startsWith("/approvals/grants") && init?.method !== "DELETE") {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        calls.push({ path: input, body: String(init?.body ?? "") });
-        return jsonResponse({
-          id: pending.approvals[0].id,
-          approved: true,
-          duration: "oneHour",
-        });
+  it("groups cards under session titles from GET /sessions ordered by maximum severity", async () => {
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-danger",
+          toolName: "desktop.action",
+          sessionID: "SESS-CHAT",
+          assessment: { severity: "dangerous", outcome: "Clicks", warnings: [] },
+          input: {
+            toolName: "desktop.action",
+            argumentsJSON: '{"action":"click"}',
+            callID: "call-danger",
+          },
+        }),
+        pendingRequest({
+          id: "req-moderate",
+          toolName: "files.write",
+          sessionID: "sess-ops",
+          assessment: { severity: "moderate", outcome: "Writes", warnings: [] },
+          input: {
+            toolName: "files.write",
+            argumentsJSON: '{"path":"/tmp/notes.txt"}',
+            callID: "call-moderate",
+          },
+        }),
+        pendingRequest({
+          id: "req-safe",
+          assessment: { severity: "safe", outcome: "Reads", warnings: [] },
+          input: {
+            toolName: "email.send",
+            argumentsJSON: '{"to":"safe@example.com"}',
+            callID: "call-safe",
+          },
+        }),
+      ],
+      sessions: [
+        { id: "sess-chat", title: "Deploy chat" },
+        { id: "SESS-OPS", title: "Ops chat" },
+      ],
+    });
+    const { container } = render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("desktop.action")).toBeInTheDocument();
+    });
+    // Dangerous group first, then moderate, then the unattributed safe card.
+    // Session identifiers compare case-insensitively against GET /sessions.
+    expect(groupTitles(container)).toEqual([
+      "Deploy chat",
+      "Ops chat",
+      "Unattributed",
+    ]);
+    // Every group header is sticky and no group is collapsed.
+    const headers = container.querySelectorAll(".approvals-group-header");
+    expect(headers).toHaveLength(3);
+    for (const header of Array.from(headers)) {
+      expect(header.tagName).toBe("H3");
+    }
+    expect(cardIDs(container)).toEqual([
+      "req-danger",
+      "req-moderate",
+      "req-safe",
+    ]);
+  });
+
+  it("orders cards within a group by severity then filing time descending", async () => {
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-danger-first",
+          assessment: { severity: "dangerous", outcome: "Clicks", warnings: [] },
+          input: {
+            toolName: "desktop.action",
+            argumentsJSON: '{"action":"click"}',
+            callID: "call-a",
+          },
+        }),
+        pendingRequest({
+          id: "req-moderate-early",
+          assessment: { severity: "moderate", outcome: "Writes", warnings: [] },
+          input: {
+            toolName: "files.write",
+            argumentsJSON: '{"path":"/tmp/a.txt"}',
+            callID: "call-b",
+          },
+        }),
+        pendingRequest({
+          id: "req-moderate-late",
+          assessment: { severity: "moderate", outcome: "Writes", warnings: [] },
+          input: {
+            toolName: "files.write",
+            argumentsJSON: '{"path":"/tmp/b.txt"}',
+            callID: "call-c",
+          },
+        }),
+        pendingRequest({
+          id: "req-safe-last",
+          assessment: { severity: "safe", outcome: "Reads", warnings: [] },
+          input: {
+            toolName: "email.send",
+            argumentsJSON: '{"to":"late@example.com"}',
+            callID: "call-d",
+          },
+        }),
+      ],
+      sessions: [{ id: "sess-chat", title: "Deploy chat" }],
+    });
+    // The wire carries no filing timestamp, so payload position is the filing
+    // order: the later moderate card is the more recent filing and reads first.
+    const { container } = render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("desktop.action")).toBeInTheDocument();
+    });
+    expect(cardIDs(container)).toEqual([
+      "req-danger-first",
+      "req-moderate-late",
+      "req-moderate-early",
+      "req-safe-last",
+    ]);
+  });
+
+  it("falls back to the raw session id when GET /sessions carries no title", async () => {
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-untitled",
+          sessionID: "SESS-RAW",
+          assessment: { severity: "moderate", outcome: "Writes", warnings: [] },
+          input: {
+            toolName: "files.write",
+            argumentsJSON: '{"path":"/tmp/raw.txt"}',
+            callID: "call-raw",
+          },
+        }),
+        pendingRequest({
+          id: "req-orphan",
+          sessionID: null,
+          assessment: { severity: "safe", outcome: "Reads", warnings: [] },
+          input: {
+            toolName: "email.send",
+            argumentsJSON: '{"to":"orphan@example.com"}',
+            callID: "call-orphan",
+          },
+        }),
+      ],
+      sessions: [{ id: "sess-other", title: "Other chat" }],
+    });
+    const { container } = render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("SESS-RAW")).toBeInTheDocument();
+    });
+    expect(groupTitles(container)).toEqual(["SESS-RAW", "Unattributed"]);
+    expect(cardIDs(container)).toEqual(["req-untitled", "req-orphan"]);
+  });
+
+  it("orders a nil assessment as moderate", async () => {
+    stubEngine({
+      approvals: [
+        pendingRequest({ id: "req-nil", assessment: null }),
+        pendingRequest({
+          id: "req-dangerous",
+          assessment: { severity: "dangerous", outcome: "Clicks", warnings: [] },
+          input: {
+            toolName: "desktop.action",
+            argumentsJSON: '{"action":"click"}',
+            callID: "call-dangerous",
+          },
+        }),
+        pendingRequest({
+          id: "req-safe",
+          assessment: { severity: "safe", outcome: "Reads", warnings: [] },
+          input: {
+            toolName: "email.send",
+            argumentsJSON: '{"to":"safe@example.com"}',
+            callID: "call-safe",
+          },
+        }),
+      ],
+      sessions: [{ id: "sess-chat", title: "Deploy chat" }],
+    });
+    const { container } = render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("desktop.action")).toBeInTheDocument();
+    });
+    // The unassessed card outranks the valued safe one but never the valued
+    // dangerous one, so enrichment cannot reorder the queue under the owner.
+    expect(cardIDs(container)).toEqual([
+      "req-dangerous",
+      "req-nil",
+      "req-safe",
+    ]);
+  });
+
+  it("renders no collapsed group, no group-level control, and no bulk approve", async () => {
+    stubEngine({
+      approvals: [
+        pendingRequest({ id: "req-one", sessionID: "sess-a" }),
+        pendingRequest({
+          id: "req-two",
+          sessionID: "sess-a",
+          toolName: "files.write",
+          input: {
+            toolName: "files.write",
+            argumentsJSON: '{"path":"/tmp/a.txt"}',
+            callID: "call-two",
+          },
+        }),
+        pendingRequest({ id: "req-three", sessionID: "sess-b" }),
+      ],
+      sessions: [
+        { id: "sess-a", title: "Alpha" },
+        { id: "sess-b", title: "Beta" },
+      ],
+    });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("Alpha")).toBeInTheDocument();
+    });
+    // No group-level or bulk control exists anywhere on the surface.
+    expect(
+      screen.queryByRole("button", {
+        name: /approve all|allow all|deny all|bulk|collapse|expand|select all/i,
       }),
-    );
+    ).toBeNull();
+    // Every card renders its own controls with nothing hidden behind a
+    // disclosure: three cards mean three Allow and three Deny buttons.
+    expect(screen.getAllByRole("button", { name: "Allow" })).toHaveLength(3);
+    expect(screen.getAllByRole("button", { name: "Deny" })).toHaveLength(3);
+  });
+
+  it("carries zero grant-management UI", async () => {
+    stubEngine({ approvals: [pendingRequest()] });
     render(<ApprovalsInbox />);
     await waitFor(() => {
       expect(screen.getByText("email.send")).toBeInTheDocument();
     });
-    await user.selectOptions(
-      screen.getByLabelText("Duration for email.send"),
-      "oneHour",
-    );
+    // Grant management moved to Settings → Access: no active-grants section,
+    // widen, revoke, or duration re-arm control survives on this surface.
+    expect(screen.queryByText("Active approvals")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Widen to all targets/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Change duration" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Allow for all targets/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("sends the unified payload with the one-shot default and no scope for this target", async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ path: string; body: string }> = [];
+    stubEngine({
+      approvals: [pendingRequest()],
+      onCall: (path, init) => {
+        if (init?.method === "POST" && path.includes("/decide")) {
+          calls.push({ path, body: String(init?.body ?? "") });
+        }
+      },
+    });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
     await user.click(screen.getByRole("button", { name: "Allow" }));
     await waitFor(() => {
       expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
     });
+    expect(calls).toHaveLength(1);
     expect(calls[0].path).toContain("/decide");
-    expect(JSON.parse(calls[0].body)).toMatchObject({
+    // The scope stays omitted so the engine resolves the request's own
+    // target, and the one-shot tier stores nothing.
+    expect(JSON.parse(calls[0].body)).toEqual({
       approved: true,
-      duration: "oneHour",
+      duration: "thisTime",
     });
   });
 
-  it("denies a pending approval", async () => {
+  it("sends the tool-wide scope when All targets is chosen", async () => {
     const user = userEvent.setup();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (input === "/approvals") {
-          return jsonResponse(pending);
+    const calls: Array<{ path: string; body: string }> = [];
+    stubEngine({
+      approvals: [pendingRequest()],
+      onCall: (path, init) => {
+        if (init?.method === "POST" && path.includes("/decide")) {
+          calls.push({ path, body: String(init?.body ?? "") });
         }
-        if (input.startsWith("/approvals/grants")) {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        return jsonResponse({
-          id: pending.approvals[0].id,
-          approved: false,
-          duration: "thisTime",
-        });
-      }),
-    );
+      },
+    });
     render(<ApprovalsInbox />);
     await waitFor(() => {
       expect(screen.getByText("email.send")).toBeInTheDocument();
     });
+    await user.click(screen.getByRole("radio", { name: "All targets" }));
     await user.click(screen.getByRole("button", { name: "Deny" }));
     await waitFor(() => {
       expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
     });
+    expect(JSON.parse(calls[0].body)).toEqual({
+      approved: false,
+      duration: "thisTime",
+      scope: { kind: "tool" },
+    });
   });
 
-  it("displays Allowing & resuming spinner while decision is in flight", async () => {
+  it("ships the edited recipient set from the scope editor", async () => {
     const user = userEvent.setup();
-    let resolveDecide: ((value: Response) => void) | null = null;
-    const decidePromise = new Promise<Response>((resolve) => {
-      resolveDecide = resolve;
-    });
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (input === "/approvals") {
-          return jsonResponse(pending);
-        }
-        // Grants load must not hang on the held decision promise; answer
-        // empty immediately so only the decide call stays in flight.
-        if (input.startsWith("/approvals/grants") && init?.method !== "DELETE") {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        return decidePromise;
-      }),
-    );
-
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(screen.getByText("email.send")).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole("button", { name: "Allow" }));
-
-    // While in flight, the "Allowing & resuming…" spinner label should appear
-    expect(screen.getByText("Allowing & resuming…")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
-
-    // Resolve the decision
-    resolveDecide!(
-      jsonResponse({
-        id: pending.approvals[0].id,
-        approved: true,
-        duration: "thisTime",
-      }),
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
-    });
-  });
-
-  it("shows active grants with scope plus revoke and expiry text", async () => {
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    const now = new Date().toISOString();
-    const grants = {
-      grants: [
-        {
-          id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-          toolName: "email.send",
-          target: "alice@example.com",
-          grantedAt: now,
-          expiresAt: future,
-          duration: "oneHour",
-          useCount: 0,
-          lastUsedAt: null,
-        },
-        {
-          id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-          toolName: "file.write",
-          target: "",
-          grantedAt: now,
-          expiresAt: null,
-          duration: "forever",
-          useCount: 0,
-          lastUsedAt: null,
-        },
+    const calls: Array<{ path: string; body: string }> = [];
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          toolName: "messages.send",
+          input: {
+            toolName: "messages.send",
+            argumentsJSON: '{"recipient":"+15551234567"}',
+            callID: "call-send",
+          },
+        }),
       ],
-      count: 2,
-    };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse(grants);
+      onCall: (path, init) => {
+        if (init?.method === "POST" && path.includes("/decide")) {
+          calls.push({ path, body: String(init?.body ?? "") });
         }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
+      },
+    });
     render(<ApprovalsInbox />);
     await waitFor(() => {
-      expect(screen.getByText("2 active")).toBeInTheDocument();
+      expect(screen.getByText("messages.send")).toBeInTheDocument();
     });
-    // Timed grant names the tool plus its narrowed target so scope is explicit.
-    expect(screen.getByText("email.send")).toBeInTheDocument();
-    expect(
-      screen.getByText("email sends to alice@example.com are approved"),
-    ).toBeInTheDocument();
-    // Timed expiry renders a countdown rather than a bare timestamp.
-    expect(screen.getByText(/Expires/)).toBeInTheDocument();
-    expect(screen.getByText("Next hour")).toBeInTheDocument();
-    // Tool-wide forever grants name every target and never carry an expiry.
-    expect(screen.getByText("file.write")).toBeInTheDocument();
-    expect(
-      screen.getByText("file writes to all targets are approved"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Never expires")).toBeInTheDocument();
-    expect(screen.getByText("Forever")).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "Revoke" })).toHaveLength(2);
-    // Fresh grants with zero hits share one untouched state so operators can
-    // spot trust that never fired without reading counters.
-    expect(screen.getAllByText("Not used yet")).toHaveLength(2);
-  });
-
-  it("shows usage counters with not-used versus used states", async () => {
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    const now = new Date().toISOString();
-    // Recent last-use keeps the relative label deterministic without freezing
-    // the clock: any sub-minute delta renders as seconds-ago.
-    const recent = new Date(Date.now() - 30_000).toISOString();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                toolName: "email.send",
-                target: "fresh@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-              {
-                id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-                toolName: "email.send",
-                target: "used@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 3,
-                lastUsedAt: recent,
-              },
-            ],
-            count: 2,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(screen.getByText("2 active")).toBeInTheDocument();
+    // Picking custom opens the editor immediately so a half-described scope
+    // can never reach a decision.
+    await user.click(screen.getByRole("radio", { name: "Custom scope" }));
+    const dialog = screen.getByRole("dialog", { name: "Edit decision scope" });
+    const editor = within(dialog).getByLabelText("Recipients");
+    // The editor prefills with the request's own recipient.
+    expect(editor).toHaveValue("+15551234567");
+    fireEvent.change(editor, {
+      target: { value: "+15551234567\nops@example.com" },
     });
-    // Untouched grants render the empty state even when the payload carries
-    // explicit zero counters.
-    expect(screen.getByText("Not used yet")).toBeInTheDocument();
-    // Exercised grants prove liveness with a hit count plus recency so a
-    // long-lived row cannot masquerade as untested trust.
-    expect(screen.getByText(/Used 3x/)).toBeInTheDocument();
-    expect(screen.getByText(/Last used/)).toBeInTheDocument();
-  });
-
-  it("renders legacy grants without usage fields as not used yet", async () => {
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    const now = new Date().toISOString();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                toolName: "email.send",
-                target: "legacy@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
+    await user.click(within(dialog).getByRole("button", { name: "Save scope" }));
     await waitFor(() => {
       expect(
-        screen.getByText("email sends to legacy@example.com are approved"),
-      ).toBeInTheDocument();
+        screen.queryByRole("dialog", { name: "Edit decision scope" }),
+      ).not.toBeInTheDocument();
     });
-    // Rows minted before tracking carry no counter keys; the card must degrade
-    // to untouched instead of rendering a blank or NaN count.
-    expect(screen.getByText("Not used yet")).toBeInTheDocument();
-    expect(screen.queryByText(/Used/)).not.toBeInTheDocument();
-  });
-
-  it("revoke opens a confirm modal instead of deleting immediately", async () => {
-    const user = userEvent.setup();
-    const grantId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    const now = new Date().toISOString();
-    const seen: Array<{ path: string; method?: string }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        seen.push({ path: input, method: init?.method });
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: grantId,
-                toolName: "email.send",
-                target: "alice@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 1,
-                lastUsedAt: now,
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(
-        screen.getByText("email sends to alice@example.com are approved"),
-      ).toBeInTheDocument();
-    });
-    await user.click(screen.getByRole("button", { name: "Revoke" }));
-    // Staging the revoke must surface the confirmation with the future-only
-    // consequence instead of firing the destructive request from the row.
-    await waitFor(() => {
-      expect(screen.getByText("Revoke approval?")).toBeInTheDocument();
-    });
-    expect(
-      screen.getByText("Future calls will require approval again."),
-    ).toBeInTheDocument();
-    expect(
-      seen.some(
-        (entry) => entry.path === `/approvals/grants/${grantId}` && entry.method === "DELETE",
-      ),
-    ).toBe(false);
-    // The grant row stays visible behind the modal until an explicit confirm.
-    // The scope line renders in both the grant card and the confirmation
-    // body while staged, so assert both copies plus the dialog-scoped copy.
-    expect(
-      screen.getAllByText("email sends to alice@example.com are approved"),
-    ).toHaveLength(2);
-    expect(
-      within(
-        screen.getByRole("dialog", { name: "Confirm revoke grant" }),
-      ).getByText("email sends to alice@example.com are approved"),
-    ).toBeInTheDocument();
-  });
-
-  it("cancel keeps the row with no DELETE", async () => {
-    const user = userEvent.setup();
-    const grantId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    const now = new Date().toISOString();
-    const seen: Array<{ path: string; method?: string }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        seen.push({ path: input, method: init?.method });
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: grantId,
-                toolName: "email.send",
-                target: "alice@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(
-        screen.getByText("email sends to alice@example.com are approved"),
-      ).toBeInTheDocument();
-    });
-    await user.click(screen.getByRole("button", { name: "Revoke" }));
-    await waitFor(() => {
-      expect(screen.getByText("Revoke approval?")).toBeInTheDocument();
-    });
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
-    // Dismissing the dialog must leave the grant untouched with no network
-    // side effect so a mis-click never drops live trust.
-    await waitFor(() => {
-      expect(screen.queryByText("Revoke approval?")).not.toBeInTheDocument();
-    });
-    expect(
-      screen.getByText("email sends to alice@example.com are approved"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("1 active")).toBeInTheDocument();
-    expect(
-      seen.some(
-        (entry) => entry.path === `/approvals/grants/${grantId}` && entry.method === "DELETE",
-      ),
-    ).toBe(false);
-  });
-
-  it("revokes an active grant and removes the card", async () => {
-    const user = userEvent.setup();
-    const grantId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    const now = new Date().toISOString();
-    const seen: Array<{ path: string; method?: string }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        seen.push({ path: input, method: init?.method });
-        if (input === "/approvals" && !init?.method) {
-          return jsonResponse({ approvals: [], count: 0 });
-        }
-        if (input === `/approvals/grants/${grantId}` && init?.method === "DELETE") {
-          return new Response(null, { status: 204 });
-        }
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: grantId,
-                toolName: "email.send",
-                target: "alice@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 2,
-                lastUsedAt: now,
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(
-        screen.getByText("email sends to alice@example.com are approved"),
-      ).toBeInTheDocument();
-    });
-    // Row clicks only stage the revoke; the destructive request fires from
-    // the modal confirm so the list cannot drop trust on a single click.
-    await user.click(screen.getByRole("button", { name: "Revoke" }));
-    await waitFor(() => {
-      expect(screen.getByText("Revoke approval?")).toBeInTheDocument();
-    });
-    await user.click(
-      screen.getByRole("button", { name: "Confirm revoke grant" }),
-    );
-    await waitFor(() => {
-      expect(screen.getByText("No active approvals.")).toBeInTheDocument();
-    });
-    expect(
-      seen.some(
-        (entry) => entry.path === `/approvals/grants/${grantId}` && entry.method === "DELETE",
-      ),
-    ).toBe(true);
-    expect(screen.getByText("0 active")).toBeInTheDocument();
-  });
-
-  it("keeps one-time approvals out of the active list", async () => {
-    const user = userEvent.setup();
-    const calls: Array<{ path: string; body: string }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (input === "/approvals" && !init?.method) {
-          return jsonResponse(pending);
-        }
-        // Duration decisions would mint a grant server-side, but a one-time
-        // decision records nothing, so every grants refetch stays empty.
-        if (input.startsWith("/approvals/grants") && init?.method !== "DELETE") {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        calls.push({ path: input, body: String(init?.body ?? "") });
-        return jsonResponse({
-          id: pending.approvals[0].id,
-          approved: true,
-          duration: "thisTime",
-        });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(screen.getByText("email.send")).toBeInTheDocument();
-    });
+    // The card names the staged scope so the owner sees what will ship.
+    expect(screen.getByText("2 recipients")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Allow" }));
     await waitFor(() => {
       expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
     });
-    expect(JSON.parse(calls[0].body)).toMatchObject({
+    expect(JSON.parse(calls[0].body)).toEqual({
+      approved: true,
+      duration: "thisTime",
+      scope: {
+        kind: "recipientSet",
+        handles: ["+15551234567", "ops@example.com"],
+      },
+    });
+  });
+
+  it("derives an edited domain scope from the hosts editor on an egress card", async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ path: string; body: string }> = [];
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-egress-edit",
+          toolName: "api.request",
+          egressHost: "api.example.com",
+          input: {
+            toolName: "api.request",
+            argumentsJSON: '{"method":"GET","url":"https://api.example.com/v1"}',
+            callID: "call-egress-edit",
+          },
+        }),
+      ],
+      onCall: (path, init) => {
+        if (init?.method === "POST" && path.includes("/decide")) {
+          calls.push({ path, body: String(init?.body ?? "") });
+        }
+      },
+    });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("api.request")).toBeInTheDocument();
+    });
+    const card = screen.getByTestId("approval-card-req-egress-edit");
+    await user.click(within(card).getByRole("button", { name: "Edit scope" }));
+    const dialog = screen.getByRole("dialog", { name: "Edit decision scope" });
+    const editor = within(dialog).getByLabelText("Hosts / domains");
+    // The editor opens on the parked host, and the owner narrows or moves the
+    // rule to the host they actually mean.
+    expect(editor).toHaveValue("api.example.com");
+    fireEvent.change(editor, { target: { value: "cdn.example.com" } });
+    await user.click(within(dialog).getByRole("button", { name: "Save scope" }));
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Edit decision scope" }),
+      ).not.toBeInTheDocument();
+    });
+    await user.click(within(card).getByRole("button", { name: "Allow" }));
+    await waitFor(() => {
+      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
+    });
+    expect(JSON.parse(calls[0].body)).toEqual({
+      approved: true,
+      duration: "thisTime",
+      scope: { kind: "domain", host: "cdn.example.com" },
+    });
+  });
+
+  it("collapses a paths list onto the first exact target for file tools", async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ path: string; body: string }> = [];
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-paths",
+          toolName: "files.write",
+          input: {
+            toolName: "files.write",
+            argumentsJSON: '{"path":"/tmp/a.txt"}',
+            callID: "call-paths",
+          },
+        }),
+      ],
+      onCall: (path, init) => {
+        if (init?.method === "POST" && path.includes("/decide")) {
+          calls.push({ path, body: String(init?.body ?? "") });
+        }
+      },
+    });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("files.write")).toBeInTheDocument();
+    });
+    const card = screen.getByTestId("approval-card-req-paths");
+    await user.click(within(card).getByRole("button", { name: "Edit scope" }));
+    const dialog = screen.getByRole("dialog", { name: "Edit decision scope" });
+    const editor = within(dialog).getByLabelText("Paths");
+    expect(editor).toHaveValue("/tmp/a.txt");
+    // One decision carries one scope, so the first entry names the rule.
+    fireEvent.change(editor, {
+      target: { value: "/tmp/x.txt\n/tmp/y.txt" },
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Save scope" }));
+    await waitFor(() => {
+      expect(
+        within(card).getByTestId("approval-scope-summary-req-paths"),
+      ).toHaveTextContent("/tmp/x.txt");
+    });
+    await user.click(within(card).getByRole("button", { name: "Allow" }));
+    await waitFor(() => {
+      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
+    });
+    expect(JSON.parse(calls[0].body)).toEqual({
+      approved: true,
+      duration: "thisTime",
+      scope: { kind: "exactTarget", target: "/tmp/x.txt" },
+    });
+  });
+
+  it("carries a bash pattern editor as the exact-target scope", async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ path: string; body: string }> = [];
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-pattern",
+          toolName: "bash.exec",
+          input: {
+            toolName: "bash.exec",
+            argumentsJSON: '{"command":"ls /tmp"}',
+            callID: "call-pattern",
+          },
+        }),
+      ],
+      onCall: (path, init) => {
+        if (init?.method === "POST" && path.includes("/decide")) {
+          calls.push({ path, body: String(init?.body ?? "") });
+        }
+      },
+    });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("bash.exec")).toBeInTheDocument();
+    });
+    const card = screen.getByTestId("approval-card-req-pattern");
+    await user.click(within(card).getByRole("button", { name: "Edit scope" }));
+    const dialog = screen.getByRole("dialog", { name: "Edit decision scope" });
+    // A command carries none of the target keys, so the editor opens blank.
+    expect(within(dialog).getByLabelText("Pattern")).toHaveValue("");
+    fireEvent.change(within(dialog).getByLabelText("Pattern"), {
+      target: { value: "ls *" },
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Save scope" }));
+    await waitFor(() => {
+      expect(
+        within(card).getByTestId("approval-scope-summary-req-pattern"),
+      ).toHaveTextContent("ls *");
+    });
+    await user.click(within(card).getByRole("button", { name: "Allow" }));
+    await waitFor(() => {
+      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
+    });
+    expect(JSON.parse(calls[0].body)).toEqual({
+      approved: true,
+      duration: "thisTime",
+      scope: { kind: "exactTarget", target: "ls *" },
+    });
+  });
+
+  it("refuses a blank scope save and holds the decision controls", async () => {
+    const user = userEvent.setup();
+    stubEngine({ approvals: [pendingRequest()] });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("radio", { name: "Custom scope" }));
+    const dialog = screen.getByRole("dialog", { name: "Edit decision scope" });
+    await user.clear(within(dialog).getByLabelText("Recipients"));
+    await user.click(within(dialog).getByRole("button", { name: "Save scope" }));
+    // A blank editor names no target, so the modal stays open with the reason
+    // and the card's decisions stay locked instead of shipping a scope the
+    // owner never described.
+    await waitFor(() => {
+      expect(within(dialog).getByRole("alert")).toHaveTextContent(
+        "Enter at least one entry.",
+      );
+    });
+    expect(screen.getByRole("dialog", { name: "Edit decision scope" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeDisabled();
+  });
+
+  it("offers an egress card only the mapped tiers and derives the domain scope", async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ path: string; body: string }> = [];
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-egress",
+          toolName: "api.request",
+          egressHost: "api.example.com",
+          input: {
+            toolName: "api.request",
+            argumentsJSON: '{"method":"GET","url":"https://api.example.com/v1"}',
+            callID: "call-egress",
+          },
+        }),
+      ],
+      onCall: (path, init) => {
+        if (init?.method === "POST" && path.includes("/decide")) {
+          calls.push({ path, body: String(init?.body ?? "") });
+        }
+      },
+    });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("api.request")).toBeInTheDocument();
+    });
+    const card = screen.getByTestId("approval-card-req-egress");
+    const duration = within(card).getByLabelText("Duration for api.request");
+    // The tier mapping reads exactly thisTime, forSession, and forever, so the
+    // picker offers those three in the shared vocabulary and nothing else.
+    expect(
+      Array.from(duration.querySelectorAll("option")).map((option) => option.value),
+    ).toEqual(["thisTime", "forSession", "forever"]);
+    // The mapping is stated on the card instead of a second control language.
+    expect(
+      within(card).getByText(
+        "Tiers map to api.example.com: once, for this session, or a durable rule.",
+      ),
+    ).toBeInTheDocument();
+    await user.selectOptions(duration, "forSession");
+    await user.click(within(card).getByRole("radio", { name: /This host/ }));
+    await user.click(within(card).getByRole("button", { name: "Allow" }));
+    await waitFor(() => {
+      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
+    });
+    expect(JSON.parse(calls[0].body)).toEqual({
+      approved: true,
+      duration: "forSession",
+      scope: { kind: "domain", host: "api.example.com" },
+    });
+  });
+
+  it("maps an egress forever denial to the durable domain scope", async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ path: string; body: string }> = [];
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-egress-deny",
+          toolName: "api.request",
+          egressHost: "blocked.example.com",
+          input: {
+            toolName: "api.request",
+            argumentsJSON: '{"method":"GET","url":"https://blocked.example.com/v1"}',
+            callID: "call-egress-deny",
+          },
+        }),
+      ],
+      onCall: (path, init) => {
+        if (init?.method === "POST" && path.includes("/decide")) {
+          calls.push({ path, body: String(init?.body ?? "") });
+        }
+      },
+    });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("api.request")).toBeInTheDocument();
+    });
+    const card = screen.getByTestId("approval-card-req-egress-deny");
+    await user.selectOptions(
+      within(card).getByLabelText("Duration for api.request"),
+      "forever",
+    );
+    await user.click(within(card).getByRole("button", { name: "Deny" }));
+    await waitFor(() => {
+      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
+    });
+    // A forever refusal on a parked host carries the domain scope so the
+    // durable deny rule covers the host the owner refused.
+    expect(JSON.parse(calls[0].body)).toEqual({
+      approved: false,
+      duration: "forever",
+      scope: { kind: "domain", host: "blocked.example.com" },
+    });
+  });
+
+  it("renders the brake card as a dedicated Resume plus Keep paused branch", async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ path: string; body: string }> = [];
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-brake",
+          toolName: "behavior.brake",
+          description:
+            "Behavior brake engaged: email.send executed 18 times in the trailing hour (baseline 3).",
+          // The watchdog parks every running turn, so a tagged session must
+          // not pull the card out of Unattributed.
+          sessionID: "sess-chat",
+        }),
+      ],
+      sessions: [{ id: "sess-chat", title: "Deploy chat" }],
+      onCall: (path, init) => {
+        if (init?.method === "POST" && path.includes("/decide")) {
+          calls.push({ path, body: String(init?.body ?? "") });
+        }
+      },
+    });
+    const { container } = render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("behavior.brake")).toBeInTheDocument();
+    });
+    expect(groupTitles(container)).toEqual(["Unattributed"]);
+    const card = screen.getByTestId("approval-card-req-brake");
+    // Dangerous badge and red accent, description shown.
+    expect(within(card).getByTestId("approval-severity-req-brake")).toHaveTextContent(
+      "🔴 Dangerous",
+    );
+    expect(card).toHaveClass("approval-brake-card");
+    expect(
+      within(card).getByText(
+        "Behavior brake engaged: email.send executed 18 times in the trailing hour (baseline 3).",
+      ),
+    ).toBeInTheDocument();
+    // Releasing the park is the complete decision: no duration picker, no
+    // scope editor, no Open Thread.
+    expect(
+      within(card).queryByLabelText("Duration for behavior.brake"),
+    ).not.toBeInTheDocument();
+    expect(within(card).queryByRole("radiogroup")).not.toBeInTheDocument();
+    expect(within(card).queryByText("Open Thread")).not.toBeInTheDocument();
+    await user.click(within(card).getByRole("button", { name: "Resume" }));
+    await waitFor(() => {
+      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
+    });
+    expect(JSON.parse(calls[0].body)).toEqual({
       approved: true,
       duration: "thisTime",
     });
-    // No grant row appears for the one-time tier.
-    expect(screen.getByText("No active approvals.")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
-    expect(screen.getByText("0 active")).toBeInTheDocument();
   });
 
-  it("hides clock-expired grants without a refetch", async () => {
-    const past = new Date(Date.now() - 60_000).toISOString();
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    const now = new Date().toISOString();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
-                toolName: "email.send",
-                target: "stale@example.com",
-                grantedAt: past,
-                expiresAt: past,
-                duration: "fiveMinutes",
-                useCount: 5,
-                lastUsedAt: past,
-              },
-              {
-                id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
-                toolName: "email.send",
-                target: "fresh@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 1,
-                lastUsedAt: now,
-              },
-            ],
-            count: 2,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(screen.getByText("1 active")).toBeInTheDocument();
-    });
-    // Lapsed scope hides locally even though the payload still carries it,
-    // so skew between server expiry and the next poll never lingers. Usage
-    // counters ride along but must not rescue an expired row.
-    expect(
-      screen.queryByText("email sends to stale@example.com are approved"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByText("email sends to fresh@example.com are approved"),
-    ).toBeInTheDocument();
-    // The surviving row still proves its liveness through usage text.
-    expect(screen.getByText(/Used 1x/)).toBeInTheDocument();
-    expect(screen.getByText(/Last used/)).toBeInTheDocument();
-  });
-
-  it("locks only the revoking row while a revoke is in flight", async () => {
-    const user = userEvent.setup();
-    const firstId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-    const secondId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    const now = new Date().toISOString();
-    let resolveRevoke: ((value: Response) => void) | null = null;
-    const revokePromise = new Promise<Response>((resolve) => {
-      resolveRevoke = resolve;
-    });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (input === `/approvals/grants/${firstId}` && init?.method === "DELETE") {
-          return revokePromise;
-        }
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: firstId,
-                toolName: "email.send",
-                target: "alice@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 2,
-                lastUsedAt: now,
-              },
-              {
-                id: secondId,
-                toolName: "file.write",
-                target: "",
-                grantedAt: now,
-                expiresAt: null,
-                duration: "forever",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-            ],
-            count: 2,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(screen.getByText("2 active")).toBeInTheDocument();
-    });
-    const revokeButtons = screen.getAllByRole("button", { name: "Revoke" });
-    await user.click(revokeButtons[0]);
-    // Staging opens the confirmation without firing the request, so the
-    // per-row lock is only engaged by the modal confirm.
-    await waitFor(() => {
-      expect(screen.getByText("Revoke approval?")).toBeInTheDocument();
-    });
-    await user.click(
-      screen.getByRole("button", { name: "Confirm revoke grant" }),
-    );
-    // The in-flight row reports progress while the sibling stays actionable,
-    // so a slow revoke cannot freeze independent grants.
-    await waitFor(() => {
-      expect(screen.getAllByText("Revoking…").length).toBeGreaterThan(0);
-    });
-    expect(screen.getAllByRole("button", { name: "Revoke" })).toHaveLength(1);
-    resolveRevoke!(new Response(null, { status: 204 }));
-    await waitFor(() => {
-      expect(screen.getByText("1 active")).toBeInTheDocument();
-    });
-    expect(
-      screen.queryByText("email sends to alice@example.com are approved"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByText("file writes to all targets are approved"),
-    ).toBeInTheDocument();
-  });
-
-  it("keeps pending approvals visible while a revoke is staged", async () => {
-    const user = userEvent.setup();
-    const grantId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    const now = new Date().toISOString();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: grantId,
-                toolName: "email.send",
-                target: "alice@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse(pending);
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(screen.getByText("email sends to alice@example.com are approved")).toBeInTheDocument();
-    });
-    // The pending inbox and the staged revoke are independent: opening the
-    // confirmation must not clear or disable the pending decision.
-    expect(screen.getByText("1 pending")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Revoke" }));
-    await waitFor(() => {
-      expect(screen.getByText("Revoke approval?")).toBeInTheDocument();
-    });
-    expect(screen.getByText("1 pending")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Allow" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
-    await waitFor(() => {
-      expect(screen.queryByText("Revoke approval?")).not.toBeInTheDocument();
-    });
-    expect(
-      screen.getByText("email sends to alice@example.com are approved"),
-    ).toBeInTheDocument();
-  });
-
-  it("passes widen: true when Allow for all targets checkbox is checked", async () => {
+  it("keeps the park on Keep paused with the one-shot denial", async () => {
     const user = userEvent.setup();
     const calls: Array<{ path: string; body: string }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (input === "/approvals") {
-          return jsonResponse(pending);
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-brake-hold",
+          toolName: "behavior.brake",
+          description: "Behavior brake engaged.",
+        }),
+      ],
+      onCall: (path, init) => {
+        if (init?.method === "POST" && path.includes("/decide")) {
+          calls.push({ path, body: String(init?.body ?? "") });
         }
-        if (input.startsWith("/approvals/grants") && init?.method !== "DELETE") {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        calls.push({ path: input, body: String(init?.body ?? "") });
-        return jsonResponse({
-          id: pending.approvals[0].id,
-          approved: true,
-          duration: "oneHour",
-        });
-      }),
-    );
+      },
+    });
     render(<ApprovalsInbox />);
     await waitFor(() => {
-      expect(screen.getByText("email.send")).toBeInTheDocument();
+      expect(screen.getByText("behavior.brake")).toBeInTheDocument();
     });
-    await user.selectOptions(
-      screen.getByLabelText("Duration for email.send"),
-      "oneHour",
-    );
-    await user.click(
-      screen.getByLabelText("Allow for all targets for email.send"),
-    );
-    await user.click(screen.getByRole("button", { name: "Allow" }));
+    await user.click(screen.getByRole("button", { name: "Keep paused" }));
     await waitFor(() => {
       expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
     });
-    expect(calls[0].path).toContain("/decide");
-    expect(JSON.parse(calls[0].body)).toMatchObject({
-      approved: true,
-      duration: "oneHour",
-      widen: true,
-    });
-  });
-
-  it("widens an active grant to all targets when clicking Widen to all targets", async () => {
-    const user = userEvent.setup();
-    const grantId = "22222222-2222-2222-2222-222222222222";
-    const now = Math.floor(Date.now() / 1000);
-    const future = now + 3600;
-    const widenCalls: string[] = [];
-    let grantTarget = "alice@example.com";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.includes("/widen")) {
-          widenCalls.push(input);
-          grantTarget = "";
-          return new Response(null, { status: 204 });
-        }
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: grantId,
-                toolName: "email.send",
-                target: grantTarget,
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(
-        screen.getByText("email sends to alice@example.com are approved"),
-      ).toBeInTheDocument();
-    });
-    const widenBtn = screen.getByRole("button", {
-      name: "Widen to all targets",
-    });
-    expect(widenBtn).toBeInTheDocument();
-    await user.click(widenBtn);
-    // Row clicks only stage the confirmation so the consequence stays visible
-    // before trust expands; the widening request fires from the modal confirm.
-    await waitFor(() => {
-      expect(screen.getByText("Widen to all targets?")).toBeInTheDocument();
-    });
-    await user.click(
-      within(
-        screen.getByRole("dialog", { name: "Confirm widen grant" }),
-      ).getByRole("button", { name: "Widen to all targets" }),
-    );
-    await waitFor(() => {
-      expect(
-        screen.getByText("email sends to all targets are approved"),
-      ).toBeInTheDocument();
-    });
-    expect(widenCalls).toHaveLength(1);
-    expect(widenCalls[0]).toContain(`/approvals/grants/${grantId}/widen`);
-  });
-
-  it("withholds the widen control for per-recipient messages.send grants", async () => {
-    const grantId = "33333333-3333-3333-3333-333333333333";
-    const now = Math.floor(Date.now() / 1000);
-    const future = now + 3600;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: grantId,
-                toolName: "messages.send",
-                target: "+15551234567",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(
-        screen.getByText("messages sends to +15551234567 are approved"),
-      ).toBeInTheDocument();
-    });
-    // Send trust is per-recipient and has no tool-wide scope, so the card never
-    // offers an action the server would honestly refuse; revoke stays available
-    // so the live grant remains manageable.
-    expect(
-      screen.queryByRole("button", { name: "Widen to all targets" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Revoke" })).toBeInTheDocument();
-  });
-
-  it("locks every widen button while one widen is in flight", async () => {
-    const user = userEvent.setup();
-    const firstId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-    const secondId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
-    const now = Math.floor(Date.now() / 1000);
-    const future = now + 3600;
-    const widenCalls: string[] = [];
-    let resolveFirstWiden: ((value: Response) => void) | null = null;
-    const firstWidenPromise = new Promise<Response>((resolve) => {
-      resolveFirstWiden = resolve;
-    });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (
-          typeof input === "string" &&
-          input.includes(`/approvals/grants/${firstId}/widen`)
-        ) {
-          widenCalls.push(input);
-          return firstWidenPromise;
-        }
-        if (typeof input === "string" && input.includes("/widen")) {
-          widenCalls.push(input);
-          return new Response(null, { status: 204 });
-        }
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: firstId,
-                toolName: "email.send",
-                target: "alice@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-              {
-                id: secondId,
-                toolName: "file.write",
-                target: "bob@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-            ],
-            count: 2,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(screen.getByText("2 active")).toBeInTheDocument();
-    });
-    const widenButtons = screen.getAllByRole("button", {
-      name: "Widen to all targets",
-    });
-    expect(widenButtons).toHaveLength(2);
-    await user.click(widenButtons[0]);
-    // Staging opens the confirmation without firing the request, so the
-    // per-row lock is only engaged by the modal confirm.
-    await waitFor(() => {
-      expect(screen.getByText("Widen to all targets?")).toBeInTheDocument();
-    });
-    await user.click(
-      within(
-        screen.getByRole("dialog", { name: "Confirm widen grant" }),
-      ).getByRole("button", { name: "Widen to all targets" }),
-    );
-    // The active row reports progress while every sibling widen locks, so a
-    // second request cannot overwrite the shared in-flight id.
-    await waitFor(() => {
-      expect(screen.getAllByText("Widening…").length).toBeGreaterThan(0);
-    });
-    const siblingWiden = screen.getByRole("button", {
-      name: "Widen to all targets",
-    });
-    expect(siblingWiden).toBeDisabled();
-    await user.click(siblingWiden);
-    expect(widenCalls).toHaveLength(1);
-    // Completing the held widen clears the spinner and releases the lock so a
-    // later widen on the previously blocked row still fires exactly once.
-    resolveFirstWiden!(new Response(null, { status: 204 }));
-    await waitFor(() => {
-      expect(screen.queryByText("Widening…")).not.toBeInTheDocument();
-    });
-    await user.click(
-      screen.getAllByRole("button", { name: "Widen to all targets" })[1],
-    );
-    await waitFor(() => {
-      expect(screen.getByText("Widen to all targets?")).toBeInTheDocument();
-    });
-    await user.click(
-      within(
-        screen.getByRole("dialog", { name: "Confirm widen grant" }),
-      ).getByRole("button", { name: "Widen to all targets" }),
-    );
-    await waitFor(() => {
-      expect(
-        widenCalls.filter((path) => path.includes(secondId)),
-      ).toHaveLength(1);
-    });
-  });
-
-  it("disables the widen checkbox and never widens for Only this time", async () => {
-    const user = userEvent.setup();
-    const calls: Array<{ path: string; body: string }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (input === "/approvals") {
-          return jsonResponse(pending);
-        }
-        if (input.startsWith("/approvals/grants") && init?.method !== "DELETE") {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        calls.push({ path: input, body: String(init?.body ?? "") });
-        return jsonResponse({
-          id: pending.approvals[0].id,
-          approved: true,
-          duration: "thisTime",
-        });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(screen.getByText("email.send")).toBeInTheDocument();
-    });
-    // Default duration is one-shot, so widening is unavailable and must not
-    // imply tool-wide trust the server would ignore.
-    const widenCheckbox = screen.getByLabelText(
-      "Allow for all targets for email.send",
-    );
-    expect(widenCheckbox).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "Allow" }));
-    await waitFor(() => {
-      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
-    });
-    expect(calls[0].path).toContain("/decide");
-    expect(JSON.parse(calls[0].body)).toMatchObject({
-      approved: true,
+    expect(JSON.parse(calls[0].body)).toEqual({
+      approved: false,
       duration: "thisTime",
-      widen: false,
     });
   });
 
-  it("forces widen off when the duration switches back to Only this time", async () => {
-    const user = userEvent.setup();
-    const calls: Array<{ path: string; body: string }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (input === "/approvals") {
-          return jsonResponse(pending);
-        }
-        if (input.startsWith("/approvals/grants") && init?.method !== "DELETE") {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        calls.push({ path: input, body: String(init?.body ?? "") });
-        return jsonResponse({
-          id: pending.approvals[0].id,
-          approved: true,
-          duration: "thisTime",
-        });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(screen.getByText("email.send")).toBeInTheDocument();
+  it("renders severity badge, intent, outcome, and warnings while hiding the static description", async () => {
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "22222222-2222-2222-2222-222222222222",
+          toolName: "desktop.action",
+          description: "Perform mouse and keyboard actions",
+          intent: "Closing inactive background tab",
+          assessment: {
+            severity: "dangerous",
+            outcome: "Simulates mouse click on close button",
+            warnings: ["Hardware CGEvent input simulation"],
+          },
+          input: {
+            toolName: "desktop.action",
+            argumentsJSON: '{"action":"click"}',
+            callID: "call-2",
+          },
+          suggestedDurations: ["thisTime"],
+        }),
+      ],
     });
-    await user.selectOptions(
-      screen.getByLabelText("Duration for email.send"),
-      "oneHour",
-    );
-    const widenCheckbox = screen.getByLabelText(
-      "Allow for all targets for email.send",
-    );
-    expect(widenCheckbox).toBeEnabled();
-    await user.click(widenCheckbox);
-    expect(widenCheckbox).toBeChecked();
-    // Switching back to the one-shot tier clears the stale widen intent in the
-    // UI and in the request body instead of shipping a contradictory decision.
-    await user.selectOptions(
-      screen.getByLabelText("Duration for email.send"),
-      "thisTime",
-    );
-    expect(widenCheckbox).toBeDisabled();
-    expect(widenCheckbox).not.toBeChecked();
-    await user.click(screen.getByRole("button", { name: "Allow" }));
-    await waitFor(() => {
-      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
-    });
-    expect(JSON.parse(calls[0].body)).toMatchObject({
-      approved: true,
-      duration: "thisTime",
-      widen: false,
-    });
-  });
-
-  it("renders severity badge, intent, outcome, and warnings without static description", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        return jsonResponse({
-          approvals: [
-            {
-              id: "22222222-2222-2222-2222-222222222222",
-              toolName: "desktop.action",
-              description: "Perform mouse and keyboard actions",
-              intent: "Closing inactive background tab",
-              assessment: {
-                severity: "dangerous",
-                outcome: "Simulates mouse click on close button",
-                warnings: ["Hardware CGEvent input simulation"],
-              },
-              input: {
-                toolName: "desktop.action",
-                argumentsJSON: '{"action":"click"}',
-                callID: "call-2",
-              },
-              suggestedDurations: ["thisTime"],
-            },
-          ],
-          count: 1,
-        });
-      }),
-    );
     render(<ApprovalsInbox />);
     await waitFor(() => {
       expect(screen.getByText("desktop.action")).toBeInTheDocument();
     });
-    expect(screen.getByTestId("approval-severity-22222222-2222-2222-2222-222222222222")).toHaveTextContent("🔴 Dangerous");
-    expect(screen.getByText("Closing inactive background tab")).toBeInTheDocument();
-    expect(screen.getByText("Simulates mouse click on close button")).toBeInTheDocument();
-    expect(screen.getByText(/Hardware CGEvent input simulation/)).toBeInTheDocument();
-    // Static description must NOT be present
-    expect(screen.queryByText("Perform mouse and keyboard actions")).not.toBeInTheDocument();
-    // Pending badge must be absent once valued.
     expect(
-      screen.queryByTestId(
-        "approval-assessment-pending-22222222-2222-2222-2222-222222222222",
-      ),
+      screen.getByTestId("approval-severity-22222222-2222-2222-2222-222222222222"),
+    ).toHaveTextContent("🔴 Dangerous");
+    expect(screen.getByText("Closing inactive background tab")).toBeInTheDocument();
+    expect(
+      screen.getByText("Simulates mouse click on close button"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Hardware CGEvent input simulation/)).toBeInTheDocument();
+    // Static description must NOT be present once the assessment is valued.
+    expect(
+      screen.queryByText("Perform mouse and keyboard actions"),
     ).not.toBeInTheDocument();
   });
 
-  it("renders pending badge with spinner copy and enabled controls while hiding outcome", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        return jsonResponse({
-          approvals: [
-            {
-              id: "33333333-3333-3333-3333-333333333333",
-              toolName: "email.send",
-              description: "Send email to ops",
-              intent: "Notifying ops of deploy",
-              assessment: null,
-              input: {
-                toolName: "email.send",
-                argumentsJSON: '{"to":"ops@example.com"}',
-                callID: "call-3",
-              },
-              suggestedDurations: ["thisTime"],
-            },
-          ],
-          count: 1,
-        });
-      }),
-    );
+  it("renders the pending badge with spinner copy and enabled controls", async () => {
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "33333333-3333-3333-3333-333333333333",
+          description: "Send email to ops",
+          intent: "Notifying ops of deploy",
+          assessment: null,
+          input: {
+            toolName: "email.send",
+            argumentsJSON: '{"to":"ops@example.com"}',
+            callID: "call-3",
+          },
+          suggestedDurations: ["thisTime"],
+        }),
+      ],
+    });
     render(<ApprovalsInbox />);
     await waitFor(() => {
       expect(screen.getByText("email.send")).toBeInTheDocument();
     });
-    // Pending badge carries the shared pending shape with the id suffix.
     const pending = screen.getByTestId(
       "approval-assessment-pending-33333333-3333-3333-3333-333333333333",
     );
@@ -1170,10 +908,11 @@ describe("ApprovalsInbox", () => {
     ).not.toBeNull();
     // Valued badge, outcome, and warnings stay hidden while pending.
     expect(
-      screen.queryByTestId("approval-severity-33333333-3333-3333-3333-333333333333"),
+      screen.queryByTestId(
+        "approval-severity-33333333-3333-3333-3333-333333333333",
+      ),
     ).not.toBeInTheDocument();
     expect(screen.queryByText(/Expected outcome/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/⚠️/)).not.toBeInTheDocument();
     // Intent, arguments disclosure, and live decisions stay available.
     expect(screen.getByText("Notifying ops of deploy")).toBeInTheDocument();
     expect(screen.getByText("View arguments")).toBeInTheDocument();
@@ -1181,41 +920,126 @@ describe("ApprovalsInbox", () => {
     expect(screen.getByRole("button", { name: "Deny" })).toBeEnabled();
   });
 
-  it("falls back to static description only when nil with description present", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({ grants: [], count: 0 });
+  it("renders the question picker through the shared card", async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ path: string; body: string }> = [];
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-question",
+          toolName: "question.ask",
+          description: "Which environment?",
+          input: {
+            toolName: "question.ask",
+            argumentsJSON:
+              '{"question":"Which environment?","options":["staging","production"]}',
+            callID: "call-question",
+          },
+          suggestedDurations: ["thisTime"],
+        }),
+      ],
+      onCall: (path, init) => {
+        if (init?.method === "POST") {
+          calls.push({ path, body: String(init?.body ?? "") });
         }
-        return jsonResponse({
-          approvals: [
-            {
-              id: "44444444-4444-4444-4444-444444444444",
-              toolName: "email.send",
-              description: "Send email to ops",
-              assessment: null,
-              input: {
-                toolName: "email.send",
-                argumentsJSON: "{}",
-                callID: "call-4",
-              },
-              suggestedDurations: ["thisTime"],
-            },
-          ],
-          count: 1,
-        });
-      }),
-    );
+      },
+    });
     render(<ApprovalsInbox />);
     await waitFor(() => {
-      expect(screen.getByText("Send email to ops")).toBeInTheDocument();
+      expect(
+        screen.getByTestId("inline-question-req-question"),
+      ).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("radio", { name: "staging" }));
+    await user.click(screen.getByRole("button", { name: /submit choice/i }));
+    await waitFor(() => {
+      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
+    });
+    expect(calls[0].path).toContain("/respond");
+    expect(JSON.parse(calls[0].body)).toMatchObject({
+      answer: "staging",
+      cancelled: false,
+    });
+  });
+
+  it("locks only the deciding row while a decision is in flight", async () => {
+    const user = userEvent.setup();
+    let resolveDecide: ((value: Response) => void) | null = null;
+    const decidePromise = new Promise<Response>((resolve) => {
+      resolveDecide = resolve;
+    });
+    stubEngine({
+      approvals: [
+        pendingRequest({ id: "req-slow", sessionID: "sess-a" }),
+        pendingRequest({
+          id: "req-fast",
+          sessionID: "sess-a",
+          toolName: "files.write",
+          input: {
+            toolName: "files.write",
+            argumentsJSON: '{"path":"/tmp/a.txt"}',
+            callID: "call-fast",
+          },
+        }),
+      ],
+      sessions: [{ id: "sess-a", title: "Alpha" }],
+      // Hold only the first decision; the reads and the sibling card answer
+      // through the default branch.
+      respond: (path, init) =>
+        init?.method === "POST" && path.includes("req-slow")
+          ? decidePromise
+          : null,
+    });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    const slowCard = screen.getByTestId("approval-card-req-slow");
+    const fastCard = screen.getByTestId("approval-card-req-fast");
+    await user.click(within(slowCard).getByRole("button", { name: "Allow" }));
+    // The in-flight row reports progress while the sibling stays actionable,
+    // so a slow decision cannot freeze independent approvals.
+    await waitFor(() => {
+      expect(within(slowCard).getByText("Allowing & resuming…")).toBeInTheDocument();
     });
     expect(
-      screen.getByTestId(
-        "approval-assessment-pending-44444444-4444-4444-4444-444444444444",
-      ),
-    ).toBeInTheDocument();
+      within(slowCard).queryByRole("button", { name: "Allow" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(fastCard).getByRole("button", { name: "Allow" }),
+    ).toBeEnabled();
+    resolveDecide!(
+      jsonResponse({
+        id: "req-slow",
+        approved: true,
+        duration: "thisTime",
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.queryByTestId("approval-card-req-slow")).not.toBeInTheDocument();
+    });
+  });
+
+  it("refetches approvals and sessions on manual refresh", async () => {
+    const user = userEvent.setup();
+    const paths: string[] = [];
+    stubEngine({
+      approvals: [pendingRequest()],
+      onCall: (path) => {
+        paths.push(path);
+      },
+    });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    const before = paths.length;
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => {
+      expect(paths.length).toBeGreaterThan(before);
+    });
+    expect(paths).toContain("/approvals");
+    expect(paths).toContain("/sessions");
   });
 
   it("upserts identical-id approval frames so enrichment swaps pending for valued", async () => {
@@ -1229,32 +1053,21 @@ describe("ApprovalsInbox", () => {
     const capture = createMockWebSocketCapture();
     vi.stubGlobal("WebSocket", createMockWebSocket(capture));
     const pendingID = "55555555-5555-5555-5555-555555555555";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        return jsonResponse({
-          approvals: [
-            {
-              id: pendingID,
-              toolName: "email.send",
-              description: "Send email to ops",
-              intent: "Notifying ops of deploy",
-              assessment: null,
-              input: {
-                toolName: "email.send",
-                argumentsJSON: '{"to":"ops@example.com"}',
-                callID: "call-5",
-              },
-              suggestedDurations: ["thisTime"],
-            },
-          ],
-          count: 1,
-        });
-      }),
-    );
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: pendingID,
+          description: "Send email to ops",
+          intent: "Notifying ops of deploy",
+          assessment: null,
+          input: {
+            toolName: "email.send",
+            argumentsJSON: '{"to":"ops@example.com"}',
+            callID: "call-5",
+          },
+        }),
+      ],
+    });
     render(<ApprovalsInbox />);
     await waitFor(() => {
       expect(
@@ -1266,8 +1079,8 @@ describe("ApprovalsInbox", () => {
       expect(capture.onMessage).not.toBeNull();
     });
     // Enrichment rebroadcast for the identical id replaces the stored entry
-    // in place: no duplicate card, pending swaps for the valued copy, and
-    // the Allow control persists without remounting.
+    // in place: no duplicate card, pending swaps for the valued copy, and the
+    // Allow control persists without remounting.
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "approval",
       request: {
@@ -1306,522 +1119,117 @@ describe("ApprovalsInbox", () => {
     resetSharedSocket();
   });
 
-  it("renders a separator between duration and expiry on every grant card", async () => {
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    const now = new Date().toISOString();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                toolName: "email.send",
-                target: "alice@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-              {
-                id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-                toolName: "file.write",
-                target: "",
-                grantedAt: now,
-                expiresAt: null,
-                duration: "forever",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-            ],
-            count: 2,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    const { container } = render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(screen.getByText("2 active")).toBeInTheDocument();
+  it("evicts decided approvals over the socket and drops rules-change frames", async () => {
+    const { resetSharedSocket } = await import("../hooks/useSharedWebSocket");
+    const {
+      createMockWebSocket,
+      createMockWebSocketCapture,
+      dispatchFrameOrThrow,
+    } = await import("../test-utils/mockWebSocket");
+    resetSharedSocket();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    const decidedID = "66666666-6666-6666-6666-666666666666";
+    stubEngine({
+      approvals: [
+        pendingRequest({ id: decidedID, sessionID: "sess-a" }),
+        pendingRequest({
+          id: "77777777-7777-7777-7777-777777777777",
+          sessionID: "sess-a",
+          toolName: "files.write",
+          input: {
+            toolName: "files.write",
+            argumentsJSON: '{"path":"/tmp/a.txt"}',
+            callID: "call-keep",
+          },
+        }),
+      ],
+      sessions: [{ id: "sess-a", title: "Alpha" }],
     });
-    // The dot joins the duration tier and the expiry so scope and lifetime
-    // read as one line; each card carries its own join rather than sharing.
-    const separators = container.querySelectorAll(".approval-grant-meta-sep");
-    expect(separators).toHaveLength(2);
-    for (const separator of Array.from(separators)) {
-      expect(separator.textContent).toBe("·");
-      expect(separator.getAttribute("aria-hidden")).toBe("true");
-    }
-  });
-
-  it("widen confirm posts once to the widen sub-action", async () => {
-    const user = userEvent.setup();
-    const grantId = "66666666-6666-6666-6666-666666666666";
-    const now = Math.floor(Date.now() / 1000);
-    const future = now + 3600;
-    const widenCalls: Array<{ path: string; method?: string }> = [];
-    let grantTarget = "alice@example.com";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (typeof input === "string" && input.includes("/widen")) {
-          widenCalls.push({ path: input, method: init?.method });
-          grantTarget = "";
-          return new Response(null, { status: 204 });
-        }
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: grantId,
-                toolName: "email.send",
-                target: grantTarget,
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
     render(<ApprovalsInbox />);
     await waitFor(() => {
-      expect(
-        screen.getByText("email sends to alice@example.com are approved"),
-      ).toBeInTheDocument();
+      expect(screen.getByTestId(`approval-card-${decidedID}`)).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Widen to all targets" }));
     await waitFor(() => {
-      expect(screen.getByText("Widen to all targets?")).toBeInTheDocument();
+      expect(capture.onMessage).not.toBeNull();
     });
-    // The staged confirm is the only path that expands trust, so one explicit
-    // confirm must yield exactly one widening request.
-    await user.click(
-      within(
-        screen.getByRole("dialog", { name: "Confirm widen grant" }),
-      ).getByRole("button", { name: "Widen to all targets" }),
-    );
+    // Standing rules changed: the inbox manages no grants, so the frame
+    // refreshes nothing and leaves the pending queue untouched.
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "access_rules_changed",
+    });
+    expect(
+      screen.getByTestId(`approval-card-${decidedID}`),
+    ).toBeInTheDocument();
+    // A decision elsewhere evicts only its own card.
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "approval_decided",
+      id: decidedID,
+    });
     await waitFor(() => {
-      expect(
-        screen.getByText("email sends to all targets are approved"),
-      ).toBeInTheDocument();
+      expect(screen.queryByTestId(`approval-card-${decidedID}`)).not.toBeInTheDocument();
     });
-    expect(widenCalls).toHaveLength(1);
-    expect(widenCalls[0].path).toContain(`/approvals/grants/${grantId}/widen`);
-    expect(widenCalls[0].method).toBe("POST");
+    expect(
+      screen.getByTestId("approval-card-77777777-7777-7777-7777-777777777777"),
+    ).toBeInTheDocument();
+    resetSharedSocket();
   });
 
-  it("widen cancel stages without posting and keeps the narrowed scope", async () => {
-    const user = userEvent.setup();
-    const grantId = "77777777-7777-7777-7777-777777777777";
-    const now = Math.floor(Date.now() / 1000);
-    const future = now + 3600;
-    const widenCalls: Array<{ path: string; method?: string }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (typeof input === "string" && input.includes("/widen")) {
-          widenCalls.push({ path: input, method: init?.method });
-          return new Response(null, { status: 204 });
-        }
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: grantId,
-                toolName: "email.send",
-                target: "alice@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(
-        screen.getByText("email sends to alice@example.com are approved"),
-      ).toBeInTheDocument();
+  it("shows the filtered session's ephemeral trust above the pending groups", async () => {
+    const trustGrants = [
+      {
+        toolName: "email.send",
+        scope: { kind: "exactTarget", target: "bob@x.com" },
+        duration: "forSession",
+        grantedAt: "2026-01-01T00:00:00Z",
+        expiresAt: null,
+      },
+    ];
+    const fetchMock = vi.fn(async (input: string) => {
+      const path = String(input);
+      if (path.startsWith("/approvals/session-trust")) {
+        return jsonResponse({
+          sessionID: "sess-a",
+          grants: trustGrants,
+          count: 1,
+        });
+      }
+      if (path === "/sessions") {
+        return jsonResponse({ sessions: [{ id: "sess-a", title: "Alpha" }], count: 1 });
+      }
+      return jsonResponse({ approvals: [], count: 0 });
     });
-    await user.click(screen.getByRole("button", { name: "Widen to all targets" }));
-    await waitFor(() => {
-      expect(screen.getByText("Widen to all targets?")).toBeInTheDocument();
-    });
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
-    // Dismissing the dialog must leave the grant untouched with no network
-    // side effect so a mis-click never expands live trust.
-    await waitFor(() => {
-      expect(screen.queryByText("Widen to all targets?")).not.toBeInTheDocument();
-    });
-    expect(
-      screen.getByText("email sends to alice@example.com are approved"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("1 active")).toBeInTheDocument();
-    expect(widenCalls).toHaveLength(0);
-  });
+    vi.stubGlobal("fetch", fetchMock);
+    const { container } = render(<ApprovalsInbox sessionID="sess-a" />);
 
-  it("widen modal quotes the grant target beside the plain-language definition", async () => {
-    const user = userEvent.setup();
-    const grantId = "88888888-8888-8888-8888-888888888888";
-    const now = Math.floor(Date.now() / 1000);
-    const future = now + 3600;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: grantId,
-                toolName: "email.send",
-                target: "alice@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
+    await waitFor(() => {
+      expect(screen.getByTestId("ephemeral-trust-chip")).toBeInTheDocument();
+    });
+    const line = container.querySelector<HTMLElement>(".ephemeral-trust-line");
+    expect(line?.textContent).toBe(
+      "email.send to bob@x.com — rest of this session",
     );
+    // The chip sits above the pending groups, and its revoke is per line.
+    const chip = screen.getByTestId("ephemeral-trust-chip");
+    const groups = container.querySelector(".approvals-groups");
+    expect(
+      chip.compareDocumentPosition(groups as Node) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Revoke" })).toBeInTheDocument();
+    // With no session filtered, the chip never mounts and no trust is read.
+    cleanup();
     render(<ApprovalsInbox />);
     await waitFor(() => {
-      expect(
-        screen.getByText("email sends to alice@example.com are approved"),
-      ).toBeInTheDocument();
+      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Widen to all targets" }));
-    await waitFor(() => {
-      expect(screen.getByText("Widen to all targets?")).toBeInTheDocument();
-    });
-    const dialog = screen.getByRole("dialog", { name: "Confirm widen grant" });
-    // The modal names the narrowed scope line plus the plain-language target
-    // definition, so the owner sees both what is approved and what widening
-    // removes before trust expands tool-wide.
     expect(
-      within(dialog).getByText("email sends to alice@example.com are approved"),
-    ).toBeInTheDocument();
-    expect(dialog.textContent).toContain('"alice@example.com"');
-    expect(dialog.textContent).toContain("A target is the specific thing");
-  });
-
-  it("duration modal lists four durable tiers without the one-shot option", async () => {
-    const user = userEvent.setup();
-    const grantId = "99999999-9999-9999-9999-999999999999";
-    const now = new Date().toISOString();
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    const patchCalls: Array<{ path: string; method?: string }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (
-          typeof input === "string" &&
-          input === `/approvals/grants/${grantId}` &&
-          init?.method === "PATCH"
-        ) {
-          patchCalls.push({ path: input, method: init?.method });
-          return new Response(null, { status: 204 });
-        }
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: grantId,
-                toolName: "email.send",
-                target: "alice@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 1,
-                lastUsedAt: now,
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(
-        screen.getByText("email sends to alice@example.com are approved"),
-      ).toBeInTheDocument();
-    });
-    await user.click(screen.getByRole("button", { name: "Change duration" }));
-    await waitFor(() => {
-      expect(screen.getByText("Change duration?")).toBeInTheDocument();
-    });
-    const dialog = screen.getByRole("dialog", { name: "Change grant duration" });
-    // Re-arming rewrites a durable lifetime in place, so the modal offers only
-    // the four durable tiers; the one-shot tier stores no row and stays out.
-    expect(
-      within(dialog).getByRole("radio", { name: "Next 5 minutes" }),
-    ).toBeInTheDocument();
-    expect(
-      within(dialog).getByRole("radio", { name: "Next hour" }),
-    ).toBeInTheDocument();
-    expect(
-      within(dialog).getByRole("radio", { name: "Next day" }),
-    ).toBeInTheDocument();
-    expect(
-      within(dialog).getByRole("radio", { name: "Forever" }),
-    ).toBeInTheDocument();
-    expect(
-      within(dialog).queryByRole("radio", { name: "Only this time" }),
+      screen.queryByTestId("ephemeral-trust-chip"),
     ).not.toBeInTheDocument();
-    // Opening the dialog previews without rewriting expiry, so no PATCH fires
-    // from staging alone.
-    expect(patchCalls).toHaveLength(0);
-  });
-
-  it("duration save patches the tier and closes with refreshed expiry", async () => {
-    const user = userEvent.setup();
-    const grantId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa01";
-    const now = new Date().toISOString();
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    const patchCalls: Array<{ path: string; method?: string; body?: string }> = [];
-    let grantDuration = "oneHour";
-    let grantExpires: string | null = future;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (
-          typeof input === "string" &&
-          input === `/approvals/grants/${grantId}` &&
-          init?.method === "PATCH"
-        ) {
-          patchCalls.push({
-            path: input,
-            method: init?.method,
-            body: String(init?.body ?? ""),
-          });
-          grantDuration = (JSON.parse(String(init?.body ?? "{}")) as { duration: string }).duration;
-          grantExpires =
-            grantDuration === "forever"
-              ? null
-              : new Date(Date.now() + 86_400_000).toISOString();
-          return new Response(null, { status: 204 });
-        }
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: grantId,
-                toolName: "email.send",
-                target: "alice@example.com",
-                grantedAt: now,
-                expiresAt: grantExpires,
-                duration: grantDuration,
-                useCount: 2,
-                lastUsedAt: now,
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(
-        screen.getByText("email sends to alice@example.com are approved"),
-      ).toBeInTheDocument();
-    });
-    await user.click(screen.getByRole("button", { name: "Change duration" }));
-    await waitFor(() => {
-      expect(screen.getByText("Change duration?")).toBeInTheDocument();
-    });
-    const dialog = screen.getByRole("dialog", { name: "Change grant duration" });
-    await user.click(within(dialog).getByRole("radio", { name: "Next day" }));
-    // The client sends only the replacement tier; identity and counters stay
-    // server-side while expiry is recomputed from confirmation time.
-    await user.click(
-      within(dialog).getByRole("button", { name: "Save duration" }),
-    );
-    await waitFor(() => {
-      expect(screen.queryByText("Change duration?")).not.toBeInTheDocument();
-    });
-    expect(patchCalls).toHaveLength(1);
-    expect(patchCalls[0].path).toBe(`/approvals/grants/${grantId}`);
-    expect(patchCalls[0].method).toBe("PATCH");
-    expect(JSON.parse(patchCalls[0].body ?? "")).toEqual({ duration: "oneDay" });
-    expect(screen.getByText("Next day")).toBeInTheDocument();
-    expect(screen.getByText("1 active")).toBeInTheDocument();
-  });
-
-  it("duration save failure keeps the modal open with the error", async () => {
-    const user = userEvent.setup();
-    const grantId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa02";
-    const now = new Date().toISOString();
-    const future = new Date(Date.now() + 3600_000).toISOString();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (
-          typeof input === "string" &&
-          input === `/approvals/grants/${grantId}` &&
-          init?.method === "PATCH"
-        ) {
-          return new Response(JSON.stringify({ reason: "Unknown grant gone" }), {
-            status: 404,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({
-            grants: [
-              {
-                id: grantId,
-                toolName: "email.send",
-                target: "alice@example.com",
-                grantedAt: now,
-                expiresAt: future,
-                duration: "oneHour",
-                useCount: 0,
-                lastUsedAt: null,
-              },
-            ],
-            count: 1,
-          });
-        }
-        return jsonResponse({ approvals: [], count: 0 });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(
-        screen.getByText("email sends to alice@example.com are approved"),
-      ).toBeInTheDocument();
-    });
-    await user.click(screen.getByRole("button", { name: "Change duration" }));
-    await waitFor(() => {
-      expect(screen.getByText("Change duration?")).toBeInTheDocument();
-    });
-    const dialog = screen.getByRole("dialog", { name: "Change grant duration" });
-    await user.click(
-      within(dialog).getByRole("button", { name: "Save duration" }),
-    );
-    // Failures keep the dialog open with the engine reason inside so the owner
-    // can retry or cancel instead of losing the staged choice behind a
-    // page-level error hidden by the modal backdrop.
-    await waitFor(() => {
-      expect(within(dialog).getByRole("alert")).toHaveTextContent("Unknown grant gone");
-    });
-    expect(screen.getByText("Change duration?")).toBeInTheDocument();
     expect(
-      within(dialog).getByText("email sends to alice@example.com are approved"),
-    ).toBeInTheDocument();
-  });
-
-  it("renders the verbatim sandbox tier line beneath Expected outcome", async () => {
-    const summary =
-      "Runs in a temporary container with no internet access. Nothing is kept after the run.";
-    const outcome = "Lists files in /tmp without changing anything";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        return jsonResponse({
-          approvals: [
-            {
-              id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaa001",
-              toolName: "bash.exec",
-              description: "Run shell command",
-              intent: "Listing temp files",
-              assessment: {
-                severity: "moderate",
-                outcome,
-                warnings: [],
-              },
-              sandbox_summary: summary,
-              input: {
-                toolName: "bash.exec",
-                argumentsJSON: '{"command":"ls /tmp"}',
-                callID: "call-tier-1",
-              },
-              suggestedDurations: ["thisTime"],
-            },
-          ],
-          count: 1,
-        });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(screen.getByText("bash.exec")).toBeInTheDocument();
-    });
-    expect(screen.getByText(outcome)).toBeInTheDocument();
-    const tier = screen.getByTestId("bash-tier-line");
-    expect(tier.textContent).toBe(summary);
-    const outcomeLabel = screen.getByText(/Expected outcome:/);
-    expect(
-      Boolean(
-        outcomeLabel.compareDocumentPosition(tier) &
-          Node.DOCUMENT_POSITION_FOLLOWING,
+      fetchMock.mock.calls.filter(([url]) =>
+        String(url).startsWith("/approvals/session-trust"),
       ),
-    ).toBe(true);
-  });
-
-  it("renders no tier line when the sandbox summary is absent", async () => {
-    const outcome = "Sends deploy notice to ops";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
-          return jsonResponse({ grants: [], count: 0 });
-        }
-        return jsonResponse({
-          approvals: [
-            {
-              id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaa002",
-              toolName: "email.send",
-              description: "Send email to ops",
-              intent: "Notifying ops of deploy",
-              assessment: {
-                severity: "moderate",
-                outcome,
-                warnings: [],
-              },
-              input: {
-                toolName: "email.send",
-                argumentsJSON: '{"to":"ops@example.com"}',
-                callID: "call-tier-2",
-              },
-              suggestedDurations: ["thisTime"],
-            },
-          ],
-          count: 1,
-        });
-      }),
-    );
-    render(<ApprovalsInbox />);
-    await waitFor(() => {
-      expect(screen.getByText("email.send")).toBeInTheDocument();
-    });
-    expect(screen.getByText(outcome)).toBeInTheDocument();
-    expect(screen.queryByTestId("bash-tier-line")).not.toBeInTheDocument();
+    ).toHaveLength(1);
   });
 });
-

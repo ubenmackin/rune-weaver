@@ -3,6 +3,7 @@
 // and Cancel / Submit actions for `question.ask` tools.
 
 import { useState } from "react";
+import type { ReactNode } from "react";
 import type { PermissionRequest } from "../api";
 import { CheckIcon, CloseIcon, MessageSquareIcon, RefreshIcon } from "./icons";
 
@@ -12,6 +13,10 @@ export interface InlineQuestionCardProps {
   onRespond: (id: string, answer?: string, cancelled?: boolean) => void;
   onOpenSession?: (sessionId: string) => void;
   variant?: "chat" | "dashboard" | "inbox";
+  // Optional trailing header control, beside the thread link. The dashboard
+  // queue passes its Approvals Inbox route here so a question card carries the
+  // same escape hatch as every other card on that surface.
+  headerLink?: ReactNode;
 }
 
 export function parseQuestionArgs(argumentsJSON?: string | null): {
@@ -44,6 +49,7 @@ export default function InlineQuestionCard({
   onRespond,
   onOpenSession,
   variant = "chat",
+  headerLink,
 }: InlineQuestionCardProps) {
   const { question, options } = parseQuestionArgs(request.input?.argumentsJSON);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
@@ -106,6 +112,9 @@ export default function InlineQuestionCard({
             <MessageSquareIcon size={13} />
             <span>Open Thread</span>
           </button>
+        ) : null}
+        {headerLink ? (
+          <span className="inline-question-header-link">{headerLink}</span>
         ) : null}
       </div>
 

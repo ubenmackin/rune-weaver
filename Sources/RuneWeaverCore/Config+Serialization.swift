@@ -192,14 +192,25 @@ extension RuneWeaverConfig {
         // Lists render as inline TOML arrays so the minimal parser can
         // re-read them without a full array-table implementation; each
         // element is quoted to survive spaces and glob characters.
-        [
+        var lines = [
             "[files]",
             "deny_patterns = \(Self.tomlStringArray(files.denyPatterns))",
             "allow_roots = \(Self.tomlStringArray(files.allowRoots))",
             "require_approval_on_deny = \(files.requireApprovalOnDeny ? "true" : "false")",
-            "write_mode = \(Self.tomlQuoted(files.writeMode.rawValue))",
-            ""
+            "write_mode = \(Self.tomlQuoted(files.writeMode.rawValue))"
         ]
+        // Per-path rules render as `[[files.write_paths]]` array-of-tables so a
+        // resave preserves them. An empty list renders no entry, and the load
+        // reseeds the documented defaults because TOML has no spelling for an
+        // empty array-of-tables.
+        for rule in files.writePathRules {
+            lines.append("")
+            lines.append("[[files.write_paths]]")
+            lines.append("path = \(Self.tomlQuoted(rule.path))")
+            lines.append("posture = \(Self.tomlQuoted(rule.posture.rawValue))")
+        }
+        lines.append("")
+        return lines
     }
 
     private func renderIndexTOML() -> [String] {

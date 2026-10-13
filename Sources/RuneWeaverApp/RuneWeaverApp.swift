@@ -1,7 +1,6 @@
 // Rune Weaver App — macOS Menu Bar Agent Application.
 
 import AppKit
-import RuneWeaverCore
 import RuneWeaverTools
 import SwiftUI
 
@@ -301,35 +300,15 @@ struct AppMenuView: View {
             }
 
             if !model.pendingApprovals.isEmpty {
-                Section("Pending Approvals (\(model.pendingApprovals.count))") {
-                    ForEach(model.pendingApprovals, id: \.id) { approval in
-                        Menu("\(approval.toolName): \(approval.description.isEmpty ? "Requires confirmation" : approval.description)") {
-                            Menu("Approve (This Target)") {
-                                ForEach(TrustDuration.allCases, id: \.self) { duration in
-                                    Button(duration.displayName) {
-                                        model.approve(id: approval.id, duration: duration, widen: false)
-                                    }
-                                }
-                            }
-                            Menu("Approve for Any Target") {
-                                // Widening grants trust beyond the single target, which
-                                // only a durable tier can express; "only this time"
-                                // stores no grant at all, so it is excluded by
-                                // construction. Deriving the eligible set from allCases
-                                // keeps a future durable tier widen-eligible here
-                                // without a second list to keep in sync.
-                                ForEach(TrustDuration.allCases.filter { $0 != .thisTime }, id: \.self) { duration in
-                                    Button(duration.displayName) {
-                                        model.approve(id: approval.id, duration: duration, widen: true)
-                                    }
-                                }
-                            }
-                            Button("Deny") {
-                                model.deny(id: approval.id)
-                            }
-                        }
-                    }
+                // Every request kind — including question.ask and desktop.resume
+                // — decides in the dashboard inbox through the shared decision
+                // contract, so the menu bar owns no approve/deny control: the row
+                // reports the parked count and routes there instead of deciding
+                // natively.
+                Button("Attention required (\(model.pendingApprovals.count))") {
+                    model.openInbox()
                 }
+                .disabled(!model.isDashboardAvailable)
             }
         }
 
@@ -378,12 +357,13 @@ struct AppMenuView: View {
                             .foregroundColor(.yellow)
                         Text("Paused (Operator took over)")
                     }
-                    Button("▶️ Resume Agent Control") {
-                        model.resumeDesktopControl()
+                    // Resuming or cancelling the parked desktop.resume request
+                    // is an approval decision like any other, so the menu only
+                    // routes to the inbox where the decision can be made.
+                    Button("Open Inbox") {
+                        model.openInbox()
                     }
-                    Button("✖️ Cancel Task") {
-                        model.cancelDesktopTask()
-                    }
+                    .disabled(!model.isDashboardAvailable)
                 } else {
                     HStack {
                         Image(systemName: model.isDesktopActive ? "eye.fill" : "eye.slash")

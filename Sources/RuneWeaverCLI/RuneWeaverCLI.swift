@@ -1,5 +1,8 @@
 // Rune Weaver CLI — Shared terminal helpers and tool-bus wiring.
 
+#if canImport(Bestline)
+    import Bestline
+#endif
 import ArgumentParser
 import Foundation
 import os
@@ -170,6 +173,84 @@ final class CLILockedValue<Value: Sendable>: Sendable {
     }
 }
 
+/// Exactly-once resume state for a blocking line read.
+final class CLIExactlyOnceReadState: Sendable {
+    private struct State: Sendable {
+        var didResume = false
+        var continuation: CheckedContinuation<String?, Never>?
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    /// Stores the continuation awaiting the background read.
+    func set(_ continuation: CheckedContinuation<String?, Never>) {
+        let alreadyResumed = state.withLock { lockState -> Bool in
+            if lockState.didResume {
+                return true
+            }
+            lockState.continuation = continuation
+            return false
+        }
+        if alreadyResumed {
+            continuation.resume(returning: nil)
+        }
+    }
+
+    /// Resumes exactly once, ignoring late racers.
+    /// - Parameter value: Line without the newline, or nil on EOF or cancellation.
+    func resume(returning value: String?) {
+        let pending = state.withLock { lockState -> CheckedContinuation<String?, Never>? in
+            guard !lockState.didResume else { return nil }
+            lockState.didResume = true
+            let cont = lockState.continuation
+            lockState.continuation = nil
+            return cont
+        }
+        pending?.resume(returning: value)
+    }
+}
+
+/// Serial queue for all line-editor blocking reads.
+/// Reads must serialize so concurrent callers cannot race on stdin and steal each other's lines.
+private let chatLineReadQueue = DispatchQueue(label: "com.runeweaver.chat-line-read", qos: .userInitiated)
+
+/// Reads one line via a blocking reader without blocking the cooperative pool.
+func cliBlockingRead(_ blockingRead: @Sendable @escaping () -> String?) async -> String? {
+    let state = CLIExactlyOnceReadState()
+    return await withTaskCancellationHandler {
+        await withCheckedContinuation { continuation in
+            state.set(continuation)
+            chatLineReadQueue.async {
+                state.resume(returning: blockingRead())
+            }
+        }
+    } onCancel: {
+        state.resume(returning: nil)
+    }
+}
+
+/// Reads one line via the editing layer, falling back to standard input.
+private func chatEditedRead(prompt: String) -> String? {
+    #if canImport(Bestline)
+        return Bestline.readLine(prompt: prompt)
+    #else
+        print(prompt, terminator: "")
+        fflush(stdout)
+        return readLine(strippingNewline: true)
+    #endif
+}
+
+/// Edited single-line reads for interactive operator prompts.
+///
+/// Kept beside the other shared terminal helpers so a blocking read never
+/// parks the cooperative pool, and every prompt path serializes on one queue.
+enum ChatLineEditing {
+    /// Reads one line without blocking the cooperative pool.
+    static func readLine(prompt: String) async -> String? {
+        await cliBlockingRead { chatEditedRead(prompt: prompt) }
+    }
+}
+
 /// Single shared store source for the CLI process.
 enum CLIShared {
     /// Cached engines keyed by episodes, vector, and document index paths.
@@ -218,10 +299,9 @@ enum CLIShared {
     ///
     /// Every bash-invoking CLI command calls this before building its tool
     /// bus so a fresh boot creates the 0700 root and a stale `tmp/` never
-    /// accumulates across runs. The workspace management command shares the
-    /// same stores direct-core with no session linkage. Failures stay
-    /// best-effort with a dim note because the per-turn quota gate still
-    /// fails closed when the directory is missing.
+    /// accumulates across runs. Failures stay best-effort with a dim note
+    /// because the per-turn quota gate still fails closed when the directory
+    /// is missing.
     /// - Parameters:
     ///   - config: Quotas and retention from `[workspace]`.
     ///   - store: Injected store for tests; nil derives from `config`.
@@ -332,7 +412,7 @@ enum CLIShared {
     /// conversations manager for chip linkage); nil keeps them unregistered while
     /// a disabled `[goals]` section still registers and fails closed inside each
     /// tool. When only the policy plus an LLM arrive, the store and engine build
-    /// here from the episodes path so chat and serve need no second wiring step.
+    /// here from the episodes path so the CLI needs no second wiring step.
     /// Agent script tools follow the same one-registry posture: an explicit pin
     /// store wins, otherwise one builds over the resolved episodes path with the
     /// effective workspace so dashboard and CLI pins never drift. Fan-out tools follow the same ships-disabled posture: the optional engine
@@ -345,7 +425,8 @@ enum CLIShared {
     ///   their instance so one store backs both.
     /// - Parameter recipientAliasStore: Durable alias store the send tool
     ///   learns from; nil auto-builds one from the resolved episodes path so
-    ///   chat remembers confirmed name sends without a second wiring step.
+    ///   a resolved-name send teaches later resolutions without a second
+    ///   wiring step.
     /// - Throws: `ExitCode(1)` after printing when the security policy cannot
     ///   be verified.
     static func makeToolBus(
@@ -395,9 +476,9 @@ enum CLIShared {
             effectiveEngine = GoalEngine(store: store, llm: goalLLM, config: goalsConfig)
         }
         // The learned-alias store needs no engine, so it auto-builds from the
-        // same resolved path whenever the caller supplied none: CLI chat records
-        // confirmed name sends without a second wiring step, and construction is
-        // path-only, so callers that never send pay no I/O.
+        // same resolved path whenever the caller supplied none: a CLI turn
+        // records confirmed name sends without a second wiring step, and
+        // construction is path-only, so callers that never send pay no I/O.
         let effectiveAliasStore = recipientAliasStore ?? RecipientAliasStore(dbPath: rawPath)
         // Agent pins share the same episodes file as goals so the dashboard
         // and the CLI observe one registry; an explicit store wins untouched

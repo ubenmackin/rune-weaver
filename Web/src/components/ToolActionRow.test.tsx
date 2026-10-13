@@ -64,9 +64,9 @@ describe("ToolActionRow honest status", () => {
       result: {
         toolCallID: "call-nav-1",
         content: JSON.stringify({
-          final_url: "https://developer.apple.com/xcode/",
+          finalUrl: "https://developer.apple.com/xcode/",
           title: "Xcode - Apple Developer",
-          redirect_count: 0,
+          redirectCount: 0,
         }),
         isError: false,
       },
@@ -91,9 +91,9 @@ describe("ToolActionRow honest status", () => {
       result: {
         toolCallID: "call-nav-2",
         content: JSON.stringify({
-          final_url: "https://developer.apple.com/xcode/",
+          finalUrl: "https://developer.apple.com/xcode/",
           title: "Xcode - Apple Developer",
-          redirect_count: 0,
+          redirectCount: 0,
         }),
         isError: false,
       },
@@ -503,7 +503,7 @@ describe("ToolActionRow bash envelope status", () => {
           ...bashAction,
           result: {
             toolCallID: "call-bash-1",
-            content: JSON.stringify({ denied: true, kill_reason: "denied" }),
+            content: JSON.stringify({ denied: true, killReason: "denied" }),
             isError: true,
           },
         }}
@@ -523,7 +523,7 @@ describe("ToolActionRow bash envelope status", () => {
             toolCallID: "call-bash-1",
             content: JSON.stringify({
               denied: false,
-              kill_reason: "wall_timeout",
+              killReason: "wall_timeout",
               exitCode: 0,
             }),
             isError: true,
@@ -545,7 +545,7 @@ describe("ToolActionRow bash envelope status", () => {
             toolCallID: "call-bash-1",
             content: JSON.stringify({
               denied: false,
-              kill_reason: "resource_limit",
+              killReason: "resource_limit",
               exitCode: 0,
             }),
             isError: true,
@@ -571,7 +571,7 @@ describe("ToolActionRow bash envelope status", () => {
               stderr: "",
               exitCode: 1,
               denied: false,
-              kill_reason: "clean",
+              killReason: "clean",
             }),
             isError: true,
           },
@@ -597,7 +597,7 @@ describe("ToolActionRow bash envelope status", () => {
               stderr: "",
               exitCode: 2,
               denied: false,
-              kill_reason: "clean",
+              killReason: "clean",
             }),
             isError: true,
           },
@@ -614,7 +614,7 @@ describe("ToolActionRow bash envelope status", () => {
 
   it("renders amber Exited 2 when result.exitCode is set even if content has untrusted wrapper", () => {
     const wrappedContent = `--- BEGIN UNTRUSTED EXTERNAL CONTENT ---
-{"approvalRequired":false,"command":"pwd; whoami; ls /Users","denied":false,"error":"Command exited with status 2","exitCode":2,"isChained":true,"kill_reason":"clean","stderr":"ls: cannot access '/Users': No such file or directory\\n","stdout":"/workspace\\nroot\\n"}
+{"approvalRequired":false,"command":"pwd; whoami; ls /Users","denied":false,"error":"Command exited with status 2","exitCode":2,"isChained":true,"killReason":"clean","stderr":"ls: cannot access '/Users': No such file or directory\\n","stdout":"/workspace\\nroot\\n"}
 --- END UNTRUSTED EXTERNAL CONTENT ---`;
     render(
       <ToolActionRow
@@ -666,7 +666,7 @@ describe("ToolActionRow bash envelope status", () => {
             toolCallID: "call-bash-1",
             content: JSON.stringify({
               denied: false,
-              kill_reason: "clean",
+              killReason: "clean",
               exitCode: 0,
             }),
             isError: false,
@@ -688,7 +688,7 @@ describe("ToolActionRow bash envelope status", () => {
             toolCallID: "call-bash-1",
             content: JSON.stringify({
               denied: false,
-              kill_reason: "clean",
+              killReason: "clean",
               exitCode: 0,
             }),
             isError: true,
@@ -729,7 +729,7 @@ describe("ToolActionRow bash envelope status", () => {
             toolCallID: "call-debug-123",
             content: JSON.stringify({
               denied: true,
-              kill_reason: "denied",
+              killReason: "denied",
               exitCode: 3,
             }),
             isError: true,

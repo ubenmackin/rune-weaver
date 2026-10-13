@@ -158,15 +158,13 @@ public struct IndexSourceRunOutcome: Content, Equatable {
         self.skippedReason = report.skippedReason
     }
 
-    /// Coding keys for the version-tolerant outcome contract.
+    /// Coding keys for the outcome contract.
     private enum CodingKeys: String, CodingKey {
         case kind
         case didRun
-        case didRunSnake = "did_run"
         case scanned
         case indexed
         case skippedReason
-        case skippedReasonSnake = "skipped_reason"
     }
 
     /// Decodes an outcome row, defaulting absent counts so older engines still decode.
@@ -174,12 +172,8 @@ public struct IndexSourceRunOutcome: Content, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         kind = try container.decode(String.self, forKey: .kind)
-        let canonicalSkipped = try container.decodeIfPresent(String.self, forKey: .skippedReason)
-        let aliasSkipped = try container.decodeIfPresent(String.self, forKey: .skippedReasonSnake)
-        skippedReason = canonicalSkipped ?? aliasSkipped
-        let canonicalDidRun = try container.decodeIfPresent(Bool.self, forKey: .didRun)
-        let aliasDidRun = try container.decodeIfPresent(Bool.self, forKey: .didRunSnake)
-        if let resolved = canonicalDidRun ?? aliasDidRun {
+        skippedReason = try container.decodeIfPresent(String.self, forKey: .skippedReason)
+        if let resolved = try container.decodeIfPresent(Bool.self, forKey: .didRun) {
             didRun = resolved
         } else {
             didRun = skippedReason == nil
@@ -1253,19 +1247,19 @@ public struct IndexSettingsUpdate: Content, Equatable {
         case reminders
         case roots
         case exclude
-        case maxFileMB = "max_file_mb"
-        case mailVectorWindow = "mail_vector_window"
-        case iCloudEvicted = "icloud_evicted"
-        case describeImagesWithLLM = "describe_images_with_llm"
-        case nightlyBudget = "nightly_budget"
-        case dbPath = "db_path"
+        case maxFileMB
+        case mailVectorWindow
+        case iCloudEvicted
+        case describeImagesWithLLM
+        case nightlyBudget
+        case dbPath
         case effort
         case workers
-        case thermalBackoff = "thermal_backoff"
-        case pauseOnBattery = "pause_on_battery"
-        case maxVectorChunksPerDocument = "max_vector_chunks_per_document"
-        case mailboxDeny = "mailbox_deny"
-        case alwaysSkipped = "always_skipped"
+        case thermalBackoff
+        case pauseOnBattery
+        case maxVectorChunksPerDocument
+        case mailboxDeny
+        case alwaysSkipped
     }
 
     /// Decodes a partial patch.

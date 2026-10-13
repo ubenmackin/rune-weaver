@@ -680,22 +680,6 @@ public struct WSApprovalDecidedFrame: Codable, Sendable, Equatable {
     }
 }
 
-/// Trust-grant change signal pushed by the engine over WebSocket.
-///
-/// Dashboards keep the trust list fresh by listening for this push instead of
-/// polling the grants endpoint, so a grant stored in one tab appears in every
-/// other tab without refresh lag, without extra request load, and without
-/// risking a stale allowlist when the next approval is judged.
-public struct WSTrustGrantsChanged: Codable, Sendable, Equatable {
-    /// Always `"trust_grants_changed"`.
-    public let type: String
-
-    /// Creates a trust-grant change signal.
-    public init() {
-        self.type = "trust_grants_changed"
-    }
-}
-
 /// Error frame sent by the engine over WebSocket.
 public struct WSErrorFrame: Codable, Sendable, Equatable {
     /// Always `"error"`.
@@ -1132,8 +1116,6 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
         case originSessionId
         /// Origin session under the legacy capital-ID spelling.
         case originSessionID
-        /// Origin session under the snake_case spelling.
-        case originSessionSnake = "origin_session_id"
         /// Creation instant.
         case createdAt
         /// Last-change instant.
@@ -1143,7 +1125,7 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
     }
 
     /// Decodes tolerantly across the origin-session spellings so payloads
-    /// written with any of the three historical keys land on one field instead
+    /// written with either of the two historical keys land on one field instead
     /// of failing the push. Routes through the shared alias helper so the
     /// snapshot and the REST row converge without duplicating the fallback.
     /// - Parameter decoder: Source decoder.
@@ -1159,7 +1141,7 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
         // Canonical `originSessionId` wins when several spellings ride together.
         let originSessionID: UUID? = BrowserNavigateWire.decodeFirst(
             container,
-            keys: [.originSessionId, .originSessionID, .originSessionSnake]
+            keys: [.originSessionId, .originSessionID]
         )
         self.originSessionID = originSessionID
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
@@ -1272,8 +1254,6 @@ public struct WSProactiveMessageFrame: Codable, Sendable, Equatable {
         case goalId
         /// Owning goal under the legacy capital-ID spelling.
         case goalID
-        /// Owning goal under the snake_case spelling.
-        case goalSnake = "goal_id"
     }
 
     /// Decodes a proactive frame, defaulting a missing discriminator while
@@ -1303,7 +1283,7 @@ public struct WSProactiveMessageFrame: Codable, Sendable, Equatable {
         // Canonical `goalId` wins when several spellings ride together.
         let goalID: UUID? = BrowserNavigateWire.decodeFirst(
             container,
-            keys: [.goalId, .goalID, .goalSnake]
+            keys: [.goalId, .goalID]
         )
         self.goalID = goalID
     }

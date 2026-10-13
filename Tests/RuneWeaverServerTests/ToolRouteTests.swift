@@ -9,31 +9,32 @@ import Testing
 @Suite("Tool hasConfig Contract")
 struct ToolRouteTests {
     @Test
-    func `Bash tool reports settings support through buildToolInfo`() {
+    func `Bash tool keeps only the enablement toggle`() {
+        // The shell policy moved to the Access surface, so the row no longer
+        // advertises a Configure action that would open a moved editor.
         let tool = BashTool(bashConfig: BashConfig(), filesConfig: FilesConfig())
         let info = buildToolInfo(for: tool, isEnabled: true, recordByPluginID: [:])
         #expect(info.name == "bash.exec")
-        #expect(info.hasConfig == true)
+        #expect(info.hasConfig == false)
         #expect(info.isEnabled == true)
     }
 
     @Test
-    func `Files tools report settings support through buildToolInfo`() throws {
+    func `Files tools report no Configure action`() throws {
         let tools = FilesTools.makeTools(filesConfig: FilesConfig())
-        // The Files category exposes only the files.write write review mode;
-        // Files & Access (allow roots, deny patterns, approval on deny) lives
-        // under Security, so every other `files.*` tool reports no Configure
-        // action.
+        // The write review policy moved to the Access surface alongside the
+        // allow roots and deny patterns, so no files row keeps a Configure
+        // action and every toggle stays on the shared enablement path.
         for tool in tools {
             let listed = buildToolInfo(for: tool, isEnabled: true, recordByPluginID: [:])
-            #expect(listed.hasConfig == (tool.name == "files.write"))
+            #expect(listed.hasConfig == false)
             #expect(listed.isEnabled == true)
         }
         let write = tools.first { $0.name == "files.write" }
         let writeTool = try #require(write)
         let writeInfo = buildToolInfo(for: writeTool, isEnabled: true, recordByPluginID: [:])
         #expect(writeInfo.name == "files.write")
-        #expect(writeInfo.hasConfig == true)
+        #expect(writeInfo.hasConfig == false)
         #expect(writeInfo.isEnabled == true)
 
         let read = tools.first { $0.name == "files.read" }
@@ -64,10 +65,10 @@ struct ToolRouteTests {
         #expect(await bus.tool(named: "bash.exec") != nil)
         #expect(await bus.isToolEnabled(named: "bash.exec") == false)
 
-        // The listing row keeps the settings flag even while disabled so
-        // the dashboard Configure action stays available.
+        // The listing row keeps the enablement toggle while disabled so the
+        // dashboard can re-enable it without a restart.
         let info = buildToolInfo(for: tool, isEnabled: false, recordByPluginID: [:])
-        #expect(info.hasConfig == true)
+        #expect(info.hasConfig == false)
         #expect(info.isEnabled == false)
     }
 }

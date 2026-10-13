@@ -9,7 +9,7 @@
 // exactly one surface identifier or an explicit exclusion with reason.
 
 export const SETTINGS_SURFACES = [
-  "bash-modal",
+  "bash-pane",
   "files-pane",
   "policy-pane",
   "index-pane",
@@ -80,6 +80,9 @@ export const CONFIG_SETTINGS_COVERAGE: Record<string, SettingsSurface> = {
   "files.allow_roots": "files-pane",
   "files.require_approval_on_deny": "files-pane",
   "files.write_mode": "files-pane",
+  "files.write_paths": "files-pane",
+  "files.write_paths.*.path": "files-pane",
+  "files.write_paths.*.posture": "files-pane",
   "index.enabled": "index-pane",
   "index.files": "index-pane",
   "index.mail": "index-pane",
@@ -157,17 +160,17 @@ export const CONFIG_SETTINGS_COVERAGE: Record<string, SettingsSurface> = {
   "goals.max_triggers_per_goal": "goals-pane",
   "goals.max_tool_iterations": "goals-pane",
   "goals.max_step_budget_exceeded_retries": "goals-pane",
-  "bash.enabled": "bash-modal",
-  "bash.default_action": "bash-modal",
-  "bash.timeout_seconds": "bash-modal",
-  "bash.allow_network": "bash-modal",
-  "bash.cpu_seconds": "bash-modal",
-  "bash.memory_mb": "bash-modal",
-  "bash.sandbox_mode": "bash-modal",
-  "bash.host_allow_patterns": "bash-modal",
-  "bash.rules": "bash-modal",
-  "bash.rules.*.pattern": "bash-modal",
-  "bash.rules.*.action": "bash-modal",
+  "bash.enabled": "bash-pane",
+  "bash.default_action": "bash-pane",
+  "bash.timeout_seconds": "bash-pane",
+  "bash.allow_network": "bash-pane",
+  "bash.cpu_seconds": "bash-pane",
+  "bash.memory_mb": "bash-pane",
+  "bash.sandbox_mode": "bash-pane",
+  "bash.host_allow_patterns": "bash-pane",
+  "bash.rules": "bash-pane",
+  "bash.rules.*.pattern": "bash-pane",
+  "bash.rules.*.action": "bash-pane",
   "proactive.mode": "proactive-pane",
   "proactive.judge_timeout_seconds": "proactive-pane",
   "ideas.enabled": "ideas-pane",
@@ -209,6 +212,10 @@ function toTemplateKey(key: string): string {
   if (key.startsWith("bash.rules.")) {
     const parts = key.split(".");
     if (parts.length >= 3) return `bash.rules.*.${parts[parts.length - 1]}`;
+  }
+  if (key.startsWith("files.write_paths.")) {
+    const parts = key.split(".");
+    if (parts.length >= 3) return `files.write_paths.*.${parts[parts.length - 1]}`;
   }
   return key;
 }

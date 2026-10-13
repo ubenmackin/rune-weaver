@@ -233,10 +233,10 @@ describe("NeedsActionQueue", () => {
       expect(screen.getByText("Push changes to origin/main")).toBeInTheDocument();
     });
 
-    const approveBtn = screen.getByRole("button", { name: /Approve git.push/i });
+    const approveBtn = screen.getByRole("button", { name: /Approve once/i });
     await user.click(approveBtn);
 
-    expect(api.decideApproval).toHaveBeenCalledWith("appr-1", true);
+    expect(api.decideApproval).toHaveBeenCalledWith("appr-1", true, "thisTime");
   });
 
   it("renders all-clear state when there are no approvals or blocked goals", async () => {
@@ -256,7 +256,7 @@ describe("NeedsActionQueue", () => {
     });
   });
 
-  it("renders continuation approval with specialized Continue and Stop labels", async () => {
+  it("renders continuation approval with the one-shot Approve once and Deny labels", async () => {
     const user = userEvent.setup();
     const mockContinuation: api.PermissionRequest = {
       id: "cont-1",
@@ -292,13 +292,15 @@ describe("NeedsActionQueue", () => {
       expect(screen.getByText("The agent has completed 10 tool rounds and is requesting continuation.")).toBeInTheDocument();
     });
 
-    const continueBtn = screen.getByRole("button", { name: /Continue execution/i });
-    expect(continueBtn).toHaveTextContent("Continue");
-    const stopBtn = screen.getByRole("button", { name: /Stop execution/i });
-    expect(stopBtn).toHaveTextContent("Stop");
+    // Continuation requests are one-shot like every other dashboard quick
+    // action: the brake branch is the sole exception to these labels.
+    const approveBtn = screen.getByRole("button", { name: /Approve once/i });
+    expect(approveBtn).toHaveTextContent("Approve once");
+    const denyBtn = screen.getByRole("button", { name: /Deny/i });
+    expect(denyBtn).toHaveTextContent("Deny");
 
-    await user.click(continueBtn);
-    expect(api.decideApproval).toHaveBeenCalledWith("cont-1", true);
+    await user.click(approveBtn);
+    expect(api.decideApproval).toHaveBeenCalledWith("cont-1", true, "thisTime");
   });
 
   it("renders arguments inside expandable disclosure with View arguments summary", async () => {
@@ -798,15 +800,15 @@ describe("DashboardView integration", () => {
     });
   });
 
-  it("greets the persona owner by name when user_name is set", async () => {
+  it("greets the persona owner by name when userName is set", async () => {
     // A saved owner name personalizes the headline, proving the greeting reads
     // the shared persona store instead of the stock address.
     resetPersonaSignalsForTesting();
     publishPersonaFromSettings({
-      assistant_name: "Zephyra",
+      assistantName: "Zephyra",
       tone: "warm",
       style: "",
-      user_name: "Kupan",
+      userName: "Kupan",
       avatar: "rose",
     });
 
@@ -830,10 +832,10 @@ describe("DashboardView integration", () => {
     // stock fallback rather than greeting an empty string.
     resetPersonaSignalsForTesting();
     publishPersonaFromSettings({
-      assistant_name: "Zephyra",
+      assistantName: "Zephyra",
       tone: "warm",
       style: "",
-      user_name: "   ",
+      userName: "   ",
       avatar: "rose",
     });
 
@@ -947,10 +949,10 @@ describe("DashboardGreetingIdentity", () => {
 
   it("renders the 112px avatar with resolved colorway, name, and working title truncated to 60 chars", async () => {
     publishPersonaFromSettings({
-      assistant_name: "Zephyra",
+      assistantName: "Zephyra",
       tone: "warm",
       style: "",
-      user_name: "Kupan",
+      userName: "Kupan",
       avatar: "rose",
     });
     const longMessage = `Migrating the scheduler ledger to the new durable schema with ${"x".repeat(80)}`;
@@ -991,7 +993,7 @@ describe("DashboardGreetingIdentity", () => {
   it("routes the attention count button to approvals when approvals are pending", async () => {
     const user = userEvent.setup();
     const onSelectTab = vi.fn();
-    publishPersonaFromSettings({ assistant_name: "Vex", avatar: "cyan" });
+    publishPersonaFromSettings({ assistantName: "Vex", avatar: "cyan" });
     vi.mocked(api.listApprovals).mockResolvedValue({
       approvals: [
         { id: "a1", toolName: "email.send" } as any,
@@ -1016,7 +1018,7 @@ describe("DashboardGreetingIdentity", () => {
   it("routes the attention count button to goals when only goals need input", async () => {
     const user = userEvent.setup();
     const onSelectTab = vi.fn();
-    publishPersonaFromSettings({ assistant_name: "Vex", avatar: "cyan" });
+    publishPersonaFromSettings({ assistantName: "Vex", avatar: "cyan" });
     vi.mocked(api.listApprovals).mockResolvedValue({ approvals: [], count: 0 });
     vi.mocked(api.listGoals).mockResolvedValue({
       goals: [{ id: "g1", status: "needs_input", title: "Blocked" } as any],
@@ -1033,7 +1035,7 @@ describe("DashboardGreetingIdentity", () => {
   });
 
   it("renders the sleeping copy after ten quiet minutes with the sleeping frame", async () => {
-    publishPersonaFromSettings({ assistant_name: "Zephyra", avatar: "violet" });
+    publishPersonaFromSettings({ assistantName: "Zephyra", avatar: "violet" });
     publishAgentActivity(Date.now() - AVATAR_SLEEP_MS - 1000);
 
     renderDashboard();
@@ -1045,7 +1047,7 @@ describe("DashboardGreetingIdentity", () => {
   });
 
   it("renders the idle copy when history exists but nothing is live", async () => {
-    publishPersonaFromSettings({ assistant_name: "Zephyra", avatar: "emerald" });
+    publishPersonaFromSettings({ assistantName: "Zephyra", avatar: "emerald" });
     vi.mocked(api.listRuns).mockResolvedValue({
       runs: [
         {

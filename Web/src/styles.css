@@ -3062,9 +3062,62 @@ button:disabled {
   align-items: flex-start;
 }
 
-.settings-sidenav {
+/* Fixed-width rail that owns the sidenav's desktop footprint and the handheld
+ * drawer transform. Holding both the section finder and the tab list lets the
+ * two slide as one unit on narrow widths instead of stranding the finder in
+ * the page flow while the list docks to the edge. */
+.settings-nav-column {
   width: 220px;
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Section finder mirrors the tools pane search: overlaid icon with a 32px
+ * left text inset (10px offset + 14px icon + 8px gap) so queries never slide
+ * under the icon, and the element-plus-attribute selector outranks the global
+ * input[type="search"] padding at every width. */
+.settings-nav-search-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.settings-nav-search-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--text-secondary, #a0aec0);
+  pointer-events: none;
+}
+
+input.settings-nav-search-input[type="search"] {
+  width: 100%;
+  padding: 8px 12px 8px 32px;
+  border-radius: 6px;
+  box-sizing: border-box;
+  background-color: var(--bg-card, #1e2533);
+  border: 1px solid var(--border-color, #2d3748);
+  color: var(--text-primary, #ffffff);
+  font-size: 0.88rem;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.settings-nav-search-input:focus {
+  border-color: var(--accent-purple, #9f7aea);
+}
+
+/* Sits inside the sidenav card so a starved query reads as part of the list
+ * rather than a stray paragraph between rails. */
+.settings-nav-empty {
+  padding: 8px 6px;
+  margin: 0;
+}
+
+.settings-sidenav {
+  width: 100%;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -3136,6 +3189,10 @@ button:disabled {
     flex-direction: column;
   }
 
+  .settings-nav-column {
+    width: 100%;
+  }
+
   .settings-sidenav {
     width: 100%;
   }
@@ -3189,25 +3246,28 @@ button:disabled {
 
 /* Handheld settings drawer sits between the 52px top nav and the 64px bottom
  * bar with safe-area clearance, sliding in from the left above a dim
- * backdrop. The fixed offsets keep the nav surfaces tappable while the drawer
- * is open, and the width bound keeps the form partially visible on wide
- * phones so the backdrop remains the single dismiss affordance alongside
- * Escape. */
+ * backdrop. The drawer transform lives on the column — not the bare tab
+ * list — so the section finder docks with the tabs it filters instead of
+ * stranding itself in the page flow. The fixed offsets keep the nav surfaces
+ * tappable while the drawer is open, and the width bound keeps the form
+ * partially visible on wide phones so the backdrop remains the single
+ * dismiss affordance alongside Escape. */
 @media (max-width: 640px) {
   .settings-menu-btn {
     display: inline-flex;
   }
 
-  .settings-sidenav {
+  .settings-nav-column {
     position: fixed;
     top: 52px;
     bottom: calc(64px + env(safe-area-inset-bottom));
     left: 0;
     width: min(300px, 85vw);
     z-index: 50;
-    border-radius: 0;
-    border-right: 1px solid var(--border-color);
     overflow-y: auto;
+    padding: 6px;
+    background: #111118;
+    border-right: 1px solid var(--border-color);
     transform: translateX(-100%);
     visibility: hidden;
     pointer-events: none;
@@ -3216,10 +3276,19 @@ button:disabled {
 
   /* Open drawer rests flush with the viewport edge with the same 200ms ease
    * as the close path so both directions feel symmetric. */
-  .settings-sidenav.open {
+  .settings-nav-column.open {
     transform: translateX(0);
     visibility: visible;
     pointer-events: auto;
+  }
+
+  /* The tab list renders statically inside the drawer column; the drawer
+   * chrome (offsets, slide, border) belongs to the column alone. */
+  .settings-nav-column .settings-sidenav {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
   }
 
   /* Tab rows keep the minimum touch size once the drawer narrows the column
@@ -3255,9 +3324,16 @@ button:disabled {
     flex-direction: row;
   }
 
+  .settings-nav-column {
+    position: static;
+    transform: none;
+    visibility: visible;
+    pointer-events: auto;
+  }
+
   .settings-sidenav {
     position: static;
-    width: 220px;
+    width: 100%;
     transform: none;
     visibility: visible;
     pointer-events: auto;
@@ -4225,26 +4301,117 @@ section[data-testid="policy-pane"] .settings-footer {
   gap: 10px;
 }
 
-/* Active grant duration/expiry line stays legible at narrow widths: the flex
- * row with wrapping gap keeps the duration label and expiry text from
- * concatenating, while the separator stays decorative for assistive tech. */
-.approval-grant-meta {
+/* Session groups: every card renders beneath a sticky header with no collapse
+ * and no group-level control, so no group can hide a pending decision or
+ * decide several cards at once. */
+.approvals-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.approvals-group-header {
+  position: sticky;
+  /* Sits below the 52px sticky top nav so a scrolled group never slides
+   * under the navigation chrome. */
+  top: 52px;
+  z-index: 5;
+  margin: 0 0 10px 0;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-muted, #94a3b8);
+  background: rgba(10, 10, 15, 0.92);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+/* Scope line: three mutually exclusive choices plus the editor entry point,
+ * wrapping under the narratives so a long target never stretches the card. */
+.approval-scope-line {
   display: flex;
   align-items: center;
-  gap: 8px;
   flex-wrap: wrap;
+  gap: 8px 14px;
 }
 
-/* Duration label holds its own box so the flex gap — not whitespace — owns
- * the separation from the expiry text at 320px and 1280px widths. */
-.approval-grant-duration {
-  flex-shrink: 0;
+.approval-scope-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
 }
 
-/* Decorative middot between duration and expiry; hidden from assistive tech
- * in markup so it never enters the accessible name. */
-.approval-grant-meta-sep {
-  opacity: 0.6;
+.approval-scope-radios {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.approval-scope-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+}
+
+.approval-scope-target {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: var(--accent-purple, #a78bfa);
+  overflow-wrap: anywhere;
+}
+
+.approval-scope-summary {
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+/* Scope editor inside the shared modal: monospace so a path, host, or handle
+ * list reads exactly as it will ship on the wire. */
+.approval-scope-editor {
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  color: inherit;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  resize: vertical;
+}
+
+/* Brake card: red accent marks the watchdog park, whose only decisions are
+ * releasing it or holding it — no duration or scope control belongs here. */
+.approval-brake-card {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+/* Standing-rules deep link wears the ghost button treatment so the header
+ * row reads as one control set instead of a bare inline anchor. */
+a.ghost.icon-text-btn {
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: inherit;
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+
+a.ghost.icon-text-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--border-focus);
 }
 
 /* ==========================================================================
@@ -7317,6 +7484,37 @@ button.ghost.staged-expand-all-btn {
   text-decoration: underline;
 }
 
+/* Approvals Inbox route off every dashboard card. Same muted inline treatment
+   as the thread link so the full duration and scope editors read as a peer
+   destination rather than as a primary decision action. */
+.btn-link.open-inbox-link {
+  color: var(--text-muted);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-link.open-inbox-link:hover {
+  color: var(--accent-purple);
+  text-decoration: underline;
+}
+
+.inline-question-header-link {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+/* Consequence line under a dashboard card's quick actions: names what the
+   one-shot decision covers and points at the Inbox for anything durable. */
+.action-card-once-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--text-muted, #94a3b8);
+  line-height: 1.4;
+}
+
 .empty-goals-card,
 .empty-schedules-card,
 .empty-reports-card {
@@ -8429,5 +8627,69 @@ button.ghost.staged-expand-all-btn {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* ==========================================================================
+   Ephemeral Session Trust Chip — chat footer and approvals inbox
+   ========================================================================== */
+
+/* Compact muted strip carrying one line per live session trust. Absent trust
+ * renders no element, so the chip never claims space it has nothing to say
+ * about; both mounts share this block. */
+.ephemeral-trust-chip {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin: 8px 0 0 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-subtle);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.ephemeral-trust-heading {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ephemeral-trust-list {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Row keeps the trust line and its revoke on one line where width allows and
+ * wraps between them where it does not. */
+.ephemeral-trust-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ephemeral-trust-line {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ephemeral-trust-tool {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.ephemeral-trust-revoke {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 11px;
 }
 

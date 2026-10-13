@@ -37,27 +37,19 @@ public struct NetworkEgressPolicyDTO: Content, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case mode
-        case allowedDomains = "allowed_domains"
-        case blockedDomains = "blocked_domains"
+        case allowedDomains
+        case blockedDomains
         case localExemptions
-        case localExemptionsSnake = "local_exemptions"
     }
 
-    /// Decodes tolerantly so older snake_case payloads still parse: camelCase
-    /// wins when both spellings arrive so the two contracts cannot fork.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         mode = try container.decode(String.self, forKey: .mode)
         allowedDomains = try container.decodeIfPresent([String].self, forKey: .allowedDomains) ?? []
         blockedDomains = try container.decodeIfPresent([String].self, forKey: .blockedDomains) ?? []
-        let camel = try container.decodeIfPresent([String].self, forKey: .localExemptions)
-        let snake = try container.decodeIfPresent([String].self, forKey: .localExemptionsSnake)
-        localExemptions = camel ?? snake ?? []
+        localExemptions = try container.decodeIfPresent([String].self, forKey: .localExemptions) ?? []
     }
 
-    /// Encodes the canonical wire shape: snake_case network lists plus
-    /// camelCase `localExemptions`. The snake spelling decodes but never
-    /// encodes so emitted payloads keep one spelling.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(mode, forKey: .mode)
@@ -84,12 +76,6 @@ public struct CredentialBindingDTO: Content, Sendable, Equatable {
         self.allowedHosts = allowedHosts
         self.allowedMethods = allowedMethods
         self.allowedPathPrefixes = allowedPathPrefixes
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case allowedHosts = "allowed_hosts"
-        case allowedMethods = "allowed_methods"
-        case allowedPathPrefixes = "allowed_path_prefixes"
     }
 }
 
@@ -137,16 +123,13 @@ public struct PolicyLocalAccessReport: Content, Sendable, Equatable {
         case granted
         case removed
         case neverDialable
-        case neverDialableSnake = "never_dialable"
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         granted = try container.decodeIfPresent([String].self, forKey: .granted) ?? []
         removed = try container.decodeIfPresent([String].self, forKey: .removed) ?? []
-        let camel = try container.decodeIfPresent([String].self, forKey: .neverDialable)
-        let snake = try container.decodeIfPresent([String].self, forKey: .neverDialableSnake)
-        neverDialable = camel ?? snake ?? []
+        neverDialable = try container.decodeIfPresent([String].self, forKey: .neverDialable) ?? []
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -189,10 +172,9 @@ public struct PolicyResponse: Content, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case policy
         case path
-        case loadedFromDisk = "loaded_from_disk"
+        case loadedFromDisk
         case violations
         case localAccess
-        case localAccessSnake = "local_access"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -201,9 +183,7 @@ public struct PolicyResponse: Content, Sendable, Equatable {
         path = try container.decode(String.self, forKey: .path)
         loadedFromDisk = try container.decodeIfPresent(Bool.self, forKey: .loadedFromDisk) ?? false
         violations = try container.decodeIfPresent([String].self, forKey: .violations) ?? []
-        let camel = try container.decodeIfPresent(PolicyLocalAccessReport.self, forKey: .localAccess)
-        let snake = try container.decodeIfPresent(PolicyLocalAccessReport.self, forKey: .localAccessSnake)
-        localAccess = camel ?? snake
+        localAccess = try container.decodeIfPresent(PolicyLocalAccessReport.self, forKey: .localAccess)
     }
 
     public func encode(to encoder: any Encoder) throws {

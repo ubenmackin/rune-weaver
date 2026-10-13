@@ -727,4 +727,103 @@ struct OutboundEgressSupervisorTests {
             #expect(output.content.contains("[redacted]"))
         }
     }
+
+    // MARK: - Active Grant Summary
+
+    @Test
+    func `Active grants report session and one-shot allows`() async throws {
+        let policy = SecurityPolicy(
+            network: NetworkEgressPolicy(
+                mode: .allowlistOnly,
+                allowedDomains: ["api.github.com"]
+            )
+        )
+        try await withTestSupervisor(policy: policy) { supervisor in
+            let sessionID = UUID()
+            let otherSession = UUID()
+            await supervisor.allowDomainForSession(sessionID: sessionID, domain: "Example.COM")
+            await supervisor.allowDomainOnce(domain: "one-shot.example.com", sessionID: sessionID)
+            // A grant rides only its own session: another session reads its
+            // own grants and never a peer's.
+            await supervisor.allowDomainForSession(sessionID: otherSession, domain: "other.example.com")
+
+            let summary = await supervisor.activeGrants(sessionID: sessionID)
+            #expect(summary.sessionDomains == ["example.com"])
+            #expect(summary.oneShotDomains == ["one-shot.example.com"])
+
+            let otherSummary = await supervisor.activeGrants(sessionID: otherSession)
+            #expect(otherSummary.sessionDomains == ["other.example.com"])
+            #expect(otherSummary.oneShotDomains == [])
+        }
+    }
+
+    @Test
+    func `Nil session reads report only session-less one-shot grants`() async throws {
+        let policy = SecurityPolicy()
+        try await withTestSupervisor(policy: policy) { supervisor in
+            let sessionID = UUID()
+            await supervisor.allowDomainOnce(domain: "open.example.com", sessionID: nil)
+            await supervisor.allowDomainOnce(domain: "scoped.example.com", sessionID: sessionID)
+            await supervisor.allowDomainForSession(sessionID: sessionID, domain: "session.example.com")
+
+            // A session-less caller can spend only the nil-key grants, and a
+            // session grant never rides a session-less read.
+            let openSummary = await supervisor.activeGrants(sessionID: nil)
+            #expect(openSummary.sessionDomains == [])
+            #expect(openSummary.oneShotDomains == ["open.example.com"])
+
+            // Any session spends the session-less grants alongside its own.
+            let scopedSummary = await supervisor.activeGrants(sessionID: sessionID)
+            #expect(scopedSummary.sessionDomains == ["session.example.com"])
+            #expect(scopedSummary.oneShotDomains == ["open.example.com", "scoped.example.com"])
+        }
+    }
+
+    @Test
+    func `Reading the summary does not spend a one-shot grant`() async throws {
+        let policy = SecurityPolicy()
+        try await withTestSupervisor(policy: policy) { supervisor in
+            let sessionID = UUID()
+            await supervisor.allowDomainOnce(domain: "repeat.example.com", sessionID: sessionID)
+            // The projection is read-only, so repeated reads leave the grant
+            // spendable by the real gate.
+            #expect(await supervisor.activeGrants(sessionID: sessionID).oneShotDomains == ["repeat.example.com"])
+            #expect(await supervisor.activeGrants(sessionID: sessionID).oneShotDomains == ["repeat.example.com"])
+        }
+    }
+
+    @Test
+    func `Consumed one-shot grant drops out of the summary`() async throws {
+        // An allowlist-empty policy parks the host, the one-shot grant covers
+        // the hop once, and the spent domain no longer reads back.
+        let policy = SecurityPolicy(
+            network: NetworkEgressPolicy(mode: .allowlistOnly)
+        )
+        try await withTestSupervisor(policy: policy) { supervisor in
+            let sessionID = UUID()
+            await supervisor.allowDomainOnce(domain: "consume.example.com", sessionID: sessionID)
+            #expect(await supervisor.activeGrants(sessionID: sessionID).oneShotDomains == ["consume.example.com"])
+            let url = try #require(URL(string: "https://consume.example.com/data"))
+            switch await supervisor.validate(url: url, method: "GET", headers: [:], sessionID: sessionID) {
+            case .allowed: break // expected — the one-shot grant covered the hop
+            case let .denied(reason), let .unlistedDomain(_, reason):
+                Issue.record("Expected the one-shot grant to allow the hop, got: \(reason)")
+            }
+            #expect(await supervisor.activeGrants(sessionID: sessionID).oneShotDomains == [])
+        }
+    }
+
+    @Test
+    func `Clearing a session evicts its grants from the summary`() async throws {
+        let policy = SecurityPolicy()
+        try await withTestSupervisor(policy: policy) { supervisor in
+            let sessionID = UUID()
+            await supervisor.allowDomainForSession(sessionID: sessionID, domain: "session.example.com")
+            await supervisor.allowDomainOnce(domain: "one-shot.example.com", sessionID: sessionID)
+            await supervisor.clearSession(sessionID: sessionID)
+            let summary = await supervisor.activeGrants(sessionID: sessionID)
+            #expect(summary.sessionDomains.isEmpty)
+            #expect(summary.oneShotDomains.isEmpty)
+        }
+    }
 }

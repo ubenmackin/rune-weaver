@@ -56,47 +56,6 @@ public struct WorkspaceUpdate: Content, Sendable, Equatable {
     public var isEmpty: Bool {
         quotaMB == nil && quotaFiles == nil && tmpTTLDays == nil
     }
-
-    private enum CodingKeys: String, CodingKey {
-        case quotaMB = "quota_mb"
-        case quotaMBCamel = "quotaMB"
-        case quotaFiles = "quota_files"
-        case quotaFilesCamel = "quotaFiles"
-        case tmpTTLDays = "tmp_ttl_days"
-        case tmpTTLDaysCamel = "tmpTTLDays"
-    }
-
-    /// Decodes a partial workspace patch accepting snake_case and camelCase aliases.
-    ///
-    /// Snake_case stays canonical so persisted files round-trip unchanged; the
-    /// camelCase spellings mirror the dashboard contract and fall back only
-    /// when the snake key is absent. When both spellings arrive the snake value
-    /// wins so the two contracts cannot fork the stored quotas.
-    /// - Parameter decoder: Decoder carrying the patch.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let snakeQuotaMB = try container.decodeIfPresent(Int.self, forKey: .quotaMB)
-        let camelQuotaMB = try container.decodeIfPresent(Int.self, forKey: .quotaMBCamel)
-        quotaMB = snakeQuotaMB ?? camelQuotaMB
-        let snakeQuotaFiles = try container.decodeIfPresent(Int.self, forKey: .quotaFiles)
-        let camelQuotaFiles = try container.decodeIfPresent(Int.self, forKey: .quotaFilesCamel)
-        quotaFiles = snakeQuotaFiles ?? camelQuotaFiles
-        let snakeTTL = try container.decodeIfPresent(Int.self, forKey: .tmpTTLDays)
-        let camelTTL = try container.decodeIfPresent(Int.self, forKey: .tmpTTLDaysCamel)
-        tmpTTLDays = snakeTTL ?? camelTTL
-    }
-
-    /// Encodes a partial workspace patch using canonical snake_case keys.
-    ///
-    /// CamelCase aliases decode but never encode so saved payloads keep the
-    /// file shape and a round-trip never invents a second spelling.
-    /// - Parameter encoder: Encoder receiving the patch.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(quotaMB, forKey: .quotaMB)
-        try container.encodeIfPresent(quotaFiles, forKey: .quotaFiles)
-        try container.encodeIfPresent(tmpTTLDays, forKey: .tmpTTLDays)
-    }
 }
 
 extension UpdateSettingsRequest {

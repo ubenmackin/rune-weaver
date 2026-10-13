@@ -98,12 +98,12 @@ struct PersonaSettingsTests {
     }
 
     @Test
-    func `Persona wire shape decodes canonical snake_case keys and merges partially`() throws {
-        // The acceptance PUT body: a single snake_case key must land on the
+    func `Persona wire shape decodes camelCase keys and merges partially`() throws {
+        // The acceptance PUT body: a single camelCase key must land on the
         // name while every omitted field stays nil so the merge preserves it.
         let request = try JSONDecoder().decode(
             UpdateSettingsRequest.self,
-            from: Data(#"{"persona":{"assistant_name":"Veda"}}"#.utf8)
+            from: Data(#"{"persona":{"assistantName":"Veda"}}"#.utf8)
         )
         #expect(request.persona?.assistantName == "Veda")
         #expect(request.persona?.tone == nil)
@@ -120,9 +120,8 @@ struct PersonaSettingsTests {
     }
 
     @Test
-    func `Persona patch decodes camelCase aliases with snake_case winning`() throws {
-        // CamelCase mirrors the dashboard contract; snake stays canonical so
-        // the wire mirrors the `[persona]` TOML keys.
+    func `Persona patch encodes camelCase only`() throws {
+        // camelCase is the single canonical wire spelling.
         let camel = try JSONDecoder().decode(
             PersonaUpdate.self,
             from: Data(#"{"assistantName":"Camel","userName":"Owner"}"#.utf8)
@@ -130,25 +129,16 @@ struct PersonaSettingsTests {
         #expect(camel.assistantName == "Camel")
         #expect(camel.userName == "Owner")
 
-        // Snake wins when both spellings arrive so the two contracts cannot
-        // fork the stored persona.
-        let both = try JSONDecoder().decode(
-            PersonaUpdate.self,
-            from: Data(#"{"assistant_name":"Snake","assistantName":"Camel","user_name":"S","userName":"C"}"#.utf8)
-        )
-        #expect(both.assistantName == "Snake")
-        #expect(both.userName == "S")
-
-        // Encode keeps the file shape so a round-trip never invents a second
+        // Encode keeps camelCase so a round-trip never invents a second
         // spelling.
         let text = try String(
             data: JSONEncoder().encode(PersonaUpdate(assistantName: "Veda", userName: "Kupan")),
             encoding: .utf8
         ) ?? ""
-        #expect(text.contains("assistant_name"))
-        #expect(text.contains("user_name"))
-        #expect(!text.contains("assistantName"))
-        #expect(!text.contains("userName"))
+        #expect(text.contains("assistantName"))
+        #expect(text.contains("userName"))
+        #expect(!text.contains("assistant_name"))
+        #expect(!text.contains("user_name"))
     }
 
     @Test
