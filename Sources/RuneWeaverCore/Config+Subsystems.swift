@@ -35,7 +35,7 @@ public struct HomeAssistantConfig: Sendable, Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case enabled
         case url
-        case tokenEnv = "token_env"
+        case tokenEnv
     }
 }
 
@@ -57,7 +57,7 @@ public struct HomeConfig: Sendable, Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case homekit
-        case homeAssistant = "home_assistant"
+        case homeAssistant
     }
 }
 
@@ -84,9 +84,9 @@ public struct PluginConfig: Sendable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case pluginsDir = "plugins_dir"
-        case marketplaceIndexURL = "marketplace_index_url"
-        case autoRescan = "auto_rescan"
+        case pluginsDir
+        case marketplaceIndexURL
+        case autoRescan
     }
 }
 
@@ -173,11 +173,11 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case searxngURL = "searxng_url"
-        case searchTimeoutSeconds = "search_timeout_seconds"
-        case maxResults = "max_results"
-        case timeoutSeconds = "timeout_seconds"
-        case fetchTimeoutSeconds = "fetch_timeout_seconds"
+        case searxngURL
+        case searchTimeoutSeconds
+        case maxResults
+        case timeoutSeconds
+        case fetchTimeoutSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -256,9 +256,9 @@ public struct DesktopConfig: Sendable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case maxImageDimension = "max_image_dimension"
-        case jpegQuality = "jpeg_quality"
-        case blockedApps = "blocked_apps"
+        case maxImageDimension
+        case jpegQuality
+        case blockedApps
     }
 }
 
@@ -318,8 +318,8 @@ public struct SecurityConfig: Sendable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case untrustedLabeling = "untrusted_labeling"
-        case emailCredentialFilter = "email_credential_filter"
+        case untrustedLabeling
+        case emailCredentialFilter
     }
 }
 
@@ -436,13 +436,13 @@ public struct GoalsConfig: Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case enabled
-        case stepIntervalMinutes = "step_interval_minutes"
-        case maxActiveGoals = "max_active_goals"
-        case maxStepsPerGoal = "max_steps_per_goal"
-        case planTimeoutSeconds = "plan_timeout_seconds"
-        case maxTriggersPerGoal = "max_triggers_per_goal"
-        case maxToolIterations = "max_tool_iterations"
-        case maxStepBudgetExceededRetries = "max_step_budget_exceeded_retries"
+        case stepIntervalMinutes
+        case maxActiveGoals
+        case maxStepsPerGoal
+        case planTimeoutSeconds
+        case maxTriggersPerGoal
+        case maxToolIterations
+        case maxStepBudgetExceededRetries
     }
 }
 
@@ -531,7 +531,7 @@ public struct ProactiveConfig: Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case mode
-        case judgeTimeoutSeconds = "judge_timeout_seconds"
+        case judgeTimeoutSeconds
     }
 }
 

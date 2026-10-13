@@ -1,10 +1,12 @@
 // Rune Weaver Tools — Shared sensitive-path guard for file tools.
 //
-// Single source of truth for the `[files]` path policy (`deny_patterns`,
-// `allow_roots`, `require_approval_on_deny`). Every file-tool read evaluates
-// here first: deny hits escalate to the approvals inbox (or fail closed when
-// configured), outside-root paths refuse with the configured roots named, and
-// only inside-root, non-denied paths read without escalation.
+// Single source of truth for the `[files]` read path (`deny_patterns`,
+// `allow_roots`, `require_approval_on_deny`); write posture lives with
+// `WritePathPolicy` in the core, which owns the engine deny list both paths
+// union in. Every file-tool read evaluates here first: deny hits escalate to
+// the approvals inbox (or fail closed when configured), outside-root paths
+// refuse with the configured roots named, and only inside-root, non-denied
+// paths read without escalation.
 //
 // Every check runs on a canonical view (standardised plus symlink-resolved) so
 // a symlinked parent or `..` segment cannot hide the true location. Matching
@@ -55,31 +57,6 @@ public enum FilesAccessGuard: Sendable {
             self.resolvedPath = resolvedPath
         }
     }
-
-    /// Engine-owned deny patterns enforced on every evaluation regardless of
-    /// the configured `[files] deny_patterns` list.
-    ///
-    /// An explicit operator list replaces the editable defaults by design, so
-    /// without this union a hand-edited or dashboard-saved config could
-    /// silently drop the engine's own private state from the guard. Persistent
-    /// browser-profile bytes (cookies, session tokens), the engine's whole
-    /// memory tree (episodic sessions and approvals, the trust-grant ledger,
-    /// the plaintext profile, and semantic vectors), the egress policy control
-    /// file, and the engine's own credentials (the owner bearer-token file and
-    /// per-install SearXNG settings) must never be readable or writable by
-    /// file tools or enter LLM context, so operators may extend the guard but
-    /// never drop these protected patterns.
-    /// Deny matching also folds in the `.rune_`/`.rune_backup_` review siblings
-    /// of each live target, so the derived review names inherit the same
-    /// protection.
-    static let alwaysDenyPatterns: [String] = [
-        ".runeweaver/memory/*",
-        ".runeweaver/memory/vectors/*",
-        ".runeweaver/browser_profiles/*",
-        ".runeweaver/policy.toml",
-        ".runeweaver/auth_token",
-        ".runeweaver/searxng/*"
-    ]
 
     /// Resolves virtual cloud shortcuts (e.g. "iCloud", "iCloud Drive", "Dropbox", "OneDrive", "Google Drive", "GoogleDrive")
     /// to their actual canonical directory path on the local filesystem.
@@ -345,8 +322,9 @@ public enum FilesAccessGuard: Sendable {
         }
         // Engine-owned protected patterns are unioned ahead of the configured
         // list so no operator list can silently drop them (configured patterns
-        // stay fully additive).
-        for rawPattern in alwaysDenyPatterns + filesConfig.denyPatterns {
+        // stay fully additive). The list itself lives with `WritePathPolicy`,
+        // the single owner both the read guard and the write policy union in.
+        for rawPattern in WritePathPolicy.alwaysDenyPatterns + filesConfig.denyPatterns {
             let trimmed = rawPattern.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 continue

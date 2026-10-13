@@ -517,7 +517,7 @@ struct IdeaWireContractTests {
             "kind": "tip",
             "title": "Hydrate",
             "body": "",
-            "goal_id": goalID.uuidString,
+            "goalId": goalID.uuidString,
             "status": "proposed",
             "createdAt": now.timeIntervalSince1970,
             "updatedAt": now.timeIntervalSince1970

@@ -2,7 +2,7 @@
 //
 // Purpose: pins that every RuneWeaverConfig leaf key resolves to one Settings
 // surface with exclusions carrying reasons, so mapping, interface, and example
-// drift fails loudly, including bash sandbox keys resolving to bash-modal.
+// drift fails loudly, including bash sandbox keys resolving to bash-pane.
 // Scope: ledger behavior only; engine decoding plus the TOML example stay with
 // their owners and are probed here as text for drift.
 // Architectural role: regression net forcing ledger, UI, and example updates to
@@ -64,6 +64,9 @@ const EXPECTED_LEAF_KEYS: readonly string[] = [
   "files.allow_roots",
   "files.require_approval_on_deny",
   "files.write_mode",
+  "files.write_paths",
+  "files.write_paths.*.path",
+  "files.write_paths.*.posture",
   "index.enabled",
   "index.files",
   "index.mail",
@@ -213,6 +216,18 @@ function normalizeSwiftField(raw: string): SwiftFieldKind {
     return {
       kind: "template",
       key: `bash.rules.*.${template.slice("bash.rules.".length)}`,
+    };
+  }
+  if (/^files\.write_paths\.(?!\*\.).+/.test(template)) {
+    return {
+      kind: "template",
+      key: `files.write_paths.*.${template.slice("files.write_paths.".length)}`,
+    };
+  }
+  if (/^files\.write_path_rules\.(?!\*\.).+/.test(template)) {
+    return {
+      kind: "template",
+      key: `files.write_path_rules.*.${template.slice("files.write_path_rules.".length)}`,
     };
   }
   if (/^llm\.providers\.[^*]+\..+/.test(template)) {
@@ -385,19 +400,19 @@ describe("configCoverage", () => {
     }
   });
 
-  it("resolves bash sandbox keys to bash-modal", () => {
-    expect(coverageForConfigKey("bash.sandbox_mode")).toBe("bash-modal");
-    expect(coverageForConfigKey("bash.host_allow_patterns")).toBe("bash-modal");
-    expect(coverageForConfigKey("bash.sandboxMode")).toBe("bash-modal");
-    expect(coverageForConfigKey("bash.hostAllowPatterns")).toBe("bash-modal");
+  it("resolves bash sandbox keys to bash-pane", () => {
+    expect(coverageForConfigKey("bash.sandbox_mode")).toBe("bash-pane");
+    expect(coverageForConfigKey("bash.host_allow_patterns")).toBe("bash-pane");
+    expect(coverageForConfigKey("bash.sandboxMode")).toBe("bash-pane");
+    expect(coverageForConfigKey("bash.hostAllowPatterns")).toBe("bash-pane");
   });
 
-  it("resolves bash camelCase aliases to bash-modal", () => {
-    expect(coverageForConfigKey("bash.defaultAction")).toBe("bash-modal");
-    expect(coverageForConfigKey("bash.timeoutSeconds")).toBe("bash-modal");
-    expect(coverageForConfigKey("bash.cpuSeconds")).toBe("bash-modal");
-    expect(coverageForConfigKey("bash.memoryMb")).toBe("bash-modal");
-    expect(coverageForConfigKey("bash.allowNetwork")).toBe("bash-modal");
+  it("resolves bash camelCase aliases to bash-pane", () => {
+    expect(coverageForConfigKey("bash.defaultAction")).toBe("bash-pane");
+    expect(coverageForConfigKey("bash.timeoutSeconds")).toBe("bash-pane");
+    expect(coverageForConfigKey("bash.cpuSeconds")).toBe("bash-pane");
+    expect(coverageForConfigKey("bash.memoryMb")).toBe("bash-pane");
+    expect(coverageForConfigKey("bash.allowNetwork")).toBe("bash-pane");
   });
 
   it("requires non-empty reasons for exclusions with surface none", () => {
@@ -419,7 +434,7 @@ describe("configCoverage", () => {
     expect(coverageForConfigKey("scheduler.jobs.morning digest.prompt")).toBe(
       "scheduler-pane",
     );
-    expect(coverageForConfigKey("bash.rules.0.pattern")).toBe("bash-modal");
+    expect(coverageForConfigKey("bash.rules.0.pattern")).toBe("bash-pane");
   });
 
   it("returns none for a synthetic unmapped key", () => {

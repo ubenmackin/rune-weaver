@@ -705,15 +705,15 @@ struct IndexSettingsDTOTests {
         )
         let data = try JSONEncoder().encode(update)
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        #expect(object["max_file_mb"] as? Int == 50)
-        #expect(object["mail_vector_window"] as? String == "all")
-        #expect(object["icloud_evicted"] as? String == "download")
-        #expect(object["describe_images_with_llm"] as? Bool == true)
+        #expect(object["maxFileMB"] as? Int == 50)
+        #expect(object["mailVectorWindow"] as? String == "all")
+        #expect(object["iCloudEvicted"] as? String == "download")
+        #expect(object["describeImagesWithLLM"] as? Bool == true)
         #expect(object["effort"] as? String == "custom")
         #expect(object["workers"] as? Int == 2)
-        #expect(object["thermal_backoff"] as? Bool == false)
-        #expect(object["pause_on_battery"] as? Bool == true)
-        #expect(object["max_vector_chunks_per_document"] as? Int == 120)
+        #expect(object["thermalBackoff"] as? Bool == false)
+        #expect(object["pauseOnBattery"] as? Bool == true)
+        #expect(object["maxVectorChunksPerDocument"] as? Int == 120)
     }
 
     @Test
@@ -735,10 +735,10 @@ struct IndexSettingsDTOTests {
         #expect(response.index.alwaysSkipped == FilesIndexer.alwaysSkippedPatterns)
         #expect(response.index.alwaysSkipped.contains("Music"))
         #expect(response.index.alwaysSkipped.contains(".git"))
-        // The wire payload carries the read-only array under snake_case.
+        // The wire payload carries the read-only array under camelCase.
         let data = try JSONEncoder().encode(response.index)
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        let wire = object["always_skipped"] as? [String]
+        let wire = object["alwaysSkipped"] as? [String]
         #expect(wire == FilesIndexer.alwaysSkippedPatterns)
     }
 

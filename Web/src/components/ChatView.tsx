@@ -43,8 +43,8 @@ import {
   toNonNegativeInt,
   toolCancel,
   updateSessionTitle,
+  type AccessScopeDTO,
   type ChatSegment,
-  type EgressDecisionTier,
   type Goal,
   type HealthResponse,
   type PermissionRequest,
@@ -56,8 +56,11 @@ import {
   type TrustDuration,
 } from "../api";
 import SessionSidebar from "./SessionSidebar";
-import InlineApprovalBanner from "./InlineApprovalBanner";
+import InlineApprovalBanner, {
+  type InlineApprovalScope,
+} from "./InlineApprovalBanner";
 import InlineQuestionCard from "./InlineQuestionCard";
+import EphemeralTrustChip from "./EphemeralTrustChip";
 import MarkdownText from "./MarkdownText";
 import { appendLiveDelta } from "./liveTextBuffer";
 import ToolActionRow from "./ToolActionRow";
@@ -2806,12 +2809,16 @@ export default function ChatView({
       id: string,
       approved: boolean,
       duration: TrustDuration,
-      widen?: boolean,
-      egressDecision?: EgressDecisionTier,
+      scope?: InlineApprovalScope,
     ) => {
       setDecidingApprovalIDs((previous) => new Set(previous).add(id));
       try {
-        await decideApproval(id, approved, duration, widen, egressDecision);
+        await decideApproval(
+          id,
+          approved,
+          duration,
+          scope as AccessScopeDTO | undefined,
+        );
         setPendingApprovals((previous) =>
           previous.filter((item) => item.id !== id),
         );
@@ -5682,13 +5689,12 @@ export default function ChatView({
                   key={request.id}
                   request={request}
                   deciding={decidingApprovalIDs.has(request.id)}
-                  onDecide={(id, approved, duration, widen, egressDecision) =>
+                  onDecide={(id, approved, duration, scope) =>
                     void handleDecideApproval(
                       id,
                       approved,
                       duration,
-                      widen,
-                      egressDecision,
+                      scope,
                     )
                   }
                 />
@@ -5761,6 +5767,12 @@ export default function ChatView({
               </button>
             )}
           </div>
+
+          {/* Ephemeral session trust sits directly below the input row: what
+              stays auto-approved for this conversation, one compact line per
+              trust with its own Revoke. Renders nothing while the session
+              holds no live ephemeral trust. */}
+          <EphemeralTrustChip sessionID={sessionID} />
 
           {/* Pinned Status Bar Attached Below Input: condensed handheld summary
               with an expander plus full desktop metrics. Both branches stay

@@ -137,21 +137,18 @@ public struct GoalStepDTO: Content, Sendable, Equatable {
         case id
         case goalId
         case goalID
-        case goalSnake = "goal_id"
         case ordinal
         case title
         case status
         case notes
         case lastRunId
         case lastRunID
-        case lastRunSnake = "last_run_id"
         case createdAt
         case updatedAt
     }
 
     /// Decodes tolerantly across the goal and run identifier spellings through
-    /// the shared alias helper so the three historical keys converge without
-    /// triplicating the fallback chain. Canonical `goalId`/`lastRunId` win
+    /// the shared alias helper. Canonical `goalId`/`lastRunId` win
     /// when several spellings ride together.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
@@ -159,7 +156,7 @@ public struct GoalStepDTO: Content, Sendable, Equatable {
         self.id = try container.decode(UUID.self, forKey: .id)
         guard let goalID: UUID = BrowserNavigateWire.decodeFirst(
             container,
-            keys: [.goalId, .goalID, .goalSnake]
+            keys: [.goalId, .goalID]
         ) else {
             throw DecodingError.keyNotFound(
                 CodingKeys.goalId,
@@ -173,7 +170,7 @@ public struct GoalStepDTO: Content, Sendable, Equatable {
         self.notes = try container.decodeIfPresent(String.self, forKey: .notes)
         let lastRunID: UUID? = BrowserNavigateWire.decodeFirst(
             container,
-            keys: [.lastRunId, .lastRunID, .lastRunSnake]
+            keys: [.lastRunId, .lastRunID]
         )
         self.lastRunID = lastRunID
         self.createdAt = try container.decode(Date.self, forKey: .createdAt)
@@ -232,7 +229,6 @@ public struct GoalEventDTO: Content, Sendable, Equatable {
         case id
         case goalId
         case goalID
-        case goalSnake = "goal_id"
         case kind
         case message
         case createdAt
@@ -247,7 +243,7 @@ public struct GoalEventDTO: Content, Sendable, Equatable {
         self.id = try container.decode(Int64.self, forKey: .id)
         guard let goalID: UUID = BrowserNavigateWire.decodeFirst(
             container,
-            keys: [.goalId, .goalID, .goalSnake]
+            keys: [.goalId, .goalID]
         ) else {
             throw DecodingError.keyNotFound(
                 CodingKeys.goalId,
@@ -344,16 +340,11 @@ public struct GoalTriggerDTO: Content, Sendable, Equatable {
         case id
         case goalId
         case goalID
-        case goalSnake = "goal_id"
         case eventKind
-        case eventKindSnake = "event_kind"
         case pattern
         case cooldownMinutes
-        case cooldownSnake = "cooldown_minutes"
         case lastFiredAt
-        case lastFiredSnake = "last_fired_at"
         case createdAt
-        case createdAtSnake = "created_at"
     }
 
     /// Decodes tolerantly across the goal and trigger identifier spellings,
@@ -365,7 +356,7 @@ public struct GoalTriggerDTO: Content, Sendable, Equatable {
         self.id = try container.decode(UUID.self, forKey: .id)
         guard let goalID: UUID = BrowserNavigateWire.decodeFirst(
             container,
-            keys: [.goalId, .goalID, .goalSnake]
+            keys: [.goalId, .goalID]
         ) else {
             throw DecodingError.keyNotFound(
                 CodingKeys.goalId,
@@ -373,20 +364,11 @@ public struct GoalTriggerDTO: Content, Sendable, Equatable {
             )
         }
         self.goalID = goalID
-        guard let eventKind: String = BrowserNavigateWire.decodeFirst(
-            container,
-            keys: [.eventKind, .eventKindSnake]
-        ) else {
-            throw DecodingError.keyNotFound(
-                CodingKeys.eventKind,
-                DecodingError.Context(codingPath: container.codingPath, debugDescription: "Missing event kind")
-            )
-        }
-        self.eventKind = eventKind
+        self.eventKind = try container.decode(String.self, forKey: .eventKind)
         self.pattern = try container.decodeIfPresent(String.self, forKey: .pattern)
-        self.cooldownMinutes = BrowserNavigateWire.decodeFirst(container, keys: [.cooldownMinutes, .cooldownSnake]) ?? 0
-        self.lastFiredAt = BrowserNavigateWire.decodeFirst(container, keys: [.lastFiredAt, .lastFiredSnake])
-        self.createdAt = BrowserNavigateWire.decodeFirst(container, keys: [.createdAt, .createdAtSnake]) ?? Date()
+        self.cooldownMinutes = try container.decodeIfPresent(Int.self, forKey: .cooldownMinutes) ?? 0
+        self.lastFiredAt = try container.decodeIfPresent(Date.self, forKey: .lastFiredAt)
+        self.createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
     }
 
     /// Encodes under the canonical spellings so older decoders see no new key.
@@ -425,11 +407,9 @@ public struct GoalTriggerInput: Content, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case eventKind
-        case eventKindSnake = "event_kind"
         case kind
         case pattern
         case cooldownMinutes
-        case cooldownSnake = "cooldown_minutes"
         case cooldown
     }
 
@@ -439,7 +419,7 @@ public struct GoalTriggerInput: Content, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         guard let eventKind: String = BrowserNavigateWire.decodeFirst(
             container,
-            keys: [.eventKind, .eventKindSnake, .kind]
+            keys: [.eventKind, .kind]
         ) else {
             throw DecodingError.keyNotFound(
                 CodingKeys.eventKind,
@@ -450,7 +430,7 @@ public struct GoalTriggerInput: Content, Sendable, Equatable {
         self.pattern = try container.decodeIfPresent(String.self, forKey: .pattern)
         self.cooldownMinutes = BrowserNavigateWire.decodeFirst(
             container,
-            keys: [.cooldownMinutes, .cooldownSnake, .cooldown]
+            keys: [.cooldownMinutes, .cooldown]
         )
     }
 
@@ -618,28 +598,19 @@ public struct GoalsSummaryResponse: Content, Equatable {
         case active
         case paused
         case needsInput
-        case needsInputSnake = "needs_input"
         case achieved
         case abandoned
         case unplanned
-        // `needsInputCount` is intentionally absent: historical payloads
-        // carrying the duplicate decode by ignoring the unknown key, while
-        // new payloads never encode it.
     }
 
-    /// Decodes tolerantly across the parked key spellings, ignoring the
-    /// retired `needsInputCount` duplicate when present.
+    /// Decodes under canonical camelCase spellings.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.total = try container.decode(Int.self, forKey: .total)
         self.active = try container.decode(Int.self, forKey: .active)
         self.paused = try container.decode(Int.self, forKey: .paused)
-        if let camel = try container.decodeIfPresent(Int.self, forKey: .needsInput) {
-            self.needsInput = camel
-        } else {
-            self.needsInput = try container.decodeIfPresent(Int.self, forKey: .needsInputSnake) ?? 0
-        }
+        self.needsInput = try container.decodeIfPresent(Int.self, forKey: .needsInput) ?? 0
         self.achieved = try container.decode(Int.self, forKey: .achieved)
         self.abandoned = try container.decode(Int.self, forKey: .abandoned)
         self.unplanned = try container.decodeIfPresent(Int.self, forKey: .unplanned) ?? 0
@@ -682,25 +653,20 @@ public struct GoalAdvanceResponse: Content, Equatable {
     private enum CodingKeys: String, CodingKey {
         case runID
         case runId
-        case runSnake = "run_id"
         case sessionID
         case sessionId
-        case sessionSnake = "session_id"
         case goalId
         case goalID
-        case goalSnake = "goal_id"
     }
 
-    /// Decodes tolerantly across the run, session, and goal identifier
-    /// spellings through the shared alias helper. Canonical keys
-    /// (`runID`, `sessionID`, `goalId`) win when several spellings ride
-    /// together.
+    /// Decodes tolerantly across camelCase identifier spellings (`runID`/`runId`,
+    /// `sessionID`/`sessionId`, `goalId`/`goalID`).
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         guard let runID: UUID = BrowserNavigateWire.decodeFirst(
             container,
-            keys: [.runID, .runId, .runSnake]
+            keys: [.runID, .runId]
         ) else {
             throw DecodingError.keyNotFound(
                 CodingKeys.runID,
@@ -710,7 +676,7 @@ public struct GoalAdvanceResponse: Content, Equatable {
         self.runID = runID
         guard let sessionID: UUID = BrowserNavigateWire.decodeFirst(
             container,
-            keys: [.sessionID, .sessionId, .sessionSnake]
+            keys: [.sessionID, .sessionId]
         ) else {
             throw DecodingError.keyNotFound(
                 CodingKeys.sessionID,
@@ -720,7 +686,7 @@ public struct GoalAdvanceResponse: Content, Equatable {
         self.sessionID = sessionID
         guard let goalID: UUID = BrowserNavigateWire.decodeFirst(
             container,
-            keys: [.goalId, .goalID, .goalSnake]
+            keys: [.goalId, .goalID]
         ) else {
             throw DecodingError.keyNotFound(
                 CodingKeys.goalId,
@@ -731,8 +697,7 @@ public struct GoalAdvanceResponse: Content, Equatable {
     }
 
     /// Encodes under the canonical spellings per identifier family: runs as
-    /// `runID`, sessions as `sessionID`, goals as `goalId`. Tolerant decode
-    /// keeps every historical spelling landing.
+    /// `runID`, sessions as `sessionID`, goals as `goalId`.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)

@@ -426,7 +426,7 @@ public struct SchedulerConfig: Sendable, Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case jobs
-        case defaultMaxToolIterations = "max_tool_iterations"
+        case defaultMaxToolIterations = "maxToolIterations"
     }
 
     public init(from decoder: Decoder) throws {

@@ -128,10 +128,10 @@ public struct PersonaConfig: Sendable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case assistantName = "assistant_name"
+        case assistantName
         case tone
         case style
-        case userName = "user_name"
+        case userName
         case avatar
     }
 

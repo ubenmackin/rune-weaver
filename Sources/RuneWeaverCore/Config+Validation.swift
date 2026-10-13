@@ -672,6 +672,34 @@ extension RuneWeaverConfig {
         return mode
     }
 
+    /// Parses a raw `files.write_paths` posture into the closed set.
+    ///
+    /// The single source of truth for per-path posture acceptance, mirroring
+    /// ``validateFilesWriteMode(_:field:)``: the TOML decoder delegates here,
+    /// so trim/lowercase normalization and the rejection field/message cannot
+    /// drift between the policy file and any future settings surface. An
+    /// unknown posture throws instead of falling back to a safer value,
+    /// because a typo would otherwise read as a posture the owner never chose.
+    /// - Parameters:
+    ///   - raw: Raw value from the entry's `posture` key.
+    ///   - field: Dotted field name carried by the thrown error.
+    /// - Returns: The matching posture after trim and lowercase normalization.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when the value
+    ///   is not one of `live`, `stage`, `ask`, or `deny`.
+    public static func validateFilesWritePathPosture(
+        _ raw: String,
+        field: String = "files.write_paths.posture"
+    ) throws -> FilesWritePathPosture {
+        let lowered = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let posture = FilesWritePathPosture(rawValue: lowered) else {
+            throw ConfigError.validationError(
+                field: field,
+                message: "must be one of \(FilesWritePathPosture.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(raw)')"
+            )
+        }
+        return posture
+    }
+
     /// Validates the Trash-class mailbox denylist as non-blank globs.
     ///
     /// Empty opts every mailbox back in, so only blank entries fail: a blank

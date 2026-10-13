@@ -101,31 +101,18 @@ public struct AgentToolDTO: Content, Sendable, Equatable {
         case id
         case name
         case scriptPath
-        case scriptPathSnake = "script_path"
         case sha256
         case status
         case createdAt
         case updatedAt
     }
 
-    /// Decodes tolerantly so snake-case promotion payloads still parse.
+    /// Decodes under canonical camelCase keys.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
-        if let camel = try container.decodeIfPresent(String.self, forKey: .scriptPath) {
-            scriptPath = camel
-        } else if let snake = try container.decodeIfPresent(String.self, forKey: .scriptPathSnake) {
-            scriptPath = snake
-        } else {
-            throw DecodingError.keyNotFound(
-                CodingKeys.scriptPath,
-                DecodingError.Context(
-                    codingPath: decoder.codingPath,
-                    debugDescription: "Missing script path"
-                )
-            )
-        }
+        scriptPath = try container.decode(String.self, forKey: .scriptPath)
         sha256 = try container.decode(String.self, forKey: .sha256)
         status = try container.decode(String.self, forKey: .status)
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
@@ -163,7 +150,7 @@ public struct AgentToolsResponse: Content, Equatable {
 public struct PromoteAgentToolRequest: Content, Equatable {
     /// Registry name for later runs.
     public let name: String?
-    /// Script path inside `workspace/tools/`; snake is canonical.
+    /// Script path inside `workspace/tools/`; camelCase is canonical.
     public let scriptPath: String?
 
     /// Creates a promote request.
@@ -175,18 +162,14 @@ public struct PromoteAgentToolRequest: Content, Equatable {
     private enum CodingKeys: String, CodingKey {
         case name
         case scriptPath
-        case scriptPathSnake = "script_path"
         case path
     }
 
-    /// Decodes accepting the camel, snake, and short aliases so hand-built
-    /// curls and dashboard forms agree without a second parameter.
+    /// Decodes accepting camelCase and short aliases.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         name = try container.decodeIfPresent(String.self, forKey: .name)
-        if let snake = try container.decodeIfPresent(String.self, forKey: .scriptPathSnake) {
-            scriptPath = snake
-        } else if let camel = try container.decodeIfPresent(String.self, forKey: .scriptPath) {
+        if let camel = try container.decodeIfPresent(String.self, forKey: .scriptPath) {
             scriptPath = camel
         } else if let short = try container.decodeIfPresent(String.self, forKey: .path) {
             scriptPath = short
@@ -195,11 +178,11 @@ public struct PromoteAgentToolRequest: Content, Equatable {
         }
     }
 
-    /// Encodes on the canonical snake key.
+    /// Encodes on the canonical camelCase key.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(name, forKey: .name)
-        try container.encodeIfPresent(scriptPath, forKey: .scriptPathSnake)
+        try container.encodeIfPresent(scriptPath, forKey: .scriptPath)
     }
 
     /// Trimmed registry name, or nil when absent or blank.

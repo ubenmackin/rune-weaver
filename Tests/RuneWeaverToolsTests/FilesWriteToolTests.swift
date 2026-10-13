@@ -1536,6 +1536,355 @@ struct FilesWriteToolTests {
         #expect(review?.resolution == nil)
         #expect(review?.backupPath == backupURL.path)
     }
+
+    // MARK: - Write path policy posture
+
+    @Test
+    func `Deny posture refuses the write even with approval granted`() async throws {
+        let (base, home) = try WriteTestSupport.makeBaseAndHome()
+        defer { WriteTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: base.appendingPathComponent("test.db").path)
+
+        // A rule denies the tree outright, so no posture, mode request, or
+        // recorded approval can write through it.
+        let vault = home.appendingPathComponent("Vault", isDirectory: true)
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        let target = vault.appendingPathComponent("notes.txt")
+
+        var config = FilesConfig(allowRoots: ["~"], writeMode: .live)
+        config.writePathRules = [FilesWritePathRule(path: "\(home.path)/Vault", posture: .deny)]
+        let tool = FilesWriteTool(homeDirectoryURL: home, filesConfig: config, stagedFilesStore: store)
+
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(target.path)\",\"content\":\"PRIVATE PAYLOAD\\n\",\"mode\":\"live\"}"
+            ),
+            context: ToolContext(conversationID: UUID(), approved: true)
+        )
+
+        #expect(output.isError == true)
+        #expect(output.content.contains("Access denied"))
+        #expect(output.content.contains("Write path rule"))
+        // The refusal names policy only: no file content travels in the envelope.
+        #expect(output.content.contains("PRIVATE PAYLOAD") == false)
+        #expect(!FileManager.default.fileExists(atPath: target.path))
+        #expect(!FileManager.default.fileExists(atPath: vault.appendingPathComponent(".rune_notes.txt").path))
+        #expect(!FileManager.default.fileExists(atPath: vault.appendingPathComponent(".rune_backup_notes.txt").path))
+        #expect(await store.state(forPath: target.path) == nil)
+        #expect(try await store.liveReview(forPath: target.path) == nil)
+    }
+
+    @Test
+    func `Deny pattern posture beats a live rule and a granted approval`() async throws {
+        let (base, home) = try WriteTestSupport.makeBaseAndHome()
+        defer { WriteTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: base.appendingPathComponent("test.db").path)
+
+        // The deny tier outranks both the rule below it and every approval,
+        // so the highest-precedence pattern wins even where the owner asked
+        // for live writes of that tree.
+        let secrets = home.appendingPathComponent("Secrets", isDirectory: true)
+        try FileManager.default.createDirectory(at: secrets, withIntermediateDirectories: true)
+        let target = secrets.appendingPathComponent("token.pem")
+
+        var config = FilesConfig(allowRoots: ["~"], writeMode: .live)
+        config.denyPatterns = ["*.pem"]
+        config.writePathRules = [FilesWritePathRule(path: "\(home.path)/Secrets", posture: .live)]
+        let tool = FilesWriteTool(homeDirectoryURL: home, filesConfig: config, stagedFilesStore: store)
+
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(target.path)\",\"content\":\"KEY MATERIAL\\n\",\"mode\":\"live\"}"
+            ),
+            context: ToolContext(conversationID: UUID(), approved: true)
+        )
+
+        #expect(output.isError == true)
+        #expect(output.content.contains("Access denied"))
+        #expect(output.content.contains("deny pattern"))
+        #expect(output.content.contains("KEY MATERIAL") == false)
+        #expect(!FileManager.default.fileExists(atPath: target.path))
+        #expect(!FileManager.default.fileExists(atPath: secrets.appendingPathComponent(".rune_token.pem").path))
+    }
+
+    @Test
+    func `Ask posture fails closed without approval and writes once approved`() async throws {
+        let (base, home) = try WriteTestSupport.makeBaseAndHome()
+        defer { WriteTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: base.appendingPathComponent("test.db").path)
+
+        let privateDir = home.appendingPathComponent("Private", isDirectory: true)
+        try FileManager.default.createDirectory(at: privateDir, withIntermediateDirectories: true)
+        let target = privateDir.appendingPathComponent("notes.txt")
+        let stagingURL = privateDir.appendingPathComponent(".rune_notes.txt")
+
+        var config = FilesConfig(allowRoots: ["~"], writeMode: .model)
+        config.writePathRules = [FilesWritePathRule(path: "\(home.path)/Private", posture: .ask)]
+        let tool = FilesWriteTool(homeDirectoryURL: home, filesConfig: config, stagedFilesStore: store)
+
+        // The parked approval cannot self-approve: without a recorded
+        // decide the call fails closed and previews promise nothing disk
+        // would do.
+        let refused = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(target.path)\",\"content\":\"Version 1\\n\"}"
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(refused.isError == true)
+        #expect(refused.content.contains("approvalRequired"))
+        #expect(!FileManager.default.fileExists(atPath: target.path))
+        #expect(!FileManager.default.fileExists(atPath: stagingURL.path))
+
+        let refusedPreview = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(target.path)\",\"content\":\"Version 1\\n\"}"
+            ),
+            context: ToolContext(conversationID: UUID(), dryRun: true)
+        )
+        #expect(refusedPreview.isError == true)
+        #expect(refusedPreview.content.contains("approvalRequired"))
+
+        // The recorded decide authorizes the write, which proceeds under the
+        // ordinary model-posture resolution and stages for review.
+        let approved = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(target.path)\",\"content\":\"Version 1\\n\"}"
+            ),
+            context: ToolContext(conversationID: UUID(), approved: true)
+        )
+        #expect(approved.isError == false)
+        let envelope = try JSONDecoder().decode(FilesWriteEnvelope.self, from: Data(approved.content.utf8))
+        #expect(envelope.status == "staged")
+        #expect(envelope.stagingPath?.hasSuffix(".rune_notes.txt") == true)
+        #expect(try String(contentsOf: stagingURL, encoding: .utf8) == "Version 1\n")
+        #expect(!FileManager.default.fileExists(atPath: target.path))
+        let records = await store.list()
+        #expect(records.count == 1)
+        #expect(records.first?.path == target.path)
+    }
+
+    @Test
+    func `Stage rule forces staged under a global live setting and names the override`() async throws {
+        let (base, home) = try WriteTestSupport.makeBaseAndHome()
+        defer { WriteTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: base.appendingPathComponent("test.db").path)
+
+        let docs = home.appendingPathComponent("Docs", isDirectory: true)
+        try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+        let target = docs.appendingPathComponent("notes.txt")
+        try WriteTestSupport.write("Version 1\n", at: target)
+        let stagingURL = docs.appendingPathComponent(".rune_notes.txt")
+
+        var config = FilesConfig(allowRoots: ["~"], writeMode: .live)
+        config.writePathRules = [FilesWritePathRule(path: "\(home.path)/Docs", posture: .stage)]
+        let tool = FilesWriteTool(homeDirectoryURL: home, filesConfig: config, stagedFilesStore: store)
+
+        // Even an explicit live request loses to the rule, and the envelope
+        // names the owner setting the policy overrode.
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(target.path)\",\"content\":\"Version 2\\n\",\"mode\":\"live\"}"
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+
+        #expect(output.isError == false)
+        let envelope = try JSONDecoder().decode(FilesWriteEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.status == "staged")
+        #expect(envelope.stagingPath?.hasSuffix(".rune_notes.txt") == true)
+        #expect(envelope.message.hasSuffix(" Owner setting files.write_mode = 'live' was overridden by write path policy: this write is staged for review."))
+
+        // The forced posture wins: the live file stayed untouched and the
+        // review copy holds the requested bytes.
+        #expect(try String(contentsOf: target, encoding: .utf8) == "Version 1\n")
+        #expect(try String(contentsOf: stagingURL, encoding: .utf8) == "Version 2\n")
+        let records = await store.list()
+        #expect(records.count == 1)
+        #expect(records.first?.path == target.path)
+    }
+
+    @Test
+    func `Live rule forces live under a global staged setting and names the override`() async throws {
+        let (base, home) = try WriteTestSupport.makeBaseAndHome()
+        defer { WriteTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: base.appendingPathComponent("test.db").path)
+
+        let liveDir = home.appendingPathComponent("Notes", isDirectory: true)
+        try FileManager.default.createDirectory(at: liveDir, withIntermediateDirectories: true)
+        let target = liveDir.appendingPathComponent("notes.txt")
+        try WriteTestSupport.write("Version 1\n", at: target)
+
+        var config = FilesConfig(allowRoots: ["~"], writeMode: .staged)
+        config.writePathRules = [FilesWritePathRule(path: "\(home.path)/Notes", posture: .live)]
+        let tool = FilesWriteTool(homeDirectoryURL: home, filesConfig: config, stagedFilesStore: store)
+
+        // An omitted mode defaults to staged, which the rule overrides; the
+        // envelope names the owner setting the policy overrode.
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(target.path)\",\"content\":\"Version 2\\n\"}"
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+
+        #expect(output.isError == false)
+        let envelope = try JSONDecoder().decode(FilesWriteEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.status == "live")
+        #expect(envelope.message.hasSuffix(" Owner setting files.write_mode = 'staged' was overridden by write path policy: this write is applied live."))
+        let backupURL = liveDir.appendingPathComponent(".rune_backup_notes.txt")
+        #expect(envelope.backupPath?.hasSuffix(".rune_backup_notes.txt") == true)
+
+        // The forced posture keeps the live review lifecycle intact: bytes
+        // moved, the rollback copy holds the original, and the row stays
+        // pending with nothing staged.
+        #expect(try String(contentsOf: target, encoding: .utf8) == "Version 2\n")
+        #expect(try String(contentsOf: backupURL, encoding: .utf8) == "Version 1\n")
+        let review = try await store.liveReview(forPath: target.path)
+        #expect(review?.resolution == nil)
+        #expect(review?.backupPath == backupURL.path)
+        #expect(await store.list().isEmpty)
+    }
+
+    @Test
+    func `Stage rule forces staged over an explicit live request under the model posture`() async throws {
+        let (base, home) = try WriteTestSupport.makeBaseAndHome()
+        defer { WriteTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: base.appendingPathComponent("test.db").path)
+
+        let docs = home.appendingPathComponent("Docs", isDirectory: true)
+        try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+        let target = docs.appendingPathComponent("notes.txt")
+        try WriteTestSupport.write("Version 1\n", at: target)
+
+        var config = FilesConfig(allowRoots: ["~"], writeMode: .model)
+        config.writePathRules = [FilesWritePathRule(path: "\(home.path)/Docs", posture: .stage)]
+        let tool = FilesWriteTool(homeDirectoryURL: home, filesConfig: config, stagedFilesStore: store)
+
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(target.path)\",\"content\":\"Version 2\\n\",\"mode\":\"live\"}"
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+
+        #expect(output.isError == false)
+        let envelope = try JSONDecoder().decode(FilesWriteEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.status == "staged")
+        #expect(envelope.message.hasSuffix(" Requested 'live' mode was overridden by write path policy: this write is staged for review."))
+        #expect(try String(contentsOf: target, encoding: .utf8) == "Version 1\n")
+        #expect(try String(contentsOf: docs.appendingPathComponent(".rune_notes.txt"), encoding: .utf8) == "Version 2\n")
+    }
+
+    @Test
+    func `Live rule forces live over an explicit staged request under the model posture`() async throws {
+        let (base, home) = try WriteTestSupport.makeBaseAndHome()
+        defer { WriteTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: base.appendingPathComponent("test.db").path)
+
+        let notes = home.appendingPathComponent("Notes", isDirectory: true)
+        try FileManager.default.createDirectory(at: notes, withIntermediateDirectories: true)
+        let target = notes.appendingPathComponent("notes.txt")
+        try WriteTestSupport.write("Version 1\n", at: target)
+
+        var config = FilesConfig(allowRoots: ["~"], writeMode: .model)
+        config.writePathRules = [FilesWritePathRule(path: "\(home.path)/Notes", posture: .live)]
+        let tool = FilesWriteTool(homeDirectoryURL: home, filesConfig: config, stagedFilesStore: store)
+
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(target.path)\",\"content\":\"Version 2\\n\",\"mode\":\"staged\"}"
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+
+        #expect(output.isError == false)
+        let envelope = try JSONDecoder().decode(FilesWriteEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.status == "live")
+        #expect(envelope.message.hasSuffix(" Requested 'staged' mode was overridden by write path policy: this write is applied live."))
+        #expect(try String(contentsOf: target, encoding: .utf8) == "Version 2\n")
+        #expect(try String(contentsOf: notes.appendingPathComponent(".rune_backup_notes.txt"), encoding: .utf8) == "Version 1\n")
+    }
+
+    @Test
+    func `Agreeing posture keeps the plain envelope with no override sentence`() async throws {
+        let (base, home) = try WriteTestSupport.makeBaseAndHome()
+        defer { WriteTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: base.appendingPathComponent("test.db").path)
+
+        // The rule agrees with the owner setting and the call omitted its
+        // mode, so nothing lost and the envelope stays the plain sentence.
+        let docs = home.appendingPathComponent("Docs", isDirectory: true)
+        try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+        let target = docs.appendingPathComponent("notes.txt")
+
+        var config = FilesConfig(allowRoots: ["~"], writeMode: .staged)
+        config.writePathRules = [FilesWritePathRule(path: "\(home.path)/Docs", posture: .stage)]
+        let tool = FilesWriteTool(homeDirectoryURL: home, filesConfig: config, stagedFilesStore: store)
+
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(target.path)\",\"content\":\"Version 1\\n\"}"
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+
+        #expect(output.isError == false)
+        let envelope = try JSONDecoder().decode(FilesWriteEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.status == "staged")
+        #expect(envelope.message == "Changes staged to .rune_notes.txt. Live file is unchanged pending user review.")
+        #expect(envelope.message.contains("overridden") == false)
+    }
+
+    @Test
+    func `Reserved review artifact namespace stays refused under a forced live posture`() async throws {
+        let (base, home) = try WriteTestSupport.makeBaseAndHome()
+        defer { WriteTestSupport.cleanup(base) }
+        let store = StagedFilesStore(dbPath: base.appendingPathComponent("test.db").path)
+
+        // A staging sibling belongs to the review lifecycle, so the reserved
+        // namespace refuses even when a rule forces every write live.
+        let document = home.appendingPathComponent("document.txt")
+        try WriteTestSupport.write("Original Version 1\n", at: document)
+        _ = try await FilesWriteTool(homeDirectoryURL: home, stagedFilesStore: store).execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(document.path)\",\"content\":\"Staged Version 2\\n\"}"
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        let reserved = home.appendingPathComponent(".rune_document.txt")
+        #expect(await store.state(forPath: document.path) == .pending)
+
+        var config = FilesConfig(allowRoots: ["~"], writeMode: .staged)
+        config.writePathRules = [FilesWritePathRule(path: "\(home.path)", posture: .live)]
+        let tool = FilesWriteTool(homeDirectoryURL: home, filesConfig: config, stagedFilesStore: store)
+
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.write",
+                argumentsJSON: "{\"path\":\"\(reserved.path)\",\"content\":\"Clobber\\n\"}"
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+
+        #expect(output.isError == true)
+        #expect(output.content.contains("reserved for review artifacts"))
+        // The staged copy, the live bytes, and the pending review all survive.
+        #expect(try String(contentsOf: reserved, encoding: .utf8) == "Staged Version 2\n")
+        #expect(try String(contentsOf: document, encoding: .utf8) == "Original Version 1\n")
+        #expect(await store.state(forPath: document.path) == .pending)
+    }
 }
 
 @Suite("LiveFileBackup")

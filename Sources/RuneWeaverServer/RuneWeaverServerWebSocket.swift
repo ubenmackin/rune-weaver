@@ -370,7 +370,20 @@ func authorizeWebSocketUpgrade(_ request: Request) -> HTTPHeaders? {
 ///
 /// Chat turns dispatch without the connection table so they survive socket
 /// close; resume continuations keep the table so close still seals them.
-func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerContext, connectionTasks: ConnectionChatTasks) async {
+/// - Parameters:
+///   - text: Raw frame text.
+///   - connectionID: Socket that sent the frame.
+///   - context: Server context owning the queue and hub.
+///   - connectionTasks: Table tracking resumes under the socket lifetime.
+///   - pulse: Verified system-pulse actor, when the caller can reach the one
+///     the health route installs; a brake decision records into it.
+func handleWebSocketText(
+    _ text: String,
+    connectionID: UUID,
+    context: ServerContext,
+    connectionTasks: ConnectionChatTasks,
+    pulse: SystemHealthSnapshot? = nil
+) async {
     guard !Task.isCancelled else { return }
     switch WSInboundKind.classify(text) {
     case let .chat(message):
@@ -380,10 +393,12 @@ func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerCont
     case let .toolCancel(message):
         await handleWebSocketToolCancel(message, connectionID: connectionID, context: context)
     case let .decision(message):
-        let egressOutcome = wsEgressDecisionTier(from: text)
-        if egressOutcome.invalid {
+        let scopeOutcome = wsDecisionScope(from: text)
+        if scopeOutcome.invalid {
+            // A present-but-undecodable scope fails closed rather than
+            // approving without the scope the owner chose.
             await sendWSError(
-                "Unknown egressDecision tier",
+                "Unknown decision scope",
                 connectionID: connectionID,
                 context: context
             )
@@ -391,10 +406,11 @@ func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerCont
         }
         await handleWebSocketDecision(
             message,
-            egressDecision: egressOutcome.tier,
+            scope: scopeOutcome.scope,
             connectionID: connectionID,
             context: context,
-            connectionTasks: connectionTasks
+            connectionTasks: connectionTasks,
+            pulse: pulse
         )
     case .unknown:
         let hint = "Expected a chat frame {\"text\": \"...\"}, a decision frame, a cancel frame, or a tool_cancel frame"
@@ -941,151 +957,127 @@ func handleWebSocketToolCancel(_ message: WSToolCancelMessage, connectionID: UUI
 
 /// Resolves an approval decision received over WebSocket.
 ///
-/// Mirrors the REST tier-to-side-effect mapping: an egress tier derives the
-/// approval outcome and applies supervisor plus policy side effects through
-/// the shared handler, failing closed when the grant cannot be honored.
+/// Routes through the same decide-plus-map function the REST route uses, so
+/// tier semantics cannot drift between transports: the question guard, the
+/// egress side effects, the brake resume, the durable-rule broadcast, and the
+/// session-tagged resume all resolve in one place. The resume stays tracked
+/// under this socket's lifetime so a close cancels it instead of leaving an
+/// orphaned synthesis turn running with no viewer to receive its broadcasts.
+/// - Parameters:
+///   - message: Decoded decision frame.
+///   - scope: Caller-supplied scope for a durable decision, or nil to derive.
+///   - connectionID: Socket that sent the decision.
+///   - context: Server context owning the queue and hub.
+///   - connectionTasks: Table tracking resumes under the socket lifetime.
+///   - pulse: Verified system-pulse actor, when the caller can reach it.
 func handleWebSocketDecision(
     _ message: WSDecisionMessage,
-    egressDecision: EgressDecisionTier? = nil,
+    scope: AccessScope? = nil,
     connectionID: UUID,
     context: ServerContext,
-    connectionTasks: ConnectionChatTasks
+    connectionTasks: ConnectionChatTasks,
+    pulse: SystemHealthSnapshot? = nil
 ) async {
     guard !Task.isCancelled else {
         return
     }
     let pending = await context.approvals.request(id: message.id)
-    // Operator choices ride the answer-bearing respond path so an approval
-    // without a choice cannot synthesize an empty acknowledgement. The legacy
-    // decide shape carries no answer, so question approvals fail closed here
-    // and direct the requester to the respond route.
-    if pending?.toolName == "question.ask" {
+    let approvalID = message.id
+    let outcome = await applyApprovalDecision(
+        input: ApprovalDecisionInput(
+            id: message.id,
+            approved: message.approved,
+            duration: message.resolvedDuration,
+            scope: scope,
+            pending: pending
+        ),
+        pulse: pulse,
+        context: context,
+        spawnResume: { effectiveApproved in
+            guard let resumeSessionID = pending?.sessionID else { return }
+            // Reserve before spawning so a close landing in the gap parks as
+            // cancelled and the insert aborts immediately; the defer removes
+            // the slot on every terminal path so the table never retains
+            // finished resumes.
+            let trackingID = UUID()
+            connectionTasks.reserve(id: trackingID)
+            let decidedCallID = pending?.input.callID
+            let resumeTask: Task<Void, Never> = Task { [weak connectionTasks] in
+                defer { connectionTasks?.remove(id: trackingID) }
+                guard !Task.isCancelled else { return }
+                await resumeNarratedApproval(
+                    id: approvalID,
+                    approved: effectiveApproved,
+                    context: context,
+                    sessionID: resumeSessionID,
+                    decidedCallID: decidedCallID
+                )
+            }
+            connectionTasks.insert(resumeTask, id: trackingID)
+        }
+    )
+    switch outcome {
+    case .resolved:
+        break
+    case .unknown:
+        await sendWSError("Unknown approval \(message.id.uuidString)", connectionID: connectionID, context: context)
+    case .questionRequiresRespond:
+        // Operator choices ride the answer-bearing respond path so an approval
+        // without a choice cannot synthesize an empty acknowledgement.
         await sendWSError(
             "Use /respond for question.ask",
             connectionID: connectionID,
             context: context,
             sessionID: pending?.sessionID
         )
-        return
-    }
-    let effectiveApproved: Bool
-    if let tier = egressDecision {
-        let applied = await applyEgressDecision(tier: tier, pending: pending, context: context)
-        switch tier {
-        case .allowOnce, .allowSession, .alwaysAllow:
-            guard applied else {
-                await sendWSError(
-                    "Egress decision could not be applied for this approval",
-                    connectionID: connectionID,
-                    context: context
-                )
-                return
-            }
-            effectiveApproved = true
-        case .deny:
-            effectiveApproved = false
-        case .denyAlways:
-            guard applied else {
-                await sendWSError(
-                    "Egress decision could not be applied for this approval",
-                    connectionID: connectionID,
-                    context: context
-                )
-                return
-            }
-            effectiveApproved = false
-        }
-    } else {
-        effectiveApproved = message.approved
-    }
-    let resolved = await context.approvals.decide(
-        id: message.id,
-        approved: effectiveApproved,
-        duration: message.resolvedDuration,
-        widen: message.resolvedWiden
-    )
-    guard resolved else {
-        await sendWSError("Unknown approval \(message.id.uuidString)", connectionID: connectionID, context: context)
-        return
-    }
-    // Durable approvals create a stored grant inside `decide`, so
-    // dashboards need a refresh signal; one-shot approvals store
-    // nothing and leave the grants list untouched. Continuation and
-    // question approvals stay one-shot inside `decide` (coerced to thisTime
-    // with no stored grant), so a durable vote on engine.continue or
-    // question.ask must not fire a refresh when nothing changed.
-    if effectiveApproved, message.resolvedDuration != .thisTime, pending?.toolName != "engine.continue", pending?.toolName != "question.ask" {
-        await context.hub.broadcastTrustGrantsChanged()
-    }
-    if pending?.sessionID != nil {
-        // Track the resume under the socket lifetime so close or shutdown
-        // cancels it instead of leaving an orphaned synthesis turn running
-        // with no viewer to receive its broadcasts. Reserve before spawning
-        // so a close landing in the gap parks as cancelled and the insert
-        // aborts immediately; the defer removes the slot on every terminal
-        // path so the table never retains finished resumes.
-        let trackingID = UUID()
-        connectionTasks.reserve(id: trackingID)
-        let approvalID = message.id
-        let approved = effectiveApproved
-        let resumeSessionID = pending?.sessionID
-        let decidedCallID = pending?.input.callID
-        let resumeTask: Task<Void, Never> = Task { [weak connectionTasks] in
-            defer { connectionTasks?.remove(id: trackingID) }
-            guard !Task.isCancelled else { return }
-            await resumeNarratedApproval(
-                id: approvalID,
-                approved: approved,
-                context: context,
-                sessionID: resumeSessionID,
-                decidedCallID: decidedCallID
-            )
-        }
-        connectionTasks.insert(resumeTask, id: trackingID)
+    case let .sideEffectFailed(reason):
+        // The requester learns the decision could not be applied instead of
+        // the approval silently resolving as approved.
+        await sendWSError(reason, connectionID: connectionID, context: context)
     }
 }
 
-/// Fail-closed decode of the egress decision tier from a raw decision frame.
+/// Fail-closed decode of the decision scope from a raw decision frame.
 ///
-/// The core decision shape carries no egress tier, so the tier rides as an
-/// optional sibling key the strict decoder ignores. A missing key means a
-/// plain approval; a present-but-undecodable value (unknown string, number)
-/// marks the frame invalid so the caller errors instead of approving without
-/// a grant, matching the REST 400 on a bad enum.
-private struct WSEgressDecisionOutcome: Sendable {
-    /// Decoded tier, nil for plain approvals and invalid frames.
-    let tier: EgressDecisionTier?
+/// The core decision shape carries no scope, so the scope rides as an optional
+/// sibling key the strict decoder ignores. A missing key means the gate
+/// derives the request's own scope; a present-but-undecodable value (unknown
+/// kind, non-canonical payload, wrong type) marks the frame invalid so the
+/// caller errors instead of minting trust the owner never chose.
+private struct WSDecisionScopeOutcome: Sendable {
+    /// Decoded scope, nil for decisions without an explicit scope.
+    let scope: AccessScope?
     /// True when the key was present but failed strict decoding.
     let invalid: Bool
 }
 
-private func wsEgressDecisionTier(from text: String) -> WSEgressDecisionOutcome {
+private func wsDecisionScope(from text: String) -> WSDecisionScopeOutcome {
     guard let data = text.data(using: .utf8),
           let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else { return WSEgressDecisionOutcome(tier: nil, invalid: false) }
-    guard raw.keys.contains("egressDecision") else {
-        return WSEgressDecisionOutcome(tier: nil, invalid: false)
+    else { return WSDecisionScopeOutcome(scope: nil, invalid: false) }
+    guard raw.keys.contains("scope") else {
+        return WSDecisionScopeOutcome(scope: nil, invalid: false)
     }
-    // A JSON null tier reads as plain approval; any other present value
+    // A JSON null scope reads as no explicit scope; any other present value
     // must strictly decode or the frame fails closed.
-    if raw["egressDecision"] is NSNull {
-        return WSEgressDecisionOutcome(tier: nil, invalid: false)
+    if raw["scope"] is NSNull {
+        return WSDecisionScopeOutcome(scope: nil, invalid: false)
     }
-    struct EgressFields: Decodable {
-        var egressDecision: EgressDecisionTier?
-        enum CodingKeys: String, CodingKey { case egressDecision }
+    struct DecisionFields: Decodable {
+        var scope: AccessScopeDTO?
+        enum CodingKeys: String, CodingKey { case scope }
     }
-    let fields: EgressFields
+    let fields: DecisionFields
     do {
-        fields = try JSONDecoder().decode(EgressFields.self, from: data)
+        fields = try JSONDecoder().decode(DecisionFields.self, from: data)
     } catch {
-        RuneWeaverLog.server.debug("decodeEgressDecision: failed to decode egressDecision: \(error.localizedDescription)")
-        return WSEgressDecisionOutcome(tier: nil, invalid: true)
+        RuneWeaverLog.server.debug("decodeDecisionScope: failed to decode scope: \(error.localizedDescription)")
+        return WSDecisionScopeOutcome(scope: nil, invalid: true)
     }
-    guard let tier = fields.egressDecision else {
-        return WSEgressDecisionOutcome(tier: nil, invalid: true)
+    guard let scope = fields.scope, let canonical = scope.accessScope() else {
+        return WSDecisionScopeOutcome(scope: nil, invalid: true)
     }
-    return WSEgressDecisionOutcome(tier: tier, invalid: false)
+    return WSDecisionScopeOutcome(scope: canonical, invalid: false)
 }
 
 /// Sends one requester-scoped error frame through the hub, best-effort.

@@ -581,12 +581,10 @@ struct ServerDTOTests {
         #expect(ApprovalDecisionRequest(approved: true).resolvedDuration == .thisTime)
         #expect(ApprovalDecisionRequest(approved: true, duration: .forever).resolvedDuration == .forever)
         #expect(WSDecisionMessage(id: UUID(), approved: true).resolvedDuration == .thisTime)
-        // Widen must default to the narrow scope on both wire paths so an
-        // omitted flag never silently mints tool-wide trust.
-        #expect(ApprovalDecisionRequest(approved: true).resolvedWiden == false)
-        #expect(ApprovalDecisionRequest(approved: true, widen: true).resolvedWiden == true)
-        #expect(WSDecisionMessage(id: UUID(), approved: true).resolvedWiden == false)
-        #expect(WSDecisionMessage(id: UUID(), approved: true, widen: true).resolvedWiden == true)
+        // An omitted scope stays nil so the gate derives the request's own
+        // target instead of silently minting tool-wide trust.
+        #expect(ApprovalDecisionRequest(approved: true).resolvedScope == nil)
+        #expect(ApprovalDecisionRequest(approved: true, scope: AccessScopeDTO(kind: .tool)).resolvedScope == .toolWide)
     }
 
     @Test
@@ -1242,143 +1240,159 @@ struct ToolStateStoreTests {
     }
 }
 
-@Suite("Trust Grants Routes")
-struct TrustGrantsRouteTests {
-    /// Mirrors the GET /approvals/grants handler so route semantics stay
-    /// covered without a live socket: prune expired, newest-first, then map.
-    private func grantsResponse(for gate: PermissionGate) async -> TrustGrantsResponse {
-        let grants = await gate.activeGrants()
-        let newestFirst = grants.sorted { $0.grantedAt > $1.grantedAt }
-        return TrustGrantsResponse(grants: newestFirst.map(TrustGrantResponse.init))
+@Suite("Access Rules Routes")
+struct AccessRulesRouteTests {
+    /// Finds the rule a descriptor's trust currently lives under, so tests
+    /// address rows by the target the owner approved rather than by identity.
+    /// - Parameters:
+    ///   - descriptor: Action the rule was minted for.
+    ///   - gate: Gate whose live rules are searched.
+    /// - Returns: The exact-target allow rule, or nil when none is live.
+    private func rule(for descriptor: ActionDescriptor, gate: PermissionGate) async -> AccessRule? {
+        await gate.activeRules().first { rule in
+            rule.toolName == descriptor.toolName && rule.scope == .exactTarget(descriptor.target)
+        }
     }
 
-    /// Mirrors the DELETE /approvals/grants/:id handler mapping so the 404
+    /// Mirrors the GET /approvals/rules handler so route semantics stay
+    /// covered without a live socket: prune expired, newest-first, then map.
+    private func rulesResponse(for gate: PermissionGate) async -> AccessRulesResponse {
+        let rules = await gate.activeRules()
+        let newestFirst = rules.sorted { $0.grantedAt > $1.grantedAt }
+        return AccessRulesResponse(rules: newestFirst.map(AccessRuleResponse.init))
+    }
+
+    /// Mirrors the DELETE /approvals/rules/:id handler mapping so the 404
     /// contract stays pinned to the revoke result.
-    private func deleteGrantStatus(id: UUID, gate: PermissionGate) async throws -> HTTPStatus {
-        let removed = await gate.revokeGrant(id: id)
+    private func deleteRuleStatus(id: UUID, gate: PermissionGate) async throws -> HTTPStatus {
+        let removed = await gate.revokeRule(id: id)
         guard removed else {
-            throw Abort(.notFound, reason: "Unknown grant \(id.uuidString)")
+            throw Abort(.notFound, reason: "Unknown rule \(id.uuidString)")
         }
         return .noContent
     }
 
-    /// Mirrors the POST /approvals/grants/:id/widen handler mapping so the
-    /// tri-state contract stays pinned: a promoted grant is 204, an unknown or
-    /// expired id is 404, and a live grant whose tool has no tool-wide scope is
-    /// the honest conflict rather than "Unknown grant".
-    private func widenGrantStatus(id: UUID, gate: PermissionGate) async throws -> HTTPStatus {
+    /// Mirrors the POST /approvals/rules/:id/widen handler mapping so the
+    /// tri-state contract stays pinned: a promoted rule is 204, an unknown or
+    /// expired id is 404, and a live rule whose tool has no tool-wide scope is
+    /// the honest conflict rather than "Unknown rule".
+    private func widenRuleStatus(id: UUID, gate: PermissionGate) async throws -> HTTPStatus {
         switch await gate.widenGrant(id: id) {
         case .widened:
             return .noContent
         case .notFound:
-            throw Abort(.notFound, reason: "Unknown grant \(id.uuidString)")
+            throw Abort(.notFound, reason: "Unknown rule \(id.uuidString)")
         case let .notWidenable(reason):
             throw Abort(.conflict, reason: reason)
         }
     }
 
-    /// Mirrors the PATCH /approvals/grants/:id handler mapping so the
-    /// tri-state contract stays pinned: a re-armed grant is 204, an unknown or
-    /// expired id is 404, and a live grant carrying a non-durable tier is the
-    /// honest 400 rather than "Unknown grant".
-    private func rearmGrantStatus(id: UUID, duration: TrustDuration, gate: PermissionGate) async throws -> HTTPStatus {
+    /// Mirrors the PATCH /approvals/rules/:id handler mapping so the
+    /// tri-state contract stays pinned: a re-armed rule is 204, an unknown or
+    /// expired id is 404, and a live rule carrying a non-durable tier is the
+    /// honest 400 rather than "Unknown rule".
+    private func rearmRuleStatus(id: UUID, duration: TrustDuration, gate: PermissionGate) async throws -> HTTPStatus {
         switch await gate.rearmGrant(id: id, duration: duration) {
         case .rearmed:
             return .noContent
         case .notFound:
-            throw Abort(.notFound, reason: "Unknown grant \(id.uuidString)")
+            throw Abort(.notFound, reason: "Unknown rule \(id.uuidString)")
         case let .invalidDuration(reason):
             throw Abort(.badRequest, reason: reason)
         }
     }
 
     @Test
-    func `Grants list returns oneHour and forever with correct fields`() async {
+    func `Rules list returns oneHour and forever with correct fields`() async {
         let gate = PermissionGate()
         let timedDescriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
         let foreverDescriptor = ActionDescriptor(toolName: "file.write", target: "/tmp/report.md")
         await gate.grantTrust(for: timedDescriptor, duration: .oneHour)
         await gate.grantTrust(for: foreverDescriptor, duration: .forever)
 
-        // Both grants gate their actions until revoked or expired.
+        // Both rules gate their actions until revoked or expired.
         #expect(await gate.isTrusted(timedDescriptor) == true)
         #expect(await gate.isTrusted(foreverDescriptor) == true)
 
-        let response = await grantsResponse(for: gate)
+        let response = await rulesResponse(for: gate)
         #expect(response.count == 2)
-        #expect(response.grants.count == 2)
+        #expect(response.rules.count == 2)
 
-        guard let timed = response.grants.first(where: { $0.duration == .oneHour }) else {
-            Issue.record("Expected oneHour grant in list")
+        guard let timed = response.rules.first(where: { $0.duration == .oneHour }) else {
+            Issue.record("Expected oneHour rule in list")
             return
         }
         #expect(timed.toolName == "email.send")
-        #expect(timed.target == "alice@example.com")
-        #expect(timed.displayTarget == "alice@example.com")
+        #expect(timed.scope == AccessScopeDTO(kind: .exactTarget, target: "alice@example.com"))
+        #expect(timed.action == .allow)
+        #expect(timed.displayScope == "target 'alice@example.com'")
         #expect(timed.duration == .oneHour)
-        // Timed grants carry a future expiry derived from the grant moment.
+        // Timed rules carry a future expiry derived from the grant moment.
         #expect(timed.expiresAt != nil)
         if let expiresAt = timed.expiresAt {
             #expect(expiresAt > timed.grantedAt)
         }
 
-        guard let forever = response.grants.first(where: { $0.duration == .forever }) else {
-            Issue.record("Expected forever grant in list")
+        guard let forever = response.rules.first(where: { $0.duration == .forever }) else {
+            Issue.record("Expected forever rule in list")
             return
         }
         #expect(forever.toolName == "file.write")
-        #expect(forever.target == "/tmp/report.md")
-        #expect(forever.displayTarget == "/tmp/report.md")
+        #expect(forever.scope == AccessScopeDTO(kind: .exactTarget, target: "/tmp/report.md"))
+        #expect(forever.displayScope == "target '/tmp/report.md'")
         #expect(forever.duration == .forever)
-        // Forever grants never expire, so the wire expiry stays nil and
+        // Forever rules never expire, so the wire expiry stays nil and
         // dashboards render them as never expiring instead of epoch dates.
         #expect(forever.expiresAt == nil)
     }
 
     @Test
-    func `Grants list hides expired entries`() async {
+    func `Rules list hides expired entries`() async throws {
         let now = Date()
-        let expired = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "stale@example.com"),
+        let expired = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .exactTarget("stale@example.com"),
+            action: .allow,
             grantedAt: now.addingTimeInterval(-7200),
-            expiresAt: now.addingTimeInterval(-60),
-            duration: .fiveMinutes
-        )
-        let active = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "fresh@example.com"),
+            duration: .fiveMinutes,
+            expiresAt: now.addingTimeInterval(-60)
+        ))
+        let active = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .exactTarget("fresh@example.com"),
+            action: .allow,
             grantedAt: now,
-            expiresAt: now.addingTimeInterval(3600),
-            duration: .oneHour
-        )
-        let forever = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "file.write", target: "/tmp/kept.md"),
+            duration: .oneHour,
+            expiresAt: now.addingTimeInterval(3600)
+        ))
+        let forever = try #require(AccessRule(
+            toolName: "file.write",
+            scope: .exactTarget("/tmp/kept.md"),
+            action: .allow,
             grantedAt: now,
-            expiresAt: nil,
             duration: .forever
-        )
-        let store = InMemoryTrustStore(grants: [expired, active, forever])
-        let gate = await PermissionGate.load(store: store)
+        ))
+        let store = InMemoryAccessRuleStore(rules: [expired, active, forever])
+        let gate = await PermissionGate.load(ruleStore: store)
 
-        let response = await grantsResponse(for: gate)
+        let response = await rulesResponse(for: gate)
         #expect(response.count == 2)
-        #expect(response.grants.contains { $0.target == "stale@example.com" } == false)
-        #expect(response.grants.contains { $0.target == "fresh@example.com" } == true)
-        #expect(response.grants.contains { $0.target == "/tmp/kept.md" } == true)
+        #expect(response.rules.contains { $0.scope == AccessScopeDTO(kind: .exactTarget, target: "stale@example.com") } == false)
+        #expect(response.rules.contains { $0.scope == AccessScopeDTO(kind: .exactTarget, target: "fresh@example.com") } == true)
+        #expect(response.rules.contains { $0.scope == AccessScopeDTO(kind: .exactTarget, target: "/tmp/kept.md") } == true)
         // Gating follows the filtered list: lapsed scope falls back to asking.
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "email.send", target: "stale@example.com")) == false)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "email.send", target: "fresh@example.com")) == true)
 
         // An expiry exactly at the reference instant already counts as
         // expired, so clock skew cannot stretch a grant by one poll tick.
-        let boundary = TrustGrant(
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "edge@example.com"),
+        let boundary = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .exactTarget("edge@example.com"),
             grantedAt: now,
-            expiresAt: now,
-            duration: .fiveMinutes
-        )
+            duration: .fiveMinutes,
+            expiresAt: now
+        ))
         #expect(boundary.isExpired(at: now) == true)
         #expect(boundary.isValid(at: now) == false)
         // A nil expiry never lapses regardless of the reference date.
@@ -1386,37 +1400,37 @@ struct TrustGrantsRouteTests {
     }
 
     @Test
-    func `Revoke removes grant and restores gating`() async throws {
+    func `Revoke removes rule and restores gating`() async throws {
         let gate = PermissionGate()
         let descriptor = ActionDescriptor(toolName: "email.send", target: "bob@example.com")
         await gate.grantTrust(for: descriptor, duration: .oneHour)
         #expect(await gate.isTrusted(descriptor) == true)
 
-        guard let id = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor })?.id else {
+        guard let id = await rule(for: descriptor, gate: gate)?.id else {
             Issue.record("Expected granted row before revoke")
             return
         }
         // A successful DELETE maps to 204 with no body.
-        #expect(try await deleteGrantStatus(id: id, gate: gate).code == 204)
+        #expect(try await deleteRuleStatus(id: id, gate: gate).code == 204)
 
         // Revocation drops the row and returns gating to ask-every-time.
         #expect(await gate.isTrusted(descriptor) == false)
-        let after = await grantsResponse(for: gate)
-        #expect(after.grants.contains { $0.id == id } == false)
+        let after = await rulesResponse(for: gate)
+        #expect(after.rules.contains { $0.id == id } == false)
         #expect(after.count == 0)
     }
 
     @Test
-    func `Revoke unknown grant reports notFound`() async {
+    func `Revoke unknown rule reports notFound`() async {
         let gate = PermissionGate()
         let unknown = UUID()
-        #expect(await gate.revokeGrant(id: unknown) == false)
+        #expect(await gate.revokeRule(id: unknown) == false)
         do {
-            _ = try await deleteGrantStatus(id: unknown, gate: gate)
-            Issue.record("Expected notFound for unknown grant")
+            _ = try await deleteRuleStatus(id: unknown, gate: gate)
+            Issue.record("Expected notFound for unknown rule")
         } catch let abort as Abort {
             // The DELETE handler maps a missed revoke to 404 so dashboards
-            // can explain the grant already lapsed instead of retrying.
+            // can explain the rule already lapsed instead of retrying.
             #expect(abort.status == .notFound)
         } catch {
             Issue.record("Unexpected error: \(error)")
@@ -1424,7 +1438,7 @@ struct TrustGrantsRouteTests {
     }
 
     @Test
-    func `ThisTime decision creates no grant row`() async {
+    func `ThisTime decision creates no rule row`() async {
         let gate = PermissionGate()
         let store = ApprovalQueue(permissionGate: gate)
         let request = await store.enqueue(
@@ -1434,8 +1448,8 @@ struct TrustGrantsRouteTests {
         )
         #expect(await store.decide(id: request.id, approved: true, duration: .thisTime) == true)
         // One-shot approvals resolve the waiter but record no durable row,
-        // so the grants list stays empty and gating stays closed.
-        #expect(await gate.activeGrants().isEmpty == true)
+        // so the rules list stays empty and gating stays closed.
+        #expect(await gate.activeRules().isEmpty == true)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "stub.write", target: "/tmp/once.md")) == false)
 
         // A duration approval on the same gate mints exactly one row,
@@ -1446,25 +1460,25 @@ struct TrustGrantsRouteTests {
             input: ToolInput(toolName: "stub.write", argumentsJSON: #"{"path":"/tmp/kept.md"}"#)
         )
         #expect(await store.decide(id: durable.id, approved: true, duration: .oneHour) == true)
-        let listed = await grantsResponse(for: gate)
+        let listed = await rulesResponse(for: gate)
         #expect(listed.count == 1)
-        #expect(listed.grants.first?.target == "/tmp/kept.md")
+        #expect(listed.rules.first?.scope == AccessScopeDTO(kind: .exactTarget, target: "/tmp/kept.md"))
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "stub.write", target: "/tmp/kept.md")) == true)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "stub.write", target: "/tmp/once.md")) == false)
     }
 
     @Test
-    func `GET exposes zero usage for fresh grants`() async {
+    func `GET exposes zero usage for fresh rules`() async {
         let gate = PermissionGate()
         let fresh = ActionDescriptor(toolName: "email.send", target: "fresh@example.com")
         await gate.grantTrust(for: fresh, duration: .oneHour)
 
         // Fresh rows must encode the untouched baseline so dashboards can
         // distinguish never-fired trust from exercised trust.
-        let response = await grantsResponse(for: gate)
+        let response = await rulesResponse(for: gate)
         #expect(response.count == 1)
-        guard let row = response.grants.first(where: { $0.target == "fresh@example.com" }) else {
-            Issue.record("Expected fresh grant in list")
+        guard let row = response.rules.first(where: { $0.scope == AccessScopeDTO(kind: .exactTarget, target: "fresh@example.com") }) else {
+            Issue.record("Expected fresh rule in list")
             return
         }
         #expect(row.useCount == 0)
@@ -1480,22 +1494,22 @@ struct TrustGrantsRouteTests {
         let used = ActionDescriptor(toolName: "email.send", target: "used@example.com")
         await gate.grantTrust(for: fresh, duration: .oneHour)
         await gate.grantTrust(for: used, duration: .forever)
-        await gate.recordUse(for: used)
-        await gate.recordUse(for: used)
-        await gate.recordUse(for: used)
+        await gate.recordUse(scope: .exactTarget("used@example.com"), toolName: "email.send")
+        await gate.recordUse(scope: .exactTarget("used@example.com"), toolName: "email.send")
+        await gate.recordUse(scope: .exactTarget("used@example.com"), toolName: "email.send")
 
         // The list must carry the durable counters so the inbox proves
         // liveness without re-deriving it from run history.
-        let response = await grantsResponse(for: gate)
+        let response = await rulesResponse(for: gate)
         #expect(response.count == 2)
-        guard let freshRow = response.grants.first(where: { $0.target == "fresh@example.com" }) else {
-            Issue.record("Expected fresh grant in list")
+        guard let freshRow = response.rules.first(where: { $0.scope == AccessScopeDTO(kind: .exactTarget, target: "fresh@example.com") }) else {
+            Issue.record("Expected fresh rule in list")
             return
         }
         #expect(freshRow.useCount == 0)
         #expect(freshRow.lastUsedAt == nil)
-        guard let usedRow = response.grants.first(where: { $0.target == "used@example.com" }) else {
-            Issue.record("Expected used grant in list")
+        guard let usedRow = response.rules.first(where: { $0.scope == AccessScopeDTO(kind: .exactTarget, target: "used@example.com") }) else {
+            Issue.record("Expected used rule in list")
             return
         }
         #expect(usedRow.useCount == 3)
@@ -1509,43 +1523,44 @@ struct TrustGrantsRouteTests {
         let gate = PermissionGate()
         let descriptor = ActionDescriptor(toolName: "email.send", target: "gone@example.com")
         await gate.grantTrust(for: descriptor, duration: .oneHour)
-        guard let id = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor })?.id else {
+        guard let id = await rule(for: descriptor, gate: gate)?.id else {
             Issue.record("Expected granted row before delete")
             return
         }
         // First DELETE removes the row with an empty 204 body.
-        #expect(try await deleteGrantStatus(id: id, gate: gate).code == 204)
+        #expect(try await deleteRuleStatus(id: id, gate: gate).code == 204)
         #expect(await gate.isTrusted(descriptor) == false)
         // A repeat DELETE for the same identifier must stay 404 so dashboards
         // explain the row is already gone instead of retrying.
         do {
-            _ = try await deleteGrantStatus(id: id, gate: gate)
-            Issue.record("Expected notFound for already-revoked grant")
+            _ = try await deleteRuleStatus(id: id, gate: gate)
+            Issue.record("Expected notFound for already-revoked rule")
         } catch let abort as Abort {
             #expect(abort.status == .notFound)
         }
-        #expect(await gate.revokeGrant(id: UUID()) == false)
+        #expect(await gate.revokeRule(id: UUID()) == false)
     }
 
     @Test
-    func `Revoke already-expired grant stays notFound`() async {
+    func `Revoke already-expired rule stays notFound`() async throws {
         let now = Date()
-        let expired = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "lapsed@example.com"),
+        let expired = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .exactTarget("lapsed@example.com"),
+            action: .allow,
             grantedAt: now.addingTimeInterval(-7200),
-            expiresAt: now.addingTimeInterval(-60),
-            duration: .fiveMinutes
-        )
+            duration: .fiveMinutes,
+            expiresAt: now.addingTimeInterval(-60)
+        ))
         // Bootstrap prunes the lapsed row, so the stranded identifier never
         // matches; the DELETE contract stays 404 for clock-skewed retries.
-        let store = InMemoryTrustStore(grants: [expired])
-        let gate = await PermissionGate.load(store: store)
-        #expect(await gate.activeGrants().isEmpty == true)
-        #expect(await gate.revokeGrant(id: expired.id) == false)
+        let store = InMemoryAccessRuleStore(rules: [expired])
+        let gate = await PermissionGate.load(ruleStore: store)
+        #expect(await gate.activeRules().isEmpty == true)
+        #expect(await gate.revokeRule(id: expired.id) == false)
         do {
-            _ = try await deleteGrantStatus(id: expired.id, gate: gate)
-            Issue.record("Expected notFound for already-expired grant")
+            _ = try await deleteRuleStatus(id: expired.id, gate: gate)
+            Issue.record("Expected notFound for already-expired rule")
         } catch let abort as Abort {
             #expect(abort.status == .notFound)
         } catch {
@@ -1554,38 +1569,41 @@ struct TrustGrantsRouteTests {
     }
 
     @Test
-    func `Widen grant route widens target and unknown returns 404`() async throws {
+    func `Widen rule route widens scope and unknown returns 404`() async throws {
         let gate = PermissionGate()
         let descriptor = ActionDescriptor(toolName: "email.send", target: "specific@example.com")
         await gate.grantTrust(for: descriptor, duration: .oneHour)
 
-        guard let id = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor })?.id else {
-            Issue.record("Expected grant")
+        guard let id = await rule(for: descriptor, gate: gate)?.id else {
+            Issue.record("Expected rule")
             return
         }
 
-        #expect(try await widenGrantStatus(id: id, gate: gate).code == 204)
+        #expect(try await widenRuleStatus(id: id, gate: gate).code == 204)
 
-        let active = await gate.activeGrants()
+        let active = await gate.activeRules()
         #expect(active.count == 1)
-        #expect(active[0].actionDescriptor.target.isEmpty == true)
+        #expect(active[0].scope == .toolWide)
+        let response = await rulesResponse(for: gate)
+        #expect(response.rules.first?.scope == AccessScopeDTO(kind: .tool))
+        #expect(response.rules.first?.displayScope == "every target")
 
         let unknown = UUID()
         do {
-            _ = try await widenGrantStatus(id: unknown, gate: gate)
-            Issue.record("Expected notFound for unknown grant")
+            _ = try await widenRuleStatus(id: unknown, gate: gate)
+            Issue.record("Expected notFound for unknown rule")
         } catch let abort as Abort {
             #expect(abort.status == .notFound)
         }
     }
 
     @Test
-    func `Widen live messages.send grant returns honest conflict, not unknown`() async {
+    func `Widen live messages.send rule returns honest conflict, not unknown`() async {
         let gate = PermissionGate()
         let descriptor = ActionDescriptor(toolName: "messages.send", target: "+15551234567")
         await gate.grantTrust(for: descriptor, duration: .forever)
 
-        guard let id = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor })?.id else {
+        guard let id = await rule(for: descriptor, gate: gate)?.id else {
             Issue.record("Expected the canonical send grant")
             return
         }
@@ -1594,35 +1612,38 @@ struct TrustGrantsRouteTests {
         // refusal (409) instead of reporting the listed id as unknown (404),
         // and the grant must survive unchanged so it stays revocable.
         do {
-            _ = try await widenGrantStatus(id: id, gate: gate)
-            Issue.record("Expected conflict for a live messages.send grant")
+            _ = try await widenRuleStatus(id: id, gate: gate)
+            Issue.record("Expected conflict for a live messages.send rule")
         } catch let abort as Abort {
             #expect(abort.status == .conflict)
             #expect(abort.reason == "messages.send grants are per-recipient and cannot be widened")
         } catch {
             Issue.record("Unexpected error: \(error)")
         }
-        #expect(await gate.activeGrants().map(\.actionDescriptor) == [descriptor])
+        let survivor = await rule(for: descriptor, gate: gate)
+        #expect(survivor?.toolName == "messages.send")
+        #expect(survivor?.scope == .exactTarget("+15551234567"))
     }
 
     @Test
-    func `Widen expired messages.send grant stays notFound`() async {
+    func `Widen expired messages.send grant stays notFound`() async throws {
         let now = Date()
-        let expired = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "messages.send", target: "+15551234567"),
+        let expired = try #require(AccessRule(
+            toolName: "messages.send",
+            scope: .exactTarget("+15551234567"),
+            action: .allow,
             grantedAt: now.addingTimeInterval(-7200),
-            expiresAt: now.addingTimeInterval(-60),
-            duration: .fiveMinutes
-        )
+            duration: .fiveMinutes,
+            expiresAt: now.addingTimeInterval(-60)
+        ))
         // Bootstrap prunes the lapsed row, so a send grant that no longer
         // exists reads as notFound rather than as the live-grant refusal; the
         // gate's guard order is what keeps those outcomes distinct.
-        let store = InMemoryTrustStore(grants: [expired])
-        let gate = await PermissionGate.load(store: store)
+        let store = InMemoryAccessRuleStore(rules: [expired])
+        let gate = await PermissionGate.load(ruleStore: store)
         do {
-            _ = try await widenGrantStatus(id: expired.id, gate: gate)
-            Issue.record("Expected notFound for an expired messages.send grant")
+            _ = try await widenRuleStatus(id: expired.id, gate: gate)
+            Issue.record("Expected notFound for an expired messages.send rule")
         } catch let abort as Abort {
             #expect(abort.status == .notFound)
         } catch {
@@ -1631,7 +1652,7 @@ struct TrustGrantsRouteTests {
     }
 
     @Test
-    func `ApprovalQueue decide with widen creates widened grant and reflects in grants list`() async {
+    func `ApprovalQueue decide with scope creates widened rule and reflects in rules list`() async {
         let gate = PermissionGate()
         let store = ApprovalQueue(permissionGate: gate)
         let request = await store.enqueue(
@@ -1640,14 +1661,47 @@ struct TrustGrantsRouteTests {
             input: ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://api.example.com/items"}"#)
         )
 
-        let decided = await store.decide(id: request.id, approved: true, duration: .oneHour, widen: true)
+        let decided = await store.decide(id: request.id, approved: true, duration: .oneHour, scope: .toolWide)
         #expect(decided == true)
 
-        let response = await grantsResponse(for: gate)
+        let response = await rulesResponse(for: gate)
         #expect(response.count == 1)
-        #expect(response.grants.first?.toolName == "api.request")
-        #expect(response.grants.first?.target.isEmpty == true)
+        #expect(response.rules.first?.toolName == "api.request")
+        #expect(response.rules.first?.scope == AccessScopeDTO(kind: .tool))
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "api.request", target: "https://other.com/items")) == true)
+    }
+
+    @Test
+    func `A durable deny lists beside allows with a nil expiry`() async {
+        let gate = PermissionGate()
+        let allowDescriptor = ActionDescriptor(toolName: "email.send", target: "friend@example.com")
+        await gate.grantTrust(for: allowDescriptor, duration: .forever)
+        await gate.denyRule(
+            .exactTarget("blocked@example.com"),
+            toolName: "email.send",
+            reason: "owner refused this recipient"
+        )
+
+        // The rules surface lists both actions so the owner sees the whole
+        // posture, and a deny carries no expiry because a refusal is standing.
+        let response = await rulesResponse(for: gate)
+        #expect(response.count == 2)
+        guard let deny = response.rules.first(where: { $0.action == .deny }) else {
+            Issue.record("Expected the deny rule in list")
+            return
+        }
+        #expect(deny.scope == AccessScopeDTO(kind: .exactTarget, target: "blocked@example.com"))
+        #expect(deny.expiresAt == nil)
+        #expect(deny.duration == nil)
+        #expect(deny.displayScope == "target 'blocked@example.com'")
+        #expect(response.rules.contains { $0.action == .allow } == true)
+
+        // Deny outranks the allow beside it, so the refused recipient stays
+        // refused and names the rule that refused it.
+        let blocked = ToolInput(toolName: "email.send", argumentsJSON: #"{"to":"blocked@example.com"}"#)
+        #expect(await gate.checkPermission(toolCall: blocked, tool: ServerSendProbeTool()) == .denied(
+            "Denied by rule: email.send is refused for target 'blocked@example.com' (owner refused this recipient)."
+        ))
     }
 
     @Test
@@ -1655,9 +1709,9 @@ struct TrustGrantsRouteTests {
         let gate = PermissionGate()
         let descriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
         await gate.grantTrust(for: descriptor, duration: .oneHour)
-        await gate.recordUse(for: descriptor)
-        await gate.recordUse(for: descriptor)
-        guard let before = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor }) else {
+        await gate.recordUse(scope: .exactTarget("alice@example.com"), toolName: "email.send")
+        await gate.recordUse(scope: .exactTarget("alice@example.com"), toolName: "email.send")
+        guard let before = await rule(for: descriptor, gate: gate) else {
             Issue.record("Expected active grant before re-arm")
             return
         }
@@ -1667,14 +1721,14 @@ struct TrustGrantsRouteTests {
         // A successful PATCH maps to an empty 204 with no second row; expiry
         // is recomputed from confirmation time while identity and liveness
         // counters survive the tier change.
-        #expect(try await rearmGrantStatus(id: before.id, duration: .oneDay, gate: gate).code == 204)
-        let active = await gate.activeGrants()
+        #expect(try await rearmRuleStatus(id: before.id, duration: .oneDay, gate: gate).code == 204)
+        let active = await gate.activeRules()
         #expect(active.count == 1)
         guard let rearmed = active.first(where: { $0.id == before.id }) else {
-            Issue.record("Expected the same grant row after re-arm")
+            Issue.record("Expected the same rule row after re-arm")
             return
         }
-        #expect(rearmed.actionDescriptor == descriptor)
+        #expect(rearmed.scope == .exactTarget("alice@example.com"))
         #expect(rearmed.grantedAt == beforeGrantedAt)
         #expect(rearmed.useCount == 2)
         #expect(rearmed.lastUsedAt == beforeLastUsed)
@@ -1683,23 +1737,24 @@ struct TrustGrantsRouteTests {
     }
 
     @Test
-    func `Rearm expired grant stays notFound`() async {
+    func `Rearm expired rule stays notFound`() async throws {
         let now = Date()
-        let expired = TrustGrant(
-            id: UUID(),
-            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "lapsed@example.com"),
+        let expired = try #require(AccessRule(
+            toolName: "email.send",
+            scope: .exactTarget("lapsed@example.com"),
+            action: .allow,
             grantedAt: now.addingTimeInterval(-7200),
-            expiresAt: now.addingTimeInterval(-60),
-            duration: .fiveMinutes
-        )
+            duration: .fiveMinutes,
+            expiresAt: now.addingTimeInterval(-60)
+        ))
         // Bootstrap prunes the lapsed row, so the stranded identifier never
         // matches; the PATCH contract stays 404 for clock-skewed retries.
-        let store = InMemoryTrustStore(grants: [expired])
-        let gate = await PermissionGate.load(store: store)
-        #expect(await gate.activeGrants().isEmpty == true)
+        let store = InMemoryAccessRuleStore(rules: [expired])
+        let gate = await PermissionGate.load(ruleStore: store)
+        #expect(await gate.activeRules().isEmpty == true)
         do {
-            _ = try await rearmGrantStatus(id: expired.id, duration: .oneHour, gate: gate)
-            Issue.record("Expected notFound for an expired grant")
+            _ = try await rearmRuleStatus(id: expired.id, duration: .oneHour, gate: gate)
+            Issue.record("Expected notFound for an expired rule")
         } catch let abort as Abort {
             #expect(abort.status == .notFound)
         } catch {
@@ -1712,16 +1767,16 @@ struct TrustGrantsRouteTests {
         let gate = PermissionGate()
         let descriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
         await gate.grantTrust(for: descriptor, duration: .oneHour)
-        guard let id = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor })?.id else {
-            Issue.record("Expected active grant before re-arm")
+        guard let id = await rule(for: descriptor, gate: gate)?.id else {
+            Issue.record("Expected active rule before re-arm")
             return
         }
 
-        // The grant is live and listed, so "Unknown grant" would be factually
+        // The rule is live and listed, so "Unknown rule" would be factually
         // wrong; the tier refusal itself is the honest answer and leaves the
         // stored row unchanged.
         do {
-            _ = try await rearmGrantStatus(id: id, duration: .thisTime, gate: gate)
+            _ = try await rearmRuleStatus(id: id, duration: .thisTime, gate: gate)
             Issue.record("Expected badRequest for a one-shot re-arm")
         } catch let abort as Abort {
             #expect(abort.status == .badRequest)
@@ -1729,8 +1784,22 @@ struct TrustGrantsRouteTests {
         } catch {
             Issue.record("Unexpected error: \(error)")
         }
-        #expect(await gate.activeGrants().count == 1)
-        #expect(await gate.activeGrants().first?.duration == .oneHour)
+        #expect(await gate.activeRules().count == 1)
+        #expect(await gate.activeRules().first?.duration == .oneHour)
+    }
+}
+
+/// Probe tool standing in for a gated send on the rules decision path.
+private struct ServerSendProbeTool: Tool, Sendable {
+    let name = "email.send"
+    let description = "Probe for email.send."
+    let permissionLevel = PermissionLevel.requiresApproval
+    var inputSchema: JSONSchema {
+        .emptyObject
+    }
+
+    func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+        .success("probe-ok", callID: input.callID)
     }
 }
 

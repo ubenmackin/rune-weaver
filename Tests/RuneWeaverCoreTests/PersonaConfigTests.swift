@@ -207,8 +207,8 @@ struct PersonaConfigTests {
         let json = String(data: data, encoding: .utf8) ?? ""
         #expect(json.contains("\"tone\":\"playful\""))
         #expect(json.contains("\"avatar\":\"emerald\""))
-        #expect(json.contains("\"assistant_name\""))
-        #expect(json.contains("\"user_name\""))
+        #expect(json.contains("\"assistantName\""))
+        #expect(json.contains("\"userName\""))
         let decoded = try JSONDecoder().decode(PersonaConfig.self, from: data)
         #expect(decoded == persona)
     }

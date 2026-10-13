@@ -312,7 +312,7 @@ describe("SchedulerManager", () => {
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
         if (input === "/settings" && !init?.method) {
-          return jsonResponse({ scheduler: { max_tool_iterations: 40 } });
+          return jsonResponse({ schedulerMaxToolIterations: 40 });
         }
         if (input.startsWith("/runs") && !init?.method) {
           return jsonResponse({ runs: [], count: 0 });
@@ -339,7 +339,7 @@ describe("SchedulerManager", () => {
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
         if (input === "/settings" && !init?.method) {
-          return jsonResponse({ scheduler: { max_tool_iterations: 33 } });
+          return jsonResponse({ schedulerMaxToolIterations: 33 });
         }
         if (input.startsWith("/runs") && !init?.method) {
           return jsonResponse({ runs: [], count: 0 });

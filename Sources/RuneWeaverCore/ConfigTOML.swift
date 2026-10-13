@@ -388,6 +388,19 @@ extension TOMLNode {
         return text
     }
 
+    /// Strict optional array-of-tables: nil when absent, throws when present
+    /// under any other shape so a malformed spelling never silently defaults
+    /// the list. Only `[[key]]` entries parse into the array dictionary, so an
+    /// inline value or a singular `[key]` table both reject here with the
+    /// same reject-on-malformed semantics as ``strictString(_:field:)``.
+    func strictArrayOfTables(_ key: String, field: String) throws -> [TOMLNode]? {
+        guard arrays[key] != nil else {
+            guard has(key) || tables[key] != nil else { return nil }
+            throw ConfigError.validationError(field: field, message: "must be an array of tables ([[\(key)]] entries)")
+        }
+        return arrays[key]
+    }
+
     /// Strict optional boolean: nil when absent, throws when present but
     /// not a boolean so values like `enabled="yes"` never silently become true.
     func strictBool(_ key: String, field: String) throws -> Bool? {
@@ -699,6 +712,47 @@ extension RuneWeaverConfig {
             // forced posture to model choice; acceptance is single-sourced in
             // `validateFilesWriteMode` so file-load and settings cannot drift.
             config.files.writeMode = try RuneWeaverConfig.validateFilesWriteMode(rawMode)
+        }
+        if let ruleTables = try files.strictArrayOfTables("write_paths", field: "files.write_paths") {
+            // An absent list keeps the documented defaults; a present list
+            // replaces them wholesale, including an explicit empty one.
+            config.files.writePathRules = try decodeWritePathRules(ruleTables)
+        }
+    }
+
+    /// Decodes the `[[files.write_paths]]` entries into write-path rules.
+    ///
+    /// Every entry needs a non-blank `path` and a closed-set `posture`, and the
+    /// list plus each path stay bounded so a hand-edited file cannot fan
+    /// classification work or carry an unbounded pattern. A malformed entry
+    /// throws naming `files.write_paths` so the load fails on the entry itself
+    /// rather than silently defaulting the whole list.
+    private static func decodeWritePathRules(_ nodes: [TOMLNode]) throws -> [FilesWritePathRule] {
+        guard nodes.count <= FilesWritePathRule.maxRuleCount else {
+            throw ConfigError.validationError(
+                field: "files.write_paths",
+                message: "must contain at most \(FilesWritePathRule.maxRuleCount) entries (got \(nodes.count))"
+            )
+        }
+        return try nodes.map { node in
+            guard let rawPath = try node.strictString("path", field: "files.write_paths.path") else {
+                throw ConfigError.validationError(field: "files.write_paths.path", message: "is required")
+            }
+            let trimmedPath = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedPath.isEmpty {
+                throw ConfigError.validationError(field: "files.write_paths.path", message: "must not be empty")
+            }
+            if trimmedPath.count > FilesWritePathRule.maxPathLength {
+                throw ConfigError.validationError(
+                    field: "files.write_paths.path",
+                    message: "must be at most \(FilesWritePathRule.maxPathLength) characters (got \(trimmedPath.count))"
+                )
+            }
+            guard let rawPosture = try node.strictString("posture", field: "files.write_paths.posture") else {
+                throw ConfigError.validationError(field: "files.write_paths.posture", message: "is required")
+            }
+            let posture = try RuneWeaverConfig.validateFilesWritePathPosture(rawPosture, field: "files.write_paths.posture")
+            return FilesWritePathRule(path: trimmedPath, posture: posture)
         }
     }
 

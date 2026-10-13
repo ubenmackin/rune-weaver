@@ -2,717 +2,22 @@
 
 import Foundation
 
-/// How long a graduated-trust grant lasts.
-public enum TrustDuration: String, Sendable, Codable, Equatable, CaseIterable {
-    /// Approve once. No grant is stored.
-    case thisTime
-    /// Trust the action for the remainder of the current turn/task.
-    case forTask
-    /// Trust the action for the remainder of the current conversation session.
-    case forSession
-    /// Trust the action for the next 5 minutes.
-    case fiveMinutes
-    /// Trust the action for the next hour.
-    case oneHour
-    /// Trust the action for the next day.
-    case oneDay
-    /// Trust the action indefinitely.
-    case forever
-
-    /// Human-readable label shown in approval prompts.
-    public var displayName: String {
-        switch self {
-        case .thisTime: "Only this time"
-        case .forTask: "For rest of this task"
-        case .forSession: "For rest of this session"
-        case .fiveMinutes: "Next 5 minutes"
-        case .oneHour: "Next hour"
-        case .oneDay: "Next day"
-        case .forever: "Forever"
-        }
-    }
-
-    /// Grant lifetime in seconds, or nil when the grant never expires.
-    public var timeInterval: TimeInterval? {
-        switch self {
-        case .thisTime: 0
-        case .forTask, .forSession: nil
-        case .fiveMinutes: 5 * 60
-        case .oneHour: 60 * 60
-        case .oneDay: 24 * 60 * 60
-        case .forever: nil
-        }
-    }
-}
-
-/// Identifies a trustable action: a tool plus an optional target.
-public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
-    /// Name of the tool (e.g. `"email.send"`).
-    public let toolName: String
-    /// Action target (e.g. `"dr.smith@clinic.com"`). Empty matches all.
-    public let target: String
-
-    /// Creates an action descriptor.
-    public init(toolName: String, target: String = "") {
-        self.toolName = toolName
-        self.target = target
-    }
-
-    /// Maximum argument bytes parsed for approval targets.
-    ///
-    /// Bounds the JSON parse so an oversized arguments blob fails closed to
-    /// an empty target instead of inflating the grant store; mirrors the
-    /// hardened object-shape checks on the bus path.
-    static let maxArgumentsJSONBytes = 64 * 1024
-
-    /// Parses tool arguments as a hardened JSON object.
-    ///
-    /// Pins `options: []` and requires the top-level object shape so
-    /// fragments (arrays, strings, numbers) reject, matching the bus execute
-    /// and narration gates. Oversized payloads fail closed before parsing.
-    /// - Parameter argumentsJSON: Raw tool arguments.
-    /// - Returns: Argument object, or nil when oversized, non-UTF8, or not an object.
-    static func parsedArgumentsObject(from argumentsJSON: String) -> [String: Any]? {
-        guard argumentsJSON.utf8.count <= maxArgumentsJSONBytes else { return nil }
-        guard let data = argumentsJSON.data(using: .utf8) else { return nil }
-        guard let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
-            return nil
-        }
-        return object
-    }
-
-    /// Derives a descriptor from a tool call.
-    /// - Parameters:
-    ///   - toolCall: Raw invocation arguments.
-    ///   - tool: Tool receiving the call.
-    /// - Returns: The action descriptor the gate stores and checks.
-    public static func descriptor(for toolCall: ToolInput, tool: any Tool) -> ActionDescriptor {
-        descriptor(for: toolCall, toolName: tool.name)
-    }
-
-    /// Derives a descriptor from a raw tool call and a tool name alone.
-    ///
-    /// An approval decision retains only the parked request's tool name, so the
-    /// decide path cannot reach a live `Tool` instance. Branching on the tool
-    /// name here keeps the grant stored on approval identical to the
-    /// descriptor allow-checks and usage accounting derive later; generic
-    /// extraction would store a different target for `browser.act` (action,
-    /// ref, and page URL) and `api.request` (method, URL, and body preview), so
-    /// a durable narrow grant would never cover the identical next call and the
-    /// engine would re-prompt despite the user having trusted that exact action.
-    /// - Parameters:
-    ///   - toolCall: Raw invocation arguments.
-    ///   - toolName: Tool name selecting the specialized target shape.
-    /// - Returns: The action descriptor the gate stores and checks.
-    public static func descriptor(for toolCall: ToolInput, toolName: String) -> ActionDescriptor {
-        if toolName == "browser.act",
-           let combined = browserActTarget(from: toolCall)
-        {
-            return ActionDescriptor(toolName: toolName, target: combined)
-        }
-        if toolName == "api.request",
-           let combined = apiRequestTarget(from: toolCall)
-        {
-            return ActionDescriptor(toolName: toolName, target: combined)
-        }
-        if toolName == "messages.send" {
-            // `messages.send` never falls through to the generic target path.
-            // Generic extraction accepts arrays and comma-split strings and
-            // skips a non-string `recipient` for a handle-shaped `to`, so a
-            // malformed call could derive a canonical handle and mint a durable
-            // per-handle grant for a send that can never execute. The strict
-            // derivation yields nil for those shapes, and the empty target it
-            // maps to is a descriptor `isGrantable` already refuses for sends.
-            return ActionDescriptor(toolName: toolName, target: messagesRecipientHandle(from: toolCall) ?? "")
-        }
-        return ActionDescriptor(toolName: toolName, target: ActionDescriptor.target(from: toolCall))
-    }
-
-    /// Canonical handle for a `messages.send` recipient, or nil when the call
-    /// carries no usable canonical handle.
-    ///
-    /// A durable send grant must key on the exact handle the owner authorized,
-    /// so the target derives through the shared classification owner instead of
-    /// the generic lowercased-text extraction that would store a display name.
-    /// Handle spellings canonicalize (`+1 (555) 123-4567` and `+15551234567`
-    /// agree on one target), while names and malformed recipients return nil so
-    /// callers can refuse them before any approval or grant is derived.
-    ///
-    /// The scan is strict about a present key: once `recipient` exists it
-    /// decides the target, so a non-string value (`["+15551234567"]`, `123`,
-    /// `true`, `{}`) or a blank/name-shaped string is malformed and returns nil
-    /// rather than falling through to the `to` alias. Only a missing (or null)
-    /// `recipient` lets `to` supply the handle, matching the tool decoder that
-    /// reads a null recipient as absent. Falling through on a present
-    /// non-string is exactly how an array or numeric recipient paired with a
-    /// handle-shaped `to` could mint a durable grant for a send that can never
-    /// execute.
-    /// - Parameter toolCall: Raw `messages.send` invocation.
-    /// - Returns: Canonical handle, or nil when absent or not a handle.
-    static func messagesRecipientHandle(from toolCall: ToolInput) -> String? {
-        guard let object = parsedArgumentsObject(from: toolCall.argumentsJSON) else { return nil }
-        for key in ["recipient", "to"] {
-            guard let raw = object[key], !(raw is NSNull) else { continue }
-            guard let text = raw as? String else { return nil }
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            return MessageRecipientClassification.canonicalHandle(trimmed)
-        }
-        return nil
-    }
-
-    /// Extracts a target string from raw tool arguments.
-    public static func target(from toolCall: ToolInput) -> String {
-        guard let object = parsedArgumentsObject(from: toolCall.argumentsJSON)
-        else { return "" }
-        for key in ["to", "recipient", "email"] {
-            if let joined = normalizedEmailTarget(object[key]) {
-                return joined
-            }
-        }
-        // Browser refs combine with the page URL so element-scoped grants
-        // never collapse across pages; the dedicated act path below adds
-        // the action verb for the same reason.
-        if let ref = stringifiedBrowserRef(in: object) {
-            if let url = trimmedString(object["url"]), !url.isEmpty {
-                return "\(ref) @ \(url)"
-            }
-            return ref
-        }
-        for key in ["target", "path", "url", "address", "destination"] {
-            if let value = object[key] as? String {
-                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    return trimmed
-                }
-            }
-        }
-        return ""
-    }
-
-    /// Builds the approval target for a browser action call.
-    private static func browserActTarget(from toolCall: ToolInput) -> String? {
-        guard let object = parsedArgumentsObject(from: toolCall.argumentsJSON)
-        else { return nil }
-        let action = trimmedString(object["action"])
-            ?? trimmedString(object["type"])
-            ?? trimmedString(object["kind"])
-        let ref = stringifiedBrowserRef(in: object)
-        let url = trimmedString(object["url"])
-            ?? trimmedString(object["page"])
-            ?? trimmedString(object["pageUrl"])
-            ?? trimmedString(object["page_url"])
-        var headParts: [String] = []
-        if let action, !action.isEmpty {
-            headParts.append(action)
-        }
-        if let ref, !ref.isEmpty {
-            headParts.append(ref)
-        }
-        let head = headParts.joined(separator: " ")
-        if !head.isEmpty, let url, !url.isEmpty {
-            return "\(head) @ \(url)"
-        }
-        if !head.isEmpty {
-            return head
-        }
-        if let url, !url.isEmpty {
-            return url
-        }
-        return nil
-    }
-
-    /// Builds the approval target for a constrained API request call.
-    ///
-    /// The target carries the header summary alongside method, URL, and body
-    /// preview so the approver can verify the secret slot: a surrogate
-    /// reference (`rwsecret:<KEY>`) stays visible while a pasted live value
-    /// redacts to the shared placeholder and never reaches the grant store.
-    /// Calls without headers keep the historical `METHOD URL [body:preview]`
-    /// shape so existing narrow grants keep covering.
-    private static func apiRequestTarget(from toolCall: ToolInput) -> String? {
-        guard let object = parsedArgumentsObject(from: toolCall.argumentsJSON)
-        else { return nil }
-        let rawMethod = trimmedString(object["method"])
-            ?? trimmedString(object["verb"])
-        let method = (rawMethod ?? "GET").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        let effectiveMethod = method.isEmpty ? "GET" : method
-        let url = trimmedString(object["url"])
-            ?? trimmedString(object["uri"])
-            ?? trimmedString(object["link"])
-        let body = trimmedString(object["body"])
-            ?? trimmedString(object["payload"])
-            ?? trimmedString(object["data"])
-        guard let url, !url.isEmpty else { return nil }
-        var target = "\(effectiveMethod) \(url)"
-        if let headers = apiRequestHeaders(from: object), !headers.isEmpty {
-            target += " headers:\(apiRedactedHeaderSummary(headers))"
-        }
-        guard let body, !body.isEmpty else {
-            return target
-        }
-        let preview = apiBodyPreview(body)
-        return "\(target) body:\(preview)"
-    }
-
-    /// Extracts model-authored headers from API request arguments.
-    ///
-    /// Accepts the `headers`/`header` aliases the tool decoder honors so the
-    /// approval target sees what the transport will validate. Entries with
-    /// blank names or non-string values drop; blank values drop so an empty
-    /// header object reads as absent and keeps the historical target shape.
-    private static func apiRequestHeaders(from object: [String: Any]) -> [String: String]? {
-        let raw: Any? = object["headers"] ?? object["header"]
-        guard let raw else { return nil }
-        var checked: [String: String] = [:]
-        if let stringMap = raw as? [String: String] {
-            for (name, value) in stringMap {
-                let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmedName.isEmpty else { continue }
-                let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmedValue.isEmpty else { continue }
-                checked[trimmedName] = trimmedValue
-            }
-        } else if let anyMap = raw as? [String: Any] {
-            for (name, value) in anyMap {
-                let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmedName.isEmpty else { continue }
-                guard let text = value as? String else { continue }
-                let trimmedValue = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmedValue.isEmpty else { continue }
-                checked[trimmedName] = trimmedValue
-            }
-        } else {
-            return nil
-        }
-        return checked.isEmpty ? nil : checked
-    }
-
-    /// Summarizes headers for the approval target with secrets redacted.
-    ///
-    /// Delegates to the shared core header rule so approval targets and the
-    /// tools-layer preview policy agree on surrogate visibility: an
-    /// `Authorization` value carrying a `rwsecret:<KEY>` reference stays
-    /// visible so dry-run previews and approval targets agree, while any other
-    /// `Authorization` value redacts to the shared placeholder and never
-    /// persists a live secret in the grant store. Other headers pass through
-    /// the shared sweep (no resolved values exist at approval time to sweep).
-    private static func apiRedactedHeaderSummary(_ headers: [String: String]) -> String {
-        var redacted: [String: String] = [:]
-        redacted.reserveCapacity(headers.count)
-        for (name, value) in headers {
-            let isAuth = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "authorization"
-            redacted[name] = SecretsManager.redactedHeaderValue(value, isAuthorization: isAuth, resolvedSecrets: [])
-        }
-        return redacted.sorted(by: { $0.key.lowercased() < $1.key.lowercased() })
-            .map { "\($0.key):\($0.value)" }
-            .joined(separator: ", ")
-    }
-
-    /// Collapses a request body to the short preview used in API targets.
-    private static func apiBodyPreview(_ body: String) -> String {
-        let single = body.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard single.count > 200 else { return single }
-        return String(single.prefix(200))
-    }
-
-    /// Trims an optional string value, collapsing blank to nil.
-    private static func trimmedString(_ value: Any?) -> String? {
-        guard let text = value as? String else { return nil }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    /// Normalizes a browser element ref from its string or integer aliases.
-    private static func stringifiedBrowserRef(in object: [String: Any]) -> String? {
-        for key in ["ref", "target", "selector", "element", "elementRef"] {
-            if let text = trimmedString(object[key]) {
-                return text
-            }
-            // Booleans bridge to NSNumber, so skip them before the numeric
-            // pass: `true` must never park as `"e1"`.
-            if object[key] is Bool {
-                continue
-            }
-            // JSON numbers arrive as NSNumber: accept integral positives
-            // only so `12` maps to `"e12"` while `12.5` or `0` falls
-            // through to fail-closed validation downstream.
-            if let boxed = object[key] as? NSNumber,
-               boxed.doubleValue == Double(boxed.intValue),
-               boxed.intValue >= 1
-            {
-                return "e\(boxed.intValue)"
-            }
-        }
-        return nil
-    }
-
-    /// Normalizes an email recipient value to a lowercased target.
-    private static func normalizedEmailTarget(_ value: Any?) -> String? {
-        if let text = value as? String {
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            // Split comma-separated strings so `"a@x.com, B@x.com"` matches
-            // the array-joined form instead of a spacing variant.
-            let parts = trimmed.split(separator: ",").map {
-                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            }.filter { !$0.isEmpty }
-            guard !parts.isEmpty else { return nil }
-            return parts.joined(separator: ",")
-        }
-        if let list = value as? [String] {
-            let parts = list.map {
-                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            }.filter { !$0.isEmpty }
-            guard !parts.isEmpty else { return nil }
-            return parts.joined(separator: ",")
-        }
-        if let list = value as? [Any] {
-            let parts = list.compactMap { $0 as? String }.map {
-                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            }.filter { !$0.isEmpty }
-            guard !parts.isEmpty else { return nil }
-            return parts.joined(separator: ",")
-        }
-        return nil
-    }
-}
-
-/// A persisted graduated-trust grant for an ``ActionDescriptor``.
-public struct TrustGrant: Sendable, Codable, Equatable {
-    /// Stable grant identifier.
-    public let id: UUID
-    /// The trusted action (tool + target).
-    public let actionDescriptor: ActionDescriptor
-    /// When the grant was created.
-    public let grantedAt: Date
-    /// When the grant expires, or nil when it never expires.
-    public let expiresAt: Date?
-    /// The duration tier this grant was created with.
-    public let duration: TrustDuration
-    /// How many covered calls have run against this grant.
-    public var useCount: Int
-    /// When the grant last covered a call, or nil when never used.
-    public var lastUsedAt: Date?
-
-    /// Coding keys for durable grant rows.
-    private enum CodingKeys: String, CodingKey {
-        /// Stable grant identifier.
-        case id
-        /// The trusted action.
-        case actionDescriptor
-        /// When the grant was created.
-        case grantedAt
-        /// When the grant expires.
-        case expiresAt
-        /// The duration tier.
-        case duration
-        /// Covered-call counter.
-        case useCount
-        /// Last covered-call time.
-        case lastUsedAt
-    }
-
-    /// Creates a trust grant.
-    public init(
-        id: UUID = UUID(),
-        actionDescriptor: ActionDescriptor,
-        grantedAt: Date = Date(),
-        expiresAt: Date?,
-        duration: TrustDuration,
-        useCount: Int = 0,
-        lastUsedAt: Date? = nil
-    ) {
-        self.id = id
-        self.actionDescriptor = actionDescriptor
-        self.grantedAt = grantedAt
-        self.expiresAt = expiresAt
-        self.duration = duration
-        // Counters never go negative in memory; clamp direct construction
-        // so a corrupt caller cannot seed a negative baseline.
-        self.useCount = max(0, useCount)
-        self.lastUsedAt = lastUsedAt
-    }
-
-    /// Decodes a grant, tolerating rows written before usage counters existed.
-    /// - Parameter decoder: Source decoder.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try container.decode(UUID.self, forKey: .id)
-        self.actionDescriptor = try container.decode(ActionDescriptor.self, forKey: .actionDescriptor)
-        self.grantedAt = try container.decode(Date.self, forKey: .grantedAt)
-        self.expiresAt = try container.decodeIfPresent(Date.self, forKey: .expiresAt)
-        self.duration = try container.decode(TrustDuration.self, forKey: .duration)
-        // Older persisted rows predate usage tracking, so a missing counter
-        // means the grant was never observed in use rather than a corrupt row.
-        // Clamp negatives so legacy or hand-edited JSON cannot seed a
-        // negative in-memory baseline.
-        let decodedCount = try container.decodeIfPresent(Int.self, forKey: .useCount) ?? 0
-        self.useCount = max(0, decodedCount)
-        self.lastUsedAt = try container.decodeIfPresent(Date.self, forKey: .lastUsedAt)
-    }
-
-    /// Encodes a grant including its usage counters.
-    /// - Parameter encoder: Destination encoder.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(id, forKey: .id)
-        try container.encode(actionDescriptor, forKey: .actionDescriptor)
-        try container.encode(grantedAt, forKey: .grantedAt)
-        try container.encodeIfPresent(expiresAt, forKey: .expiresAt)
-        try container.encode(duration, forKey: .duration)
-        try container.encode(useCount, forKey: .useCount)
-        try container.encodeIfPresent(lastUsedAt, forKey: .lastUsedAt)
-    }
-
-    /// Whether the grant is expired at the given date.
-    /// - Parameter date: Reference date. Defaults to now.
-    /// - Returns: True when `expiresAt` is past `date`.
-    public func isExpired(at date: Date = Date()) -> Bool {
-        guard let expiresAt else { return false }
-        return expiresAt <= date
-    }
-
-    /// Whether the grant is currently valid.
-    /// - Parameter date: Reference date. Defaults to now.
-    /// - Returns: True when not expired.
-    public func isValid(at date: Date = Date()) -> Bool {
-        !isExpired(at: date)
-    }
-}
-
-/// Outcome of promoting a persisted grant to its tool-wide scope.
-///
-/// Widening can fail for two reasons callers must keep distinct: the
-/// identifier may name no live grant, or the grant may be live but belong to a
-/// tool with no tool-wide scope. Collapsing both into "not widened" makes a
-/// visible, live grant read as unknown.
-public enum GrantWidenOutcome: Sendable, Equatable {
-    /// The grant was found and now covers every target for its tool. An
-    /// already tool-wide grant reports success without changing.
-    case widened
-    /// No live grant carries the identifier: unknown, expired, or pruned.
-    case notFound
-    /// A live grant exists but its tool has no tool-wide scope, so promoting
-    /// it would invent trust the owner never approved. Carries the
-    /// caller-facing explanation.
-    case notWidenable(reason: String)
-
-    /// Caller-facing reason a live `messages.send` grant cannot be widened.
-    /// Send trust is keyed to the canonical recipient the owner approved, so
-    /// there is no tool-wide scope to promote it to.
-    public static let messagesSendRefusal = "messages.send grants are per-recipient and cannot be widened"
-}
-
-/// Outcome of changing a persisted grant's duration tier in place.
-///
-/// Re-arming can fail for two reasons callers must keep distinct: the
-/// identifier may name no live grant, or the requested tier may not be a
-/// durable tier. Collapsing both into a single failure makes an expired grant
-/// read as a bad tier, or a one-shot request read as unknown.
-public enum GrantRearmOutcome: Sendable, Equatable {
-    /// The grant was found and now carries the new duration with expiry
-    /// recomputed from now. Identity and usage counters are unchanged.
-    case rearmed
-    /// No live grant carries the identifier: unknown, expired, or pruned.
-    case notFound
-    /// The requested tier cannot back a durable grant. Only the four durable
-    /// tiers may re-arm; a one-shot approval has no lifetime to recompute.
-    /// Carries the caller-facing explanation.
-    case invalidDuration(reason: String)
-
-    /// Caller-facing reason a `thisTime` approval cannot re-arm a grant.
-    /// One-shot approvals store no row, so there is no lifetime to extend;
-    /// re-arming accepts only the durable tiers.
-    public static let thisTimeRefusal =
-        "thisTime is one-shot and cannot re-arm a grant; choose fiveMinutes, oneHour, oneDay, or forever"
-}
-
-/// Estimated risk level of an action requesting approval.
-public enum ImpactSeverity: String, Sendable, Codable, Equatable, CaseIterable {
-    /// Read-only inspection, search, or status query with no side effects.
-    case safe
-    /// Local state changes, non-destructive file writes, or network requests.
-    case moderate
-    /// Destructive actions, bulk deletions, privilege escalation, or sensitive data access.
-    case dangerous
-}
-
-/// Safety and impact assessment for a tool invocation.
-public struct ImpactAssessment: Sendable, Codable, Equatable {
-    /// Evaluated risk severity.
-    public let severity: ImpactSeverity
-    /// Plain-English explanation of the expected outcome.
-    public let outcome: String
-    /// Specific risk warnings identified during evaluation.
-    public let warnings: [String]
-
-    /// Creates an impact assessment.
-    public init(severity: ImpactSeverity, outcome: String, warnings: [String] = []) {
-        self.severity = severity
-        self.outcome = outcome
-        self.warnings = warnings
-    }
-}
-
-/// Approval prompt sent to connected clients (e.g. over WebSocket).
-public struct PermissionRequest: Sendable, Codable, Equatable {
-    /// Stable request identifier.
-    public let id: UUID
-    /// Name of the tool requesting approval.
-    public let toolName: String
-    /// Human-readable summary of what the tool wants to do.
-    public let description: String
-    /// The original invocation arguments.
-    public let input: ToolInput
-    /// Duration options offered to the user.
-    public let suggestedDurations: [TrustDuration]
-    /// Owning session for narrated parked turns, if known.
-    public let sessionID: UUID?
-    /// Conversational intent of the agent proposing this action.
-    public let intent: String?
-    /// Evaluated safety and impact outcome.
-    public let assessment: ImpactAssessment?
-    /// Target host for unlisted network egress requests.
-    public let egressHost: String?
-    /// Server-stamped sandbox tier line for bash approvals, rendered verbatim.
-    public let sandboxSummary: String?
-
-    /// Coding keys for the approval prompt.
-    private enum CodingKeys: String, CodingKey {
-        /// Stable request identifier.
-        case id
-        /// Name of the tool requesting approval.
-        case toolName
-        /// Human-readable summary.
-        case description
-        /// Original invocation arguments.
-        case input
-        /// Duration options offered to the user.
-        case suggestedDurations
-        /// Owning session, when tagged.
-        case sessionID
-        /// Agent intent.
-        case intent
-        /// Impact assessment.
-        case assessment
-        /// Target host for egress requests.
-        case egressHost = "egress_host"
-        /// Stamped sandbox tier line.
-        case sandboxSummary = "sandbox_summary"
-    }
-
-    /// Creates a permission request.
-    public init(
-        id: UUID = UUID(),
-        toolName: String,
-        description: String = "",
-        input: ToolInput,
-        suggestedDurations: [TrustDuration] = TrustDuration.allCases,
-        sessionID: UUID? = nil,
-        intent: String? = nil,
-        assessment: ImpactAssessment? = nil,
-        egressHost: String? = nil,
-        sandboxSummary: String? = nil
-    ) {
-        self.id = id
-        self.toolName = toolName
-        self.description = description
-        self.input = input
-        self.suggestedDurations = suggestedDurations
-        self.sessionID = sessionID
-        self.intent = intent
-        self.assessment = assessment
-        self.egressHost = egressHost
-        self.sandboxSummary = sandboxSummary
-    }
-
-    /// Decodes a request, tolerating payloads written before session tagging or assessment.
-    /// - Parameter decoder: Source decoder.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try container.decode(UUID.self, forKey: .id)
-        self.toolName = try container.decode(String.self, forKey: .toolName)
-        self.description = try container.decodeIfPresent(String.self, forKey: .description) ?? ""
-        self.input = try container.decode(ToolInput.self, forKey: .input)
-        self.suggestedDurations = try container.decode([TrustDuration].self, forKey: .suggestedDurations)
-        self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
-        self.intent = try container.decodeIfPresent(String.self, forKey: .intent)
-        self.assessment = try container.decodeIfPresent(ImpactAssessment.self, forKey: .assessment)
-        self.egressHost = try container.decodeIfPresent(String.self, forKey: .egressHost)
-        self.sandboxSummary = try container.decodeIfPresent(String.self, forKey: .sandboxSummary)
-    }
-
-    /// Encodes a request, omitting optional fields when absent.
-    /// - Parameter encoder: Destination encoder.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(id, forKey: .id)
-        try container.encode(toolName, forKey: .toolName)
-        try container.encode(description, forKey: .description)
-        try container.encode(input, forKey: .input)
-        try container.encode(suggestedDurations, forKey: .suggestedDurations)
-        try container.encodeIfPresent(sessionID, forKey: .sessionID)
-        try container.encodeIfPresent(intent, forKey: .intent)
-        try container.encodeIfPresent(assessment, forKey: .assessment)
-        try container.encodeIfPresent(egressHost, forKey: .egressHost)
-        try container.encodeIfPresent(sandboxSummary, forKey: .sandboxSummary)
-    }
-}
-
-/// Verdict returned by ``PermissionGate/checkPermission(toolCall:tool:)``.
-public enum PermissionDecision: Sendable, Equatable {
-    /// The call may run immediately.
-    case allowed
-    /// The call needs user approval via the associated request.
-    case requiresApproval(PermissionRequest)
-    /// The call is refused with the associated reason.
-    case denied(String)
-}
-
-/// Pre-admission verdict for a tool call carrying a target-shaped argument.
-///
-/// Tools whose arguments encode an externally-addressed target can refuse a
-/// call before the permission gate parks it, so an invalid target never reaches
-/// the approvals inbox and a durable trust grant can never be keyed on it.
-/// Execution still re-validates and fails closed; this verdict only decides
-/// whether the call may enter the approval pipeline.
-public enum ToolAdmissionVerdict: Sendable, Equatable {
-    /// The call may proceed to permission evaluation and approval filing.
-    case proceed
-    /// The call is refused before admission; the reason is the caller-facing message.
-    case refuse(reason: String)
-}
-
-/// Optional pre-admission validation seam for target-shaped tool calls.
-///
-/// The orchestrator consults the verdict before `PermissionGate.checkPermission`
-/// and before `ApprovalQueue.fileRequest`. A refusal is answered to the model as
-/// an immediate failure result, so an invalid target is actionable before the
-/// owner is asked to approve anything. Tools that do not conform keep their
-/// existing admission path byte-identically.
-public protocol ToolAdmissionValidating: Sendable {
-    /// Validates one call before permission evaluation and approval filing.
-    /// - Parameter input: Raw invocation about to be admitted.
-    /// - Returns: `.proceed` to keep the existing admission path, or `.refuse` with the caller-facing reason.
-    func admissionVerdict(for input: ToolInput) async -> ToolAdmissionVerdict
-}
-
 /// Trust boundary between the agent and the real world.
 public actor PermissionGate {
-    /// Live grants, mirrored to the store best-effort.
-    private var grants: [TrustGrant] = []
-    /// Explicit refusals by descriptor, carrying the denial reason.
-    private var denials: [ActionDescriptor: String] = [:]
-    /// Optional persistence backend.
-    private let store: (any TrustStore)?
+    /// Durable rules, mirrored to the store best-effort.
+    ///
+    /// Allow and deny rows live in one list so ``checkPermission`` can rank
+    /// them in one place; the deny rows it consults first are the durable
+    /// half of the deny-outranks contract.
+    private var rules: [AccessRule] = []
+    /// Optional persistence backend for durable rules.
+    private let ruleStore: (any AccessRuleStoring)?
     /// Configured plugins directory for protected path enforcement.
     public let pluginsDir: URL?
     /// Ephemeral grants valid for the remainder of an active task/turn, indexed by session ID.
-    private var taskGrants: [UUID: Set<ActionDescriptor>] = [:]
+    private var taskGrants: [UUID: Set<EphemeralGrant>] = [:]
     /// Ephemeral grants valid for the remainder of a conversation session, indexed by session ID.
-    private var sessionGrants: [UUID: Set<ActionDescriptor>] = [:]
+    private var sessionGrants: [UUID: Set<EphemeralGrant>] = [:]
     /// First-seen time per session key present in either ephemeral table.
     ///
     /// Drives oldest-first eviction and TTL expiry so a process that never
@@ -732,31 +37,44 @@ public actor PermissionGate {
     private static let ephemeralSessionTTL: TimeInterval = 24 * 60 * 60
     /// Live bash shell policy consulted before parking `bash.exec` calls.
     private var bashConfig = BashConfig()
+    /// Live file write policy consulted before parking `files.write` calls.
+    private var filesConfig = FilesConfig()
     /// Workspace root execution resolves against for tier stamping.
     private var workspaceRoot: URL?
-    /// Recurring task for pruning expired grants periodically.
+    /// Recurring task for pruning expired rules periodically.
     private var reaperTask: Task<Void, Never>?
     /// Optional egress policy evaluator for network egress admission.
     private var egressEvaluator: (any EgressPolicyEvaluator)?
 
+    /// Refusal text when the write-path policy denies without naming a reason.
+    ///
+    /// Every real posture carries its own reason, so this only backstops a
+    /// classification that somehow answered deny with nothing to say.
+    private static let filesWriteRefusalFallback = "Path is refused by the files write policy."
+
     /// Creates a permission gate.
     public init(
-        store: (any TrustStore)? = nil,
+        ruleStore: (any AccessRuleStoring)? = nil,
         pluginsDir: URL? = nil,
         egressEvaluator: (any EgressPolicyEvaluator)? = nil
     ) {
-        self.store = store
+        self.ruleStore = ruleStore
         self.pluginsDir = pluginsDir
         self.egressEvaluator = egressEvaluator
     }
 
-    /// Loads a permission gate hydrated from durable storage, pruning expired grants on startup.
+    /// Loads a permission gate hydrated from durable storage, pruning expired
+    /// rules on startup.
     public static func load(
-        store: (any TrustStore)? = nil,
+        ruleStore: (any AccessRuleStoring)? = nil,
         pluginsDir: URL? = nil,
         egressEvaluator: (any EgressPolicyEvaluator)? = nil
     ) async -> PermissionGate {
-        let gate = PermissionGate(store: store, pluginsDir: pluginsDir, egressEvaluator: egressEvaluator)
+        let gate = PermissionGate(
+            ruleStore: ruleStore,
+            pluginsDir: pluginsDir,
+            egressEvaluator: egressEvaluator
+        )
         await gate.bootstrap()
         return gate
     }
@@ -779,6 +97,18 @@ public actor PermissionGate {
         bashConfig
     }
 
+    /// Updates the live file write policy consulted before parking `files.write` calls.
+    /// - Parameter config: Replacement files policy.
+    public func updateFilesConfig(_ config: FilesConfig) {
+        filesConfig = config
+    }
+
+    /// Live files policy snapshot for write posture classification.
+    /// - Returns: Current files policy.
+    public func filesConfigSnapshot() -> FilesConfig {
+        filesConfig
+    }
+
     /// Updates the workspace root consulted when stamping bash tiers.
     /// - Parameter root: Workspace root execution resolves against.
     public func updateWorkspaceRoot(_ root: URL) {
@@ -791,32 +121,44 @@ public actor PermissionGate {
         workspaceRoot
     }
 
-    /// Hydrates grants from storage, cleaning up expired records immediately.
+    /// Hydrates rules from storage, cleaning up expired records immediately.
     public func bootstrap() async {
-        guard let store else { return }
+        guard let ruleStore else { return }
         let now = Date()
+        // The legacy grant table is carried forward before anything reads the
+        // rule store, so an upgraded install observes its pre-migration trust
+        // exactly once instead of starting from an empty rule set.
         do {
-            try await store.pruneExpired(at: now)
+            try await ruleStore.migrateLegacyIfNeeded()
         } catch is CancellationError {
             return
         } catch {
-            RuneWeaverLog.stores.debug("PermissionGate: failed to prune expired grants at bootstrap: \(error.localizedDescription)")
+            RuneWeaverLog.stores.debug("PermissionGate: failed to migrate legacy trust grants at bootstrap: \(error.localizedDescription)")
         }
         do {
-            grants = try await store.load()
+            try await ruleStore.pruneExpired(at: now)
+        } catch is CancellationError {
+            return
         } catch {
-            grants = []
+            RuneWeaverLog.stores.debug("PermissionGate: failed to prune expired rules at bootstrap: \(error.localizedDescription)")
         }
-        grants.removeAll { $0.isExpired(at: now) }
-        // Rows written before the per-recipient send invariant may key on an
-        // empty or display-name target. Matching fails closed for them either
-        // way, but an invalid descriptor stays an invalid descriptor: dropping
-        // it at load keeps the grants list honest instead of showing send trust
-        // that can never cover a real call.
-        grants.removeAll { !Self.isGrantable($0.actionDescriptor) }
+        do {
+            rules = try await ruleStore.load()
+        } catch {
+            rules = []
+        }
+        rules.removeAll { $0.action == .allow && $0.isExpired(at: now) }
+        // Rows written before the rule model may key on a shape the scope
+        // canonicalizers refuse, and a `messages.send` tool-wide row is the
+        // pre-invariant spelling that can never cover a real send. Matching
+        // fails closed for them either way, but an unusable rule stays an
+        // unusable rule: dropping it at load keeps the list honest instead of
+        // showing send trust that can never cover a call.
+        rules.removeAll { AccessScope.canonicalized($0.scope) != $0.scope }
+        rules.removeAll { !Self.isGrantableRule($0) }
     }
 
-    /// Starts a periodic background reaper that checks and cleans up expired grants.
+    /// Starts a periodic background reaper that checks and cleans up expired rules.
     public func startPeriodicCleanup(intervalSeconds: TimeInterval = 60) async {
         await stopPeriodicCleanup()
         let interval = max(0.01, intervalSeconds)
@@ -845,21 +187,20 @@ public actor PermissionGate {
         _ = await task?.value
     }
 
-    /// Prunes expired grants from memory and storage.
+    /// Prunes expired rules from memory and storage.
     ///
     /// Also ages out ephemeral session keys past their TTL so the periodic
     /// reaper bounds in-memory trust even when no teardown arrives.
     public func pruneExpiredAndPersist() async {
         let now = Date()
-        grants.removeAll { $0.isExpired(at: now) }
-        evictStaleEphemeralGrants(now: now)
-        if let store {
+        pruneExpired()
+        if let ruleStore {
             do {
-                try await store.pruneExpired(at: now)
+                try await ruleStore.pruneExpired(at: now)
             } catch is CancellationError {
                 return
             } catch {
-                RuneWeaverLog.stores.debug("PermissionGate: failed to prune expired grants: \(error.localizedDescription)")
+                RuneWeaverLog.stores.debug("PermissionGate: failed to prune expired rules: \(error.localizedDescription)")
             }
         }
     }
@@ -902,6 +243,15 @@ public actor PermissionGate {
             case let .explicitlyBlocked(reason):
                 return .denied(reason)
             case .unlisted:
+                // A covering domain allow authorizes this host without parking:
+                // durable egress allows live as gate rules and the task tier
+                // lives as an ephemeral grant beside them, so consulting them
+                // here keeps the next identical call auto-approved. Deny rules
+                // won above and blocked hosts denied above, so this never
+                // softens a refusal; an uncovered host still parks below.
+                if egressAllowCovers(host: host, toolName: tool.name, sessionID: sessionID) {
+                    continue
+                }
                 let sandboxSummary = ApprovalQueue.stampedSandboxSummary(
                     toolName: tool.name,
                     argumentsJSON: toolCall.argumentsJSON,
@@ -926,15 +276,24 @@ public actor PermissionGate {
     }
 
     /// Decides whether a tool call may run.
+    ///
+    /// Decision order, highest first: a durable deny rule covering the call
+    /// refuses it; protected engine paths refuse an agent edit; egress host
+    /// status decides unlisted network hosts; the bash shell policy evaluates
+    /// `bash.exec`; `files.write` resolves its write posture, where stage and
+    /// live hand the call to the tool's own review flow and ask parks it;
+    /// ephemeral task and session grants then durable allow rules may cover the
+    /// call; anything left parks for approval.
     public func checkPermission(
         toolCall: ToolInput,
         tool: any Tool,
         sessionID: UUID? = nil
     ) async -> PermissionDecision {
         pruneExpired()
-        let descriptor = ActionDescriptor.descriptor(for: toolCall, tool: tool)
-        if let reason = denials[descriptor] ?? denials[ActionDescriptor(toolName: tool.name)] {
-            return .denied(reason)
+        // Deny outranks: a durable refusal is evaluated before any grant
+        // coverage, so no allow rule can override, shorten, or ride past it.
+        if let rule = denyRule(matchingToolCall: toolCall, toolName: tool.name) {
+            return .denied(denyReason(for: rule))
         }
 
         // Guard against automated agent modifications to protected engine paths
@@ -961,7 +320,24 @@ public actor PermissionGate {
                     break
                 }
             }
-            if covers(descriptor, sessionID: sessionID) {
+            if tool.name == "files.write", let decision = writePathDecision(toolCall: toolCall) {
+                // The write-path policy is the single owner of write posture:
+                // deny refuses here, ask falls through to parking below, and
+                // stage or live proceeds so the tool's own review flow is the
+                // gate instead of a second approval request.
+                switch decision.posture {
+                case .deny:
+                    return .denied(decision.reason ?? Self.filesWriteRefusalFallback)
+                case .ask:
+                    break
+                case .stage, .live:
+                    return .allowed
+                }
+            }
+            if coversEphemeral(toolName: tool.name, argumentsJSON: toolCall.argumentsJSON, sessionID: sessionID) {
+                return .allowed
+            }
+            if coveringRule(toolName: tool.name, argumentsJSON: toolCall.argumentsJSON, at: Date()) != nil {
                 return .allowed
             }
             let sandboxSummary = ApprovalQueue.stampedSandboxSummary(
@@ -984,89 +360,38 @@ public actor PermissionGate {
 
     /// Records trust for an action.
     ///
-    /// Fail-closed on unmintable scope: an ephemeral tier without an owning
-    /// session, or a descriptor the per-recipient invariant refuses, stores
-    /// nothing and reports failure so the caller keeps the park/deny instead
-    /// of treating the approval as honored.
+    /// Thin wrapper over ``grant(_:toolName:duration:sessionID:)`` that maps a
+    /// descriptor to its scope, so the per-recipient `messages.send` invariant
+    /// and every existing caller keep their semantics: a handle-shaped send
+    /// mints the exact canonical handle it approved, an empty target keeps the
+    /// tool-wide scope every other tool already had, and a malformed or
+    /// name-shaped send stores nothing.
     /// - Parameters:
     ///   - descriptor: The trusted action to store.
     ///   - duration: Trust tier; ephemeral tiers require `sessionID`.
     ///   - sessionID: Owning session for ephemeral tiers; nil means unscoped.
     /// - Returns: True when the approval may proceed (stored, already covered,
-    ///   or one-shot with nothing to store); false when no grant was minted
+    ///   or one-shot with nothing to store); false when no rule was minted
     ///   and the caller must not treat the decision as honored.
     @discardableResult
     public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration, sessionID: UUID? = nil) async -> Bool {
         guard duration != .thisTime else { return true }
-        // Every durable mint path funnels through here — the CLI approval
-        // handler, `ApprovalQueue.decide`, and the bus passthrough — so the
+        // Every durable mint path funnels through the rule mint — the CLI
+        // approval handler, `ApprovalQueue.decide`, and this wrapper — so the
         // per-recipient send invariant is enforced at one boundary: a
         // `messages.send` target that is empty (malformed call) or not the
         // canonical handle (display name) is an invalid descriptor and stores
-        // nothing. Handle-shaped sends mint their canonical handle exactly as
-        // before, and every other tool keeps its tool-wide semantics.
+        // nothing.
         guard Self.isGrantable(descriptor) else {
             RuneWeaverLog.stores.warning("PermissionGate: refusing to mint trust for invalid descriptor \(descriptor.toolName).")
             return false
         }
-
-        if duration == .forTask {
-            guard let sessionID else {
-                assertionFailure("PermissionGate: forTask grant without owning session mints nothing.")
-                RuneWeaverLog.stores.warning("PermissionGate: forTask grant without owning session mints nothing for \(descriptor.toolName).")
-                return false
-            }
-            taskGrants[sessionID, default: []].insert(descriptor)
-            denials.removeValue(forKey: descriptor)
-            trackEphemeralSession(sessionID)
-            return true
-        }
-
-        if duration == .forSession {
-            guard let sessionID else {
-                assertionFailure("PermissionGate: forSession grant without owning session mints nothing.")
-                RuneWeaverLog.stores.warning("PermissionGate: forSession grant without owning session mints nothing for \(descriptor.toolName).")
-                return false
-            }
-            sessionGrants[sessionID, default: []].insert(descriptor)
-            denials.removeValue(forKey: descriptor)
-            trackEphemeralSession(sessionID)
-            return true
-        }
-
-        pruneExpired()
-        let now = Date()
-        let expiresAt = duration.timeInterval.map { now.addingTimeInterval($0) }
-        // A tool-wide grant (empty target) covers every target for its tool,
-        // so installing one is a widening act and must obey the same
-        // never-shorten invariant as the explicit widen path: when an existing
-        // tool-wide grant already survives at least as long as the
-        // replacement, keep it and drop the redundant candidate. Effective
-        // expiry is the sole comparison, so an equal-tier grant created later
-        // or a lower-tier grant that expires later still wins, while an older
-        // long-tier grant that has decayed past the replacement is replaced.
-        if descriptor.target.isEmpty,
-           let existing = grants.first(where: { $0.actionDescriptor == descriptor }),
-           !Self.expiryLifetime(expiresAt, outlives: existing.expiresAt)
-        {
-            denials.removeValue(forKey: descriptor)
-            return true
-        }
-        grants.removeAll { $0.actionDescriptor == descriptor }
-        // A replacement grant starts its usage history fresh so prior
-        // counters cannot leak into the new lifetime.
-        let grant = TrustGrant(
-            actionDescriptor: descriptor,
-            grantedAt: now,
-            expiresAt: expiresAt,
+        return await grant(
+            Self.scope(for: descriptor),
+            toolName: descriptor.toolName,
             duration: duration,
-            useCount: 0,
-            lastUsedAt: nil
+            sessionID: sessionID
         )
-        grants.append(grant)
-        denials.removeValue(forKey: descriptor)
-        await persist()
-        return true
     }
 
     /// Clears ephemeral task-scoped grants for a session when the turn completes.
@@ -1148,192 +473,420 @@ public actor PermissionGate {
         }
     }
 
-    /// Records one covered use of a live grant without notifying clients.
-    /// - Parameter descriptor: The executed action to attribute.
-    public func recordUse(for descriptor: ActionDescriptor) async {
+    /// Records one covered use of a live rule without notifying clients.
+    /// - Parameters:
+    ///   - scope: Scope of the executed call.
+    ///   - toolName: Tool the call ran against.
+    public func recordUse(scope: AccessScope, toolName: String) async {
         pruneExpired()
         let now = Date()
         // Attribute usage exactly where an allow decision came from.
         // Staying silent keeps accounting out of the approval broadcast path.
-        guard let index = coveringGrantIndex(for: descriptor, at: now) else { return }
+        guard let index = coveringRuleIndex(scope: scope, toolName: toolName, at: now) else { return }
         // Saturate at the limit instead of trapping on overflow.
-        if grants[index].useCount < Int.max {
-            grants[index].useCount += 1
+        if rules[index].useCount < Int.max {
+            rules[index].useCount += 1
         }
-        grants[index].lastUsedAt = now
-        await persist()
-    }
-
-    /// Removes trust for an action.
-    public func revokeTrust(for descriptor: ActionDescriptor) async {
-        if descriptor.target.isEmpty {
-            grants.removeAll { $0.actionDescriptor.toolName == descriptor.toolName }
-        } else {
-            grants.removeAll { $0.actionDescriptor == descriptor }
-        }
+        rules[index].lastUsedAt = now
         await persist()
     }
 }
 
-// MARK: - Grant Administration & Lifecycle
+// MARK: - Rule Administration & Lifecycle
 
 extension PermissionGate {
-    /// Removes one grant by identifier, persisting only when something changed.
-    /// Expired grants are pruned first so an expired identifier reports no match.
-    /// - Parameter id: Stable grant identifier.
-    /// - Returns: True when a matching grant was removed.
-    public func revokeGrant(id: UUID) async -> Bool {
+    /// Mints a durable allow rule or an ephemeral grant for one scope.
+    ///
+    /// The tiers split by lifetime rather than by surface: `forTask` and
+    /// `forSession` land in the in-memory ephemeral tables and die on a
+    /// lifecycle signal, while a nil standing tier plus the four durable tiers
+    /// persist as an allow rule.
+    /// Fail-closed on an unmintable scope — an ephemeral tier without an
+    /// owning session, a malformed scope, or the tool-wide send scope the
+    /// per-recipient invariant refuses — stores nothing and reports failure so
+    /// the caller keeps the park/deny instead of treating the approval as
+    /// honored.
+    /// - Parameters:
+    ///   - scope: Scope the rule reaches.
+    ///   - toolName: Tool the rule covers.
+    ///   - duration: Trust tier, or nil for a standing rule that never expires;
+    ///     ephemeral tiers require `sessionID`.
+    ///   - sessionID: Owning session for ephemeral tiers; nil means unscoped.
+    /// - Returns: True when the approval may proceed (stored, already covered,
+    ///   or one-shot with nothing to store).
+    @discardableResult
+    public func grant(_ scope: AccessScope, toolName: String, duration: TrustDuration?, sessionID: UUID? = nil) async -> Bool {
+        if let duration, duration == .thisTime {
+            return true
+        }
+        guard AccessRule.canonicalToolName(toolName) != nil else {
+            RuneWeaverLog.stores.warning("PermissionGate: refusing to mint trust for a blank tool name.")
+            return false
+        }
+        // The tool-wide send scope is the signature of a malformed call, never
+        // a scope a send may be trusted under: send trust is keyed to the exact
+        // canonical handle the owner approved. Refusing here rather than
+        // storing a row that can never honestly cover a send keeps the
+        // invariant at the single mint boundary both entry points share.
+        guard Self.isMintableScope(scope, toolName: toolName) else {
+            RuneWeaverLog.stores.warning("PermissionGate: refusing to mint a tool-wide rule for \(toolName).")
+            return false
+        }
+        // Send trust keys on the exact canonical handle or a recipient set; a
+        // display-name target can never match an honest send, so it stores
+        // nothing rather than a dead row no call can exercise.
+        if toolName == "messages.send", !scope.isMintableSendScope {
+            RuneWeaverLog.stores.warning("PermissionGate: refusing to mint a non-handle send scope for \(toolName).")
+            return false
+        }
+
+        if duration == .forTask || duration == .forSession {
+            guard let sessionID else {
+                assertionFailure("PermissionGate: ephemeral grant without owning session mints nothing.")
+                RuneWeaverLog.stores.warning("PermissionGate: \(duration?.rawValue ?? "ephemeral") grant without owning session mints nothing for \(toolName).")
+                return false
+            }
+            let kind: EphemeralGrant.Kind = duration == .forTask ? .task : .session
+            guard let grant = EphemeralGrant(toolName: toolName, scope: scope, kind: kind) else {
+                RuneWeaverLog.stores.warning("PermissionGate: refusing to mint an ephemeral grant with a malformed scope for \(toolName).")
+                return false
+            }
+            if kind == .task {
+                taskGrants[sessionID, default: []].insert(grant)
+            } else {
+                sessionGrants[sessionID, default: []].insert(grant)
+            }
+            trackEphemeralSession(sessionID)
+            return true
+        }
+
         pruneExpired()
-        let before = grants.count
-        grants.removeAll { $0.id == id }
-        guard grants.count != before else { return false }
+        let now = Date()
+        let expiresAt: Date? = if let duration, let interval = duration.timeInterval {
+            now.addingTimeInterval(interval)
+        } else {
+            nil
+        }
+        // A tool-wide rule covers every target for its tool, so installing one
+        // is a widening act and must obey the same never-shorten invariant as
+        // the explicit widen path: when an existing rule for the same scope
+        // already survives at least as long as the replacement, keep it and
+        // drop the redundant candidate. Effective expiry is the sole
+        // comparison, so an equal-tier rule created later or a lower-tier rule
+        // that expires later still wins, while an older long-tier rule that has
+        // decayed past the replacement is replaced.
+        if let existing = rules.first(where: {
+            $0.action == .allow && $0.toolName == toolName && $0.scope == scope && $0.isValid(at: now)
+        }), !Self.expiryLifetime(expiresAt, outlives: existing.expiresAt) {
+            return true
+        }
+        // Dedupe allow rows for the same tool plus scope. A deny row for that
+        // scope is never touched: deny outranks, and an allow mint must not
+        // evict the refusal that already covers it.
+        rules.removeAll { $0.action == .allow && $0.toolName == toolName && $0.scope == scope }
+        // A replacement rule starts its usage history fresh so prior counters
+        // cannot leak into the new lifetime.
+        guard let rule = AccessRule(
+            toolName: toolName,
+            scope: scope,
+            action: .allow,
+            grantedAt: now,
+            duration: duration,
+            reason: nil
+        ) else {
+            RuneWeaverLog.stores.warning("PermissionGate: refusing to mint an allow rule with a malformed scope for \(toolName).")
+            return false
+        }
+        rules.append(rule)
         await persist()
         return true
     }
 
-    /// Promotes an existing active grant to a tool-wide grant (empty target).
-    /// Preserves the original grant's ID, grantedAt, expiresAt, duration, and usage counters.
-    /// When a longer-lived tool-wide grant for the same tool already exists, that
-    /// grant is kept instead so widening never shortens trust.
-    /// - Parameter id: Stable grant identifier.
-    /// - Returns: `.widened` when a live grant was found and now covers every
-    ///   target (an already tool-wide grant is idempotent success),
-    ///   `.notFound` when the identifier matches no live grant, and
-    ///   `.notWidenable` when the grant is live but its tool has no tool-wide
+    /// Mints a standing deny rule that outranks every allow decision.
+    ///
+    /// Deny rows carry no expiry, so they never age out and are removed only
+    /// by ``revokeRule(id:)``. A malformed scope logs and stores nothing:
+    /// refusing silently would read as protection that was never installed.
+    /// - Parameters:
+    ///   - scope: Scope the refusal reaches.
+    ///   - toolName: Tool the refusal covers.
+    ///   - reason: Caller-facing explanation carried into the denial.
+    public func denyRule(_ scope: AccessScope, toolName: String, reason: String? = nil) async {
+        guard Self.isMintableScope(scope, toolName: toolName) else {
+            RuneWeaverLog.stores.warning("PermissionGate: refusing to mint a tool-wide deny rule for \(toolName).")
+            return
+        }
+        // A display-name send target can never match an honest send, so it
+        // stores nothing rather than a dead refusal.
+        if toolName == "messages.send", !scope.isMintableSendScope {
+            RuneWeaverLog.stores.warning("PermissionGate: refusing to mint a non-handle send deny rule for \(toolName).")
+            return
+        }
+        // Only a standing refusal mints here: a dated deny would let a refusal
+        // lapse into the allow decision underneath it, which is exactly the
+        // trust inversion the deny-outranks contract forbids.
+        guard let rule = AccessRule(
+            toolName: toolName,
+            scope: scope,
+            action: .deny,
+            duration: nil,
+            reason: reason
+        ) else {
+            RuneWeaverLog.stores.warning("PermissionGate: refusing to mint a deny rule with a malformed scope for \(toolName).")
+            return
+        }
+        // One refusal per tool plus scope: a second mint replaces the row
+        // instead of stacking duplicates the list would keep reporting.
+        rules.removeAll { $0.action == .deny && $0.toolName == toolName && $0.scope == scope }
+        rules.append(rule)
+        await persist()
+    }
+
+    /// Removes one rule by identifier, persisting only when something changed.
+    /// Expired rules are pruned first so an expired identifier reports no match.
+    /// - Parameter id: Stable rule identifier.
+    /// - Returns: True when a matching rule was removed.
+    public func revokeRule(id: UUID) async -> Bool {
+        pruneExpired()
+        let before = rules.count
+        rules.removeAll { $0.id == id }
+        guard rules.count != before else { return false }
+        await persist()
+        return true
+    }
+
+    /// Promotes an existing active rule to its tool-wide scope.
+    /// Preserves the original rule's ID, grantedAt, expiresAt, duration, and usage counters.
+    /// When a longer-lived tool-wide rule for the same tool already exists, that
+    /// rule is kept instead so widening never shortens trust, and a deny rule is
+    /// never promoted: the tool-wide send scope is refused for `messages.send`.
+    /// - Parameter id: Stable rule identifier.
+    /// - Returns: `.widened` when a live rule was found and now covers every
+    ///   target (an already tool-wide rule is idempotent success),
+    ///   `.notFound` when the identifier matches no live rule, and
+    ///   `.notWidenable` when the rule is live but its tool has no tool-wide
     ///   scope.
     public func widenGrant(id: UUID) async -> GrantWidenOutcome {
         pruneExpired()
-        guard let current = grants.first(where: { $0.id == id && $0.isValid() }) else {
+        guard let current = rules.first(where: { $0.id == id && $0.isValid() }) else {
             return .notFound
         }
-        // A send grant is per-recipient by design: an empty target is an
-        // invalid descriptor there, never a tool-wide scope, so send trust is
-        // never promoted past the canonical handle the owner approved. The
-        // distinct outcome keeps the live grant from reading as unknown on the
-        // widen route.
-        guard current.actionDescriptor.toolName != "messages.send" else {
+        // Widening answers for allow rules only: a refusal is not trust to
+        // promote, so a deny row reports unknown rather than losing its scope.
+        guard current.action == .allow else { return .notFound }
+        // A send rule is per-recipient by design: an empty target is an invalid
+        // scope there, never a tool-wide scope, so send trust is never promoted
+        // past the canonical handle the owner approved. The distinct outcome
+        // keeps the live rule from reading as unknown on the widen route.
+        guard current.toolName != "messages.send" else {
             return .notWidenable(reason: GrantWidenOutcome.messagesSendRefusal)
         }
-        guard !current.actionDescriptor.target.isEmpty else {
+        guard current.scope != .toolWide else {
             return .widened
         }
-        let widenedDescriptor = ActionDescriptor(toolName: current.actionDescriptor.toolName, target: "")
-        // A pre-existing tool-wide grant may outlive the narrow grant the user
-        // is promoting. Widening must never shorten trust, so keep any
-        // covering tool-wide grant that survives at least as long as the
-        // promotion and drop the now-redundant narrow row. Effective expiry is
-        // the sole comparison: an absent expiry is the forever tier and always
-        // wins, an equal-tier grant created later or a lower-tier grant with a
-        // later expiry is kept rather than truncated to the promoted row's
-        // earlier expiry, and only a promotion that strictly outlives the
-        // covering grant replaces it.
-        if let covering = grants.first(where: { $0.id != id && $0.actionDescriptor == widenedDescriptor }),
-           !Self.expiryLifetime(current.expiresAt, outlives: covering.expiresAt)
-        {
-            grants.removeAll { $0.id == id }
+        // A pre-existing tool-wide rule may outlive the narrow rule the user is
+        // promoting. Widening must never shorten trust, so keep any covering
+        // tool-wide rule that survives at least as long as the promotion and
+        // drop the now-redundant narrow row. Effective expiry is the sole
+        // comparison: an absent expiry is the forever tier and always wins, an
+        // equal-tier rule created later or a lower-tier rule with a later
+        // expiry is kept rather than truncated to the promoted row's earlier
+        // expiry, and only a promotion that strictly outlives the covering
+        // rule replaces it.
+        if let covering = rules.first(where: {
+            $0.id != id && $0.action == .allow && $0.toolName == current.toolName && $0.scope == .toolWide
+        }), !Self.expiryLifetime(current.expiresAt, outlives: covering.expiresAt) {
+            rules.removeAll { $0.id == id }
             await persist()
             return .widened
         }
-        // Dedupe can remove a tool-wide grant positioned before the target,
+        // Dedupe can remove a tool-wide rule positioned before the target,
         // shifting the target's slot; a pre-removal index would then land on an
-        // unrelated grant or read past the end when the target was last.
+        // unrelated rule or read past the end when the target was last.
         // Re-resolve the target by its stable identifier after the mutation.
-        grants.removeAll { $0.id != id && $0.actionDescriptor == widenedDescriptor }
-        let widened = TrustGrant(
+        rules.removeAll {
+            $0.id != id && $0.action == .allow && $0.toolName == current.toolName && $0.scope == .toolWide
+        }
+        // Identity, creation time, and usage counters survive so the dashboard
+        // keeps proving liveness across the change and no second row is minted.
+        guard var widened = AccessRule(
             id: current.id,
-            actionDescriptor: widenedDescriptor,
+            toolName: current.toolName,
+            scope: .toolWide,
+            action: .allow,
             grantedAt: current.grantedAt,
-            expiresAt: current.expiresAt,
             duration: current.duration,
-            useCount: current.useCount,
-            lastUsedAt: current.lastUsedAt
-        )
-        if let index = grants.firstIndex(where: { $0.id == id }) {
-            grants[index] = widened
+            expiresAt: current.expiresAt,
+            reason: current.reason
+        ) else { return .notWidenable(reason: GrantWidenOutcome.messagesSendRefusal) }
+        widened.useCount = current.useCount
+        widened.lastUsedAt = current.lastUsedAt
+        if let index = rules.firstIndex(where: { $0.id == id }) {
+            rules[index] = widened
         } else {
             // The dedupe excludes the target's own identifier, so it should
-            // always survive; append only as a last resort so a promoted grant
+            // always survive; append only as a last resort so a promoted rule
             // is never silently dropped if in-memory state ever drifts.
-            grants.append(widened)
+            rules.append(widened)
         }
         await persist()
         return .widened
     }
 
-    /// Re-arms an existing active grant to a new duration tier.
+    /// Re-arms an existing active allow rule to a new duration tier.
     /// The single owner of duration changes: expiry is always recomputed from
     /// confirmation time, so a shorter tier shortens trust and a longer tier
-    /// extends it from now rather than from the original grant date. Identity
-    /// (id, tool plus target), creation time, and usage counters survive so the
+    /// extends it from now rather than from the original rule date. Identity
+    /// (id, tool plus scope), creation time, and usage counters survive so the
     /// dashboard keeps proving liveness across the change and no second row is
-    /// ever minted.
+    /// ever minted. A deny rule is never re-armed: it carries no expiry to
+    /// recompute.
     /// - Parameters:
-    ///   - id: Stable grant identifier.
+    ///   - id: Stable rule identifier.
     ///   - duration: Replacement tier; only the durable tiers are accepted.
-    /// - Returns: `.rearmed` when the live grant now carries the new tier,
-    ///   `.notFound` when the identifier matches no live grant (unknown,
+    /// - Returns: `.rearmed` when the live rule now carries the new tier,
+    ///   `.notFound` when the identifier matches no live rule (unknown,
     ///   expired, or pruned), and `.invalidDuration` when the tier cannot back
-    ///   a durable grant.
+    ///   a durable rule.
     public func rearmGrant(id: UUID, duration: TrustDuration) async -> GrantRearmOutcome {
         pruneExpired()
-        guard let current = grants.first(where: { $0.id == id && $0.isValid() }) else {
+        guard let current = rules.first(where: { $0.id == id && $0.isValid() && $0.action == .allow }) else {
             return .notFound
         }
         // One-shot approvals store no row, so there is no lifetime to extend.
         // Allowlist the durable tiers so any future tier defaults to refusal
         // instead of silently minting an unexpected lifetime.
-        guard duration == .fiveMinutes || duration == .oneHour || duration == .oneDay || duration == .forever else {
+        guard duration.isDurable else {
             return .invalidDuration(reason: GrantRearmOutcome.thisTimeRefusal)
         }
         // Recompute from confirmation time: a nil interval is the forever tier
         // and clears expiry, while a dated tier expires that far from now.
         let expiresAt = duration.timeInterval.map { Date().addingTimeInterval($0) }
-        let rearmed = TrustGrant(
+        guard var rearmed = AccessRule(
             id: current.id,
-            actionDescriptor: current.actionDescriptor,
+            toolName: current.toolName,
+            scope: current.scope,
+            action: .allow,
             grantedAt: current.grantedAt,
-            expiresAt: expiresAt,
             duration: duration,
-            useCount: current.useCount,
-            lastUsedAt: current.lastUsedAt
-        )
-        if let index = grants.firstIndex(where: { $0.id == id }) {
-            grants[index] = rearmed
+            expiresAt: expiresAt,
+            reason: current.reason
+        ) else { return .invalidDuration(reason: GrantRearmOutcome.thisTimeRefusal) }
+        rearmed.useCount = current.useCount
+        rearmed.lastUsedAt = current.lastUsedAt
+        if let index = rules.firstIndex(where: { $0.id == id }) {
+            rules[index] = rearmed
         } else {
-            // The lookup above found the grant, so it should still be present;
-            // append only as a last resort so a re-armed grant is never dropped
+            // The lookup above found the rule, so it should still be present;
+            // append only as a last resort so a re-armed rule is never dropped
             // if in-memory state ever drifts.
-            grants.append(rearmed)
+            rules.append(rearmed)
         }
         await persist()
         return .rearmed
     }
 
-    /// Explicitly refuses an action with a reason.
-    public func deny(_ descriptor: ActionDescriptor, reason: String) {
-        denials[descriptor] = reason
-    }
-
-    /// Clears an explicit refusal.
-    /// - Parameter descriptor: The action to unblock.
-    public func removeDenial(for descriptor: ActionDescriptor) {
-        denials.removeValue(forKey: descriptor)
-    }
-
-    /// Returns the currently valid grants, pruning expired ones first.
-    /// - Returns: Live grants.
-    public func activeGrants() -> [TrustGrant] {
+    /// Returns the currently valid rules, pruning expired ones first.
+    /// - Returns: Live rules, allow and deny together.
+    public func activeRules() -> [AccessRule] {
         pruneExpired()
-        return grants
+        return rules
     }
 
-    /// Whether a live grant covers the descriptor.
-    /// - Parameter descriptor: The action to check.
-    /// - Parameter sessionID: Optional session ID to evaluate against task and session-scoped grants.
-    /// - Returns: True when a valid grant matches.
+    /// Lists the ephemeral grants a session currently holds.
+    ///
+    /// Task grants read first, then session grants, so a caller can tell a
+    /// turn-scoped approval from a conversation-scoped one through the
+    /// ``EphemeralGrant/kind``.
+    /// - Parameter sessionID: Session whose ephemeral trust is listed.
+    /// - Returns: Ephemeral grants, empty when none are live.
+    public func ephemeralGrants(sessionID: UUID) -> [EphemeralGrant] {
+        pruneExpired()
+        let task = Array(taskGrants[sessionID] ?? [])
+        let session = Array(sessionGrants[sessionID] ?? [])
+        // Set iteration order is unspecified, so sort for a stable listing the
+        // caller can compare without flaking on hash order.
+        return (task + session).sorted {
+            if $0.kind != $1.kind {
+                return $0.kind == .task
+            }
+            if $0.toolName != $1.toolName {
+                return $0.toolName < $1.toolName
+            }
+            return Self.scopeLabel($0.scope) < Self.scopeLabel($1.scope)
+        }
+    }
+
+    /// Whether a live rule or ephemeral grant covers the scope.
+    /// - Parameters:
+    ///   - scope: Scope the call is made under.
+    ///   - toolName: Name of the tool making the call.
+    ///   - sessionID: Optional session ID to evaluate against task and session-scoped grants.
+    /// - Returns: True when a valid rule or grant matches.
+    public func isTrusted(scope: AccessScope, toolName: String, sessionID: UUID? = nil) -> Bool {
+        pruneExpired()
+        if let sessionID, coversEphemeral(scope: scope, toolName: toolName, sessionID: sessionID) {
+            return true
+        }
+        return rules.contains {
+            $0.action == .allow && $0.isValid() && $0.toolName == toolName && Self.scope($0.scope, covers: scope)
+        }
+    }
+
+    /// Whether a covering domain allow authorizes egress to a host.
+    ///
+    /// Durable egress allows live as domain-scoped allow rules and the task
+    /// tier lives as an ephemeral domain grant, so both are consulted here:
+    /// the gate checks this before parking an unlisted host and the egress
+    /// supervisor honors it during validation, which together keep a covered
+    /// next call auto-approved. Deny rules and blocked hosts are decided
+    /// before this is ever consulted, so this never softens a refusal; an
+    /// uncovered or malformed host answers false and the caller parks or
+    /// denies exactly as before.
+    /// - Parameters:
+    ///   - host: Destination hostname or IP address.
+    ///   - toolName: Tool making the call, or nil for any tool.
+    ///   - sessionID: Session whose ephemeral grants are read, or nil when unscoped.
+    /// - Returns: True when a live domain allow covers the host.
+    public func egressAllowCovers(host: String, toolName: String?, sessionID: UUID?) -> Bool {
+        pruneExpired()
+        guard let want = AccessScope.canonicalDomain(host) else { return false }
+        if let sessionID {
+            let tables = [taskGrants[sessionID], sessionGrants[sessionID]].compactMap(\.self)
+            for table in tables {
+                for grant in table where toolName == nil || grant.toolName == toolName {
+                    if case let .domain(ruleHost, subdomains) = grant.scope,
+                       want == ruleHost || (subdomains && want.hasSuffix("." + ruleHost))
+                    {
+                        return true
+                    }
+                }
+            }
+        }
+        for rule in rules where rule.action == .allow && rule.isValid() {
+            if let toolName, rule.toolName != toolName {
+                continue
+            }
+            if case let .domain(ruleHost, subdomains) = rule.scope,
+               want == ruleHost || (subdomains && want.hasSuffix("." + ruleHost))
+            {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Whether a live rule or ephemeral grant covers the descriptor.
+    ///
+    /// Descriptor-shaped convenience over ``isTrusted(scope:toolName:sessionID:)``
+    /// so a caller holding only the derived target is answered by the same rule
+    /// the gate itself would allow on.
+    /// - Parameters:
+    ///   - descriptor: The action to check.
+    ///   - sessionID: Optional session ID to evaluate against task and session-scoped grants.
+    /// - Returns: True when a valid rule or grant matches.
     public func isTrusted(_ descriptor: ActionDescriptor, sessionID: UUID? = nil) -> Bool {
-        pruneExpired()
-        return covers(descriptor, sessionID: sessionID)
+        isTrusted(scope: Self.scope(for: descriptor), toolName: descriptor.toolName, sessionID: sessionID)
     }
 
     // MARK: - Private
@@ -1355,15 +908,52 @@ extension PermissionGate {
     }
 
     /// Whether the first effective expiry strictly outlives the second. A nil
-    /// expiry is the forever tier, so it outlives every dated grant while two
-    /// forever grants tie. Widening and tool-wide granting rely on this as the
-    /// sole never-shorten comparison: a candidate only replaces a covering
-    /// grant when it strictly outlives it, so trust can never be truncated by
-    /// nominal tier or by a grant date that happens to land earlier.
+    /// expiry is the forever tier, so it outlives every dated rule while two
+    /// forever rules tie. Widening, tool-wide granting, and rule minting rely
+    /// on this as the sole never-shorten comparison: a candidate only replaces
+    /// a covering rule when it strictly outlives it, so trust can never be
+    /// truncated by nominal tier or by a rule date that happens to land
+    /// earlier.
     private static func expiryLifetime(_ candidate: Date?, outlives incumbent: Date?) -> Bool {
         guard let candidate else { return incumbent != nil }
         guard let incumbent else { return false }
         return candidate > incumbent
+    }
+
+    /// Scope a descriptor maps to.
+    ///
+    /// An empty target is the tool-wide scope every tool supports; anything
+    /// else is the exact legacy target, which is the only scope that
+    /// reproduces pre-migration trust-grant matching byte-for-byte.
+    /// - Parameter descriptor: Descriptor to map.
+    /// - Returns: Scope the descriptor's trust lives under.
+    static func scope(for descriptor: ActionDescriptor) -> AccessScope {
+        descriptor.target.isEmpty ? .toolWide : .exactTarget(descriptor.target)
+    }
+
+    /// Whether a scope may be minted for a tool.
+    ///
+    /// A `messages.send` tool-wide scope is the signature of a malformed call,
+    /// never a scope a send can be trusted under, so both mint paths refuse it
+    /// rather than storing a row no honest call can exercise.
+    /// - Parameters:
+    ///   - scope: Candidate scope.
+    ///   - toolName: Tool the rule would cover.
+    /// - Returns: True when the scope is mintable for the tool.
+    private static func isMintableScope(_ scope: AccessScope, toolName: String) -> Bool {
+        guard toolName == "messages.send", scope == .toolWide else { return true }
+        return false
+    }
+
+    /// Whether a stored rule may be loaded and evaluated.
+    ///
+    /// Mirrors the mint refusal at the load boundary: a `messages.send`
+    /// tool-wide row is the pre-invariant spelling that can never cover a real
+    /// send, so it drops instead of lingering as trust nobody can exercise.
+    /// - Parameter rule: Stored rule under test.
+    /// - Returns: True when the rule may stay live.
+    private static func isGrantableRule(_ rule: AccessRule) -> Bool {
+        isMintableScope(rule.scope, toolName: rule.toolName)
     }
 
     /// Whether a descriptor may key a durable grant.
@@ -1374,99 +964,220 @@ extension PermissionGate {
     /// non-string recipient), and a display-name target is the signature of a
     /// name-shaped call; neither may persist send trust, so both are invalid
     /// descriptors rather than a tool-wide scope. Every other tool keeps its
-    /// existing tool-wide semantics.
+    /// existing tool-wide semantics. The scope-shaped answer comes from the
+    /// single send-mint owner, reached through the descriptor's scope mapping.
     /// - Parameter descriptor: Candidate grant key.
     /// - Returns: True when the descriptor may be stored.
     private static func isGrantable(_ descriptor: ActionDescriptor) -> Bool {
         guard descriptor.toolName == "messages.send" else { return true }
-        guard !descriptor.target.isEmpty else { return false }
-        return MessageRecipientClassification.canonicalHandle(descriptor.target) == descriptor.target
+        return scope(for: descriptor).isMintableSendScope
     }
 
-    /// Index of the live grant covering the descriptor, if any. An exact
-    /// tool-plus-target grant wins, with a tool-wide empty-target grant as
-    /// the fallback. Shared by allow checks and usage accounting so both
-    /// attribute to the same grant.
-    private func coveringGrantIndex(for descriptor: ActionDescriptor, at date: Date) -> Int? {
-        // A `messages.send` scope is always an exact canonical handle. An empty
-        // target is the widen scope every other tool supports but, for a send,
-        // the signature of a malformed call (or a legacy tool-wide row), so it
-        // never matches — not even exactly — and never falls back to a stored
-        // empty-target grant. Handle-shaped sends keep the exact-match path.
-        let isMessagesSend = descriptor.toolName == "messages.send"
-        if !(isMessagesSend && descriptor.target.isEmpty),
-           let exact = grants.firstIndex(where: {
-               $0.isValid(at: date)
-                   && $0.actionDescriptor.toolName == descriptor.toolName
-                   && $0.actionDescriptor.target == descriptor.target
-           })
-        {
+    /// Index of the live allow rule covering a scope, if any.
+    ///
+    /// An exact tool-plus-scope rule wins, with a tool-wide rule as the
+    /// fallback, so a narrow rule and the tool-wide rule that subsumes it
+    /// attribute usage to the same place. Shared by allow checks and usage
+    /// accounting so both attribute to the same rule.
+    private func coveringRuleIndex(scope: AccessScope, toolName: String, at date: Date) -> Int? {
+        if let exact = rules.firstIndex(where: {
+            $0.action == .allow && $0.isValid(at: date) && $0.toolName == toolName && $0.scope == scope
+        }) {
             return exact
         }
-        guard !descriptor.target.isEmpty, !isMessagesSend else { return nil }
-        return grants.firstIndex(where: {
-            $0.isValid(at: date)
-                && $0.actionDescriptor.toolName == descriptor.toolName
-                && $0.actionDescriptor.target.isEmpty
+        guard scope != .toolWide else { return nil }
+        return rules.firstIndex(where: {
+            $0.action == .allow && $0.isValid(at: date) && $0.toolName == toolName && $0.scope == .toolWide
         })
     }
 
-    /// Whether one ephemeral set covers the descriptor, by exact or tool-wide match.
+    /// Whether a stored scope covers a requested scope.
     ///
-    /// Single owner of the ephemeral match rule so task and session tables
-    /// cannot drift: an exact tool-plus-target grant wins, with a tool-wide
-    /// empty-target grant as the fallback. Send trust stays per-recipient, so
-    /// an empty send target never matches and never falls back to tool-wide.
+    /// Exact scope equality first, then the tool-wide fallback. Scope shapes
+    /// themselves compare through ``AccessScope/matches(toolName:argumentsJSON:)``
+    /// whenever a live call is available; this answers only the scope-versus-scope
+    /// question a caller without the call's arguments can ask.
     /// - Parameters:
-    ///   - descriptor: The action to check.
-    ///   - grants: Ephemeral set for one session, or nil when absent.
-    /// - Returns: True when the set covers the descriptor.
-    private func coversEphemeral(_ descriptor: ActionDescriptor, in grants: Set<ActionDescriptor>?) -> Bool {
-        guard let ephemeral = grants else { return false }
-        let isMessagesSend = descriptor.toolName == "messages.send"
-        if !(isMessagesSend && descriptor.target.isEmpty), ephemeral.contains(descriptor) {
+    ///   - stored: Scope a rule or grant carries.
+    ///   - requested: Scope the call is made under.
+    /// - Returns: True when the stored scope covers the requested one.
+    private static func scope(_ stored: AccessScope, covers requested: AccessScope) -> Bool {
+        if stored == requested {
             return true
         }
-        if !descriptor.target.isEmpty, !isMessagesSend,
-           ephemeral.contains(ActionDescriptor(toolName: descriptor.toolName, target: ""))
-        {
+        return stored == .toolWide
+    }
+
+    /// Whether either ephemeral table covers the scope for one session.
+    ///
+    /// Single owner of the ephemeral match rule so task and session tables
+    /// cannot drift. A `messages.send` scope is always an exact canonical
+    /// handle, and a tool-wide send scope is never minted, so send trust stays
+    /// per-recipient without a special case here.
+    /// - Parameters:
+    ///   - scope: Scope the call is made under.
+    ///   - toolName: Name of the tool making the call.
+    ///   - sessionID: Session whose tables are read.
+    /// - Returns: True when either table covers the scope.
+    private func coversEphemeral(scope: AccessScope, toolName: String, sessionID: UUID) -> Bool {
+        let tables = [taskGrants[sessionID], sessionGrants[sessionID]].compactMap(\.self)
+        for table in tables where table.contains(where: { $0.toolName == toolName && Self.scope($0.scope, covers: scope) }) {
             return true
         }
         return false
     }
 
-    /// Whether any live or ephemeral task/session grant covers the descriptor,
-    /// either by exact target match or by a tool-wide grant with an empty target.
-    private func covers(_ descriptor: ActionDescriptor, sessionID: UUID? = nil) -> Bool {
-        if let sessionID {
-            if coversEphemeral(descriptor, in: taskGrants[sessionID]) {
-                return true
-            }
-            if coversEphemeral(descriptor, in: sessionGrants[sessionID]) {
-                return true
-            }
+    /// Whether either ephemeral table covers a live call for one session.
+    ///
+    /// The call's arguments decide through the single scope matcher, so a
+    /// stored recipient set, domain, path prefix, or glob is judged by exactly
+    /// the same code that judges a durable rule.
+    /// - Parameters:
+    ///   - toolName: Name of the tool making the call.
+    ///   - argumentsJSON: Raw tool arguments document.
+    ///   - sessionID: Session whose tables are read, or nil when unscoped.
+    /// - Returns: True when either table covers the call.
+    private func coversEphemeral(toolName: String, argumentsJSON: String, sessionID: UUID?) -> Bool {
+        guard let sessionID else { return false }
+        let tables = [taskGrants[sessionID], sessionGrants[sessionID]].compactMap(\.self)
+        for table in tables where table.contains(where: {
+            $0.toolName == toolName && $0.scope.matches(toolName: toolName, argumentsJSON: argumentsJSON)
+        }) {
+            return true
         }
-        return coveringGrantIndex(for: descriptor, at: Date()) != nil
+        return false
     }
 
-    /// Drops expired grants from memory only, without touching storage.
+    /// The durable deny rule covering a live call, if any.
     ///
-    /// Also ages out ephemeral session keys past their TTL so stale session
+    /// Consulted before every allow decision, so the ordering that makes deny
+    /// outrank is decided in exactly one place.
+    /// - Parameters:
+    ///   - toolCall: Raw invocation under test.
+    ///   - toolName: Name of the tool making the call.
+    /// - Returns: The covering deny rule, or nil when none covers it.
+    private func denyRule(matchingToolCall toolCall: ToolInput, toolName: String) -> AccessRule? {
+        rules.first {
+            $0.action == .deny && $0.isValid() && $0.covers(toolName: toolName, argumentsJSON: toolCall.argumentsJSON)
+        }
+    }
+
+    /// The durable allow rule covering a live call, if any.
+    /// - Parameters:
+    ///   - toolName: Name of the tool making the call.
+    ///   - argumentsJSON: Raw tool arguments document.
+    ///   - date: Reference date for expiry.
+    /// - Returns: The covering allow rule, or nil when none covers it.
+    private func coveringRule(toolName: String, argumentsJSON: String, at date: Date) -> AccessRule? {
+        rules.first {
+            $0.action == .allow && $0.isValid(at: date)
+                && $0.covers(toolName: toolName, argumentsJSON: argumentsJSON)
+        }
+    }
+
+    /// Refusal text for a deny rule, naming the rule's scope and reason.
+    /// - Parameter rule: Deny rule that refused the call.
+    /// - Returns: Caller-facing denial carrying no argument content.
+    private func denyReason(for rule: AccessRule) -> String {
+        let scope = Self.scopeLabel(rule.scope)
+        let reason = rule.reason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if reason.isEmpty {
+            return "Denied by rule: \(rule.toolName) is refused for \(scope)."
+        }
+        return "Denied by rule: \(rule.toolName) is refused for \(scope) (\(reason))."
+    }
+
+    /// Human-readable label for a scope, shared by denial text and the
+    /// ephemeral listing so both spell a scope the same way.
+    /// - Parameter scope: Scope to label.
+    /// - Returns: Short label carrying the scope's canonical payload.
+    private static func scopeLabel(_ scope: AccessScope) -> String {
+        switch scope {
+        case .toolWide:
+            "every target"
+        case let .exactTarget(target):
+            "target '\(target)'"
+        case let .recipientSet(members):
+            "recipients \(AccessScope.normalizeRecipients(members).joined(separator: ", "))"
+        case let .domain(host, subdomains):
+            subdomains ? "domain \(host) and its subdomains" : "domain \(host)"
+        case let .pathPrefix(prefix):
+            "path prefix \(prefix)"
+        case let .glob(pattern):
+            "command pattern \(pattern)"
+        }
+    }
+
+    /// Write posture for a `files.write` call, or nil when the call carries no
+    /// usable path.
+    ///
+    /// A missing or unparseable path answers nil so the call falls through to
+    /// parking rather than being trusted by a policy that never saw a target.
+    /// - Parameter toolCall: Raw `files.write` invocation.
+    /// - Returns: The policy decision, or nil when no path could be read.
+    private func writePathDecision(toolCall: ToolInput) -> WritePathPolicy.Decision? {
+        guard let path = Self.writePath(from: toolCall) else { return nil }
+        // The model-authored mode travels with the call so the `.model` write
+        // posture resolves exactly as the tool it hands the call to does.
+        let requestedMode = Self.writeRequestedMode(from: toolCall)
+        return WritePathPolicy.classify(
+            path: path,
+            filesConfig: filesConfig,
+            requestedMode: requestedMode
+        )
+    }
+
+    /// Per-call write mode a `files.write` call requests, or nil when absent.
+    ///
+    /// Only a real string value reaches the policy, so a malformed mode is an
+    /// absent one and the write stays on its safe default.
+    /// - Parameter toolCall: Raw `files.write` invocation.
+    /// - Returns: Requested mode, or nil when the call carries none.
+    private static func writeRequestedMode(from toolCall: ToolInput) -> String? {
+        guard let object = ActionDescriptor.parsedArgumentsObject(from: toolCall.argumentsJSON) else { return nil }
+        guard let raw = object["mode"], !(raw is NSNull) else { return nil }
+        guard let text = raw as? String else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// First non-empty path-shaped argument of a `files.write` call.
+    ///
+    /// Reads the same key list the protected-path guard screens, so the write
+    /// posture and the engine-file guard look at one call the same way.
+    /// - Parameter toolCall: Raw `files.write` invocation.
+    /// - Returns: Trimmed path, or nil when absent or unparseable.
+    private static func writePath(from toolCall: ToolInput) -> String? {
+        let candidateKeys = ["path", "file_path", "filePath", "target", "destination", "directory", "dir"]
+        guard let object = ActionDescriptor.parsedArgumentsObject(from: toolCall.argumentsJSON) else { return nil }
+        for key in candidateKeys {
+            guard let raw = object[key] as? String else { continue }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            return trimmed
+        }
+        return nil
+    }
+
+    /// Drops expired rules from memory only, without touching storage.
+    ///
+    /// A deny rule carries no expiry, so it never ages out; only allow rules
+    /// do. Also ages out ephemeral session keys past their TTL so stale session
     /// trust cannot linger when no teardown arrives.
     private func pruneExpired() {
         let now = Date()
-        grants.removeAll { $0.isExpired(at: now) }
+        rules.removeAll { $0.action == .allow && $0.isExpired(at: now) }
         evictStaleEphemeralGrants(now: now)
     }
 
-    /// Mirrors the current grants to the store in actor order.
+    /// Mirrors the current rules to the store in actor order.
     private func persist() async {
-        guard let store else { return }
-        let snapshot = grants
+        guard let ruleStore else { return }
+        let snapshot = rules
         do {
-            try await store.save(snapshot)
+            try await ruleStore.save(snapshot)
         } catch {
-            RuneWeaverLog.stores.error("PermissionGate: Failed to persist trust grants: \(error)")
+            RuneWeaverLog.stores.error("PermissionGate: Failed to persist access rules: \(error)")
         }
     }
 }

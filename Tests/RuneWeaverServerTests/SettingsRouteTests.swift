@@ -76,11 +76,11 @@ struct SettingsRouteTests {
         config.bash.timeoutSeconds = 120
         config.files.denyPatterns = ["custom*"]
 
-        // The dashboard wire shape for a containers edit: snake_case inside
+        // The dashboard wire shape for a containers edit: camelCase inside
         // the nested object, mirroring the accepted `PUT /settings` body.
         let request = try JSONDecoder().decode(
             UpdateSettingsRequest.self,
-            from: Data(#"{"containers":{"memory_mb":1024,"max_concurrent":8,"ttl_minutes":30}}"#.utf8)
+            from: Data(#"{"containers":{"memoryMb":1024,"maxConcurrent":8,"ttlMinutes":30}}"#.utf8)
         )
         #expect(request.containers?.memoryMB == 1024)
         #expect(request.containers?.maxConcurrent == 8)
@@ -101,28 +101,21 @@ struct SettingsRouteTests {
         #expect(response.containers.maxConcurrent == 8)
         #expect(response.containers.ttlMinutes == 30)
 
-        // The nested snapshot encodes as one object with snake_case keys so
+        // The nested snapshot encodes as one object with camelCase keys so
         // GET and PUT share a single lockstep shape.
         let encoded = try JSONEncoder().encode(response)
         let text = String(data: encoded, encoding: .utf8) ?? ""
         #expect(text.contains(#""containers""#))
-        #expect(text.contains("memory_mb"))
+        #expect(text.contains("memoryMb"))
+        #expect(!text.contains("memory_mb"))
         let decoded = try JSONDecoder().decode(SettingsResponse.self, from: encoded)
         #expect(decoded.containers == config.containers)
     }
 
     @Test
-    func `ContainersSettingsUpdate decodes both spellings with snake winning and encodes snake_case`() throws {
+    func `ContainersSettingsUpdate decodes and encodes camelCase`() throws {
         let decoder = JSONDecoder()
         let encoder = JSONEncoder()
-
-        let snake = try decoder.decode(
-            ContainersSettingsUpdate.self,
-            from: Data(#"{"memory_mb":1024,"max_concurrent":8,"ttl_minutes":30}"#.utf8)
-        )
-        #expect(snake.memoryMB == 1024)
-        #expect(snake.maxConcurrent == 8)
-        #expect(snake.ttlMinutes == 30)
 
         let camel = try decoder.decode(
             ContainersSettingsUpdate.self,
@@ -132,22 +125,14 @@ struct SettingsRouteTests {
         #expect(camel.maxConcurrent == 8)
         #expect(camel.ttlMinutes == 30)
 
-        let both = try decoder.decode(
-            ContainersSettingsUpdate.self,
-            from: Data(#"{"memory_mb":1024,"memoryMb":256,"max_concurrent":8,"maxConcurrent":2,"ttl_minutes":30,"ttlMinutes":60}"#.utf8)
-        )
-        #expect(both.memoryMB == 1024)
-        #expect(both.maxConcurrent == 8)
-        #expect(both.ttlMinutes == 30)
-
         let encoded = try encoder.encode(ContainersSettingsUpdate(memoryMB: 1024, maxConcurrent: 8, ttlMinutes: 30))
         let text = String(data: encoded, encoding: .utf8) ?? ""
-        #expect(text.contains("memory_mb"))
-        #expect(text.contains("max_concurrent"))
-        #expect(text.contains("ttl_minutes"))
-        #expect(!text.contains("memoryMb"))
-        #expect(!text.contains("maxConcurrent"))
-        #expect(!text.contains("ttlMinutes"))
+        #expect(text.contains("memoryMb"))
+        #expect(text.contains("maxConcurrent"))
+        #expect(text.contains("ttlMinutes"))
+        #expect(!text.contains("memory_mb"))
+        #expect(!text.contains("max_concurrent"))
+        #expect(!text.contains("ttl_minutes"))
     }
 
     @Test
@@ -836,21 +821,11 @@ struct SettingsRouteTests {
     }
 
     @Test
-    func `BashSettingsUpdate decodes camelCase aliases and encodes snake_case`() throws {
+    func `BashSettingsUpdate decodes and encodes camelCase`() throws {
         let decoder = JSONDecoder()
         let encoder = JSONEncoder()
 
-        // Snake_case stays canonical.
-        let snakePayload = "{\"default_action\":\"deny\",\"timeout_seconds\":120,\"allow_network\":true}"
-        let snake = try decoder.decode(
-            BashSettingsUpdate.self,
-            from: Data(snakePayload.utf8)
-        )
-        #expect(snake.defaultAction == "deny")
-        #expect(snake.timeoutSeconds == 120)
-        #expect(snake.allowNetwork == true)
-
-        // CamelCase aliases mirror the dashboard contract.
+        // CamelCase mirrors the wire contract.
         let camelPayload = "{\"defaultAction\":\"deny\",\"timeoutSeconds\":120,\"allowNetwork\":true}"
         let camel = try decoder.decode(
             BashSettingsUpdate.self,
@@ -860,33 +835,21 @@ struct SettingsRouteTests {
         #expect(camel.timeoutSeconds == 120)
         #expect(camel.allowNetwork == true)
 
-        // Snake wins when both spellings arrive so the contracts cannot fork.
-        let bothPayload = "{\"default_action\":\"deny\",\"defaultAction\":\"allow\","
-            + "\"timeout_seconds\":120,\"timeoutSeconds\":5,"
-            + "\"allow_network\":true,\"allowNetwork\":false}"
-        let both = try decoder.decode(
-            BashSettingsUpdate.self,
-            from: Data(bothPayload.utf8)
-        )
-        #expect(both.defaultAction == "deny")
-        #expect(both.timeoutSeconds == 120)
-        #expect(both.allowNetwork == true)
-
-        // Encode preserves snake_case so saved payloads keep the file shape.
+        // Encode emits camelCase.
         let encoded = try encoder.encode(
             BashSettingsUpdate(defaultAction: "deny", timeoutSeconds: 120, allowNetwork: true)
         )
         let text = String(data: encoded, encoding: .utf8) ?? ""
-        #expect(text.contains("default_action"))
-        #expect(text.contains("timeout_seconds"))
-        #expect(text.contains("allow_network"))
-        #expect(!text.contains("defaultAction"))
-        #expect(!text.contains("timeoutSeconds"))
-        #expect(!text.contains("allowNetwork"))
+        #expect(text.contains("defaultAction"))
+        #expect(text.contains("timeoutSeconds"))
+        #expect(text.contains("allowNetwork"))
+        #expect(!text.contains("default_action"))
+        #expect(!text.contains("timeout_seconds"))
+        #expect(!text.contains("allow_network"))
     }
 
     @Test
-    func `Bash cpu_seconds delta preserves other bash keys`() throws {
+    func `Bash cpuSeconds delta preserves other bash keys`() throws {
         var config = RuneWeaverConfig.default
         config.bash.enabled = false
         config.bash.defaultAction = .deny
@@ -899,11 +862,11 @@ struct SettingsRouteTests {
         config.bash.memoryMB = 1024
         config.bash.allowNetwork = true
 
-        // The dashboard wire shape for a single-knob edit: snake_case inside
+        // The dashboard wire shape for a single-knob edit: camelCase inside
         // the bash object, mirroring the accepted `PUT /settings` body.
         let request = try JSONDecoder().decode(
             UpdateSettingsRequest.self,
-            from: Data(#"{"bash":{"cpu_seconds":60}}"#.utf8)
+            from: Data(#"{"bash":{"cpuSeconds":60}}"#.utf8)
         )
         #expect(request.bash?.cpuSeconds == 60)
         #expect(request.bash?.memoryMb == nil)
@@ -1012,11 +975,10 @@ struct SettingsRouteTests {
     }
 
     @Test
-    func `Bash resource bounds keep snake_case with snake winning dual spellings`() throws {
+    func `Bash resource bounds decodes and encodes camelCase`() throws {
         let decoder = JSONDecoder()
         let encoder = JSONEncoder()
 
-        // CamelCase aliases mirror the dashboard contract.
         let camel = try decoder.decode(
             BashSettingsUpdate.self,
             from: Data(#"{"cpuSeconds":60,"memoryMb":512}"#.utf8)
@@ -1024,21 +986,12 @@ struct SettingsRouteTests {
         #expect(camel.cpuSeconds == 60)
         #expect(camel.memoryMb == 512)
 
-        // Snake wins when both spellings arrive so the contracts cannot fork.
-        let both = try decoder.decode(
-            BashSettingsUpdate.self,
-            from: Data(#"{"cpu_seconds":60,"cpuSeconds":5,"memory_mb":512,"memoryMb":256}"#.utf8)
-        )
-        #expect(both.cpuSeconds == 60)
-        #expect(both.memoryMb == 512)
-
-        // Encode preserves snake_case so saved payloads keep the file shape.
         let encoded = try encoder.encode(BashSettingsUpdate(cpuSeconds: 60, memoryMb: 512))
         let text = String(data: encoded, encoding: .utf8) ?? ""
-        #expect(text.contains("cpu_seconds"))
-        #expect(text.contains("memory_mb"))
-        #expect(!text.contains("cpuSeconds"))
-        #expect(!text.contains("memoryMb"))
+        #expect(text.contains("cpuSeconds"))
+        #expect(text.contains("memoryMb"))
+        #expect(!text.contains("cpu_seconds"))
+        #expect(!text.contains("memory_mb"))
     }
 
     @Test
@@ -1051,7 +1004,7 @@ struct SettingsRouteTests {
         // The dashboard wire shape for a single-knob edit.
         let request = try JSONDecoder().decode(
             UpdateSettingsRequest.self,
-            from: Data(#"{"workspace":{"quota_mb":100}}"#.utf8)
+            from: Data(#"{"workspace":{"quotaMB":100}}"#.utf8)
         )
         #expect(request.workspace?.quotaMB == 100)
         #expect(request.workspace?.quotaFiles == nil)
@@ -1127,20 +1080,11 @@ struct SettingsRouteTests {
     }
 
     @Test
-    func `WorkspaceUpdate decodes both spellings with snake winning and encodes snake_case`() throws {
+    func `WorkspaceUpdate decodes and encodes camelCase`() throws {
         let decoder = JSONDecoder()
         let encoder = JSONEncoder()
 
-        // Snake_case stays canonical.
-        let snake = try decoder.decode(
-            WorkspaceUpdate.self,
-            from: Data(#"{"quota_mb":100,"quota_files":200,"tmp_ttl_days":3}"#.utf8)
-        )
-        #expect(snake.quotaMB == 100)
-        #expect(snake.quotaFiles == 200)
-        #expect(snake.tmpTTLDays == 3)
-
-        // CamelCase aliases mirror the dashboard contract.
+        // CamelCase mirrors the dashboard contract.
         let camel = try decoder.decode(
             WorkspaceUpdate.self,
             from: Data(#"{"quotaMB":100,"quotaFiles":200,"tmpTTLDays":3}"#.utf8)
@@ -1149,24 +1093,15 @@ struct SettingsRouteTests {
         #expect(camel.quotaFiles == 200)
         #expect(camel.tmpTTLDays == 3)
 
-        // Snake wins when both spellings arrive so the contracts cannot fork.
-        let both = try decoder.decode(
-            WorkspaceUpdate.self,
-            from: Data(#"{"quota_mb":100,"quotaMB":200,"quota_files":200,"quotaFiles":400,"tmp_ttl_days":3,"tmpTTLDays":9}"#.utf8)
-        )
-        #expect(both.quotaMB == 100)
-        #expect(both.quotaFiles == 200)
-        #expect(both.tmpTTLDays == 3)
-
-        // Encode preserves snake_case so saved payloads keep the file shape.
+        // Encode emits camelCase.
         let encoded = try encoder.encode(WorkspaceUpdate(quotaMB: 100, quotaFiles: 200, tmpTTLDays: 3))
         let text = String(data: encoded, encoding: .utf8) ?? ""
-        #expect(text.contains("quota_mb"))
-        #expect(text.contains("quota_files"))
-        #expect(text.contains("tmp_ttl_days"))
-        #expect(!text.contains("quotaMB"))
-        #expect(!text.contains("quotaFiles"))
-        #expect(!text.contains("tmpTTLDays"))
+        #expect(text.contains("quotaMB"))
+        #expect(text.contains("quotaFiles"))
+        #expect(text.contains("tmpTTLDays"))
+        #expect(!text.contains("quota_mb"))
+        #expect(!text.contains("quota_files"))
+        #expect(!text.contains("tmp_ttl_days"))
     }
 
     @Test
@@ -1332,11 +1267,11 @@ struct SettingsRouteTests {
     }
 
     @Test
-    func `FanOutSettingsUpdate decodes snake_case wire keys`() throws {
-        // The dashboard PUT sends `{"fanout":{"max_workers":5}}`; the patch
+    func `FanOutSettingsUpdate decodes camelCase wire keys`() throws {
+        // The dashboard PUT sends `{"fanout":{"maxWorkers":5}}`; the patch
         // must land on the workers knob while the omitted knobs stay nil so
         // the merge preserves them instead of resetting.
-        let payload = #"{"fanout":{"max_workers":5}}"#
+        let payload = #"{"fanout":{"maxWorkers":5}}"#
         let request = try JSONDecoder().decode(
             UpdateSettingsRequest.self,
             from: Data(payload.utf8)
@@ -1450,12 +1385,12 @@ struct SettingsRouteTests {
         #expect(info.isEnabled == true)
 
         // Unrelated tools keep no Configure action so the fan-out addition
-        // never widens other rows; files.write is the one files tool exposing
-        // its own write review mode, and every other files tool stays clean.
+        // never widens other rows; the bash and files policies moved to the
+        // Access surface, so no files row exposes its own Configure action.
         let filesTools = FilesTools.makeTools(filesConfig: FilesConfig())
         for filesTool in filesTools {
             let listed = buildToolInfo(for: filesTool, isEnabled: true, recordByPluginID: [:])
-            #expect(listed.hasConfig == (filesTool.name == "files.write"))
+            #expect(listed.hasConfig == false)
         }
     }
 
@@ -2929,9 +2864,8 @@ struct SettingsPolicyLocalAccessTests {
     }
 
     @Test
-    func `NetworkEgressPolicyDTO emits camelCase and tolerates snake_case`() throws {
-        // The canonical wire shape is camelCase sorted; snake decodes but never
-        // encodes.
+    func `NetworkEgressPolicyDTO emits and decodes camelCase`() throws {
+        // The canonical wire shape is camelCase sorted; snake is not emitted.
         let dto = NetworkEgressPolicyDTO(
             mode: "allowlist_only",
             allowedDomains: ["127.0.0.1"],
@@ -2943,11 +2877,7 @@ struct SettingsPolicyLocalAccessTests {
         #expect(text.contains("localExemptions"))
         #expect(!text.contains("local_exemptions"))
 
-        let snakePayload = #"{"mode":"allowlist_only","allowed_domains":["127.0.0.1"],"blocked_domains":["169.254.169.254"],"local_exemptions":["192.168.1.10"]}"#
-        let snake = try JSONDecoder().decode(NetworkEgressPolicyDTO.self, from: Data(snakePayload.utf8))
-        #expect(snake.localExemptions == ["192.168.1.10"])
-
-        let camelPayload = #"{"mode":"allowlist_only","allowed_domains":["127.0.0.1"],"blocked_domains":["169.254.169.254"],"localExemptions":["192.168.1.10"]}"#
+        let camelPayload = #"{"mode":"allowlist_only","allowedDomains":["127.0.0.1"],"blockedDomains":["169.254.169.254"],"localExemptions":["192.168.1.10"]}"#
         let camel = try JSONDecoder().decode(NetworkEgressPolicyDTO.self, from: Data(camelPayload.utf8))
         #expect(camel.localExemptions == ["192.168.1.10"])
     }
@@ -3239,7 +3169,7 @@ struct SettingsPolicyRecheckLocalTests {
     }
 
     @Test
-    func `Domain validation parity with PolicyPane client validator`() async throws {
+    func `Domain validation parity with AccessNetworkSection client validator`() async throws {
         let (store, _, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
 

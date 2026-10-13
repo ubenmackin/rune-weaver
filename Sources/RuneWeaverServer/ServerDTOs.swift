@@ -55,9 +55,15 @@ public enum ServerPaths {
     public static let decide = "decide"
     /// Question response subpath under `/approvals/:id`.
     public static let respond = "respond"
-    /// Durable trust grants subpath under `/approvals`.
-    public static let grants = "grants"
-    /// Widen grant subpath under `/approvals/grants/:id`.
+    /// Durable access rules subpath under `/approvals`.
+    public static let rules = "rules"
+    /// Session trust subpath under `/approvals`.
+    public static let sessionTrust = "session-trust"
+    /// Ephemeral trust subpath under `/approvals`.
+    public static let ephemeral = "ephemeral"
+    /// Ephemeral trust clear subpath under `/approvals/ephemeral`.
+    public static let clear = "clear"
+    /// Widen rule subpath under `/approvals/rules/:id`.
     public static let widen = "widen"
     /// Scheduler group.
     public static let scheduler = "scheduler"
@@ -963,42 +969,29 @@ extension ApprovalsResponse {
     }
 }
 
-/// Tiers for network egress interactive decisions.
-public enum EgressDecisionTier: String, Codable, Sendable, Equatable {
-    /// Allow this single tool call invocation.
-    case allowOnce
-    /// Allow for the duration of the active chat session.
-    case allowSession
-    /// Permanently add to policy.toml allowed_domains.
-    case alwaysAllow
-    /// Deny this single tool call invocation.
-    case deny
-    /// Permanently add to policy.toml blocked_domains.
-    case denyAlways
-}
-
 /// Approval decision request for `POST /approvals/:id/decide`.
+///
+/// The single decision path every transport sends: the chat inline banner, the
+/// approvals inbox, the dashboard quick action, and WebSocket triage all post
+/// this one body, so tier semantics cannot drift between surfaces. An
+/// egress-parked request resolves its own domain scope, which is why the scope
+/// stays optional rather than required.
 public struct ApprovalDecisionRequest: Content, Equatable {
     /// Whether the tool call may run.
     public let approved: Bool
     /// Graduated-trust tier recorded on approval. Defaults to `thisTime`.
     public var duration: TrustDuration?
-    /// Whether to grant tool-wide trust matching any target.
-    public var widen: Bool?
-    /// Network egress decision tier when deciding an egress approval.
-    public var egressDecision: EgressDecisionTier?
+    /// How wide a durable decision reaches. Nil derives the request's own
+    /// scope: an egress-parked request resolves to the host it dialed, every
+    /// other request to the target the gate derives for the next identical
+    /// call.
+    public var scope: AccessScopeDTO?
 
     /// Creates a decision request.
-    public init(
-        approved: Bool,
-        duration: TrustDuration? = nil,
-        widen: Bool? = nil,
-        egressDecision: EgressDecisionTier? = nil
-    ) {
+    public init(approved: Bool, duration: TrustDuration? = nil, scope: AccessScopeDTO? = nil) {
         self.approved = approved
         self.duration = duration
-        self.widen = widen
-        self.egressDecision = egressDecision
+        self.scope = scope
     }
 
     /// Trust tier, defaulting to `thisTime` (one-shot).
@@ -1007,13 +1000,10 @@ public struct ApprovalDecisionRequest: Content, Equatable {
         DTODefaults.duration(duration)
     }
 
-    /// Whether to grant tool-wide trust matching any target, defaulting to
-    /// `false` so an omitted flag never silently widens a grant. Kept beside
-    /// `resolvedDuration` so the decision defaults stay single-sourced across
-    /// the REST and WebSocket paths.
-    /// - Returns: Resolved widen flag.
-    public var resolvedWiden: Bool {
-        widen ?? false
+    /// Canonical core scope the request names, or nil when omitted or malformed.
+    /// - Returns: Canonical scope, or nil when the caller stored nothing.
+    public var resolvedScope: AccessScope? {
+        scope?.accessScope()
     }
 }
 

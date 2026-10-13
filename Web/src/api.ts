@@ -459,13 +459,6 @@ export interface ImpactAssessment {
   warnings?: string[];
 }
 
-export type EgressDecisionTier =
-  | "allowOnce"
-  | "allowSession"
-  | "alwaysAllow"
-  | "deny"
-  | "denyAlways";
-
 export interface PermissionRequest {
   id: string;
   toolName: string;
@@ -479,9 +472,7 @@ export interface PermissionRequest {
   intent?: string | null;
   assessment?: ImpactAssessment | null;
   egressHost?: string | null;
-  egress_host?: string | null;
   sandboxSummary?: string | null;
-  sandbox_summary?: string | null;
 }
 
 export interface ApprovalsResponse {
@@ -495,13 +486,68 @@ export interface ApprovalDecisionResponse {
   duration: TrustDuration;
 }
 
-// Graduated-trust grant minted from an approval decision: one row per tool-plus-target pair
-// that stays auto-approved until revoked or expired. A null expiresAt is the forever tier,
-// so the dashboard must render it as never expiring rather than as missing data.
-export interface TrustGrant {
+// Scope one durable rule or one decision covers: the discriminator plus only
+// the per-kind fields that name what trust reaches. A tool-wide scope carries
+// its kind alone and matches any target for the tool; an exactTarget scope
+// names one target (a canonical handle for `messages.send`); a recipientSet
+// scope names the canonical handles a send may reach; a domain scope names one
+// egress host. Every other shape fails isAccessScope instead of reaching the
+// wire.
+export type AccessScopeDTO =
+  | { kind: "tool" }
+  | { kind: "exactTarget"; target: string }
+  | { kind: "recipientSet"; handles: string[] }
+  | { kind: "domain"; host: string };
+
+// Shared scope-text check: a scope field must carry visible characters, so a
+// blank or whitespace-only value names no target and fails the guard.
+function isScopeText(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+// Reports whether a value is a well-formed scope DTO: a known kind plus the
+// per-kind fields that kind requires. Fail-closed on every other shape — an
+// unknown kind, a missing or blank field, a wrong field type, or an empty
+// handle set — so a malformed scope fails here instead of reaching the wire,
+// where a drifted kind could mint trust the owner never chose.
+export function isAccessScope(value: unknown): value is AccessScopeDTO {
+  if (!isRecord(value)) return false;
+  const kind = value.kind;
+  if (typeof kind !== "string") return false;
+  switch (kind) {
+    case "tool":
+      return true;
+    case "exactTarget":
+      return isScopeText(value.target);
+    case "recipientSet":
+      return (
+        Array.isArray(value.handles) &&
+        value.handles.length > 0 &&
+        value.handles.every((handle) => isScopeText(handle))
+      );
+    case "domain":
+      return isScopeText(value.host);
+    default:
+      return false;
+  }
+}
+
+// Effect a durable access rule carries: an allow rule keeps a matching call
+// auto-approved until it expires or is revoked, while a deny rule parks the
+// matching call every time. A `forever` refusal mints a deny rule exactly like
+// a `forever` approval mints an allow rule.
+export type AccessRuleEffect = "allow" | "deny";
+
+// Durable access rule minted from a non-thisTime decision or from the rules
+// surface: one row per tool-plus-scope pair that stays auto-approved (or
+// parked, for a deny rule) until revoked or expired. A null expiresAt is the
+// forever tier, so the dashboard must render it as never expiring rather than
+// as missing data.
+export interface AccessRule {
   id: string;
   toolName: string;
-  target: string;
+  scope: AccessScopeDTO;
+  effect: AccessRuleEffect;
   // Creation time in either wire shape the engine emits: ISO-8601 strings from older payloads
   // or Unix seconds as JSON numbers from SQLite persistence. Kept as a union so callers
   // normalize through parseRunTimestamp instead of assuming one encoding.
@@ -510,20 +556,57 @@ export interface TrustGrant {
   // survive as "forever" through every UI path rather than collapsing to the epoch.
   expiresAt: string | number | null;
   duration: TrustDuration;
-  // Auto-approved hit count so the inbox can distinguish untouched grants from exercised
-  // trust without re-deriving it from run history. Zero means the grant never fired. Optional
+  // Auto-approved hit count so the inbox can distinguish untouched rules from exercised
+  // trust without re-deriving it from run history. Zero means the rule never fired. Optional
   // because rows minted before usage tracking omit the key; absent degrades to untouched.
   useCount?: number;
-  // Last auto-approved use in either wire shape, or null when the grant never fired. Kept as
+  // Last auto-approved use in either wire shape, or null when the rule never fired. Kept as
   // the same ISO-or-Unix-seconds union as grantedAt/expiresAt so callers normalize through
   // parseRunTimestamp instead of branching on the encoding. Optional because legacy payloads
   // omit the key entirely; absent degrades to untouched like an explicit null.
   lastUsedAt?: string | number | null;
 }
 
-export interface TrustGrantsResponse {
-  grants: TrustGrant[];
+export interface AccessRulesResponse {
+  rules: AccessRule[];
   count: number;
+}
+
+// One ephemeral (never-persisted) grant a session still carries: the thisTime,
+// forTask, and forSession tiers that expire with their turn, task, or session
+// instead of surviving into the durable rule store. Ephemeral grants carry no
+// identity and no effect because a refusal stores nothing at all.
+export interface EphemeralGrantDTO {
+  toolName: string;
+  scope: AccessScopeDTO;
+  duration: TrustDuration;
+  grantedAt: string | number;
+  // Expiry in the same dual wire shape as a durable rule, or null when the
+  // tier runs to the end of its task or session rather than to a clock time.
+  expiresAt: string | number | null;
+  // Hit counters ride the same optional contract as a durable rule so the
+  // session view proves an exercised grant without a second derivation.
+  useCount?: number;
+  lastUsedAt?: string | number | null;
+}
+
+// Session trust view: the ephemeral grants one session still carries, listed so
+// the dashboard can show what stays auto-approved for the rest of the session
+// without re-deriving it from run history.
+export interface SessionTrustResponse {
+  sessionID: string;
+  grants: EphemeralGrantDTO[];
+  count: number;
+}
+
+// Creation request for the rules surface. The tool plus effect plus scope plus
+// tier fully describe the rule, so the client validates the whole shape before
+// the wire instead of asking the engine to store a half-described rule.
+export interface NewAccessRuleInput {
+  tool: string;
+  effect: AccessRuleEffect;
+  scope: AccessScopeDTO;
+  duration: TrustDuration;
 }
 
 export interface MemoryResult {
@@ -1923,18 +2006,31 @@ export function listApprovals(limit?: number): Promise<ApprovalsResponse> {
   return fetchJson<ApprovalsResponse>(`/approvals${query}`);
 }
 
-export function decideApproval(
+// Single decision path shared by the chat banner, the inbox, the dashboard
+// quick action, and WebSocket triage: one POST carrying
+// {approved, duration, scope}. The scope is optional and names what a stored
+// rule would cover — omitted, the engine resolves the request's own target.
+// A malformed scope fails the guard before the wire so the client refuses a
+// decision it cannot describe instead of letting a drifted DTO reach the
+// engine and mint trust the owner never chose.
+export async function decideApproval(
   id: string,
   approved: boolean,
   duration: TrustDuration = "thisTime",
-  widen?: boolean,
-  egressDecision?: EgressDecisionTier,
+  scope?: AccessScopeDTO,
 ): Promise<ApprovalDecisionResponse> {
+  if (scope !== undefined && !isAccessScope(scope)) {
+    throw new ApiError("Decision scope is malformed", 0);
+  }
   return fetchJson<ApprovalDecisionResponse>(
     `/approvals/${encodeURIComponent(id)}/decide`,
     {
       method: "POST",
-      body: JSON.stringify({ approved, duration, widen, egressDecision }),
+      body: JSON.stringify({
+        approved,
+        duration,
+        ...(scope !== undefined ? { scope } : {}),
+      }),
     },
   );
 }
@@ -1953,54 +2049,142 @@ export function respondToQuestion(
   );
 }
 
-// Normalizes a grant expiry into a Date while preserving the forever contract: null stays
+// Normalizes a rule expiry into a Date while preserving the forever contract: null stays
 // null so callers can branch on "never expires" without sentinel-date comparisons. Non-null
 // values delegate to parseRunTimestamp because the engine emits the same dual wire shape as
 // run timestamps (Unix seconds from SQLite versus ISO strings from older payloads).
-export function parseTrustGrantExpiry(
+export function parseRuleExpiry(
   value: string | number | null | undefined,
 ): Date | null {
   if (value == null) return null;
   return parseRunTimestamp(value);
 }
 
-// Lists active graduated-trust grants so the dashboard can show what stays auto-approved
-// without re-deriving it from the pending approvals inbox.
-export function listTrustGrants(): Promise<TrustGrantsResponse> {
-  return fetchJson<TrustGrantsResponse>("/approvals/grants");
+// Lists durable access rules so the dashboard can show what stays
+// auto-approved (or parked, for a deny rule) without re-deriving it from the
+// pending approvals inbox.
+export function listRules(): Promise<AccessRulesResponse> {
+  return fetchJson<AccessRulesResponse>("/approvals/rules");
 }
 
-// Widens an active grant to all targets (empty target).
-export function widenTrustGrant(id: string): Promise<void> {
-  return fetchJson<void>(
-    `/approvals/grants/${encodeURIComponent(id)}/widen`,
-    {
-      method: "POST",
-    },
-  );
-}
-
-// Revokes one grant by id. A 404 surfaces as ApiError through the shared fetchJson reason
-// parsing so the UI can explain the grant already lapsed; a successful revoke returns 204
-// with no body, which fetchJson maps to void.
-export function revokeTrustGrant(id: string): Promise<void> {
-  return fetchJson<void>(`/approvals/grants/${encodeURIComponent(id)}`, {
+// Revokes one rule by id. A 404 surfaces as ApiError through the shared fetchJson reason
+// parsing so the UI can explain the rule already lapsed; a successful revoke returns 204
+// with no body, which fetchJson maps to void. Revocation stops future matches only — past
+// allowed calls already happened and stay in history.
+export function revokeRule(id: string): Promise<void> {
+  return fetchJson<void>(`/approvals/rules/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }
 
-// Re-arms an active grant with a new expiry tier in place. The engine keeps the
-// grant identity and usage counters and recomputes expiry from confirmation
-// time, so the client only sends the new duration and refreshes grants on
-// trust_grants_changed; a 404 surfaces as ApiError when the grant already lapsed.
-export function changeDurationGrant(
+// Widens an active rule to a tool-wide scope. The engine keeps the rule
+// identity and recomputes scope in place, so the client only names the rule
+// and refreshes on `access_rules_changed`; a 404 surfaces as ApiError when the
+// rule already lapsed, and a rule the engine cannot widen (a send rule) stays
+// a 409 with its reason.
+export function widenRule(id: string): Promise<void> {
+  return fetchJson<void>(`/approvals/rules/${encodeURIComponent(id)}/widen`, {
+    method: "POST",
+  });
+}
+
+// Re-arms an active rule with a new expiry tier in place. The engine keeps the
+// rule identity and usage counters and recomputes expiry from confirmation
+// time, so the client only sends the new duration and refreshes rules on
+// `access_rules_changed`; a 404 surfaces as ApiError when the rule already lapsed.
+export function rearmRule(
   id: string,
   duration: TrustDuration,
 ): Promise<void> {
-  return fetchJson<void>(`/approvals/grants/${encodeURIComponent(id)}`, {
+  return fetchJson<void>(`/approvals/rules/${encodeURIComponent(id)}`, {
     method: "PATCH",
     body: JSON.stringify({ duration }),
   });
+}
+
+// Reports whether a value names a tier in the shared duration vocabulary.
+// Single source for the rule validator so the client refuses a tier the
+// engine would reject.
+function isTrustDurationValue(value: unknown): value is TrustDuration {
+  return trustDurationOptions.some((option) => option.value === value);
+}
+
+// Fail-closed validator for a rule creation request: the tool must name a
+// tool, the effect must be allow or deny, the scope must pass isAccessScope,
+// and the tier must come from the shared duration vocabulary. Every other
+// shape returns false so createRule refuses before the wire.
+function isAccessRuleInput(value: unknown): value is NewAccessRuleInput {
+  if (!isRecord(value)) return false;
+  const tool = value.tool;
+  if (typeof tool !== "string" || tool.trim().length === 0) return false;
+  if (value.effect !== "allow" && value.effect !== "deny") return false;
+  if (!isAccessScope(value.scope)) return false;
+  return isTrustDurationValue(value.duration);
+}
+
+// Mints a durable rule directly from the rules surface. The engine broadcasts
+// `access_rules_changed` after the write, so every open dashboard refetches the
+// list without a manual refresh. A malformed input fails here before the wire
+// instead of asking the engine to store a half-described rule.
+export async function createRule(
+  input: NewAccessRuleInput,
+): Promise<AccessRule> {
+  if (!isAccessRuleInput(input)) {
+    throw new ApiError("Access rule request is malformed", 0);
+  }
+  return fetchJson<AccessRule>("/approvals/rules", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+// Reads the ephemeral trust one session still carries: the thisTime, forTask,
+// and forSession grants that expire with their turn, task, or session instead
+// of surviving into the durable rule store.
+export function sessionTrust(sessionID: string): Promise<SessionTrustResponse> {
+  const trimmed = sessionID.trim();
+  const query = trimmed ? `?sessionID=${encodeURIComponent(trimmed)}` : "";
+  return fetchJson<SessionTrustResponse>(`/approvals/session-trust${query}`);
+}
+
+// One revoke request for the ephemeral trust one session carries.
+export interface EphemeralClearInput {
+  sessionID: string;
+  toolName: string;
+  scope: AccessScopeDTO;
+}
+
+// Revokes the ephemeral trust one session still carries for one tool plus
+// scope: the chip posts the owning session, the trusted tool, and the scoped
+// target verbatim so the clear reaches exactly the row the owner clicked.
+// Clearing stops future auto-approvals only — past allowed calls already
+// happened and stay in history. A failure surfaces as ApiError through the
+// shared fetchJson reason parsing so the caller keeps the row until proven
+// cleared.
+export function clearEphemeralTrust(
+  input: EphemeralClearInput,
+): Promise<void> {
+  if (!isEphemeralClearInput(input)) {
+    throw new ApiError("Ephemeral trust clear request is malformed", 0);
+  }
+  return fetchJson<void>("/approvals/ephemeral/clear", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+// Fail-closed validator for the revoke request: the session and tool must name
+// something and the scope must pass isAccessScope, mirroring createRule's
+// pre-wire refusal so a half-described clear never reaches the engine.
+function isEphemeralClearInput(value: unknown): value is EphemeralClearInput {
+  if (!isRecord(value)) return false;
+  if (typeof value.sessionID !== "string" || value.sessionID.trim().length === 0) {
+    return false;
+  }
+  if (typeof value.toolName !== "string" || value.toolName.trim().length === 0) {
+    return false;
+  }
+  return isAccessScope(value.scope);
 }
 
 export function searchMemory(
@@ -2662,7 +2846,7 @@ export function parseGoalSnapshot(value: unknown): Goal | null {
   // Canonical `originSessionId` wins when several historical spellings ride
   // together, mirroring the engine's alias-tolerant decoder.
   const originRaw =
-    value.originSessionId ?? value.originSessionID ?? value.origin_session_id;
+    value.originSessionId ?? value.originSessionID;
   const originSessionId =
     typeof originRaw === "string" && originRaw.trim() ? originRaw : null;
   // Runtime-validate each timestamp instead of casting: a drifted object or
@@ -2852,7 +3036,7 @@ export function parseIdea(value: unknown): Idea | null {
   const title = rawTitle.trim();
   if (!title) return null;
   const body = typeof value.body === "string" ? value.body : "";
-  const goalRaw = value.goalId ?? value.goalID ?? value.goal_id;
+  const goalRaw = value.goalId ?? value.goalID;
   const trimmedGoal = typeof goalRaw === "string" ? goalRaw.trim() : "";
   const goalId = trimmedGoal ? trimmedGoal : null;
   // Type-check timestamps rather than casting so a drifted object or boolean
@@ -2920,24 +3104,16 @@ export function dismissIdea(id: string): Promise<Idea> {
 export interface ProviderConfigData {
   enabled: boolean;
   model?: string;
-  server_url?: string;
   serverURL?: string;
-  api_key_env?: string;
   apiKeyEnv?: string;
-  provider_type?: string;
   providerType?: string;
-  api_style?: string;
   apiStyle?: string;
-  context_length?: number;
   contextLength?: number;
   // llama.cpp prefix-reuse knobs round-tripped through SettingsResponse providers. Dual snake/camel
   // aliases mirror the existing provider pattern so file-configured values survive a dashboard
   // PUT instead of being stripped to nil. Absent stays unset (server auto-assign / always-on hint).
-  slot_count?: number;
   slotCount?: number;
-  cache_prompt?: boolean;
   cachePrompt?: boolean;
-  supports_vision?: boolean;
   supportsVision?: boolean;
 }
 
@@ -2947,14 +3123,11 @@ export interface EmailAccountData {
   host: string;
   port: number;
   username: string;
-  // Optional SMTP overrides persisted as smtp_host/smtp_port/smtp_security.
+  // Optional SMTP overrides persisted as smtpHost/smtpPort/smtpSecurity.
   // Camel-case aliases mirror the provider pattern so older dashboards keep
   // round-tripping without dropping overrides.
-  smtp_host?: string;
   smtpHost?: string;
-  smtp_port?: number;
   smtpPort?: number;
-  smtp_security?: string;
   smtpSecurity?: string;
 }
 
@@ -2967,11 +3140,8 @@ export interface EmailAccountData {
 export interface ArrServiceConfigData {
   enabled: boolean;
   url?: string;
-  api_key_env?: string;
   apiKeyEnv?: string;
-  default_quality_profile?: string;
   defaultQualityProfile?: string;
-  default_root_folder?: string;
   defaultRootFolder?: string;
 }
 
@@ -2985,7 +3155,6 @@ export type RadarrConfigData = ArrServiceConfigData;
 export interface MediaConfigData {
   sonarr: SonarrConfigData;
   radarr: RadarrConfigData;
-  timeout_seconds?: number;
   timeoutSeconds?: number;
 }
 
@@ -3003,12 +3172,12 @@ export interface IndexConfigData {
   reminders: boolean;
   roots: string[];
   exclude: string[];
-  max_file_mb: number;
-  mail_vector_window: string;
-  icloud_evicted: string;
-  describe_images_with_llm: boolean;
-  nightly_budget: number;
-  db_path: string;
+  maxFileMB: number;
+  mailVectorWindow: string;
+  iCloudEvicted: string;
+  describeImagesWithLLM: boolean;
+  nightlyBudget: number;
+  dbPath: string;
   // Indexing effort preset (`light`, `balanced`, `performance`, or `custom`).
   // Optional for back-compat with older engines that predate the knob; absent
   // degrades to the balanced default instead of failing.
@@ -3019,22 +3188,22 @@ export interface IndexConfigData {
   workers?: number;
   // Whether the run backs off when the machine reports thermal pressure.
   // Optional for back-compat; absent degrades to the default.
-  thermal_backoff?: boolean;
+  thermalBackoff?: boolean;
   // Whether scheduled and on-demand runs pause while on battery power.
   // Optional for back-compat; absent degrades to the default.
-  pause_on_battery?: boolean;
+  pauseOnBattery?: boolean;
   // Maximum vector chunks stored per document, bounding per-document
   // embedding work; chunks beyond the cap stay keyword-only. Optional for
   // back-compat; absent degrades to the engine default instead of failing.
-  max_vector_chunks_per_document?: number;
+  maxVectorChunksPerDocument?: number;
   // Trash-class mailbox denylist skipped without dialing. Optional for
   // back-compat; absent degrades to the engine default instead of failing.
-  mailbox_deny?: string[];
+  mailboxDeny?: string[];
   // Directory and file names the walker always skips, even when absent from
   // `exclude`. Read-only: populated by the engine from the walker's prune list
   // and ignored on write. Optional for back-compat with older engines that
   // predate the field; absent degrades to an empty list instead of failing.
-  always_skipped?: string[];
+  alwaysSkipped?: string[];
 }
 
 // Partial index patch for `PUT /settings`, mirroring the engine
@@ -3050,18 +3219,18 @@ export interface IndexSettingsUpdate {
   reminders?: boolean;
   roots?: string[];
   exclude?: string[];
-  max_file_mb?: number;
-  mail_vector_window?: string;
-  icloud_evicted?: string;
-  describe_images_with_llm?: boolean;
-  nightly_budget?: number;
-  db_path?: string;
+  maxFileMB?: number;
+  mailVectorWindow?: string;
+  iCloudEvicted?: string;
+  describeImagesWithLLM?: boolean;
+  nightlyBudget?: number;
+  dbPath?: string;
   effort?: string;
   workers?: number;
-  thermal_backoff?: boolean;
-  pause_on_battery?: boolean;
-  max_vector_chunks_per_document?: number;
-  mailbox_deny?: string[];
+  thermalBackoff?: boolean;
+  pauseOnBattery?: boolean;
+  maxVectorChunksPerDocument?: number;
+  mailboxDeny?: string[];
 }
 
 // Native desktop vision and gated control policy mirroring the engine
@@ -3071,9 +3240,9 @@ export interface IndexSettingsUpdate {
 // the blocklist live here; enablement lives in the tool-state toggles and no
 // secret ever appears.
 export interface DesktopConfigData {
-  max_image_dimension: number;
-  jpeg_quality: number;
-  blocked_apps: string[];
+  maxImageDimension: number;
+  jpegQuality: number;
+  blockedApps: string[];
 }
 
 // Partial desktop patch for `PUT /settings`, mirroring the engine
@@ -3081,9 +3250,9 @@ export interface DesktopConfigData {
 // key leaves the rest of the stored `[desktop]` section untouched; the JSON
 // keys are the snake_case names the engine persists.
 export interface DesktopSettingsUpdate {
-  max_image_dimension?: number;
-  jpeg_quality?: number;
-  blocked_apps?: string[];
+  maxImageDimension?: number;
+  jpegQuality?: number;
+  blockedApps?: string[];
 }
 
 // Steady goal pursuit policy mirroring the engine `GoalsConfig`
@@ -3092,17 +3261,11 @@ export interface DesktopSettingsUpdate {
 // is stored on each new goal and the active cap bounds scheduler fan-out.
 export interface GoalsConfigData {
   enabled: boolean;
-  step_interval_minutes: number;
   stepIntervalMinutes?: number;
-  max_active_goals: number;
   maxActiveGoals?: number;
-  max_steps_per_goal?: number;
   maxStepsPerGoal?: number;
-  plan_timeout_seconds?: number;
   planTimeoutSeconds?: number;
-  max_triggers_per_goal?: number;
   maxTriggersPerGoal?: number;
-  max_tool_iterations?: number;
   maxToolIterations?: number;
 }
 
@@ -3113,15 +3276,10 @@ export interface GoalsConfigData {
 // camelCase aliases, so either spelling writes.
 export interface GoalsSettingsUpdate {
   enabled?: boolean;
-  step_interval_minutes?: number;
   stepIntervalMinutes?: number;
-  max_active_goals?: number;
   maxActiveGoals?: number;
-  max_steps_per_goal?: number;
   maxStepsPerGoal?: number;
-  plan_timeout_seconds?: number;
   planTimeoutSeconds?: number;
-  max_triggers_per_goal?: number;
   maxTriggersPerGoal?: number;
 }
 
@@ -3129,7 +3287,6 @@ export interface GoalsSettingsUpdate {
 // (Sources/RuneWeaverCore/Scheduler.swift). The section default bounds
 // consecutive tool rounds per scheduled run; a per-job override wins.
 export interface SchedulerConfigData {
-  max_tool_iterations?: number | null;
   maxToolIterations?: number | null;
 }
 
@@ -3165,7 +3322,6 @@ export function schedulerMaxToolIterations(
 ): number {
   const raw =
     settings?.schedulerMaxToolIterations ??
-    settings?.scheduler?.max_tool_iterations ??
     settings?.scheduler?.maxToolIterations;
   return clampToolRounds(raw, DEFAULT_SCHEDULER_MAX_TOOL_ITERATIONS);
 }
@@ -3198,7 +3354,7 @@ export function engineMaxToolIterations(
 // approvals inbox always record regardless of mode.
 export interface ProactiveConfigData {
   mode: string;
-  judge_timeout_seconds: number;
+  judgeTimeoutSeconds: number;
 }
 
 // Partial proactive patch for `PUT /settings`, mirroring the engine
@@ -3206,7 +3362,6 @@ export interface ProactiveConfigData {
 // leaves the rest of the stored `[proactive]` section untouched.
 export interface ProactiveSettingsUpdate {
   mode?: string;
-  judge_timeout_seconds?: number;
   judgeTimeoutSeconds?: number;
 }
 
@@ -3216,18 +3371,14 @@ export interface ProactiveSettingsUpdate {
 // stay file-owned planning bounds.
 export interface IdeasConfigData {
   enabled: boolean;
-  max_per_cycle: number;
   maxPerCycle?: number;
-  timeout_seconds: number;
   timeoutSeconds?: number;
 }
 
 // Partial ideas patch for `PUT /settings`, mirroring the engine `IdeasUpdate`.
 export interface IdeasSettingsUpdate {
   enabled?: boolean;
-  max_per_cycle?: number;
   maxPerCycle?: number;
-  timeout_seconds?: number;
   timeoutSeconds?: number;
 }
 
@@ -3244,13 +3395,12 @@ export const DEFAULT_GOALS_MAX_ACTIVE_GOALS = 10;
 // Default goal-run tool rounds mirroring GoalsConfig.
 export const DEFAULT_GOALS_MAX_TOOL_ITERATIONS = 35;
 
-// Reads the live goal tool budget from GET /settings, preferring snake_case
-// then camelCase and falling back to the engine default on absent or drifted shapes.
+// Reads the live goal tool budget from GET /settings, preferring camelCase
+// and falling back to the engine default on absent or drifted shapes.
 export function goalsMaxToolIterations(
   goals: GoalsConfigData | undefined | null,
 ): number {
   const raw =
-    goals?.max_tool_iterations ??
     goals?.maxToolIterations ??
     DEFAULT_GOALS_MAX_TOOL_ITERATIONS;
   return clampToolRounds(raw, DEFAULT_GOALS_MAX_TOOL_ITERATIONS);
@@ -3331,32 +3481,21 @@ export const PROACTIVE_JUDGE_TIMEOUT_MAX_SECONDS = 120;
 // (Sources/RuneWeaverCore/Config.swift). One `[containers]` table governs the
 // container tiers: the guest memory budget, the concurrent-container cap, and
 // the idle reclamation TTL across bash tiers plus detonation; the images
-// themselves are pinned in code and carry no key. The canonical wire keys are
-// snake_case; camelCase aliases decode the same way as the `WorkspaceUpdate`
-// patch, so either spelling reads while the dashboard sends snake_case to
-// keep the file shape.
+// themselves are pinned in code and carry no key.
 export interface ContainersConfigData {
-  memory_mb: number;
-  memoryMb?: number;
-  max_concurrent: number;
-  maxConcurrent?: number;
-  ttl_minutes: number;
-  ttlMinutes?: number;
+  memoryMb: number;
+  maxConcurrent: number;
+  ttlMinutes: number;
 }
 
 // Partial containers patch for `PUT /settings`, mirroring the engine
 // `ContainersUpdate`. Every field is optional so a request carrying one key
 // leaves the rest of the stored `[containers]` section untouched. The
-// dashboard sends the snake_case keys the engine persists; camelCase aliases
-// decode but never encode so saved payloads keep the file shape. Legacy
-// sandbox keys are ignored server-side and shed on resave, so no sandbox
-// alias exists here.
+// dashboard sends camelCase keys only. Legacy sandbox keys are ignored
+// server-side and shed on resave, so no sandbox alias exists here.
 export interface ContainersSettingsUpdate {
-  memory_mb?: number;
   memoryMb?: number;
-  max_concurrent?: number;
   maxConcurrent?: number;
-  ttl_minutes?: number;
   ttlMinutes?: number;
 }
 
@@ -3381,9 +3520,9 @@ export const CONTAINERS_TTL_MAX_MINUTES = 1440;
 // form seeds from this so the knob editors match the boundary the engine
 // enforces before the first settings fetch.
 export const DEFAULT_CONTAINERS_CONFIG: ContainersConfigData = {
-  memory_mb: DEFAULT_CONTAINERS_MEMORY_MB,
-  max_concurrent: DEFAULT_CONTAINERS_MAX_CONCURRENT,
-  ttl_minutes: DEFAULT_CONTAINERS_TTL_MINUTES,
+  memoryMb: DEFAULT_CONTAINERS_MEMORY_MB,
+  maxConcurrent: DEFAULT_CONTAINERS_MAX_CONCURRENT,
+  ttlMinutes: DEFAULT_CONTAINERS_TTL_MINUTES,
 };
 
 // Sandboxed shell execution policy mirroring the engine `BashConfig`
@@ -3405,40 +3544,33 @@ export interface BashRuleData {
 // both read either key and send the snake form the file persists. The bounds
 // plus the sandbox tier and host allowlist stay optional because older
 // engines omit them, and the form keeps its defaults until a value arrives.
+// Full bash snapshot on `GET /settings`, mirroring the engine `BashConfig`.
+// The canonical wire keys are camelCase only.
 export interface BashConfigData {
   enabled: boolean;
-  default_action: string;
-  defaultAction?: string;
+  defaultAction: string;
   rules: BashRuleData[];
-  timeout_seconds: number;
-  timeoutSeconds?: number;
-  cpu_seconds?: number;
+  timeoutSeconds: number;
   cpuSeconds?: number;
-  memory_mb?: number;
   memoryMb?: number;
-  allow_network: boolean;
-  allowNetwork?: boolean;
-  sandbox_mode?: string;
+  allowNetwork: boolean;
   sandboxMode?: string;
-  host_allow_patterns?: string[];
   hostAllowPatterns?: string[];
 }
 
 // Partial bash patch for `PUT /settings`, mirroring the engine
 // `BashSettingsUpdate`. Every field is optional so a request carrying one
-// key leaves the rest of the stored `[bash]` section untouched. The dashboard
-// encodes snake_case exclusively; the engine decodes either spelling, so
-// camelCase aliases live on the read interface only and never encode.
+// key leaves the rest of the stored `[bash]` section untouched.
 export interface BashSettingsUpdate {
   enabled?: boolean;
-  default_action?: string;
+  defaultAction?: string;
   rules?: BashRuleData[];
-  timeout_seconds?: number;
-  cpu_seconds?: number;
-  memory_mb?: number;
-  allow_network?: boolean;
-  sandbox_mode?: string;
-  host_allow_patterns?: string[];
+  timeoutSeconds?: number;
+  cpuSeconds?: number;
+  memoryMb?: number;
+  allowNetwork?: boolean;
+  sandboxMode?: string;
+  hostAllowPatterns?: string[];
 }
 
 // Bash defaults mirror BashConfig in Sources/RuneWeaverCore/Config.swift
@@ -3471,14 +3603,14 @@ export const BASH_TIMEOUT_MAX_SECONDS = 3600;
 // CPU budget bounds mirror BashConfig.minCPUSeconds/maxCPUSeconds: a zero
 // budget would kill every command instantly while an unbounded one holds a
 // run past any plausible shell turn, so both fail closed. Single source for
-// the Bash modal inputs and the client validator so the form clamps agree
+// the Bash section inputs and the client validator so the form clamps agree
 // with the server 400.
 export const BASH_CPU_MIN_SECONDS = 1;
 export const BASH_CPU_MAX_SECONDS = 3600;
 
 // Address-space bounds mirror BashConfig.minMemoryMB/maxMemoryMB: a tiny
 // budget fails every spawn while a host-scale one invites OOM swaps, so both
-// fail closed. Single source for the Bash modal inputs and the client
+// fail closed. Single source for the Bash section inputs and the client
 // validator so the form clamps agree with the server 400.
 export const BASH_MEMORY_MIN_MB = 64;
 export const BASH_MEMORY_MAX_MB = 8192;
@@ -3492,22 +3624,22 @@ export const DEFAULT_BASH_RULES: BashRuleData[] = [
 // Combined bash default mirroring BashConfig. The fresh form seeds from this
 // object so the editor matches the boundary the engine enforces before the
 // first settings fetch. Resource budgets join the timeout here so a fresh
-// modal shows the same CPU and memory bounds the engine clamps at use,
+// section shows the same CPU and memory bounds the engine clamps at use,
 // while the sandbox tier plus host allowlist seed the confinement editors.
 export const DEFAULT_BASH_CONFIG: BashConfigData = {
   enabled: DEFAULT_BASH_ENABLED,
-  default_action: DEFAULT_BASH_DEFAULT_ACTION,
+  defaultAction: DEFAULT_BASH_DEFAULT_ACTION,
   rules: DEFAULT_BASH_RULES.map((rule) => ({ ...rule })),
-  timeout_seconds: DEFAULT_BASH_TIMEOUT_SECONDS,
-  cpu_seconds: DEFAULT_BASH_CPU_SECONDS,
-  memory_mb: DEFAULT_BASH_MEMORY_MB,
-  allow_network: DEFAULT_BASH_ALLOW_NETWORK,
-  sandbox_mode: DEFAULT_BASH_SANDBOX_MODE,
-  host_allow_patterns: [...DEFAULT_BASH_HOST_ALLOW_PATTERNS],
+  timeoutSeconds: DEFAULT_BASH_TIMEOUT_SECONDS,
+  cpuSeconds: DEFAULT_BASH_CPU_SECONDS,
+  memoryMb: DEFAULT_BASH_MEMORY_MB,
+  allowNetwork: DEFAULT_BASH_ALLOW_NETWORK,
+  sandboxMode: DEFAULT_BASH_SANDBOX_MODE,
+  hostAllowPatterns: [...DEFAULT_BASH_HOST_ALLOW_PATTERNS],
 };
 
 // Closed set of valid bash permission actions, mirroring BashPermissionAction
-// on the engine. Single source for the client validator and the Bash modal
+// on the engine. Single source for the client validator and the Bash section
 // option lists so the two cannot drift.
 export const BASH_PERMISSION_ACTIONS = ["allow", "ask", "deny"] as const;
 
@@ -3518,7 +3650,7 @@ export const BASH_PERMISSION_ACTIONS = ["allow", "ask", "deny"] as const;
 // and the last matching rule decides, so the catch-all stays first and
 // specifics follow. Blank lines are ignored and line order is preserved so
 // copy and paste of rule sets works. Owner for parsing is parseBashRulesText
-// here; owner for saving is handleSaveBashConfig in SettingsManager.tsx.
+// here; owner for saving is AccessBashSection.tsx.
 export function parseBashRulesText(text: string | undefined | null): BashRuleData[] {
   if (typeof text !== "string") return [];
   const rules: BashRuleData[] = [];
@@ -3564,7 +3696,7 @@ export const DEFAULT_BASH_RULES_TEXT: string =
   formatBashRulesText(DEFAULT_BASH_RULES);
 
 // Closed sandbox tier vocabulary mirroring BashSandboxMode on the engine.
-// Single source for the client validator and the Bash modal dropdown so the
+// Single source for the client validator and the Bash section dropdown so the
 // two cannot drift from the server 400.
 export const BASH_SANDBOX_MODES = [
   "strictContainer",
@@ -3581,8 +3713,7 @@ export const BASH_HOST_ALLOW_PATTERN_MAX_LENGTH = 256;
 // Host allowlist textarea codec: one pattern per line. Trims lines, drops
 // blanks, preserves first-seen order, and caps at the auditable bound so
 // copy and paste of pattern sets works. Owner for parsing is
-// parseHostAllowPatternsText here; owner for saving is handleSaveBashConfig
-// in SettingsManager.tsx.
+// parseHostAllowPatternsText here; owner for saving is AccessBashSection.tsx.
 export function parseHostAllowPatternsUncapped(
   text: string | undefined | null,
 ): string[] {
@@ -3794,32 +3925,31 @@ export function formatBlockedAppsText(apps: string[] | undefined | null): string
 // Default desktop policy mirroring DesktopConfig so a fresh form matches the
 // boundary the engine enforces before the first settings fetch.
 export const DEFAULT_DESKTOP_CONFIG: DesktopConfigData = {
-  max_image_dimension: DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION,
-  jpeg_quality: DEFAULT_DESKTOP_JPEG_QUALITY,
-  blocked_apps: [...DEFAULT_DESKTOP_BLOCKED_APPS],
+  maxImageDimension: DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION,
+  jpegQuality: DEFAULT_DESKTOP_JPEG_QUALITY,
+  blockedApps: [...DEFAULT_DESKTOP_BLOCKED_APPS],
 };
 
 // Parallel worker fan-out policy mirroring the engine `FanOutConfig`
 // (Sources/RuneWeaverCore/Config.swift). Workers stay on the read-only subset
-// unless full_tools widens them to the full registry; the modal owns these
+// unless fullTools widens them to the full registry; the modal owns these
 // knobs while tool enablement lives in the tool-state toggles. The dashboard
 // defaults below are the modal empty-field fallbacks so a cleared input saves
 // an explicit value instead of omitting the key; the engine file defaults may
 // differ and the server remains the authoritative enforcer.
 export interface FanoutConfigData {
-  max_workers: number;
-  worker_timeout_seconds: number;
-  full_tools: boolean;
+  maxWorkers: number;
+  workerTimeoutSeconds: number;
+  fullTools: boolean;
 }
 
 // Partial fan-out patch for `PUT /settings`, mirroring the engine fan-out
 // update shape. Every field is optional so a request carrying one key leaves
-// the rest of the stored `[fanout]` section untouched; the JSON keys are the
-// snake_case names the engine persists.
+// the rest of the stored `[fanout]` section untouched; the JSON keys are camelCase.
 export interface FanoutSettingsUpdate {
-  max_workers?: number;
-  worker_timeout_seconds?: number;
-  full_tools?: boolean;
+  maxWorkers?: number;
+  workerTimeoutSeconds?: number;
+  fullTools?: boolean;
 }
 
 // Modal empty-field fallbacks for the fan-out knobs: a cleared Max workers
@@ -3834,9 +3964,9 @@ export const DEFAULT_FANOUT_FULL_TOOLS = false;
 // Combined fan-out default seeding the fresh form before the first fetch so
 // the editor matches the modal empty-field boundary.
 export const DEFAULT_FANOUT_CONFIG: FanoutConfigData = {
-  max_workers: DEFAULT_FANOUT_MAX_WORKERS,
-  worker_timeout_seconds: DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS,
-  full_tools: DEFAULT_FANOUT_FULL_TOOLS,
+  maxWorkers: DEFAULT_FANOUT_MAX_WORKERS,
+  workerTimeoutSeconds: DEFAULT_FANOUT_WORKER_TIMEOUT_SECONDS,
+  fullTools: DEFAULT_FANOUT_FULL_TOOLS,
 };
 
 // One source's enablement row on `GET /index/status`. Global enablement gates
@@ -4651,18 +4781,18 @@ export const DEFAULT_INDEX_CONFIG: IndexConfigData = {
   reminders: false,
   roots: ["~"],
   exclude: [...DEFAULT_INDEX_EXCLUDE_PATTERNS],
-  max_file_mb: 20,
-  mail_vector_window: "2y",
-  icloud_evicted: "skip",
-  describe_images_with_llm: false,
-  nightly_budget: 0,
-  db_path: "~/.runeweaver/index.db",
+  maxFileMB: 20,
+  mailVectorWindow: "2y",
+  iCloudEvicted: "skip",
+  describeImagesWithLLM: false,
+  nightlyBudget: 0,
+  dbPath: "~/.runeweaver/index.db",
   effort: DEFAULT_INDEX_EFFORT,
   workers: 0,
-  thermal_backoff: DEFAULT_INDEX_THERMAL_BACKOFF,
-  pause_on_battery: DEFAULT_INDEX_PAUSE_ON_BATTERY,
-  max_vector_chunks_per_document: DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT,
-  mailbox_deny: [...DEFAULT_INDEX_MAILBOX_DENY],
+  thermalBackoff: DEFAULT_INDEX_THERMAL_BACKOFF,
+  pauseOnBattery: DEFAULT_INDEX_PAUSE_ON_BATTERY,
+  maxVectorChunksPerDocument: DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT,
+  mailboxDeny: [...DEFAULT_INDEX_MAILBOX_DENY],
 };
 
 // Owner-facing assistant persona mirrored from the engine `PersonaConfig`
@@ -4675,14 +4805,9 @@ export const DEFAULT_INDEX_CONFIG: IndexConfigData = {
 // boot-held, so the running engine adopts the new identity on reload while
 // the dashboard mirrors it immediately.
 export interface PersonaData {
-  // Canonical wire keys are the snake_case TOML spellings the engine encodes;
-  // the camelCase aliases mirror the dual-alias read of every other section
-  // so file-configured values survive a dashboard round-trip either way.
-  assistant_name?: string;
   assistantName?: string;
   tone?: string;
   style?: string;
-  user_name?: string;
   userName?: string;
   avatar?: string;
 }
@@ -4690,14 +4815,11 @@ export interface PersonaData {
 // Partial persona patch for `PUT /settings`, mirroring the engine
 // `PersonaUpdate`. Every field is optional so a request carrying one key
 // leaves the rest of the stored `[persona]` section untouched; the dashboard
-// sends the snake_case keys the engine persists while the engine also
-// accepts the camelCase aliases, so either spelling writes.
+// sends camelCase keys only.
 export interface PersonaSettingsUpdate {
-  assistant_name?: string;
   assistantName?: string;
   tone?: string;
   style?: string;
-  user_name?: string;
   userName?: string;
   avatar?: string;
 }
@@ -4743,11 +4865,11 @@ export function normalizePersonaAvatarColor(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
-// Reads the assistant display name across both wire spellings, normalizing
-// absent or blank payloads to null so identity surfaces fall back to the
-// stock label instead of rendering an empty string.
+// Reads the assistant display name, normalizing absent or blank payloads
+// to null so identity surfaces fall back to the stock label instead of rendering
+// an empty string.
 export function personaAssistantName(persona: PersonaData | null | undefined): string | null {
-  const raw = persona?.assistant_name ?? persona?.assistantName;
+  const raw = persona?.assistantName;
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : null;
@@ -4761,10 +4883,9 @@ export function personaAvatarColor(persona: PersonaData | null | undefined): str
   return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
 }
 
-// Reads the owner address name across both spellings with the same blank
-// normalization the settings populate path applies.
+// Reads the owner address name with the same blank normalization the settings populate path applies.
 export function personaUserName(persona: PersonaData | null | undefined): string {
-  const raw = persona?.user_name ?? persona?.userName;
+  const raw = persona?.userName;
   return typeof raw === "string" ? raw : "";
 }
 
@@ -4773,6 +4894,11 @@ export function personaUserName(persona: PersonaData | null | undefined): string
 export function personaStyle(persona: PersonaData | null | undefined): string {
   const raw = persona?.style;
   return typeof raw === "string" ? raw : "";
+}
+
+export interface FilesWritePathRuleData {
+  path: string;
+  posture: string;
 }
 
 export interface SettingsResponse {
@@ -4808,6 +4934,7 @@ export interface SettingsResponse {
   // `model` keeps per-call mode selection with an omitted mode defaulting to
   // staged review; the engine remains the validator of record.
   filesWriteMode?: string;
+  filesWritePathRules?: FilesWritePathRuleData[];
   // Web search policy persisted under [browser] (searxng_url, timeout, max_results). The engine
   // encodes both the canonical `browser*` keys and the `search*` aliases with identical values so
   // either contract reads without falling back to defaults; older engines may carry only `browser*`.
@@ -4898,6 +5025,7 @@ export interface UpdateSettingsInput {
   // closed `model` | `staged` | `live` set and rejects an unknown value instead
   // of silently falling back to the model posture.
   filesWriteMode?: string;
+  filesWritePathRules?: FilesWritePathRuleData[];
   // Dual-write both contracts so old and new engines persist the [browser] values tools dial.
   browserSearxngURL?: string;
   browserSearchTimeoutSeconds?: number;
@@ -6026,30 +6154,21 @@ export const WORKSPACE_QUOTA_FILES_MAX = 100000;
 export const WORKSPACE_TMP_TTL_MIN_DAYS = 0;
 export const WORKSPACE_TMP_TTL_MAX_DAYS = 90;
 
-// Full workspace snapshot on `GET /settings`, mirroring the engine
-// `WorkspaceConfig`. The canonical wire keys are snake_case; camelCase
-// aliases decode the same way as the `WorkspaceUpdate` patch, so either
-// spelling reads while the dashboard sends snake_case to keep the file shape.
+// Full workspace snapshot on `GET /settings`, mirroring the engine `WorkspaceConfig`.
+// The canonical wire keys are camelCase only.
 export interface WorkspaceConfigData {
-  quota_mb: number;
-  quotaMB?: number;
-  quota_files: number;
-  quotaFiles?: number;
-  tmp_ttl_days: number;
-  tmpTTLDays?: number;
+  quotaMB: number;
+  quotaFiles: number;
+  tmpTTLDays: number;
 }
 
 // Partial workspace patch for `PUT /settings`, mirroring the engine
 // `WorkspaceUpdate`. Every field is optional so a request carrying one key
-// leaves the rest of the stored `[workspace]` section untouched. The dashboard
-// sends the snake_case keys the engine persists; camelCase aliases decode but
-// never encode so saved payloads keep the file shape.
+// leaves the rest of the stored `[workspace]` section untouched; the dashboard
+// sends camelCase keys only.
 export interface WorkspaceSettingsUpdate {
-  quota_mb?: number;
   quotaMB?: number;
-  quota_files?: number;
   quotaFiles?: number;
-  tmp_ttl_days?: number;
   tmpTTLDays?: number;
 }
 
@@ -6057,9 +6176,9 @@ export interface WorkspaceSettingsUpdate {
 // seeds from this so the quota editors match the boundary the engine enforces
 // before the first settings fetch.
 export const DEFAULT_WORKSPACE_CONFIG: WorkspaceConfigData = {
-  quota_mb: DEFAULT_WORKSPACE_QUOTA_MB,
-  quota_files: DEFAULT_WORKSPACE_QUOTA_FILES,
-  tmp_ttl_days: DEFAULT_WORKSPACE_TMP_TTL_DAYS,
+  quotaMB: DEFAULT_WORKSPACE_QUOTA_MB,
+  quotaFiles: DEFAULT_WORKSPACE_QUOTA_FILES,
+  tmpTTLDays: DEFAULT_WORKSPACE_TMP_TTL_DAYS,
 };
 
 // Eligible promotion directory, relative to the workspace root. Only scripts
@@ -6250,7 +6369,7 @@ export function promoteAgentTool(
 ): Promise<AgentTool> {
   return fetchJson<AgentTool>("/agent-tools/promote", {
     method: "POST",
-    body: JSON.stringify({ name, script_path: scriptPath }),
+    body: JSON.stringify({ name, scriptPath }),
   });
 }
 

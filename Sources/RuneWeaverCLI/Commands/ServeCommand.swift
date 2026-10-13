@@ -246,14 +246,25 @@ extension ServeCommand {
         return conversations
     }
 
-    private func loadPermissionGate(episodesDBPath: String, pluginsDir: String, bashConfig: BashConfig, workspaceConfig: WorkspaceConfig) async -> PermissionGate {
+    private func loadPermissionGate(
+        episodesDBPath: String,
+        pluginsDir: String,
+        bashConfig: BashConfig,
+        filesConfig: FilesConfig,
+        workspaceConfig: WorkspaceConfig
+    ) async -> PermissionGate {
         let episodesDB = (episodesDBPath as NSString).expandingTildeInPath
-        let trustStore = SQLiteTrustStore(dbPath: episodesDB)
+        let ruleStore = SQLiteAccessRuleStore(dbPath: episodesDB)
         let gate = await PermissionGate.load(
-            store: trustStore,
+            ruleStore: ruleStore,
             pluginsDir: URL(fileURLWithPath: (pluginsDir as NSString).expandingTildeInPath)
         )
         await gate.updateBashConfig(bashConfig)
+        // The write posture is decided ahead of the tool, so the served
+        // `[files]` policy reaches the gate: a staged or live write runs
+        // without a second approval request while an ask-postured write
+        // parks exactly as before.
+        await gate.updateFilesConfig(filesConfig)
         await gate.updateWorkspaceRoot(WorkspaceStore(config: workspaceConfig).root())
         return gate
     }
@@ -360,6 +371,7 @@ extension ServeCommand {
             episodesDBPath: loaded.config.memory.episodesDBPath,
             pluginsDir: loaded.config.plugins.pluginsDir,
             bashConfig: loaded.config.bash,
+            filesConfig: loaded.config.files,
             workspaceConfig: loaded.config.workspace
         )
         // Resolve the embeddings producer once from config so served memory

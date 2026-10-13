@@ -513,9 +513,9 @@ private func validateUnbracketedHostShape(_ lowered: String, trimmed: String, co
 ///
 /// Host-shape gate parity:
 /// This server-side gate enforces authoritative host validation. A matching client-side
-/// implementation exists in Web/src/components/PolicyPane.tsx (`isValidDomainLine`) to give
+/// implementation exists in Web/src/components/access/AccessNetworkSection.tsx (`isValidDomainLine`) to give
 /// instant interactive UI feedback without network round-trips. Test suites in SettingsRouteTests.swift
-/// and PolicyPane.test.tsx maintain identical test vectors to prevent semantic drift.
+/// and AccessNetworkSection.test.tsx maintain identical test vectors to prevent semantic drift.
 private func validateHostEntry(_ raw: String, field: String, gate: String) throws -> String {
     let context = HostValidationContext(field: field, gate: gate)
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -926,10 +926,10 @@ describe("TopNav operator profile", () => {
   it("keeps the trigger label static Profile with a persona set", async () => {
     const user = userEvent.setup();
     publishPersonaFromSettings({
-      assistant_name: "Weaver",
+      assistantName: "Weaver",
       tone: "warm",
       style: "",
-      user_name: "Kupan",
+      userName: "Kupan",
       avatar: "rose",
     });
     renderPersonaNav();
@@ -980,10 +980,10 @@ describe("TopNav operator profile", () => {
   it("shows the stored owner name in the menu header", async () => {
     const user = userEvent.setup();
     publishPersonaFromSettings({
-      assistant_name: "Weaver",
+      assistantName: "Weaver",
       tone: "warm",
       style: "",
-      user_name: "Kupan",
+      userName: "Kupan",
       avatar: "rose",
     });
     renderPersonaNav();
@@ -1019,8 +1019,8 @@ describe("TopNav operator profile", () => {
     // Blank normalizes like absent (same trim rule as the greeting row), so a
     // whitespace-only owner name never renders an empty header.
     publishPersonaFromSettings({
-      assistant_name: "Weaver",
-      user_name: "   ",
+      assistantName: "Weaver",
+      userName: "   ",
       avatar: "rose",
     });
     renderPersonaNav();
@@ -1043,8 +1043,8 @@ describe("TopNav operator profile", () => {
     // With a persona set: the owner name shows, the assistant name does not —
     // neither on the trigger nor in the open menu.
     publishPersonaFromSettings({
-      assistant_name: "Weaver",
-      user_name: "Kupan",
+      assistantName: "Weaver",
+      userName: "Kupan",
       avatar: "rose",
     });
     const { unmount } = renderPersonaNav();
@@ -1074,7 +1074,7 @@ describe("TopNav operator profile", () => {
     // An assistant-only save still shows operator fallback here: the owner
     // slot has no value, so the header reads "Operator" and the assistant
     // name never leaks into either surface.
-    publishPersonaFromSettings({ assistant_name: "Weaver", avatar: "chartreuse" });
+    publishPersonaFromSettings({ assistantName: "Weaver", avatar: "chartreuse" });
     renderPersonaNav();
     expect(document.querySelector(".profile-btn-label")?.textContent).toBe(
       "Profile",
@@ -1093,8 +1093,8 @@ describe("TopNav operator profile", () => {
     // The badge still publishes the shared attention signal for the greeting
     // cluster, but this bar never renders the image itself.
     publishPersonaFromSettings({
-      assistant_name: "Weaver",
-      user_name: "Kupan",
+      assistantName: "Weaver",
+      userName: "Kupan",
       avatar: "cyan",
     });
     renderPersonaNav({ approvalsBadge: 2 });
@@ -1108,8 +1108,8 @@ describe("TopNav operator profile", () => {
 
   it("renders zero avatar nodes for an unread goal nudge alone", () => {
     publishPersonaFromSettings({
-      assistant_name: "Weaver",
-      user_name: "Kupan",
+      assistantName: "Weaver",
+      userName: "Kupan",
       avatar: "cyan",
     });
     renderPersonaNav({ goalsBadge: 1 });
@@ -1138,8 +1138,8 @@ describe("TopNav operator profile", () => {
     // inside act to keep the state update attached to this test's render.
     act(() => {
       publishPersonaFromSettings({
-        assistant_name: "Weaver",
-        user_name: "Kupan",
+        assistantName: "Weaver",
+        userName: "Kupan",
         avatar: "emerald",
       });
     });

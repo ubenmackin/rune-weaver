@@ -2,10 +2,14 @@
 //
 // Surfaces all items blocked on human decision:
 // 1. Tool and egress approvals (consequential actions: delete, push, spend, email).
-// 2. Goals paused in 'needs_input' status waiting on operator direction.
+// 2. The behavior brake card the trusted-tool watchdog files into the same inbox.
+// 3. Goals paused in 'needs_input' status waiting on operator direction.
 //
-// Operators can approve or reject immediately with one click directly from
-// the dashboard, or jump into the owning chat session.
+// Every quick action on this surface is one-shot: a decision carries the single
+// decide payload with the thisTime tier and no scope, so nothing decided from
+// the dashboard can mint durable trust. Duration and scope editing live in the
+// Approvals Inbox, which every card links to, and there is no batch or bulk
+// control anywhere — each card is decided on its own.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -17,6 +21,7 @@ import {
   listGoals,
   respondToQuestion,
   type Goal,
+  type ImpactSeverity,
   type PermissionRequest,
 } from "../../api";
 import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
@@ -25,6 +30,7 @@ import BashTierLine from "../BashTierLine";
 import { resolveSandboxSummary } from "../InlineApprovalBanner";
 import {
   AlertTriangleIcon,
+  ApprovalsIcon,
   CheckIcon,
   CloseIcon,
   MessageSquareIcon,
@@ -35,6 +41,60 @@ interface NeedsActionQueueProps {
   onOpenSession?: (sessionId: string) => void;
   onOpenGoals?: () => void;
   onActionDecided?: () => void;
+}
+
+// Watchdog brake card. Releasing the parked turns is its complete decision, so
+// it renders a dedicated Resume / Keep paused branch with no duration control
+// instead of the generic approve or deny pair.
+const BRAKE_TOOL_NAME = "behavior.brake";
+
+// One ordering scale shared by tool approvals, questions, and brake cards, so a
+// consequential card never sinks below a quieter one.
+function severityRank(severity: ImpactSeverity): number {
+  switch (severity) {
+    case "dangerous":
+      return 3;
+    case "moderate":
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+function requestSeverity(req: PermissionRequest): ImpactSeverity {
+  return req.assessment?.severity ?? "moderate";
+}
+
+// Severity descending, then filing time descending. The wire carries no filing
+// timestamp, so payload position is the only filing signal available: a later
+// position in the payload reads as the more recent filing, so equal severities
+// break newest-first.
+function orderBySeverityThenFiling(approvals: PermissionRequest[]): PermissionRequest[] {
+  return approvals
+    .map((req, index) => ({ req, index }))
+    .sort((a, b) => {
+      const severity =
+        severityRank(requestSeverity(b.req)) - severityRank(requestSeverity(a.req));
+      return severity !== 0 ? severity : b.index - a.index;
+    })
+    .map((entry) => entry.req);
+}
+
+// Full duration and scope options live in the Approvals Inbox, so every card
+// routes there. The hash anchor resolves through the shell's existing
+// hashchange router, which keeps the link working without threading a
+// navigation callback through every card variant.
+function OpenInboxLink({ req }: { req: PermissionRequest }) {
+  return (
+    <a
+      href="#approvals"
+      className="btn-link open-inbox-link"
+      title={`Open ${req.toolName} in the Approvals Inbox for duration and scope options`}
+    >
+      <ApprovalsIcon size={13} />
+      <span>Open in Inbox</span>
+    </a>
+  );
 }
 
 export default function NeedsActionQueue({
@@ -106,7 +166,10 @@ export default function NeedsActionQueue({
   async function handleDecision(req: PermissionRequest, approved: boolean) {
     try {
       setDecidingId(req.id);
-      await decideApproval(req.id, approved);
+      // One-shot by construction: thisTime persists nothing and the scope is
+      // omitted, so a dashboard decision covers exactly this call. The durable
+      // tiers stay reachable only from the Approvals Inbox.
+      await decideApproval(req.id, approved, "thisTime");
       setApprovals((prev) => prev.filter((a) => a.id !== req.id));
       onActionDecided?.();
     } catch (err) {
@@ -142,7 +205,8 @@ export default function NeedsActionQueue({
     }
   }
 
-  const totalActionsNeeded = approvals.length + blockedGoals.length;
+  const orderedApprovals = orderBySeverityThenFiling(approvals);
+  const totalActionsNeeded = orderedApprovals.length + blockedGoals.length;
 
   return (
     <section className="dashboard-section needs-action-section" aria-label="Items needing your action">
@@ -181,8 +245,12 @@ export default function NeedsActionQueue({
       ) : (
         <div className="needs-action-list">
           {/* Pending Tool Approvals & Questions */}
-          {approvals.map((req) => {
+          {/* A future pending-scheduled branch joins this same ordered list:
+              Cancel routes through cancelScheduledSend and Edit opens the
+              Schedules surface. */}
+          {orderedApprovals.map((req) => {
             const isBusy = decidingId === req.id;
+            const severity = requestSeverity(req);
             if (req.toolName === "question.ask") {
               return (
                 <InlineQuestionCard
@@ -194,12 +262,67 @@ export default function NeedsActionQueue({
                     void handleQuestionResponse(id, answer, cancelled)
                   }
                   onOpenSession={onOpenSession}
+                  headerLink={<OpenInboxLink req={req} />}
                 />
+              );
+            }
+            // The brake card owns its decision completely: releasing the parked
+            // turns is the whole action, so it carries no duration or scope
+            // control of any kind.
+            if (req.toolName === BRAKE_TOOL_NAME) {
+              return (
+                <article
+                  key={req.id}
+                  className={`action-card action-card-brake severity-${severity}`}
+                >
+                  <div className="action-card-header">
+                    <div className="action-card-title-row">
+                      <span className={`badge severity-badge severity-${severity}`}>PAUSED</span>
+                      <span className="tool-name-badge">{BRAKE_TOOL_NAME}</span>
+                    </div>
+                    <OpenInboxLink req={req} />
+                  </div>
+
+                  <div className="action-card-body">
+                    <p className="action-card-desc">
+                      {req.description ||
+                        "The behavior brake parked the running turns after an anomaly in trusted-tool outcomes."}
+                    </p>
+                    <p className="action-card-once-note">
+                      Releasing the parked turns is the whole decision — neither choice grants a permission.
+                    </p>
+                  </div>
+
+                  <div className="action-card-buttons">
+                    <button
+                      type="button"
+                      className="btn btn-primary approve-action-btn"
+                      onClick={() => handleDecision(req, true)}
+                      disabled={isBusy}
+                      aria-label="Resume"
+                      title="Releases the parked turns and resets the brake counters"
+                    >
+                      <CheckIcon size={15} />
+                      <span>{isBusy ? "Resuming…" : "Resume"}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn reject-action-btn"
+                      onClick={() => handleDecision(req, false)}
+                      disabled={isBusy}
+                      aria-label="Keep paused"
+                      title="Leaves every parked turn exactly as it is"
+                    >
+                      <CloseIcon size={15} />
+                      <span>{isBusy ? "Keeping paused…" : "Keep paused"}</span>
+                    </button>
+                  </div>
+                </article>
               );
             }
             const isContinuation = req.toolName === "engine.continue";
             const isDesktopResume = req.toolName === "desktop.resume";
-            const severity = req.assessment?.severity || "moderate";
             const argSummary = (isContinuation || isDesktopResume)
               ? null
               : (req.input?.argumentsJSON || req.intent || null);
@@ -233,6 +356,7 @@ export default function NeedsActionQueue({
                       <span>Open Thread</span>
                     </button>
                   ) : null}
+                  <OpenInboxLink req={req} />
                 </div>
 
                 <div className="action-card-body">
@@ -256,22 +380,10 @@ export default function NeedsActionQueue({
                     className="btn btn-primary approve-action-btn"
                     onClick={() => handleDecision(req, true)}
                     disabled={isBusy}
-                    aria-label={isContinuation ? "Continue execution" : isDesktopResume ? "Resume desktop control" : `Approve ${req.toolName}`}
+                    aria-label={`Approve once for ${req.toolName}`}
                   >
                     <CheckIcon size={15} />
-                    <span>
-                      {isBusy
-                        ? isContinuation
-                          ? "Continuing…"
-                          : isDesktopResume
-                          ? "Resuming…"
-                          : "Approving…"
-                        : isContinuation
-                        ? "Continue"
-                        : isDesktopResume
-                        ? "Resume Control"
-                        : "Approve"}
-                    </span>
+                    <span>{isBusy ? "Approving…" : "Approve once"}</span>
                   </button>
 
                   <button
@@ -279,24 +391,17 @@ export default function NeedsActionQueue({
                     className="btn reject-action-btn"
                     onClick={() => handleDecision(req, false)}
                     disabled={isBusy}
-                    aria-label={isContinuation ? "Stop execution" : isDesktopResume ? "Cancel task" : `Reject ${req.toolName}`}
+                    aria-label={`Deny ${req.toolName}`}
                   >
                     <CloseIcon size={15} />
-                    <span>
-                      {isBusy
-                        ? isContinuation
-                          ? "Stopping…"
-                          : isDesktopResume
-                          ? "Cancelling…"
-                          : "Rejecting…"
-                        : isContinuation
-                        ? "Stop"
-                        : isDesktopResume
-                        ? "Cancel Task"
-                        : "Reject"}
-                    </span>
+                    <span>{isBusy ? "Denying…" : "Deny"}</span>
                   </button>
                 </div>
+
+                <p className="action-card-once-note">
+                  One shot: this decision covers this call only and stays allowed
+                  nowhere. Use Open in Inbox for a duration or a scope.
+                </p>
               </article>
             );
           })}

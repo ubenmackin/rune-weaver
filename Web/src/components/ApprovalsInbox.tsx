@@ -1,152 +1,365 @@
-// Rune Weaver Dashboard — Approvals inbox for reviewing and deciding gated tool requests.
+// Rune Weaver Dashboard — Approvals inbox for pending gated tool requests.
+//
+// Purpose: render every pending approval as its own decidable card, grouped by
+// the owning chat session so a parked turn reads beside the conversation that
+// filed it. Standing rules live in Settings → Access; this surface decides
+// pending requests only and manages no grants.
+// Scope: session grouping with sticky headers titled from GET /sessions,
+// severity-ordered groups and cards, the unified decide payload
+// ({approved, duration, scope}) on every card, the shared question picker
+// card, and the dedicated behavior-brake branch.
+// Architectural role: the Approvals tab surface, sharing the ApprovalQueue
+// wire contract with the chat inline banner and the dashboard quick actions.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ApiError,
-  changeDurationGrant,
   decideApproval,
   listApprovals,
-  listTrustGrants,
-  parseRunTimestamp,
-  parseTrustGrantExpiry,
+  listSessions,
   respondToQuestion,
-  revokeTrustGrant,
   trustDurationOptions,
-  widenTrustGrant,
+  type AccessScopeDTO,
+  type ImpactSeverity,
   type PermissionRequest,
   type TrustDuration,
-  type TrustGrant,
 } from "../api";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
-import { mergeApprovalFrame } from "../approvalsSession";
-import { formatRelativeAgo, formatRelativeIn } from "../relativeTime";
+import {
+  approvalSessionID,
+  mergeApprovalFrame,
+  normalizeSessionID,
+} from "../approvalsSession";
+import { isRecord } from "../typeGuards";
 import InlineQuestionCard from "./InlineQuestionCard";
 import BashTierLine from "./BashTierLine";
-import { resolveSandboxSummary } from "./InlineApprovalBanner";
+import EphemeralTrustChip from "./EphemeralTrustChip";
+import { resolveEgressHost, resolveSandboxSummary } from "./InlineApprovalBanner";
 import Modal from "./Modal";
-import { CloseIcon, RefreshIcon } from "./icons";
+import { ApprovalsIcon, CloseIcon, RefreshIcon } from "./icons";
 
-function isTrustDuration(value: string): value is TrustDuration {
-  return trustDurationOptions.some((option) => option.value === value);
+// Watchdog brake card identity, mirroring the engine's brake tool name: the
+// one card whose complete decision is releasing the parked turns.
+const BRAKE_TOOL_NAME = "behavior.brake";
+
+// Group key and header for requests no session claims: the brake card, older
+// payloads without a session tag, and headless filings all read here.
+const UNATTRIBUTED_KEY = "__unattributed__";
+const UNATTRIBUTED_TITLE = "Unattributed";
+
+// Deep link into the Settings → Access pane that owns standing rules.
+const STANDING_RULES_HREF = "#settings?access=rules";
+
+// Engine recipient-set bound, mirrored so the editor refuses a set the rule
+// store would reject instead of failing at the wire.
+const MAX_RECIPIENT_SET_MEMBERS = 50;
+
+// Argument keys the legacy target derivation reads, in the engine's priority
+// order, so the preview line names the same thing a stored rule would cover.
+const TARGET_ARGUMENT_KEYS = [
+  "to",
+  "recipient",
+  "email",
+  "target",
+  "path",
+  "url",
+  "address",
+  "destination",
+];
+
+// One ordering scale shared by cards and groups: dangerous over moderate over
+// safe, so a consequential card never sinks below a quieter one.
+function severityRank(severity: ImpactSeverity): number {
+  switch (severity) {
+    case "dangerous":
+      return 3;
+    case "moderate":
+      return 2;
+    default:
+      return 1;
+  }
 }
 
-// Clock tick plus grants poll cadence: relative countdowns roll on the same
-// interval that refetches usage counters (record-use emits no WS broadcast,
-// so the poll proves a grant is live); expiry eviction derives from the same
-// timestamp.
-const GRANT_CLOCK_POLL_MS = 30_000;
+// A nil assessment is the pending state and sorts as moderate, so an
+// unassessed card never outranks a valued dangerous one nor sinks below a
+// valued safe one while background enrichment is still in flight.
+function requestSeverity(request: PermissionRequest): ImpactSeverity {
+  return request.assessment?.severity ?? "moderate";
+}
 
-function durationLabelFor(duration: TrustDuration): string {
-  return (
-    trustDurationOptions.find((option) => option.value === duration)?.label ??
-    duration
+// The egress tier mapping names exactly three durations: thisTime allows the
+// host once, forSession allows it for the session, and forever mints the
+// durable domain rule. Offering a dated tier the mapping never reads would
+// invent a second control language, so a parked-host card carries only these
+// three tiers in the shared duration vocabulary.
+const EGRESS_DURATIONS: TrustDuration[] = ["thisTime", "forSession", "forever"];
+
+interface DurationOption {
+  value: TrustDuration;
+  label: string;
+}
+
+function durationOptionsFor(request: PermissionRequest): DurationOption[] {
+  if (!resolveEgressHost(request)) return trustDurationOptions;
+  return EGRESS_DURATIONS.map((value) =>
+    trustDurationOptions.find((option) => option.value === value),
+  ).filter((option): option is DurationOption => option !== undefined);
+}
+
+// Best-effort preview of the request's own target for the scope line. The
+// engine's descriptor derivation stays authoritative — "this target" omits the
+// scope so the server resolves it — this copy only names what the owner is
+// about to trust. Unreadable arguments degrade to no preview rather than a
+// misleading one.
+function previewRequestTarget(request: PermissionRequest): string | null {
+  const host = resolveEgressHost(request);
+  if (host) return host;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(request.input?.argumentsJSON ?? "");
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  for (const key of TARGET_ARGUMENT_KEYS) {
+    const value = parsed[key];
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
+}
+
+// Editor shape a custom scope takes, keyed to what the wire scope vocabulary
+// can carry for the tool: a recipient set for the send tools, one host for an
+// egress-parked request, and a single exact-target string for path, pattern,
+// and generic calls.
+type ScopeEditorKind = "recipients" | "hosts" | "paths" | "pattern";
+
+const SCOPE_EDITOR_COPY: Record<
+  ScopeEditorKind,
+  { label: string; hint: string }
+> = {
+  recipients: {
+    label: "Recipients",
+    hint: "One canonical recipient per line. Every listed recipient is covered.",
+  },
+  hosts: {
+    label: "Hosts / domains",
+    hint: "One host or domain per line. The first entry becomes the rule's host.",
+  },
+  paths: {
+    label: "Paths",
+    hint: "One path per line. The first entry becomes the rule's target.",
+  },
+  pattern: {
+    label: "Pattern",
+    hint: "One pattern or exact target per line. The first entry becomes the rule's target.",
+  },
+};
+
+function scopeEditorKind(request: PermissionRequest): ScopeEditorKind {
+  if (resolveEgressHost(request)) return "hosts";
+  if (request.toolName === "messages.send" || request.toolName === "email.send") {
+    return "recipients";
+  }
+  if (request.toolName === "bash.exec") return "pattern";
+  if (request.toolName.startsWith("files.")) return "paths";
+  return "pattern";
+}
+
+// Editor prefill: the request's own target for the kind that can carry it, so
+// narrowing starts from what is about to run. Everything else opens blank.
+function scopePrefill(request: PermissionRequest): string {
+  switch (scopeEditorKind(request)) {
+    case "hosts":
+      return resolveEgressHost(request) ?? "";
+    default:
+      return previewRequestTarget(request) ?? "";
+  }
+}
+
+// Splits editor text into deduplicated, non-blank entries. The
+// case-insensitive dedupe matches the recipient normalization the rule store
+// applies, so a repeated spelling never reads as two members.
+function splitScopeEntries(text: string): string[] {
+  const seen = new Set<string>();
+  const entries: string[] = [];
+  for (const rawLine of text.split("\n")) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push(trimmed);
+  }
+  return entries;
+}
+
+// Builds the wire scope from editor text. The recipient set travels whole;
+// every single-value kind names its first entry, because one decision carries
+// one scope and the wire vocabulary holds one host or one target per rule.
+// Returns null for an all-blank editor so the caller refuses the save.
+function buildCustomScope(
+  kind: ScopeEditorKind,
+  text: string,
+): AccessScopeDTO | null {
+  const entries = splitScopeEntries(text);
+  if (entries.length === 0) return null;
+  switch (kind) {
+    case "recipients":
+      return { kind: "recipientSet", handles: entries };
+    case "hosts":
+      return { kind: "domain", host: entries[0] };
+    default:
+      return { kind: "exactTarget", target: entries[0] };
+  }
+}
+
+// Editor text for a staged scope, so reopening the modal shows exactly what
+// the next decision would ship.
+function scopeToText(scope: AccessScopeDTO): string {
+  switch (scope.kind) {
+    case "tool":
+      return "";
+    case "exactTarget":
+      return scope.target;
+    case "recipientSet":
+      return scope.handles.join("\n");
+    case "domain":
+      return scope.host;
+  }
+}
+
+// One-line reading of a staged scope for the card summary.
+function describeScope(scope: AccessScopeDTO): string {
+  switch (scope.kind) {
+    case "tool":
+      return "all targets";
+    case "exactTarget":
+      return scope.target;
+    case "recipientSet":
+      return `${scope.handles.length} recipients`;
+    case "domain":
+      return scope.host;
+  }
+}
+
+type ScopeChoice = "thisTarget" | "allTargets" | "custom";
+
+// Resolves the scope one decision carries. "All targets" names the tool-wide
+// scope, "custom" ships the staged editor scope, and "this target" derives
+// the domain scope for an egress-parked request — otherwise the scope stays
+// omitted so the engine resolves the request's own target instead of the
+// dashboard second-guessing it.
+function decisionScopeFor(
+  request: PermissionRequest,
+  choice: ScopeChoice,
+  custom: AccessScopeDTO | undefined,
+): AccessScopeDTO | undefined {
+  if (choice === "allTargets") return { kind: "tool" };
+  if (choice === "custom") return custom;
+  const host = resolveEgressHost(request);
+  return host ? { kind: "domain", host } : undefined;
+}
+
+interface ApprovalGroup {
+  key: string;
+  title: string;
+  requests: PermissionRequest[];
+  // Newest filing position inside the group, kept as the stable tiebreak
+  // between groups of equal maximum severity.
+  newestIndex: number;
+}
+
+// The brake card parks every running turn rather than one session's call, so
+// it always reads under Unattributed even when the watchdog tagged a session.
+function groupKeyFor(request: PermissionRequest): string {
+  if (request.toolName === BRAKE_TOOL_NAME) return UNATTRIBUTED_KEY;
+  return normalizeSessionID(approvalSessionID(request)) || UNATTRIBUTED_KEY;
+}
+
+// The wire carries no filing timestamp, so payload position is the filing
+// signal: the engine lists pending entries oldest-first, which makes a later
+// position the more recent filing. Cards order by severity descending then by
+// that position descending; groups order by their maximum card severity with
+// the same newest-filing tiebreak, so the ordering is total and stable.
+function buildGroups(
+  approvals: PermissionRequest[],
+  titles: Map<string, string>,
+): ApprovalGroup[] {
+  const buckets = new Map<
+    string,
+    {
+      rawID: string;
+      entries: Array<{ request: PermissionRequest; index: number }>;
+    }
+  >();
+  approvals.forEach((request, index) => {
+    const key = groupKeyFor(request);
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.entries.push({ request, index });
+      if (!bucket.rawID) bucket.rawID = (approvalSessionID(request) ?? "").trim();
+      return;
+    }
+    buckets.set(key, {
+      rawID: (approvalSessionID(request) ?? "").trim(),
+      entries: [{ request, index }],
+    });
+  });
+
+  const groups: ApprovalGroup[] = [];
+  for (const [key, bucket] of buckets) {
+    const ordered = [...bucket.entries].sort((a, b) => {
+      const bySeverity =
+        severityRank(requestSeverity(b.request)) -
+        severityRank(requestSeverity(a.request));
+      return bySeverity !== 0 ? bySeverity : b.index - a.index;
+    });
+    const titled = titles.get(key);
+    groups.push({
+      key,
+      title:
+        key === UNATTRIBUTED_KEY
+          ? UNATTRIBUTED_TITLE
+          : titled || bucket.rawID || UNATTRIBUTED_TITLE,
+      requests: ordered.map((entry) => entry.request),
+      newestIndex: Math.max(...bucket.entries.map((entry) => entry.index)),
+    });
+  }
+
+  return groups.sort((a, b) => {
+    const bySeverity =
+      maxSeverityRank(b.requests) - maxSeverityRank(a.requests);
+    return bySeverity !== 0 ? bySeverity : b.newestIndex - a.newestIndex;
+  });
+}
+
+function maxSeverityRank(requests: PermissionRequest[]): number {
+  return requests.reduce(
+    (highest, request) =>
+      Math.max(highest, severityRank(requestSeverity(request))),
+    0,
   );
 }
 
-// Turns a tool identifier into sentence prose ("email.send" reads as
-// "email sends") so grant scope lines read naturally across tools.
-function humanizeGrantTool(toolName: string): string {
-  const parts = toolName.split(".");
-  if (parts.length === 2 && parts[0] && parts[1]) {
-    const verb = parts[1].endsWith("s") ? parts[1] : `${parts[1]}s`;
-    return `${parts[0]} ${verb}`;
-  }
-  return toolName;
+interface ScopeDraft {
+  id: string;
+  kind: ScopeEditorKind;
+  text: string;
 }
 
-// Builds the human scope line for a grant card. Tool-wide grants carry an
-// empty target by contract, so they must name "all targets" explicitly
-// instead of rendering a blank recipient.
-function grantScopeLine(grant: TrustGrant): string {
-  const target = (grant.target ?? "").trim();
-  const tool = humanizeGrantTool(grant.toolName);
-  if (!target) return `${tool} to all targets are approved`;
-  return `${tool} to ${target} are approved`;
+interface ApprovalsInboxProps {
+  // Session the inbox is filtered to, when one is selected. The ephemeral
+  // trust chip renders only for that session, so with no session selected
+  // the chip stays hidden instead of implying trust for the whole inbox.
+  sessionID?: string;
 }
 
-// Send trust is keyed to the recipient the owner approved and has no tool-wide
-// scope, so the widen route honestly refuses `messages.send` grants. Withhold
-// the control instead of offering an action the server cannot perform, while
-// every other targeted grant stays widenable.
-function isWidenableGrant(grant: TrustGrant): boolean {
-  const target = (grant.target ?? "").trim();
-  return target.length > 0 && grant.toolName !== "messages.send";
-}
-
-function grantExpiryDate(grant: TrustGrant): Date | null {
-  return parseTrustGrantExpiry(grant.expiresAt);
-}
-
-// Grant recency routing both tenses through the shared ladders so expiry
-// countdowns, last-use recency, and chat footers agree by construction.
-// Callers handle their own empty/expired/just-now sentinels.
-function formatDuration(diffMs: number, future: boolean): string {
-  if (!future) return formatRelativeAgo(diffMs);
-  return formatRelativeIn(diffMs);
-}
-
-// Relative countdown for a timed grant ("in 5m"); forever grants have no
-// expiry date and render "Never expires" instead of a countdown.
-function grantRelativeLabel(expiry: Date | null, nowMs: number): string {
-  if (!expiry) return "Never expires";
-  const diffMs = expiry.getTime() - nowMs;
-  if (diffMs <= 0) return "Expired";
-  return formatDuration(diffMs, true);
-}
-
-function isGrantExpired(grant: TrustGrant, nowMs: number): boolean {
-  const expiry = grantExpiryDate(grant);
-  if (!expiry) return false;
-  return expiry.getTime() <= nowMs;
-}
-
-// Normalizes the last-use timestamp through the same dual-shape parser as expiry, so ISO
-// strings and Unix seconds converge without the card branching on the wire encoding. A null
-// or epoch result means the grant never fired and renders as untouched.
-function grantLastUsedDate(grant: TrustGrant): Date | null {
-  const raw = grant.lastUsedAt;
-  if (raw == null) return null;
-  const parsed = parseRunTimestamp(raw);
-  if (parsed.getTime() === 0) return null;
-  return parsed;
-}
-
-// Relative "ago" label sharing the expiry countdown ladder, so elapsed time reads with
-// the same granularity as remaining time. Future-skewed stamps and sub-second
-// uses collapse to "just now" rather than rendering a negative countdown or
-// "0s ago".
-function grantLastUsedRelativeLabel(lastUsed: Date | null, nowMs: number): string {
-  if (!lastUsed) return "Never";
-  return formatRelativeAgo(nowMs - lastUsed.getTime());
-}
-
-// Hit count tolerating payloads minted before usage tracking, so older grants degrade to
-// "not used" instead of rendering NaN or crashing the card.
-function grantUseCount(grant: TrustGrant): number {
-  const raw = grant.useCount;
-  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return 0;
-  return Math.floor(raw);
-}
-
-// Re-arm preview mirrors the server recomputation (expiry from confirmation
-// time), so the modal shows the wall-clock date the grant would receive if
-// saved now; forever carries no date and previews as never expiring.
-function durableDurationMs(duration: TrustDuration): number | null {
-  switch (duration) {
-    case "fiveMinutes":
-      return 5 * 60 * 1000;
-    case "oneHour":
-      return 60 * 60 * 1000;
-    case "oneDay":
-      return 24 * 60 * 60 * 1000;
-    case "forever":
-      return null;
-    default:
-      return null;
-  }
-}
-
-export default function ApprovalsInbox() {
+export default function ApprovalsInbox({
+  sessionID,
+}: ApprovalsInboxProps = {}) {
   const [approvals, setApprovals] = useState<PermissionRequest[]>([]);
   const [durations, setDurations] = useState<Record<string, TrustDuration>>({});
   const [loading, setLoading] = useState(false);
@@ -155,49 +368,36 @@ export default function ApprovalsInbox() {
     id: string;
     action: "allowing" | "denying";
   } | null>(null);
-  const [grants, setGrants] = useState<TrustGrant[]>([]);
-  const [wideningId, setWideningId] = useState<string | null>(null);
-  const [widenSelections, setWidenSelections] = useState<Record<string, boolean>>({});
-  // Staged widen target renders the shared confirmation modal; the widening
-  // request only fires from the modal so list-row clicks stay non-destructive
-  // and the consequence stays visible before trust expands tool-wide.
-  const [pendingWiden, setPendingWiden] = useState<TrustGrant | null>(null);
-  // Widen failure stays inside the confirmation dialog because the page-level
-  // error renders behind the modal portal backdrop and would be invisible
-  // while staged.
-  const [widenError, setWidenError] = useState<string | null>(null);
-  const [revokingId, setRevokingId] = useState<string | null>(null);
-  // Staged revoke target renders the shared confirmation modal; the destructive request only
-  // fires from the modal so list-row clicks stay non-destructive by default.
-  const [pendingRevoke, setPendingRevoke] = useState<TrustGrant | null>(null);
-  // Revoke failure stays inside the confirmation dialog because the page-level error renders
-  // behind the modal portal backdrop and would be invisible while staged.
-  const [revokeError, setRevokeError] = useState<string | null>(null);
-  // Staged re-arm target renders the duration modal; the PATCH only fires from
-  // the modal confirm so row clicks preview without rewriting expiry, and the
-  // staged tier stays local until saved.
-  const [pendingDurationGrant, setPendingDurationGrant] = useState<TrustGrant | null>(null);
-  const [selectedDuration, setSelectedDuration] = useState<TrustDuration>("oneHour");
-  // Duration failure stays inside the modal for the same backdrop reason as
-  // widen/revoke: the page-level error would be hidden while staged.
-  const [durationError, setDurationError] = useState<string | null>(null);
-  // In-flight re-arm id mirrors the widen/revoke locks so a slow PATCH cannot
-  // be double-submitted and sibling rows stay locked until it settles.
-  const [changingDurationId, setChangingDurationId] = useState<string | null>(null);
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [sessionTitles, setSessionTitles] = useState<Map<string, string>>(
+    () => new Map(),
+  );
+  const [scopeChoices, setScopeChoices] = useState<Record<string, ScopeChoice>>(
+    {},
+  );
+  const [customScopes, setCustomScopes] = useState<
+    Record<string, AccessScopeDTO>
+  >({});
+  // Staged scope edit renders through the shared modal; only the modal save
+  // commits a scope, so a half-typed list can never reach a decision.
+  const [scopeDraft, setScopeDraft] = useState<ScopeDraft | null>(null);
+  const [scopeDraftError, setScopeDraftError] = useState<string | null>(null);
 
-  // Grants fetch stays best-effort so a grants outage never clears the
-  // pending inbox; malformed shapes (e.g. approval payloads in tests)
-  // resolve to empty rather than crashing the section.
-  const refreshGrants = useCallback(async () => {
+  // Session titles name the group headers. Best-effort: a sessions outage
+  // keeps the prior map, and a header without a title falls back to the raw
+  // session id rather than hiding the group.
+  const refreshSessions = useCallback(async () => {
     try {
-      const response = await listTrustGrants();
-      const next = (response as unknown as { grants?: unknown }).grants;
-      if (Array.isArray(next)) {
-        setGrants(next as TrustGrant[]);
+      const response = await listSessions();
+      const titles = new Map<string, string>();
+      for (const session of response.sessions ?? []) {
+        const key = normalizeSessionID(session.id);
+        if (!key) continue;
+        const title = typeof session.title === "string" ? session.title.trim() : "";
+        if (title) titles.set(key, title);
       }
+      setSessionTitles(titles);
     } catch {
-      // Keep stale grants visible; revoke failures surface separately.
+      // Keep prior titles on transient failure; headers fall back to raw ids.
     }
   }, []);
 
@@ -205,9 +405,8 @@ export default function ApprovalsInbox() {
     setLoading(true);
     setError(null);
     try {
-      const response = await listApprovals();
+      const [response] = await Promise.all([listApprovals(), refreshSessions()]);
       setApprovals(response.approvals);
-      await refreshGrants();
     } catch (failure) {
       setError(
         failure instanceof ApiError ? failure.message : "Approvals failed",
@@ -215,53 +414,11 @@ export default function ApprovalsInbox() {
     } finally {
       setLoading(false);
     }
-  }, [refreshGrants]);
+  }, [refreshSessions]);
 
-  // Live approval prompts arrive over the shared socket; merge them so the
-  // inbox updates without waiting for the next manual refresh. Decision frames
-  // evict promptly so cross-tab or menu-bar decisions disappear immediately.
-  // Grant frames refetch instead of merging payloads so duration grants
-  // appear through one path whether filed locally or in another tab.
-  const handleWSApproval = useCallback(
-    (data: unknown) => {
-      if (typeof data === "object" && data !== null) {
-        const frame = data as Record<string, unknown>;
-        if (frame.type === "trust_grants_changed") {
-          void refreshGrants();
-          return;
-        }
-        if (
-          (frame.type === "approval_decided" ||
-            frame.type === "approval_resolved") &&
-          typeof frame.id === "string"
-        ) {
-          const decidedID = frame.id;
-          setApprovals((previous) =>
-            previous.filter((item) => item.id !== decidedID),
-          );
-          // A duration decision mints a grant server-side while a one-time
-          // decision records nothing; refetching covers both without the
-          // inbox guessing which tier was chosen.
-          void refreshGrants();
-          return;
-        }
-      }
-      const request = mergeApprovalFrame(data);
-      if (!request) return;
-      // Same-id upsert: an enrichment rebroadcast for a known id replaces
-      // the stored pending entry in place so the card swaps pending copy
-      // for valued copy without remounting and without bumping the badge.
-      setApprovals((previous) =>
-        previous.some((item) => item.id === request.id)
-          ? previous.map((item) => (item.id === request.id ? request : item))
-          : [...previous, request],
-      );
-    },
-    [refreshGrants],
-  );
-
-  useSharedWebSocket(handleWSApproval);
-
+  // Initial load: pending approvals plus the session titles that name the
+  // group headers. Both stay best-effort so a sessions outage never clears
+  // the pending list.
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -280,60 +437,82 @@ export default function ApprovalsInbox() {
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    listTrustGrants()
-      .then((response) => {
-        if (cancelled) return;
-        const next = (response as unknown as { grants?: unknown }).grants;
-        if (Array.isArray(next)) setGrants(next as TrustGrant[]);
-      })
-      .catch(() => {
-        // Grants stay empty when the endpoint is unavailable; pending still renders.
-      });
+    void refreshSessions();
     return () => {
       cancelled = true;
     };
+  }, [refreshSessions]);
+
+  // Live approval prompts arrive over the shared socket; same-id frames merge
+  // in place so enrichment swaps the pending badge for the valued one without
+  // remounting the card. Decision frames evict promptly so a cross-tab or
+  // menu-bar decision disappears immediately. The rules-change frame drops
+  // here: standing rules live in Settings → Access, so nothing
+  // grants-related remains for this surface to refresh.
+  const handleWSApproval = useCallback((data: unknown) => {
+    if (isRecord(data)) {
+      const frame = data as Record<string, unknown>;
+      if (frame.type === "access_rules_changed") return;
+      if (
+        frame.type === "approval_decided" ||
+        frame.type === "approval_resolved"
+      ) {
+        const decidedID = [frame.id, frame.approvalID, frame.approvalId].find(
+          (candidate): candidate is string =>
+            typeof candidate === "string" && candidate.trim().length > 0,
+        );
+        if (decidedID) {
+          setApprovals((previous) =>
+            previous.filter((item) => item.id !== decidedID),
+          );
+        }
+        return;
+      }
+    }
+    const request = mergeApprovalFrame(data);
+    if (!request) return;
+    setApprovals((previous) =>
+      previous.some((item) => item.id === request.id)
+        ? previous.map((item) => (item.id === request.id ? request : item))
+        : [...previous, request],
+    );
   }, []);
 
-  // Tick the clock for relative countdowns and poll grants for usage
-  // counters on the same cadence. Record-use emits no WS broadcast by
-  // contract, so the 30s poll is what proves a grant is live; expiry
-  // eviction still derives from the same timestamp.
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setNowMs(Date.now());
-      void refreshGrants();
-    }, GRANT_CLOCK_POLL_MS);
-    return () => {
-      clearInterval(timer);
-    };
-  }, [refreshGrants]);
+  useSharedWebSocket(handleWSApproval);
+
+  const groups = useMemo(
+    () => buildGroups(approvals, sessionTitles),
+    [approvals, sessionTitles],
+  );
 
   function durationFor(id: string): TrustDuration {
     return durations[id] ?? "thisTime";
   }
 
-  // "Only this time" records no grant at all, so widen must read as unavailable
-  // for that tier; otherwise the checkbox implies tool-wide one-shot trust the
-  // engine would silently ignore (thisTime never widens).
-  function widenEnabledFor(id: string): boolean {
-    return durationFor(id) !== "thisTime";
+  // An enrichment upsert can add an egress host to a card whose picker held a
+  // dated tier, so the effective duration always falls back into the options
+  // the card actually offers instead of rendering an unselectable value.
+  function effectiveDurationFor(request: PermissionRequest): TrustDuration {
+    const current = durationFor(request.id);
+    return durationOptionsFor(request).some((option) => option.value === current)
+      ? current
+      : "thisTime";
   }
 
-  async function decide(id: string, approved: boolean) {
+  // Single decision path: every card, including the brake, leaves through
+  // POST /approvals/:id/decide with the unified {approved, duration, scope}
+  // payload.
+  async function submitDecision(
+    id: string,
+    approved: boolean,
+    duration: TrustDuration,
+    scope?: AccessScopeDTO,
+  ) {
     setDecidingState({ id, action: approved ? "allowing" : "denying" });
     setError(null);
-    // Enforce the thisTime guard client-side too: a widen intent that was
-    // checked before the tier changed must never ship alongside a one-shot
-    // grant, so the request can only widen when the duration supports it.
-    const duration = durationFor(id);
-    const widen = approved && widenEnabledFor(id) && Boolean(widenSelections[id]);
     try {
-      await decideApproval(id, approved, duration, widen);
+      await decideApproval(id, approved, duration, scope);
       setApprovals((previous) => previous.filter((item) => item.id !== id));
-      // Duration decisions mint a grant server-side; refetch so the Active
-      // section reflects it. One-time decisions record nothing, so the
-      // refetch resolves to the same list and no grant row appears.
-      await refreshGrants();
     } catch (failure) {
       setError(
         failure instanceof ApiError ? failure.message : "Decision failed",
@@ -343,13 +522,32 @@ export default function ApprovalsInbox() {
     }
   }
 
-  async function handleQuestionResponse(id: string, answer?: string, cancelled?: boolean) {
+  function decideFromCard(request: PermissionRequest, approved: boolean) {
+    const choice = scopeChoices[request.id] ?? "thisTarget";
+    void submitDecision(
+      request.id,
+      approved,
+      effectiveDurationFor(request),
+      decisionScopeFor(request, choice, customScopes[request.id]),
+    );
+  }
+
+  // The brake's complete decision is releasing or holding the park, so it
+  // sends the one-shot tier with no scope: neither choice can mint a rule.
+  function decideBrake(request: PermissionRequest, approved: boolean) {
+    void submitDecision(request.id, approved, "thisTime");
+  }
+
+  async function handleQuestionResponse(
+    id: string,
+    answer?: string,
+    cancelled?: boolean,
+  ) {
     setDecidingState({ id, action: cancelled ? "denying" : "allowing" });
     setError(null);
     try {
       await respondToQuestion(id, answer, cancelled);
       setApprovals((previous) => previous.filter((item) => item.id !== id));
-      await refreshGrants();
     } catch (failure) {
       setError(
         failure instanceof ApiError ? failure.message : "Response failed",
@@ -359,124 +557,405 @@ export default function ApprovalsInbox() {
     }
   }
 
-  // Staging keeps row clicks non-destructive: the widening request only fires
-  // from the modal confirm, so hover alone never expands trust and a
-  // mis-click never widens without reading the consequence first.
-  function stageWiden(grant: TrustGrant) {
-    setWidenError(null);
-    setPendingWiden(grant);
-  }
-
-  function cancelWiden() {
-    setPendingWiden(null);
-    setWidenError(null);
-  }
-
-  // Confirms the staged widen: posts the tool-wide expansion, refetches so the
-  // card flips to the all-targets scope, then closes. Failures keep the modal
-  // open with the error surfaced inside the dialog so the user can retry or
-  // cancel instead of losing scope.
-  async function confirmWiden() {
-    if (!pendingWiden) return;
-    if (wideningId !== null) return;
-    const id = pendingWiden.id;
-    setWideningId(id);
-    setWidenError(null);
-    try {
-      await widenTrustGrant(id);
-      await refreshGrants();
-      setPendingWiden(null);
-      setWidenError(null);
-    } catch (failure) {
-      setWidenError(
-        failure instanceof ApiError ? failure.message : "Failed to widen grant",
-      );
-    } finally {
-      setWideningId(null);
+  function selectScopeChoice(request: PermissionRequest, choice: ScopeChoice) {
+    setScopeChoices((previous) => ({ ...previous, [request.id]: choice }));
+    // Picking custom with nothing staged opens the editor immediately so a
+    // decision can never ship a half-described scope.
+    if (choice === "custom" && !customScopes[request.id]) {
+      openScopeDraft(request);
     }
   }
 
-  // Confirms the staged revoke: the server already removed the row on 204, so filtering
-  // locally avoids a flash of stale state. Failures keep the modal open with the error
-  // surfaced inside the dialog so the user can retry or cancel instead of losing scope.
-  async function confirmRevoke() {
-    if (!pendingRevoke) return;
-    const id = pendingRevoke.id;
-    setRevokingId(id);
-    setRevokeError(null);
-    try {
-      await revokeTrustGrant(id);
-      // Drop the row without a refetch: the server already removed it, so
-      // filtering locally avoids a flash of stale state.
-      setGrants((previous) => previous.filter((grant) => grant.id !== id));
-      setPendingRevoke(null);
-      setRevokeError(null);
-    } catch (failure) {
-      setRevokeError(
-        failure instanceof ApiError ? failure.message : "Revoke failed",
-      );
-    } finally {
-      setRevokingId(null);
+  function openScopeDraft(request: PermissionRequest) {
+    setScopeDraftError(null);
+    const staged = customScopes[request.id];
+    setScopeDraft({
+      id: request.id,
+      kind: scopeEditorKind(request),
+      text: staged ? scopeToText(staged) : scopePrefill(request),
+    });
+  }
+
+  function saveScopeDraft() {
+    if (!scopeDraft) return;
+    const scope = buildCustomScope(scopeDraft.kind, scopeDraft.text);
+    if (!scope) {
+      setScopeDraftError("Enter at least one entry.");
+      return;
     }
+    if (
+      scope.kind === "recipientSet" &&
+      scope.handles.length > MAX_RECIPIENT_SET_MEMBERS
+    ) {
+      setScopeDraftError(
+        `Keep the recipient list to ${MAX_RECIPIENT_SET_MEMBERS} or fewer entries.`,
+      );
+      return;
+    }
+    setCustomScopes((previous) => ({ ...previous, [scopeDraft.id]: scope }));
+    setScopeChoices((previous) => ({ ...previous, [scopeDraft.id]: "custom" }));
+    setScopeDraft(null);
+    setScopeDraftError(null);
   }
 
-  function cancelRevoke() {
-    setPendingRevoke(null);
-    setRevokeError(null);
+  function cancelScopeDraft() {
+    setScopeDraft(null);
+    setScopeDraftError(null);
   }
 
-  // Staging keeps row clicks non-destructive: the PATCH only fires from the
-  // modal confirm, so opening the dialog never rewrites expiry and the
-  // current tier stays selected until the owner picks another.
-  function stageDurationChange(grant: TrustGrant) {
-    setDurationError(null);
-    setSelectedDuration(
-      grant.duration === "thisTime" ? "fiveMinutes" : grant.duration,
+  function decidingLabel(
+    request: PermissionRequest,
+    action: "allowing" | "denying",
+  ): string {
+    if (request.toolName === BRAKE_TOOL_NAME) {
+      return action === "allowing" ? "Resuming…" : "Keeping paused…";
+    }
+    return action === "allowing" ? "Allowing & resuming…" : "Denying…";
+  }
+
+  function renderSeverityBadge(request: PermissionRequest) {
+    const id = request.id;
+    if (request.assessment) {
+      // Fail-closed on unknown tiers: only engine-known severities render a
+      // badge rather than guessing a tier color.
+      if (
+        request.assessment.severity === "safe" ||
+        request.assessment.severity === "moderate" ||
+        request.assessment.severity === "dangerous"
+      ) {
+        return (
+          <span
+            className={`badge approval-severity-badge severity-${request.assessment.severity}`}
+            data-testid={`approval-severity-${id}`}
+          >
+            {request.assessment.severity === "safe" && "🟢 Safe"}
+            {request.assessment.severity === "moderate" && "🟡 State Change"}
+            {request.assessment.severity === "dangerous" && "🔴 Dangerous"}
+          </span>
+        );
+      }
+      return null;
+    }
+    // Nil assessment is the pending state: spinner badge with the shared
+    // pending copy, hiding outcome and warnings while keeping Allow/Deny
+    // enabled.
+    return (
+      <span
+        className="badge approval-severity-badge severity-pending"
+        data-testid={`approval-assessment-pending-${id}`}
+      >
+        <span
+          className="approval-assessment-pending approval-assessment-pending-spinner"
+          aria-hidden="true"
+        />
+        Checking safety…
+      </span>
     );
-    setPendingDurationGrant(grant);
   }
 
-  function cancelDurationChange() {
-    setPendingDurationGrant(null);
-    setDurationError(null);
-  }
-
-  // Confirms the staged re-arm: patches the tier in place, refetches so the
-  // row expiry updates without a manual refresh, then closes. The server
-  // keeps identity and usage counters, so the client only sends the tier.
-  // Failures keep the modal open with the error inside so the owner can
-  // retry or cancel instead of losing the staged choice.
-  async function confirmDurationChange() {
-    if (!pendingDurationGrant) return;
-    if (changingDurationId !== null) return;
-    const id = pendingDurationGrant.id;
-    const duration = selectedDuration;
-    setChangingDurationId(id);
-    setDurationError(null);
-    try {
-      await changeDurationGrant(id, duration);
-      await refreshGrants();
-      setPendingDurationGrant(null);
-      setDurationError(null);
-    } catch (failure) {
-      setDurationError(
-        failure instanceof ApiError ? failure.message : "Failed to save duration",
+  function renderCard(request: PermissionRequest) {
+    if (request.toolName === "question.ask") {
+      return (
+        <InlineQuestionCard
+          key={request.id}
+          request={request}
+          deciding={decidingState?.id === request.id}
+          variant="inbox"
+          onRespond={(id, answer, cancelled) =>
+            void handleQuestionResponse(id, answer, cancelled)
+          }
+        />
       );
-    } finally {
-      setChangingDurationId(null);
     }
-  }
 
-  // Expired-by-clock rows hide locally so a lapsed grant never lingers
-  // until the next server poll.
-  // Live re-arm preview derives from confirmation time, so it ticks with the
-  // same clock that drives expiry countdowns and stays honest while staged.
-  const durationPreviewMs = durableDurationMs(selectedDuration);
-  const durationPreviewDate =
-    durationPreviewMs == null ? null : new Date(nowMs + durationPreviewMs);
-  const visibleGrants = grants.filter(
-    (grant) => !isGrantExpired(grant, nowMs),
-  );
+    if (request.toolName === BRAKE_TOOL_NAME) {
+      const isDeciding = decidingState?.id === request.id;
+      return (
+        <div
+          className="card approval-card approval-brake-card"
+          key={request.id}
+          data-testid={`approval-card-${request.id}`}
+        >
+          <div className="approval-card-header">
+            <div className="approval-title-group">
+              <span className="badge approval-tool-badge">
+                {BRAKE_TOOL_NAME}
+              </span>
+              <span
+                className="badge approval-severity-badge severity-dangerous"
+                data-testid={`approval-severity-${request.id}`}
+              >
+                🔴 Dangerous
+              </span>
+            </div>
+          </div>
+
+          <div className="approval-narrative approval-intent">
+            {request.description ||
+              "The behavior brake parked the running turns after an anomaly in trusted-tool outcomes."}
+          </div>
+
+          <div className="approval-actions-bar">
+            <div className="approval-decision-buttons">
+              {isDeciding ? (
+                <span className="text-xs muted approval-resuming-label">
+                  <RefreshIcon size={12} className="spin" />
+                  <span>
+                    {decidingLabel(
+                      request,
+                      decidingState?.action ?? "allowing",
+                    )}
+                  </span>
+                </span>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={isDeciding}
+                    onClick={() => decideBrake(request, true)}
+                  >
+                    Resume
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    disabled={isDeciding}
+                    onClick={() => decideBrake(request, false)}
+                  >
+                    Keep paused
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const id = request.id;
+    const isDeciding = decidingState?.id === id;
+    const choice = scopeChoices[id] ?? "thisTarget";
+    const customScope = customScopes[id];
+    // A custom choice without a staged scope names no target, so the decision
+    // controls hold until the editor saves one instead of shipping a
+    // half-described payload.
+    const scopeReady = choice !== "custom" || customScope !== undefined;
+    const egressHost = resolveEgressHost(request);
+    const targetPreview = previewRequestTarget(request);
+
+    return (
+      <div
+        className="card approval-card"
+        key={id}
+        data-testid={`approval-card-${id}`}
+      >
+        <div className="approval-card-header">
+          <div className="approval-title-group">
+            <span className="badge approval-tool-badge">{request.toolName}</span>
+            {egressHost ? (
+              <span
+                className="badge approval-egress-badge"
+                data-testid={`approval-egress-${id}`}
+              >
+                🌐 {egressHost}
+              </span>
+            ) : null}
+            {renderSeverityBadge(request)}
+          </div>
+        </div>
+
+        {request.intent ? (
+          <div className="approval-narrative approval-intent">
+            <span className="approval-section-label">Why:</span> {request.intent}
+          </div>
+        ) : request.description && !request.assessment ? (
+          <div className="approval-narrative approval-intent">
+            {request.description}
+          </div>
+        ) : null}
+
+        {request.assessment?.outcome ? (
+          <div className="approval-narrative approval-outcome">
+            <span className="approval-section-label">Expected outcome:</span>{" "}
+            {request.assessment.outcome}
+          </div>
+        ) : null}
+
+        <BashTierLine summary={resolveSandboxSummary(request)} />
+
+        {request.assessment?.warnings && request.assessment.warnings.length > 0 ? (
+          <ul className="approval-warnings">
+            {request.assessment.warnings.map((w, idx) => (
+              <li key={idx} className="approval-warning-item">
+                ⚠️ {w}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
+        {request.input?.argumentsJSON ? (
+          <details className="approval-args-details">
+            <summary className="approval-args-summary">View arguments</summary>
+            <div className="approval-args-wrapper">
+              <pre className="approval-args-code">{request.input.argumentsJSON}</pre>
+            </div>
+          </details>
+        ) : null}
+
+        <div className="approval-scope-line" data-testid={`approval-scope-${id}`}>
+          <span className="approval-section-label">Scope:</span>
+          <div className="approval-scope-options">
+            <div
+              role="radiogroup"
+              aria-label={`Decision scope for ${request.toolName}`}
+              className="approval-scope-radios"
+            >
+              <label className="approval-scope-option">
+                <input
+                  type="radio"
+                  name={`approval-scope-${id}`}
+                  checked={choice === "thisTarget"}
+                  disabled={isDeciding}
+                  onChange={() => selectScopeChoice(request, "thisTarget")}
+                />
+                <span>
+                  {egressHost
+                    ? "This host"
+                    : request.toolName === "messages.send" ||
+                        request.toolName === "email.send"
+                      ? "This recipient"
+                      : "This target"}
+                  {targetPreview ? (
+                    <>
+                      {" "}
+                      <code className="approval-scope-target">
+                        {targetPreview}
+                      </code>
+                    </>
+                  ) : null}
+                </span>
+              </label>
+              <label className="approval-scope-option">
+                <input
+                  type="radio"
+                  name={`approval-scope-${id}`}
+                  checked={choice === "allTargets"}
+                  disabled={isDeciding}
+                  onChange={() => selectScopeChoice(request, "allTargets")}
+                />
+                <span>All targets</span>
+              </label>
+              <label className="approval-scope-option">
+                <input
+                  type="radio"
+                  name={`approval-scope-${id}`}
+                  checked={choice === "custom"}
+                  disabled={isDeciding}
+                  onChange={() => selectScopeChoice(request, "custom")}
+                />
+                <span>Custom scope</span>
+              </label>
+            </div>
+            <button
+              type="button"
+              className="ghost"
+              disabled={isDeciding}
+              onClick={() => openScopeDraft(request)}
+            >
+              Edit scope
+            </button>
+            {choice === "custom" && customScope ? (
+              <span
+                className="muted text-sm approval-scope-summary"
+                data-testid={`approval-scope-summary-${id}`}
+              >
+                {describeScope(customScope)}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
+        {egressHost ? (
+          <p className="muted text-sm approval-scope-hint">
+            {`Tiers map to ${egressHost}: once, for this session, or a durable rule.`}
+          </p>
+        ) : null}
+
+        <div className="approval-actions-bar">
+          <label className="approval-duration-label">
+            <span className="text-sm muted">Duration:</span>
+            <select
+              aria-label={`Duration for ${request.toolName}`}
+              value={effectiveDurationFor(request)}
+              disabled={isDeciding}
+              onChange={(event) => {
+                const val = event.target.value;
+                const duration: TrustDuration = durationOptionsFor(
+                  request,
+                ).some((option) => option.value === val)
+                  ? (val as TrustDuration)
+                  : "thisTime";
+                setDurations((previous) => ({
+                  ...previous,
+                  [id]: duration,
+                }));
+              }}
+            >
+              {durationOptionsFor(request).map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="approval-decision-buttons">
+            {isDeciding ? (
+              <span className="text-xs muted approval-resuming-label">
+                <RefreshIcon size={12} className="spin" />
+                <span>
+                  {decidingLabel(request, decidingState?.action ?? "allowing")}
+                </span>
+              </span>
+            ) : (
+              <>
+                {/* Per-row locking: only the deciding row disables so
+                    independent approvals stay actionable while one decision
+                    (and its parked resume) is in flight. */}
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={!scopeReady}
+                  title={
+                    scopeReady
+                      ? undefined
+                      : "Pick a custom scope first — Edit scope opens the editor."
+                  }
+                  onClick={() => decideFromCard(request, true)}
+                >
+                  Allow
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  disabled={!scopeReady}
+                  title={
+                    scopeReady
+                      ? undefined
+                      : "Pick a custom scope first — Edit scope opens the editor."
+                  }
+                  onClick={() => decideFromCard(request, false)}
+                >
+                  Deny
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <section className="panel approvals-panel" aria-label="Approvals inbox">
@@ -484,11 +963,20 @@ export default function ApprovalsInbox() {
         <div>
           <h2>Inbox</h2>
           <p className="muted text-sm">
-            Review and decide gated tool execution requests and operator questions.
+            Review and decide gated tool execution requests and operator
+            questions.
           </p>
         </div>
 
         <div className="row">
+          <a
+            className="ghost icon-text-btn"
+            href={STANDING_RULES_HREF}
+            title="Standing rules live in Settings → Access"
+          >
+            <ApprovalsIcon size={14} />
+            <span>Manage standing rules</span>
+          </a>
           <button
             type="button"
             className="ghost icon-text-btn"
@@ -502,6 +990,11 @@ export default function ApprovalsInbox() {
         </div>
       </div>
 
+      {/* Ephemeral session trust for the filtered session, above the pending
+          groups: it lists what stays auto-approved for that conversation with
+          a per-line revoke. Nothing renders while no session is filtered. */}
+      <EphemeralTrustChip sessionID={sessionID} />
+
       {error ? <p className="error">{error}</p> : null}
       {approvals.length === 0 && !loading ? (
         <div className="approvals-empty muted">
@@ -509,588 +1002,77 @@ export default function ApprovalsInbox() {
         </div>
       ) : null}
 
-      <div className="approvals-list">
-        {approvals.map((request) => {
-          if (request.toolName === "question.ask") {
-            return (
-              <InlineQuestionCard
-                key={request.id}
-                request={request}
-                deciding={decidingState?.id === request.id}
-                variant="inbox"
-                onRespond={(id, answer, cancelled) =>
-                  void handleQuestionResponse(id, answer, cancelled)
-                }
-              />
-            );
-          }
-          return (
-          <div className="card approval-card" key={request.id}>
-            <div className="approval-card-header">
-              <div className="approval-title-group">
-                <span className="badge approval-tool-badge">{request.toolName}</span>
-                {request.assessment ? (
-                  // Fail-closed on unknown tiers: only engine-known severities
-                  // render a badge rather than guessing a tier color.
-                  request.assessment.severity === "safe" ||
-                  request.assessment.severity === "moderate" ||
-                  request.assessment.severity === "dangerous" ? (
-                    <span
-                      className={`badge approval-severity-badge severity-${request.assessment.severity}`}
-                      data-testid={`approval-severity-${request.id}`}
-                    >
-                      {request.assessment.severity === "safe" && "🟢 Safe"}
-                      {request.assessment.severity === "moderate" && "🟡 State Change"}
-                      {request.assessment.severity === "dangerous" && "🔴 Dangerous"}
-                    </span>
-                  ) : null
-                ) : (
-                  // Nil assessment is the pending state: spinner badge with
-                  // the shared pending copy, hiding outcome and warnings
-                  // while keeping Allow/Deny enabled.
-                  <span
-                    className="badge approval-severity-badge severity-pending"
-                    data-testid={`approval-assessment-pending-${request.id}`}
-                  >
-                    <span
-                      className="approval-assessment-pending approval-assessment-pending-spinner"
-                      aria-hidden="true"
-                    />
-                    Checking safety…
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {request.intent ? (
-              <div className="approval-narrative approval-intent">
-                <span className="approval-section-label">Why:</span> {request.intent}
-              </div>
-            ) : request.description && !request.assessment ? (
-              <div className="approval-narrative approval-intent">
-                {request.description}
-              </div>
-            ) : null}
-
-            {request.assessment?.outcome ? (
-              <div className="approval-narrative approval-outcome">
-                <span className="approval-section-label">Expected outcome:</span>{" "}
-                {request.assessment.outcome}
-              </div>
-            ) : null}
-
-            <BashTierLine summary={resolveSandboxSummary(request)} />
-
-            {request.assessment?.warnings && request.assessment.warnings.length > 0 ? (
-              <ul className="approval-warnings">
-                {request.assessment.warnings.map((w, idx) => (
-                  <li key={idx} className="approval-warning-item">
-                    ⚠️ {w}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-
-            {request.input?.argumentsJSON ? (
-              <details className="approval-args-details">
-                <summary className="approval-args-summary">View arguments</summary>
-                <div className="approval-args-wrapper">
-                  <pre className="approval-args-code">{request.input.argumentsJSON}</pre>
-                </div>
-              </details>
-            ) : null}
-
-            <div className="approval-actions-bar">
-              <label className="approval-duration-label">
-                <span className="text-sm muted">Duration:</span>
-                <select
-                  aria-label={`Duration for ${request.toolName}`}
-                  value={durationFor(request.id)}
-                  onChange={(event) => {
-                    const val = event.target.value;
-                    const duration: TrustDuration = isTrustDuration(val) ? val : "thisTime";
-                    setDurations((previous) => ({
-                      ...previous,
-                      [request.id]: duration,
-                    }));
-                  }}
-                >
-                  {trustDurationOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="approval-widen-toggle">
-                <input
-                  type="checkbox"
-                  aria-label={`Allow for all targets for ${request.toolName}`}
-                  checked={
-                    widenEnabledFor(request.id) &&
-                    Boolean(widenSelections[request.id])
-                  }
-                  disabled={!widenEnabledFor(request.id)}
-                  onChange={(event) => {
-                    const checked = event.target.checked;
-                    setWidenSelections((previous) => ({
-                      ...previous,
-                      [request.id]: checked,
-                    }));
-                  }}
-                />
-                <span className="text-sm muted">
-                  {widenEnabledFor(request.id)
-                    ? "Allow for all targets (any target)"
-                    : "Allow for all targets (pick a duration other than \u201cOnly this time\u201d)"}
-                </span>
-              </label>
-
-              <div className="approval-decision-buttons">
-                {decidingState?.id === request.id ? (
-                  <span className="text-xs muted approval-resuming-label">
-                    <RefreshIcon size={12} className="spin" />
-                    <span>
-                      {decidingState.action === "allowing"
-                        ? "Allowing & resuming…"
-                        : "Denying…"}
-                    </span>
-                  </span>
-                ) : (
-                  <>
-                    {/* Per-row locking: only the deciding row disables so
-                        independent approvals stay actionable while one
-                        decision (and its parked resume) is in flight. */}
-                    <button
-                      type="button"
-                      className="primary"
-                      disabled={decidingState?.id === request.id}
-                      onClick={() => void decide(request.id, true)}
-                    >
-                      Allow
-                    </button>
-                    <button
-                      type="button"
-                      className="danger"
-                      disabled={decidingState?.id === request.id}
-                      onClick={() => void decide(request.id, false)}
-                    >
-                      Deny
-                    </button>
-                  </>
-                )}
-              </div>
+      <div className="approvals-groups">
+        {groups.map((group) => (
+          <div
+            className="approvals-group"
+            key={group.key}
+            data-testid={`approvals-group-${group.key}`}
+          >
+            {/* Sticky session header: every card renders beneath it with no
+                collapse, so no group can hide a pending decision. */}
+            <h3 className="approvals-group-header">{group.title}</h3>
+            <div className="approvals-list">
+              {group.requests.map((request) => renderCard(request))}
             </div>
           </div>
-        );
-      })}
+        ))}
       </div>
 
-      <div className="active-approvals-section">
-        <div className="panel-header-row">
-          <div>
-            <h3>Active approvals</h3>
-            <p className="muted text-sm">
-              Trusted tools that stay auto-approved until revoked or expired.
-            </p>
-          </div>
-          <span className="muted text-sm">{visibleGrants.length} active</span>
-        </div>
-
-        {visibleGrants.length === 0 ? (
-          <div className="approvals-empty muted">
-            <p>No active approvals.</p>
-          </div>
-        ) : null}
-
-        <div className="approvals-list">
-          {visibleGrants.map((grant) => {
-            const expiry = grantExpiryDate(grant);
-            const relative = grantRelativeLabel(expiry, nowMs);
-            // Usage degrades to untouched only when both signals agree the grant never
-            // fired, so a partial-migration row with a count but no stamp (or a stamp
-            // but no count) still proves exercised trust instead of hiding as unused.
-            const useCount = grantUseCount(grant);
-            const lastUsed = grantLastUsedDate(grant);
-            const isUnused = useCount === 0 && !lastUsed;
-            return (
-              <div className="card approval-card" key={grant.id}>
-                <div className="approval-card-header">
-                  <div className="approval-title-group">
-                    <span className="badge approval-tool-badge">
-                      {grant.toolName}
-                    </span>
-                    <span className="approval-desc">
-                      {grantScopeLine(grant)}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="approval-grant-meta text-sm muted">
-                  <span className="approval-grant-duration">
-                    {durationLabelFor(grant.duration)}
-                  </span>
-                  <span className="approval-grant-meta-sep" aria-hidden="true">
-                    ·
-                  </span>
-                  {expiry ? (
-                    <span>
-                      Expires {expiry.toLocaleString()} ({relative})
-                    </span>
-                  ) : (
-                    <span>Never expires</span>
-                  )}
-                </div>
-
-                <div className="approval-grant-usage text-sm muted">
-                  {isUnused ? (
-                    <span>Not used yet</span>
-                  ) : useCount > 0 && lastUsed ? (
-                    <span>
-                      Used {useCount}x · Last used{" "}
-                      {grantLastUsedRelativeLabel(lastUsed, nowMs)} (
-                      {lastUsed.toLocaleString()})
-                    </span>
-                  ) : useCount > 0 ? (
-                    <span>Used {useCount}x</span>
-                  ) : lastUsed ? (
-                    <span>
-                      Last used {grantLastUsedRelativeLabel(lastUsed, nowMs)} (
-                      {lastUsed.toLocaleString()})
-                    </span>
-                  ) : (
-                    <span>Not used yet</span>
-                  )}
-                </div>
-
-                <div className="approval-actions-bar">
-                  <div className="approval-decision-buttons">
-                    {/* Widen staging lock: row clicks only stage the confirmation so
-                        hover states the consequence without expanding trust; the
-                        modal confirm issues the request. Every widen locks while
-                        one is in flight or staged, mirroring the revoke staging
-                        lock. Send grants are per-recipient and withhold the
-                        control entirely. */}
-                    {isWidenableGrant(grant) ? (
-                      <button
-                        type="button"
-                        className="secondary"
-                        title={`This approval currently covers only ${(grant.target ?? "").trim()}. Widening allows ${grant.toolName} for any recipient, address, file, or site.`}
-                        disabled={
-                          wideningId !== null ||
-                          revokingId !== null ||
-                          changingDurationId !== null ||
-                          pendingRevoke !== null ||
-                          pendingWiden !== null ||
-                          pendingDurationGrant !== null
-                        }
-                        onClick={() => stageWiden(grant)}
-                      >
-                        {wideningId === grant.id ? (
-                          <>
-                            <RefreshIcon size={12} className="spin" />
-                            <span>Widening…</span>
-                          </>
-                        ) : (
-                          "Widen to all targets"
-                        )}
-                      </button>
-                    ) : null}
-                    {/* Re-arm keeps the narrowed scope and only rewrites expiry, so it
-                        stays offered even for per-recipient send rows where widening
-                        has no tool-wide meaning. Staging keeps the row click
-                        non-destructive; the modal confirm issues the PATCH. */}
-                    <button
-                      type="button"
-                      className="ghost"
-                      disabled={
-                        wideningId !== null ||
-                        revokingId !== null ||
-                        changingDurationId !== null ||
-                        pendingRevoke !== null ||
-                        pendingWiden !== null ||
-                        pendingDurationGrant !== null
-                      }
-                      onClick={() => stageDurationChange(grant)}
-                    >
-                      Change duration
-                    </button>
-                    {revokingId === grant.id ? (
-                      // Disabled in-flight control keeps the row locked while
-                      // surfacing progress, mirroring the pending inbox
-                      // per-row spinner without freeing the button early.
-                      <button
-                        type="button"
-                        className="danger"
-                        disabled
-                      >
-                        <RefreshIcon size={12} className="spin" />
-                        <span>Revoking…</span>
-                      </button>
-                    ) : (
-                      <>
-                        {/* Staging lock for confirm-every-revoke: while a revoke or a
-                            widen is staged (modal open, not yet confirming)
-                            every row disables so a second action cannot
-                            overwrite the staged context and silently drop the
-                            first scope. Once confirming, only the acting row
-                            locks so siblings stay actionable. */}
-                        <button
-                          type="button"
-                          className="danger"
-                          disabled={
-                            revokingId !== null
-                              ? revokingId === grant.id
-                              : pendingRevoke !== null ||
-                                pendingWiden !== null ||
-                                pendingDurationGrant !== null
-                          }
-                          onClick={() => {
-                            setRevokeError(null);
-                            setPendingRevoke(grant);
-                          }}
-                        >
-                          Revoke
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Revoke confirmation via the shared modal so the dialog portals above page
-          stacking contexts with Escape support. Staging keeps row clicks
-          non-destructive; only the modal confirm issues the DELETE. */}
-      {pendingRevoke ? (
+      {/* Scope editor through the shared modal so the dialog portals above
+          page stacking contexts with Escape support; only the modal save
+          commits a scope to the card's next decision. */}
+      {scopeDraft ? (
         <Modal
-          label="Confirm revoke grant"
-          onClose={() => {
-            if (revokingId === pendingRevoke.id) return;
-            cancelRevoke();
-          }}
+          label="Edit decision scope"
+          onClose={cancelScopeDraft}
           containerClassName="modal-container session-delete-modal"
         >
           <div className="modal-header">
-            <h3>Revoke approval?</h3>
+            <h3>Edit scope</h3>
             <button
               type="button"
               className="icon-button"
-              onClick={cancelRevoke}
-              disabled={revokingId === pendingRevoke.id}
+              onClick={cancelScopeDraft}
               aria-label="Close"
             >
               <CloseIcon size={16} />
             </button>
           </div>
           <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
-              {grantScopeLine(pendingRevoke)}
+            <p className="muted text-sm" style={{ margin: 0 }}>
+              {SCOPE_EDITOR_COPY[scopeDraft.kind].hint}
             </p>
-            <p
-              className="muted text-sm"
-              style={{ margin: "8px 0 0 0", overflowWrap: "anywhere" }}
-            >
-              {pendingRevoke.toolName} ·{" "}
-              {durationLabelFor(pendingRevoke.duration)}
-              {grantExpiryDate(pendingRevoke)
-                ? ` · Expires ${grantExpiryDate(pendingRevoke)?.toLocaleString()} (${grantRelativeLabel(grantExpiryDate(pendingRevoke), nowMs)})`
-                : " · Never expires"}
-            </p>
-            <p className="muted" style={{ margin: "8px 0 0 0" }}>
-              Future calls will require approval again.
-            </p>
-            {revokeError ? (
+            <label className="muted text-sm" htmlFor="approval-scope-editor">
+              {SCOPE_EDITOR_COPY[scopeDraft.kind].label}
+            </label>
+            <textarea
+              id="approval-scope-editor"
+              className="approval-scope-editor"
+              rows={6}
+              value={scopeDraft.text}
+              onChange={(event) =>
+                setScopeDraft((previous) =>
+                  previous ? { ...previous, text: event.target.value } : previous,
+                )
+              }
+            />
+            {scopeDraftError ? (
               <p className="error" role="alert" style={{ margin: "8px 0 0 0" }}>
-                {revokeError}
+                {scopeDraftError}
               </p>
             ) : null}
           </div>
           <div className="modal-footer">
-            <button
-              type="button"
-              className="ghost"
-              onClick={cancelRevoke}
-              disabled={revokingId === pendingRevoke.id}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="danger"
-              onClick={() => void confirmRevoke()}
-              disabled={revokingId === pendingRevoke.id}
-              aria-label="Confirm revoke grant"
-            >
-              {revokingId === pendingRevoke.id ? "Revoking…" : "Revoke"}
-            </button>
-          </div>
-        </Modal>
-      ) : null}
-
-      {/* Widen confirmation via the shared modal so the consequence stays visible
-          before trust expands tool-wide. Staging keeps row clicks
-          non-destructive; only the modal confirm issues the widen request. */}
-      {pendingWiden ? (
-        <Modal
-          label="Confirm widen grant"
-          onClose={() => {
-            if (wideningId === pendingWiden.id) return;
-            cancelWiden();
-          }}
-          containerClassName="modal-container session-delete-modal"
-        >
-          <div className="modal-header">
-            <h3>Widen to all targets?</h3>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={cancelWiden}
-              disabled={wideningId === pendingWiden.id}
-              aria-label="Close"
-            >
-              <CloseIcon size={16} />
-            </button>
-          </div>
-          <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
-              {grantScopeLine(pendingWiden)}
-            </p>
-            <p
-              className="muted text-sm"
-              style={{ margin: "8px 0 0 0", overflowWrap: "anywhere" }}
-            >
-              {pendingWiden.toolName} ·{" "}
-              {durationLabelFor(pendingWiden.duration)}
-              {grantExpiryDate(pendingWiden)
-                ? ` · Expires ${grantExpiryDate(pendingWiden)?.toLocaleString()} (${grantRelativeLabel(grantExpiryDate(pendingWiden), nowMs)})`
-                : " · Never expires"}
-            </p>
-            <p className="muted" style={{ margin: "8px 0 0 0" }}>
-              {`A target is the specific thing this approval is limited to: the recipient or address for send tools, the file path for file tools, or the site or address for web tools. This approval currently covers only "${(pendingWiden.target ?? "").trim()}". Widening removes that limit so ${pendingWiden.toolName} is auto-approved for anything until ${grantExpiryDate(pendingWiden) ? grantExpiryDate(pendingWiden)?.toLocaleString() : "forever"}. Revoke stays available to undo it.`}
-            </p>
-            {widenError ? (
-              <p className="error" role="alert" style={{ margin: "8px 0 0 0" }}>
-                {widenError}
-              </p>
-            ) : null}
-          </div>
-          <div className="modal-footer">
-            <button
-              type="button"
-              className="ghost"
-              onClick={cancelWiden}
-              disabled={wideningId === pendingWiden.id}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => void confirmWiden()}
-              disabled={wideningId === pendingWiden.id}
-            >
-              {wideningId === pendingWiden.id ? "Widening…" : "Widen to all targets"}
-            </button>
-          </div>
-        </Modal>
-      ) : null}
-
-      {/* Re-arm via the shared modal so the new expiry stays visible before
-          trust is rewritten. Staging keeps row clicks non-destructive; only
-          the modal confirm issues the PATCH and then refetches. */}
-      {pendingDurationGrant ? (
-        <Modal
-          label="Change grant duration"
-          onClose={() => {
-            if (changingDurationId === pendingDurationGrant.id) return;
-            cancelDurationChange();
-          }}
-          containerClassName="modal-container session-delete-modal"
-        >
-          <div className="modal-header">
-            <h3>Change duration?</h3>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={cancelDurationChange}
-              disabled={changingDurationId === pendingDurationGrant.id}
-              aria-label="Close"
-            >
-              <CloseIcon size={16} />
-            </button>
-          </div>
-          <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
-              {grantScopeLine(pendingDurationGrant)}
-            </p>
-            <p
-              className="muted text-sm"
-              style={{ margin: "8px 0 0 0", overflowWrap: "anywhere" }}
-            >
-              {pendingDurationGrant.toolName} ·{" "}
-              {durationLabelFor(pendingDurationGrant.duration)} · Current
-              expiry:{" "}
-              {grantExpiryDate(pendingDurationGrant)
-                ? `Expires ${grantExpiryDate(pendingDurationGrant)?.toLocaleString()} (${grantRelativeLabel(grantExpiryDate(pendingDurationGrant), nowMs)})`
-                : "Never expires"}
-            </p>
-            <fieldset
-              style={{ margin: "12px 0 0 0", border: "none", padding: 0 }}
-            >
-              <legend className="muted text-sm">New duration</legend>
-              {trustDurationOptions
-                .filter((option) => option.value !== "thisTime")
-                .map((option) => (
-                  <label
-                    key={option.value}
-                    style={{ display: "block", margin: "4px 0" }}
-                  >
-                    <input
-                      type="radio"
-                      name="grant-duration"
-                      value={option.value}
-                      checked={selectedDuration === option.value}
-                      onChange={() => setSelectedDuration(option.value)}
-                      disabled={changingDurationId === pendingDurationGrant.id}
-                    />{" "}
-                    {option.label}
-                  </label>
-                ))}
-            </fieldset>
-            <p className="muted text-sm" style={{ margin: "8px 0 0 0" }}>
-              {durationPreviewDate == null
-                ? "Never expires"
-                : `New expiry: ${durationPreviewDate.toLocaleString()} (${grantRelativeLabel(durationPreviewDate, nowMs)})`}
-            </p>
-            {durationError ? (
-              <p className="error" role="alert" style={{ margin: "8px 0 0 0" }}>
-                {durationError}
-              </p>
-            ) : null}
-          </div>
-          <div className="modal-footer">
-            <button
-              type="button"
-              className="ghost"
-              onClick={cancelDurationChange}
-              disabled={changingDurationId === pendingDurationGrant.id}
-            >
+            <button type="button" className="ghost" onClick={cancelScopeDraft}>
               Cancel
             </button>
             <button
               type="button"
               className="primary"
-              onClick={() => void confirmDurationChange()}
-              disabled={changingDurationId === pendingDurationGrant.id}
+              onClick={saveScopeDraft}
             >
-              {changingDurationId === pendingDurationGrant.id
-                ? "Saving…"
-                : "Save duration"}
+              Save scope
             </button>
           </div>
         </Modal>

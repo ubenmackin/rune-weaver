@@ -714,7 +714,7 @@ extension PolicyStore {
         lines.append("# Rune Weaver Security Policy")
         lines.append("# Declarative security boundaries — network egress plus credential bindings.")
         lines.append("#")
-        lines.append("# Edit via the Web Dashboard Policy tab or directly in this file.")
+        lines.append("# Edit via Settings -> Access (Network/Credentials) or directly in this file.")
         lines.append("# The engine validates invariants on load; violations fall back to safe defaults.")
         lines.append("")
         lines.append("version = \(policy.version)")

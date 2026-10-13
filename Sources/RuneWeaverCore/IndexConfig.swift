@@ -236,19 +236,19 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         case reminders
         case roots
         case exclude
-        case maxFileMB = "max_file_mb"
-        case mailVectorWindow = "mail_vector_window"
-        case iCloudEvicted = "icloud_evicted"
-        case describeImagesWithLLM = "describe_images_with_llm"
-        case nightlyBudget = "nightly_budget"
-        case dbPath = "db_path"
+        case maxFileMB
+        case mailVectorWindow
+        case iCloudEvicted
+        case describeImagesWithLLM
+        case nightlyBudget
+        case dbPath
         case effort
         case workers
-        case thermalBackoff = "thermal_backoff"
-        case pauseOnBattery = "pause_on_battery"
-        case maxVectorChunksPerDocument = "max_vector_chunks_per_document"
-        case mailboxDeny = "mailbox_deny"
-        case alwaysSkipped = "always_skipped"
+        case thermalBackoff
+        case pauseOnBattery
+        case maxVectorChunksPerDocument
+        case mailboxDeny
+        case alwaysSkipped
     }
 
     /// Decodes an index config, defaulting every omitted key.

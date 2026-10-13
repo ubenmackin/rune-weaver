@@ -114,6 +114,7 @@ iOSInjectionProject/
 # Scratch / build artifacts
 scratch/
 dist/
+node_modules/
 
 # Generated engine version stamped by `make version` from the repo-root VERSION
 # file; fresh clones bootstrap it via `make version` (a prereq of build/test/run).

@@ -39,9 +39,9 @@ public struct EngineConfig: Sendable, Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case name
-        case logLevel = "log_level"
-        case compactionThresholdPercent = "compaction_threshold_percent"
-        case maxToolIterations = "max_tool_iterations"
+        case logLevel
+        case compactionThresholdPercent
+        case maxToolIterations
     }
 
     public init(from decoder: Decoder) throws {
@@ -97,7 +97,7 @@ public struct ServerEndpointConfig: Sendable, Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case hostname
         case port
-        case allowedHosts = "allowed_hosts"
+        case allowedHosts
     }
 
     /// Decodes an endpoint, defaulting omitted keys to the loopback default.
@@ -154,8 +154,8 @@ public struct AuthConfig: Sendable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case tokenEnv = "token_env"
-        case tokenFile = "token_file"
+        case tokenEnv
+        case tokenFile
     }
 
     /// Decodes auth sources, treating absent keys as unset.
@@ -266,14 +266,14 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case enabled
         case model
-        case serverURL = "server_url"
-        case apiKeyEnv = "api_key_env"
-        case providerType = "provider_type"
-        case apiStyle = "api_style"
-        case contextLength = "context_length"
-        case supportsVision = "supports_vision"
-        case slotCount = "slot_count"
-        case cachePrompt = "cache_prompt"
+        case serverURL
+        case apiKeyEnv
+        case providerType
+        case apiStyle
+        case contextLength
+        case supportsVision
+        case slotCount
+        case cachePrompt
     }
 
     public init(from decoder: Decoder) throws {
@@ -326,8 +326,8 @@ public struct LLMConfig: Sendable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case defaultProvider = "default_provider"
-        case fallbackProvider = "fallback_provider"
+        case defaultProvider
+        case fallbackProvider
         case providers
     }
 }
@@ -408,13 +408,13 @@ public struct RecallBudgets: Sendable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case perTierLimit = "per_tier_limit"
-        case autoLimit = "auto_limit"
+        case perTierLimit
+        case autoLimit
         case threshold
-        case maxChars = "max_chars"
-        case perHitChars = "per_hit_chars"
-        case docPoolMultiplier = "doc_pool_multiplier"
-        case episodicWeight = "episodic_weight"
+        case maxChars
+        case perHitChars
+        case docPoolMultiplier
+        case episodicWeight
     }
 
     /// Decodes recall budgets, defaulting every omitted key.
@@ -494,11 +494,11 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case vectorDBPath = "vector_db_path"
-        case episodesDBPath = "episodes_db_path"
-        case embeddingModel = "embedding_model"
-        case embeddingBackend = "embedding_backend"
-        case recallBudgets = "recall_budgets"
+        case vectorDBPath
+        case episodesDBPath
+        case embeddingModel
+        case embeddingBackend
+        case recallBudgets
     }
 
     /// Decodes a memory config, defaulting an absent backend to `apple`.
@@ -533,9 +533,9 @@ public struct VoiceConfig: Sendable, Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case sttProvider = "stt_provider"
-        case whisperModel = "whisper_model"
-        case ttsProvider = "tts_provider"
+        case sttProvider
+        case whisperModel
+        case ttsProvider
     }
 }
 
@@ -589,9 +589,9 @@ public struct ContainersConfig: Sendable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case memoryMB = "memory_mb"
-        case maxConcurrent = "max_concurrent"
-        case ttlMinutes = "ttl_minutes"
+        case memoryMB = "memoryMb"
+        case maxConcurrent
+        case ttlMinutes
     }
 }
 
@@ -612,116 +612,6 @@ extension ContainersConfig: Codable {
         try container.encode(memoryMB, forKey: .memoryMB)
         try container.encode(maxConcurrent, forKey: .maxConcurrent)
         try container.encode(ttlMinutes, forKey: .ttlMinutes)
-    }
-}
-
-/// Write posture for the `files.write` tool.
-///
-/// `model` keeps per-call mode selection, so an omitted call mode means staged
-/// review; `staged` and `live` force every write through that posture even when
-/// the call asks for the other mode, because the durable owner setting
-/// outranks a model-authored request. A forced write is never rejected for
-/// contradicting the setting — it proceeds in the forced mode and names the
-/// override in its envelope so the outcome stays honest.
-public enum FilesWriteMode: String, Sendable, Codable, Equatable, CaseIterable {
-    /// The agent picks per call; an omitted call mode stages for review.
-    case model
-    /// Every write is staged for review, even when the call asks for live.
-    case staged
-    /// Every write applies live with a `.rune_backup_` rollback copy.
-    case live
-}
-
-/// `[files]` — file-tool access policy.
-public struct FilesConfig: Sendable, Equatable {
-    /// Glob deny patterns enforced by the shared file access guard.
-    public var denyPatterns: [String]
-    /// Allowed root directories for file reads (`~` expands to home).
-    public var allowRoots: [String]
-    /// Whether deny hits escalate to approval instead of hard denial.
-    public var requireApprovalOnDeny: Bool
-    /// Forced write posture for `files.write`; `.model` defers to the per-call mode.
-    public var writeMode: FilesWriteMode
-
-    /// Default deny patterns enforced by the shared file access guard.
-    public static let defaultDenyPatterns = [
-        ".env*",
-        ".netrc",
-        "secrets.json",
-        "config.toml",
-        "*.pem",
-        "*.key",
-        "*keychain*",
-        ".ssh/*",
-        ".aws/*",
-        ".runeweaver/memory/*",
-        ".runeweaver/memory/vectors/*",
-        ".runeweaver/browser_profiles/*",
-        ".runeweaver/policy.toml",
-        ".runeweaver/auth_token",
-        ".runeweaver/searxng/*",
-        ".git-credentials",
-        ".gitcookies",
-        ".rclone.conf",
-        ".npmrc",
-        ".pypirc",
-        ".Xauthority",
-        ".emulator_console_auth_token",
-        ".gnupg/*",
-        ".kube/*",
-        ".docker/*",
-        ".config/gcloud/*",
-        ".chia_keys/*",
-        "*_history",
-        ".zsh_sessions/*"
-    ]
-    /// Default allowed roots (home directory).
-    public static let defaultAllowRoots = ["~"]
-    /// Default escalation for deny hits.
-    public static let defaultRequireApprovalOnDeny = true
-    /// Default write posture: the agent chooses the mode per call.
-    public static let defaultWriteMode: FilesWriteMode = .model
-
-    /// Creates a files config.
-    public init(
-        denyPatterns: [String] = defaultDenyPatterns,
-        allowRoots: [String] = defaultAllowRoots,
-        requireApprovalOnDeny: Bool = defaultRequireApprovalOnDeny,
-        writeMode: FilesWriteMode = defaultWriteMode
-    ) {
-        self.denyPatterns = denyPatterns
-        self.allowRoots = allowRoots
-        self.requireApprovalOnDeny = requireApprovalOnDeny
-        self.writeMode = writeMode
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case denyPatterns = "deny_patterns"
-        case allowRoots = "allow_roots"
-        case requireApprovalOnDeny = "require_approval_on_deny"
-        case writeMode = "write_mode"
-    }
-}
-
-extension FilesConfig: Codable {
-    /// Decodes a files config, defaulting omitted keys.
-    /// - Parameter decoder: Decoder for the config document.
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        denyPatterns = try container.decodeIfPresent([String].self, forKey: .denyPatterns) ?? Self.defaultDenyPatterns
-        allowRoots = try container.decodeIfPresent([String].self, forKey: .allowRoots) ?? Self.defaultAllowRoots
-        requireApprovalOnDeny = try container.decodeIfPresent(Bool.self, forKey: .requireApprovalOnDeny) ?? Self.defaultRequireApprovalOnDeny
-        writeMode = try container.decodeIfPresent(FilesWriteMode.self, forKey: .writeMode) ?? Self.defaultWriteMode
-    }
-
-    /// Encodes a files config including deny patterns and roots.
-    /// - Parameter encoder: Encoder for the config document.
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(denyPatterns, forKey: .denyPatterns)
-        try container.encode(allowRoots, forKey: .allowRoots)
-        try container.encode(requireApprovalOnDeny, forKey: .requireApprovalOnDeny)
-        try container.encode(writeMode, forKey: .writeMode)
     }
 }
 
@@ -828,14 +718,14 @@ public struct BashConfig: Sendable, Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case enabled
-        case defaultAction = "default_action"
+        case defaultAction
         case rules
-        case timeoutSeconds = "timeout_seconds"
-        case allowNetwork = "allow_network"
-        case cpuSeconds = "cpu_seconds"
-        case memoryMB = "memory_mb"
-        case sandboxMode = "sandbox_mode"
-        case hostAllowPatterns = "host_allow_patterns"
+        case timeoutSeconds
+        case allowNetwork
+        case cpuSeconds
+        case memoryMB = "memoryMb"
+        case sandboxMode
+        case hostAllowPatterns
     }
 
     public init(from decoder: Decoder) throws {
@@ -941,9 +831,9 @@ public struct EmailAccount: Sendable, Equatable {
         case host
         case port
         case username
-        case smtpHost = "smtp_host"
-        case smtpPort = "smtp_port"
-        case smtpSecurity = "smtp_security"
+        case smtpHost
+        case smtpPort
+        case smtpSecurity
     }
 }
 
@@ -1055,8 +945,8 @@ public struct IdeasConfig: Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case enabled
-        case maxPerCycle = "max_per_cycle"
-        case timeoutSeconds = "timeout_seconds"
+        case maxPerCycle
+        case timeoutSeconds
     }
 }
 
@@ -1152,9 +1042,9 @@ public struct FanOutConfig: Sendable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case maxWorkers = "max_workers"
-        case workerTimeoutSeconds = "worker_timeout_seconds"
-        case fullTools = "full_tools"
+        case maxWorkers
+        case workerTimeoutSeconds
+        case fullTools
     }
 }
 
@@ -1237,9 +1127,9 @@ public struct WorkspaceConfig: Sendable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case quotaMB = "quota_mb"
-        case quotaFiles = "quota_files"
-        case tmpTTLDays = "tmp_ttl_days"
+        case quotaMB
+        case quotaFiles
+        case tmpTTLDays
     }
 }
 

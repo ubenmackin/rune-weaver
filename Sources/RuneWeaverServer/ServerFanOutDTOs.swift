@@ -49,9 +49,9 @@ public struct FanOutSettingsUpdate: Content, Sendable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case maxWorkers = "max_workers"
-        case workerTimeoutSeconds = "worker_timeout_seconds"
-        case fullTools = "full_tools"
+        case maxWorkers
+        case workerTimeoutSeconds
+        case fullTools
     }
 }
 

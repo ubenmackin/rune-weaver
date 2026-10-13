@@ -1,0 +1,2 @@
+index_store_path: .build/out
+skip_build: true

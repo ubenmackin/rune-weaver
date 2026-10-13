@@ -162,16 +162,15 @@ public final class AppModel {
     }
 
     private func setupNotificationCallbacks() {
-        notificationManager.onApprovalDecision = { [weak self] id, approved in
-            // Notification actions carry no duration choice, so they map to a
-            // one-shot this-time decision that never widens trust. Routing
-            // through the shared decision helper keeps this path from
-            // stranding a parked narrated turn the way a bare `decide` would.
-            await self?.decideApproval(id: id, approved: approved, duration: .thisTime, widen: false)
-        }
-
         notificationManager.onOpenDashboard = { [weak self] in
             self?.openDashboard()
+        }
+
+        // An approval notification carries no decision affordance, so its tap
+        // only deep-links to the dashboard inbox where the request can be
+        // decided.
+        notificationManager.onOpenInbox = { [weak self] in
+            self?.openInbox()
         }
     }
 
@@ -752,126 +751,6 @@ extension AppModel {
 // MARK: - Actions & Navigation
 
 extension AppModel {
-    public func approve(id: UUID, duration: TrustDuration = .thisTime, widen: Bool = false) {
-        Task {
-            await decideApproval(id: id, approved: true, duration: duration, widen: widen)
-        }
-    }
-
-    public func deny(id: UUID) {
-        Task {
-            await decideApproval(id: id, approved: false, duration: .thisTime, widen: false)
-        }
-    }
-
-    /// Resolves one approval through the same path the served inbox uses so
-    /// every client converges and a parked narrated turn continues instead of
-    /// stalling. The session tag plus decided call identifier must be captured
-    /// before `decide` removes the pending entry, because the resume path needs
-    /// the owning conversation and call to select the awaiting run. Decisions
-    /// for untagged approvals stop here: REST and WebSocket both skip the shared
-    /// resume helper when no session owns the request, and this path must match
-    /// so a menu-bar decision cannot broadcast a decided frame carrying a null
-    /// session or enter a resume no other client takes.
-    private func decideApproval(id: UUID, approved: Bool, duration: TrustDuration, widen: Bool) async {
-        guard let context = serverContext else { return }
-        let pending = await context.approvals.request(id: id)
-        // Operator choices ride the answer-bearing respond path so an approval
-        // without a choice cannot synthesize an empty acknowledgement. The
-        // menu-bar decide shape carries no answer, so question approvals fail
-        // closed here and stay pending for the respond flow with guidance.
-        if pending?.toolName == "question.ask" {
-            RuneWeaverLog.app.warning("Refusing menu-bar decide for question.ask; use respond with a non-empty answer.")
-            await refreshPendingApprovals()
-            return
-        }
-        let resolved = await context.approvals.decide(id: id, approved: approved, duration: duration, widen: widen)
-        guard resolved else {
-            await refreshPendingApprovals()
-            return
-        }
-        // Durable approvals create a stored grant inside `decide`, so the
-        // grants list must refresh; one-shot approvals store nothing. `widen`
-        // only applies off `thisTime`, so a this-time decision never widens.
-        // Continuation and question approvals stay one-shot inside `decide`
-        // (coerced to thisTime with no stored grant), so a durable menu-bar
-        // vote on either must not fire a refresh when nothing changed.
-        if approved, duration != .thisTime, pending?.toolName != "engine.continue", pending?.toolName != "question.ask" {
-            await context.hub.broadcastTrustGrantsChanged()
-        }
-        // Only session-tagged approvals own a conversation to resume. The
-        // shared helper also emits the decided frame other tabs use to evict,
-        // so tagged one-shot approvals still broadcast even though the resume
-        // itself no-ops for them. Untagged approvals stay broadcast-free,
-        // matching REST and WebSocket and keeping a null session off the wire.
-        if pending?.sessionID != nil {
-            await resumeNarratedApproval(
-                id: id,
-                approved: approved,
-                context: context,
-                sessionID: pending?.sessionID,
-                decidedCallID: pending?.input.callID
-            )
-        }
-        await refreshPendingApprovals()
-    }
-
-    /// Resolves a question approval with the operator's choice through the
-    /// answer-bearing path so the parked turn resumes with the chosen text
-    /// instead of an empty acknowledgement. Question approvals stay one-shot
-    /// (thisTime with no widened grant), matching the served respond route.
-    public func respondToQuestion(id: UUID, answer: String?, cancelled: Bool = false) {
-        Task {
-            await decideQuestionResponse(id: id, answer: answer, cancelled: cancelled)
-        }
-    }
-
-    /// Validates then resolves one question approval without minting trust.
-    /// An approval without a choice cannot synthesize an empty acknowledgement;
-    /// only an explicit cancel resolves without text. The length bound matches
-    /// the served respond route so history and synthesis stay bounded.
-    private func decideQuestionResponse(id: UUID, answer: String?, cancelled: Bool) async {
-        guard let context = serverContext else { return }
-        let pending = await context.approvals.request(id: id)
-        guard let pending, pending.toolName == "question.ask" else {
-            await refreshPendingApprovals()
-            return
-        }
-        if !cancelled {
-            let trimmed = (answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
-                RuneWeaverLog.app.warning("Refusing empty answer for question.ask without cancel.")
-                await refreshPendingApprovals()
-                return
-            }
-            guard trimmed.count <= 2000 else {
-                RuneWeaverLog.app.warning("Refusing overlong answer for question.ask; at most 2000 characters.")
-                await refreshPendingApprovals()
-                return
-            }
-        }
-        let approved = !cancelled
-        let resolved = await context.approvals.decide(id: id, approved: approved, duration: .thisTime, widen: false)
-        guard resolved else {
-            await refreshPendingApprovals()
-            return
-        }
-        // Question approvals store no grant, so no grants refresh fires here.
-        // Only session-tagged approvals own a conversation to resume, matching
-        // the shared helper contract used by the decide path.
-        if pending.sessionID != nil {
-            await resumeNarratedApproval(
-                id: id,
-                approved: approved,
-                answer: answer,
-                context: context,
-                sessionID: pending.sessionID,
-                decidedCallID: pending.input.callID
-            )
-        }
-        await refreshPendingApprovals()
-    }
-
     /// Whether the web dashboard and web settings can be opened from the menu.
     public var isDashboardAvailable: Bool {
         // A refused bind leaves no live endpoint while the published fields
@@ -927,6 +806,24 @@ extension AppModel {
 
     public func openChat(id: UUID) {
         if let url = dashboardURL(fragment: "chat", queryItems: [URLQueryItem(name: "session", value: id.uuidString)]) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Resolves the dashboard inbox deep link the attention row opens. Internal
+    /// so the approval-surface test can pin the fragment the menu bar routes to
+    /// without opening a browser at the bound endpoint.
+    func inboxURL() -> URL? {
+        dashboardURL(fragment: "approvals")
+    }
+
+    /// Opens the dashboard on the Approvals inbox tab, the one surface where any
+    /// request kind can be decided. Honors the live-bind availability check so
+    /// a menu row never opens a browser at a server that is not running, the
+    /// same guard the menu applies to its other dashboard destinations.
+    public func openInbox() {
+        guard isDashboardAvailable else { return }
+        if let url = inboxURL() {
             NSWorkspace.shared.open(url)
         }
     }
@@ -1040,20 +937,6 @@ extension AppModel {
                     await context.activeTurns.cancel(sessionID: sessionID)
                 }
             }
-        }
-    }
-
-    /// Resumes paused desktop automation after operator takeover.
-    public func resumeDesktopControl() {
-        if let req = pendingApprovals.first(where: { $0.toolName == "desktop.resume" }) {
-            approve(id: req.id)
-        }
-    }
-
-    /// Cancels paused desktop automation task after operator takeover.
-    public func cancelDesktopTask() {
-        if let req = pendingApprovals.first(where: { $0.toolName == "desktop.resume" }) {
-            deny(id: req.id)
         }
     }
 }

@@ -114,7 +114,7 @@ struct ToolBusTests {
         let bus = ToolBus(permissionGate: gate)
         await bus.register(tool: ApprovalStubTool())
         // Explicit denial must hold even when the caller promises dry run.
-        await gate.deny(ActionDescriptor(toolName: "stub.write"), reason: "no writes in test")
+        await gate.denyRule(.toolWide, toolName: "stub.write", reason: "no writes in test")
         let denied = await bus.execute(
             toolCall: ToolInput(toolName: "stub.write", argumentsJSON: "{}"),
             context: ToolContext(conversationID: UUID(), dryRun: true)
