@@ -128,6 +128,11 @@ func applyApprovalDecision(
         await context.watchdog.resume()
         if let pulse {
             await pulse.recordWatchdogHealth(context.watchdog.health())
+            if await context.watchdog.isArmed() {
+                await pulse.recordWatchdogGestation(nil)
+            } else {
+                await pulse.recordWatchdogGestation(context.watchdog.gestationRemainingDays())
+            }
         }
     }
     // A durable decision stores a rule inside `decide`, so dashboards need a

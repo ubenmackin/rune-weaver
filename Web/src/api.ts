@@ -63,6 +63,10 @@ export interface HealthResponse {
   probeVerdict?: string | null;
   // Bounded backing reasons for a non-green status, driving the card disclosure.
   degradedReasons?: string[];
+  // Bounded info notes that never move the dot, driving the Details disclosure
+  // alongside reasons. Optional because older engines predate the countdown;
+  // absent means no info to disclose.
+  infoNotes?: string[];
   // Authoritative turn cap advertised by the engine on GET /health. Optional because older
   // engines predate the advertisement and because getHealth injects it from the response
   // header when the JSON body carries none; absent degrades to MAX_CONCURRENT_CHAT_TURNS.

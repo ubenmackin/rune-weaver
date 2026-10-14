@@ -574,6 +574,11 @@ func runSecurityProbes(sink: SecurityProbeSink, reason: String) async -> ProbeRe
     if let watchdog = sink.watchdog {
         _ = await watchdog.evaluate()
         await sink.pulse.recordWatchdogHealth(watchdog.health())
+        if await watchdog.isArmed() {
+            await sink.pulse.recordWatchdogGestation(nil)
+        } else {
+            await sink.pulse.recordWatchdogGestation(watchdog.gestationRemainingDays())
+        }
     }
     guard sink.gate.shouldRecord(report) else {
         RuneWeaverLog.server.debug("Security probe suite (\(reason)): posture unchanged.")
@@ -771,23 +776,23 @@ private func registerHealthRoute(_ app: Application) {
         // absent keys by keeping its file snapshot, so omission degrades the
         // banner instead of breaking the probe.
         let disclosesBind = req.runeWeaverAuthenticated
-        // Record this probe's subsystem outcome before snapshotting so the
-        // served verdict always reflects the probe just run: a down search
-        // degrades (it never failed closed), and a recovered one clears on
-        // the next passing cycle when its entry is overwritten. Read through
-        // application storage so a replaced test actor takes effect.
+        // Search reachability stays on the TopNav dot plus the Settings search
+        // panel via searchReachable plus searchStatus plus searchStage; it is
+        // never recorded into the pulse, so idle search never moves the dot.
+        // Read through application storage so a replaced test actor takes effect.
         let pulse = req.application.systemHealthSnapshot
-        await pulse.recordProbes([HealthProbeOutcome(
-            name: "search",
-            passed: searchReachable,
-            detail: searchReachable ? nil : "Search service is unreachable."
-        )])
         // The watchdog evaluates on the serving cadence too: the trailing
         // window reads live state, so a spike engages the brake without a
         // restart and the pulse fuses the latest posture on every probe.
+        // Gestation countdown rides info notes with no dot effect.
         let watchdog = req.application.runeWeaver.watchdog
         _ = await watchdog.evaluate()
         await pulse.recordWatchdogHealth(watchdog.health())
+        if await watchdog.isArmed() {
+            await pulse.recordWatchdogGestation(nil)
+        } else {
+            await pulse.recordWatchdogGestation(watchdog.gestationRemainingDays())
+        }
         let pulseValue = await pulse.snapshot()
         // Publish only on deep change against the last served value so
         // steady-state polling never re-fans an identical pulse.
@@ -816,7 +821,8 @@ private func registerHealthRoute(_ app: Application) {
             policyHash: disclosesBind ? pulseValue.policyHash : nil,
             policyVerified: pulseValue.policyVerified,
             probeVerdict: pulseValue.probeVerdict?.rawValue,
-            degradedReasons: pulseValue.degradedReasons.isEmpty ? nil : pulseValue.degradedReasons
+            degradedReasons: pulseValue.degradedReasons.isEmpty ? nil : pulseValue.degradedReasons,
+            infoNotes: pulseValue.infoNotes.isEmpty ? nil : pulseValue.infoNotes
         )
         // Advertise the authoritative turn cap alongside the JSON body so the
         // dashboard prefers the server value over its fallback constant; a
