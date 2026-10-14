@@ -103,9 +103,9 @@ public struct BrakeDecision: Sendable, Equatable {
 /// Red is fail-closed: it clears only on an explicit owner Resume against a
 /// fresh passing snapshot, never on a timer.
 public enum WatchdogHealth: String, Sendable, Codable {
-    /// Every rule is armed and quiet.
+    /// Quiet including gestation; the countdown rides info notes, never the dot.
     case green
-    /// Degraded: baselines are still gestating, so detection is not armed yet.
+    /// Legacy wire-compat only, never produced; gestation stays green-quiet.
     case yellow
     /// Fail-closed: the brake is engaged and an inbox card is pending.
     case red
@@ -510,16 +510,47 @@ public actor BehaviorWatchdog {
 
     /// Live health for the dashboard pulse.
     ///
-    /// Yellow while baselines gestate (degraded: detection is not armed, with
-    /// the remaining gestation disclosed through the baselines snapshot), red
-    /// only while the brake is engaged with an inbox card pending. Red clears
-    /// on Resume against a fresh passing snapshot, never on a timer.
+    /// Green while quiet including gestation, red only while the brake is
+    /// engaged with an inbox card pending. Gestation never moves the dot;
+    /// the remaining countdown rides `gestationRemainingDays()` into the
+    /// pulse info disclosure instead. Red clears on Resume against a fresh
+    /// passing snapshot, never on a timer.
     /// - Returns: Current watchdog health.
     public func health() -> WatchdogHealth {
         if braking {
             return .red
         }
-        return isArmed(now: now()) ? .green : .yellow
+        return .green
+    }
+
+    /// Days until gestation arms detection, ceiling-divided.
+    ///
+    /// - Returns: Remaining days, minimum 1 and maximum 14.
+    public func gestationRemainingDays() -> Int {
+        let now = self.now()
+        guard !isArmed(now: now) else {
+            return 1
+        }
+        guard let anchor = baselines.learnedAt ?? firstSeen else {
+            return 14
+        }
+        let elapsed = now.timeIntervalSince(anchor)
+        guard elapsed >= 0 else {
+            return 14
+        }
+        let remaining = Self.gestationSeconds - elapsed
+        guard remaining > 0 else {
+            return 1
+        }
+        let days = Int(ceil(remaining / 86400))
+        return min(max(days, 1), 14)
+    }
+
+    /// Whether detection is armed.
+    ///
+    /// - Returns: True once gestation elapsed or seeded counts arm immediately.
+    public func isArmed() -> Bool {
+        isArmed(now: now())
     }
 
     /// Whether the brake is currently engaged.

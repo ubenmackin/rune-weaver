@@ -24,22 +24,13 @@ interface SystemPulseCardProps {
   onOpenPolicy?: () => void;
 }
 
-// Closed pulse presentation: the engine serves green/yellow/red while older
-// payloads (and the minimal liveness shape) still carry "ok", which reads as
-// green so a legacy probe never flips a healthy engine to degraded. Anything
-// else — including an unanswered probe — reads as degraded, never as healthy
-// and never as fail-closed without evidence.
+// Closed pulse presentation: red parks fail-closed, yellow degrades when
+// degradedReasons is non-empty, and green requires an explicit green/ok
+// status. Anything else with a payload present still reads as degraded.
+// Info notes never move the dot. A null payload (unanswered probe)
+// still reads as degraded, never as healthy and never as fail-closed.
 type PulseState = "green" | "yellow" | "red";
 
-function resolvePulseState(health: HealthResponse | null): PulseState {
-  const status = health?.status;
-  if (status === "red") return "red";
-  if (status === "green" || status === "ok") return "green";
-  return "yellow";
-}
-
-// Borrowed reason lines, trimmed and non-empty, so a drifted payload with
-// blank entries still renders a clean disclosure instead of empty bullets.
 function resolvePulseReasons(health: HealthResponse | null): string[] {
   const raw = health?.degradedReasons;
   if (!Array.isArray(raw)) return [];
@@ -51,6 +42,29 @@ function resolvePulseReasons(health: HealthResponse | null): string[] {
     out.push(trimmed);
   }
   return out;
+}
+
+// Info notes ride the Details disclosure with no dot effect: gestation
+// countdown plus other non-safety copy lives here, never in degradedReasons.
+function resolvePulseInfoNotes(health: HealthResponse | null): string[] {
+  const raw = health?.infoNotes;
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function resolvePulseState(health: HealthResponse | null): PulseState {
+  if (!health) return "yellow";
+  if (health.status === "red") return "red";
+  if (resolvePulseReasons(health).length > 0) return "yellow";
+  if (health.status === "green" || health.status === "ok") return "green";
+  return "yellow";
 }
 
 export default function SystemPulseCard({
@@ -142,6 +156,7 @@ export default function SystemPulseCard({
   const effectiveHealth = liveHealth ?? health;
   const pulse = resolvePulseState(effectiveHealth);
   const reasons = resolvePulseReasons(effectiveHealth);
+  const infoNotes = resolvePulseInfoNotes(effectiveHealth);
   const modelName = effectiveHealth?.model || "Configured LLM";
   const provider = effectiveHealth?.provider || effectiveHealth?.engine || "RuneWeaver";
 
@@ -182,16 +197,27 @@ export default function SystemPulseCard({
           </div>
         </div>
 
-        {pulse === "yellow" && (
+        {(pulse === "yellow" || infoNotes.length > 0) && pulse !== "red" && (
           <details className="pulse-details">
             <summary>Details</summary>
             {effectiveHealth ? (
-              reasons.length > 0 ? (
-                <ul className="pulse-reasons">
-                  {reasons.map((reason) => (
-                    <li key={reason}>{reason}</li>
-                  ))}
-                </ul>
+              reasons.length > 0 || infoNotes.length > 0 ? (
+                <>
+                  {reasons.length > 0 && (
+                    <ul className="pulse-reasons">
+                      {reasons.map((reason) => (
+                        <li key={reason}>{reason}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {infoNotes.length > 0 && (
+                    <ul className="pulse-info-notes">
+                      {infoNotes.map((note) => (
+                        <li key={note}>{note}</li>
+                      ))}
+                    </ul>
+                  )}
+                </>
               ) : (
                 <p className="text-xs muted">No details reported.</p>
               )

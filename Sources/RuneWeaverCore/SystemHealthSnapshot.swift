@@ -50,11 +50,12 @@ public enum HealthProbeVerdict: String, Sendable, Codable, Equatable {
 /// One subsystem probe completion recorded into the pulse.
 ///
 /// A probe names a verifier the serving path actually ran (for example the
-/// search reachability check on the health route). A failed probe with
+/// suite or traversal check). Search reachability is intentionally excluded;
+/// it rides TopNav, never the pulse. A failed probe with
 /// `failClosed` set forces the pulse red; any other failure degrades it to
 /// yellow with the detail behind the disclosure.
 public struct HealthProbeOutcome: Sendable, Equatable, Codable {
-    /// Stable verifier name (for example `"search"`).
+    /// Stable verifier name (for example `"suite"`).
     public let name: String
     /// Whether the probe passed.
     public let passed: Bool
@@ -180,6 +181,10 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
     /// Maximum length per reason; longer text truncates since the signal is
     /// display copy, unlike a digest whose identity must stay exact.
     public static let maxReasonLength = 160
+    /// Maximum served info notes, same bound as degraded reasons.
+    public static let maxInfoNotes = 8
+    /// Maximum length per info note, same bound as degraded reasons.
+    public static let maxInfoNoteLength = 160
 
     /// Closed pulse status.
     public let status: HealthPulseStatus
@@ -195,6 +200,8 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
     public let probeVerdict: HealthProbeVerdict?
     /// Bounded backing reasons for a non-green status.
     public let degradedReasons: [String]
+    /// Bounded info notes that never move the dot.
+    public let infoNotes: [String]
 
     /// Creates a snapshot value.
     /// - Parameters:
@@ -205,6 +212,7 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
     ///   - policyVerified: Whether the live policy verifies.
     ///   - probeVerdict: Collapsed probe verdict.
     ///   - degradedReasons: Backing reasons for a non-green status.
+    ///   - infoNotes: Info notes that never move the dot.
     public init(
         status: HealthPulseStatus,
         ledgerTip: String? = nil,
@@ -212,7 +220,8 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
         policyHash: String? = nil,
         policyVerified: Bool = false,
         probeVerdict: HealthProbeVerdict? = nil,
-        degradedReasons: [String] = []
+        degradedReasons: [String] = [],
+        infoNotes: [String] = []
     ) {
         self.status = status
         self.ledgerTip = Self.normalizedTip(ledgerTip)
@@ -221,6 +230,44 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
         self.policyVerified = policyVerified
         self.probeVerdict = probeVerdict
         self.degradedReasons = Self.normalizedReasons(degradedReasons)
+        self.infoNotes = Self.normalizedInfoNotes(infoNotes)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case ledgerTip
+        case ledgerVerifiedAt
+        case policyHash
+        case policyVerified
+        case probeVerdict
+        case degradedReasons
+        case infoNotes
+    }
+
+    /// Decodes tolerantly so values persisted before info notes still parse.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        status = try container.decode(HealthPulseStatus.self, forKey: .status)
+        ledgerTip = try container.decodeIfPresent(String.self, forKey: .ledgerTip)
+        ledgerVerifiedAt = try container.decodeIfPresent(Date.self, forKey: .ledgerVerifiedAt)
+        policyHash = try container.decodeIfPresent(String.self, forKey: .policyHash)
+        policyVerified = try container.decodeIfPresent(Bool.self, forKey: .policyVerified) ?? false
+        probeVerdict = try container.decodeIfPresent(HealthProbeVerdict.self, forKey: .probeVerdict)
+        degradedReasons = try Self.normalizedReasons(container.decodeIfPresent([String].self, forKey: .degradedReasons))
+        infoNotes = try Self.normalizedInfoNotes(container.decodeIfPresent([String].self, forKey: .infoNotes))
+    }
+
+    /// Encodes every field so deep equality covers info notes.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(ledgerTip, forKey: .ledgerTip)
+        try container.encodeIfPresent(ledgerVerifiedAt, forKey: .ledgerVerifiedAt)
+        try container.encodeIfPresent(policyHash, forKey: .policyHash)
+        try container.encode(policyVerified, forKey: .policyVerified)
+        try container.encodeIfPresent(probeVerdict, forKey: .probeVerdict)
+        try container.encode(degradedReasons, forKey: .degradedReasons)
+        try container.encode(infoNotes, forKey: .infoNotes)
     }
 
     /// Normalizes a tip or hash digest: trims, lowercases, and accepts hex
@@ -262,6 +309,23 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
         return normalized
     }
 
+    /// Normalizes an info list with the same 8-item 160-char bounds.
+    /// - Parameter values: Raw info notes.
+    /// - Returns: Bounded notes, empty when none survive.
+    public static func normalizedInfoNotes(_ values: [String]?) -> [String] {
+        guard let values else { return [] }
+        var normalized: [String] = []
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            normalized.append(String(trimmed.prefix(maxInfoNoteLength)))
+            if normalized.count >= maxInfoNotes {
+                break
+            }
+        }
+        return normalized
+    }
+
     /// Normalizes a collapsed probe verdict against its closed vocabulary.
     /// Drifted values degrade to nil instead of failing the probe.
     /// - Parameter value: Raw verdict candidate.
@@ -292,9 +356,12 @@ public actor SystemHealthSnapshot {
     /// Reason served while the behavior brake parks the pulse red.
     private static let watchdogBrakeReason =
         "Trusted-tool anomaly brake is engaged; turns are parked until the brake card is resumed."
-    /// Reason served while the watchdog baseline still gestates.
-    private static let watchdogGestationReason =
-        "Behavior baseline is still learning; anomaly detection is not armed yet."
+
+    /// Builds the gestation countdown info note, clamped to the 1...14 bound.
+    private static func gestationNote(days: Int) -> String {
+        let clamped = min(max(days, 1), 14)
+        return "Behavior baseline is still learning; anomaly detection arms in ~\(clamped) days."
+    }
 
     /// Live declarative policy store read on every snapshot, or nil when the
     /// snapshot has no policy posture to report. A nil store contributes no
@@ -311,6 +378,10 @@ public actor SystemHealthSnapshot {
     /// Absence constrains nothing: the brake narrows the pulse only once it
     /// reports, mirroring every other verifier family.
     private var watchdogHealth: WatchdogHealth?
+    /// Gestation countdown days, nil when armed or braking. Set alongside
+    /// the watchdog health on the serving cadence; cleared when armed so an
+    /// armed quiet pulse carries no countdown.
+    private var watchdogGestationDays: Int?
     /// Observed primary ledger head from the last ceremony that presented one.
     private var ledgerTip: String?
     /// Last explicit ledger verification instant.
@@ -430,13 +501,25 @@ public actor SystemHealthSnapshot {
 
     /// Records the live watchdog health into the pulse.
     ///
-    /// Red parks fail-closed with the brake reason; yellow degrades with the
-    /// gestation reason behind the disclosure; green records quiet. Called on
+    /// Red parks fail-closed with the brake reason; green records quiet.
+    /// Gestation never moves the dot: a gestating green carries its countdown
+    /// through `recordWatchdogGestation(_:)` into info notes instead. Called on
     /// the serving cadence — every health probe and every periodic verifier
     /// run — so the pulse always fuses the latest brake posture.
     /// - Parameter health: Current watchdog health.
     public func recordWatchdogHealth(_ health: WatchdogHealth) {
         watchdogHealth = health
+    }
+
+    /// Records the gestation countdown for the info disclosure.
+    ///
+    /// - Parameter days: Remaining days 1...14, or nil when armed or braking.
+    public func recordWatchdogGestation(_ days: Int?) {
+        if let days {
+            watchdogGestationDays = min(max(days, 1), 14)
+        } else {
+            watchdogGestationDays = nil
+        }
     }
 
     /// Records subsystem probe completions, merging by verifier name.
@@ -491,11 +574,13 @@ public actor SystemHealthSnapshot {
     /// Reads the live policy posture through the shared store, so policy
     /// writes surface here with no restart plus no watcher. Red wins over
     /// yellow: a parked mismatch, an engaged brake, live policy violations,
-    /// or a failed fail-closed probe each fail closed, while a gestating
-    /// watchdog or any other probe failure merely degrades.
+    /// or a failed fail-closed probe each fail closed, while any other probe
+    /// failure merely degrades. Gestation plus idle search never move the dot:
+    /// gestation countdown rides info notes while the status stays green.
     /// - Returns: The verified snapshot value.
     public func snapshot() async -> HealthSnapshotValue {
         var reasons: [String] = []
+        var notes: [String] = []
         var status = HealthPulseStatus.green
         if parkedMismatch {
             status = .red
@@ -506,12 +591,11 @@ public actor SystemHealthSnapshot {
             status = .red
             reasons.append(Self.watchdogBrakeReason)
         case .yellow:
-            if status == .green {
-                status = .yellow
-            }
-            reasons.append(Self.watchdogGestationReason)
+            notes.append(Self.gestationNote(days: watchdogGestationDays ?? 14))
         case .green, nil:
-            break
+            if let days = watchdogGestationDays {
+                notes.append(Self.gestationNote(days: days))
+            }
         }
         var policyHash: String?
         var policyVerified = false
@@ -557,7 +641,8 @@ public actor SystemHealthSnapshot {
             policyHash: policyHash,
             policyVerified: policyVerified,
             probeVerdict: verdict,
-            degradedReasons: HealthSnapshotValue.normalizedReasons(reasons)
+            degradedReasons: HealthSnapshotValue.normalizedReasons(reasons),
+            infoNotes: HealthSnapshotValue.normalizedInfoNotes(notes)
         )
     }
 
