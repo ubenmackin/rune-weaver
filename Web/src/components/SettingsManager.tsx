@@ -7,14 +7,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
-  DEFAULT_FILES_ALLOW_ROOTS,
-  DEFAULT_FILES_ALLOW_ROOTS_TEXT,
-  DEFAULT_FILES_DENY_PATTERNS,
-  DEFAULT_FILES_DENY_PATTERNS_TEXT,
-  formatAllowRootsText,
-  formatDenyPatternsText,
-  parseAllowRootsText,
-  parseDenyPatternsText,
   DEFAULT_CONTAINERS_CONFIG,
   CONTAINERS_MAX_CONCURRENT_MAX,
   CONTAINERS_MAX_CONCURRENT_MIN,
@@ -161,9 +153,11 @@ import {
 import {
   AlertTriangleIcon,
   ApprovalsIcon,
+  CalendarIcon,
   ChatIcon,
   CheckIcon,
   CloseIcon,
+  FolderIcon,
   GlobeIcon,
   KeyIcon,
   MailIcon,
@@ -178,6 +172,7 @@ import {
   SettingsIcon,
   StopIcon,
   TargetIcon,
+  TerminalIcon,
   TrashIcon,
   UserIcon,
   WrenchIcon,
@@ -192,6 +187,11 @@ import {
   publishPersonaFromSettings,
 } from "./PersonaAvatar";
 import { ToastStack } from "./Toast";
+import {
+  ACCESS_RULES_SECTION_TOKEN,
+  readAccessDeepLink,
+  readAccessParamValue,
+} from "./access/accessNav";
 import { useRunningRuns } from "../hooks/useRunningRuns";
 import { useToastStack } from "../hooks/useToastStack";
 import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
@@ -231,16 +231,16 @@ const SETTINGS_TABS: readonly SettingsTab[] = [
   "access",
   "providers",
   "persona",
-  "goals",
-  "engine",
-  "tools",
-  "security",
-  "memory",
   "voice",
+  "memory",
+  "goals",
+  "tools",
+  "indexing",
   "search",
   "email",
+  "security",
   "network",
-  "indexing",
+  "engine",
 ];
 
 // Section-finder index behind the sidenav search: each tab matches its own
@@ -280,6 +280,17 @@ export function isSettingsTab(value: unknown): value is SettingsTab {
   );
 }
 
+// An access deep link lands on Access whether it names the section or a
+// single rule. The shared readers resolve raw values and rule ids across hash
+// and query-string forms; the bare section token returns null from the rule
+// reader by design, so it is matched explicitly here while everything else
+// delegates — this file never re-runs the URLSearchParams loop itself.
+function hasAccessSectionLink(): boolean {
+  if (typeof window === "undefined") return false;
+  if (readAccessDeepLink() !== null) return true;
+  return readAccessParamValue() === ACCESS_RULES_SECTION_TOKEN;
+}
+
 // Converges a loaded tone/accent spelling to the closed set the engine merge
 // accepts, falling back to the stock default for an unknown or absent value.
 // The populate path and the delta baseline must start from identical converged
@@ -311,15 +322,18 @@ interface ToolCategoryMeta {
 // splitting them stranded web.fetch away from the timeout UI its calls need.
 // The browser-web id is the sole grouping for both prefixes, so pills, search
 // filtering, and bulk toggles stay in lockstep and any future browser.* or
-// web.* tool lands here without a second pill or section. Bash and files have
-// no category: their policy editors live on the Access surface beside this
-// pane, so their rows fall through to Other Tools carrying only the enablement
-// toggle and no category-level Configure can dangle behind a moved editor.
+// web.* tool lands here without a second pill or section. Bash, files, and
+// calendar-reminders each keep a dedicated section carrying only the
+// enablement toggle; their policy editors live on the Access surface, so no
+// category-level Configure is offered here.
 const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
   { id: "desktop", name: "Desktop & Automation", description: "Screen capture, OCR, and approval-gated mouse/keyboard control", icon: MonitorIcon },
   { id: "messages", name: "Messages & SMS", description: "Search, read, and send macOS iMessages and text messages", icon: MessageSquareIcon },
   { id: "email", name: "Email & Mailboxes", description: "IMAP search, message read, attachment inspection, and drafts", icon: MailIcon },
+  { id: "calendar-reminders", name: "Calendar & Reminders", description: "macOS Calendar events and Reminders management", icon: CalendarIcon },
   { id: "browser-web", name: "Browser, Web & API", description: "Web search, page fetch, browser automation, and API requests", icon: GlobeIcon },
+  { id: "bash", name: "Bash & Shell", description: "Terminal execution and sandboxed system commands", icon: TerminalIcon },
+  { id: "files", name: "Files & Workspace", description: "Filesystem reads, staged changes, and workspace writes", icon: FolderIcon },
   { id: "memories", name: "Long-Term Memory", description: "Episodic and profile memory store and recall", icon: MemoryIcon },
   { id: "goal", name: "Autonomous Goals", description: "Multi-turn goal planning, tracking, and execution", icon: TargetIcon },
   { id: "fanout", name: "Fan-Out Workers", description: "Concurrent worker turns for parallel subtasks", icon: WrenchIcon },
@@ -332,12 +346,7 @@ const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
 // into browser-web so the single Browser, Web & API editor owns all three.
 // External plugin tools stay in Other regardless of name prefix, so a
 // colliding bash.evil or files.evil never joins a builtin section; only builtin
-// names route by prefix. Bash and files builtins route to Other because
-// their policy editors live on the Access surface, leaving the enablement
-// toggle as the row's only control here. Bare names without a dot (including
-// the remember_fact/recall_memories aliases) fall through to their explicit
-// branches or to other, so a future unprefixed tool never joins a category by
-// accident.
+// names route by prefix.
 const KNOWN_BUILTIN_TOOL_CATEGORIES: Record<string, string> = {
   "desktop.screenshot": "desktop",
   "desktop.action": "desktop",
@@ -350,10 +359,26 @@ const KNOWN_BUILTIN_TOOL_CATEGORIES: Record<string, string> = {
   "email.send": "email",
   "email.listMailboxes": "email",
   "email.move": "email",
+  "calendar.search": "calendar-reminders",
+  "calendar.create": "calendar-reminders",
+  "calendar.update": "calendar-reminders",
+  "calendar.delete": "calendar-reminders",
+  "calendar.list": "calendar-reminders",
+  "reminders.search": "calendar-reminders",
+  "reminders.create": "calendar-reminders",
+  "reminders.update": "calendar-reminders",
+  "reminders.delete": "calendar-reminders",
+  "reminders.list": "calendar-reminders",
   "browser.navigate": "browser-web",
   "browser.act": "browser-web",
   "web.search": "browser-web",
   "web.fetch": "browser-web",
+  "bash.exec": "bash",
+  "files.read": "files",
+  "files.grep": "files",
+  "files.glob": "files",
+  "files.write": "files",
+  "files.list": "files",
   "memories.store": "memories",
   "memories.recall": "memories",
   "goal.create": "goal",
@@ -367,15 +392,14 @@ const KNOWN_BUILTIN_TOOL_CATEGORIES: Record<string, string> = {
 
 // Routes a builtin tool name by prefix. Callers must gate on provenance
 // first; this helper alone cannot tell bash.exec apart from bash.evil.
-// Browser, web, and api prefixes share one section so any future api.* tool
-// lands with the same Browser, Web & API editor without a second pill. Bash
-// and files prefixes stay unrouted: their policy editors live on the Access
-// surface, so the rows land in Other with only the enablement toggle.
 function resolveBuiltinCategoryByName(toolName: string): string {
   if (toolName.startsWith("desktop.")) return "desktop";
   if (toolName.startsWith("messages.")) return "messages";
   if (toolName.startsWith("email.")) return "email";
+  if (toolName.startsWith("calendar.") || toolName.startsWith("reminders.")) return "calendar-reminders";
   if (toolName.startsWith("browser.") || toolName.startsWith("web.") || toolName.startsWith("api.")) return "browser-web";
+  if (toolName.startsWith("bash.")) return "bash";
+  if (toolName.startsWith("files.")) return "files";
   if (toolName.startsWith("memories.")) return "memories";
   if (toolName.startsWith("goal.")) return "goal";
   if (toolName.startsWith("fanout.")) return "fanout";
@@ -401,10 +425,10 @@ export function getToolCategory(tool: ToolInfo | string): string {
 // One Configure entry per integration surface keeps a single modal per editor:
 // desktop, media, fanout, and browser-web each own one existing modal, so the
 // header button opens that editor whenever any rendered tool in the category
-// reports hasConfig. Bash and files have no entry: their editors live on the
-// Access surface, their rows fall through to Other Tools, and the server no
-// longer flags either configurable, so no category header can dangle a
-// Configure for a moved editor. Security stays the single config-form editor
+// reports hasConfig. Bash, files, and calendar-reminders have no entry: their
+// editors live on the Access surface and each keeps a dedicated section with
+// only the enablement toggle, so no category header can dangle a Configure
+// for a moved editor. Security stays the single config-form editor
 // for allow roots, deny patterns, and approval on deny. The server hasConfig
 // flag is the sole authority — a null key or no flagged tool hides the button,
 // which keeps unconfigurable categories clean and avoids stale per-tool
@@ -634,7 +658,30 @@ export interface SettingsManagerProps {
 
 export default function SettingsManager({ onSettingsSaved }: SettingsManagerProps = {}) {
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
-  const [activeTab, setActiveTab] = useState<SettingsTab>("providers");
+  const [activeTab, setActiveTab] = useState<SettingsTab>(() => {
+    if (typeof window !== "undefined") {
+      if (hasAccessSectionLink()) return "access";
+      const match = window.location.hash.match(/#settings\/([a-z-]+)/);
+      if (match && isSettingsTab(match[1])) return match[1];
+    }
+    return "providers";
+  });
+
+  useEffect(() => {
+    function syncTabFromHash() {
+      if (typeof window === "undefined") return;
+      if (hasAccessSectionLink()) {
+        setActiveTab("access");
+      } else {
+        const match = window.location.hash.match(/#settings\/([a-z-]+)/);
+        if (match && isSettingsTab(match[1])) {
+          setActiveTab(match[1]);
+        }
+      }
+    }
+    window.addEventListener("hashchange", syncTabFromHash);
+    return () => window.removeEventListener("hashchange", syncTabFromHash);
+  }, []);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -747,24 +794,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const [containersTTLMinutes, setContainersTTLMinutes] = useState<number | string>(
     DEFAULT_CONTAINERS_CONFIG.ttlMinutes
   );
-  // Blocked-paths editor holds raw textarea text (one glob per line) so blank lines survive editing
-  // and only collapse on save; the parsed count drives the live badge while an emptied editor
-  // intentionally means allow-all in scope rather than falling back to defaults.
-  const [filesDenyText, setFilesDenyText] = useState<string>(
-    DEFAULT_FILES_DENY_PATTERNS_TEXT
-  );
-  // Allowed-roots editor holds raw textarea text (one root per line) so blank
-  // lines survive editing and only collapse on save; the parsed count drives
-  // the live badge. Copy and paste of root sets works through this text.
-  const [filesAllowRootsText, setFilesAllowRootsText] = useState<string>(
-    formatAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS)
-  );
-  const [filesRequireApprovalOnDeny, setFilesRequireApprovalOnDeny] = useState(true);
-  // Form-local reset confirmations: resetting only rewrites the in-progress
-  // form and never persists until Save, so the modal must state counts and
-  // the until-Save nature explicitly.
-  const [pendingResetDeny, setPendingResetDeny] = useState(false);
-  const [pendingResetRoots, setPendingResetRoots] = useState(false);
+
   const [memoryVectorDBPath, setMemoryVectorDBPath] = useState("");
   const [memoryEpisodesDBPath, setMemoryEpisodesDBPath] = useState("");
   const [memoryEmbeddingModel, setMemoryEmbeddingModel] = useState("");
@@ -2399,53 +2429,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   ]);
 
   // Builds the [files] delta for the single page Save via executeSave; no section save remains.
-  // Reuses the existing top-level keys (filesDenyPatterns, filesAllowRoots,
-  // filesRequireApprovalOnDeny) so the wire contract stays single-shaped.
-  // Each textarea parses one entry per line with blank lines
-  // ignored; allow-roots order is preserved for display only.
-  const buildFilesPayload = useCallback(
-    (): {
-      filesDenyPatterns: string[];
-      filesAllowRoots: string[];
-      filesRequireApprovalOnDeny: boolean;
-    } => {
-      return {
-        filesDenyPatterns: parseDenyPatternsText(filesDenyText),
-        filesAllowRoots: parseAllowRootsText(filesAllowRootsText),
-        filesRequireApprovalOnDeny,
-      };
-    },
-    [filesDenyText, filesAllowRootsText, filesRequireApprovalOnDeny]
-  );
 
-  // Shared files validation for the single page Save via executeSave
-  // so it rejects traversal escapes and empty roots before any network write
-  // with one message. Validation reports original line numbers so a
-  // bad entry points at its editor row; blank lines collapse on save. Deny
-  // lines validate per-line while allow roots also reject an emptied editor,
-  // and `..` segments are rejected with line numbers.
-  const validateFilesFields = useCallback((): string | null => {
-    const denyLines = filesDenyText.split("\n");
-    for (let lineIndex = 0; lineIndex < denyLines.length; lineIndex += 1) {
-      const trimmed = denyLines[lineIndex].trim();
-      if (!trimmed) continue;
-      if (trimmed.includes("..")) {
-        return `Line ${lineIndex + 1}: Deny pattern must not contain '..': "${trimmed}".`;
-      }
-    }
-    const allowLines = filesAllowRootsText.split("\n");
-    for (let lineIndex = 0; lineIndex < allowLines.length; lineIndex += 1) {
-      const trimmed = allowLines[lineIndex].trim();
-      if (!trimmed) continue;
-      if (trimmed.includes("..")) {
-        return `Line ${lineIndex + 1}: Allowed root must not contain '..': "${trimmed}".`;
-      }
-    }
-    if (parseAllowRootsText(filesAllowRootsText).length === 0) {
-      return "Allowed roots cannot be empty.";
-    }
-    return null;
-  }, [filesDenyText, filesAllowRootsText]);
 
   // Copies one settings fetch into the workspace quota editors, tolerating
   // both snake_case and camelCase DTO aliases and an absent [workspace]
@@ -2625,9 +2609,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     );
     setProvidersList(pList);
 
-    setFilesDenyText(formatDenyPatternsText(data.filesDenyPatterns));
-    setFilesAllowRootsText(formatAllowRootsText(data.filesAllowRoots));
-    setFilesRequireApprovalOnDeny(data.filesRequireApprovalOnDeny ?? true);
+
     setMemoryVectorDBPath(data.memoryVectorDBPath);
     setMemoryEpisodesDBPath(data.memoryEpisodesDBPath);
     setMemoryEmbeddingModel(data.memoryEmbeddingModel);
@@ -3124,16 +3106,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       };
     }
 
-    // Blocked-paths plus allowed-roots validation for the single page Save shares validateFilesFields so page Save rejects
-    // the same shapes before any network write. Blank lines collapse on save and an emptied
-    // allow-roots editor is rejected, while `..` fails closed here and
-    // authoritatively on the server guard.
-    const filesValidationError = validateFilesFields();
-    if (filesValidationError) {
-      setError(filesValidationError);
-      setSaving(false);
-      return;
-    }
+
     // Workspace quotas share their validation helper so the Tools-tab save
     // rejects an out-of-range quota or retention before any network write.
     // Mirrors WorkspaceConfig clamps (10-10240 MB, 100-100000 files, 0-90
@@ -3418,7 +3391,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         fallbackProvider: fallbackProvider,
         providers: providersMap,
         containers: buildContainersPatch(),
-        ...buildFilesPayload(),
         memoryVectorDBPath,
         memoryEpisodesDBPath,
         memoryEmbeddingModel: preservedEmbeddingModel,
@@ -3857,37 +3829,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     );
   };
 
-  // Blocked-paths editing is a single textarea (small-screen friendly for
-  // long guard lists); reset only rewrites the form text after an explicit
-  // modal confirm and never persists until Save.
-  const handleConfirmResetDenyPatterns = () => {
-    setFilesDenyText(DEFAULT_FILES_DENY_PATTERNS_TEXT);
-    setPendingResetDeny(false);
-  };
 
-  const handleCancelResetDenyPatterns = () => {
-    setPendingResetDeny(false);
-  };
-
-  // Allowed-roots editing is a single textarea (small-screen friendly for
-  // long root sets, and copy and paste of root sets works through this text);
-  // reset only rewrites the form text after an explicit modal confirm and
-  // never persists until Save.
-  const handleConfirmResetAllowRoots = () => {
-    setFilesAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS_TEXT);
-    setPendingResetRoots(false);
-  };
-
-  const handleCancelResetAllowRoots = () => {
-    setPendingResetRoots(false);
-  };
-
-  // Live parsed count keeps the badge and the textarea hint in sync without
-  // storing a second source of truth beside the raw editor text.
-  const denyPatternCount = parseDenyPatternsText(filesDenyText).length;
-  // Live parsed allowed-roots entries share the same single-source pattern:
-  // the badge and the save path read from the raw textarea text.
-  const allowRootsCount = parseAllowRootsText(filesAllowRootsText).length;
   // Live parsed allowed-hosts entries share the same single-source pattern:
   // the badge and the save path read from the raw textarea text.
   const serverAllowedHostsCount = parseServerAllowedHostsText(serverAllowedHostsText).length;
@@ -4064,6 +4006,32 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
             </button>
           ) : null}
 
+          {navTabVisible("voice") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "voice"}
+              className={`settings-tab-btn ${activeTab === "voice" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("voice")}
+            >
+              <MicIcon size={16} />
+              <span>Voice</span>
+            </button>
+          ) : null}
+
+          {navTabVisible("memory") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "memory"}
+              className={`settings-tab-btn ${activeTab === "memory" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("memory")}
+            >
+              <MemoryIcon size={16} />
+              <span>Memory and Storage</span>
+            </button>
+          ) : null}
+
           {navTabVisible("goals") ? (
             <button
               type="button"
@@ -4074,19 +4042,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
             >
               <TargetIcon size={16} />
               <span>Goals</span>
-            </button>
-          ) : null}
-
-          {navTabVisible("engine") ? (
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === "engine"}
-              className={`settings-tab-btn ${activeTab === "engine" ? "active" : ""}`}
-              onClick={() => selectSettingsTab("engine")}
-            >
-              <SettingsIcon size={16} />
-              <span>Engine and Logs</span>
             </button>
           ) : null}
 
@@ -4123,42 +4078,16 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
             </button>
           ) : null}
 
-          {navTabVisible("security") ? (
+          {navTabVisible("indexing") ? (
             <button
               type="button"
               role="tab"
-              aria-selected={activeTab === "security"}
-              className={`settings-tab-btn ${activeTab === "security" ? "active" : ""}`}
-              onClick={() => selectSettingsTab("security")}
-            >
-              <ApprovalsIcon size={16} />
-              <span>Security</span>
-            </button>
-          ) : null}
-
-          {navTabVisible("memory") ? (
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === "memory"}
-              className={`settings-tab-btn ${activeTab === "memory" ? "active" : ""}`}
-              onClick={() => selectSettingsTab("memory")}
+              aria-selected={activeTab === "indexing"}
+              className={`settings-tab-btn ${activeTab === "indexing" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("indexing")}
             >
               <MemoryIcon size={16} />
-              <span>Memory and Storage</span>
-            </button>
-          ) : null}
-
-          {navTabVisible("voice") ? (
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === "voice"}
-              className={`settings-tab-btn ${activeTab === "voice" ? "active" : ""}`}
-              onClick={() => selectSettingsTab("voice")}
-            >
-              <MicIcon size={16} />
-              <span>Voice</span>
+              <span>Indexing</span>
             </button>
           ) : null}
 
@@ -4188,6 +4117,19 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
             </button>
           ) : null}
 
+          {navTabVisible("security") ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "security"}
+              className={`settings-tab-btn ${activeTab === "security" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("security")}
+            >
+              <ApprovalsIcon size={16} />
+              <span>Security</span>
+            </button>
+          ) : null}
+
           {navTabVisible("network") ? (
             <button
               type="button"
@@ -4210,16 +4152,16 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
             </button>
           ) : null}
 
-          {navTabVisible("indexing") ? (
+          {navTabVisible("engine") ? (
             <button
               type="button"
               role="tab"
-              aria-selected={activeTab === "indexing"}
-              className={`settings-tab-btn ${activeTab === "indexing" ? "active" : ""}`}
-              onClick={() => selectSettingsTab("indexing")}
+              aria-selected={activeTab === "engine"}
+              className={`settings-tab-btn ${activeTab === "engine" ? "active" : ""}`}
+              onClick={() => selectSettingsTab("engine")}
             >
-              <MemoryIcon size={16} />
-              <span>Indexing</span>
+              <SettingsIcon size={16} />
+              <span>Engine and Logs</span>
             </button>
           ) : null}
 
@@ -6137,117 +6079,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                 </span>
               </div>
             </div>
-            </div>
-            {/* Single Files and Access editor: both guard textareas live here so
-                copy and paste of root sets works and Security is the only files
-                editor. Deny-then-containment stays server-side; the textareas
-                only edit the policy text. */}
-            <div className="settings-section card">
-              <div className="settings-section-title-group">
-                <h3>Files & Access</h3>
-                <p className="settings-section-hint">
-                  Allow roots bound file tools, email attachment saves, bash working directories, and staged-file review: those surfaces can only reach paths inside the allowed roots. Denied paths are skipped everywhere including the document index, while allow roots do not affect index coverage.
-                </p>
-              </div>
-              <div className="settings-subsection-header">
-                <div className="settings-section-title-group">
-                  <h4 style={{ margin: "0 0 4px 0" }}>Blocked Paths</h4>
-                  <p className="settings-section-hint">
-                    One glob per line. Denied paths escalate or fail per the toggle below.
-                  </p>
-                </div>
-                <div className="row">
-                  <button
-                    type="button"
-                    className="ghost icon-text-btn"
-                    onClick={() => setPendingResetDeny(true)}
-                  >
-                    <RefreshIcon size={14} />
-                    <span>Reset to Defaults</span>
-                  </button>
-                </div>
-              </div>
-              <div className="form-group" style={{ marginTop: "8px" }}>
-                <label htmlFor="deny-patterns-textarea">
-                  Deny patterns{" "}
-                  <span className="muted text-sm">
-                    ({denyPatternCount} {denyPatternCount === 1 ? "pattern" : "patterns"})
-                  </span>
-                </label>
-                <textarea
-                  id="deny-patterns-textarea"
-                  className="input-field deny-patterns-textarea"
-                  aria-label="Deny patterns, one per line"
-                  value={filesDenyText}
-                  onChange={(e) => setFilesDenyText(e.target.value)}
-                  placeholder="e.g. .env*, *.pem, .ssh/*"
-                  rows={8}
-                />
-                <span className="form-group-hint">
-                  Glob-like patterns: `*` matches within a name, directory prefixes like
-                  `.ssh/*` guard a whole subtree. `..` escapes are rejected with line
-                  numbers; blank lines are ignored.
-                </span>
-                {denyPatternCount === 0 && (
-                  <span className="form-group-hint">
-                    No deny patterns configured. File tools will allow all in-scope paths.
-                  </span>
-                )}
-              </div>
-              <div className="settings-subsection-header" style={{ marginTop: "20px" }}>
-                <div className="settings-section-title-group">
-                  <h4 style={{ margin: "0 0 4px 0" }}>Allowed Roots</h4>
-                  <p className="settings-section-hint">
-                    Home containment boundary (`~` expands to the home directory). Paths outside
-                    these roots escalate to approval.
-                  </p>
-                </div>
-                <div className="row">
-                  <button
-                    type="button"
-                    className="ghost icon-text-btn"
-                    onClick={() => setPendingResetRoots(true)}
-                  >
-                    <RefreshIcon size={14} />
-                    <span>Reset Roots</span>
-                  </button>
-                </div>
-              </div>
-              <div className="form-group" style={{ marginTop: "8px" }}>
-                <label htmlFor="allow-roots-textarea">
-                  Allowed roots, one per line{" "}
-                  <span className="muted text-sm">
-                    ({allowRootsCount} {allowRootsCount === 1 ? "root" : "roots"})
-                  </span>
-                </label>
-                <textarea
-                  id="allow-roots-textarea"
-                  className="input-field allow-roots-textarea"
-                  aria-label="Allowed roots, one per line"
-                  value={filesAllowRootsText}
-                  onChange={(e) => setFilesAllowRootsText(e.target.value)}
-                  placeholder="e.g. ~"
-                  rows={6}
-                />
-                <span className="form-group-hint">
-                  One root per line. `~` expands to the home directory for home containment.
-                  Blank lines are ignored. Order is display-only and never changes the access decision.
-                </span>
-              </div>
-              <div className="form-group checkbox-group" style={{ marginTop: "16px" }}>
-                <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
-                  <input
-                    id="files-require-approval"
-                    type="checkbox"
-                    checked={filesRequireApprovalOnDeny}
-                    onChange={(e) => setFilesRequireApprovalOnDeny(e.target.checked)}
-                  />
-                  <span>Require approval on deny</span>
-                </label>
-                <span className="form-group-hint">
-                  When on, denied paths escalate to the approvals inbox instead of failing silently.
-                </span>
-              </div>
             </div>
             {/* Access management: the single owner token gate. Rotation lives
                 here rather than in a general settings save because it changes a
@@ -8385,100 +8216,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
         </Modal>
       ) : null}
 
-      {/* Form-local reset confirmations for the Security Files & Access editor share
-          the modal so destructive rewrites stay explicit: counts show what is
-          lost and the copy stresses nothing persists until Save. They live
-          alongside the Security pane so Security is the only home for file policy. */}
-      {pendingResetDeny ? (
-        <Modal
-          label="Confirm reset deny patterns"
-          onClose={handleCancelResetDenyPatterns}
-          containerClassName="modal-container session-delete-modal"
-        >
-          <div className="modal-header">
-            <h3>Reset deny patterns?</h3>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={handleCancelResetDenyPatterns}
-              aria-label="Close"
-            >
-              <CloseIcon size={16} />
-            </button>
-          </div>
-          <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
-              This will replace {denyPatternCount}{" "}
-              {denyPatternCount === 1 ? "custom pattern" : "custom patterns"} with{" "}
-              {DEFAULT_FILES_DENY_PATTERNS.length} defaults. This only updates the
-              form — nothing is saved until you choose Save.
-            </p>
-          </div>
-          <div className="modal-footer">
-            <button
-              type="button"
-              className="ghost"
-              onClick={handleCancelResetDenyPatterns}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="danger"
-              onClick={handleConfirmResetDenyPatterns}
-              aria-label="Confirm reset deny patterns"
-            >
-              Reset to Defaults
-            </button>
-          </div>
-        </Modal>
-      ) : null}
-      {pendingResetRoots ? (
-        <Modal
-          label="Confirm reset allowed roots"
-          onClose={handleCancelResetAllowRoots}
-          containerClassName="modal-container session-delete-modal"
-        >
-          <div className="modal-header">
-            <h3>Reset allowed roots?</h3>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={handleCancelResetAllowRoots}
-              aria-label="Close"
-            >
-              <CloseIcon size={16} />
-            </button>
-          </div>
-          <div className="modal-body">
-            <p className="muted" style={{ margin: 0 }}>
-              This will replace {allowRootsCount}{" "}
-              {allowRootsCount === 1 ? "custom root" : "custom roots"} with{" "}
-              {DEFAULT_FILES_ALLOW_ROOTS.length}{" "}
-              {DEFAULT_FILES_ALLOW_ROOTS.length === 1 ? "default" : "defaults"} (
-              {DEFAULT_FILES_ALLOW_ROOTS.join(", ")}). This only updates the form —
-              nothing is saved until you choose Save.
-            </p>
-          </div>
-          <div className="modal-footer">
-            <button
-              type="button"
-              className="ghost"
-              onClick={handleCancelResetAllowRoots}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="danger"
-              onClick={handleConfirmResetAllowRoots}
-              aria-label="Confirm reset allowed roots"
-            >
-              Reset Roots
-            </button>
-          </div>
-        </Modal>
-      ) : null}
 
       {secretModal && secretModal.isOpen && (
         <StoreSecretModal

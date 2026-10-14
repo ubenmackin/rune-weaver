@@ -841,6 +841,49 @@ describe("dashboard api client", () => {
     expect(listed.rules[0].toolName).toBe("email.send");
   });
 
+  it("normalizes server access rules returning action into both effect and action", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        rules: [
+          {
+            id: "11111111-1111-1111-1111-111111111111",
+            toolName: "email.send",
+            scope: { kind: "exactTarget", target: "alice@example.com" },
+            action: "allow",
+            grantedAt: "2026-10-13T00:00:00Z",
+            expiresAt: null,
+            duration: "forever",
+            useCount: 0,
+            lastUsedAt: null,
+          },
+          {
+            id: "22222222-2222-2222-2222-222222222222",
+            toolName: "bash.exec",
+            scope: { kind: "tool" },
+            action: "deny",
+            grantedAt: "2026-10-13T00:00:00Z",
+            expiresAt: null,
+            useCount: 0,
+            lastUsedAt: null,
+          },
+        ],
+        count: 2,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const listed = await listRules();
+    expect(listed.rules[0].effect).toBe("allow");
+    expect(listed.rules[0].action).toBe("allow");
+    expect(listed.rules[0].toolName).toBe("email.send");
+    expect(listed.rules[0].tool).toBe("email.send");
+    expect(listed.rules[0].duration).toBe("forever");
+
+    expect(listed.rules[1].effect).toBe("deny");
+    expect(listed.rules[1].action).toBe("deny");
+    expect(listed.rules[1].toolName).toBe("bash.exec");
+    expect(listed.rules[1].duration).toBe("forever");
+  });
+
   it("revokes a rule with an encoded DELETE", async () => {
     const seen: Array<{ path: string; method?: string }> = [];
     const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
@@ -1066,6 +1109,8 @@ describe("dashboard api client", () => {
     // The payload names the whole rule: a deny rule rides the same shape with
     // effect flipped, so the create form never needs a second endpoint.
     expect(JSON.parse(seen[0].body ?? "")).toEqual({
+      toolName: "email.send",
+      action: "allow",
       tool: "email.send",
       effect: "allow",
       scope: { kind: "exactTarget", target: "new@example.com" },

@@ -4,7 +4,9 @@
 // store round-trips every scope shape, action, and usage counter so a second
 // store instance sees exactly what the first saved; the legacy `trust_grants`
 // table is carried forward exactly once with byte-for-byte matching and is
-// never deleted or re-read; poison rows skip without aborting the rule set;
+// never deleted or re-read; an upgraded narrow `access_rules` table gains its
+// additive columns so durable rules — including permanent deny rules — survive
+// the schema widening; poison rows skip without aborting the rule set;
 // expired allow rules prune while deny rules never expire; and a failed save
 // rolls back to the pre-save contents. The in-memory store pins the same
 // load/save/prune contract without a database.
@@ -246,6 +248,69 @@ struct AccessRuleStoreTests {
         try await store.save([rule])
         try await store.migrateLegacyIfNeeded()
         #expect(try await store.load() == [rule])
+    }
+
+    @Test
+    func `an upgraded narrow access_rules table gains its additive columns and keeps its durable rules`() async throws {
+        let (base, dbURL) = try AccessRuleStoreTestSupport.makeTempWorkspace()
+        defer { AccessRuleStoreTestSupport.cleanup(base) }
+
+        // A database from before the additive rule columns existed: the narrow
+        // `access_rules` shape plus one permanent deny row and one allow row,
+        // written raw so the schema genuinely predates the store's widening.
+        let narrowSchema = """
+        CREATE TABLE access_rules (
+            id TEXT PRIMARY KEY,
+            tool_name TEXT NOT NULL,
+            scope_kind TEXT NOT NULL,
+            scope_data TEXT NOT NULL,
+            action TEXT NOT NULL,
+            granted_at REAL NOT NULL,
+            expires_at REAL,
+            duration TEXT
+        );
+        INSERT INTO access_rules VALUES
+            ('AAAAAAAA-0000-0000-0000-000000000060', 'bash.exec', 'glob', 'rm *', 'deny', 1000, NULL, 'forever'),
+            ('AAAAAAAA-0000-0000-0000-000000000061', 'email.send', 'exactTarget', 'a@x.com', 'allow', 1000, NULL, 'forever');
+        """
+        #expect(AccessRuleStoreTestSupport.execRaw(dbPath: dbURL.path, sql: narrowSchema))
+
+        let store = SQLiteAccessRuleStore(dbPath: dbURL.path)
+
+        // The migrated rows read back through the widened schema: the permanent
+        // deny survives with no expiry, exactly as the owner left it.
+        let loaded = try await store.load()
+        #expect(loaded.count == 2)
+        let deny = try #require(loaded.first { $0.id.uuidString == "AAAAAAAA-0000-0000-0000-000000000060" })
+        #expect(deny.action == .deny)
+        #expect(deny.toolName == "bash.exec")
+        #expect(deny.scope == .glob("rm *"))
+        #expect(deny.duration == .forever)
+        #expect(deny.expiresAt == nil)
+        #expect(deny.useCount == 0)
+        #expect(deny.lastUsedAt == nil)
+
+        // A save carrying a reason and counters now prepares and commits, and
+        // a second store reads the same durable copy back.
+        let noted = try makeRule(
+            id: 62,
+            toolName: "api.request",
+            scope: .domain(host: "example.com", subdomains: true),
+            action: .deny,
+            duration: .forever,
+            useCount: 2,
+            lastUsedAt: Date(timeIntervalSince1970: 1500),
+            reason: "owner refused this host"
+        )
+        try await store.save(loaded + [noted])
+        let second = SQLiteAccessRuleStore(dbPath: dbURL.path)
+        let reloaded = try await second.load()
+        #expect(
+            reloaded.sorted { $0.id.uuidString < $1.id.uuidString }
+                == (loaded + [noted]).sorted { $0.id.uuidString < $1.id.uuidString }
+        )
+        let persisted = try #require(reloaded.first { $0.id == AccessRuleStoreTestSupport.identifier(62) })
+        #expect(persisted.reason == "owner refused this host")
     }
 
     // MARK: - Poison rows

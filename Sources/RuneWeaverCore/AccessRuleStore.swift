@@ -103,6 +103,7 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
         static func open(dbPath: String) throws -> OpaquePointer? {
             let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: { AccessRuleStorageError(message: $0) })
             do {
+                try migrateColumnsIfNeeded(handle: handle)
                 try SQLiteHelpers.exec(
                     handle: handle,
                     sql: """
@@ -133,6 +134,57 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
                 throw error
             }
             return handle
+        }
+
+        /// Adds the rule columns that arrived additively to older `access_rules`
+        /// schemas, mirroring the session-store migration idiom.
+        ///
+        /// Runs before `CREATE TABLE IF NOT EXISTS` because that statement is a
+        /// no-op on an existing table: without this probe-and-`ALTER`, an
+        /// upgraded database would keep its narrow schema and every save and
+        /// load would fail to prepare against the missing columns — silently
+        /// degrading durable rules, including permanent deny rules, to
+        /// process-lifetime memory. A fresh database probes empty (the table
+        /// does not exist yet), which skips the `ALTER`s and lets the following
+        /// `CREATE` establish the full schema; an upgraded database probes
+        /// non-empty, so only the missing columns are added and a replay is
+        /// idempotent. The empty-probe case also covers a probe that cannot
+        /// prepare, leaving the `CREATE` as the schema authority.
+        private static func migrateColumnsIfNeeded(handle: OpaquePointer?) throws {
+            let existing = SQLiteHelpers.columnNames(handle: handle, table: .accessRules)
+            guard !existing.isEmpty else { return }
+            let columnsToAdd: [(name: String, sql: String)] = [
+                ("use_count", "ALTER TABLE access_rules ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0;"),
+                ("last_used_at", "ALTER TABLE access_rules ADD COLUMN last_used_at REAL;"),
+                ("reason", "ALTER TABLE access_rules ADD COLUMN reason TEXT;")
+            ]
+            for (col, alterSQL) in columnsToAdd where !existing.contains(col) {
+                do {
+                    try SQLiteHelpers.exec(
+                        handle: handle,
+                        sql: alterSQL,
+                        failure: { AccessRuleStorageError(message: $0) }
+                    )
+                } catch {
+                    // Concurrent opens can race the probe onto the same
+                    // `ALTER`; only that duplicate-column case is safe to
+                    // ignore, every other failure surfaces so a broken
+                    // migration cannot masquerade as migrated.
+                    var engineDetail = ""
+                    if let message = sqlite3_errmsg(handle) {
+                        engineDetail = String(cString: message)
+                    }
+                    let combined = (engineDetail + " " + String(describing: error)).lowercased()
+                    if combined.contains("duplicate column") {
+                        continue
+                    }
+                    let code = sqlite3_errcode(handle)
+                    RuneWeaverLog.stores.warning(
+                        "SQLiteAccessRuleStorage: migration failed for column '\(col)' (code \(code)): \(error)"
+                    )
+                    throw error
+                }
+            }
         }
 
         static func load(dbPath: String) -> [AccessRule] {

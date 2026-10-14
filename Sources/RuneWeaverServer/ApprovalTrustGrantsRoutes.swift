@@ -18,6 +18,12 @@ import Foundation
 import RuneWeaverCore
 import Vapor
 
+/// Bound on a stored rule reason so an unbounded paste never persists to the
+/// rule store or renders unbounded in every table row. Matches the cap the
+/// dashboard's Rule modal enforces, so a compliant client never trips it and
+/// a raw caller gets an honest refusal instead of a silently shortened note.
+private let maxRuleReasonChars = 512
+
 extension WSHub {
     /// Broadcasts an access-rule change so dashboards refresh their rules list.
     ///
@@ -118,10 +124,11 @@ private func registerAccessRulesCreateRoute(_ app: Application) {
             if let requested = body.duration, !requested.isDurable {
                 throw Abort(.badRequest, reason: "An allow rule needs fiveMinutes, oneHour, oneDay, or forever (or no tier for a standing rule).")
             }
-            let minted = await context.permissionGate.grant(
+            let minted = try await context.permissionGate.grant(
                 scope,
                 toolName: toolName,
-                duration: body.duration
+                duration: body.duration,
+                reason: trimmedRuleReason(body.reason)
             )
             // A refused mint is the send invariant (no tool-wide send scope)
             // or a malformed shape; either way nothing was stored, so the row
@@ -139,7 +146,7 @@ private func registerAccessRulesCreateRoute(_ app: Application) {
         case .deny:
             // A standing refusal carries no expiry: a dated deny would lapse
             // into the allow decision underneath it, so the tier is ignored.
-            await context.permissionGate.denyRule(
+            try await context.permissionGate.denyRule(
                 scope,
                 toolName: toolName,
                 reason: trimmedRuleReason(body.reason)
@@ -267,10 +274,21 @@ private func registerAccessRulesSessionTrustRoutes(_ app: Application) {
 ///
 /// The gate renders a nil reason from the tool and scope, so a blank caller
 /// note degrades to that derived text instead of storing an empty label.
+/// A reason longer than ``maxRuleReasonChars`` is refused rather than
+/// truncated, mirroring the scope canonicalizers: a denial reason is read
+/// back to the agent, so a silently shortened note could say something the
+/// owner never wrote, and the dashboard enforces the same cap in its modal.
 /// - Parameter reason: Raw reason from the request.
 /// - Returns: Trimmed reason, or nil when absent or blank.
-private func trimmedRuleReason(_ reason: String?) -> String? {
+/// - Throws: `Abort(.badRequest)` when the reason exceeds the stored bound.
+private func trimmedRuleReason(_ reason: String?) throws -> String? {
     guard let reason else { return nil }
     let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
-    return trimmed.isEmpty ? nil : trimmed
+    if trimmed.isEmpty {
+        return nil
+    }
+    guard trimmed.count <= maxRuleReasonChars else {
+        throw Abort(.badRequest, reason: "reason must be at most \(maxRuleReasonChars) characters")
+    }
+    return trimmed
 }

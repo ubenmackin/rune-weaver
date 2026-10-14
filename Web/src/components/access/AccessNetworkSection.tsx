@@ -244,6 +244,12 @@ function validatePolicyDraft(draft: PolicyDraft | null): string[] {
     }
   }
   for (const [key, binding] of Object.entries(draft.credentials ?? {})) {
+    // TOML-breaking bytes refuse before the alphabet check so an unquotable
+    // key can never reach disk serialization even if the alphabet widens.
+    if (hasTomlBreakingChars(key)) {
+      problems.push("Key '" + key + "' carries characters that would break TOML.");
+      continue;
+    }
     if (!isValidPolicyKey(key)) {
       problems.push("Key '" + key + "' must use only letters, numbers, _, -, . (max 256 characters).");
       continue;
@@ -755,7 +761,11 @@ export function NetworkEgressEditors({
 // tab. This component keeps the single verified draft, the shared save, and
 // the sub-tab chrome; the network editors render inline while the credentials
 // half renders through the sibling credentials section.
-export function AccessNetworkSection() {
+export interface AccessNetworkSectionProps {
+  activeView?: "network" | "credentials";
+}
+
+export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps = {}) {
   const [draft, setDraft] = useState<PolicyDraft | null>(null);
   const [policyPath, setPolicyPath] = useState<string>("");
   const [loadedFromDisk, setLoadedFromDisk] = useState<boolean>(false);
@@ -815,6 +825,7 @@ export function AccessNetworkSection() {
   const [applying, setApplying] = useState<boolean>(false);
   const [recheckError, setRecheckError] = useState<string | null>(null);
   const [policySubTab, setPolicySubTab] = useState<"network" | "credentials">("network");
+  const currentTab = activeView ?? policySubTab;
   // Success-only toasts: failures stay as inline banners with no toast.
   const { toasts, pushSuccessToast, dismissToast } = useToastStack();
 
@@ -1085,9 +1096,14 @@ export function AccessNetworkSection() {
     allowed_path_prefixes?: string[];
   }) {
     // Pasted surrogate spellings resolve to the bare slot so the draft never
-    // stores a colon-bearing key the gate would refuse.
+    // stores a colon-bearing key the gate would refuse. Keys outside the
+    // surrogate alphabet refuse here so an unusable name never enters the draft.
     const nextKey = normalizeSecretKey(modalDraft?.key ?? "");
     if (!nextKey) return;
+    // Fail closed on unquotable bytes before the alphabet gate so the draft
+    // never stages a key the store could not serialize back to TOML.
+    if (hasTomlBreakingChars(nextKey)) return;
+    if (!isValidPolicyKey(nextKey)) return;
     const hosts =
       modalDraft.hosts ?? modalDraft.allowedHosts ?? modalDraft.allowed_hosts ?? [];
     const methods =
@@ -1298,6 +1314,11 @@ export function AccessNetworkSection() {
           Declarative network egress plus target-bound credentials. Changes apply
           immediately with no restart.
         </p>
+        <p className="settings-section-hint">
+          System-boundary file roots and blocked paths live in Access →
+          Files; fine-grained file write posture (Stage, Ask, Live, Deny per path)
+          lives in Access → Files.
+        </p>
         {policyPath ? (
           <p className="muted text-sm" data-testid="policy-location">
             Location: <code>{policyPath}</code> ({loadedFromDisk ? "Customized" : "Factory Defaults"})
@@ -1423,36 +1444,38 @@ export function AccessNetworkSection() {
 
       {draft ? (
         <>
-          <div
-            data-testid="policy-subtabs"
-            role="tablist"
-            aria-label="Policy sections"
-            className="policy-tabs"
-          >
-            <button
-              type="button"
-              role="tab"
-              aria-selected={policySubTab === "network"}
-              aria-controls="policy-panel-network"
-              data-testid="policytab-network"
-              className={`policy-tab${policySubTab === "network" ? " active" : ""}`}
-              onClick={() => setPolicySubTab("network")}
+          {!activeView ? (
+            <div
+              data-testid="policy-subtabs"
+              role="tablist"
+              aria-label="Policy sections"
+              className="policy-tabs"
             >
-              Network
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={policySubTab === "credentials"}
-              aria-controls="policy-panel-credentials"
-              data-testid="policytab-credentials"
-              className={`policy-tab${policySubTab === "credentials" ? " active" : ""}`}
-              onClick={() => setPolicySubTab("credentials")}
-            >
-              Credentials
-            </button>
-          </div>
-          {policySubTab === "network" ? (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={policySubTab === "network"}
+                aria-controls="policy-panel-network"
+                data-testid="policytab-network"
+                className={`policy-tab${policySubTab === "network" ? " active" : ""}`}
+                onClick={() => setPolicySubTab("network")}
+              >
+                Network
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={policySubTab === "credentials"}
+                aria-controls="policy-panel-credentials"
+                data-testid="policytab-credentials"
+                className={`policy-tab${policySubTab === "credentials" ? " active" : ""}`}
+                onClick={() => setPolicySubTab("credentials")}
+              >
+                Credentials
+              </button>
+            </div>
+          ) : null}
+          {currentTab === "network" ? (
             <section
               id="policy-panel-network"
               role="tabpanel"
@@ -1474,8 +1497,12 @@ export function AccessNetworkSection() {
             </section>
           ) : null}
 
+          {/* Single-view mounts render only their view so Network and
+              Credentials never share a tab strip; the legacy tab shell keeps the
+              credentials section mounted for modal continuity across switches. */}
+          {activeView === "network" ? null : (
           <AccessCredentialsSection
-            active={policySubTab === "credentials"}
+            active={currentTab === "credentials"}
             bindings={draft.credentials}
             secretStatus={secretStatus}
             allowedDomains={allowedDomainsForBindings}
@@ -1508,6 +1535,7 @@ export function AccessNetworkSection() {
             onCancelDeleteSecret={handleCancelDeleteSecret}
             onConfirmDeleteSecret={() => void handleConfirmDeleteSecret()}
           />
+          )}
 
           {recheckOpen && recheckPreview ? (
             <Modal

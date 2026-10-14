@@ -18,7 +18,7 @@
 // hide the server's reason, and a deep link cannot land the owner on the wrong
 // rule.
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AccessPane from "./AccessPane";
@@ -45,6 +45,7 @@ interface RuleSeed {
   useCount?: number;
   expiresAt?: string | null;
   lastUsedAt?: string | null;
+  reason?: string | null;
 }
 
 // Builds one wire rule mirroring the engine's GET /approvals/rules shape: a
@@ -60,11 +61,12 @@ function seedRule(seed: RuleSeed): AccessRule {
     duration: seed.duration ?? "forever",
     useCount: seed.useCount ?? 0,
     lastUsedAt: seed.lastUsedAt ?? null,
+    reason: seed.reason ?? null,
   };
 }
 
 interface StubRoutesOptions {
-  rules?: AccessRule[];
+  rules?: (AccessRule | Record<string, unknown>)[];
   // Per-write override so a case can return a refusal (for example a widen 409)
   // while every other write answers the engine's bodyless 204.
   onWrite?: (path: string, method: string, body: Record<string, unknown> | undefined) => Response | undefined;
@@ -153,34 +155,34 @@ describe("AccessPane", () => {
     });
   });
 
-  it("renders the rail with Rules as the landing section and keeps its selection stable", async () => {
+  it("renders the tabs with Rules as the landing section and keeps its selection stable", async () => {
     stubRoutes({ rules: [] });
     const user = userEvent.setup();
     render(<AccessPane />);
 
     for (const key of ["rules", "bash", "network", "credentials", "files"]) {
-      expect(screen.getByTestId(`access-rail-${key}`)).toBeInTheDocument();
+      expect(screen.getByTestId(`access-tab-${key}`)).toBeInTheDocument();
     }
-    expect(screen.getByTestId("access-rail-rules").getAttribute("aria-current")).toBe("page");
+    expect(screen.getByTestId("access-tab-rules").getAttribute("aria-selected")).toBe("true");
     await waitFor(() => {
       expect(screen.getByTestId("access-rules-section")).toBeInTheDocument();
     });
 
-    // Selecting another section moves the rail and mounts only that section.
-    await user.click(screen.getByTestId("access-rail-bash"));
-    expect(screen.getByTestId("access-rail-bash").getAttribute("aria-current")).toBe("page");
-    expect(screen.getByTestId("access-rail-rules").getAttribute("aria-current")).toBeNull();
+    // Selecting another section moves the tabs and mounts only that section.
+    await user.click(screen.getByTestId("access-tab-bash"));
+    expect(screen.getByTestId("access-tab-bash").getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByTestId("access-tab-rules").getAttribute("aria-selected")).toBe("false");
     await waitFor(() => {
       expect(screen.getByTestId("bash-pane")).toBeInTheDocument();
     });
     expect(screen.queryByTestId("access-rules-section")).toBeNull();
 
     // Returning to Rules keeps the selection under the shell's control.
-    await user.click(screen.getByTestId("access-rail-rules"));
+    await user.click(screen.getByTestId("access-tab-rules"));
     await waitFor(() => {
       expect(screen.getByTestId("access-rules-section")).toBeInTheDocument();
     });
-    expect(screen.getByTestId("access-rail-rules").getAttribute("aria-current")).toBe("page");
+    expect(screen.getByTestId("access-tab-rules").getAttribute("aria-selected")).toBe("true");
   });
 
   it("derives the plain-English header from active allow rules grouped by tool", async () => {
@@ -256,11 +258,11 @@ describe("AccessPane", () => {
     });
   });
 
-  it("widens an allow rule through POST /approvals/rules/:id/widen", async () => {
+  it("edits an allow rule through the edit modal, replacing it with updated scope", async () => {
     const fetchMock = stubRoutes({
       rules: [
         seedRule({
-          id: "rule-widen",
+          id: "rule-edit-1",
           toolName: "bash.exec",
           scope: { kind: "exactTarget", target: "git status" },
           effect: "allow",
@@ -271,53 +273,65 @@ describe("AccessPane", () => {
     render(<AccessPane />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("access-rule-row-rule-widen")).toBeInTheDocument();
+      expect(screen.getByTestId("access-rule-row-rule-edit-1")).toBeInTheDocument();
     });
-    await user.click(screen.getByTestId("access-rule-widen-rule-widen"));
-    await user.click(screen.getByTestId("access-widen-confirm"));
+    await user.click(screen.getByTestId("access-rule-edit-rule-edit-1"));
+    expect(screen.getByText("Edit Access Rule")).toBeInTheDocument();
+
+    // Switch scope to tool-wide
+    await user.click(screen.getByLabelText("All calls to this tool (tool-wide)"));
+    await user.click(screen.getByTestId("access-deny-submit"));
 
     await waitFor(() => {
       expect(
         recordedWrites(fetchMock).some(
           (recorded) =>
-            recorded.method === "POST" && recorded.path === "/approvals/rules/rule-widen/widen",
+            recorded.method === "DELETE" && recorded.path === "/approvals/rules/rule-edit-1",
         ),
       ).toBe(true);
+      const post = recordedWrites(fetchMock).find(
+        (recorded) => recorded.method === "POST" && recorded.path === "/approvals/rules",
+      );
+      expect(post?.body).toMatchObject({
+        toolName: "bash.exec",
+        scope: { kind: "tool" },
+        effect: "allow",
+      });
     });
   });
 
-  it("surfaces the server widening refusal inside the widen modal", async () => {
+  it("surfaces error inside the edit modal when update fails", async () => {
     stubRoutes({
       rules: [
         seedRule({
-          id: "rule-send",
+          id: "rule-send-fail",
           toolName: "email.send",
           scope: { kind: "recipientSet", handles: ["a@x.com"] },
           effect: "allow",
         }),
       ],
-      onWrite: (path, _method) =>
-        path.endsWith("/widen")
-          ? jsonResponse({ reason: "Cannot widen a send rule to every recipient." }, 409)
+      onWrite: (path, method) =>
+        method === "POST" && path.endsWith("/rules")
+          ? jsonResponse({ reason: "Cannot trust email without valid recipient." }, 400)
           : undefined,
     });
     const user = userEvent.setup();
     render(<AccessPane />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("access-rule-row-rule-send")).toBeInTheDocument();
+      expect(screen.getByTestId("access-rule-row-rule-send-fail")).toBeInTheDocument();
     });
-    await user.click(screen.getByTestId("access-rule-widen-rule-send"));
-    await user.click(screen.getByTestId("access-widen-confirm"));
+    await user.click(screen.getByTestId("access-rule-edit-rule-send-fail"));
+    await user.click(screen.getByTestId("access-deny-submit"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("access-widen-error").textContent).toContain(
-        "Cannot widen a send rule to every recipient.",
+      expect(screen.getByTestId("access-deny-error").textContent).toContain(
+        "Cannot trust email without valid recipient.",
       );
     });
   });
 
-  it("changes a rule duration through PATCH with the chosen durable tier", async () => {
+  it("edits a rule duration and reason and displays reason in the table row", async () => {
     const fetchMock = stubRoutes({
       rules: [
         seedRule({
@@ -326,6 +340,7 @@ describe("AccessPane", () => {
           scope: { kind: "exactTarget", target: "https://example.com" },
           effect: "allow",
           duration: "oneHour",
+          reason: "Prior check reason",
         }),
       ],
     });
@@ -335,18 +350,34 @@ describe("AccessPane", () => {
     await waitFor(() => {
       expect(screen.getByTestId("access-rule-row-rule-dur")).toBeInTheDocument();
     });
-    await user.click(screen.getByTestId("access-rule-duration-rule-dur"));
+    expect(screen.getByTestId("access-rule-reason-rule-dur").textContent).toContain("Prior check reason");
 
-    const radios = within(screen.getByRole("radiogroup", { name: "Duration" }));
-    await user.click(radios.getByRole("radio", { name: "Next day" }));
-    await user.click(screen.getByTestId("access-duration-confirm"));
+    await user.click(screen.getByTestId("access-rule-edit-rule-dur"));
+
+    // Check pre-populated reason input
+    const reasonInput = screen.getByTestId("access-deny-reason") as HTMLInputElement;
+    expect(reasonInput.value).toBe("Prior check reason");
+
+    // Change duration to Next day
+    await user.click(screen.getByLabelText("Next day"));
+    await user.clear(reasonInput);
+    await user.type(reasonInput, "Updated verification reason");
+    await user.click(screen.getByTestId("access-deny-submit"));
 
     await waitFor(() => {
-      const patch = recordedWrites(fetchMock).find(
-        (recorded) =>
-          recorded.method === "PATCH" && recorded.path === "/approvals/rules/rule-dur",
+      expect(
+        recordedWrites(fetchMock).some(
+          (recorded) =>
+            recorded.method === "DELETE" && recorded.path === "/approvals/rules/rule-dur",
+        ),
+      ).toBe(true);
+      const post = recordedWrites(fetchMock).find(
+        (recorded) => recorded.method === "POST" && recorded.path === "/approvals/rules",
       );
-      expect(patch?.body).toEqual({ duration: "oneDay" });
+      expect(post?.body).toMatchObject({
+        duration: "oneDay",
+        reason: "Updated verification reason",
+      });
     });
   });
 
@@ -356,9 +387,14 @@ describe("AccessPane", () => {
     render(<AccessPane />);
 
     await waitFor(() => {
+      expect(screen.getByTestId("access-add-rule-btn")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("access-add-rule-btn"));
+    await waitFor(() => {
       expect(screen.getByTestId("access-deny-submit")).toBeInTheDocument();
     });
-    await user.type(screen.getByTestId("access-deny-tool"), "email.send");
+    await user.click(screen.getByTestId("access-rule-effect-deny"));
+    await user.selectOptions(screen.getByTestId("access-rule-tool-select"), "email.send");
     await user.type(screen.getByTestId("access-deny-target"), "spam@evil.com");
     await user.type(screen.getByTestId("access-deny-reason"), "never send here");
     await user.click(screen.getByTestId("access-deny-submit"));
@@ -367,7 +403,9 @@ describe("AccessPane", () => {
       const create = recordedWrites(fetchMock).find(
         (recorded) => recorded.method === "POST" && recorded.path === "/approvals/rules",
       );
-      expect(create?.body).toEqual({
+      expect(create?.body).toMatchObject({
+        toolName: "email.send",
+        action: "deny",
         tool: "email.send",
         effect: "deny",
         scope: { kind: "exactTarget", target: "spam@evil.com" },
@@ -437,5 +475,129 @@ describe("AccessPane", () => {
     await waitFor(() => {
       expect(readCount()).toBeGreaterThan(initialReads);
     });
+  });
+
+  it("mints an allow rule with tool dropdown, scope, and chosen duration", async () => {
+    const fetchMock = stubRoutes({ rules: [] });
+    const user = userEvent.setup();
+    render(<AccessPane />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("access-add-rule-btn")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("access-add-rule-btn"));
+    await waitFor(() => {
+      expect(screen.getByTestId("access-rule-effect-allow")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("access-rule-effect-allow"));
+    await user.selectOptions(screen.getByTestId("access-rule-tool-select"), "bash.exec");
+    await user.type(screen.getByTestId("access-deny-target"), "git status");
+    await user.click(screen.getByRole("radio", { name: "Next hour" }));
+    await user.type(screen.getByTestId("access-deny-reason"), "allow git checks");
+    await user.click(screen.getByTestId("access-deny-submit"));
+
+    await waitFor(() => {
+      const create = recordedWrites(fetchMock).find(
+        (recorded) => recorded.method === "POST" && recorded.path === "/approvals/rules",
+      );
+      expect(create?.body).toMatchObject({
+        toolName: "bash.exec",
+        action: "allow",
+        tool: "bash.exec",
+        effect: "allow",
+        scope: { kind: "exactTarget", target: "git status" },
+        duration: "oneHour",
+        reason: "allow git checks",
+      });
+    });
+  });
+
+  it("filters rules table between All, Allow only, and Deny only", async () => {
+    stubRoutes({
+      rules: [
+        seedRule({ id: "allow-1", toolName: "email.send", scope: { kind: "tool" }, effect: "allow" }),
+        seedRule({ id: "deny-1", toolName: "bash.exec", scope: { kind: "tool" }, effect: "deny" }),
+      ],
+    });
+    const user = userEvent.setup();
+    render(<AccessPane />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("access-rule-row-allow-1")).toBeInTheDocument();
+      expect(screen.getByTestId("access-rule-row-deny-1")).toBeInTheDocument();
+    });
+
+    // Filter to Allow only
+    await user.click(screen.getByTestId("access-filter-allow"));
+    expect(screen.getByTestId("access-rule-row-allow-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("access-rule-row-deny-1")).toBeNull();
+
+    // Filter to Deny only
+    await user.click(screen.getByTestId("access-filter-deny"));
+    expect(screen.queryByTestId("access-rule-row-allow-1")).toBeNull();
+    expect(screen.getByTestId("access-rule-row-deny-1")).toBeInTheDocument();
+
+    // Reset to All
+    await user.click(screen.getByTestId("access-filter-all"));
+    expect(screen.getByTestId("access-rule-row-allow-1")).toBeInTheDocument();
+    expect(screen.getByTestId("access-rule-row-deny-1")).toBeInTheDocument();
+  });
+
+  it("mounts Network and Credentials views without internal duplicate tabs", async () => {
+    stubRoutes({ rules: [] });
+    const user = userEvent.setup();
+    render(<AccessPane />);
+
+    await user.click(screen.getByTestId("access-tab-network"));
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-network-section")).toBeInTheDocument();
+    });
+    // Internal duplicate policy-subtabs are omitted because top Access tab owns view switching
+    expect(screen.queryByTestId("policy-subtabs")).toBeNull();
+
+    await user.click(screen.getByTestId("access-tab-credentials"));
+    await waitFor(() => {
+      expect(screen.getByTestId("policy-credentials-section")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("policy-network-section")).toBeNull();
+    expect(screen.queryByTestId("policy-subtabs")).toBeNull();
+  });
+
+  it("renders rules when server response provides action instead of effect", async () => {
+    stubRoutes({
+      rules: [
+        {
+          id: "server-allow-1",
+          toolName: "email.send",
+          scope: { kind: "exactTarget", target: "alice@example.com" },
+          action: "allow",
+          duration: "forever",
+          grantedAt: nowIso(),
+          expiresAt: null,
+          useCount: 0,
+          lastUsedAt: null,
+        },
+        {
+          id: "server-deny-1",
+          toolName: "bash.exec",
+          scope: { kind: "tool" },
+          action: "deny",
+          grantedAt: nowIso(),
+          expiresAt: null,
+          useCount: 0,
+          lastUsedAt: null,
+        },
+      ],
+    });
+    render(<AccessPane />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("access-rule-row-server-allow-1")).toBeInTheDocument();
+      expect(screen.getByTestId("access-rule-row-server-deny-1")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("access-filter-all")).toHaveTextContent("All (2)");
+    expect(screen.getByTestId("access-filter-allow")).toHaveTextContent("Allow (1)");
+    expect(screen.getByTestId("access-filter-deny")).toHaveTextContent("Deny (1)");
+    expect(screen.getAllByText("Forever").length).toBeGreaterThan(0);
   });
 });

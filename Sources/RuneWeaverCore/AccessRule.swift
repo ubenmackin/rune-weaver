@@ -14,6 +14,12 @@
 
 import Foundation
 
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
+
 /// Whether an access rule trusts or refuses the calls its scope covers.
 public enum AccessAction: String, Sendable, Codable, Equatable, Hashable, CaseIterable {
     /// Covered calls run without asking again.
@@ -188,16 +194,18 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
     /// target must itself spell a canonical handle. A tool-wide send scope is
     /// the signature of a malformed call and a display-name target is the
     /// signature of a name-shaped call; both store nothing while the approved
-    /// call still fails closed at execution. Single owner of the invariant so
-    /// the approval queue, the rules routes, and the gate's grant check agree
-    /// on what send trust may cover.
+    /// call still fails closed at execution. A wildcard exact target
+    /// (`*`, `?`) is exempt: pattern sends such as `+1555*` persist and match
+    /// through the same pathname glob the evaluator uses. Single owner of the
+    /// invariant so the approval queue, the rules routes, and the gate's grant
+    /// check agree on what send trust may cover.
     /// - Returns: True when the scope may back a durable send grant.
     public var isMintableSendScope: Bool {
         switch self {
         case .recipientSet:
             true
         case let .exactTarget(target):
-            MessageRecipientClassification.canonicalHandle(target) == target
+            target.contains("*") || target.contains("?") || MessageRecipientClassification.canonicalHandle(target) == target
         case .toolWide, .domain, .pathPrefix, .glob:
             false
         }
@@ -222,7 +230,8 @@ public enum AccessScope: Sendable, Codable, Equatable, Hashable {
             // legacy derivation only ever produces it from unusable arguments.
             guard !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
             let call = ToolInput(toolName: toolName, argumentsJSON: argumentsJSON)
-            return ActionDescriptor.descriptor(for: call, toolName: toolName).target == target
+            let callTarget = ActionDescriptor.descriptor(for: call, toolName: toolName).target
+            return Self.matchesTarget(callTarget: callTarget, pattern: target, toolName: toolName)
         case let .recipientSet(members):
             // Normalized here too, so member order or casing in the stored or
             // decoded scope cannot decide whether a recipient is covered.
@@ -427,6 +436,184 @@ extension AccessScope {
         guard toolName == "bash.exec" else { return false }
         guard let command = Self.bashCommand(from: argumentsJSON) else { return false }
         return BashSecurity.matches(command: command, pattern: pattern)
+    }
+
+    /// Whether a concrete call target matches a pattern or exact target.
+    ///
+    /// Wildcards `*` and `?` match through fnmatch, and the slash rule follows
+    /// the shape of the comparison. A path-shaped comparison — `files.write`
+    /// paths, email addresses, phone prefixes, and every other single-part
+    /// target — runs with `FNM_PATHNAME`, so `*` never crosses `/` (`*.pem`
+    /// matches `a.pem` but not `a/b.pem`) and `?` matches exactly one
+    /// character other than `/`. A URL-shaped comparison — the multi-part
+    /// `api.request` (`METHOD URL`) and `browser.act` (`ACTION @ URL`) scopes
+    /// plus any pattern naming a `scheme://` target, as `web.fetch` carries —
+    /// matches across `/`, so `* https://api.kraken.com/*` covers every path
+    /// beneath that host. A leading dot carries no special meaning, and a bare
+    /// `*` pattern still matches every target. For multi-part scopes like
+    /// `api.request` (`METHOD URL`) and `browser.act` (`ACTION @ URL`), a
+    /// URL-only pattern matches any leading segment. For `email.send`,
+    /// comparison is case-insensitive. For `files.write`, tilde prefixes
+    /// expand before comparison. The non-Darwin/Glibc fallback implements the
+    /// same two slash modes without fnmatch.
+    public static func matchesTarget(callTarget: String, pattern: String, toolName: String) -> Bool {
+        let trimmedTarget = callTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPattern = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedTarget.isEmpty, !trimmedPattern.isEmpty else { return false }
+
+        // Fast path: literal exact match
+        if trimmedTarget == trimmedPattern {
+            return true
+        }
+
+        // Wildcard wildcard-all
+        if trimmedPattern == "*" {
+            return true
+        }
+
+        // A URL-shaped comparison spans the path separator so one star covers
+        // a whole URL path; every other shape keeps fnmatch's FNM_PATHNAME
+        // rule so a star never crosses `/`.
+        let crossesPathSeparator = trimmedPattern.contains("://") || toolName == "api.request" || toolName == "browser.act"
+
+        // Email: case-insensitive match
+        if toolName == "email.send" || (trimmedPattern.contains("@") && !trimmedPattern.contains(" ")) {
+            if trimmedTarget.lowercased() == trimmedPattern.lowercased() {
+                return true
+            }
+            if trimmedPattern.contains("*") || trimmedPattern.contains("?"),
+               matchesGlobString(candidate: trimmedTarget.lowercased(), pattern: trimmedPattern.lowercased(), crossesPathSeparator: crossesPathSeparator)
+            {
+                return true
+            }
+        }
+
+        // api.request: candidate target format is "METHOD URL..." (e.g. "GET https://api.kraken.com/0/public/Time")
+        if toolName == "api.request" || toolName.isEmpty {
+            // If pattern is a URL pattern without a method (e.g. "https://api.kraken.com/*" or "*://...")
+            let isURLOnly = trimmedPattern.hasPrefix("http://") || trimmedPattern.hasPrefix("https://") || trimmedPattern.hasPrefix("*://")
+            if isURLOnly {
+                let methodAgnosticPattern = "* " + trimmedPattern
+                if matchesGlobString(candidate: trimmedTarget, pattern: methodAgnosticPattern, crossesPathSeparator: crossesPathSeparator) {
+                    return true
+                }
+            }
+            // Case-insensitive method matching: "get https://..." should match "GET https://..."
+            let parts = trimmedPattern.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            if parts.count == 2 {
+                let method = parts[0].uppercased()
+                let normalizedPattern = "\(method) \(parts[1])"
+                if normalizedPattern == trimmedTarget {
+                    return true
+                }
+                if matchesGlobString(candidate: trimmedTarget, pattern: normalizedPattern, crossesPathSeparator: crossesPathSeparator) {
+                    return true
+                }
+            }
+        }
+
+        // browser.act: candidate target format is "ACTION @ URL"
+        if toolName == "browser.act" || toolName.isEmpty {
+            let isURLOnly = trimmedPattern.hasPrefix("http://") || trimmedPattern.hasPrefix("https://") || trimmedPattern.hasPrefix("*://")
+            if isURLOnly {
+                let urlPattern = "* @ " + trimmedPattern
+                if matchesGlobString(candidate: trimmedTarget, pattern: urlPattern, crossesPathSeparator: crossesPathSeparator) {
+                    return true
+                }
+            }
+        }
+
+        // files.write / filesystem paths: expand tilde in pattern
+        if trimmedPattern.hasPrefix("~") {
+            let expandedPattern = (trimmedPattern as NSString).expandingTildeInPath
+            if trimmedTarget == expandedPattern {
+                return true
+            }
+            if matchesGlobString(candidate: trimmedTarget, pattern: expandedPattern, crossesPathSeparator: crossesPathSeparator) {
+                return true
+            }
+        }
+
+        // General glob wildcard match
+        if trimmedPattern.contains("*") || trimmedPattern.contains("?") {
+            return matchesGlobString(candidate: trimmedTarget, pattern: trimmedPattern, crossesPathSeparator: crossesPathSeparator)
+        }
+
+        return false
+    }
+
+    /// Whether a pattern's wildcards match a candidate in the slash mode its
+    /// shape asks for.
+    ///
+    /// `FNM_PATHNAME` keeps `*` and `?` inside one path segment, while the
+    /// zero-flag form lets them span `/` for URL-shaped comparisons. The
+    /// non-Darwin/Glibc fallback implements the same two modes, so the slash
+    /// rule cannot drift between platforms.
+    /// - Parameters:
+    ///   - candidate: Call target under test.
+    ///   - pattern: Pattern carrying the wildcards.
+    ///   - crossesPathSeparator: Whether `*` and `?` also match `/`.
+    /// - Returns: True when the pattern matches the candidate.
+    private static func matchesGlobString(candidate: String, pattern: String, crossesPathSeparator: Bool) -> Bool {
+        #if canImport(Darwin) || canImport(Glibc)
+            return fnmatch(pattern, candidate, crossesPathSeparator ? 0 : FNM_PATHNAME) == 0
+        #else
+            return wildcardPathnameMatch(candidate: candidate, pattern: pattern, crossesPathSeparator: crossesPathSeparator)
+        #endif
+    }
+
+    /// Hand-rolled wildcard match mirroring fnmatch in both slash modes.
+    ///
+    /// With `crossesPathSeparator` false the match carries `FNM_PATHNAME`
+    /// semantics: `*` consumes any run of characters except `/` and `?`
+    /// consumes exactly one character other than `/`. With it true both
+    /// consume `/` as well, mirroring fnmatch's zero flags for URL-shaped
+    /// patterns. Greedy star matching with one backtrack point keeps the walk
+    /// linear while still honoring the slash rule under backtracking.
+    /// - Parameters:
+    ///   - candidate: Call target under test.
+    ///   - pattern: Pattern carrying the wildcards.
+    ///   - crossesPathSeparator: Whether `*` and `?` also match `/`.
+    /// - Returns: True when the pattern matches the candidate.
+    private static func wildcardPathnameMatch(candidate: String, pattern: String, crossesPathSeparator: Bool) -> Bool {
+        let candidateChars = Array(candidate)
+        let patternChars = Array(pattern)
+        var candidateIndex = 0
+        var patternIndex = 0
+        var starIndex: Int?
+        var matchIndex = 0
+        while candidateIndex < candidateChars.count {
+            if patternIndex < patternChars.count, patternChars[patternIndex] == "?" {
+                guard crossesPathSeparator || candidateChars[candidateIndex] != "/" else {
+                    guard let star = starIndex else { return false }
+                    patternIndex = star + 1
+                    matchIndex += 1
+                    candidateIndex = matchIndex
+                    continue
+                }
+                patternIndex += 1
+                candidateIndex += 1
+            } else if patternIndex < patternChars.count, patternChars[patternIndex] == "*" {
+                starIndex = patternIndex
+                matchIndex = candidateIndex
+                patternIndex += 1
+            } else if patternIndex < patternChars.count, patternChars[patternIndex] == candidateChars[candidateIndex] {
+                patternIndex += 1
+                candidateIndex += 1
+            } else if let star = starIndex {
+                guard crossesPathSeparator || candidateChars[matchIndex] != "/" else { return false }
+                patternIndex = star + 1
+                matchIndex += 1
+                candidateIndex = matchIndex
+            } else {
+                return false
+            }
+        }
+        while patternIndex < patternChars.count, patternChars[patternIndex] == "*" {
+            patternIndex += 1
+        }
+        return patternIndex == patternChars.count
     }
 
     /// Recipient-shaped values a call may carry, in the order the target

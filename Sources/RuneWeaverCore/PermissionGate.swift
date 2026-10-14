@@ -370,11 +370,12 @@ public actor PermissionGate {
     ///   - descriptor: The trusted action to store.
     ///   - duration: Trust tier; ephemeral tiers require `sessionID`.
     ///   - sessionID: Owning session for ephemeral tiers; nil means unscoped.
+    ///   - reason: Caller-facing note persisted with a durable rule.
     /// - Returns: True when the approval may proceed (stored, already covered,
     ///   or one-shot with nothing to store); false when no rule was minted
     ///   and the caller must not treat the decision as honored.
     @discardableResult
-    public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration, sessionID: UUID? = nil) async -> Bool {
+    public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration, sessionID: UUID? = nil, reason: String? = nil) async -> Bool {
         guard duration != .thisTime else { return true }
         // Every durable mint path funnels through the rule mint — the CLI
         // approval handler, `ApprovalQueue.decide`, and this wrapper — so the
@@ -390,7 +391,8 @@ public actor PermissionGate {
             Self.scope(for: descriptor),
             toolName: descriptor.toolName,
             duration: duration,
-            sessionID: sessionID
+            sessionID: sessionID,
+            reason: reason
         )
     }
 
@@ -515,7 +517,13 @@ extension PermissionGate {
     /// - Returns: True when the approval may proceed (stored, already covered,
     ///   or one-shot with nothing to store).
     @discardableResult
-    public func grant(_ scope: AccessScope, toolName: String, duration: TrustDuration?, sessionID: UUID? = nil) async -> Bool {
+    public func grant(
+        _ scope: AccessScope,
+        toolName: String,
+        duration: TrustDuration?,
+        sessionID: UUID? = nil,
+        reason: String? = nil
+    ) async -> Bool {
         if let duration, duration == .thisTime {
             return true
         }
@@ -574,10 +582,30 @@ extension PermissionGate {
         // drop the redundant candidate. Effective expiry is the sole
         // comparison, so an equal-tier rule created later or a lower-tier rule
         // that expires later still wins, while an older long-tier rule that has
-        // decayed past the replacement is replaced.
-        if let existing = rules.first(where: {
+        // decayed past the replacement is replaced. Free-text reason never
+        // participates in the dedupe key; a differing reason updates the live
+        // row in place instead of duplicating it.
+        if let existingIndex = rules.firstIndex(where: {
             $0.action == .allow && $0.toolName == toolName && $0.scope == scope && $0.isValid(at: now)
-        }), !Self.expiryLifetime(expiresAt, outlives: existing.expiresAt) {
+        }), !Self.expiryLifetime(expiresAt, outlives: rules[existingIndex].expiresAt) {
+            if rules[existingIndex].reason != reason,
+               let refreshed = AccessRule(
+                   id: rules[existingIndex].id,
+                   toolName: rules[existingIndex].toolName,
+                   scope: rules[existingIndex].scope,
+                   action: .allow,
+                   grantedAt: rules[existingIndex].grantedAt,
+                   duration: rules[existingIndex].duration,
+                   expiresAt: rules[existingIndex].expiresAt,
+                   reason: reason
+               )
+            {
+                var merged = refreshed
+                merged.useCount = rules[existingIndex].useCount
+                merged.lastUsedAt = rules[existingIndex].lastUsedAt
+                rules[existingIndex] = merged
+                await persist()
+            }
             return true
         }
         // Dedupe allow rows for the same tool plus scope. A deny row for that
@@ -592,7 +620,7 @@ extension PermissionGate {
             action: .allow,
             grantedAt: now,
             duration: duration,
-            reason: nil
+            reason: reason
         ) else {
             RuneWeaverLog.stores.warning("PermissionGate: refusing to mint an allow rule with a malformed scope for \(toolName).")
             return false
@@ -829,7 +857,7 @@ extension PermissionGate {
             return true
         }
         return rules.contains {
-            $0.action == .allow && $0.isValid() && $0.toolName == toolName && Self.scope($0.scope, covers: scope)
+            $0.action == .allow && $0.isValid() && $0.toolName == toolName && Self.scope($0.scope, covers: scope, toolName: toolName)
         }
     }
 
@@ -985,6 +1013,11 @@ extension PermissionGate {
         }) {
             return exact
         }
+        if let covering = rules.firstIndex(where: {
+            $0.action == .allow && $0.isValid(at: date) && $0.toolName == toolName && Self.scope($0.scope, covers: scope, toolName: toolName)
+        }) {
+            return covering
+        }
         guard scope != .toolWide else { return nil }
         return rules.firstIndex(where: {
             $0.action == .allow && $0.isValid(at: date) && $0.toolName == toolName && $0.scope == .toolWide
@@ -993,19 +1026,27 @@ extension PermissionGate {
 
     /// Whether a stored scope covers a requested scope.
     ///
-    /// Exact scope equality first, then the tool-wide fallback. Scope shapes
-    /// themselves compare through ``AccessScope/matches(toolName:argumentsJSON:)``
-    /// whenever a live call is available; this answers only the scope-versus-scope
-    /// question a caller without the call's arguments can ask.
+    /// Exact scope equality first, then the tool-wide fallback. Exact-target
+    /// patterns compare through the single target matcher with the live tool
+    /// name, so covering answers equal evaluation for that tool.
     /// - Parameters:
     ///   - stored: Scope a rule or grant carries.
     ///   - requested: Scope the call is made under.
+    ///   - toolName: Tool the scopes belong to.
     /// - Returns: True when the stored scope covers the requested one.
-    private static func scope(_ stored: AccessScope, covers requested: AccessScope) -> Bool {
+    private static func scope(_ stored: AccessScope, covers requested: AccessScope, toolName: String) -> Bool {
         if stored == requested {
             return true
         }
-        return stored == .toolWide
+        if stored == .toolWide {
+            return true
+        }
+        if case let .exactTarget(storedPattern) = stored,
+           case let .exactTarget(requestedTarget) = requested
+        {
+            return AccessScope.matchesTarget(callTarget: requestedTarget, pattern: storedPattern, toolName: toolName)
+        }
+        return false
     }
 
     /// Whether either ephemeral table covers the scope for one session.
@@ -1021,7 +1062,7 @@ extension PermissionGate {
     /// - Returns: True when either table covers the scope.
     private func coversEphemeral(scope: AccessScope, toolName: String, sessionID: UUID) -> Bool {
         let tables = [taskGrants[sessionID], sessionGrants[sessionID]].compactMap(\.self)
-        for table in tables where table.contains(where: { $0.toolName == toolName && Self.scope($0.scope, covers: scope) }) {
+        for table in tables where table.contains(where: { $0.toolName == toolName && Self.scope($0.scope, covers: scope, toolName: toolName) }) {
             return true
         }
         return false

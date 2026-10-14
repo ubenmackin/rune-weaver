@@ -1048,10 +1048,11 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Files guard lives in the Security Files & Access section, so
-    // open it through the Security tab inline editor.
-    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
-    await user.click(securityTabBtn);
+    // Files guard lives in the Access Files & Workspace section, so
+    // open it through the Access tab -> Files rail entry.
+    const accessTabBtn = screen.getByRole("tab", { name: "Access" });
+    await user.click(accessTabBtn);
+    await user.click(screen.getByTestId("access-tab-files"));
     await waitFor(() => {
       expect(screen.getByText("Files & Access")).toBeDefined();
     });
@@ -1073,23 +1074,22 @@ describe("SettingsManager", () => {
     await user.type(denyTextarea, "  .env*  \n\n*.pem\n   \n.ssh/*  ");
     expect(screen.getByText(/3 patterns/i)).toBeDefined();
 
-    // Single page Save owns the Files & Access persist: no section-level
-    // Save Configuration remains in Security, so the page save payload
-    // carries the files keys.
+    // Section Save owns the Files & Access persist: no section-level
+    // Save Configuration remains, so the files save payload carries the keys.
     expect(
       screen.queryByRole("button", { name: /Save Configuration/i })
     ).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByTestId("files-write-save"));
 
     await waitFor(() => {
       expect(sentPayload).not.toBeNull();
     });
     expect(sentPayload?.["filesDenyPatterns"]).toEqual([".env*", "*.pem", ".ssh/*"]);
     await waitFor(() => {
-      expect(screen.getByText("Settings saved.")).toBeDefined();
+      expect(screen.getByTestId("files-write-saved")).toBeDefined();
     });
 
-    // Security editor stays mounted after the page save, so the follow-up
+    // Files editor stays mounted after the save, so the follow-up
     // steps run against the same textarea without reopening a modal.
     const reopenedTextarea = screen.getByLabelText(
       /Deny patterns, one per line/i
@@ -1100,7 +1100,7 @@ describe("SettingsManager", () => {
     const putsBeforeTraversal = putCount;
     await user.clear(reopenedTextarea);
     await user.type(reopenedTextarea, ".env*\n../escape\n*.pem");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByTestId("files-write-save"));
     await waitFor(() => {
       expect(screen.getByText(/Line 2.*\.\./i)).toBeDefined();
     });
@@ -1109,7 +1109,7 @@ describe("SettingsManager", () => {
     // Empty means allow all in scope: clearing the editor saves an empty
     // array and surfaces the allow-all hint instead of an error.
     await user.clear(reopenedTextarea);
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByTestId("files-write-save"));
     await waitFor(() => {
       expect(sentPayload?.["filesDenyPatterns"]).toEqual([]);
     });
@@ -1158,10 +1158,10 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Reset confirmations live in the Security Files & Access section;
-    // Security owns both container governance and the file editors.
-    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
-    await user.click(securityTabBtn);
+    // Reset confirmations live in the Access Files & Workspace section.
+    const accessTabBtn = screen.getByRole("tab", { name: "Access" });
+    await user.click(accessTabBtn);
+    await user.click(screen.getByTestId("access-tab-files"));
     await waitFor(() => {
       expect(screen.getByText("Files & Access")).toBeDefined();
     });
@@ -1263,10 +1263,10 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Files header actions live in the Security Files & Access section;
-    // container governance (Containers) shares the same pane.
-    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
-    await user.click(securityTabBtn);
+    // Files header actions live in the Access Files & Workspace section.
+    const accessTabBtn = screen.getByRole("tab", { name: "Access" });
+    await user.click(accessTabBtn);
+    await user.click(screen.getByTestId("access-tab-files"));
     await waitFor(() => {
       expect(screen.getByText("Files & Access")).toBeDefined();
     });
@@ -1292,15 +1292,18 @@ describe("SettingsManager", () => {
     // Subsection headings keep each policy surface discoverable in the section.
     expect(screen.getByText("Blocked Paths")).toBeDefined();
     expect(screen.getByText("Allowed Roots")).toBeDefined();
-    // Container governance shares the Security pane beside the Files section;
-    // both pinned images render as read-only text lines in it.
-    expect(screen.getByText("Containers")).toBeDefined();
-    expect(screen.getByTestId("containers-strict-image")).toBeDefined();
-    expect(screen.getByTestId("containers-machine-image")).toBeDefined();
 
     // Approval escalation toggle stays with its explanatory hint.
     expect(screen.getByLabelText(/Require approval on deny/i)).toBeDefined();
     expect(screen.getByText(/approvals inbox instead of failing silently/i)).toBeDefined();
+
+    // Container governance lives in the Security pane;
+    // both pinned images render as read-only text lines in it.
+    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
+    await user.click(securityTabBtn);
+    expect(screen.getByText("Containers")).toBeDefined();
+    expect(screen.getByTestId("containers-strict-image")).toBeDefined();
+    expect(screen.getByTestId("containers-machine-image")).toBeDefined();
   });
 
   it("edits max tool rounds per turn in engine tab and saves", async () => {
@@ -2475,8 +2478,7 @@ describe("SettingsManager", () => {
       expect(screen.getByText("Media & Streaming")).toBeDefined();
     });
     expect(screen.getByText("Email & Mailboxes")).toBeDefined();
-    expect(screen.queryByText("Files & Workspace")).toBeNull();
-    expect(screen.getByText("Other Tools")).toBeDefined();
+    expect(screen.getByText("Files & Workspace")).toBeDefined();
     expect(screen.getByText("files.read")).toBeDefined();
     const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
     expect(configureButtons.length).toBe(1);
@@ -2598,7 +2600,7 @@ describe("SettingsManager", () => {
     expect(screen.getByText("browser.navigate")).toBeDefined();
   });
 
-  it("routes bash.exec to Other Tools with no category Configure", async () => {
+  it("routes bash.exec to Bash & Shell with no category Configure", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -2649,23 +2651,17 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    // Bash has no category of its own: the row falls through to Other Tools
-    // beside the email section, with no Bash pill left behind.
+    // Bash has its own category beside the email section
     await waitFor(() => {
-      expect(screen.getByText("Other Tools")).toBeDefined();
+      expect(screen.getByText("Bash & Shell")).toBeDefined();
     });
-    expect(screen.queryByText("Bash & Shell")).toBeNull();
     expect(screen.getByText("Email & Mailboxes")).toBeDefined();
     expect(screen.getByText("bash.exec")).toBeDefined();
     expect(document.querySelectorAll(".tool-category-section").length).toBe(2);
     const pillsBar = document.querySelector(".tools-category-pills");
     expect(pillsBar).not.toBeNull();
-    expect(within(pillsBar as HTMLElement).queryByText("Bash")).toBeNull();
-    expect(within(pillsBar as HTMLElement).getByText("Other")).toBeDefined();
+    expect(within(pillsBar as HTMLElement).getByText("Bash")).toBeDefined();
     expect(within(pillsBar as HTMLElement).getByText("Email")).toBeDefined();
-    // Even with a stale hasConfig flag, the Other Tools header earns no
-    // Configure: the Bash & Shell editor lives on the Access surface, so no
-    // dangling button can open a deleted modal from a moved editor.
     expect(screen.queryByRole("button", { name: /^Configure$/ })).toBeNull();
     expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
   });
@@ -2730,40 +2726,41 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
-    await user.click(securityTabBtn);
+    const accessTabBtn = screen.getByRole("tab", { name: "Access" });
+    await user.click(accessTabBtn);
+    await user.click(screen.getByTestId("access-tab-files"));
 
-    // Security owns the single Files & Access editor through the shared
+    // Access owns the single Files & Access editor through the shared
     // files payload helper; Tools owns no files editor.
     await waitFor(() => {
       expect(screen.getByText("Files & Access")).toBeDefined();
     });
 
-    // The Security section mirrors the guard form through the shared payload helper.
+    // The section mirrors the guard form through the shared payload helper.
     expect(screen.getByLabelText(/Deny patterns, one per line/i)).toBeDefined();
     expect(screen.getByLabelText(/Allowed roots, one per line/i)).toBeDefined();
     expect(screen.getByLabelText(/Require approval on deny/i)).toBeDefined();
 
-    // Single page Save owns the persist with no section Save Configuration;
-    // the header scope note states the sharing boundary once and no
-    // consumer note remains.
     expect(
       screen.queryByRole("button", { name: /Save Configuration/i })
     ).toBeNull();
     expect(screen.getByText(/Allow roots bound/i)).toBeDefined();
     expect(screen.queryByTestId("files-consumer-note")).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    const denyTextarea = screen.getByLabelText(/Deny patterns, one per line/i);
+    await user.clear(denyTextarea);
+    await user.type(denyTextarea, ".env*\n*.secret");
+    await user.click(screen.getByLabelText(/Require approval on deny/i));
+    await user.click(screen.getByTestId("files-write-save"));
 
     await waitFor(() => {
       expect(sentPayload).not.toBeNull();
     });
-    expect(sentPayload?.["filesDenyPatterns"]).toEqual([".env*"]);
-    expect(sentPayload?.["filesAllowRoots"]).toEqual(["~"]);
-    expect(sentPayload?.["filesRequireApprovalOnDeny"]).toBe(true);
+    expect(sentPayload?.["filesDenyPatterns"]).toEqual([".env*", "*.secret"]);
+    expect(sentPayload?.["filesRequireApprovalOnDeny"]).toBe(false);
   });
 
-  it("keeps Files & Access in the Security pane", async () => {
+  it("keeps Files & Access in Access pane without redundant card in Security pane", async () => {
     const user = userEvent.setup();
     const settingsWithFiles = {
       ...mockSettings,
@@ -2785,21 +2782,32 @@ describe("SettingsManager", () => {
     const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
     await user.click(securityTabBtn);
 
-    // Security owns container governance plus Files & Access plus access
-    // management; the file guard lives in Security as its own section.
+    // Security owns container governance plus access management only;
+    // file policy lives cleanly under Access > Files.
     await waitFor(() => {
       expect(screen.getByText("Containers")).toBeDefined();
     });
-    expect(screen.getByText("Files & Access")).toBeDefined();
+    expect(screen.getByText("Access Management")).toBeDefined();
+    expect(screen.queryByText("Files & Access")).toBeNull();
+    expect(screen.queryByLabelText(/Deny patterns, one per line/i)).toBeNull();
+    expect(screen.queryByLabelText(/Allowed roots, one per line/i)).toBeNull();
+    expect(screen.getByTestId("containers-strict-image")).toBeDefined();
+    expect(screen.getByTestId("containers-machine-image")).toBeDefined();
+
+    // Navigating to Access -> Files surfaces the active file editors
+    const accessTabBtn = screen.getByRole("tab", { name: "Access" });
+    await user.click(accessTabBtn);
+    await user.click(screen.getByTestId("access-tab-files"));
+    await waitFor(() => {
+      expect(screen.getByText("Files & Access")).toBeDefined();
+    });
     expect(screen.getByText("Blocked Paths")).toBeDefined();
     expect(screen.getByText("Allowed Roots")).toBeDefined();
     expect(screen.getByLabelText(/Deny patterns, one per line/i)).toBeDefined();
     expect(screen.getByLabelText(/Allowed roots, one per line/i)).toBeDefined();
-    expect(screen.getByTestId("containers-strict-image")).toBeDefined();
-    expect(screen.getByTestId("containers-machine-image")).toBeDefined();
   });
 
-  it("lands bash.exec in Other Tools beside unknown prefixes", async () => {
+  it("routes bash.exec to Bash & Shell while unknown prefixes land in Other Tools", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -2850,22 +2858,24 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    // Bash routes to the same Other Tools section as the unknown prefix —
-    // one section, no Bash pill, no borrowed section boundary between them.
+    // Bash routes to Bash & Shell, while custom.widget lands in Other Tools
     await waitFor(() => {
-      expect(screen.getByText("Other Tools")).toBeDefined();
+      expect(screen.getByText("Bash & Shell")).toBeDefined();
     });
-    expect(screen.queryByText("Bash & Shell")).toBeNull();
-    expect(document.querySelectorAll(".tool-category-section").length).toBe(1);
+    expect(screen.getByText("Other Tools")).toBeDefined();
+    expect(document.querySelectorAll(".tool-category-section").length).toBe(2);
     const pillsBar = document.querySelector(".tools-category-pills");
     expect(pillsBar).not.toBeNull();
-    expect(within(pillsBar as HTMLElement).queryByText("Bash")).toBeNull();
+    expect(within(pillsBar as HTMLElement).getByText("Bash")).toBeDefined();
     expect(within(pillsBar as HTMLElement).getByText("Other")).toBeDefined();
     const sections = Array.from(document.querySelectorAll(".tool-category-section"));
+    const bashSection = sections.find((section) =>
+      section.textContent?.includes("Bash & Shell")
+    );
+    expect(bashSection?.textContent).toContain("bash.exec");
     const otherSection = sections.find((section) =>
       section.textContent?.includes("Other Tools")
     );
-    expect(otherSection?.textContent).toContain("bash.exec");
     expect(otherSection?.textContent).toContain("custom.widget");
   });
 
@@ -2904,18 +2914,16 @@ describe("SettingsManager", () => {
       source: "plugin",
       integrityStatus: "valid",
     };
-    // Builtin shell entry routes to Other with the provenance gate: its policy
-    // editor lives on the Access surface, so the row carries only the
-    // enablement toggle here.
-    expect(getToolCategory(builtinBash)).toBe("other");
+    // Builtin shell entry routes to bash category with the provenance gate.
+    expect(getToolCategory(builtinBash)).toBe("bash");
     // External names never join builtin sections regardless of prefix.
     expect(getToolCategory(pluginBashEvil)).toBe("other");
     expect(getToolCategory(pluginFilesEvil)).toBe("other");
-    // String fallback has no provenance, so only exact known builtin names
-    // resolve; bash and files builtins join the external fallthrough in Other
-    // and colliding or unknown names fall through there too.
-    expect(getToolCategory("bash.exec")).toBe("other");
-    expect(getToolCategory("files.read")).toBe("other");
+    // String fallback resolves exact known builtin names
+    expect(getToolCategory("bash.exec")).toBe("bash");
+    expect(getToolCategory("files.read")).toBe("files");
+    expect(getToolCategory("calendar.list")).toBe("calendar-reminders");
+    expect(getToolCategory("reminders.list")).toBe("calendar-reminders");
     // api.* collapses into browser-web like browser.* and web.*, so the removed
     // dead API category entry can never strand a pill or section.
     expect(getToolCategory("api.request")).toBe("browser-web");
@@ -2960,8 +2968,9 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
-    await user.click(securityTabBtn);
+    const accessTabBtn = screen.getByRole("tab", { name: "Access" });
+    await user.click(accessTabBtn);
+    await user.click(screen.getByTestId("access-tab-files"));
     await waitFor(() => {
       expect(screen.getByText("Files & Access")).toBeDefined();
     });
@@ -3030,7 +3039,6 @@ describe("SettingsManager", () => {
 
     // Blank lines and surrounding whitespace collapse on save with order
     // preserved for display; the wire shape is a trimmed string array.
-    // Single page Save owns the persist with no section Save Configuration.
     expect(
       screen.queryByRole("button", { name: /Save Configuration/i })
     ).toBeNull();
@@ -3040,22 +3048,20 @@ describe("SettingsManager", () => {
     await user.clear(editedTextarea);
     await user.type(editedTextarea, "  ~/a  \n\n~/b\n   \n");
     expect(screen.getByText(/2 roots/i)).toBeDefined();
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByTestId("files-write-save"));
     await waitFor(() => {
       expect(sentPayload).not.toBeNull();
     });
     expect(sentPayload?.["filesAllowRoots"]).toEqual(["~/a", "~/b"]);
-    expect(sentPayload?.["filesDenyPatterns"]).toEqual([".env*"]);
-    expect(sentPayload?.["filesRequireApprovalOnDeny"]).toBe(true);
     await waitFor(() => {
-      expect(screen.getByText("Settings saved.")).toBeDefined();
+      expect(screen.getByTestId("files-write-saved")).toBeDefined();
     });
     const putsAfterSave = putCount;
 
     // Traversal escapes fail closed with their editor line number.
     await user.clear(editedTextarea);
     await user.type(editedTextarea, "~/a\n../escape");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByTestId("files-write-save"));
     await waitFor(() => {
       expect(screen.getByText(/Line 2.*\.\./i)).toBeDefined();
     });
@@ -3064,7 +3070,7 @@ describe("SettingsManager", () => {
     // Empty means no roots: clearing the editor rejects with an error and
     // never reaches the network.
     await user.clear(editedTextarea);
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByTestId("files-write-save"));
     await waitFor(() => {
       expect(screen.getByText(/Allowed roots cannot be empty/i)).toBeDefined();
     });
@@ -3464,7 +3470,7 @@ describe("SettingsManager", () => {
     expect(getToolCategory("fanout.evil")).toBe("other");
   });
 
-  it("routes files tools to Other Tools with no Configure anywhere in Tools", async () => {
+  it("routes files tools to Files & Workspace with no Configure anywhere in Tools", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -3524,17 +3530,11 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // The Files & Workspace category is gone from Tools: no section header,
-    // no write-posture hint paragraph, and all three files rows land in the
-    // single Other Tools section — files.write included, despite its stale
-    // hasConfig flag, because its editor lives on the Access surface.
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
     await waitFor(() => {
-      expect(screen.getByText("Other Tools")).toBeDefined();
+      expect(screen.getByText("Files & Workspace")).toBeDefined();
     });
-    expect(screen.queryByText("Files & Workspace")).toBeNull();
-    expect(screen.queryByText(/Write posture and write-path rules are edited under Security/i)).toBeNull();
     expect(screen.getByText("files.write")).toBeDefined();
     expect(screen.getByText("files.read")).toBeDefined();
     expect(screen.getByText("files.grep")).toBeDefined();
@@ -3622,9 +3622,9 @@ describe("SettingsManager access tab", () => {
     await waitFor(() => {
       expect(screen.getByTestId("access-pane")).toBeDefined();
     });
-    // The structured policy editor hides behind the rail's Network section;
-    // the Credentials entry mounts the same surface on its own sub-tab.
-    await user.click(screen.getByTestId("access-rail-network"));
+    // The structured policy editor mounts behind the tab bar's Network Policy section;
+    // the Credentials entry mounts the credential list on its own tab.
+    await user.click(screen.getByTestId("access-tab-network"));
     await waitFor(() => {
       expect(screen.getByTestId("policy-pane")).toBeDefined();
     });
@@ -3647,13 +3647,12 @@ describe("SettingsManager access tab", () => {
       (screen.getByLabelText("Blocked domains") as HTMLTextAreaElement).value
     ).toContain("metadata.google.internal");
 
-    // Network is the default sub-tab with credentials hidden behind theirs.
-    expect(screen.getByTestId("policy-subtabs")).toBeDefined();
+    // Network displays the network egress posture with credentials hidden on their own tab.
     expect(screen.getByTestId("policy-network-section")).toBeDefined();
     expect(screen.queryByTestId("credentials-list")).toBeNull();
 
-    // Credentials read as a bound list, not text: the seeded key renders a row.
-    await user.click(screen.getByTestId("policytab-credentials"));
+    // Credentials read as a bound list, not text: the seeded key renders a row on the Credentials tab.
+    await user.click(screen.getByTestId("access-tab-credentials"));
     await waitFor(() => {
       expect(screen.getByTestId("credentials-list")).toBeDefined();
     });
@@ -4059,16 +4058,16 @@ describe("SettingsManager persona pane", () => {
     expect(labels[0]).toMatch(/^Access$/);
     expect(labels[1]).toMatch(/LLM Providers/);
     expect(labels[2]).toMatch(/Persona/);
-    expect(labels[3]).toMatch(/Goals/);
-    expect(labels[4]).toMatch(/Engine and Logs/);
-    expect(labels[5]).toMatch(/Tools and Runes/);
-    expect(labels[6]).toMatch(/^Security/);
-    expect(labels[7]).toMatch(/Memory and Storage/);
-    expect(labels[8]).toMatch(/^Voice/);
-    expect(labels[9]).toMatch(/^Web/);
-    expect(labels[10]).toMatch(/Email Accounts/);
+    expect(labels[3]).toMatch(/^Voice/);
+    expect(labels[4]).toMatch(/Memory and Storage/);
+    expect(labels[5]).toMatch(/Goals/);
+    expect(labels[6]).toMatch(/Tools and Runes/);
+    expect(labels[7]).toMatch(/Indexing/);
+    expect(labels[8]).toMatch(/^Web/);
+    expect(labels[9]).toMatch(/Email Accounts/);
+    expect(labels[10]).toMatch(/^Security/);
     expect(labels[11]).toMatch(/Network/);
-    expect(labels[12]).toMatch(/Indexing/);
+    expect(labels[12]).toMatch(/Engine and Logs/);
     // Access absorbed the retired Policy tab: no Policy entry remains in the
     // rail and Access leads the promotion order.
     expect(labels.join("|")).not.toMatch(/Policy/);
@@ -4879,6 +4878,46 @@ describe("SettingsManager workspace machine control", () => {
       expect(saved).toBe(true);
       expect(onSettingsSaved).toHaveBeenCalled();
     });
+  });
+
+  it("initializes active tab to access when hash contains access=rules", async () => {
+    window.location.hash = "#settings?access=rules";
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(mockSettings)));
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      const accessBtn = screen.getByRole("tab", { name: "Access" });
+      expect(accessBtn.getAttribute("aria-selected")).toBe("true");
+    });
+    window.location.hash = "";
+  });
+
+  it("renders sidenav tab buttons in the logical governance-first order", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(mockSettings)));
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Access" })).toBeDefined();
+    });
+
+    const sidenav = document.querySelector(".settings-sidenav");
+    expect(sidenav).not.toBeNull();
+    const tabButtons = Array.from(sidenav!.querySelectorAll(".settings-tab-btn > span")).map((s) => s.textContent);
+    expect(tabButtons).toEqual([
+      "Access",
+      "LLM Providers",
+      "Persona",
+      "Voice",
+      "Memory and Storage",
+      "Goals",
+      "Tools and Runes",
+      "Indexing",
+      "Web",
+      "Email Accounts",
+      "Security",
+      "Network",
+      "Engine and Logs",
+    ]);
   });
 });
 

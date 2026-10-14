@@ -322,7 +322,10 @@ struct CalendarGatewayTests {
             )
         ])
         let gateway = ProductionCalendarGateway(store: store)
-        let hits = try await gateway.search(query: "Woven")
+        // Pin "now" a day after the fixture so the now-anchored default
+        // window provably contains it on every run, whatever the wall clock reads.
+        let now = start.addingTimeInterval(86400)
+        let hits = try await gateway.search(query: "Woven", now: now)
         #expect(hits.count == 1)
         #expect(hits.first?.startDateISO == "2026-10-07T00:00:00Z")
         #expect(hits.first?.endDateISO == "2026-10-07T01:00:00Z")
@@ -366,7 +369,10 @@ struct CalendarGatewayTests {
             )
         ])
         let gateway = ProductionCalendarGateway(store: store)
-        let hits = try await gateway.search(query: "Holiday")
+        // Pin "now" a day after the fixture so the now-anchored default
+        // window provably contains it on every run, whatever the wall clock reads.
+        let now = date.addingTimeInterval(86400)
+        let hits = try await gateway.search(query: "Holiday", now: now)
         #expect(hits.count == 1)
         #expect(!(hits.first?.startDisplay.contains(":") ?? true))
         #expect(!(hits.first?.endDisplay.contains(":") ?? true))
