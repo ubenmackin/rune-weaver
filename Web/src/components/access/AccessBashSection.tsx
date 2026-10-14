@@ -1,14 +1,17 @@
 // Rune Weaver Dashboard — Bash & Shell section of the owner configuration surface.
 //
 // Purpose: Owns the sandboxed shell execution policy ([bash]) as its own settings
-// surface. Rules stay an ordered `pattern = action` list evaluated
-// top-to-bottom last-match-wins, so line order is the policy and the catch-all
-// belongs first; the section edits that owner configuration only, and no
-// rule-engine behavior lives here.
+// surface: the ordered `pattern = action` rules list evaluated top-to-bottom
+// last-match-wins (so line order is the policy and the catch-all belongs first),
+// the execution tier with its host allow patterns, the wall-clock, CPU, and
+// memory budgets, the default action, and network confinement. The section
+// edits that owner configuration only, and no rule-engine behavior lives here.
 // Scope: Loading the [bash] snapshot, inline fail-closed editing with field
 // errors, and persisting the changed-only bash patch through PUT /settings.
 // Tool enablement, Keychain values, and engine rule evaluation stay with their
-// owners.
+// owners — the section in particular carries no Enabled checkbox, because
+// enablement lives solely in the Settings → Tools toggle and a second gate here
+// could only disagree with it.
 // Architectural role: Settings-adjacent surface rendered outside the shared
 // config form, mirroring the indexing and policy panel precedents. Writes apply
 // live through the engine with no restart and no filesystem watcher, so the
@@ -55,7 +58,6 @@ import { AlertTriangleIcon, PlusIcon } from "../icons";
 // cleared allowlist sends an explicit empty list. Rules ride the formatted
 // textarea text so the comparison sees the same parse the editor does.
 interface BashLoadedSnapshot {
-  enabled: boolean;
   defaultAction: string;
   rulesText: string;
   timeoutSeconds: number;
@@ -66,12 +68,11 @@ interface BashLoadedSnapshot {
   hostAllowPatterns: string[];
 }
 
-// The editor draft as the nine knobs sit in the form. Numeric fields hold raw
+// The editor draft as the knobs sit in the form. Numeric fields hold raw
 // input (including empty) so a cleared field surfaces a range error instead of
 // silently keeping a stale value, and the rules textarea holds raw text so
 // blank lines survive editing and only collapse on save.
 interface BashDraft {
-  enabled: boolean;
   defaultAction: string;
   rulesText: string;
   timeoutSeconds: number | string;
@@ -86,7 +87,6 @@ interface BashDraft {
 // matches the engine boundary before the first settings fetch.
 function freshBashDraft(): BashDraft {
   return {
-    enabled: DEFAULT_BASH_CONFIG.enabled,
     defaultAction: DEFAULT_BASH_CONFIG.defaultAction,
     rulesText: DEFAULT_BASH_RULES_TEXT,
     timeoutSeconds: DEFAULT_BASH_CONFIG.timeoutSeconds,
@@ -100,7 +100,6 @@ function freshBashDraft(): BashDraft {
 
 function freshBashLoaded(): BashLoadedSnapshot {
   return {
-    enabled: DEFAULT_BASH_CONFIG.enabled,
     defaultAction: DEFAULT_BASH_CONFIG.defaultAction,
     rulesText: DEFAULT_BASH_RULES_TEXT,
     timeoutSeconds: DEFAULT_BASH_CONFIG.timeoutSeconds,
@@ -117,7 +116,10 @@ function freshBashLoaded(): BashLoadedSnapshot {
 // numbers coerce the same way the patch builder reads them, so an edit that
 // returns to the loaded shape never stays dirty on formatting alone. A
 // malformed line has no parsed shape to compare, so the raw text stands in and
-// the editor reads dirty until the line is repaired.
+// the editor reads dirty until the line is repaired. The host allowlist parses
+// uncapped here because the validator judges the uncapped read: an over-limit
+// paste must read dirty while the editor still carries the extra entries
+// instead of reading clean against a truncated copy of itself.
 function bashDraftSignature(draft: BashDraft): string {
   let rules: unknown;
   try {
@@ -126,7 +128,6 @@ function bashDraftSignature(draft: BashDraft): string {
     rules = draft.rulesText;
   }
   return JSON.stringify({
-    enabled: draft.enabled,
     defaultAction: draft.defaultAction.trim().toLowerCase(),
     rules,
     timeoutSeconds: Number(draft.timeoutSeconds),
@@ -134,7 +135,7 @@ function bashDraftSignature(draft: BashDraft): string {
     memoryMb: Number(draft.memoryMB),
     allowNetwork: draft.allowNetwork,
     sandboxMode: draft.sandboxMode.trim(),
-    hostAllowPatterns: parseHostAllowPatternsText(draft.hostAllowPatternsText),
+    hostAllowPatterns: parseHostAllowPatternsUncapped(draft.hostAllowPatternsText),
   });
 }
 
@@ -158,9 +159,6 @@ function countBashRules(text: string): number {
 // shared textarea codec so line order survives the round trip.
 function applyBashConfigToDraft(draft: BashDraft, bash: BashConfigData): BashDraft {
   const next: BashDraft = { ...draft };
-  if (typeof bash.enabled === "boolean") {
-    next.enabled = bash.enabled;
-  }
   const defaultAction =
     typeof bash.defaultAction === "string" && bash.defaultAction.trim()
       ? bash.defaultAction.trim().toLowerCase()
@@ -228,7 +226,6 @@ function applyBashConfigToDraft(draft: BashDraft, bash: BashConfigData): BashDra
 // value instead of resetting to a fresh-form default.
 function bashDraftFromLoaded(loaded: BashLoadedSnapshot): BashDraft {
   return {
-    enabled: loaded.enabled,
     defaultAction: loaded.defaultAction,
     rulesText: loaded.rulesText,
     timeoutSeconds: loaded.timeoutSeconds,
@@ -244,7 +241,6 @@ function bashDraftFromLoaded(loaded: BashLoadedSnapshot): BashDraft {
 // save that echoes the loaded shape leaves the next patch empty.
 function bashLoadedFromDraft(draft: BashDraft): BashLoadedSnapshot {
   return {
-    enabled: draft.enabled,
     defaultAction: draft.defaultAction.trim().toLowerCase(),
     rulesText: draft.rulesText,
     timeoutSeconds: Number(draft.timeoutSeconds),
@@ -262,7 +258,6 @@ function bashLoadedFromDraft(draft: BashDraft): BashLoadedSnapshot {
 export function AccessBashSection() {
   const [loading, setLoading] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [enabled, setEnabled] = useState<boolean>(DEFAULT_BASH_CONFIG.enabled);
   const [defaultAction, setDefaultAction] = useState<string>(
     DEFAULT_BASH_CONFIG.defaultAction
   );
@@ -303,7 +298,6 @@ export function AccessBashSection() {
   const rulesTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   const draft: BashDraft = {
-    enabled,
     defaultAction,
     rulesText,
     timeoutSeconds,
@@ -327,7 +321,6 @@ export function AccessBashSection() {
     );
     bashLoadedRef.current = bashLoadedFromDraft(next);
     loadedSignatureRef.current = bashDraftSignature(next);
-    setEnabled(next.enabled);
     setDefaultAction(next.defaultAction);
     setRulesText(next.rulesText);
     setTimeoutSeconds(next.timeoutSeconds);
@@ -362,11 +355,6 @@ export function AccessBashSection() {
   // covering the current draft.
   function markEdited() {
     setSaved(false);
-  }
-
-  function handleEnabledChange(next: boolean) {
-    setEnabled(next);
-    markEdited();
   }
 
   function handleDefaultActionChange(next: string) {
@@ -415,9 +403,6 @@ export function AccessBashSection() {
   function buildBashPatch(): BashSettingsUpdate {
     const patch: BashSettingsUpdate = {};
     const loaded = bashLoadedRef.current;
-    if (draft.enabled !== loaded.enabled) {
-      patch.enabled = draft.enabled;
-    }
     const nextAction = draft.defaultAction.trim().toLowerCase();
     if (nextAction !== loaded.defaultAction) {
       patch.defaultAction = nextAction;
@@ -572,6 +557,9 @@ export function AccessBashSection() {
         </p>
       </div>
 
+      {/* Deliberately no Enabled checkbox: the Settings → Tools toggle is the one
+          enablement gate, so a second one here could only disagree with it. */}
+
       {loading ? <p className="muted text-sm" data-testid="bash-loading">Loading bash settings…</p> : null}
 
       {loadError ? (
@@ -614,21 +602,6 @@ export function AccessBashSection() {
           <p className="muted text-sm" style={{ marginBottom: "16px" }}>
             Default working directory is the engine home with an optional per-call override inside allowed roots, confined by the execution tier below.
           </p>
-
-          <div className="form-group checkbox-group" style={{ marginBottom: "12px" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
-              <input
-                id="bash-enabled"
-                type="checkbox"
-                checked={enabled}
-                onChange={(e) => handleEnabledChange(e.target.checked)}
-              />
-              <span>Enabled</span>
-            </label>
-            <span className="form-group-hint">
-              When off, the shell tool refuses every command without dialing.
-            </span>
-          </div>
 
           <div className="form-group" style={{ marginBottom: "12px" }}>
             <label htmlFor="bash-default-action" style={{ fontSize: "0.82rem" }}>Default action</label>

@@ -8,7 +8,9 @@
 // hash (for example `#settings?access=<id>`) or a bare query (`?access=<id>`).
 // Scope: Parsing the deep link only. Which rule is highlighted on the page,
 // which section is selected, and the rule data itself stay with their owners;
-// this file answers one question — which rule id a link names.
+// this file answers one question — which rule id a link names — plus the raw
+// `access` value behind it, so the settings shell can detect a bare section
+// link without re-running the URLSearchParams loop itself.
 // Architectural role: the single reader of the access deep link, so the pane
 // shell and the Rules section agree on the targeted rule instead of each
 // re-parsing the URL and drifting on the query spelling.
@@ -21,8 +23,10 @@ export const ACCESS_RULES_SECTION_TOKEN = "rules";
 // Extracts the `access` query value from a location string that may carry its
 // query on the hash, on the search, or on both. Returns the first value found,
 // or null when neither carries the parameter. URLSearchParams decodes
-// percent-encoding so an encoded rule id resolves to its real spelling.
-function readAccessParam(): string | null {
+// percent-encoding so an encoded rule id resolves to its real spelling. This
+// is the single owner of the raw `access` extraction across hash and search;
+// callers that only need the targeted rule id should use readAccessDeepLink.
+export function readAccessParamValue(): string | null {
   if (typeof window === "undefined") return null;
   const sources = [window.location.hash, window.location.search];
   for (const source of sources) {
@@ -40,7 +44,7 @@ function readAccessParam(): string | null {
 // section without a highlight; any other non-blank value names the rule to
 // highlight. Case is preserved so a case-sensitive rule id round-trips.
 export function readAccessDeepLink(): string | null {
-  const value = readAccessParam()?.trim();
+  const value = readAccessParamValue()?.trim();
   if (!value) return null;
   if (value === ACCESS_RULES_SECTION_TOKEN) return null;
   return value;

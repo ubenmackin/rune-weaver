@@ -496,6 +496,91 @@ struct BashSmokeGateContractTests {
         #expect(await gate.checkPermission(toolCall: allowedCall, tool: GateProbeTool(name: "bash.exec")) == .allowed)
     }
 
+    // MARK: - Wildcard Target Matching
+
+    @Test
+    func `wildcard rules correctly cover api request calls with methods and URLs`() async {
+        let gate = PermissionGate()
+        // 1. Any method + URL pattern: "* https://api.kraken.com/*"
+        #expect(await gate.grant(.exactTarget("* https://api.kraken.com/*"), toolName: "api.request", duration: .forever))
+
+        let getTime = ToolInput(toolName: "api.request", argumentsJSON: #"{"method":"GET","url":"https://api.kraken.com/0/public/Time"}"#)
+        let postOrder = ToolInput(toolName: "api.request", argumentsJSON: #"{"method":"POST","url":"https://api.kraken.com/0/private/AddOrder"}"#)
+        let otherHost = ToolInput(toolName: "api.request", argumentsJSON: #"{"method":"GET","url":"https://api.binance.com/api/v3/time"}"#)
+
+        #expect(await gate.checkPermission(toolCall: getTime, tool: GateProbeTool(name: "api.request")) == .allowed)
+        #expect(await gate.checkPermission(toolCall: postOrder, tool: GateProbeTool(name: "api.request")) == .allowed)
+        #expect(await GateVerdictSupport.parks(gate.checkPermission(toolCall: otherHost, tool: GateProbeTool(name: "api.request"))))
+
+        // 2. Specific method rule: "GET https://*.example.com/*"
+        #expect(await gate.grant(.exactTarget("GET https://*.example.com/*"), toolName: "api.request", duration: .forever))
+
+        let subGet = ToolInput(toolName: "api.request", argumentsJSON: #"{"method":"GET","url":"https://sub.example.com/data"}"#)
+        let subPost = ToolInput(toolName: "api.request", argumentsJSON: #"{"method":"POST","url":"https://sub.example.com/data"}"#)
+
+        #expect(await gate.checkPermission(toolCall: subGet, tool: GateProbeTool(name: "api.request")) == .allowed)
+        #expect(await GateVerdictSupport.parks(gate.checkPermission(toolCall: subPost, tool: GateProbeTool(name: "api.request"))))
+
+        // 3. Method-omitted URL pattern: "https://api.github.com/*" covers any method
+        #expect(await gate.grant(.exactTarget("https://api.github.com/*"), toolName: "api.request", duration: .forever))
+
+        let ghGet = ToolInput(toolName: "api.request", argumentsJSON: #"{"method":"GET","url":"https://api.github.com/user"}"#)
+        let ghPatch = ToolInput(toolName: "api.request", argumentsJSON: #"{"method":"PATCH","url":"https://api.github.com/user"}"#)
+
+        #expect(await gate.checkPermission(toolCall: ghGet, tool: GateProbeTool(name: "api.request")) == .allowed)
+        #expect(await gate.checkPermission(toolCall: ghPatch, tool: GateProbeTool(name: "api.request")) == .allowed)
+    }
+
+    @Test
+    func `wildcard rules correctly cover email, files, messages, and browser`() async {
+        let gate = PermissionGate()
+
+        // email.send: *@company.com
+        #expect(await gate.grant(.exactTarget("*@company.com"), toolName: "email.send", duration: .forever))
+        let email1 = ToolInput(toolName: "email.send", argumentsJSON: #"{"to":"alice@company.com"}"#)
+        let email2 = ToolInput(toolName: "email.send", argumentsJSON: #"{"to":"bob@OTHER.com"}"#)
+        #expect(await gate.checkPermission(toolCall: email1, tool: GateProbeTool(name: "email.send")) == .allowed)
+        #expect(await GateVerdictSupport.parks(gate.checkPermission(toolCall: email2, tool: GateProbeTool(name: "email.send"))))
+
+        // files.write: /tmp/*
+        #expect(await gate.grant(.exactTarget("/tmp/*"), toolName: "files.write", duration: .forever))
+        let file1 = ToolInput(toolName: "files.write", argumentsJSON: #"{"path":"/tmp/test.txt"}"#)
+        let file2 = ToolInput(toolName: "files.write", argumentsJSON: #"{"path":"/etc/passwd"}"#)
+        #expect(await gate.checkPermission(toolCall: file1, tool: GateProbeTool(name: "files.write")) == .allowed)
+        #expect(await GateVerdictSupport.parks(gate.checkPermission(toolCall: file2, tool: GateProbeTool(name: "files.write"))))
+
+        // messages.send: +1555*
+        #expect(await gate.grant(.exactTarget("+1555*"), toolName: "messages.send", duration: .forever))
+        let msg1 = ToolInput(toolName: "messages.send", argumentsJSON: #"{"recipient":"+15551234567"}"#)
+        let msg2 = ToolInput(toolName: "messages.send", argumentsJSON: #"{"recipient":"+19991234567"}"#)
+        #expect(await gate.checkPermission(toolCall: msg1, tool: GateProbeTool(name: "messages.send")) == .allowed)
+        #expect(await GateVerdictSupport.parks(gate.checkPermission(toolCall: msg2, tool: GateProbeTool(name: "messages.send"))))
+
+        // browser.act: * @ https://app.example.com/*
+        #expect(await gate.grant(.exactTarget("* @ https://app.example.com/*"), toolName: "browser.act", duration: .forever))
+        let act1 = ToolInput(toolName: "browser.act", argumentsJSON: #"{"action":"click #btn","url":"https://app.example.com/checkout"}"#)
+        let act2 = ToolInput(toolName: "browser.act", argumentsJSON: #"{"action":"click #btn","url":"https://evil.com/phish"}"#)
+        #expect(await gate.checkPermission(toolCall: act1, tool: GateProbeTool(name: "browser.act")) == .allowed)
+        #expect(await GateVerdictSupport.parks(gate.checkPermission(toolCall: act2, tool: GateProbeTool(name: "browser.act"))))
+    }
+
+    @Test
+    func `wildcard deny rule outranks allow rules`() async throws {
+        let gate = PermissionGate()
+        // Allow all calls to api.request
+        #expect(await gate.grant(.toolWide, toolName: "api.request", duration: .forever))
+        // Deny rule for specific sensitive wildcard endpoint: DELETE https://api.kraken.com/*
+        await gate.denyRule(.exactTarget("DELETE https://api.kraken.com/*"), toolName: "api.request", reason: "no deletes allowed")
+
+        let getCall = ToolInput(toolName: "api.request", argumentsJSON: #"{"method":"GET","url":"https://api.kraken.com/order"}"#)
+        let deleteCall = ToolInput(toolName: "api.request", argumentsJSON: #"{"method":"DELETE","url":"https://api.kraken.com/order"}"#)
+
+        #expect(await gate.checkPermission(toolCall: getCall, tool: GateProbeTool(name: "api.request")) == .allowed)
+        let decision = await gate.checkPermission(toolCall: deleteCall, tool: GateProbeTool(name: "api.request"))
+        let reason = try #require(GateVerdictSupport.denialReason(decision))
+        #expect(reason.contains("no deletes allowed"))
+    }
+
     /// Gate wired to the smoke-test shell policy.
     private func makeSmokeGate() async -> PermissionGate {
         let gate = PermissionGate()

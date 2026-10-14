@@ -18,12 +18,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
+  DEFAULT_FILES_ALLOW_ROOTS,
+  DEFAULT_FILES_DENY_PATTERNS,
+  DEFAULT_FILES_DENY_PATTERNS_TEXT,
+  formatAllowRootsText,
+  formatDenyPatternsText,
+  parseAllowRootsText,
+  parseDenyPatternsText,
   getSettings,
   updateSettings,
   type SettingsResponse,
   type UpdateSettingsInput,
 } from "../../api";
-import { AlertTriangleIcon, PlusIcon, TrashIcon } from "../icons";
+import { AlertTriangleIcon, CloseIcon, PlusIcon, RefreshIcon, TrashIcon } from "../icons";
+import Modal from "../Modal";
 
 // Closed write-mode vocabulary for files.write ([files] write_mode). The engine
 // stays the validator of record: it rejects anything outside this set, so the
@@ -137,12 +145,41 @@ interface WritePathRule {
   posture: FilesWritePosture;
 }
 
-// Last-loaded [files] write snapshot driving the changed-only patch: the mode
-// and the rule list the owner never touches stay omitted so the stored values
-// survive.
-interface FilesWriteLoadedSnapshot {
+// Last-loaded [files] snapshot driving the changed-only patch: mode, rules,
+// deny patterns, allow roots, and approval on deny.
+interface FilesLoadedSnapshot {
   writeMode: FilesWriteMode;
   writePathRules: WritePathRule[];
+  denyPatternsText: string;
+  allowRootsText: string;
+  requireApprovalOnDeny: boolean;
+}
+
+// Validates deny patterns and allowed roots boundaries before save.
+export function validateFilesBoundaryFields(
+  denyText: string,
+  allowRootsText: string
+): string | null {
+  const denyLines = denyText.split("\n");
+  for (let lineIndex = 0; lineIndex < denyLines.length; lineIndex += 1) {
+    const trimmed = denyLines[lineIndex].trim();
+    if (!trimmed) continue;
+    if (trimmed.includes("..")) {
+      return `Line ${lineIndex + 1}: Deny pattern must not contain '..': "${trimmed}".`;
+    }
+  }
+  const allowLines = allowRootsText.split("\n");
+  for (let lineIndex = 0; lineIndex < allowLines.length; lineIndex += 1) {
+    const trimmed = allowLines[lineIndex].trim();
+    if (!trimmed) continue;
+    if (trimmed.includes("..")) {
+      return `Line ${lineIndex + 1}: Allowed root must not contain '..': "${trimmed}".`;
+    }
+  }
+  if (parseAllowRootsText(allowRootsText).length === 0) {
+    return "Allowed roots cannot be empty.";
+  }
+  return null;
 }
 
 
@@ -273,7 +310,7 @@ export function validateFilesWriteFields(
 function buildFilesWritePatch(
   writeMode: FilesWriteMode,
   rules: readonly WritePathRule[],
-  loaded: FilesWriteLoadedSnapshot
+  loaded: FilesLoadedSnapshot
 ): UpdateSettingsInput {
   const patch: UpdateSettingsInput = {};
   if (writeMode !== loaded.writeMode) {
@@ -289,7 +326,7 @@ function buildFilesWritePatch(
   return patch;
 }
 
-// File write-posture configuration for the settings Access surface. Keeps the
+// File access and write-posture configuration for the settings Access surface. Keeps the
 // single draft, the changed-only save, and the live-apply banner; the engine
 // stays the sole evaluator of the posture a write actually takes.
 export function AccessFilesSection() {
@@ -301,18 +338,38 @@ export function AccessFilesSection() {
   const [rules, setRules] = useState<WritePathRule[]>(
     DEFAULT_FILES_WRITE_PATH_RULES.map((rule) => ({ ...rule }))
   );
+  const [filesDenyText, setFilesDenyText] = useState<string>(
+    DEFAULT_FILES_DENY_PATTERNS_TEXT
+  );
+  const [filesAllowRootsText, setFilesAllowRootsText] = useState<string>(
+    formatAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS)
+  );
+  const [filesRequireApprovalOnDeny, setFilesRequireApprovalOnDeny] =
+    useState<boolean>(true);
+  const [pendingResetDeny, setPendingResetDeny] = useState<boolean>(false);
+  const [pendingResetRoots, setPendingResetRoots] = useState<boolean>(false);
+
   const [saved, setSaved] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const loadedRef = useRef<FilesWriteLoadedSnapshot>({
+  const loadedRef = useRef<FilesLoadedSnapshot>({
     writeMode: DEFAULT_FILES_WRITE_MODE,
     writePathRules: DEFAULT_FILES_WRITE_PATH_RULES.map((rule) => ({ ...rule })),
+    denyPatternsText: DEFAULT_FILES_DENY_PATTERNS_TEXT,
+    allowRootsText: formatAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS),
+    requireApprovalOnDeny: true,
   });
+
+  const denyPatternCount = parseDenyPatternsText(filesDenyText).length;
+  const allowRootsCount = parseAllowRootsText(filesAllowRootsText).length;
 
   const canonicalRules = canonicalWritePathRules(rules);
   const changed =
     writeMode !== loadedRef.current.writeMode ||
-    !writePathRulesEqual(canonicalRules, loadedRef.current.writePathRules);
+    !writePathRulesEqual(canonicalRules, loadedRef.current.writePathRules) ||
+    filesDenyText !== loadedRef.current.denyPatternsText ||
+    filesAllowRootsText !== loadedRef.current.allowRootsText ||
+    filesRequireApprovalOnDeny !== loadedRef.current.requireApprovalOnDeny;
 
   // Copies one loaded snapshot into both editors at once, then reseeds the
   // loaded ref and the dirty comparison from that same snapshot. Deriving both
@@ -322,9 +379,26 @@ export function AccessFilesSection() {
     if (!settings) return;
     const nextMode = normalizeFilesWriteMode(settings.filesWriteMode);
     const nextRules = readLoadedWritePathRules(settings);
-    loadedRef.current = { writeMode: nextMode, writePathRules: nextRules };
+    const nextDenyText = Array.isArray(settings.filesDenyPatterns)
+      ? formatDenyPatternsText(settings.filesDenyPatterns)
+      : DEFAULT_FILES_DENY_PATTERNS_TEXT;
+    const nextAllowRootsText = Array.isArray(settings.filesAllowRoots)
+      ? formatAllowRootsText(settings.filesAllowRoots)
+      : formatAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS);
+    const nextApprovalOnDeny = settings.filesRequireApprovalOnDeny ?? true;
+
+    loadedRef.current = {
+      writeMode: nextMode,
+      writePathRules: nextRules,
+      denyPatternsText: nextDenyText,
+      allowRootsText: nextAllowRootsText,
+      requireApprovalOnDeny: nextApprovalOnDeny,
+    };
     setWriteMode(nextMode);
     setRules(nextRules.map((rule) => ({ ...rule })));
+    setFilesDenyText(nextDenyText);
+    setFilesAllowRootsText(nextAllowRootsText);
+    setFilesRequireApprovalOnDeny(nextApprovalOnDeny);
     setSaved(false);
   }, []);
 
@@ -337,7 +411,7 @@ export function AccessFilesSection() {
       setLoadError(
         err instanceof ApiError
           ? err.message
-          : "Failed to load file write settings."
+          : "Failed to load file settings."
       );
     } finally {
       setLoading(false);
@@ -400,6 +474,11 @@ export function AccessFilesSection() {
   // error path without discarding the draft. Posture applies live, so success
   // shows the saved banner with no restart banner.
   const handleSave = async (): Promise<void> => {
+    const boundaryError = validateFilesBoundaryFields(filesDenyText, filesAllowRootsText);
+    if (boundaryError) {
+      setSaveError(boundaryError);
+      return;
+    }
     const validationError = validateFilesWriteFields(writeMode, rules);
     if (validationError) {
       setSaveError(validationError);
@@ -408,9 +487,17 @@ export function AccessFilesSection() {
     setSaveLoading(true);
     setSaveError(null);
     try {
-      const updated = await updateSettings(
-        buildFilesWritePatch(writeMode, rules, loadedRef.current)
-      );
+      const patch = buildFilesWritePatch(writeMode, rules, loadedRef.current);
+      if (filesDenyText !== loadedRef.current.denyPatternsText) {
+        patch.filesDenyPatterns = parseDenyPatternsText(filesDenyText);
+      }
+      if (filesAllowRootsText !== loadedRef.current.allowRootsText) {
+        patch.filesAllowRoots = parseAllowRootsText(filesAllowRootsText);
+      }
+      if (filesRequireApprovalOnDeny !== loadedRef.current.requireApprovalOnDeny) {
+        patch.filesRequireApprovalOnDeny = filesRequireApprovalOnDeny;
+      }
+      const updated = await updateSettings(patch);
       // Repopulate first so the accepted snapshot re-seeds both the loaded ref
       // and the dirty comparison; the banner then flips on after it, because
       // the repopulate clears the flag for the plain load path.
@@ -420,7 +507,7 @@ export function AccessFilesSection() {
       setSaveError(
         err instanceof ApiError
           ? err.message
-          : "Failed to save file write settings"
+          : "Failed to save file settings"
       );
     } finally {
       setSaveLoading(false);
@@ -430,18 +517,158 @@ export function AccessFilesSection() {
   const atRuleBound = rules.length >= FILES_WRITE_PATH_RULE_MAX_COUNT;
 
   return (
-    <section
-      className="settings-section card"
-      aria-label="File Write Posture"
-      data-testid="files-write-pane"
-    >
-      <div className="settings-section-title-group">
-        <h3>File Write Posture</h3>
-        <p className="settings-section-hint">
-          Choose how every <code>files.write</code> lands and which paths take
-          which posture. Changes apply immediately with no restart.
-        </p>
-      </div>
+    <div className="access-files-pane" data-testid="files-pane">
+      {/* SECTION 1: Files & Access */}
+      <section
+        className="settings-section card"
+        aria-label="Files & Access"
+        data-testid="files-access-pane"
+        style={{ marginBottom: "20px" }}
+      >
+        <div className="settings-section-title-group">
+          <h3>Files & Access</h3>
+          <p className="settings-section-hint">
+            Allow roots bound file tools, email attachment saves, bash working directories, and staged-file review: those surfaces can only reach paths inside the allowed roots. Denied paths are skipped everywhere including the document index, while allow roots do not affect index coverage.
+          </p>
+          <p className="settings-section-hint">
+            This is the system-boundary allowed-roots and blocked-paths surface in
+            Access → Files. Fine-grained write-path posture (Stage, Ask,
+            Live, Deny per path) lives in Access → Files below.
+          </p>
+        </div>
+
+        <div className="settings-subsection-header">
+          <div className="settings-section-title-group">
+            <h4 style={{ margin: "0 0 4px 0" }}>Blocked Paths</h4>
+            <p className="settings-section-hint">
+              One glob per line. Denied paths escalate or fail per the toggle below.
+            </p>
+          </div>
+          <div className="row">
+            <button
+              type="button"
+              className="ghost icon-text-btn"
+              onClick={() => setPendingResetDeny(true)}
+            >
+              <RefreshIcon size={14} />
+              <span>Reset to Defaults</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="form-group" style={{ marginTop: "8px" }}>
+          <label htmlFor="deny-patterns-textarea">
+            Deny patterns{" "}
+            <span className="muted text-sm">
+              ({denyPatternCount} {denyPatternCount === 1 ? "pattern" : "patterns"})
+            </span>
+          </label>
+          <textarea
+            id="deny-patterns-textarea"
+            className="input-field deny-patterns-textarea"
+            aria-label="Deny patterns, one per line"
+            value={filesDenyText}
+            onChange={(e) => {
+              setFilesDenyText(e.target.value);
+              markEdited();
+            }}
+            placeholder="e.g. .env*, *.pem, .ssh/*"
+            rows={8}
+          />
+          <span className="form-group-hint">
+            Glob-like patterns: `*` matches within a name, directory prefixes like
+            `.ssh/*` guard a whole subtree. `..` escapes are rejected with line
+            numbers; blank lines are ignored.
+          </span>
+          {denyPatternCount === 0 && (
+            <span className="form-group-hint">
+              No deny patterns configured. File tools will allow all in-scope paths.
+            </span>
+          )}
+        </div>
+
+        <div className="settings-subsection-header" style={{ marginTop: "20px" }}>
+          <div className="settings-section-title-group">
+            <h4 style={{ margin: "0 0 4px 0" }}>Allowed Roots</h4>
+            <p className="settings-section-hint">
+              Home containment boundary (`~` expands to the home directory). Paths outside
+              these roots escalate to approval.
+            </p>
+          </div>
+          <div className="row">
+            <button
+              type="button"
+              className="ghost icon-text-btn"
+              onClick={() => setPendingResetRoots(true)}
+            >
+              <RefreshIcon size={14} />
+              <span>Reset Roots</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="form-group" style={{ marginTop: "8px" }}>
+          <label htmlFor="allow-roots-textarea">
+            Allowed roots, one per line{" "}
+            <span className="muted text-sm">
+              ({allowRootsCount} {allowRootsCount === 1 ? "root" : "roots"})
+            </span>
+          </label>
+          <textarea
+            id="allow-roots-textarea"
+            className="input-field allow-roots-textarea"
+            aria-label="Allowed roots, one per line"
+            value={filesAllowRootsText}
+            onChange={(e) => {
+              setFilesAllowRootsText(e.target.value);
+              markEdited();
+            }}
+            placeholder="e.g. ~"
+            rows={6}
+          />
+          <span className="form-group-hint">
+            One root per line. `~` expands to the home directory for home containment.
+            Blank lines are ignored. Order is display-only and never changes the access decision.
+          </span>
+        </div>
+
+        <div className="form-group checkbox-group" style={{ marginTop: "16px" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+            <input
+              id="files-require-approval"
+              type="checkbox"
+              checked={filesRequireApprovalOnDeny}
+              onChange={(e) => {
+                setFilesRequireApprovalOnDeny(e.target.checked);
+                markEdited();
+              }}
+            />
+            <span>Require approval on deny</span>
+          </label>
+          <span className="form-group-hint">
+            When on, denied paths escalate to the approvals inbox instead of failing silently.
+          </span>
+        </div>
+      </section>
+
+      {/* SECTION 2: File Write Posture */}
+      <section
+        className="settings-section card"
+        aria-label="File Write Posture"
+        data-testid="files-write-pane"
+      >
+        <div className="settings-section-title-group">
+          <h3>File Write Posture</h3>
+          <p className="settings-section-hint">
+            Choose how every <code>files.write</code> lands and which paths take
+            which posture. Changes apply immediately with no restart.
+          </p>
+          <p className="settings-section-hint">
+            This is the fine-grained write-path posture surface in Access → Files.
+            System-boundary allowed roots and blocked paths live
+            in Access → Files above.
+          </p>
+        </div>
 
       {loading ? (
         <p className="muted text-sm" data-testid="files-write-loading">
@@ -554,6 +781,22 @@ export function AccessFilesSection() {
             </div>
           </div>
 
+          <div className="files-explainer-card" data-testid="files-write-explainer">
+            <h5>About Write Path Rules</h5>
+            <p>
+              Write path rules define folder-specific write postures, overriding the global write mode above for matching directories. The longest matching path wins:
+            </p>
+            <ul>
+              <li><strong>Stage</strong>: Writes wait in Staged Changes for your review; no prompt needed.</li>
+              <li><strong>Ask</strong>: Parks an approval request in your Inbox before anything is written.</li>
+              <li><strong>Live</strong>: Writes directly to disk with an automatic rollback backup.</li>
+              <li><strong>Deny</strong>: Refuses writes outright. Deny rules are locked for safety.</li>
+            </ul>
+            <p className="muted text-sm" style={{ marginBottom: 0 }}>
+              Deny outranks every other posture and persists until the rule is removed.
+            </p>
+          </div>
+
           <span className="form-group-hint" data-testid="files-write-rules-bounds">
             Up to {FILES_WRITE_PATH_RULE_MAX_COUNT} rules, each path up to{" "}
             {FILES_WRITE_PATH_RULE_MAX_PATH_CHARS} characters.{" "}
@@ -569,82 +812,98 @@ export function AccessFilesSection() {
             </p>
           ) : null}
 
-          {rules.map((rule, index) => {
-            const ruleNumber = index + 1;
-            const pathId = `files-write-rule-path-${index}`;
-            const postureId = `files-write-rule-posture-${index}`;
-            const locked = rule.posture === "deny";
-            return (
-              <div
-                key={`files-write-rule-${index}`}
-                data-testid={`files-write-rule-${index}`}
-                style={{
-                  display: "flex",
-                  gap: "8px",
-                  alignItems: "flex-start",
-                  marginTop: "12px",
-                }}
-              >
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <label htmlFor={pathId} style={{ fontSize: "0.82rem" }}>
-                    Rule {ruleNumber} path
-                  </label>
-                  <input
-                    id={pathId}
-                    className="input-field"
-                    value={rule.path}
-                    onChange={(e) => handleRulePathChange(index, e.target.value)}
-                    placeholder="~/Documents/Secrets"
-                  />
-                </div>
-                <div style={{ width: "140px", flexShrink: 0 }}>
-                  <label htmlFor={postureId} style={{ fontSize: "0.82rem" }}>
-                    Rule {ruleNumber} posture
-                  </label>
-                  <select
-                    id={postureId}
-                    className="input-field"
-                    value={rule.posture}
-                    onChange={(e) =>
-                      handleRulePostureChange(index, e.target.value)
-                    }
-                    disabled={locked}
-                    title={locked ? "A deny rule cannot be softened here" : undefined}
-                  >
-                    {FILES_WRITE_POSTURE_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <button
-                  type="button"
-                  className="icon-button"
-                  aria-label={`Remove rule ${ruleNumber}`}
-                  data-testid={`files-write-rule-${index}-remove`}
-                  onClick={() => handleRemoveRule(index)}
-                  title={`Remove rule ${ruleNumber}`}
-                >
-                  <TrashIcon size={14} />
-                </button>
-                <span
-                  className="form-group-hint"
-                  data-testid={`files-write-rule-${index}-consequence`}
-                  style={{ flexBasis: "100%" }}
-                >
-                  {writePostureConsequence(rule.posture)}
-                  {locked ? (
-                    <span data-testid={`files-write-rule-${index}-lock`}>
-                      {" "}
-                      Deny is locked: this refusal can be widened only by
-                      removing the rule.
-                    </span>
-                  ) : null}
-                </span>
-              </div>
-            );
-          })}
+          {rules.length > 0 ? (
+            <div
+              className="files-write-table-wrapper"
+              data-testid="files-write-table-scroll"
+              style={{ maxHeight: "320px", overflowY: "auto" }}
+            >
+              <table className="files-write-table" data-testid="files-write-rules-table">
+                <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
+                  <tr>
+                    <th style={{ width: "35%", position: "sticky", top: 0 }}>Path</th>
+                    <th style={{ width: "160px", position: "sticky", top: 0 }}>Posture</th>
+                    <th style={{ position: "sticky", top: 0 }}>Consequence</th>
+                    <th style={{ width: "50px", textAlign: "center", position: "sticky", top: 0 }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rules.map((rule, index) => {
+                    const ruleNumber = index + 1;
+                    const pathId = `files-write-rule-path-${index}`;
+                    const postureId = `files-write-rule-posture-${index}`;
+                    const locked = rule.posture === "deny";
+                    return (
+                      <tr
+                        key={`files-write-rule-${index}`}
+                        data-testid={`files-write-rule-${index}`}
+                      >
+                        <td>
+                          <input
+                            id={pathId}
+                            aria-label={`Rule ${ruleNumber} path`}
+                            className="input-field"
+                            value={rule.path}
+                            onChange={(e) => handleRulePathChange(index, e.target.value)}
+                            placeholder="~/Documents/Secrets"
+                            style={{ margin: 0, width: "100%" }}
+                          />
+                        </td>
+                        <td>
+                          <select
+                            id={postureId}
+                            aria-label={`Rule ${ruleNumber} posture`}
+                            className="input-field"
+                            value={rule.posture}
+                            onChange={(e) =>
+                              handleRulePostureChange(index, e.target.value)
+                            }
+                            disabled={locked}
+                            title={locked ? "A deny rule cannot be softened here" : undefined}
+                            style={{ margin: 0, width: "100%" }}
+                          >
+                            {FILES_WRITE_POSTURE_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td>
+                          <span
+                            className="form-group-hint"
+                            data-testid={`files-write-rule-${index}-consequence`}
+                            style={{ margin: 0, display: "inline-block" }}
+                          >
+                            {writePostureConsequence(rule.posture)}
+                            {locked ? (
+                              <span data-testid={`files-write-rule-${index}-lock`}>
+                                {" "}
+                                Deny is locked: this refusal can be widened only by
+                                removing the rule.
+                              </span>
+                            ) : null}
+                          </span>
+                        </td>
+                        <td style={{ textAlign: "center" }}>
+                          <button
+                            type="button"
+                            className="icon-button"
+                            aria-label={`Remove rule ${ruleNumber}`}
+                            data-testid={`files-write-rule-${index}-remove`}
+                            onClick={() => handleRemoveRule(index)}
+                            title={`Remove rule ${ruleNumber}`}
+                          >
+                            <TrashIcon size={14} />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
 
           <div className="settings-footer">
             <span className="muted text-sm" data-testid="files-write-save-hint">
@@ -664,7 +923,108 @@ export function AccessFilesSection() {
           </div>
         </>
       ) : null}
-    </section>
+      </section>
+
+      {pendingResetDeny ? (
+        <Modal
+          label="Confirm reset deny patterns"
+          onClose={() => setPendingResetDeny(false)}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Reset deny patterns?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setPendingResetDeny(false)}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              This will replace {denyPatternCount}{" "}
+              {denyPatternCount === 1 ? "custom pattern" : "custom patterns"} with{" "}
+              {DEFAULT_FILES_DENY_PATTERNS.length} defaults. This only updates the
+              form — nothing is saved until you choose Save.
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setPendingResetDeny(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => {
+                setFilesDenyText(DEFAULT_FILES_DENY_PATTERNS_TEXT);
+                setPendingResetDeny(false);
+                markEdited();
+              }}
+              aria-label="Confirm reset deny patterns"
+            >
+              Reset to Defaults
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {pendingResetRoots ? (
+        <Modal
+          label="Confirm reset allowed roots"
+          onClose={() => setPendingResetRoots(false)}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Reset allowed roots?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setPendingResetRoots(false)}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              This will replace {allowRootsCount}{" "}
+              {allowRootsCount === 1 ? "custom root" : "custom roots"} with{" "}
+              {DEFAULT_FILES_ALLOW_ROOTS.length}{" "}
+              {DEFAULT_FILES_ALLOW_ROOTS.length === 1 ? "default" : "defaults"} (
+              {DEFAULT_FILES_ALLOW_ROOTS.join(", ")}). This only updates the form —
+              nothing is saved until you choose Save.
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setPendingResetRoots(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => {
+                setFilesAllowRootsText(formatAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS));
+                setPendingResetRoots(false);
+                markEdited();
+              }}
+              aria-label="Confirm reset allowed roots"
+            >
+              Reset Roots
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+    </div>
   );
 }
 

@@ -401,6 +401,28 @@ public struct ProductionCalendarGateway: CalendarGateway, Sendable {
         until: Date? = nil,
         limit: Int = 20
     ) async throws -> [CalendarEventItem] {
+        try await search(
+            query: query,
+            eventID: eventID,
+            calendarNames: calendarNames,
+            since: since,
+            until: until,
+            limit: limit,
+            now: Date()
+        )
+    }
+
+    public func search(
+        query: String? = nil,
+        eventID: String? = nil,
+        calendarNames: [String]? = nil,
+        since: Date? = nil,
+        until: Date? = nil,
+        limit: Int = 20,
+        // Injectable so hermetic tests can pin the default window;
+        // production callers omit it and read the wall clock.
+        now: Date
+    ) async throws -> [CalendarEventItem] {
         let capped = min(max(limit, Self.minLimit), Self.maxLimit)
         try ensureAuthorized()
         let all = try liveCalendars()
@@ -434,7 +456,8 @@ public struct ProductionCalendarGateway: CalendarGateway, Sendable {
             wanted: wanted,
             since: since,
             until: until,
-            trimmedQuery: trimmedQuery
+            trimmedQuery: trimmedQuery,
+            now: now
         )
         let sorted =
             if since != nil {
@@ -704,9 +727,10 @@ extension ProductionCalendarGateway {
         wanted: Set<String>?,
         since: Date?,
         until: Date?,
-        trimmedQuery: String?
+        trimmedQuery: String?,
+        now: Date = Date()
     ) throws -> [StoreEvent] {
-        let (fetchStart, fetchEnd) = try effectiveWindow(since: since, until: until)
+        let (fetchStart, fetchEnd) = try effectiveWindow(since: since, until: until, now: now)
         let predicate = store.predicateForEvents(start: fetchStart, end: fetchEnd, calendars: targets)
         let fetched: [StoreEvent]
         do {

@@ -98,7 +98,7 @@ describe("AccessBashSection", () => {
     expect((screen.getByLabelText(/Allow network access/i) as HTMLInputElement).checked).toBe(
       false
     );
-    expect((screen.getByLabelText(/^Enabled$/i) as HTMLInputElement).checked).toBe(true);
+    expect(screen.queryByLabelText(/^Enabled$/i)).toBeNull();
     expect(screen.queryByTestId("bash-loading")).toBeNull();
     // Unedited draft reads clean so the footer never claims a pending write.
     expect(screen.getByTestId("bash-save-hint").textContent).toContain(

@@ -277,7 +277,8 @@ struct AccessRulesRouteLiveTests {
                 toolName: "email.send",
                 scope: AccessScopeDTO(kind: .exactTarget, target: "carol@example.com"),
                 action: .allow,
-                duration: .oneHour
+                duration: .oneHour,
+                reason: "Allow Carol for project updates"
             )
             let response = try await accessRulesCall(app: app, method: .POST, path: "/approvals/rules", body: request)
             #expect(response.status == .ok)
@@ -287,11 +288,13 @@ struct AccessRulesRouteLiveTests {
             #expect(row.action == .allow)
             #expect(row.duration == .oneHour)
             #expect(row.expiresAt != nil)
+            #expect(row.reason == "Allow Carol for project updates")
 
             let listed = try await accessRulesCall(app: app, method: .GET, path: "/approvals/rules")
             let body = try listed.content.decode(AccessRulesResponse.self)
             #expect(body.count == 1)
             #expect(body.rules.first?.id == row.id)
+            #expect(body.rules.first?.reason == "Allow Carol for project updates")
         }
     }
 

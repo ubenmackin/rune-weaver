@@ -546,8 +546,10 @@ export type AccessRuleEffect = "allow" | "deny";
 export interface AccessRule {
   id: string;
   toolName: string;
+  tool?: string;
   scope: AccessScopeDTO;
   effect: AccessRuleEffect;
+  action?: AccessRuleEffect;
   // Creation time in either wire shape the engine emits: ISO-8601 strings from older payloads
   // or Unix seconds as JSON numbers from SQLite persistence. Kept as a union so callers
   // normalize through parseRunTimestamp instead of assuming one encoding.
@@ -555,7 +557,7 @@ export interface AccessRule {
   // Expiry in either wire shape, or null for the forever tier which never expires. Null must
   // survive as "forever" through every UI path rather than collapsing to the epoch.
   expiresAt: string | number | null;
-  duration: TrustDuration;
+  duration?: TrustDuration | null;
   // Auto-approved hit count so the inbox can distinguish untouched rules from exercised
   // trust without re-deriving it from run history. Zero means the rule never fired. Optional
   // because rows minted before usage tracking omit the key; absent degrades to untouched.
@@ -565,6 +567,8 @@ export interface AccessRule {
   // parseRunTimestamp instead of branching on the encoding. Optional because legacy payloads
   // omit the key entirely; absent degrades to untouched like an explicit null.
   lastUsedAt?: string | number | null;
+  reason?: string | null;
+  displayScope?: string;
 }
 
 export interface AccessRulesResponse {
@@ -603,10 +607,13 @@ export interface SessionTrustResponse {
 // tier fully describe the rule, so the client validates the whole shape before
 // the wire instead of asking the engine to store a half-described rule.
 export interface NewAccessRuleInput {
-  tool: string;
-  effect: AccessRuleEffect;
+  tool?: string;
+  toolName?: string;
+  effect?: AccessRuleEffect;
+  action?: AccessRuleEffect;
   scope: AccessScopeDTO;
-  duration: TrustDuration;
+  duration?: TrustDuration;
+  reason?: string;
 }
 
 export interface MemoryResult {
@@ -2060,11 +2067,67 @@ export function parseRuleExpiry(
   return parseRunTimestamp(value);
 }
 
+// Normalizes a rule payload from the engine into the client model. The engine
+// encodes `action` ("allow" | "deny") while older client mocks and legacy frames
+// used `effect`; both spellings bridge to the two UI keys. Unknown effects,
+// blank tools, and unknown durations fail closed with ApiError instead of
+// defaulting to allow-forever. A missing duration on a deny rule reads as
+// forever; a missing duration on an allow rule stays absent (standing rule).
+export function normalizeAccessRule(raw: unknown): AccessRule {
+  if (!isRecord(raw)) {
+    throw new ApiError("Access rule response is malformed", 0);
+  }
+  const record = raw as Record<string, unknown>;
+  const rawEffect = typeof record.action === "string" ? record.action : record.effect;
+  if (rawEffect !== "allow" && rawEffect !== "deny") {
+    throw new ApiError("Access rule response is malformed", 0);
+  }
+  const action = rawEffect as AccessRuleEffect;
+  const rawTool = typeof record.toolName === "string" ? record.toolName : record.tool;
+  if (typeof rawTool !== "string" || rawTool.trim().length === 0) {
+    throw new ApiError("Access rule response is malformed", 0);
+  }
+  const toolName = rawTool.trim();
+  let duration: TrustDuration | null | undefined;
+  const rawDuration = record.duration;
+  if (rawDuration === undefined || rawDuration === null) {
+    duration = action === "deny" ? "forever" : ((rawDuration as null | undefined) ?? undefined);
+  } else {
+    if (!isTrustDurationValue(rawDuration)) {
+      throw new ApiError("Access rule response is malformed", 0);
+    }
+    if (action === "deny" && rawDuration !== "forever") {
+      throw new ApiError("Access rule response is malformed", 0);
+    }
+    duration = rawDuration;
+  }
+  return {
+    ...(record as unknown as AccessRule),
+    toolName,
+    tool: toolName,
+    action,
+    effect: action,
+    duration: duration as TrustDuration,
+  };
+}
+
 // Lists durable access rules so the dashboard can show what stays
 // auto-approved (or parked, for a deny rule) without re-deriving it from the
 // pending approvals inbox.
-export function listRules(): Promise<AccessRulesResponse> {
-  return fetchJson<AccessRulesResponse>("/approvals/rules");
+export async function listRules(): Promise<AccessRulesResponse> {
+  const response = await fetchJson<AccessRulesResponse>("/approvals/rules");
+  const rawRules = Array.isArray(response?.rules) ? response.rules : [];
+  const rules = rawRules.map(normalizeAccessRule);
+  const serverCount =
+    typeof (response as { count?: unknown } | null | undefined)?.count === "number" &&
+    Number.isFinite((response as { count: number }).count)
+      ? (response as { count: number }).count
+      : rules.length;
+  return {
+    ...response,
+    rules,
+    count: serverCount,
+  };
 }
 
 // Revokes one rule by id. A 404 surfaces as ApiError through the shared fetchJson reason
@@ -2111,15 +2174,18 @@ function isTrustDurationValue(value: unknown): value is TrustDuration {
 
 // Fail-closed validator for a rule creation request: the tool must name a
 // tool, the effect must be allow or deny, the scope must pass isAccessScope,
-// and the tier must come from the shared duration vocabulary. Every other
-// shape returns false so createRule refuses before the wire.
+// and the tier must be a defined TrustDuration with deny always forever.
+// Every other shape returns false so createRule refuses before the wire.
 function isAccessRuleInput(value: unknown): value is NewAccessRuleInput {
   if (!isRecord(value)) return false;
-  const tool = value.tool;
+  const tool = typeof value.toolName === "string" ? value.toolName : value.tool;
   if (typeof tool !== "string" || tool.trim().length === 0) return false;
-  if (value.effect !== "allow" && value.effect !== "deny") return false;
+  const effect = typeof value.action === "string" ? value.action : value.effect;
+  if (effect !== "allow" && effect !== "deny") return false;
   if (!isAccessScope(value.scope)) return false;
-  return isTrustDurationValue(value.duration);
+  if (!isTrustDurationValue(value.duration)) return false;
+  if (effect === "deny" && value.duration !== "forever") return false;
+  return true;
 }
 
 // Mints a durable rule directly from the rules surface. The engine broadcasts
@@ -2132,10 +2198,24 @@ export async function createRule(
   if (!isAccessRuleInput(input)) {
     throw new ApiError("Access rule request is malformed", 0);
   }
-  return fetchJson<AccessRule>("/approvals/rules", {
+  const toolName = (input.toolName ?? input.tool)!.trim();
+  const action = (typeof input.action === "string" ? input.action : input.effect) as AccessRuleEffect;
+  const wirePayload: Record<string, unknown> = {
+    toolName,
+    action,
+    tool: toolName,
+    effect: action,
+    scope: input.scope,
+    duration: input.duration,
+  };
+  if (typeof input.reason === "string" && input.reason.trim().length > 0) {
+    wirePayload.reason = input.reason.trim();
+  }
+  const response = await fetchJson<AccessRule>("/approvals/rules", {
     method: "POST",
-    body: JSON.stringify(input),
+    body: JSON.stringify(wirePayload),
   });
+  return normalizeAccessRule(response);
 }
 
 // Reads the ephemeral trust one session still carries: the thisTime, forTask,
