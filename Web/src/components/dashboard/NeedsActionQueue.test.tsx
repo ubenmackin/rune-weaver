@@ -1,13 +1,16 @@
 // Rune Weaver Dashboard — Unit tests for the Needs Action queue card list.
 // Pins the one-shot decision payload, the "Approve once" / "Deny" labels, the
-// Open in Inbox link on every card, the dedicated brake branch, the
-// severity-then-filing ordering matrix, and the absence of any bulk control.
+// Open in Inbox link on every approval card, the dedicated brake branch, the
+// severity-then-filing ordering matrix, the absence of any bulk control, and
+// the scheduled-sends monitoring group (placement and fire-time ordering, the
+// cancel flow, exclusion from the attention count and badge, the all-clear
+// matrix, and Manage navigation).
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import NeedsActionQueue from "./NeedsActionQueue";
-import type { Goal, PermissionRequest } from "../../api";
+import type { Goal, PermissionRequest, ScheduledSend } from "../../api";
 import { jsonResponse } from "../../test-utils/http";
 
 interface DecideCall {
@@ -16,8 +19,15 @@ interface DecideCall {
   body: Record<string, unknown>;
 }
 
+interface CancelCall {
+  path: string;
+  method: string;
+}
+
 interface StubbedApi {
   decideCalls: DecideCall[];
+  cancelCalls: CancelCall[];
+  fetchCalls: string[];
 }
 
 function makeApproval(
@@ -52,23 +62,58 @@ function makeGoal(overrides: Partial<Goal> = {}): Goal {
   };
 }
 
+function makeSend(overrides: Partial<ScheduledSend> & Pick<ScheduledSend, "id">): ScheduledSend {
+  const fireAt = new Date(Date.now() + 3_600_000).toISOString();
+  return {
+    channel: "email",
+    status: "queued",
+    recipient: "ops@example.com",
+    subject: "Weekly digest",
+    bodyText: "Hello",
+    bodyHtml: null,
+    fireAt,
+    createdAt: new Date(Date.now() - 60_000).toISOString(),
+    updatedAt: new Date(Date.now() - 60_000).toISOString(),
+    settledAt: null,
+    failureReason: null,
+    ...overrides,
+  };
+}
+
 // Stubs the engine surface the queue reads, capturing every decide write so the
-// wire payload (not just the call arguments) is asserted.
+// wire payload (not just the call arguments) is asserted. The sends list stays
+// mutable so a DELETE cancel is reflected by the next refetch, matching the
+// engine settling the row.
 function stubApi(
   approvals: PermissionRequest[],
   goals: Goal[] = [],
+  sends: ScheduledSend[] = [],
 ): StubbedApi {
   const decideCalls: DecideCall[] = [];
+  const cancelCalls: CancelCall[] = [];
+  const fetchCalls: string[] = [];
+  let liveSends = [...sends];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = (init?.method ?? "GET").toUpperCase();
+      fetchCalls.push(`${method} ${path}`);
       if (path.startsWith("/approvals") && method === "GET") {
         return jsonResponse({ approvals, count: approvals.length });
       }
       if (path.startsWith("/goals") && method === "GET") {
         return jsonResponse({ goals, count: goals.length });
+      }
+      if (path === "/scheduler/sends" && method === "GET") {
+        return jsonResponse({ sends: liveSends, count: liveSends.length });
+      }
+      if (path.startsWith("/scheduler/sends/") && method === "DELETE") {
+        cancelCalls.push({ path, method });
+        const id = decodeURIComponent(path.split("/").pop() ?? "");
+        const row = liveSends.find((s) => s.id === id);
+        liveSends = liveSends.filter((s) => s.id !== id);
+        return jsonResponse({ ...(row ?? makeSend({ id })), status: "cancelled" });
       }
       if (path.endsWith("/decide")) {
         decideCalls.push({
@@ -99,7 +144,7 @@ function stubApi(
       return jsonResponse({});
     }),
   );
-  return { decideCalls };
+  return { decideCalls, cancelCalls, fetchCalls };
 }
 
 function renderedToolNames(container: HTMLElement): string[] {
@@ -417,5 +462,234 @@ describe("NeedsActionQueue", () => {
     // once, so no card is ever approved by association.
     expect(screen.getAllByRole("button", { name: /Approve once/i })).toHaveLength(2);
     expect(screen.queryByRole("button", { name: /approve all|deny all|bulk|selected/i })).toBeNull();
+  });
+
+  it("renders the scheduled-sends group below the approval cards ordered by fire time ascending", async () => {
+    const now = Date.now();
+    stubApi(
+      [makeApproval({ id: "appr-1", toolName: "git.push" })],
+      [],
+      [
+        makeSend({
+          id: "send-later",
+          recipient: "later@example.com",
+          fireAt: new Date(now + 86_400_000).toISOString(),
+        }),
+        makeSend({
+          id: "send-sooner",
+          channel: "messages",
+          recipient: "+15551234567",
+          subject: "Reminder",
+          fireAt: new Date(now + 3_600_000).toISOString(),
+        }),
+      ],
+    );
+
+    const { container } = render(<NeedsActionQueue />);
+
+    const group = await screen.findByRole("region", { name: /Scheduled sends/i });
+    expect(group).toBeInTheDocument();
+    // The group lands after the approval cards, never interleaved with them.
+    const approvalCard = container.querySelector(".needs-action-list .action-card") as HTMLElement;
+    expect(
+      approvalCard.compareDocumentPosition(group) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // Fire-time ascending: the sooner send leads regardless of payload order.
+    const recipients = Array.from(
+      group.querySelectorAll(".scheduled-send-card .tool-name-badge"),
+    ).map((node) => node.textContent ?? "");
+    expect(recipients).toEqual(["+15551234567", "later@example.com"]);
+    // Every send card names its channel, its recipient, and its fire time with
+    // both the local rendering and the relative countdown.
+    expect(within(group).getByText("MESSAGES")).toBeInTheDocument();
+    expect(within(group).getByText("EMAIL")).toBeInTheDocument();
+    expect(within(group).getByText("Reminder")).toBeInTheDocument();
+    expect(group.querySelectorAll(".send-fire-time")).toHaveLength(2);
+    expect(group.querySelectorAll(".send-fire-relative")).toHaveLength(2);
+    // Each booked send renders its own countdown, so the relative label is
+    // asserted across every card rather than as one shared text node.
+    expect(within(group).getAllByText(/in \d+[smhd]/)).toHaveLength(2);
+  });
+
+  it("gives every send card its own Cancel and no approve, deny, duration, or edit control", async () => {
+    stubApi(
+      [],
+      [],
+      [
+        makeSend({ id: "send-1", recipient: "ops@example.com" }),
+        makeSend({ id: "send-2", recipient: "team@example.com" }),
+      ],
+    );
+
+    const { container } = render(<NeedsActionQueue />);
+
+    const group = await screen.findByRole("region", { name: /Scheduled sends/i });
+    expect(
+      within(group).getAllByRole("button", { name: /Cancel scheduled send to/i }),
+    ).toHaveLength(2);
+    // Monitoring only: no approval semantics ride along on a send card.
+    expect(within(group).queryByRole("button", { name: /Approve|Deny/i })).toBeNull();
+    expect(within(group).queryByRole("button", { name: /Edit/i })).toBeNull();
+    expect(within(group).queryByRole("combobox")).toBeNull();
+    expect(within(group).queryByRole("checkbox")).toBeNull();
+    const cards = container.querySelectorAll(".scheduled-send-card");
+    for (const card of Array.from(cards)) {
+      expect(card.querySelector("details")).toBeNull();
+    }
+    // Send cards never route to the Approvals Inbox; the group owns one Manage
+    // shortcut to the Schedules surface instead.
+    expect(within(group).queryByRole("link", { name: /Open in Inbox/i })).toBeNull();
+  });
+
+  it("cancels a scheduled send with DELETE, refetches, and notifies", async () => {
+    const user = userEvent.setup();
+    const onActionDecided = vi.fn();
+    const { cancelCalls, fetchCalls } = stubApi(
+      [],
+      [],
+      [makeSend({ id: "send-1", recipient: "ops@example.com" })],
+    );
+
+    render(<NeedsActionQueue onActionDecided={onActionDecided} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Cancel scheduled send to ops@example\.com/i }),
+    );
+
+    await waitFor(() => expect(cancelCalls).toHaveLength(1));
+    expect(cancelCalls[0].method).toBe("DELETE");
+    expect(cancelCalls[0].path).toBe("/scheduler/sends/send-1");
+    // The cancel refetches the queue and notifies, and the settled row leaves
+    // the monitoring group on the fresh snapshot.
+    await waitFor(() =>
+      expect(fetchCalls.filter((call) => call === "GET /scheduler/sends").length).toBeGreaterThan(1),
+    );
+    await waitFor(() => expect(onActionDecided).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /Cancel scheduled send to/i }),
+      ).toBeNull(),
+    );
+  });
+
+  it("excludes scheduled sends from the attention count, badge, and subtitle", async () => {
+    stubApi(
+      [],
+      [],
+      [
+        makeSend({ id: "send-1", recipient: "ops@example.com" }),
+        makeSend({ id: "send-2", recipient: "team@example.com" }),
+      ],
+    );
+
+    const { container, unmount } = render(<NeedsActionQueue />);
+
+    await screen.findByRole("region", { name: /Scheduled sends/i });
+    // Two booked sends move nothing: no badge, and the subtitle keeps reading
+    // as no pending decisions.
+    expect(container.querySelector(".dashboard-count-badge")).toBeNull();
+    expect(screen.getByText("No pending decisions")).toBeInTheDocument();
+
+    // With approvals present the badge counts approvals alone.
+    unmount();
+    vi.unstubAllGlobals();
+    stubApi(
+      [
+        makeApproval({ id: "appr-1", toolName: "git.push" }),
+        makeApproval({ id: "appr-2", toolName: "email.send" }),
+      ],
+      [],
+      [makeSend({ id: "send-1", recipient: "ops@example.com" })],
+    );
+    const { container: withApprovals } = render(<NeedsActionQueue />);
+    await screen.findByRole("region", { name: /Scheduled sends/i });
+    expect(withApprovals.querySelector(".dashboard-count-badge")).toHaveTextContent("2");
+  });
+
+  it("shows the all-clear card only when approvals, goals, and sends are all empty", async () => {
+    stubApi([], [], []);
+    const { unmount } = render(<NeedsActionQueue />);
+    expect(await screen.findByText("All Caught Up")).toBeInTheDocument();
+    unmount();
+    vi.unstubAllGlobals();
+
+    // Sends alone suppress the all-clear without joining the count.
+    stubApi([], [], [makeSend({ id: "send-1", recipient: "ops@example.com" })]);
+    const sendsOnly = render(<NeedsActionQueue />);
+    await screen.findByRole("region", { name: /Scheduled sends/i });
+    expect(screen.queryByText("All Caught Up")).toBeNull();
+    sendsOnly.unmount();
+    vi.unstubAllGlobals();
+
+    // Approvals alone suppress the all-clear.
+    stubApi([makeApproval({ id: "appr-1", toolName: "git.push" })], [], []);
+    const approvalsOnly = render(<NeedsActionQueue />);
+    await screen.findByRole("button", { name: /Approve once/i });
+    expect(screen.queryByText("All Caught Up")).toBeNull();
+    approvalsOnly.unmount();
+    vi.unstubAllGlobals();
+
+    // Blocked goals alone suppress the all-clear.
+    stubApi([], [makeGoal()], []);
+    const goalsOnly = render(<NeedsActionQueue />);
+    await screen.findByText("Develop Crypto Trading Plan");
+    expect(screen.queryByText("All Caught Up")).toBeNull();
+    goalsOnly.unmount();
+  });
+
+  it("routes Manage to the schedules surface through onOpenSchedules", async () => {
+    const user = userEvent.setup();
+    const onOpenSchedules = vi.fn();
+    stubApi([], [], [makeSend({ id: "send-1", recipient: "ops@example.com" })]);
+
+    render(<NeedsActionQueue onOpenSchedules={onOpenSchedules} />);
+
+    await user.click(await screen.findByRole("button", { name: /Manage/i }));
+    expect(onOpenSchedules).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders approvals when the scheduled-sends endpoint fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (path === "/scheduler/sends") {
+          throw new Error("sends down");
+        }
+        if (path.startsWith("/approvals") && method === "GET") {
+          const approvals = [makeApproval({ id: "appr-1", toolName: "git.push" })];
+          return jsonResponse({ approvals, count: approvals.length });
+        }
+        if (path.startsWith("/goals") && method === "GET") {
+          return jsonResponse({ goals: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    render(<NeedsActionQueue />);
+
+    await screen.findByRole("button", { name: /Approve once/i });
+    expect(screen.queryByRole("region", { name: /Scheduled sends/i })).toBeNull();
+    expect(screen.queryByText("All Caught Up")).toBeNull();
+  });
+
+  it("hides the scheduled-sends group while showing only settled sends", async () => {
+    stubApi(
+      [],
+      [],
+      [
+        makeSend({ id: "send-sent", status: "sent", recipient: "ops@example.com" }),
+        makeSend({ id: "send-cancelled", status: "cancelled", recipient: "team@example.com" }),
+        makeSend({ id: "send-failed", status: "failed", recipient: "pager@example.com" }),
+      ],
+    );
+
+    render(<NeedsActionQueue />);
+
+    await screen.findByText("All Caught Up");
+    expect(screen.queryByRole("region", { name: /Scheduled sends/i })).toBeNull();
   });
 });

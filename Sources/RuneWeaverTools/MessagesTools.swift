@@ -677,8 +677,8 @@ public struct MessagesSendTool: Tool, Sendable {
     public let description =
         "Sends a text message or iMessage to a recipient phone number or email using macOS Messages. "
             + "Requires operator approval. Use when the user explicitly instructs to send or reply to a message. "
-            + "For a delayed send, request a scheduled send through the Schedules surface instead of passing scheduleAt: "
-            + "the schedule stores the exact approved bytes and fires them once at the approved time."
+            + "Pass scheduleAt to book a scheduled send for that fire time: "
+            + "approval stores the exact bytes and fires them once at the approved time."
 
     public let inputSchema = JSONSchema(
         rawValue: #"{"type":"object","properties":{"recipient":{"type":"string","description":"Recipient phone number or email handle. It MUST be a handle "#
@@ -688,8 +688,8 @@ public struct MessagesSendTool: Tool, Sendable {
             + #""resolvedFrom":{"type":"string","description":"Optional original display name when recipient "#
             + #"was resolved from a name; remembered for future lookups."},"#
             + #""scheduleAt":{"type":["number","string"],"description":"Optional fire time for a scheduled send as epoch seconds "#
-            + #"or an ISO-8601 datetime (5 minutes to 365 days out, minute-aligned). A scheduled send is filed through the "#
-            + #"Schedules surface; messages.send itself still sends immediately on approval."}},"#
+            + #"or an ISO-8601 datetime (5 minutes to 365 days out, minute-aligned). Approval books the send for that "#
+            + #"fire time; omit to send immediately on approval."}},"#
             + #""required":["recipient","text"],"additionalProperties":false}"#
     )
 
@@ -707,15 +707,19 @@ public struct MessagesSendTool: Tool, Sendable {
     private let gateway: any MessagesGateway
     private let resolver: (any MessagesRecipientResolving)?
     private let recipientAliasStore: (any MessageAliasStoring)?
+    /// Booking seam storing approved scheduled sends; nil fails closed with guidance.
+    private let booking: (any ScheduledSendBooking)?
 
     public init(
         gateway: any MessagesGateway,
         resolver: (any MessagesRecipientResolving)? = nil,
-        recipientAliasStore: (any MessageAliasStoring)? = nil
+        recipientAliasStore: (any MessageAliasStoring)? = nil,
+        booking: (any ScheduledSendBooking)? = nil
     ) {
         self.gateway = gateway
         self.resolver = resolver
         self.recipientAliasStore = recipientAliasStore
+        self.booking = booking
     }
 
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
@@ -726,18 +730,15 @@ public struct MessagesSendTool: Tool, Sendable {
             return .failure("Invalid messages.send arguments: expected {\"recipient\": \"...\", \"text\": \"...\"}.", callID: input.callID)
         }
 
-        // A fire time makes this a scheduled send, which the deterministic
-        // scheduler owns: an approval on this tool sends immediately, so
-        // honoring the schedule here would silently drop the requested fire
-        // time. Validate the bounds first so a past or out-of-horizon date is
-        // answered with its own reason, then refuse with guidance.
-        if args.scheduleAt != nil {
-            do {
-                _ = try args.validateScheduleAt()
-            } catch {
-                return .failure(error.localizedDescription, callID: input.callID)
-            }
-            return .failure(Self.scheduledSendRefusalNote, callID: input.callID)
+        // A fire time makes this a scheduled send: validate the bounds first
+        // so a past or out-of-horizon date is answered with its own reason,
+        // then book the exact approved bytes through the seam once the
+        // recipient and text below prove valid.
+        let scheduledFireAt: Date?
+        do {
+            scheduledFireAt = try args.validateScheduleAt()
+        } catch {
+            return .failure(error.localizedDescription, callID: input.callID)
         }
 
         let recipient = args.recipient.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -768,6 +769,10 @@ public struct MessagesSendTool: Tool, Sendable {
         // so an approval preview is never filed for a name.
         guard let canonicalRecipient = MessageRecipientClassification.canonicalHandle(recipient) else {
             return await .failure(nameRefusal(for: recipient), callID: input.callID)
+        }
+
+        if let scheduledFireAt {
+            return await bookedSendOutput(recipient: canonicalRecipient, text: text, fireAt: scheduledFireAt, callID: input.callID, context: context)
         }
 
         if context.dryRun {
@@ -810,6 +815,56 @@ public struct MessagesSendTool: Tool, Sendable {
         }
     }
 
+    /// Books a validated scheduled send, or previews the booking under dry-run.
+    ///
+    /// Booking stores the exact approved bytes without dialing the gateway, so
+    /// dry-run and unwired contexts write nothing. Booking errors stay
+    /// caller-visible as failures, never silent.
+    private func bookedSendOutput(recipient: String, text: String, fireAt: Date, callID: String, context: ToolContext) async -> ToolOutput {
+        guard let booking else {
+            return .failure(Self.bookingUnavailableNote, callID: callID)
+        }
+        if context.dryRun {
+            return encodedEnvelope(MessagesSendEnvelope(
+                success: true,
+                recipient: recipient,
+                text: text,
+                note: "Dry run: would book a scheduled send to '\(recipient)' for "
+                    + "\(ScheduledSendFireTimeText.describe(fireAt)) without writing."
+            ), callID: callID)
+        }
+        let booked: BookedScheduledSend
+        do {
+            booked = try await booking.book(ScheduledSendDraft(
+                channel: .messages,
+                recipient: recipient,
+                text: text,
+                fireAt: fireAt
+            ))
+        } catch {
+            return .failure(error.localizedDescription, callID: callID)
+        }
+        return encodedEnvelope(MessagesSendEnvelope(
+            success: true,
+            recipient: recipient,
+            text: text,
+            note: "Booked scheduled send \(booked.id.uuidString) to '\(recipient)' for "
+                + "\(ScheduledSendFireTimeText.describe(booked.fireAt)). Approval stored the exact bytes; the send fires once at that time."
+        ), callID: callID)
+    }
+
+    /// Encodes a send envelope, falling back to a failure when encoding throws.
+    private func encodedEnvelope(_ envelope: MessagesSendEnvelope, callID: String) -> ToolOutput {
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+            let json = try String(bytes: encoder.encode(envelope), encoding: .utf8) ?? "{}"
+            return .success(json, callID: callID)
+        } catch {
+            return .failure(error.localizedDescription, callID: callID)
+        }
+    }
+
     /// Composes the owner-facing note from a send result.
     ///
     /// A missing or positive confirmation leaves the gateway's own note
@@ -831,9 +886,11 @@ public struct MessagesSendTool: Tool, Sendable {
     /// small enough that the refusal stays one actionable paragraph.
     private static let candidateLimit = 5
 
-    /// Fail-closed refusal for a delayed-send request: this tool never delays.
-    private static let scheduledSendRefusalNote =
-        "A scheduleAt fire time requests a scheduled send, and messages.send always sends immediately on approval. "
+    /// Fail-closed guidance when a delayed-send request arrives where no
+    /// booking is wired: the approval cannot store the send, so it refuses
+    /// rather than sending immediately and silently dropping the fire time.
+    private static let bookingUnavailableNote =
+        "A scheduleAt fire time requests a scheduled send, and scheduled-send booking is not wired in this context. "
             + "Book the send through the Schedules surface (`POST /scheduler/sends`) so the approved bytes are "
             + "stored and fired exactly once at the requested time."
 
@@ -1104,7 +1161,8 @@ public enum MessagesTools {
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         gateway: (any MessagesGateway)? = nil,
         resolver: (any MessagesRecipientResolving)? = nil,
-        recipientAliasStore: (any MessageAliasStoring)? = nil
+        recipientAliasStore: (any MessageAliasStoring)? = nil,
+        booking: (any ScheduledSendBooking)? = nil
     ) -> [any Tool] {
         let effectiveGateway = gateway ?? ProductionMessagesGateway(chatDatabasePath: chatDatabasePath)
         // The default resolver reads contacts and chat history live per call, so
@@ -1131,7 +1189,8 @@ public enum MessagesTools {
             MessagesSendTool(
                 gateway: effectiveGateway,
                 resolver: effectiveResolver,
-                recipientAliasStore: recipientAliasStore
+                recipientAliasStore: recipientAliasStore,
+                booking: booking
             ),
             MessagesResolveRecipientTool(resolver: effectiveResolver)
         ]

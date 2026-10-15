@@ -58,6 +58,8 @@ public enum BuiltinToolPlugins {
     ///   direct-core writers silent.
     /// - Parameter recipientAliasStore: Durable alias store the send tool
     ///   learns from after a resolved-name send; nil keeps alias learning off.
+    /// - Parameter scheduledSendBooking: Seam booking approved scheduled sends
+    ///   for the send tools; nil keeps scheduleAt failing closed with guidance.
     /// - Throws: `PolicyInvariantError` when no verified policy is available.
     public static func makeAllTools(
         emailConfig: EmailConfig? = nil,
@@ -91,6 +93,7 @@ public enum BuiltinToolPlugins {
         remindersGateway: (any RemindersGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         recipientAliasStore: (any MessageAliasStoring)? = nil,
+        scheduledSendBooking: (any ScheduledSendBooking)? = nil,
         stagedFilesStore: StagedFilesStore? = nil,
         supersededReviewNotifier: (@Sendable (String) async -> Void)? = nil,
         fanOutEngine: FanOutEngine? = nil,
@@ -137,6 +140,7 @@ public enum BuiltinToolPlugins {
             remindersGateway: remindersGateway,
             stagedFilesStore: stagedFilesStore,
             recipientAliasStore: recipientAliasStore,
+            scheduledSendBooking: scheduledSendBooking,
             supersededReviewNotifier: supersededReviewNotifier
         )
         // Bash always registers so GET /tools stays stable; a disabled
@@ -232,6 +236,7 @@ public enum BuiltinToolPlugins {
         policyStore: PolicyStore? = nil,
         egressSupervisor: OutboundEgressSupervisor? = nil,
         recipientAliasStore: (any MessageAliasStoring)? = nil,
+        scheduledSendBooking: (any ScheduledSendBooking)? = nil,
         workspaceStore: WorkspaceStore? = nil,
         calendarGateway: (any CalendarGateway)? = nil,
         remindersGateway: (any RemindersGateway)? = nil
@@ -264,6 +269,7 @@ public enum BuiltinToolPlugins {
             calendarGateway: calendarGateway,
             remindersGateway: remindersGateway,
             recipientAliasStore: recipientAliasStore,
+            scheduledSendBooking: scheduledSendBooking,
             fanOutEngine: fanOutEngine,
             policyStore: policyStore,
             egressSupervisor: egressSupervisor,
@@ -325,6 +331,7 @@ public enum BuiltinToolPlugins {
         remindersGateway: (any RemindersGateway)? = nil,
         chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
         recipientAliasStore: (any MessageAliasStoring)? = nil,
+        scheduledSendBooking: (any ScheduledSendBooking)? = nil,
         stagedFilesStore: StagedFilesStore? = nil,
         supersededReviewNotifier: (@Sendable (String) async -> Void)? = nil,
         fanOutEngine: FanOutEngine? = nil,
@@ -366,6 +373,7 @@ public enum BuiltinToolPlugins {
             remindersGateway: remindersGateway,
             chatDatabasePath: chatDatabasePath,
             recipientAliasStore: recipientAliasStore,
+            scheduledSendBooking: scheduledSendBooking,
             stagedFilesStore: stagedFilesStore,
             supersededReviewNotifier: supersededReviewNotifier,
             fanOutEngine: fanOutEngine,
@@ -510,6 +518,7 @@ extension BuiltinToolPlugins {
         remindersGateway: (any RemindersGateway)? = nil,
         stagedFilesStore: StagedFilesStore? = nil,
         recipientAliasStore: (any MessageAliasStoring)? = nil,
+        scheduledSendBooking: (any ScheduledSendBooking)? = nil,
         supersededReviewNotifier: (@Sendable (String) async -> Void)? = nil
     ) -> [any Tool] {
         var tools: [any Tool] = []
@@ -521,13 +530,15 @@ extension BuiltinToolPlugins {
                 containersConfig: resolvedContainers,
                 filesConfig: filesConfig ?? FilesConfig(),
                 ephemeralLedger: sharedLedger,
-                securityConfig: securityConfig
+                securityConfig: securityConfig,
+                booking: scheduledSendBooking
             )
         }
         tools += MessagesTools.makeTools(
             chatDatabasePath: chatDatabasePath,
             gateway: messagesGateway,
-            recipientAliasStore: recipientAliasStore
+            recipientAliasStore: recipientAliasStore,
+            booking: scheduledSendBooking
         )
         // Calendar and reminders resolve nil to the shared production default:
         // a single live EventKit store on EventKit platforms, fail-closed

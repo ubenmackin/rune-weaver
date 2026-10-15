@@ -943,7 +943,8 @@ public enum EmailTools {
         homeDirectoryURL: URL? = nil,
         archiveDetonator: (any EmailArchiveDetonator)? = nil,
         ephemeralLedger: EphemeralContainerLedger? = nil,
-        securityConfig: SecurityConfig = SecurityConfig()
+        securityConfig: SecurityConfig = SecurityConfig(),
+        booking: (any ScheduledSendBooking)? = nil
     ) -> [any Tool] {
         let shared: any EmailIMAPGateway = gateway ?? SubprocessIMAPGateway()
         let sharedSMTP: any EmailSMTPGateway = smtpGateway ?? SubprocessSMTPGateway()
@@ -961,7 +962,8 @@ public enum EmailTools {
         let send: any Tool = EmailSendTool(
             emailConfig: emailConfig,
             smtpGateway: sharedSMTP,
-            gateway: shared
+            gateway: shared,
+            booking: booking
         )
         let listMailboxes: any Tool = EmailListMailboxesTool(emailConfig: emailConfig, gateway: shared)
         let move: any Tool = EmailMoveTool(emailConfig: emailConfig, gateway: shared)
@@ -979,7 +981,8 @@ public enum EmailTools {
         homeDirectoryURL: URL? = nil,
         archiveDetonator: (any EmailArchiveDetonator)? = nil,
         ephemeralLedger: EphemeralContainerLedger? = nil,
-        securityConfig: SecurityConfig = SecurityConfig()
+        securityConfig: SecurityConfig = SecurityConfig(),
+        booking: (any ScheduledSendBooking)? = nil
     ) async {
         let effectiveLedger: EphemeralContainerLedger? = if archiveDetonator == nil {
             if let ephemeralLedger {
@@ -999,7 +1002,8 @@ public enum EmailTools {
             homeDirectoryURL: homeDirectoryURL,
             archiveDetonator: archiveDetonator,
             ephemeralLedger: effectiveLedger,
-            securityConfig: securityConfig
+            securityConfig: securityConfig,
+            booking: booking
         ) {
             await bus.register(tool: tool)
         }

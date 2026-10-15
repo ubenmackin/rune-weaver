@@ -354,8 +354,12 @@ public actor ApprovalQueue {
         // one-shot: coerce any durable tier back to thisTime so a direct decide
         // call cannot mint a dead row. `behavior.brake` is not an executable
         // tool, so a durable vote on it would only store a rule no call can hit.
+        // A send carrying a wire-valid fire time is booked through the schedule
+        // store rather than trusted for repeats, so its approval coerces the
+        // same way while a durable denial still mints the recipient deny below.
         let isOneShotTool = Self.oneShotToolNames.contains(request.toolName)
-        let effectiveDuration: TrustDuration = isOneShotTool ? .thisTime : duration
+        let isScheduledSend = Self.isScheduledSend(toolName: request.toolName, argumentsJSON: request.input.argumentsJSON)
+        let effectiveDuration: TrustDuration = (isOneShotTool || isScheduledSend) ? .thisTime : duration
         let decision = ApprovalQueueDecision(approved: approved, duration: effectiveDuration)
         timeoutTasks.removeValue(forKey: id)?.cancel()
         if let waiter = waiters.removeValue(forKey: id) {
@@ -387,10 +391,12 @@ public actor ApprovalQueue {
                 duration: effectiveDuration,
                 sessionID: request.sessionID
             )
-        } else if !approved, effectiveDuration == .forever {
+        } else if !approved, duration == .forever, !isOneShotTool {
             // An explicit durable denial is the only owner decision that mints
             // a deny rule: it outranks every allow decision and never expires,
-            // so the denied call fails closed on every later repeat.
+            // so the denied call fails closed on every later repeat. One-shot
+            // tools stay exempt (their tier coerced above); a scheduled send
+            // keeps the standing deny contract.
             let resolvedScope = scope ?? Self.derivedScope(for: request)
             await permissionGate?.denyRule(
                 resolvedScope,
@@ -557,6 +563,76 @@ extension ApprovalQueue {
         "desktop.resume",
         "behavior.brake"
     ]
+
+    /// Send tools whose approval may book a scheduled send instead of sending now.
+    private static let scheduledSendToolNames: Set<String> = [
+        "email.send",
+        "messages.send"
+    ]
+
+    /// Whether one send approval carries a wire-valid fire time, so the booking
+    /// is the sole effect and no repeat trust is minted.
+    /// - Parameters:
+    ///   - toolName: Tool the pending request filed.
+    ///   - argumentsJSON: Raw tool arguments document.
+    /// - Returns: True for a send tool with a decodable fire time.
+    private static func isScheduledSend(toolName: String, argumentsJSON: String) -> Bool {
+        guard scheduledSendToolNames.contains(toolName) else { return false }
+        return hasValidScheduleAt(argumentsJSON)
+    }
+
+    /// Wire-shape validity for a scheduleAt fire time: an epoch-seconds number
+    /// or an ISO-8601 datetime, mirroring the send-tool wire contract. A blank
+    /// string reads as omitted and any other shape reads as malformed, so only
+    /// a decodable fire time coerces; lead and horizon bounds live at booking
+    /// and execution, not at the trust decision.
+    /// - Parameter argumentsJSON: Raw tool arguments document.
+    /// - Returns: True when scheduleAt decodes to a fire time.
+    private static func hasValidScheduleAt(_ argumentsJSON: String) -> Bool {
+        guard let data = argumentsJSON.data(using: .utf8),
+              let probe = try? JSONDecoder().decode(ScheduleAtProbe.self, from: data),
+              let value = probe.scheduleAt
+        else { return false }
+        switch value {
+        case let .number(seconds):
+            return seconds.isFinite
+        case let .string(raw):
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return false }
+            return SharedDateFormatters.isoWithFractionalSecondsDate(from: trimmed) != nil
+                || SharedDateFormatters.isoInternetTimeDate(from: trimmed) != nil
+        }
+    }
+
+    /// Polymorphic scheduleAt probe decoding the two wire shapes without
+    /// failing the whole document on a malformed value.
+    private struct ScheduleAtProbe: Decodable {
+        var scheduleAt: ScheduleAtValue?
+    }
+
+    /// The two accepted fire-time shapes: epoch seconds or ISO-8601 text.
+    private enum ScheduleAtValue: Decodable {
+        case number(Double)
+        case string(String)
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if let seconds = try? container.decode(Double.self) {
+                self = .number(seconds)
+                return
+            }
+            if let raw = try? container.decode(String.self) {
+                self = .string(raw)
+                return
+            }
+            throw DecodingError.dataCorrupted(
+                DecodingError.Context(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "scheduleAt must be an epoch-seconds number or an ISO-8601 datetime"
+                )
+            )
+        }
+    }
 }
 
 // MARK: - Bash Sandbox Copy Wiring

@@ -714,7 +714,8 @@ private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneW
                 containersConfig: config.containers,
                 filesConfig: live.files,
                 ephemeralLedger: sharedLedger,
-                securityConfig: config.security
+                securityConfig: config.security,
+                booking: SchedulerStoreBookingAdapter(store: context.scheduler)
             ) {
                 await reregisterPreservingToggle(tool, on: context)
             }

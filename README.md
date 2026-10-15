@@ -44,7 +44,7 @@ If your assistant ever starts acting unlike itself — an unusual burst of activ
 Ask the same thing twice, and the second answer returns instantly — Rune Weaver keeps answers it produced entirely on its own right on your Mac. Anything that touched a tool, needed your approval, or sent a message is never replayed from memory, and stored answers are cleared the moment your notes, goals, or settings change.
 
 ### Send Later, Exactly as Approved
-Approve an email or message now and schedule it for later. Rune Weaver stores the exact approved message, recipient, and time — then sends precisely those bytes when the moment arrives, checking again that everything is still safe. Change your mind? Cancelling or editing needs a fresh approval, so what goes out is always exactly what you agreed to.
+When the assistant suggests sending something later, your approval books it. Rune Weaver stores the exact approved message, recipient, and time — then sends precisely those words when the moment arrives, checking again that everything is still safe. You can review what is waiting and cancel in Schedules or the Needs Your Action queue. Change your mind? Cancelling or editing needs a fresh approval, so what goes out is always exactly what you agreed to.
 
 ---
 

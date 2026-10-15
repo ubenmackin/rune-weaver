@@ -4,26 +4,36 @@
 // 1. Tool and egress approvals (consequential actions: delete, push, spend, email).
 // 2. The behavior brake card the trusted-tool watchdog files into the same inbox.
 // 3. Goals paused in 'needs_input' status waiting on operator direction.
+// 4. Booked scheduled sends awaiting their fire time (monitoring only: Cancel
+//    plus a Manage shortcut, no approval semantics of any kind).
 //
 // Every quick action on this surface is one-shot: a decision carries the single
 // decide payload with the thisTime tier and no scope, so nothing decided from
 // the dashboard can mint durable trust. Duration and scope editing live in the
-// Approvals Inbox, which every card links to, and there is no batch or bulk
-// control anywhere — each card is decided on its own.
+// Approvals Inbox, which every approval card links to, and there is no batch or
+// bulk control anywhere — each card is decided on its own. Scheduled sends sit
+// outside the attention count entirely: they never move the badge, the subtitle,
+// or the greeting caption, and the all-clear card requires approvals, goals,
+// and sends to all be empty.
 
 import { useCallback, useEffect, useState } from "react";
 import {
   advanceGoal,
+  cancelScheduledSend,
   decideApproval,
   goalNeedsInput,
   isGoalUnplanned,
   listApprovals,
   listGoals,
+  listScheduledSends,
+  parseRunTimestamp,
   respondToQuestion,
   type Goal,
   type ImpactSeverity,
   type PermissionRequest,
+  type ScheduledSend,
 } from "../../api";
+import { formatRelativeIn } from "../../relativeTime";
 import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
 import InlineQuestionCard from "../InlineQuestionCard";
 import BashTierLine from "../BashTierLine";
@@ -32,6 +42,7 @@ import {
   AlertTriangleIcon,
   ApprovalsIcon,
   CheckIcon,
+  ChevronRightIcon,
   CloseIcon,
   MessageSquareIcon,
   TargetIcon,
@@ -40,6 +51,7 @@ import {
 interface NeedsActionQueueProps {
   onOpenSession?: (sessionId: string) => void;
   onOpenGoals?: () => void;
+  onOpenSchedules?: () => void;
   onActionDecided?: () => void;
 }
 
@@ -80,9 +92,16 @@ function orderBySeverityThenFiling(approvals: PermissionRequest[]): PermissionRe
     .map((entry) => entry.req);
 }
 
-// Full duration and scope options live in the Approvals Inbox, so every card
-// routes there. The hash anchor resolves through the shell's existing
-// hashchange router, which keeps the link working without threading a
+// Fire-time ascending so the most imminent send leads the monitoring group.
+function orderSendsByFireTime(sends: ScheduledSend[]): ScheduledSend[] {
+  return [...sends].sort(
+    (a, b) => parseRunTimestamp(a.fireAt).getTime() - parseRunTimestamp(b.fireAt).getTime(),
+  );
+}
+
+// Full duration and scope options live in the Approvals Inbox, so every
+// approval card routes there. The hash anchor resolves through the shell's
+// existing hashchange router, which keeps the link working without threading a
 // navigation callback through every card variant.
 function OpenInboxLink({ req }: { req: PermissionRequest }) {
   return (
@@ -100,20 +119,24 @@ function OpenInboxLink({ req }: { req: PermissionRequest }) {
 export default function NeedsActionQueue({
   onOpenSession,
   onOpenGoals,
+  onOpenSchedules,
   onActionDecided,
 }: NeedsActionQueueProps) {
   const [approvals, setApprovals] = useState<PermissionRequest[]>([]);
   const [blockedGoals, setBlockedGoals] = useState<Goal[]>([]);
+  const [pendingSends, setPendingSends] = useState<ScheduledSend[]>([]);
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [planningGoalId, setPlanningGoalId] = useState<string | null>(null);
+  const [cancellingSendId, setCancellingSendId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fetchActionItems = useCallback(async () => {
     try {
       setError(null);
-      const [approvalsRes, goalsRes] = await Promise.all([
+      const [approvalsRes, goalsRes, sendsRes] = await Promise.all([
         listApprovals(20).catch(() => ({ approvals: [], count: 0 })),
         listGoals().catch(() => ({ goals: [], count: 0 })),
+        listScheduledSends().catch(() => ({ sends: [], count: 0 })),
       ]);
 
       setApprovals(approvalsRes.approvals || []);
@@ -123,6 +146,12 @@ export default function NeedsActionQueue({
         (g) => goalNeedsInput(g.status) || (isGoalUnplanned(g.status) && !g.isPlanning),
       );
       setBlockedGoals(actionGoals);
+      // Settled rows (sent, cancelled, failed) already have their Runs history
+      // entry, so only queued or in-flight sends need monitoring here.
+      const pending = (sendsRes.sends || []).filter(
+        (s) => s.status === "queued" || s.status === "sending",
+      );
+      setPendingSends(pending);
     } catch (err) {
       console.warn("Failed to fetch needs-action items:", err);
     }
@@ -139,6 +168,7 @@ export default function NeedsActionQueue({
         frameType === "approval" ||
         frameType === "approval_decided" ||
         frameType === "goal_updated" ||
+        frameType === "run_started" ||
         frameType === "run_completed"
       ) {
         fetchActionItems();
@@ -205,8 +235,23 @@ export default function NeedsActionQueue({
     }
   }
 
+  async function handleCancelSend(send: ScheduledSend) {
+    try {
+      setCancellingSendId(send.id);
+      await cancelScheduledSend(send.id);
+      await fetchActionItems();
+      onActionDecided?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel scheduled send");
+    } finally {
+      setCancellingSendId(null);
+    }
+  }
+
   const orderedApprovals = orderBySeverityThenFiling(approvals);
+  const orderedSends = orderSendsByFireTime(pendingSends);
   const totalActionsNeeded = orderedApprovals.length + blockedGoals.length;
+  const hasVisibleItems = totalActionsNeeded > 0 || orderedSends.length > 0;
 
   return (
     <section className="dashboard-section needs-action-section" aria-label="Items needing your action">
@@ -232,22 +277,9 @@ export default function NeedsActionQueue({
 
       {error && <div className="notice-banner error">{error}</div>}
 
-      {totalActionsNeeded === 0 ? (
-        <div className="dashboard-empty-card all-clear-card">
-          <span className="all-clear-icon">✨</span>
-          <div className="all-clear-text">
-            <h3 className="all-clear-title">All Caught Up</h3>
-            <p className="all-clear-desc">
-              No pending approvals, high-impact tool requests, or blocked goals.
-            </p>
-          </div>
-        </div>
-      ) : (
+      {hasVisibleItems ? (
         <div className="needs-action-list">
           {/* Pending Tool Approvals & Questions */}
-          {/* A future pending-scheduled branch joins this same ordered list:
-              Cancel routes through cancelScheduledSend and Edit opens the
-              Schedules surface. */}
           {orderedApprovals.map((req) => {
             const isBusy = decidingId === req.id;
             const severity = requestSeverity(req);
@@ -471,6 +503,84 @@ export default function NeedsActionQueue({
               </article>
             );
           })}
+
+          {/* Booked scheduled sends awaiting their fire time. Monitoring only:
+              each card carries its own Cancel and nothing else — no approve or
+              deny pair, no duration or scope control, no bulk action, no
+              collapse, no edit. */}
+          {orderedSends.length > 0 ? (
+            <section className="scheduled-sends-group" aria-label="Scheduled sends">
+              <div className="scheduled-sends-header">
+                <h3 className="scheduled-sends-title">Scheduled sends</h3>
+                <button
+                  type="button"
+                  className="btn-link view-all-link"
+                  onClick={() => onOpenSchedules?.()}
+                >
+                  <span>Manage</span>
+                  <ChevronRightIcon size={13} />
+                </button>
+              </div>
+              <div className="scheduled-sends-list">
+                {orderedSends.map((send) => {
+                  const isCancelling = cancellingSendId === send.id;
+                  const fireDate = parseRunTimestamp(send.fireAt);
+                  const hasFireTime = fireDate.getTime() > 0;
+                  const fireLocal = hasFireTime ? fireDate.toLocaleString() : "Unknown time";
+                  const fireRelative = hasFireTime
+                    ? formatRelativeIn(fireDate.getTime() - Date.now())
+                    : null;
+                  return (
+                    <article key={send.id} className="action-card scheduled-send-card">
+                      <div className="action-card-header">
+                        <div className="action-card-title-row">
+                          <span className={`badge channel-badge channel-${send.channel}`}>
+                            {send.channel === "email" ? "EMAIL" : "MESSAGES"}
+                          </span>
+                          <span className="tool-name-badge">{send.recipient}</span>
+                        </div>
+                      </div>
+
+                      <div className="action-card-body">
+                        {send.subject ? (
+                          <h4 className="goal-action-title">{send.subject}</h4>
+                        ) : null}
+                        <p className="action-card-desc">
+                          <span className="send-fire-time">{fireLocal}</span>
+                          {fireRelative ? (
+                            <span className="send-fire-relative"> ({fireRelative})</span>
+                          ) : null}
+                        </p>
+                      </div>
+
+                      <div className="action-card-buttons">
+                        <button
+                          type="button"
+                          className="btn reject-action-btn cancel-send-btn"
+                          onClick={() => void handleCancelSend(send)}
+                          disabled={isCancelling}
+                          aria-label={`Cancel scheduled send to ${send.recipient}`}
+                        >
+                          <CloseIcon size={15} />
+                          <span>{isCancelling ? "Cancelling…" : "Cancel"}</span>
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          ) : null}
+        </div>
+      ) : (
+        <div className="dashboard-empty-card all-clear-card">
+          <span className="all-clear-icon">✨</span>
+          <div className="all-clear-text">
+            <h3 className="all-clear-title">All Caught Up</h3>
+            <p className="all-clear-desc">
+              No pending approvals, high-impact tool requests, or blocked goals.
+            </p>
+          </div>
         </div>
       )}
     </section>

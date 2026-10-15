@@ -6,10 +6,13 @@
 // other request, a durable denial mints a standing deny rule that outranks
 // every allow, the one-shot tools (engine.continue, question.ask,
 // desktop.resume, behavior.brake) never mint a row even under a durable tier
-// with a non-nil scope, and the per-recipient messages.send invariant refuses
-// any send scope that is not a recipient set or a canonical handle. The same
-// boundary keeps the enrichment-cancel-before-decide ordering, so a late model
-// result never resurrects a decided entry or mints a second row.
+// with a non-nil scope, a scheduled send (email.send or messages.send
+// carrying a wire-valid scheduleAt) coerces the approval to thisTime with no
+// stored rule while a durable denial still mints the recipient deny, and the
+// per-recipient messages.send invariant refuses any send scope that is not a
+// recipient set or a canonical handle. The same boundary keeps the
+// enrichment-cancel-before-decide ordering, so a late model result never
+// resurrects a decided entry or mints a second row.
 // Architectural role: the regression suite for `ApprovalQueue.decide`, the one
 // decision path the chat banner, inbox, dashboard, and WebSocket triage all
 // share, so no surface can drift onto a scope or a durable row the queue never
@@ -314,6 +317,125 @@ struct ApprovalQueueScopeTests {
         #expect(rules.first?.scope == .recipientSet(["+15551234567", "bob@example.com"]))
         let call = ToolInput(toolName: "messages.send", argumentsJSON: #"{"recipient":"+15551234567","text":"Hi"}"#)
         #expect(await gate.checkPermission(toolCall: call, tool: tool) == .allowed)
+    }
+
+    @Test
+    func `scheduled sends coerce durable approvals to thisTime with no stored rule`() async {
+        let fireAt = Date().addingTimeInterval(3600)
+        let epoch = String(fireAt.timeIntervalSince1970)
+        let iso = SharedDateFormatters.isoInternetTimeString(from: fireAt)
+        // Both wire shapes across both send tools and both durable tiers: the
+        // booking is the sole effect, so even a lasting vote resolves one-shot
+        // with no stored row.
+        let cases: [(toolName: String, arguments: String)] = [
+            ("email.send", #"{"account":"volcrypt","to":["a@example.com"],"subject":"Hi","scheduleAt":\#(epoch)}"#),
+            ("email.send", #"{"account":"volcrypt","to":["a@example.com"],"subject":"Hi","scheduleAt":"\#(iso)"}"#),
+            ("messages.send", #"{"recipient":"+15551234567","text":"Hi","scheduleAt":\#(epoch)}"#),
+            ("messages.send", #"{"recipient":"+15551234567","text":"Hi","scheduleAt":"\#(iso)"}"#)
+        ]
+        for duration in [TrustDuration.forever, TrustDuration.oneHour] {
+            for entry in cases {
+                let gate = PermissionGate()
+                let queue = ApprovalQueue(permissionGate: gate)
+                let request = await queue.enqueue(
+                    toolName: entry.toolName,
+                    description: "Scheduled send.",
+                    input: ToolInput(toolName: entry.toolName, argumentsJSON: entry.arguments)
+                )
+                async let decision = await queue.waitForDecision(id: request.id)
+                #expect(await queue.decide(id: request.id, approved: true, duration: duration) == true)
+                let resolved = await decision
+                #expect(resolved.approved == true)
+                #expect(resolved.duration == .thisTime)
+                #expect(await gate.activeRules().isEmpty == true)
+                await queue.clear()
+            }
+        }
+    }
+
+    @Test
+    func `sends without a valid fire time keep existing duration behavior`() async {
+        // Absent, blank, and malformed fire times are immediate sends, so a
+        // durable vote still mints exactly as before.
+        let arguments = [
+            #"{"account":"volcrypt","to":["a@example.com"],"subject":"Hi"}"#,
+            #"{"account":"volcrypt","to":["a@example.com"],"subject":"Hi","scheduleAt":""}"#,
+            #"{"account":"volcrypt","to":["a@example.com"],"subject":"Hi","scheduleAt":"not-a-date"}"#,
+            #"{"account":"volcrypt","to":["a@example.com"],"subject":"Hi","scheduleAt":true}"#,
+            #"{"account":"volcrypt","to":["a@example.com"],"subject":"Hi","scheduleAt":{}}"#
+        ]
+        for args in arguments {
+            let gate = PermissionGate()
+            let queue = ApprovalQueue(permissionGate: gate)
+            let request = await queue.enqueue(
+                toolName: "email.send",
+                description: "Immediate send.",
+                input: ToolInput(toolName: "email.send", argumentsJSON: args)
+            )
+            #expect(await queue.decide(id: request.id, approved: true, duration: .forever) == true)
+            let rules = await gate.activeRules()
+            #expect(rules.count == 1)
+            #expect(rules.first?.toolName == "email.send")
+            #expect(rules.first?.action == .allow)
+            await queue.clear()
+        }
+    }
+
+    @Test
+    func `deny-forever on a scheduled send still mints the standing deny`() async {
+        let fireAt = Date().addingTimeInterval(3600)
+        let epoch = String(fireAt.timeIntervalSince1970)
+        let iso = SharedDateFormatters.isoInternetTimeString(from: fireAt)
+        let cases: [(toolName: String, arguments: String)] = [
+            ("email.send", #"{"account":"volcrypt","to":["a@example.com"],"subject":"Hi","scheduleAt":\#(epoch)}"#),
+            ("messages.send", #"{"recipient":"+1 (555) 123-4567","text":"Hi","scheduleAt":"\#(iso)"}"#)
+        ]
+        for entry in cases {
+            let gate = PermissionGate()
+            let queue = ApprovalQueue(permissionGate: gate)
+            let request = await queue.enqueue(
+                toolName: entry.toolName,
+                description: "Scheduled send.",
+                input: ToolInput(toolName: entry.toolName, argumentsJSON: entry.arguments)
+            )
+            async let decision = await queue.waitForDecision(id: request.id)
+            #expect(await queue.decide(id: request.id, approved: false, duration: .forever) == true)
+            let resolved = await decision
+            #expect(resolved.approved == false)
+            // The waiter observes the coerced one-shot tier while the standing
+            // refusal still lands.
+            #expect(resolved.duration == .thisTime)
+            let rules = await gate.activeRules()
+            #expect(rules.count == 1)
+            #expect(rules.first?.toolName == entry.toolName)
+            #expect(rules.first?.action == .deny)
+            await queue.clear()
+        }
+
+        // The messages refusal keys on the canonical handle, so an immediate
+        // repeat to that handle fails closed on the deny.
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let tool = ScopeProbeTool(name: "messages.send")
+        let scheduled = ToolInput(
+            toolName: "messages.send",
+            argumentsJSON: #"{"recipient":"+1 (555) 123-4567","text":"Hi","scheduleAt":\#(epoch)}"#
+        )
+        let request = await queue.enqueue(
+            toolName: "messages.send",
+            description: "Scheduled send.",
+            input: scheduled
+        )
+        #expect(await queue.decide(id: request.id, approved: false, duration: .forever) == true)
+        let rules = await gate.activeRules()
+        #expect(rules.count == 1)
+        #expect(rules.first?.scope == .exactTarget("+15551234567"))
+        let repeatCall = ToolInput(toolName: "messages.send", argumentsJSON: #"{"recipient":"+15551234567","text":"Hi"}"#)
+        guard case .denied = await gate.checkPermission(toolCall: repeatCall, tool: tool) else {
+            Issue.record("Expected the deny rule to refuse the repeat send")
+            return
+        }
+        await queue.clear()
     }
 
     @Test

@@ -424,6 +424,7 @@ export default function DashboardView({
           <NeedsActionQueue
             onOpenSession={handleOpenSession}
             onOpenGoals={() => onSelectTab("goals")}
+            onOpenSchedules={() => onSelectTab("schedules")}
           />
 
           <WorkingNowStream

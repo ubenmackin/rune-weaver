@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
+  cancelScheduledSend,
   createJob,
   DEFAULT_SCHEDULER_MAX_TOOL_ITERATIONS,
   deleteJob,
@@ -12,6 +13,7 @@ import {
   isActiveRunStatus,
   listJobs,
   listRuns,
+  listScheduledSends,
   RUN_LOG_POLL_LIMIT,
   RUN_POLL_INTERVAL_MS,
   runJobNow,
@@ -22,9 +24,12 @@ import {
   updateJob,
   type NewSchedulerJobInput,
   type RunLogEntry,
+  type ScheduledSend,
   type SchedulerJob,
   type UpdateSchedulerJobInput,
 } from "../api";
+import { useSharedWebSocket, type WSIncomingFrame } from "../hooks/useSharedWebSocket";
+import { formatRelativeAgo, formatRelativeIn } from "../relativeTime";
 import RunDetailModal from "./RunDetailModal";
 import ScheduleWizardModal from "./ScheduleWizardModal";
 import Modal from "./Modal";
@@ -66,6 +71,34 @@ export default function SchedulerManager() {
   const [loadingRunsJobId, setLoadingRunsJobId] = useState<string | null>(null);
   const [selectedRun, setSelectedRun] = useState<RunLogEntry | null>(null);
 
+  // Booked delayed sends pending their fire time. Terminal rows settle in run
+  // history, so only queued/sending rows stay visible here.
+  const [sends, setSends] = useState<ScheduledSend[]>([]);
+  const [sendsLoading, setSendsLoading] = useState(false);
+  const [cancellingSendId, setCancellingSendId] = useState<string | null>(null);
+
+  const refreshSends = useCallback(async () => {
+    setSendsLoading(true);
+    try {
+      const response = await listScheduledSends();
+      const pending = (response.sends || [])
+        .filter((send) => send.status === "queued" || send.status === "sending")
+        .sort((a, b) => {
+          const aMs = new Date(a.fireAt).getTime();
+          const bMs = new Date(b.fireAt).getTime();
+          if (!Number.isFinite(aMs) && !Number.isFinite(bMs)) return 0;
+          if (!Number.isFinite(aMs)) return 1;
+          if (!Number.isFinite(bMs)) return -1;
+          return aMs - bMs;
+        });
+      setSends(pending);
+    } catch {
+      // Fail-soft like the jobs list: keep the retained rows on a bad read.
+    } finally {
+      setSendsLoading(false);
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -77,7 +110,8 @@ export default function SchedulerManager() {
     } finally {
       setLoading(false);
     }
-  }, []);
+    void refreshSends();
+  }, [refreshSends]);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,6 +158,35 @@ export default function SchedulerManager() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    void refreshSends();
+  }, [refreshSends]);
+
+  const handleSendsFrame = useCallback(
+    (frame: WSIncomingFrame) => {
+      if ((frame as { type?: string }).type === "run_completed") {
+        void refreshSends();
+      }
+    },
+    [refreshSends],
+  );
+
+  const handleSendsSocketOpen = useCallback(() => {
+    void refreshSends();
+  }, [refreshSends]);
+
+  useSharedWebSocket(handleSendsFrame, undefined, handleSendsSocketOpen);
+
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        void refreshSends();
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [refreshSends]);
 
   // Poll while a job is running to detect completion and refresh runs
   useEffect(() => {
@@ -204,6 +267,21 @@ export default function SchedulerManager() {
 
   function cancelDelete() {
     setPendingDelete(null);
+  }
+
+  async function handleCancelSend(send: ScheduledSend) {
+    setCancellingSendId(send.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await cancelScheduledSend(send.id);
+      setNotice(`Cancelled send to ${send.recipient}`);
+      await refreshSends();
+    } catch (failure) {
+      setError(failure instanceof ApiError ? failure.message : "Cancel failed");
+    } finally {
+      setCancellingSendId(null);
+    }
   }
 
   async function handleRunNow(job: SchedulerJob) {
@@ -568,6 +646,81 @@ export default function SchedulerManager() {
             </div>
           );
         })}
+      </div>
+
+      <div className="scheduled-sends-section" aria-label="Scheduled sends">
+        <div className="panel-header-row">
+          <div>
+            <h2>Scheduled sends</h2>
+            <p className="muted text-sm">
+              Pending delayed sends booked through agent approvals. To change a
+              send, cancel it here and ask the agent in chat to re-schedule it.
+            </p>
+          </div>
+          <span className="muted text-sm">
+            {sendsLoading ? "Loading…" : `${sends.length} pending`}
+          </span>
+        </div>
+
+        {sends.length === 0 && !sendsLoading ? (
+          <p className="muted text-sm">No scheduled sends</p>
+        ) : null}
+
+        <div className="scheduled-sends-list">
+          {sends.map((send) => {
+            const fireMs = new Date(send.fireAt).getTime();
+            const hasFireTime = Number.isFinite(fireMs);
+            const relative = hasFireTime
+              ? fireMs - Date.now() >= 0
+                ? formatRelativeIn(fireMs - Date.now())
+                : `${formatRelativeAgo(Date.now() - fireMs)} (overdue)`
+              : null;
+            return (
+              <div key={send.id} className="schedule-card scheduled-send-row">
+                <div className="schedule-card-top">
+                  <div className="schedule-card-identity">
+                    <div className="schedule-card-title-row">
+                      {send.channel === "email" ? (
+                        <span className="trigger-badge poll email">
+                          <MailIcon size={12} />
+                          <span>Email</span>
+                        </span>
+                      ) : (
+                        <span className="trigger-badge poll messages">
+                          <ChatIcon size={12} />
+                          <span>Messages</span>
+                        </span>
+                      )}
+                      <strong className="schedule-card-name">{send.recipient}</strong>
+                      <span className="trigger-badge budget">{send.status}</span>
+                    </div>
+                    <div className="schedule-card-details muted text-xs">
+                      {hasFireTime ? (
+                        <span>
+                          {new Date(send.fireAt).toLocaleString()}
+                          {relative ? ` · ${relative}` : ""}
+                        </span>
+                      ) : (
+                        <span>{send.fireAt}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="schedule-card-actions">
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => void handleCancelSend(send)}
+                      disabled={cancellingSendId === send.id}
+                      aria-label={`Cancel send to ${send.recipient}`}
+                    >
+                      {cancellingSendId === send.id ? "Cancelling…" : "Cancel"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {/* Creation / Edit Wizard Modal */}

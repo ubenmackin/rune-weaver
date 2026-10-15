@@ -809,6 +809,10 @@ extension ServerContext {
         /// caller did not wire one (the fanout.run tool then stays
         /// unregistered, mirroring the goal-tools invariant).
         let fanOutEngine: FanOutEngine?
+        /// Booking seam storing approved scheduled sends for the send tools, or
+        /// nil when no firing worker owns the rows (direct-core contexts keep
+        /// scheduleAt failing closed with guidance).
+        let scheduledSendBooking: (any ScheduledSendBooking)?
         /// The one policy store for this process, shared by the supervisor
         /// built for `api.request` and the settings policy routes.
         let policyStore: PolicyStore
@@ -845,6 +849,7 @@ extension ServerContext {
             goalConversations: args.goals.conversations,
             goalsConfig: args.configs.goals,
             goalUpdatedNotifier: args.goalUpdatedNotifier,
+            scheduledSendBooking: args.scheduledSendBooking,
             stagedFilesStore: args.stagedFiles,
             supersededReviewNotifier: args.supersededReviewNotifier,
             fanOutEngine: args.fanOutEngine,
@@ -1126,7 +1131,9 @@ extension ServerContext {
             goalUpdatedNotifier: { [hub = services.durable.hub] goal, steps in
                 await hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
             },
-            fanOutEngine: engines.fanOutEngine, policyStore: resolvedPolicyStore,
+            fanOutEngine: engines.fanOutEngine,
+            scheduledSendBooking: SchedulerStoreBookingAdapter(store: services.durable.scheduler),
+            policyStore: resolvedPolicyStore,
             egressSupervisor: egressSupervisor
         ))
         let context = ServerContext(
