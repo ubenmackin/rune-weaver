@@ -1,7 +1,6 @@
 // Rune Weaver Tools — Seatbelt-confined staging for email attachments.
 
 import Foundation
-import RuneWeaverCore
 
 extension EmailAttachmentTool {
     /// Resolves the Seatbelt-confined isolated-temp destination for a download.

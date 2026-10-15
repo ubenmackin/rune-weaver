@@ -46,14 +46,6 @@ public struct ArrSettingsUpdate: Content, Equatable {
         self.defaultQualityProfile = config.defaultQualityProfile
         self.defaultRootFolder = config.defaultRootFolder
     }
-
-    private enum CodingKeys: String, CodingKey {
-        case enabled
-        case url
-        case apiKeyEnv
-        case defaultQualityProfile
-        case defaultRootFolder
-    }
 }
 
 /// Partial Sonarr patch, sharing the Arr shape so the two services cannot drift.

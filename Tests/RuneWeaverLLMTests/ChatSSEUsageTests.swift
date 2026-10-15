@@ -1,6 +1,5 @@
 // Rune Weaver LLM Tests — Chat SSE usage-only tail parsing tests.
 import Foundation
-@testable import RuneWeaverCore
 @testable import RuneWeaverLLM
 import Testing
 

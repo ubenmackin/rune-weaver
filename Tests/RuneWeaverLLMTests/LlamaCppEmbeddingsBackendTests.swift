@@ -161,8 +161,12 @@ struct LlamaCppEmbeddingsBackendTests {
         let data = Data(count: 1024)
         try data.write(to: testFile)
 
+        // The shared supervisor is disabled so the size guard rejects the file
+        // itself; a live llama-server elsewhere on the shared socket must never
+        // turn this rejection into a launch failure.
         let backend = LlamaCppEmbeddingsBackend(
             socketPath: "/tmp/mock.sock",
+            supervisor: nil,
             maxImageBytes: 512
         )
 

@@ -47,12 +47,6 @@ public struct FanOutSettingsUpdate: Content, Sendable, Equatable {
         self.workerTimeoutSeconds = config.workerTimeoutSeconds
         self.fullTools = config.fullTools
     }
-
-    private enum CodingKeys: String, CodingKey {
-        case maxWorkers
-        case workerTimeoutSeconds
-        case fullTools
-    }
 }
 
 extension UpdateSettingsRequest {

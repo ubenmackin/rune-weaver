@@ -54,13 +54,6 @@ public final class SettingsWindowController: NSObject {
         NSApp.activate()
     }
 
-    /// Synchronous convenience overload that delegates to async `show`.
-    public func show(url: URL) {
-        Task { [weak self] in
-            await self?.show(url: url, sessionToken: nil)
-        }
-    }
-
     private func getOrCreateWindow() -> NSWindow {
         if let existing = window {
             return existing

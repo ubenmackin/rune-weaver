@@ -7,7 +7,6 @@
 // plus fail-fast plus backstop semantics while delegating each stage here.
 
 import Foundation
-import RuneWeaverCore
 
 extension SearXNGEnsurer {
     /// Consecutive-5xx streak across watch ticks.

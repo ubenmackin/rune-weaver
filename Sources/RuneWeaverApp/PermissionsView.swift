@@ -15,16 +15,11 @@ import AppKit
 import SwiftUI
 
 /// Checklist of macOS permissions with live per-row affordances.
-public struct PermissionsView: View {
+struct PermissionsView: View {
     @Bindable var viewModel: PermissionsViewModel
     let onDone: () -> Void
 
-    public init(viewModel: PermissionsViewModel, onDone: @escaping () -> Void) {
-        self.viewModel = viewModel
-        self.onDone = onDone
-    }
-
-    public var body: some View {
+    var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Permissions")
                 .font(.headline)

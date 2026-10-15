@@ -210,13 +210,13 @@ extension PermissionStatus {
 /// one interpretation: a TCC denial always reads denied, an untouched prompt
 /// always reads notDetermined, and anything unrecognized fails closed
 /// rather than guessing granted.
-public enum PermissionStatusMapping {
+enum PermissionStatusMapping {
     /// Interprets the Contacts authorization state.
     ///
     /// Limited access still withholds arbitrary lookups the send path needs,
     /// so it reads denied rather than granted; an unknown future case reads
     /// denied so the window never claims access it has not verified.
-    public static func contacts(_ status: CNAuthorizationStatus) -> PermissionStatus {
+    static func contacts(_ status: CNAuthorizationStatus) -> PermissionStatus {
         switch status {
         case .authorized:
             .granted
@@ -236,7 +236,7 @@ public enum PermissionStatusMapping {
     /// unlocks the search the event and task paths need, so write-only still
     /// reads denied rather than granted; an unknown future case reads
     /// denied so the window never claims access it has not verified.
-    public static func eventKit(_ status: EKAuthorizationStatus) -> PermissionStatus {
+    static func eventKit(_ status: EKAuthorizationStatus) -> PermissionStatus {
         switch status {
         case .fullAccess:
             .granted
@@ -254,7 +254,7 @@ public enum PermissionStatusMapping {
     ///
     /// Thin alias over the shared EventKit reading so the call site names the
     /// capability while the interpretation stays in one place.
-    public static func calendars(_ status: EKAuthorizationStatus) -> PermissionStatus {
+    static func calendars(_ status: EKAuthorizationStatus) -> PermissionStatus {
         eventKit(status)
     }
 
@@ -262,7 +262,7 @@ public enum PermissionStatusMapping {
     ///
     /// Thin alias over the shared EventKit reading so the call site names the
     /// capability while the interpretation stays in one place.
-    public static func reminders(_ status: EKAuthorizationStatus) -> PermissionStatus {
+    static func reminders(_ status: EKAuthorizationStatus) -> PermissionStatus {
         eventKit(status)
     }
 
@@ -275,7 +275,7 @@ public enum PermissionStatusMapping {
     /// saw a dialog, while the prompting Enable variant stays the repair
     /// path: it re-invokes the system prompt when still answerable and the
     /// owner can still reach the pane by hand when the system suppresses it.
-    public static func accessibility(trusted: Bool) -> PermissionStatus {
+    static func accessibility(trusted: Bool) -> PermissionStatus {
         trusted ? .granted : .notDetermined
     }
 
@@ -287,7 +287,7 @@ public enum PermissionStatusMapping {
     /// Accessibility: first-run owners keep the prompting path instead of a
     /// premature Settings detour, and the prompting variant stays the repair
     /// path when the grant is still answerable.
-    public static func screenRecording(hasAccess: Bool) -> PermissionStatus {
+    static func screenRecording(hasAccess: Bool) -> PermissionStatus {
         hasAccess ? .granted : .notDetermined
     }
 
@@ -296,7 +296,7 @@ public enum PermissionStatusMapping {
     /// Success proves readability; an explicit permission denial proves the
     /// grant is missing; any other failure (missing database, unreadable
     /// snapshot) is environmental, so it reads unavailable rather than denied.
-    public static func fullDiskAccess(result: Result<Void, Error>) -> PermissionStatus {
+    static func fullDiskAccess(result: Result<Void, Error>) -> PermissionStatus {
         switch result {
         case .success:
             return .granted
@@ -315,7 +315,7 @@ public enum PermissionStatusMapping {
     /// The target-not-running shape reads deferred because the system will
     /// ask on first send; anything outside the four documented outcomes reads
     /// unavailable so an OS change fails closed instead of claiming granted.
-    public static func automation(_ status: OSStatus) -> PermissionStatus {
+    static func automation(_ status: OSStatus) -> PermissionStatus {
         switch status {
         case noErr:
             .granted
@@ -336,8 +336,8 @@ public enum PermissionStatusMapping {
 /// Granted and deferred rows need no action (deferred resolves on first
 /// send); an unanswered prompt offers Enable; an explicit denial or an
 /// environmental failure points at Settings where the owner can repair it.
-public enum PermissionActionsMapping {
-    public static func action(for status: PermissionStatus) -> PermissionAction {
+enum PermissionActionsMapping {
+    static func action(for status: PermissionStatus) -> PermissionAction {
         switch status {
         case .granted:
             .none

@@ -54,8 +54,8 @@ public struct PermissionsOnboardingStore {
 /// Auto-open requires both that no owner token is needed and that onboarding
 /// has not completed: a needed token means token setup owns this launch,
 /// and a completed flag means the owner has already seen the guidance.
-public enum PermissionsOnboarding {
-    public static func shouldAutoOpen(needsOwnerToken: Bool, hasCompleted: Bool) -> Bool {
+enum PermissionsOnboarding {
+    static func shouldAutoOpen(needsOwnerToken: Bool, hasCompleted: Bool) -> Bool {
         !needsOwnerToken && !hasCompleted
     }
 }

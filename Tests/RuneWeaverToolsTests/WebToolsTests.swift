@@ -12,14 +12,6 @@ private enum WebTestSupport {
         func ensure(browser _: BrowserConfig) async throws {}
     }
 
-    /// Ensurer stub that fails closed with guidance.
-    struct FailEnsurer: SearXNGEnsuring, Sendable {
-        let message: String
-        func ensure(browser _: BrowserConfig) async throws {
-            throw NSError(domain: "RuneWeaverSearXNG", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
-        }
-    }
-
     /// Search transport returning one canned body with a 200 response.
     struct StubSearchTransport: WebSearchTransport, Sendable {
         let body: Data
@@ -96,20 +88,6 @@ private enum WebTestSupport {
           {"title": "No URL", "url": "", "content": "dropped"}
         ]}
         """.utf8)
-    }
-
-    /// Publishes canned public proof so fetch guards stay hermetic without touching the network.
-    /// Production still fails closed on real DNS; the stub clears after each test so proof never leaks.
-    /// Task-scoped binding keeps parallel suites isolated: the process-global
-    /// holder is shared, so publishing here could redirect another suite's
-    /// lookups while a concurrent clear could drop this suite's proof mid-test.
-    static func stubPublicDNS() {
-        ApiSSRFGuard.testDNSResolver = { _ in ["93.184.216.34"] }
-    }
-
-    /// Restores system resolution after a stubbed test.
-    static func clearDNS() {
-        ApiSSRFGuard.testDNSResolver = nil
     }
 
     /// Runs `body` with canned public proof bound to the current task.

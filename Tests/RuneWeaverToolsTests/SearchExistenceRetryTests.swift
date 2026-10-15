@@ -11,7 +11,6 @@
 // script.
 
 import Foundation
-@testable import RuneWeaverCore
 @testable import RuneWeaverTools
 import Testing
 

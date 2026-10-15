@@ -2,8 +2,6 @@
 
 import Foundation
 @testable import RuneWeaverApp
-import RuneWeaverCore
-import RuneWeaverServer
 import Testing
 
 @Suite("AppModel dashboardURL resolution")
