@@ -198,85 +198,93 @@ public struct MediaTextExtractor: Sendable {
             guard SFSpeechRecognizer.authorizationStatus() == .authorized else {
                 return ""
             }
-            guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else {
-                return ""
-            }
             try Task.checkCancellation()
 
-            final class RecognitionHolder: @unchecked Sendable {
-                let lock = NSLock()
-                var task: SFSpeechRecognitionTask?
-                var pendingCancel = false
-            }
-            let holder = RecognitionHolder()
-
+            let coordinator = AudioTranscriptionCoordinator()
             return try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-                    let resumeLock = NSLock()
-                    var didResume = false
-                    func resumeOnceReturning(_ value: String) {
-                        resumeLock.lock()
-                        guard !didResume else {
-                            resumeLock.unlock()
-                            return
-                        }
-                        didResume = true
-                        resumeLock.unlock()
-                        continuation.resume(returning: value)
-                    }
-                    func resumeOnceThrowing(_ error: Error) {
-                        resumeLock.lock()
-                        guard !didResume else {
-                            resumeLock.unlock()
-                            return
-                        }
-                        didResume = true
-                        resumeLock.unlock()
-                        continuation.resume(throwing: error)
-                    }
-                    if Task.isCancelled {
-                        resumeOnceThrowing(CancellationError())
-                        return
-                    }
-                    let request = SFSpeechURLRecognitionRequest(url: fileURL)
-                    request.shouldReportPartialResults = false
-                    let recognitionTask = recognizer.recognitionTask(with: request) { result, error in
-                        if Task.isCancelled {
-                            resumeOnceThrowing(CancellationError())
-                            return
-                        }
-                        if let error {
-                            // Failures degrade to empty string rather than crashing the indexer
-                            RuneWeaverLog.stores.debug("MediaTextExtractor: audio transcription failed: \(error.localizedDescription)")
-                            resumeOnceReturning("")
-                            return
-                        }
-                        if let result {
-                            if result.isFinal {
-                                let transcript = result.bestTranscription.formattedString
-                                resumeOnceReturning(transcript)
-                            }
-                            return
-                        }
-                        resumeOnceReturning("")
-                    }
-                    holder.lock.lock()
-                    holder.task = recognitionTask
-                    let shouldCancelNow = holder.pendingCancel || Task.isCancelled
-                    holder.lock.unlock()
-                    if shouldCancelNow {
-                        recognitionTask.cancel()
-                    }
-                }
+                try await coordinator.start(fileURL: fileURL)
             } onCancel: {
-                holder.lock.lock()
-                holder.pendingCancel = true
-                let task = holder.task
-                holder.lock.unlock()
-                task?.cancel()
+                Task {
+                    await coordinator.cancel()
+                }
             }
         #else
             return ""
         #endif
     }
 }
+
+#if canImport(Speech)
+    private actor AudioTranscriptionCoordinator {
+        private var recognitionTask: SFSpeechRecognitionTask?
+        private var isCancelled = false
+
+        func start(fileURL: URL) async throws -> String {
+            guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else {
+                return ""
+            }
+            try Task.checkCancellation()
+
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+                let didResume = OSAllocatedUnfairLock(initialState: false)
+                func resumeOnceReturning(_ value: String) {
+                    let alreadyResumed = didResume.withLock { resumed in
+                        if resumed {
+                            return true
+                        }
+                        resumed = true
+                        return false
+                    }
+                    guard !alreadyResumed else { return }
+                    continuation.resume(returning: value)
+                }
+                func resumeOnceThrowing(_ error: Error) {
+                    let alreadyResumed = didResume.withLock { resumed in
+                        if resumed {
+                            return true
+                        }
+                        resumed = true
+                        return false
+                    }
+                    guard !alreadyResumed else { return }
+                    continuation.resume(throwing: error)
+                }
+                if Task.isCancelled {
+                    resumeOnceThrowing(CancellationError())
+                    return
+                }
+                let request = SFSpeechURLRecognitionRequest(url: fileURL)
+                request.shouldReportPartialResults = false
+                let task = recognizer.recognitionTask(with: request) { result, error in
+                    if Task.isCancelled {
+                        resumeOnceThrowing(CancellationError())
+                        return
+                    }
+                    if let error {
+                        // Failures degrade to empty string rather than crashing the indexer
+                        RuneWeaverLog.stores.debug("MediaTextExtractor: audio transcription failed: \(error.localizedDescription)")
+                        resumeOnceReturning("")
+                        return
+                    }
+                    if let result {
+                        if result.isFinal {
+                            let transcript = result.bestTranscription.formattedString
+                            resumeOnceReturning(transcript)
+                        }
+                        return
+                    }
+                    resumeOnceReturning("")
+                }
+                self.recognitionTask = task
+                if self.isCancelled || Task.isCancelled {
+                    task.cancel()
+                }
+            }
+        }
+
+        func cancel() {
+            isCancelled = true
+            recognitionTask?.cancel()
+        }
+    }
+#endif

@@ -525,7 +525,9 @@ extension FilesIndexer {
                 cancelBox.set()
                 return (nil, false)
             } catch {
-                // Handled in embedImageVisualVector
+                RuneWeaverLog.stores.debug(
+                    "FilesIndexerSequential: visual embedding skipped; falling back to text chunks: \(error.localizedDescription)"
+                )
             }
         }
 
@@ -585,7 +587,9 @@ extension FilesIndexer {
                     cancelBox.set()
                     return (nil, false)
                 } catch {
-                    // Handled in embedImageVisualVector
+                    RuneWeaverLog.stores.debug(
+                        "FilesIndexerSequential: pooled visual embedding skipped; falling back to text chunks: \(error.localizedDescription)"
+                    )
                 }
             }
 

@@ -26,9 +26,9 @@ public enum IndexPhase: String, Sendable, Equatable, CaseIterable {
 
 /// Indexable corpora the coordinator sequences, in canonical run order.
 ///
-/// Declared separately from ``IndexSource`` because the vision describe pass is
-/// not a document origin — it enriches documents already written by another
-/// source — yet it still needs a stable position in the run order.
+/// Declared separately from ``IndexSource`` (the persisted corpus origin) so
+/// stage ordering can evolve independently of the storage spelling; the two
+/// currently share the same five kinds.
 public enum IndexSourceKind: String, Sendable, Hashable, CaseIterable {
     /// Local filesystem documents.
     case files
@@ -517,5 +517,33 @@ public struct IndexClosureStage: IndexSourceStage {
     /// Invokes the cancellation hook.
     public func cancel() async {
         await onCancel()
+    }
+}
+
+/// Immediate outcome of initiating an index run asynchronously via ``IndexCoordinator/start(trigger:)``.
+public enum IndexStartOutcome: Sendable, Equatable {
+    /// The index pass was successfully spawned in the background. The child
+    /// task rides the payload so an awaiter joins the exact pass it started
+    /// without re-reading coordinator state across an actor hop.
+    case started(sessionID: UUID, startedAt: Date, task: Task<IndexRunSummary, Never>)
+    /// A pass was already running; duplicate run was skipped.
+    case alreadyRunning
+    /// Indexing is disabled in configuration; pass was skipped.
+    case disabled(reason: String)
+
+    /// Equality compares the identity fields only: the spawned task is an
+    /// uncomparable handle, not a value, so two started outcomes match when
+    /// their session and start instant match regardless of task identity.
+    public static func == (lhs: IndexStartOutcome, rhs: IndexStartOutcome) -> Bool {
+        switch (lhs, rhs) {
+        case let (.started(lhsSession, lhsStartedAt, _), .started(rhsSession, rhsStartedAt, _)):
+            lhsSession == rhsSession && lhsStartedAt == rhsStartedAt
+        case (.alreadyRunning, .alreadyRunning):
+            true
+        case let (.disabled(lhsReason), .disabled(rhsReason)):
+            lhsReason == rhsReason
+        default:
+            false
+        }
     }
 }

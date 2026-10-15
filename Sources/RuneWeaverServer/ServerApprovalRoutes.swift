@@ -15,6 +15,26 @@ import Foundation
 import RuneWeaverCore
 import Vapor
 
+/// The client-facing subset of the decision-log surface vocabulary
+/// (ARCHITECTURE.md "Approvals — Decision Contract, Surfaces, Decision Log"): the chat inline banner, the dashboard quick-action
+/// card, and the Inbox card are the only surfaces a REST decide caller can
+/// name. `websocket` and `question` arrive solely through trusted internal
+/// paths — the WS triage handler and the question respond route — and never
+/// through this boundary, so they are deliberately absent here.
+private let clientDecisionSurfaces: Set<String> = ["chat", "inbox", "dashboard"]
+
+/// Normalizes a client-supplied surface tag to the closed vocabulary before
+/// it reaches the decision log: the three client-facing surfaces pass
+/// through and anything else — hostile, drifted, over-long, or absent —
+/// records "unknown", so the durable `surface` column only ever carries a
+/// documented value without failing the decision it tags.
+/// - Parameter raw: The caller-supplied surface tag, if any.
+/// - Returns: The normalized tag for the audit row.
+private func normalizedDecisionSurface(_ raw: String?) -> String {
+    guard let raw, clientDecisionSurfaces.contains(raw) else { return "unknown" }
+    return raw
+}
+
 /// Outcome of one approval decision applied through the shared contract.
 enum ApprovalDecisionOutcome: Equatable {
     /// The decision resolved; carries the effective approval verdict.
@@ -42,19 +62,22 @@ struct ApprovalDecisionInput: Sendable {
     var duration: TrustDuration
     var scope: AccessScope?
     var pending: PermissionRequest?
+    var surface: String
 
     init(
         id: UUID,
         approved: Bool,
         duration: TrustDuration,
         scope: AccessScope? = nil,
-        pending: PermissionRequest? = nil
+        pending: PermissionRequest? = nil,
+        surface: String = "unknown"
     ) {
         self.id = id
         self.approved = approved
         self.duration = duration
         self.scope = scope
         self.pending = pending
+        self.surface = surface
     }
 }
 
@@ -119,6 +142,18 @@ func applyApprovalDecision(
         scope: resolvedScope
     )
     guard resolved else { return .unknown }
+    // Recorded exactly once through the shared contract. The store never
+    // throws by design, so the audit trail cannot block the decision.
+    await context.approvalDecisions.append(ApprovalDecisionEntry(
+        toolName: pending.toolName,
+        scope: resolvedScope,
+        allowed: effectiveApproved,
+        duration: input.duration.rawValue,
+        surface: input.surface,
+        sessionID: pending.sessionID?.uuidString,
+        displayTarget: pending.displayTarget,
+        decidedAt: Date()
+    ))
     // The brake clears only on an explicit owner Resume: approving the brake
     // card releases every parked turn with fresh counters, while denying it
     // leaves the park exactly as the owner left it. Every transport reaches
@@ -239,6 +274,7 @@ func registerApprovalRoutes(_ app: Application) {
 
     registerAccessRulesRoutes(app)
     registerQuestionResponseRoute(app)
+    registerApprovalHistoryRoutes(app)
 
     app
         .post(PathComponent.constant(ServerPaths.approvals), PathComponent.parameter("id"),
@@ -262,7 +298,11 @@ func registerApprovalRoutes(_ app: Application) {
                     approved: body.approved,
                     duration: body.resolvedDuration,
                     scope: body.resolvedScope,
-                    pending: pending
+                    pending: pending,
+                    // Entry-boundary normalization: a hostile or drifted
+                    // client tag never reaches the durable audit row; only
+                    // the closed client-facing vocabulary passes through.
+                    surface: normalizedDecisionSurface(body.surface)
                 ),
                 pulse: req.application.systemHealthSnapshot,
                 context: context,
@@ -341,6 +381,16 @@ private func registerQuestionResponseRoute(_ app: Application) {
             guard resolved else {
                 throw Abort(.notFound, reason: "Unknown approval \(raw)")
             }
+            // The store never throws by design, so recording cannot fail the response.
+            await context.approvalDecisions.append(ApprovalDecisionEntry(
+                toolName: pending.toolName,
+                allowed: approved,
+                duration: TrustDuration.thisTime.rawValue,
+                surface: "question",
+                sessionID: pending.sessionID?.uuidString,
+                displayTarget: pending.displayTarget,
+                decidedAt: Date()
+            ))
             if pending.sessionID != nil {
                 Task {
                     await resumeNarratedApproval(
@@ -355,4 +405,57 @@ private func registerQuestionResponseRoute(_ app: Application) {
             }
             return ApprovalDecisionResponse(id: id, approved: approved, duration: .thisTime)
         }
+}
+
+/// Registers the decision history list plus clear routes.
+/// - Parameter app: Application receiving the routes.
+private func registerApprovalHistoryRoutes(_ app: Application) {
+    app.get(
+        PathComponent.constant(ServerPaths.approvals),
+        PathComponent.constant(ServerPaths.history)
+    ) { req async throws -> ApprovalHistoryResponse in
+        let limit = try parseQueryLimit(req, default: 50, min: 1, max: 100)
+        let tool = req.query[String.self, at: "tool"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let toolFilter = (tool?.isEmpty == false) ? tool : nil
+        let actionFilter: Bool? = try {
+            guard let raw = req.query[String.self, at: "action"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty
+            else {
+                return nil
+            }
+            if raw == "allowed" {
+                return true
+            }
+            if raw == "denied" {
+                return false
+            }
+            throw Abort(.badRequest, reason: "action must be allowed or denied")
+        }()
+        let context = req.application.runeWeaver
+        // The filters ride the store's SELECT as WHERE clauses, so the page
+        // and the total count reflect the query directly instead of slicing
+        // an unbounded window in memory.
+        let entries = try await context.approvalDecisions.list(
+            limit: limit,
+            offset: 0,
+            toolName: toolFilter,
+            allowed: actionFilter
+        )
+        let total = try await context.approvalDecisions.count(
+            toolName: toolFilter,
+            allowed: actionFilter
+        )
+        return ApprovalHistoryResponse(
+            entries: entries.map(ApprovalHistoryEntry.init),
+            count: total
+        )
+    }
+
+    app.delete(
+        PathComponent.constant(ServerPaths.approvals),
+        PathComponent.constant(ServerPaths.history)
+    ) { req async throws -> HTTPStatus in
+        await req.application.runeWeaver.approvalDecisions.clearAll()
+        return .noContent
+    }
 }

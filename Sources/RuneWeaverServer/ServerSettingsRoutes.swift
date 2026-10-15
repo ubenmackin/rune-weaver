@@ -381,10 +381,7 @@ private func serverBindHasOwnerToken(config: RuneWeaverConfig) async -> Bool {
 /// Live-reloads the active LLM provider into the live orchestrator, goal engine, fanout, and context without a restart.
 ///
 /// Fails closed when the persisted `[llm]` section selects no provider, so a save that disables
-/// every entry reports a bad request instead of success with stale engines. The index vision stage
-/// keeps the provider captured at boot until the next index rebuild; the boot wiring supplies an
-/// empty backlog so the stale adapter never describes, and the next enable or `db_path` rebuild
-/// resolves the fresh serving provider.
+/// every entry reports a bad request instead of success with stale engines.
 /// - Parameters:
 ///   - config: Persisted config carrying the `[llm]` section.
 ///   - context: Live server context receiving the swap.
@@ -819,7 +816,7 @@ func reconcileLiveIndexPolicy(savedConfig: RuneWeaverConfig, context: ServerCont
 /// along into the reconcile so the PUT probes a new path once.
 /// - Parameters:
 ///   - savedConfig: Merged config about to be persisted.
-///   - context: Live server context supplying the embedder and vision provider.
+///   - context: Live server context supplying the shared embedder.
 ///   - patchPresent: Whether the request carries an `index` patch.
 /// - Returns: Probed components for a new path, or nil when no probe ran.
 /// - Throws: `Abort(.badRequest)` when the new `db_path` cannot back a store.
@@ -847,7 +844,7 @@ private func preflightLiveIndexPolicy(savedConfig: RuneWeaverConfig, context: Se
 /// to a fresh inline probe.
 /// - Parameters:
 ///   - savedConfig: Persisted config to build from.
-///   - context: Live context supplying the shared embedder and vision provider.
+///   - context: Live context supplying the shared embedder.
 ///   - prebuilt: Components probed by the pre-save preflight, if any.
 /// - Returns: The prebuilt components when their path matches, else freshly probed ones.
 private func reusedOrProbedIndexComponents(savedConfig: RuneWeaverConfig, context: ServerContext, prebuilt: ServerIndexComponents?) async throws -> ServerIndexComponents {
@@ -887,7 +884,7 @@ private func cancelAndJoinIndexRun(_ coordinator: IndexCoordinator) async throws
 /// settings-enabled run lands where the status probe reads it.
 /// - Parameters:
 ///   - savedConfig: Persisted config to build from.
-///   - context: Live context supplying the shared embedder and vision provider.
+///   - context: Live context supplying the shared embedder.
 /// - Returns: Probed store plus coordinator.
 /// - Throws: `Abort(.badRequest)` when the new store cannot serve stats.
 private func probedIndexComponents(savedConfig: RuneWeaverConfig, context: ServerContext) async throws -> ServerIndexComponents {

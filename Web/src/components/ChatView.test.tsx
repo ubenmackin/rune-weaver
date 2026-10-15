@@ -1572,7 +1572,9 @@ describe("Inline session approval banner", () => {
     expect(JSON.parse(decideCalls[0].body)).toMatchObject({
       approved: true,
       duration: "thisTime",
+      surface: "chat",
     });
+    expect(JSON.parse(decideCalls[0].body)).not.toHaveProperty("scope");
   });
 
   it("chevron menu Allow passes the chosen duration", async () => {
@@ -1593,10 +1595,12 @@ describe("Inline session approval banner", () => {
     expect(JSON.parse(decideCalls[0].body)).toMatchObject({
       approved: true,
       duration: "oneHour",
+      surface: "chat",
     });
+    expect(JSON.parse(decideCalls[0].body)).not.toHaveProperty("scope");
   });
 
-  it("chevron menu Allow with all targets passes tool-wide scope", async () => {
+  it("deny chevron offers Deny always with a forever duration", async () => {
     const user = userEvent.setup();
     const { decideCalls } = stubApprovalsFetch([approval()]);
     render(<ChatView />);
@@ -1604,20 +1608,22 @@ describe("Inline session approval banner", () => {
       expect(screen.getByText("email.send")).toBeInTheDocument();
     });
     await user.click(
-      screen.getByRole("button", { name: "Allow options for email.send" }),
+      screen.getByRole("button", { name: "Deny options for email.send" }),
     );
+    expect(screen.getAllByRole("menuitem")).toHaveLength(1);
     await user.click(
-      screen.getByRole("menuitem", { name: "Next hour (all targets)" }),
+      screen.getByRole("menuitem", { name: "Deny always" }),
     );
     await waitFor(() => {
       expect(screen.queryByText("email.send")).not.toBeInTheDocument();
     });
     expect(decideCalls).toHaveLength(1);
     expect(JSON.parse(decideCalls[0].body)).toMatchObject({
-      approved: true,
-      duration: "oneHour",
-      scope: { kind: "tool" },
+      approved: false,
+      duration: "forever",
+      surface: "chat",
     });
+    expect(JSON.parse(decideCalls[0].body)).not.toHaveProperty("scope");
   });
 
   it("Deny decides with thisTime and evicts the row", async () => {
@@ -1635,7 +1641,9 @@ describe("Inline session approval banner", () => {
     expect(JSON.parse(decideCalls[0].body)).toMatchObject({
       approved: false,
       duration: "thisTime",
+      surface: "chat",
     });
+    expect(JSON.parse(decideCalls[0].body)).not.toHaveProperty("scope");
   });
 });
 

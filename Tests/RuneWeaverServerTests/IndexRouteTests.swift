@@ -239,8 +239,28 @@ struct IndexControlRouteTests {
 
     @Test
     func `Control routes drive the injected coordinator and store`() async throws {
-        let (coordinator, store, directory) = try makeIndexComponents()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DocIndexStore(dbPath: directory.appendingPathComponent("index.db").path)
+        // Blocking stage keeps the run in flight across the cancel request:
+        // an empty-stage run could settle before cancel reads `isRunning`,
+        // so this stage parks on the cooperative flag until cancel releases it.
+        let blockingStage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, isCancelled in
+            for _ in 0 ..< 200 {
+                if isCancelled() {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            return IndexSourceRunReport(kind: .files, scanned: 1, indexed: 0)
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: []),
+            stages: [blockingStage],
+            store: store,
+            stateStore: IndexRunStateStore(path: directory.appendingPathComponent("state.json").path)
+        )
 
         try await withIndexTestApp { app in
             app.runeWeaver = makeIndexTestContext(coordinator: coordinator, store: store)
@@ -249,13 +269,34 @@ struct IndexControlRouteTests {
             let run = try await indexRequest(app: app, method: .POST, path: "/index/run")
             #expect(run.status == .ok)
             let summary = try run.content.decode(IndexRunResponse.self)
-            #expect(summary.status == IndexRunStatus.ok.rawValue)
+            #expect(summary.status == "running")
             #expect(summary.documentsIndexed == 0)
             #expect(summary.errors == 0)
 
+            // Status-poll until the run is observed in flight so the cancel
+            // below reads `isRunning` deterministically instead of racing an
+            // already-settled pass.
+            for _ in 0 ..< 100 {
+                let probe = try await indexRequest(app: app, method: .GET, path: "/index/status")
+                if (try? probe.content.decode(IndexStatusResponse.self).running) == true {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            #expect(await coordinator.isRunning)
+
             let cancel = try await indexRequest(app: app, method: .POST, path: "/index/cancel")
             #expect(cancel.status == .ok)
-            #expect(try cancel.content.decode(IndexCancelResponse.self).cancelled == false)
+            #expect(try cancel.content.decode(IndexCancelResponse.self).cancelled == true)
+
+            // Settle the cancelled pass before driving reset and prune so the
+            // later probes never interleave with the run still tearing down.
+            for _ in 0 ..< 100 {
+                if await !coordinator.isRunning {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
 
             let reset = try await indexRequest(app: app, method: .POST, path: "/index/reset")
             #expect(reset.status == .ok)
@@ -812,7 +853,7 @@ struct IndexLiveConstructionTests {
             let run = try await indexRequest(app: app, method: .POST, path: "/index/run")
             #expect(run.status == .ok)
             let summary = try run.content.decode(IndexRunResponse.self)
-            #expect(summary.status == IndexRunStatus.ok.rawValue)
+            #expect(summary.status == "running")
             let livePath = await app.runeWeaver.indexStore?.dbPath
             #expect(livePath == dbPath)
         }

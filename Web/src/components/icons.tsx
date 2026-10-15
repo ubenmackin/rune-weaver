@@ -704,17 +704,6 @@ export function IndexVectorIcon({ size = 16, className = "", ...props }: IconPro
   );
 }
 
-// Framed image for the vision phase: LLM descriptions of images and scans.
-export function IndexVisionIcon({ size = 16, className = "", ...props }: IconProps) {
-  return (
-    <IndexIconBase size={size} className={className} {...props}>
-      <rect width="18" height="18" x="3" y="3" rx="2" />
-      <circle cx="9" cy="9" r="2" />
-      <path d="m21 15-3.5-3.5a2 2 0 0 0-3 0L6 20" />
-    </IndexIconBase>
-  );
-}
-
 // Database drum for the committing phase: saving batches to the index.
 export function IndexCommitIcon({ size = 16, className = "", ...props }: IconProps) {
   return (

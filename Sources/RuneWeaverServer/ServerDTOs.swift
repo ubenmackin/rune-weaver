@@ -55,6 +55,8 @@ public enum ServerPaths {
     public static let decide = "decide"
     /// Question response subpath under `/approvals/:id`.
     public static let respond = "respond"
+    /// Decision history subpath under `/approvals`.
+    public static let history = "history"
     /// Durable access rules subpath under `/approvals`.
     public static let rules = "rules"
     /// Session trust subpath under `/approvals`.
@@ -983,12 +985,19 @@ public struct ApprovalDecisionRequest: Content, Equatable {
     /// other request to the target the gate derives for the next identical
     /// call.
     public var scope: AccessScopeDTO?
+    /// Decision surface tag. REST callers name one of the client-facing
+    /// surfaces — `chat`, `inbox`, or `dashboard`; anything else (including
+    /// `websocket` and `question`, which arrive solely through trusted
+    /// internal paths and are not client-settable) normalizes to `unknown`
+    /// in the decision log.
+    public var surface: String?
 
     /// Creates a decision request.
-    public init(approved: Bool, duration: TrustDuration? = nil, scope: AccessScopeDTO? = nil) {
+    public init(approved: Bool, duration: TrustDuration? = nil, scope: AccessScopeDTO? = nil, surface: String? = nil) {
         self.approved = approved
         self.duration = duration
         self.scope = scope
+        self.surface = surface
     }
 
     /// Trust tier, defaulting to `thisTime` (one-shot).
@@ -1031,6 +1040,70 @@ public struct ApprovalDecisionResponse: Content, Equatable {
         self.id = id
         self.approved = approved
         self.duration = duration
+    }
+}
+
+/// One recorded decision for `GET /approvals/history`, newest first.
+public struct ApprovalHistoryEntry: Content, Equatable {
+    public let id: UUID
+    public let toolName: String
+    public let scopeKind: String?
+    public let scopeData: String?
+    public let allowed: Bool
+    public let duration: String
+    public let surface: String
+    public let sessionID: String?
+    public let displayTarget: String?
+    public let decidedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        toolName: String,
+        scopeKind: String? = nil,
+        scopeData: String? = nil,
+        allowed: Bool,
+        duration: String,
+        surface: String,
+        sessionID: String? = nil,
+        displayTarget: String? = nil,
+        decidedAt: Date = Date()
+    ) {
+        self.id = id
+        self.toolName = toolName
+        self.scopeKind = scopeKind
+        self.scopeData = scopeData
+        self.allowed = allowed
+        self.duration = duration
+        self.surface = surface
+        self.sessionID = sessionID
+        self.displayTarget = displayTarget
+        self.decidedAt = decidedAt
+    }
+
+    public init(_ entry: ApprovalDecisionEntry) {
+        self.init(
+            id: entry.id,
+            toolName: entry.toolName,
+            scopeKind: entry.scopeKind,
+            scopeData: entry.scopeData,
+            allowed: entry.allowed,
+            duration: entry.duration,
+            surface: entry.surface,
+            sessionID: entry.sessionID,
+            displayTarget: entry.displayTarget,
+            decidedAt: entry.decidedAt
+        )
+    }
+}
+
+/// Decision history page for `GET /approvals/history`.
+public struct ApprovalHistoryResponse: Content, Equatable {
+    public let entries: [ApprovalHistoryEntry]
+    public let count: Int
+
+    public init(entries: [ApprovalHistoryEntry], count: Int) {
+        self.entries = entries
+        self.count = count
     }
 }
 

@@ -989,7 +989,8 @@ func handleWebSocketDecision(
             approved: message.approved,
             duration: message.resolvedDuration,
             scope: scope,
-            pending: pending
+            pending: pending,
+            surface: "websocket"
         ),
         pulse: pulse,
         context: context,

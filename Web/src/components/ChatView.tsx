@@ -43,7 +43,6 @@ import {
   toNonNegativeInt,
   toolCancel,
   updateSessionTitle,
-  type AccessScopeDTO,
   type ChatSegment,
   type Goal,
   type HealthResponse,
@@ -56,9 +55,7 @@ import {
   type TrustDuration,
 } from "../api";
 import SessionSidebar from "./SessionSidebar";
-import InlineApprovalBanner, {
-  type InlineApprovalScope,
-} from "./InlineApprovalBanner";
+import InlineApprovalBanner from "./InlineApprovalBanner";
 import InlineQuestionCard from "./InlineQuestionCard";
 import EphemeralTrustChip from "./EphemeralTrustChip";
 import MarkdownText from "./MarkdownText";
@@ -2803,22 +2800,13 @@ export default function ChatView({
 
   // Decides one inline approval without blocking the chat input or sibling rows: each row tracks
   // its own in-flight decision so concurrent approvals stay actionable, matching the inbox per-row
-  // pattern.
+  // pattern. The "chat" surface tag rides the shared decision body so the audit trail can name
+  // this banner as the deciding origin.
   const handleDecideApproval = useCallback(
-    async (
-      id: string,
-      approved: boolean,
-      duration: TrustDuration,
-      scope?: InlineApprovalScope,
-    ) => {
+    async (id: string, approved: boolean, duration: TrustDuration) => {
       setDecidingApprovalIDs((previous) => new Set(previous).add(id));
       try {
-        await decideApproval(
-          id,
-          approved,
-          duration,
-          scope as AccessScopeDTO | undefined,
-        );
+        await decideApproval(id, approved, duration, undefined, "chat");
         setPendingApprovals((previous) =>
           previous.filter((item) => item.id !== id),
         );
@@ -5689,13 +5677,8 @@ export default function ChatView({
                   key={request.id}
                   request={request}
                   deciding={decidingApprovalIDs.has(request.id)}
-                  onDecide={(id, approved, duration, scope) =>
-                    void handleDecideApproval(
-                      id,
-                      approved,
-                      duration,
-                      scope,
-                    )
+                  onDecide={(id, approved, duration) =>
+                    void handleDecideApproval(id, approved, duration)
                   }
                 />
               ),

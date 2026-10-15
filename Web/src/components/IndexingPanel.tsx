@@ -46,10 +46,8 @@ import {
   relativeProgressCurrent,
   requestIndexAccess,
   resetIndex,
-  resolveIndexRetiredCount,
   resolveIndexSourceAccess,
   resolveIndexSourceSkippedReason,
-  resolveIndexTruncatedCount,
   runIndex,
   updateSettings,
   type IndexConfigData,
@@ -1010,15 +1008,14 @@ export function resolveIndexLastRunText(
   return describeIndexRun(lastRun);
 }
 
-// Stage-aware header copy for the live progress line. Vision always describes
-// images, embedding vectorizes, extracting reads the named corpus, and the
-// phase-only snapshots keep their plain copy; anything unrecognized degrades
-// to the generic running copy so the header never sticks on a wire token.
+// Stage-aware header copy for the live progress line. Embedding vectorizes,
+// extracting reads the named corpus, and the phase-only snapshots keep their
+// plain copy; anything unrecognized degrades to the generic running copy so
+// the header never sticks on a wire token.
 export function resolveIndexLiveTitle(
   phase: string | null | undefined,
   stage: string | null | undefined,
 ): string {
-  if (stage === "vision") return "Describing images…";
   if (phase === "embedding") return "Vectorizing…";
   if (phase === "extracting") {
     if (stage === "files") return "Reading files…";
@@ -1169,6 +1166,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // the state drives the Cancelling pill, header, and disabled buttons.
   const cancellingRef = useRef(false);
   const [cancelling, setCancelling] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectDismissed, setReconnectDismissed] = useState(false);
   // Non-blocking destructive confirmations: prune and reset each render a
   // true modal so stored memory is never cleared by an accidental click. Each
   // modal carries its own description, so the button row stays label-only.
@@ -1211,9 +1210,14 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // Mirrors the engine running flag for the broadcast consumer without
   // re-subscribing the shared socket on every status poll.
   const statusRunningRef = useRef(false);
+  // Ref mirror of the committed status so async loaders can decide
+  // freeze-vs-adopt from current truth without re-subscribing effects or
+  // widening callback dependencies into a refetch loop.
+  const statusRef = useRef(status);
   useEffect(() => {
+    statusRef.current = status;
     statusRunningRef.current = status?.running === true;
-  }, [status?.running]);
+  }, [status]);
   // Polled live snapshot for the grep-style block. Null when idle; the block
   // mounts only from this, never from frame parsing, and unmounts on settle
   // when the engine clears it. The Status pill owns the Running indicator.
@@ -1251,14 +1255,6 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // arrival flag keeps sizing honest for an empty index whose breakdown stays
   // all zeros after slow lands.
   const storage = resolveIndexStorageBreakdown(status, hasStorage);
-  // Retired documents from the last run, accepting both wire spellings.
-  // Null when the engine predates retirement tracking so the strip omits it
-  // instead of rendering a zero.
-  const lastRunRetired = resolveIndexRetiredCount(status?.lastRun ?? null);
-  // Truncated documents from the last run, accepting both wire spellings.
-  // Null when the engine predates truncation tracking so the strip omits it
-  // instead of rendering a zero.
-  const lastRunTruncated = resolveIndexTruncatedCount(status?.lastRun ?? null);
   // Resolved effort reality for the status pane: the canonical nested `effort`
   // block when present, otherwise the local mapping against the machine cores so the
   // line still reflects the hardware. Hidden for older engines without any
@@ -1294,15 +1290,37 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     loadGenerationRef.current = generation;
     setError(null);
     let fast: IndexStatusResponse | null = null;
+    // Freeze-then-jump gate for this load: while the fresh snapshot reports
+    // a run in flight over an existing panel, committed cards hold the last
+    // settled snapshot and only liveness (running plus live) is adopted, so
+    // a reconnect, a post-start probe, or any overlapping poll can never
+    // overwrite frozen totals mid-run. A null baseline still adopts fully so
+    // a mid-run mount paints instead of sticking on the skeleton, and a
+    // settled snapshot always adopts fully for the atomic jump.
+    let frozeCommitted = false;
     try {
       const response = await getIndexStatus();
       fast = response;
-      cachedIndexStatus = response;
-      // Fast resets the slow arrival gate so sizing shows until the fresh
-      // storage merge lands for this generation.
-      cachedHasStorage = false;
-      setStatus(response);
-      setHasStorage(false);
+      if (statusRef.current != null && response.running === true) {
+        frozeCommitted = true;
+        const frozen = statusRef.current;
+        const merged: IndexStatusResponse & IndexStorageResponse = {
+          ...frozen,
+          running: response.running,
+          live: response.live,
+        };
+        cachedIndexStatus = merged;
+        setStatus(merged);
+        // The slow sizing gate stays untouched: frozen cards keep their
+        // storage state instead of flashing the sizing copy mid-run.
+      } else {
+        cachedIndexStatus = response;
+        // Fast resets the slow arrival gate so sizing shows until the fresh
+        // storage merge lands for this generation.
+        cachedHasStorage = false;
+        setStatus(response);
+        setHasStorage(false);
+      }
     } catch (failure) {
       // Only the newest poll owns the error slot so a stale rejection never
       // clears a newer panel that already painted.
@@ -1314,8 +1332,11 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     }
     // Phase 2 fires without awaiting paint so the cold mount paints counts,
     // pills, and the last-run strip immediately. The generation guard keeps
-    // only the newest storage answer when polls overlap.
+    // only the newest storage answer when polls overlap. A frozen phase 1
+    // skips the slow merge because its byte totals are committed state too:
+    // they ride the settle jump instead of moving the size card mid-run.
     void (async () => {
+      if (frozeCommitted) return;
       try {
         const s = await getIndexStorage();
         if (loadGenerationRef.current !== generation) return;
@@ -1406,29 +1427,20 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
           }
         }
         if (frameType === "run_completed" && isIndexKind) {
-          if (cancellingRef.current) {
-            // The cancelling window ends on the terminal broadcast. A run this
-            // panel started still resolves through its awaiting run request with
-            // full counts, so only a remote run refreshes its kept-work notice
-            // from the reloaded strip entry; the status reload below settles
-            // the pill either way and unmounts the live block on settle.
-            const wasLocal = runActiveRef.current;
-            cancellingRef.current = false;
-            setCancelling(false);
-            if (!wasLocal) {
-              void loadStatus().then((fresh) => {
-                if (fresh?.lastRun) {
-                  setNotice(describeIndexRun(fresh.lastRun));
-                } else {
-                  setNotice(
-                    "Last run cancelled · Committed work is kept and the next run resumes from there.",
-                  );
-                }
-              });
-              return;
+          runActiveRef.current = false;
+          setRunActive(false);
+          const wasCancelling = cancellingRef.current;
+          cancellingRef.current = false;
+          setCancelling(false);
+          void loadStatus().then((fresh) => {
+            if (fresh?.lastRun) {
+              setNotice(describeIndexRun(fresh.lastRun));
+            } else if (wasCancelling) {
+              setNotice(
+                "Last run cancelled · Committed work is kept and the next run resumes from there.",
+              );
             }
-          }
-          void loadStatus();
+          });
           return;
         }
         // Freeze-then-jump: a run_started frame only refreshes the live
@@ -1456,7 +1468,26 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     [loadStatus, loadLiveOnly],
   );
 
-  useSharedWebSocket(handleIndexBroadcast);
+  const handleWSClose = useCallback(() => {
+    setReconnecting(true);
+    setReconnectDismissed(false);
+  }, []);
+
+  const handleWSOpen = useCallback(() => {
+    setReconnecting(false);
+    void loadStatus();
+  }, [loadStatus]);
+
+  const { retryConnection } = useSharedWebSocket(
+    handleIndexBroadcast,
+    handleWSClose,
+    handleWSOpen,
+  );
+
+  const handleRetryConnection = useCallback(() => {
+    setReconnectDismissed(false);
+    retryConnection();
+  }, [retryConnection]);
 
   // Clears the local run flight once the engine reports no run in flight, so a
   // run started from another tab still settles the panel's busy state. The
@@ -1506,13 +1537,10 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     return () => clearInterval(timer);
   }, [progressActive, cancelling, loadLiveOnly]);
 
-  // Starts an on-demand run and awaits its terminal summary. The polled live
-  // snapshot keeps the live block honest while the request is in flight; the
-  // summary fills the notice through the shared run formatter so the notice
-  // and the reloaded strip read identically. A locally cancelled run settles
-  // here with its full counts, clearing the cancelling window without
-  // overwriting the detailed summary. The live block unmounts on settle when
-  // the engine clears the snapshot, with no persistence.
+  // Starts an on-demand run asynchronously. The start request returns immediately
+  // (~5ms) without holding an idle HTTP socket open over long-running passes. The
+  // live progress block tracks live activity via WebSocket and status polling, and
+  // the run_completed broadcast settles the panel with the terminal summary.
   const handleRun = async () => {
     if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) return;
     runActiveRef.current = true;
@@ -1521,21 +1549,29 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     setError(null);
     setNotice(null);
     try {
-      const summary = await runIndex();
-      setNotice(describeIndexRun(summary));
-      // The run reached its terminal summary, so any cancelling window opened
-      // by a concurrent cancel request is over; the detailed summary above
-      // already carries the kept-work copy for the cancelled case.
-      if (cancellingRef.current) {
-        cancellingRef.current = false;
-        setCancelling(false);
+      const startResult = await runIndex();
+      if (startResult.status === "skipped") {
+        setNotice(startResult.skippedReason || "Index run was skipped.");
+        runActiveRef.current = false;
+        setRunActive(false);
+      } else {
+        setNotice("Manual run started.");
+        if (cancellingRef.current) {
+          cancellingRef.current = false;
+          setCancelling(false);
+        }
       }
       await loadStatus();
     } catch (failure) {
-      setError(failure instanceof ApiError ? failure.message : "Index run failed");
+      // If a network blip occurred but the run is actually underway on the server,
+      // probe status so we stay in the active tracking flow instead of displaying an error.
+      const fresh = await loadStatus().catch(() => null);
+      if (fresh?.running !== true) {
+        setError(failure instanceof ApiError ? failure.message : "Index run failed");
+        runActiveRef.current = false;
+        setRunActive(false);
+      }
     } finally {
-      runActiveRef.current = false;
-      setRunActive(false);
       setAction(null);
     }
   };
@@ -1751,6 +1787,38 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
 
   return (
     <section className="panel indexing-panel" aria-label="Index Status">
+      {/* Reconnect notice rendered as a fixed centered toast so an outage stays visible
+          without shifting the panel header or layout. Leaves on socket recovery or explicit
+          retry/dismiss. */}
+      {reconnecting && !reconnectDismissed ? (
+        <div
+          className="connection-toast"
+          data-testid="index-reconnecting"
+          role="alert"
+          aria-live="assertive"
+        >
+          <span className="connection-toast-message">
+            Live updates paused — reconnecting to server… Indexing continues in the background.
+          </span>
+          <div className="connection-toast-actions">
+            <button
+              type="button"
+              data-testid="index-reconnect-retry"
+              onClick={handleRetryConnection}
+            >
+              Retry now
+            </button>
+            <button
+              type="button"
+              data-testid="index-reconnect-dismiss"
+              onClick={() => setReconnectDismissed(true)}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {hideHeader ? null : (
         <div className="panel-header-row">
           <div>
@@ -1914,33 +1982,13 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                 status plus indexed/scanned/errors/retired/truncated and the
                 finish time, so the latest outcome reads without opening run
                 history. A first run in flight names itself instead of reading
-                as empty history. The retired and truncated badges mirror the
-                shared formatter so the counts read identically in the notice
-                and the strip. */}
+                as empty history. */}
             <div
               className="index-last-run"
               data-testid="index-last-run"
               style={{ marginTop: 12 }}
             >
               <span className="muted text-sm">{lastRunText}</span>
-              {lastRunRetired != null && lastRunRetired > 0 ? (
-                <span
-                  className="muted text-sm"
-                  data-testid="index-last-run-retired"
-                  style={{ marginLeft: 8 }}
-                >
-                  {formatIndexCount(lastRunRetired)} retired
-                </span>
-              ) : null}
-              {lastRunTruncated != null && lastRunTruncated > 0 ? (
-                <span
-                  className="muted text-sm"
-                  data-testid="index-last-run-truncated"
-                  style={{ marginLeft: 8 }}
-                >
-                  {formatIndexCount(lastRunTruncated)} truncated
-                </span>
-              ) : null}
             </div>
             {/* Resolved effort reality for the status pane: the engine preset
                 plus the worker resolution against the machine cores. Rendered
@@ -2712,7 +2760,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
 
 // Index policy form for the Settings → Indexing tab: master enablement,
 // per-source toggles, exclude globs, caps, effort presets with thermal and
-// power toggles, and the vision describe toggle, persisted only through this
+// power toggles, persisted only through this
 // form's own Save. Status cards, charts, and run controls stay on the Memory
 // tab so one surface never duplicates the other's control set.
 export function IndexPolicyPanel() {
@@ -3075,11 +3123,19 @@ export function IndexPolicyPanel() {
             );
             return;
           }
-          const summary = await runIndex();
+          // The start request only answers `running` or `skipped`, so no
+          // notice derives from the start response: the terminal outcome
+          // settles through the post-restart status probe, which renders the
+          // fresh last-run summary on the restart outcome line — the same
+          // probe-driven settle every other run path uses. Without this
+          // re-probe render the outcome line would stay blank until an
+          // unrelated poll tick or broadcast.
+          await runIndex();
+          const restarted = await loadStatus();
           if (!mountedRef.current) return;
-          setNotice(describeIndexRun(summary));
-          await loadStatus();
-          if (!mountedRef.current) return;
+          if (restarted?.lastRun) {
+            setNotice(describeIndexRun(restarted.lastRun));
+          }
           pushSuccessToast(
             "Index settings saved. Restarted the running scan so new settings apply.",
           );

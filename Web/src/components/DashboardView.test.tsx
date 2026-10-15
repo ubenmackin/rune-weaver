@@ -236,7 +236,7 @@ describe("NeedsActionQueue", () => {
     const approveBtn = screen.getByRole("button", { name: /Approve once/i });
     await user.click(approveBtn);
 
-    expect(api.decideApproval).toHaveBeenCalledWith("appr-1", true, "thisTime");
+    expect(api.decideApproval).toHaveBeenCalledWith("appr-1", true, "thisTime", undefined, "dashboard");
   });
 
   it("renders all-clear state when there are no approvals or blocked goals", async () => {
@@ -296,11 +296,13 @@ describe("NeedsActionQueue", () => {
     // action: the brake branch is the sole exception to these labels.
     const approveBtn = screen.getByRole("button", { name: /Approve once/i });
     expect(approveBtn).toHaveTextContent("Approve once");
-    const denyBtn = screen.getByRole("button", { name: /Deny/i });
+    // The Deny main button is named for its tool ("Deny engine.continue"),
+    // which keeps the query off the Deny chevron ("Deny options for …").
+    const denyBtn = screen.getByRole("button", { name: "Deny engine.continue" });
     expect(denyBtn).toHaveTextContent("Deny");
 
     await user.click(approveBtn);
-    expect(api.decideApproval).toHaveBeenCalledWith("cont-1", true, "thisTime");
+    expect(api.decideApproval).toHaveBeenCalledWith("cont-1", true, "thisTime", undefined, "dashboard");
   });
 
   it("renders arguments inside expandable disclosure with View arguments summary", async () => {
