@@ -1,7 +1,7 @@
 // Rune Weaver Core — Coordinator owning nightly and on-demand index runs.
 //
 // One actor sequences the per-source indexers (files, mail, messages, calendars,
-// reminders, and the opt-in vision describe pass) into a single run, exposes the single live
+// and reminders) into a single run, exposes the single live
 // source as the `liveTotals` poll snapshot (nil when idle) that the menu and
 // page read via `GET /index/status` `live` on about a 2s in-run poll, reports
 // run lifecycle through an injected seam so the server can broadcast
@@ -38,7 +38,7 @@ public actor IndexCoordinator {
     /// Heartbeat cadence for stalled runs, bypassing the frame floor.
     ///
     /// A run that makes no progress still emits a liveness frame on this
-    /// cadence so a slow IMAP fetch, embedding batch, or vision turn never
+    /// cadence so a slow IMAP fetch or embedding batch never
     /// looks wedged. Heartbeats reuse the coordinator emit path, so they carry
     /// the same elapsed, rate, cumulative counts, and phase/stage tokens.
     /// The nanosecond form below derives from this single value so the two
@@ -99,7 +99,7 @@ public actor IndexCoordinator {
     /// Handle for the run task in flight, so cancellation aborts in-flight awaits.
     ///
     /// Stored at run start and cleared alongside `running` so `cancel()` can
-    /// abort awaits (IMAP, embedding batch, vision turn) via `Task` cancellation
+    /// abort awaits (IMAP, embedding batch) via `Task` cancellation
     /// in addition to the cooperative flag; the awaits then throw at their next
     /// checkpoint instead of running to stage end.
     private var activeRunTask: Task<IndexRunSummary, Never>?
@@ -278,6 +278,61 @@ public actor IndexCoordinator {
         }
     }
 
+    /// Starts an index pass in the background without awaiting its completion.
+    ///
+    /// Returns immediately (~5ms) with ``IndexStartOutcome`` so callers never
+    /// hold an idle network connection open across long-running index passes.
+    /// The spawned run task rides the ``IndexStartOutcome/started`` payload so
+    /// an awaiter joins the exact pass it started instead of re-reading
+    /// coordinator state across an actor hop, where a fast settle could clear
+    /// the stored handle first. Progress streams via WebSocket frames, and
+    /// terminal summary is emitted on completion.
+    /// - Parameter trigger: What caused the run.
+    /// - Returns: Immediate start outcome.
+    @discardableResult
+    public func start(trigger: IndexRunTrigger = .onDemand) async -> IndexStartOutcome {
+        guard config.enabled else {
+            return .disabled(reason: "Indexing is disabled in [index].")
+        }
+        guard !running else {
+            return .alreadyRunning
+        }
+        running = true
+        cancelFlag.reset()
+        activeStages = []
+        lastFrameAt = nil
+        let startedAt = now()
+        let sessionID = UUID()
+        let eventID = UUID()
+
+        // The child holds the coordinator strongly: a started run must settle
+        // (clear `running` and `activeRunTask`, emit the completion broadcast)
+        // even when every caller drops the coordinator first. The only cycle —
+        // the stored handle below reaching back to this closure — breaks when
+        // the actor-isolated `performRun` clears it via `markRunFinished`
+        // before the task returns. Cleanup lives inside `performRun` (same-actor
+        // context, so no cross-isolation hop) rather than in this closure, where
+        // a sync actor-state mutation would rely on closure isolation
+        // inheritance to prove correct. The single `await` below is for the
+        // `async` `performRun` itself, which requires `await` in every context.
+        let child = Task<IndexRunSummary, Never> {
+            await self.performRun(
+                trigger: trigger,
+                sessionID: sessionID,
+                eventID: eventID,
+                startedAt: startedAt
+            )
+        }
+        activeRunTask = child
+        return .started(sessionID: sessionID, startedAt: startedAt, task: child)
+    }
+
+    /// Cleans up internal running state when a background run task finishes.
+    private func markRunFinished() {
+        running = false
+        activeRunTask = nil
+    }
+
     /// Runs one index pass over every enabled source.
     ///
     /// The run never throws: a failing stage is counted and the pass continues,
@@ -288,50 +343,53 @@ public actor IndexCoordinator {
     /// - Returns: A summary describing the pass.
     @discardableResult
     public func run(trigger: IndexRunTrigger = .onDemand) async -> IndexRunSummary {
-        guard config.enabled else {
-            return await reportSkipped(trigger: trigger, reason: "Indexing is disabled in [index].")
-        }
-        guard !running else {
+        let outcome = await start(trigger: trigger)
+        switch outcome {
+        case let .disabled(reason):
+            return await reportSkipped(trigger: trigger, reason: reason)
+        case .alreadyRunning:
             return await reportSkipped(trigger: trigger, reason: "An index run is already in progress.")
-        }
-        running = true
-        defer {
-            running = false
-            activeRunTask = nil
-        }
-
-        cancelFlag.reset()
-        activeStages = []
-        lastFrameAt = nil
-        let startedAt = now()
-        let sessionID = UUID()
-        let eventID = UUID()
-        let flag = cancelFlag
-        // Own the stage loop in a child task so cancel() can abort in-flight
-        // awaits via Task cancellation in addition to the cooperative flag.
-        // The child runs its actor work in the child's task context, so every
-        // per-batch Task probe inside the stages observes the cancel within one
-        // batch instead of running to stage end.
-        let child = Task<IndexRunSummary, Never> {
-            await self.performRun(
-                trigger: trigger,
-                sessionID: sessionID,
-                eventID: eventID,
-                startedAt: startedAt
-            )
-        }
-        activeRunTask = child
-        // Forward outer cancellation (for example a dropped request task) to
-        // the run task; cancel() itself never awaits the run, so the cancel
-        // route keeps returning immediately while the run settles via broadcast.
-        return await withTaskCancellationHandler {
-            await child.value
-        } onCancel: {
-            flag.set()
-            child.cancel()
+        case let .started(_, _, child):
+            // Join the exact child returned in the outcome: reading the stored
+            // handle here instead would race a fast settle that clears it on
+            // an interleaved actor hop.
+            let flag = cancelFlag
+            return await withTaskCancellationHandler {
+                await child.value
+            } onCancel: {
+                flag.set()
+                child.cancel()
+            }
         }
     }
 
+    /// Requests cancellation of the run in flight.
+    ///
+    /// The flag is set immediately, every active stage is asked to stop at its
+    /// next safe point, and the stored run task is cancelled so in-flight
+    /// awaits throw at their next checkpoint instead of running to stage end.
+    /// Joining happens in the stage loop, so this stays immediate while the
+    /// run settles via broadcast. Work already committed by prior batches
+    /// stays in place. Returns immediately without awaiting the run;
+    /// completion is observed via the `run_completed` broadcast or the status probe.
+    public func cancel() async {
+        cancelFlag.set()
+        for stage in activeStages {
+            await stage.cancel()
+        }
+        activeRunTask?.cancel()
+    }
+
+    /// Clears the durable run state store and resets the launch catch-up attempt flag.
+    public func reset() async throws {
+        didAttemptLaunchCatchUp = false
+        try await stateStore.reset()
+    }
+}
+
+// MARK: - Run Execution
+
+extension IndexCoordinator {
     /// Executes the stage loop for one run.
     ///
     /// Runs in the run task's context so Task cancellation from `cancel()` is
@@ -352,6 +410,11 @@ public actor IndexCoordinator {
         eventID: UUID,
         startedAt: Date
     ) async -> IndexRunSummary {
+        // Settle single-flight state on every exit path while still on the
+        // actor: `performRun` executes on the coordinator's executor (reached
+        // via `await self.performRun`), so this sync mutation needs no hop and
+        // runs even for fire-and-forget `start` callers that never join the task.
+        defer { markRunFinished() }
         var totals = Totals()
         // One snapshot for the whole run so a save landing mid-run cannot
         // split stages across policies; the next run picks it up instead.
@@ -545,29 +608,6 @@ public actor IndexCoordinator {
         overlapBaseIndexed = 0
         overlapScanned = [:]
         overlapIndexed = [:]
-    }
-
-    /// Requests cancellation of the run in flight.
-    ///
-    /// The flag is set immediately, every active stage is asked to stop at its
-    /// next safe point, and the stored run task is cancelled so in-flight
-    /// awaits throw at their next checkpoint instead of running to stage end.
-    /// Joining happens in the stage loop, so this stays immediate while the
-    /// run settles via broadcast. Work already committed by prior batches
-    /// stays in place. Returns immediately without awaiting the run;
-    /// completion is observed via the `run_completed` broadcast or the status probe.
-    public func cancel() async {
-        cancelFlag.set()
-        for stage in activeStages {
-            await stage.cancel()
-        }
-        activeRunTask?.cancel()
-    }
-
-    /// Clears the durable run state store and resets the launch catch-up attempt flag.
-    public func reset() async throws {
-        didAttemptLaunchCatchUp = false
-        try await stateStore.reset()
     }
 }
 

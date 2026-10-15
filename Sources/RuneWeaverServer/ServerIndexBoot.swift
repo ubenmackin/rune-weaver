@@ -2,8 +2,8 @@
 //
 // Builds the `[index]` pipeline once per boot so serve and the menu-bar app share
 // one construction path: a `DocIndexStore` over the configured `db_path`, one
-// source stage per corpus (files, mail, messages, calendars, reminders, plus the
-// opt-in vision describe stage), and the `IndexCoordinator` sequencing them. A
+// source stage per corpus (files, mail, messages, calendars, reminders), and
+// the `IndexCoordinator` sequencing them. A
 // disabled `[index]` section returns nil so boot keeps the previous no-index
 // posture and the index routes keep failing closed. Credentials are never
 // resolved here; the mail stage reads through the shared IMAP gateway seam and
@@ -40,9 +40,8 @@ public enum ServerIndexBoot {
     ///
     /// Files walk through the shared `[files]` policy adapter, mail reads through
     /// the shared IMAP gateway adapter, messages use their bundled defaults,
-    /// calendars and reminders read through the shared live EventKit store, and
-    /// the vision stage describes only when the opt-in flag is set and an active
-    /// provider is available. Each stage still gates on its own toggle, so an
+    /// and calendars and reminders read through the shared live EventKit
+    /// store. Each stage still gates on its own toggle, so an
     /// enabled indexer with every source off runs an honest empty pass. The run
     /// reporter adapts the coordinator lifecycle onto the same run store the
     /// status probe reads plus the live socket hub, so a manual run leaves one

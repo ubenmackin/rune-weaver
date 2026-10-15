@@ -500,6 +500,8 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
     public let assessment: ImpactAssessment?
     /// Target host for unlisted network egress requests.
     public let egressHost: String?
+    /// Engine-derived display target naming what "this target" covers.
+    public let displayTarget: String?
     /// Server-stamped sandbox tier line for bash approvals, rendered verbatim.
     public let sandboxSummary: String?
 
@@ -523,6 +525,8 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         case assessment
         /// Target host for egress requests.
         case egressHost
+        /// Engine-derived display target.
+        case displayTarget
         /// Stamped sandbox tier line.
         case sandboxSummary
     }
@@ -549,6 +553,11 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         self.intent = intent
         self.assessment = assessment
         self.egressHost = egressHost
+        self.displayTarget = PermissionRequestTarget.derive(
+            toolName: toolName,
+            argumentsJSON: input.argumentsJSON,
+            egressHost: egressHost
+        )
         self.sandboxSummary = sandboxSummary
     }
 
@@ -565,6 +574,7 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         self.intent = try container.decodeIfPresent(String.self, forKey: .intent)
         self.assessment = try container.decodeIfPresent(ImpactAssessment.self, forKey: .assessment)
         self.egressHost = try container.decodeIfPresent(String.self, forKey: .egressHost)
+        self.displayTarget = try container.decodeIfPresent(String.self, forKey: .displayTarget)
         self.sandboxSummary = try container.decodeIfPresent(String.self, forKey: .sandboxSummary)
     }
 
@@ -581,6 +591,7 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         try container.encodeIfPresent(intent, forKey: .intent)
         try container.encodeIfPresent(assessment, forKey: .assessment)
         try container.encodeIfPresent(egressHost, forKey: .egressHost)
+        try container.encodeIfPresent(displayTarget, forKey: .displayTarget)
         try container.encodeIfPresent(sandboxSummary, forKey: .sandboxSummary)
     }
 }

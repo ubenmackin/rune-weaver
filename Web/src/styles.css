@@ -4291,6 +4291,49 @@ section[data-testid="policy-pane"] .settings-footer {
   gap: 16px;
 }
 
+/* Pending | History segmented control in the inbox header row: a joined pill
+ * pair whose aria-pressed state (not a separate .active class) carries the
+ * selected view, so the toggle stays honest with the buttons' accessibility
+ * contract. */
+.approvals-view-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.approvals-view-toggle button {
+  padding: 6px 14px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.approvals-view-toggle button:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.approvals-view-toggle button[aria-pressed="true"] {
+  background: var(--accent-purple, #8b5cf6);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.approvals-view-toggle button:focus-visible {
+  outline: 2px solid var(--accent-purple, #8b5cf6);
+  outline-offset: 1px;
+}
+
 .approvals-list {
   display: flex;
   flex-direction: column;
@@ -4619,6 +4662,92 @@ a.ghost.icon-text-btn:hover {
 }
 
 /* ==========================================================================
+   Approval Decision History (Inbox → History)
+   ========================================================================== */
+
+/* Decision history pane: the filter row reuses the shared ghost button
+ * treatment, and the table follows the app's other tables (sticky-free,
+ * hairline row separators, muted uppercase-adjacent headers) so the History
+ * view does not drift from the design system. */
+.approval-history {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-x: auto;
+}
+
+.approval-history-filters {
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
+.approval-history-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.approval-history-filter input,
+.approval-history-filter select {
+  font-size: 13px;
+}
+
+.approval-history-empty {
+  padding: 24px 16px;
+  text-align: center;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+}
+
+.approval-history-empty p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.approval-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.approval-history-table th {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+  font-weight: 600;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.approval-history-table td {
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  vertical-align: middle;
+  word-break: break-word;
+}
+
+.approval-history-target {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: var(--accent-purple, #a78bfa);
+  overflow-wrap: anywhere;
+}
+
+.approval-history-decision-allowed {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.approval-history-decision-denied {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* ==========================================================================
    Inline Session Approval Banner (Chat)
    ========================================================================== */
 
@@ -4765,6 +4894,37 @@ a.ghost.icon-text-btn:hover {
   background: rgba(239, 68, 68, 0.2);
   color: #ffffff;
   outline: none;
+}
+
+/* Split Deny control mirrors the split Allow geometry so Deny reads as one
+ * joined control on both quick surfaces. The group is the positioned anchor
+ * the shared duration menu resolves against — without it the absolutely
+ * positioned menu attaches to a distant ancestor and the dashboard card's
+ * overflow clipping hides "Deny always" entirely. */
+.split-deny-group {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 180px;
+  flex: 0 1 auto;
+  max-width: 340px;
+}
+
+.split-deny-main {
+  flex: 4 1 80%;
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+  border-right: 1px solid rgba(255, 255, 255, 0.25) !important;
+}
+
+.split-deny-chevron {
+  flex: 1 1 20%;
+  min-width: 40px;
+  max-width: 56px;
+  border-top-left-radius: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  padding-left: 8px !important;
+  padding-right: 8px !important;
 }
 
 .approval-egress-badge {
@@ -5883,6 +6043,19 @@ button.danger:hover:not(:disabled) {
   .split-allow-menu {
     max-width: calc(100vw - 16px);
     right: 0;
+  }
+
+  /* The deny split follows the allow split's shrink behavior so both controls
+   * wrap onto their own lines inside a 375px card without overflow. */
+  .split-deny-group {
+    flex: 1 1 200px;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .split-deny-chevron {
+    min-width: 40px;
+    max-width: 56px;
   }
 
   /* Profile and Work menus re-affirm the slim-top clamp inside this unit so
@@ -7888,6 +8061,31 @@ button.ghost.staged-expand-all-btn {
   font-size: 13px;
   color: #c7c7d4;
   line-height: 1.4;
+}
+
+/* Target line on a Needs Action card: mirrors the inbox scope target so the
+ * resolved target reads the same across surfaces — muted uppercase label,
+ * monospace purple value that wraps instead of stretching the card. */
+.action-target-line {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted, #94a3b8);
+  overflow-wrap: anywhere;
+}
+
+.action-target-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.action-target-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: var(--accent-purple, #a78bfa);
+  overflow-wrap: anywhere;
 }
 
 .action-card-body .goal-action-title {

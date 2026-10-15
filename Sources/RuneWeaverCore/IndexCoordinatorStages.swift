@@ -1,6 +1,6 @@
 // Rune Weaver Core — Concrete index source stages for the coordinator.
 //
-// Builds the files, mail, Messages, and vision stages the `IndexCoordinator`
+// Builds the files, mail, and Messages stages the `IndexCoordinator`
 // sequences in canonical run order. Each factory adapts its concrete indexer
 // into an `IndexClosureStage` so the coordinator stays transport-agnostic and
 // cancellation reaches the in-flight files indexer through a small actor box.

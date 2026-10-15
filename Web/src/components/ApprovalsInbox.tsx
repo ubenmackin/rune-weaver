@@ -18,12 +18,16 @@ import {
   listApprovals,
   listSessions,
   respondToQuestion,
-  trustDurationOptions,
   type AccessScopeDTO,
   type ImpactSeverity,
   type PermissionRequest,
   type TrustDuration,
 } from "../api";
+import {
+  deriveRequestTarget,
+  durationOptionsFor,
+  truncateTarget,
+} from "../approvalsShared";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import {
   approvalSessionID,
@@ -32,6 +36,7 @@ import {
 } from "../approvalsSession";
 import { isRecord } from "../typeGuards";
 import InlineQuestionCard from "./InlineQuestionCard";
+import ApprovalHistory from "./ApprovalHistory";
 import BashTierLine from "./BashTierLine";
 import EphemeralTrustChip from "./EphemeralTrustChip";
 import { resolveEgressHost, resolveSandboxSummary } from "./InlineApprovalBanner";
@@ -54,19 +59,6 @@ const STANDING_RULES_HREF = "#settings?access=rules";
 // store would reject instead of failing at the wire.
 const MAX_RECIPIENT_SET_MEMBERS = 50;
 
-// Argument keys the legacy target derivation reads, in the engine's priority
-// order, so the preview line names the same thing a stored rule would cover.
-const TARGET_ARGUMENT_KEYS = [
-  "to",
-  "recipient",
-  "email",
-  "target",
-  "path",
-  "url",
-  "address",
-  "destination",
-];
-
 // One ordering scale shared by cards and groups: dangerous over moderate over
 // safe, so a consequential card never sinks below a quieter one.
 function severityRank(severity: ImpactSeverity): number {
@@ -85,49 +77,6 @@ function severityRank(severity: ImpactSeverity): number {
 // valued safe one while background enrichment is still in flight.
 function requestSeverity(request: PermissionRequest): ImpactSeverity {
   return request.assessment?.severity ?? "moderate";
-}
-
-// The egress tier mapping names exactly three durations: thisTime allows the
-// host once, forSession allows it for the session, and forever mints the
-// durable domain rule. Offering a dated tier the mapping never reads would
-// invent a second control language, so a parked-host card carries only these
-// three tiers in the shared duration vocabulary.
-const EGRESS_DURATIONS: TrustDuration[] = ["thisTime", "forSession", "forever"];
-
-interface DurationOption {
-  value: TrustDuration;
-  label: string;
-}
-
-function durationOptionsFor(request: PermissionRequest): DurationOption[] {
-  if (!resolveEgressHost(request)) return trustDurationOptions;
-  return EGRESS_DURATIONS.map((value) =>
-    trustDurationOptions.find((option) => option.value === value),
-  ).filter((option): option is DurationOption => option !== undefined);
-}
-
-// Best-effort preview of the request's own target for the scope line. The
-// engine's descriptor derivation stays authoritative — "this target" omits the
-// scope so the server resolves it — this copy only names what the owner is
-// about to trust. Unreadable arguments degrade to no preview rather than a
-// misleading one.
-function previewRequestTarget(request: PermissionRequest): string | null {
-  const host = resolveEgressHost(request);
-  if (host) return host;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(request.input?.argumentsJSON ?? "");
-  } catch {
-    return null;
-  }
-  if (!isRecord(parsed)) return null;
-  for (const key of TARGET_ARGUMENT_KEYS) {
-    const value = parsed[key];
-    if (typeof value !== "string") continue;
-    const trimmed = value.trim();
-    if (trimmed) return trimmed;
-  }
-  return null;
 }
 
 // Editor shape a custom scope takes, keyed to what the wire scope vocabulary
@@ -175,7 +124,7 @@ function scopePrefill(request: PermissionRequest): string {
     case "hosts":
       return resolveEgressHost(request) ?? "";
     default:
-      return previewRequestTarget(request) ?? "";
+      return deriveRequestTarget(request) ?? "";
   }
 }
 
@@ -381,6 +330,10 @@ export default function ApprovalsInbox({
   // commits a scope, so a half-typed list can never reach a decision.
   const [scopeDraft, setScopeDraft] = useState<ScopeDraft | null>(null);
   const [scopeDraftError, setScopeDraftError] = useState<string | null>(null);
+  // Pending versus History pane. Pending is the default so the inbox keeps
+  // opening on the decidable queue; History swaps the groups for the durable
+  // decision log while the header row stays put.
+  const [view, setView] = useState<"pending" | "history">("pending");
 
   // Session titles name the group headers. Best-effort: a sessions outage
   // keeps the prior map, and a header without a title falls back to the raw
@@ -501,7 +454,8 @@ export default function ApprovalsInbox({
 
   // Single decision path: every card, including the brake, leaves through
   // POST /approvals/:id/decide with the unified {approved, duration, scope}
-  // payload.
+  // payload plus the "inbox" surface tag naming this card as the deciding
+  // origin for the audit trail.
   async function submitDecision(
     id: string,
     approved: boolean,
@@ -511,7 +465,7 @@ export default function ApprovalsInbox({
     setDecidingState({ id, action: approved ? "allowing" : "denying" });
     setError(null);
     try {
-      await decideApproval(id, approved, duration, scope);
+      await decideApproval(id, approved, duration, scope, "inbox");
       setApprovals((previous) => previous.filter((item) => item.id !== id));
     } catch (failure) {
       setError(
@@ -742,7 +696,7 @@ export default function ApprovalsInbox({
     // half-described payload.
     const scopeReady = choice !== "custom" || customScope !== undefined;
     const egressHost = resolveEgressHost(request);
-    const targetPreview = previewRequestTarget(request);
+    const derivedTarget = deriveRequestTarget(request);
 
     return (
       <div
@@ -826,11 +780,14 @@ export default function ApprovalsInbox({
                         request.toolName === "email.send"
                       ? "This recipient"
                       : "This target"}
-                  {targetPreview ? (
+                  {derivedTarget ? (
                     <>
                       {" "}
-                      <code className="approval-scope-target">
-                        {targetPreview}
+                      <code
+                        className="approval-scope-target"
+                        title={derivedTarget}
+                      >
+                        {truncateTarget(derivedTarget)}
                       </code>
                     </>
                   ) : null}
@@ -853,18 +810,19 @@ export default function ApprovalsInbox({
                   checked={choice === "custom"}
                   disabled={isDeciding}
                   onChange={() => selectScopeChoice(request, "custom")}
+                  onClick={() => {
+                    // Re-clicking the already-checked Custom radio fires no
+                    // onChange, so the click itself reopens the editor while
+                    // custom is selected with nothing staged — the radio is
+                    // the sole custom-scope entry point.
+                    if (choice === "custom" && !customScopes[id]) {
+                      openScopeDraft(request);
+                    }
+                  }}
                 />
                 <span>Custom scope</span>
               </label>
             </div>
-            <button
-              type="button"
-              className="ghost"
-              disabled={isDeciding}
-              onClick={() => openScopeDraft(request)}
-            >
-              Edit scope
-            </button>
             {choice === "custom" && customScope ? (
               <span
                 className="muted text-sm approval-scope-summary"
@@ -930,7 +888,7 @@ export default function ApprovalsInbox({
                   title={
                     scopeReady
                       ? undefined
-                      : "Pick a custom scope first — Edit scope opens the editor."
+                      : "Pick a custom scope first — select the Custom scope radio to open the editor."
                   }
                   onClick={() => decideFromCard(request, true)}
                 >
@@ -943,7 +901,7 @@ export default function ApprovalsInbox({
                   title={
                     scopeReady
                       ? undefined
-                      : "Pick a custom scope first — Edit scope opens the editor."
+                      : "Pick a custom scope first — select the Custom scope radio to open the editor."
                   }
                   onClick={() => decideFromCard(request, false)}
                 >
@@ -969,6 +927,28 @@ export default function ApprovalsInbox({
         </div>
 
         <div className="row">
+          <div
+            role="group"
+            aria-label="Inbox view"
+            className="approvals-view-toggle"
+          >
+            <button
+              type="button"
+              data-testid="inbox-view-pending"
+              aria-pressed={view === "pending"}
+              onClick={() => setView("pending")}
+            >
+              Pending
+            </button>
+            <button
+              type="button"
+              data-testid="inbox-view-history"
+              aria-pressed={view === "history"}
+              onClick={() => setView("history")}
+            >
+              History
+            </button>
+          </div>
           <a
             className="ghost icon-text-btn"
             href={STANDING_RULES_HREF}
@@ -977,47 +957,57 @@ export default function ApprovalsInbox({
             <ApprovalsIcon size={14} />
             <span>Manage standing rules</span>
           </a>
-          <button
-            type="button"
-            className="ghost icon-text-btn"
-            onClick={() => void refresh()}
-            disabled={loading}
-          >
-            <RefreshIcon size={14} className={loading ? "spin" : ""} />
-            <span>{loading ? "Refreshing…" : "Refresh"}</span>
-          </button>
-          <span className="muted text-sm">{approvals.length} pending</span>
+          {view === "pending" ? (
+            <>
+              <button
+                type="button"
+                className="ghost icon-text-btn"
+                onClick={() => void refresh()}
+                disabled={loading}
+              >
+                <RefreshIcon size={14} className={loading ? "spin" : ""} />
+                <span>{loading ? "Refreshing…" : "Refresh"}</span>
+              </button>
+              <span className="muted text-sm">{approvals.length} pending</span>
+            </>
+          ) : null}
         </div>
       </div>
 
-      {/* Ephemeral session trust for the filtered session, above the pending
-          groups: it lists what stays auto-approved for that conversation with
-          a per-line revoke. Nothing renders while no session is filtered. */}
-      <EphemeralTrustChip sessionID={sessionID} />
+      {view === "pending" ? (
+        <>
+          {/* Ephemeral session trust for the filtered session, above the pending
+              groups: it lists what stays auto-approved for that conversation with
+              a per-line revoke. Nothing renders while no session is filtered. */}
+          <EphemeralTrustChip sessionID={sessionID} />
 
-      {error ? <p className="error">{error}</p> : null}
-      {approvals.length === 0 && !loading ? (
-        <div className="approvals-empty muted">
-          <p>No pending approvals.</p>
-        </div>
-      ) : null}
-
-      <div className="approvals-groups">
-        {groups.map((group) => (
-          <div
-            className="approvals-group"
-            key={group.key}
-            data-testid={`approvals-group-${group.key}`}
-          >
-            {/* Sticky session header: every card renders beneath it with no
-                collapse, so no group can hide a pending decision. */}
-            <h3 className="approvals-group-header">{group.title}</h3>
-            <div className="approvals-list">
-              {group.requests.map((request) => renderCard(request))}
+          {error ? <p className="error">{error}</p> : null}
+          {approvals.length === 0 && !loading ? (
+            <div className="approvals-empty muted">
+              <p>No pending approvals.</p>
             </div>
+          ) : null}
+
+          <div className="approvals-groups">
+            {groups.map((group) => (
+              <div
+                className="approvals-group"
+                key={group.key}
+                data-testid={`approvals-group-${group.key}`}
+              >
+                {/* Sticky session header: every card renders beneath it with no
+                    collapse, so no group can hide a pending decision. */}
+                <h3 className="approvals-group-header">{group.title}</h3>
+                <div className="approvals-list">
+                  {group.requests.map((request) => renderCard(request))}
+                </div>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </>
+      ) : (
+        <ApprovalHistory />
+      )}
 
       {/* Scope editor through the shared modal so the dialog portals above
           page stacking contexts with Escape support; only the modal save

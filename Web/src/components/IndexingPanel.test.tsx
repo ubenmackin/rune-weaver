@@ -174,20 +174,25 @@ function stubFetch(
       return jsonResponse({});
     }
     if (url === "/index/run") {
+      // The run route answers in-flight (`running`) or `skipped` only; the
+      // terminal summary settles through the status probe and broadcasts, so
+      // the stub mirrors the started response the engine emits.
       return jsonResponse({
         sessionID: "s1",
         trigger: "onDemand",
-        status: "ok",
-        documentsIndexed: 3,
-        vectorChunks: 2,
-        keywordChunks: 1,
-        scanned: 5,
+        status: "running",
+        documentsIndexed: 0,
+        vectorChunks: 0,
+        keywordChunks: 0,
+        scanned: 0,
         skipped: 0,
         errors: 0,
+        retiredCount: 0,
+        truncatedCount: 0,
         warnings: [],
         startedAt: 0,
-        finishedAt: 1,
-        indexAsOf: 1,
+        finishedAt: 0,
+        indexAsOf: null,
         skippedReason: null,
       });
     }
@@ -273,8 +278,6 @@ describe("IndexingPanel helpers", () => {
   it("maps phase and stage to stage-aware header copy", () => {
     expect(resolveIndexLiveTitle("extracting", "files")).toBe("Reading files…");
     expect(resolveIndexLiveTitle("embedding", null)).toBe("Vectorizing…");
-    expect(resolveIndexLiveTitle("embedding", "vision")).toBe("Describing images…");
-    expect(resolveIndexLiveTitle("extracting", "vision")).toBe("Describing images…");
     expect(resolveIndexLiveTitle("discovering", null)).toBe("Discovering…");
     expect(resolveIndexLiveTitle("committing", null)).toBe("Committing…");
     expect(resolveIndexLiveTitle(null, null)).toBe("Running…");
@@ -1095,17 +1098,19 @@ describe("IndexingPanel", () => {
         return jsonResponse({
           sessionID: "s1",
           trigger: "onDemand",
-          status: "ok",
-          documentsIndexed: 3,
-          vectorChunks: 2,
-          keywordChunks: 1,
-          scanned: 5,
+          status: "running",
+          documentsIndexed: 0,
+          vectorChunks: 0,
+          keywordChunks: 0,
+          scanned: 0,
           skipped: 0,
           errors: 0,
+          retiredCount: 0,
+          truncatedCount: 0,
           warnings: [],
           startedAt: 0,
-          finishedAt: 1,
-          indexAsOf: 1,
+          finishedAt: 0,
+          indexAsOf: null,
           skippedReason: null,
         });
       }
@@ -1141,8 +1146,11 @@ describe("IndexingPanel", () => {
         ),
       ).toBeInTheDocument();
     });
-    // The fresh run outcome shares the strip formatter.
-    expect(screen.getByText(/Last run ok/)).toBeInTheDocument();
+    // The start request answers in-flight only; the strip settles from the
+    // refreshed status probe after the restart, so the "Last run ok" content
+    // arrives asynchronously and must be awaited like the other probe-driven
+    // assertions.
+    expect(await screen.findByText(/Last run ok/)).toBeInTheDocument();
     const cancelAt = calls.findIndex((call) => call.url === "/index/cancel");
     const runAt = calls.findIndex((call) => call.url === "/index/run");
     expect(cancelAt).toBeGreaterThan(-1);
@@ -1330,13 +1338,12 @@ describe("IndexingPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "Run" }));
 
-    // The top notice shares the strip formatter, so it reads as the same
-    // one-line outcome the strip renders. Both surfaces carry the status, so
-    // the assertions scope to all matches instead of a single element.
+    // The start request answers in-flight (`running`), so the notice confirms
+    // the start immediately; the terminal summary settles through the refreshed
+    // status probe into the strip rather than mirroring the start response.
     await waitFor(() => {
-      expect(screen.getAllByText(/Last run ok/).length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText("Manual run started.")).toBeInTheDocument();
     });
-    expect(screen.getAllByText(/3 indexed/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByTestId("index-last-run")).toHaveTextContent("Last run ok");
     expect(screen.getByTestId("index-last-run")).toHaveTextContent("3 indexed");
   });
@@ -1825,7 +1832,6 @@ describe("IndexingPanel", () => {
   it("maps the live stage title without duplicating Running", () => {
     expect(resolveIndexLiveStageTitle("extracting", "files")).toBe("Reading files…");
     expect(resolveIndexLiveStageTitle("embedding", null)).toBe("Vectorizing…");
-    expect(resolveIndexLiveStageTitle("embedding", "vision")).toBe("Describing images…");
     expect(resolveIndexLiveStageTitle(null, null)).toBe("Indexing…");
   });
 
@@ -1904,38 +1910,8 @@ describe("IndexingPanel", () => {
     expect(header).not.toMatch(/39751/);
   });
 
-  it("renders vision stage copy from the polled live snapshot", async () => {
-    const { fetchMock } = stubFetch({
-      settings: { ...indexConfig, enabled: true },
-      status: {
-        ...statusPayload,
-        enabled: true,
-        running: true,
-        live: {
-          trigger: "onDemand",
-          phase: "embedding",
-          stage: "vision",
-          scanned: 2,
-          indexed: 1,
-          elapsedMs: 3500,
-          current: null,
-        },
-      },
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<IndexingPanel />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId("index-live-progress")).toHaveTextContent("Describing images…");
-    });
-    expect(screen.getByTestId("index-live-header")).toHaveTextContent("Manual Run");
-    expect(screen.getByTestId("index-live-header")).toHaveTextContent("2 scanned");
-    expect(screen.getByTestId("index-live-header")).toHaveTextContent("1 indexed");
-  });
-
   // Mini-card step tests left with the deleted cards; the grep-style block
-  // covers vision and counts through the polled snapshot above.
+  // covers counts through the polled snapshot above.
 
   it("unmounts the live block on settle with no persistence", async () => {
     let live: Record<string, unknown> | null = {
@@ -3140,7 +3116,11 @@ describe("IndexingPanel reclaim action", () => {
       expect(screen.getByTestId("index-last-run")).toBeInTheDocument();
     });
     expect(screen.getByTestId("index-last-run")).toHaveTextContent("7 retired");
-    expect(screen.getByTestId("index-last-run-retired")).toHaveTextContent("7 retired");
+    expect(
+      screen.getByTestId("index-last-run").textContent?.match(/7 retired/g)
+        ?.length,
+    ).toBe(1);
+    expect(screen.queryByTestId("index-last-run-retired")).toBeNull();
   });
 });
 
@@ -3384,17 +3364,19 @@ describe("IndexingPanel run actions wrap", () => {
       jsonResponse({
         sessionID: "s1",
         trigger: "onDemand",
-        status: "ok",
-        documentsIndexed: 3,
-        vectorChunks: 2,
-        keywordChunks: 1,
-        scanned: 5,
+        status: "running",
+        documentsIndexed: 0,
+        vectorChunks: 0,
+        keywordChunks: 0,
+        scanned: 0,
         skipped: 0,
         errors: 0,
+        retiredCount: 0,
+        truncatedCount: 0,
         warnings: [],
         startedAt: 0,
-        finishedAt: 1,
-        indexAsOf: 1,
+        finishedAt: 0,
+        indexAsOf: null,
         skippedReason: null,
       }),
     );
@@ -4471,5 +4453,207 @@ describe("IndexingPanel two-phase storage", () => {
     expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
     expect(screen.getByText("30 docs · 70 chunks · 0 B")).toBeInTheDocument();
     expect(screen.getByTestId("index-bar-files")).toBeInTheDocument();
+  });
+});
+
+describe("IndexingPanel connection resilience", () => {
+  function makeCountingSocket(): {
+    capture: ReturnType<typeof createMockWebSocketCapture>;
+    instances: WebSocket[];
+    CountingSocket: new (url?: string) => WebSocket;
+  } {
+    const capture = createMockWebSocketCapture();
+    const BaseSocket = createMockWebSocket(capture) as unknown as new (
+      url?: string,
+    ) => WebSocket;
+    const instances: WebSocket[] = [];
+    class CountingSocket extends BaseSocket {
+      constructor(url?: string) {
+        super(url);
+        instances.push(this);
+      }
+    }
+    return { capture, instances, CountingSocket };
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    clearCachedIndexStatusForTesting();
+  });
+
+  it("renders the reconnect notice toast when websocket connection drops", async () => {
+    const { capture, instances, CountingSocket } = makeCountingSocket();
+    const { fetchMock } = stubFetch();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    expect(screen.queryByTestId("index-reconnecting")).not.toBeInTheDocument();
+
+    await act(async () => {
+      instances[0].close();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-reconnecting")).toBeInTheDocument();
+    });
+    const toast = screen.getByTestId("index-reconnecting");
+    expect(toast).toHaveClass("connection-toast");
+    expect(
+      within(toast).getByText(/Live updates paused — reconnecting to server… Indexing continues in the background./),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("index-reconnect-retry")).toBeInTheDocument();
+    expect(screen.getByTestId("index-reconnect-dismiss")).toBeInTheDocument();
+  });
+
+  it("retry button triggers immediate redial and clears toast on recovery", async () => {
+    const user = userEvent.setup();
+    const { capture, instances, CountingSocket } = makeCountingSocket();
+    const { fetchMock } = stubFetch();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+
+    await act(async () => {
+      instances[0].close();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-reconnecting")).toBeInTheDocument();
+    });
+
+    const dialedBeforeRetry = instances.length;
+    await user.click(screen.getByTestId("index-reconnect-retry"));
+    expect(instances.length).toBe(dialedBeforeRetry + 1);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("index-reconnecting")).not.toBeInTheDocument();
+    });
+  });
+
+  it("dismiss hides the reconnect toast until next disconnect", async () => {
+    const user = userEvent.setup();
+    const { capture, instances, CountingSocket } = makeCountingSocket();
+    const { fetchMock } = stubFetch();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+
+    await act(async () => {
+      instances[0].close();
+    });
+    await screen.findByTestId("index-reconnecting");
+    await user.click(screen.getByTestId("index-reconnect-dismiss"));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("index-reconnecting")).not.toBeInTheDocument();
+    });
+
+    // Fresh drop re-arms the notice
+    await act(async () => {
+      instances[0].close();
+    });
+    await screen.findByTestId("index-reconnecting");
+    expect(screen.getByTestId("index-reconnecting")).toBeInTheDocument();
+  });
+
+  it("triggers one-shot on-demand pass and tracks in-flight progress asynchronously", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    let isRunning = false;
+    const fetchMock = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === "/index/run") {
+        isRunning = true;
+        return jsonResponse({
+          sessionID: "s1",
+          trigger: "onDemand",
+          status: "running",
+          documentsIndexed: 0,
+          vectorChunks: 0,
+          keywordChunks: 0,
+          scanned: 0,
+          skipped: 0,
+          errors: 0,
+          retiredCount: 0,
+          truncatedCount: 0,
+          warnings: [],
+          startedAt: 1,
+          finishedAt: 1,
+        });
+      }
+      if (url === "/index/status") {
+        return jsonResponse({
+          ...statusPayload,
+          enabled: true,
+          running: isRunning,
+          live: isRunning
+            ? {
+                stage: "indexing",
+                scannedFiles: 42,
+                indexedFiles: 10,
+                failedFiles: 0,
+                skippedFiles: 0,
+                current: "sample.swift",
+                bytesRead: 1024,
+                trigger: "onDemand",
+              }
+            : null,
+          lastRun: isRunning
+            ? null
+            : { status: "ok", indexed: 10, scanned: 42, errors: 0, finishedAt: 2 },
+        });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Enabled")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Run" }));
+
+    // Immediately confirms start without waiting for the pass to finish
+    await waitFor(() => {
+      expect(screen.getByText("Manual run started.")).toBeInTheDocument();
+    });
+
+    // Live progress block is mounted and shows the progress
+    await waitFor(() => {
+      expect(screen.getByTestId("index-live-progress")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/sample\.swift/)).toBeInTheDocument();
+
+    // Now emit run_completed over WebSocket to simulate completion
+    isRunning = false;
+    await act(async () => {
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "run_completed",
+        run: {
+          kind: "index",
+          status: "ok",
+          message: "Index run finished (onDemand)",
+        },
+      });
+    });
+
+    // Final summary is loaded and displayed
+    await waitFor(() => {
+      expect(
+        screen.getAllByText(/Last run ok · 10 indexed/).length,
+      ).toBeGreaterThanOrEqual(1);
+    });
   });
 });

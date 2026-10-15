@@ -1,16 +1,21 @@
 // Rune Weaver Dashboard — Unit tests for the Needs Action queue card list.
-// Pins the one-shot decision payload, the "Approve once" / "Deny" labels, the
+// Pins the duration-only split-button payload (Allow main plus chevron tiers,
+// Deny plus Deny always, every decision tagged surface dashboard with no
+// scope), the coerced-tool exception (one-shot cards carry no standing-deny
+// control, matching the chat banner's dedicated one-shot branches), the
+// truncated target line, the "Approve once" / "Deny" labels, the
 // Open in Inbox link on every approval card, the dedicated brake branch, the
 // severity-then-filing ordering matrix, the absence of any bulk control, and
 // the scheduled-sends monitoring group (placement and fire-time ordering, the
 // cancel flow, exclusion from the attention count and badge, the all-clear
 // matrix, and Manage navigation).
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import NeedsActionQueue from "./NeedsActionQueue";
 import type { Goal, PermissionRequest, ScheduledSend } from "../../api";
+import { durationOptionsFor } from "../../approvalsShared";
 import { jsonResponse } from "../../test-utils/http";
 
 interface DecideCall {
@@ -162,7 +167,7 @@ describe("NeedsActionQueue", () => {
     vi.unstubAllGlobals();
   });
 
-  it("sends the one-shot decide payload with duration thisTime and no scope", async () => {
+  it("sends the Allow main payload with duration thisTime, surface dashboard, and no scope", async () => {
     const user = userEvent.setup();
     const { decideCalls } = stubApi([
       makeApproval({ id: "appr-1", toolName: "git.push" }),
@@ -176,12 +181,13 @@ describe("NeedsActionQueue", () => {
     await waitFor(() => expect(decideCalls).toHaveLength(1));
     expect(decideCalls[0].method).toBe("POST");
     expect(decideCalls[0].path).toBe("/approvals/appr-1/decide");
-    // The whole payload: the one-shot tier and nothing else, so no scope can
-    // ride along and widen the grant beyond this call.
-    expect(decideCalls[0].body).toEqual({ approved: true, duration: "thisTime" });
+    // Duration-only quick surface: the picked tier plus the dashboard surface
+    // tag, and no scope key so the engine resolves the request's own target.
+    expect(decideCalls[0].body).toEqual({ approved: true, duration: "thisTime", surface: "dashboard" });
+    expect(decideCalls[0].body).not.toHaveProperty("scope");
   });
 
-  it("sends the same one-shot payload when the card is denied", async () => {
+  it("sends the Deny main payload as deny-once with surface dashboard and no scope", async () => {
     const user = userEvent.setup();
     const { decideCalls } = stubApi([
       makeApproval({ id: "appr-1", toolName: "git.push" }),
@@ -194,27 +200,275 @@ describe("NeedsActionQueue", () => {
     await user.click(denyBtn);
 
     await waitFor(() => expect(decideCalls).toHaveLength(1));
-    expect(decideCalls[0].body).toEqual({ approved: false, duration: "thisTime" });
+    expect(decideCalls[0].body).toEqual({ approved: false, duration: "thisTime", surface: "dashboard" });
+    expect(decideCalls[0].body).not.toHaveProperty("scope");
   });
 
-  it("labels the quick actions Approve once and Deny with the one-shot consequence visible", async () => {
+  it("sends Deny always as a standing deny with surface dashboard", async () => {
+    const user = userEvent.setup();
+    const { decideCalls } = stubApi([
+      makeApproval({ id: "appr-1", toolName: "git.push" }),
+    ]);
+
+    render(<NeedsActionQueue />);
+
+    const denyChevron = await screen.findByRole("button", { name: /Deny options for git.push/i });
+    await user.click(denyChevron);
+    await user.click(await screen.findByRole("menuitem", { name: /Deny always/i }));
+
+    await waitFor(() => expect(decideCalls).toHaveLength(1));
+    expect(decideCalls[0].path).toBe("/approvals/appr-1/decide");
+    expect(decideCalls[0].body).toEqual({ approved: false, duration: "forever", surface: "dashboard" });
+    expect(decideCalls[0].body).not.toHaveProperty("scope");
+  });
+
+  it("hides the standing-deny control on a coerced-tool continuation card", async () => {
+    stubApi([
+      makeApproval({ id: "cont-1", toolName: "engine.continue" }),
+    ]);
+
+    render(<NeedsActionQueue />);
+
+    // The one-shot card keeps its this-time Deny main button…
+    expect(
+      await screen.findByRole("button", { name: /Deny engine\.continue/i }),
+    ).toBeInTheDocument();
+    // …but offers no Deny chevron and no Deny always item: the decision
+    // contract coerces any durable tier on a one-shot tool back to thisTime
+    // and mints no rule, so a standing deny would be a dead vote — the same
+    // semantics the chat banner's dedicated Continue/Stop branch renders.
+    expect(
+      screen.queryByRole("button", { name: /Deny options for engine\.continue/i }),
+    ).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /Deny always/i })).toBeNull();
+  });
+
+  it("hides the standing-deny control on a coerced-tool desktop resume card", async () => {
+    stubApi([
+      makeApproval({ id: "resume-1", toolName: "desktop.resume" }),
+    ]);
+
+    render(<NeedsActionQueue />);
+
+    expect(
+      await screen.findByRole("button", { name: /Deny desktop\.resume/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Deny options for desktop\.resume/i }),
+    ).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /Deny always/i })).toBeNull();
+  });
+
+  it("sends the coerced-tool Deny main payload as deny-once with surface dashboard", async () => {
+    const user = userEvent.setup();
+    const { decideCalls } = stubApi([
+      makeApproval({ id: "cont-1", toolName: "engine.continue" }),
+    ]);
+
+    render(<NeedsActionQueue />);
+
+    await user.click(await screen.findByRole("button", { name: /Deny engine\.continue/i }));
+
+    await waitFor(() => expect(decideCalls).toHaveLength(1));
+    expect(decideCalls[0].body).toEqual({ approved: false, duration: "thisTime", surface: "dashboard" });
+    expect(decideCalls[0].body).not.toHaveProperty("scope");
+  });
+
+  it("lists exactly the shared duration options on the Allow chevron and sends each tier duration-only", async () => {
+    const user = userEvent.setup();
+    const plain = makeApproval({ id: "appr-1", toolName: "git.push" });
+    const expected = durationOptionsFor(plain);
+    expect(expected).toHaveLength(7);
+
+    // Menu shape: one render asserting the chevron lists every shared tier.
+    {
+      stubApi([plain]);
+      const { unmount } = render(<NeedsActionQueue />);
+      await user.click(
+        await screen.findByRole("button", { name: /Allow options for git.push/i }),
+      );
+      const items = await screen.findAllByRole("menuitem");
+      expect(items.map((item) => item.textContent)).toEqual(
+        expected.map((option) => option.label),
+      );
+      unmount();
+      vi.unstubAllGlobals();
+    }
+
+    // Payload shape: a fresh card per tier, so each pick is asserted against
+    // its own decide write without the decided card leaving the list.
+    for (const option of expected) {
+      const { decideCalls } = stubApi([
+        makeApproval({ id: `appr-${option.value}`, toolName: "git.push" }),
+      ]);
+      const { unmount } = render(<NeedsActionQueue />);
+      await user.click(
+        await screen.findByRole("button", { name: /Allow options for git.push/i }),
+      );
+      await user.click(screen.getByRole("menuitem", { name: option.label }));
+      await waitFor(() => expect(decideCalls).toHaveLength(1));
+      expect(decideCalls[0].body).toEqual({
+        approved: true,
+        duration: option.value,
+        surface: "dashboard",
+      });
+      expect(decideCalls[0].body).not.toHaveProperty("scope");
+      unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("lists exactly the three egress durations for an egress-parked card", async () => {
+    const user = userEvent.setup();
+    const egress = makeApproval({
+      id: "egress-1",
+      toolName: "api.request",
+      egressHost: "unlisted.example.com",
+    });
+    const expected = durationOptionsFor(egress);
+    expect(expected.map((option) => option.value)).toEqual([
+      "thisTime",
+      "forSession",
+      "forever",
+    ]);
+    const { decideCalls } = stubApi([egress]);
+
+    render(<NeedsActionQueue />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Allow options for api.request/i }),
+    );
+    const items = await screen.findAllByRole("menuitem");
+    expect(items).toHaveLength(3);
+    expect(items.map((item) => item.textContent)).toEqual(
+      expected.map((option) => option.label),
+    );
+
+    await user.click(screen.getByRole("menuitem", { name: expected[1].label }));
+    await waitFor(() => expect(decideCalls).toHaveLength(1));
+    expect(decideCalls[0].body).toEqual({
+      approved: true,
+      duration: expected[1].value,
+      surface: "dashboard",
+    });
+    expect(decideCalls[0].body).not.toHaveProperty("scope");
+  });
+
+  it("moves Allow chevron focus with arrows, Home, End, and Escape", async () => {
+    const user = userEvent.setup();
+    stubApi([makeApproval({ id: "appr-1", toolName: "git.push" })]);
+
+    render(<NeedsActionQueue />);
+
+    const chevron = await screen.findByRole("button", { name: /Allow options for git.push/i });
+    await user.click(chevron);
+
+    const items = await screen.findAllByRole("menuitem");
+    expect(items).toHaveLength(7);
+    expect(items[0]).toHaveFocus();
+
+    await user.keyboard("{ArrowDown}");
+    expect(items[1]).toHaveFocus();
+
+    await user.keyboard("{ArrowUp}");
+    expect(items[0]).toHaveFocus();
+
+    await user.keyboard("{ArrowUp}");
+    expect(items[items.length - 1]).toHaveFocus();
+
+    await user.keyboard("{End}");
+    expect(items[items.length - 1]).toHaveFocus();
+
+    await user.keyboard("{Home}");
+    expect(items[0]).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(chevron).toHaveFocus();
+  });
+
+  it("dismisses an open chevron menu on outside pointer down", async () => {
+    const user = userEvent.setup();
+    stubApi([makeApproval({ id: "appr-1", toolName: "git.push" })]);
+
+    render(<NeedsActionQueue />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Allow options for git.push/i }),
+    );
+    expect(await screen.findByRole("menu")).toBeInTheDocument();
+
+    // jsdom ships no PointerEvent constructor, so the outside pointer-down
+    // travels as a MouseEvent carrying the same type; listeners dispatch on
+    // type, never on event class.
+    act(() => {
+      document.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    });
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+  });
+
+  it("renders the derived target line truncated with the full value on title", async () => {
+    const longTarget = `file-${"a".repeat(100)}.txt`;
+    stubApi([
+      makeApproval({
+        id: "target-1",
+        toolName: "files.read",
+        displayTarget: longTarget,
+        input: {
+          toolName: "files.read",
+          argumentsJSON: '{"path":"/other.txt"}',
+          callID: "call-target-1",
+        },
+      }),
+    ]);
+
+    const { container } = render(<NeedsActionQueue />);
+
+    await screen.findByRole("button", { name: /Approve once/i });
+    const line = container.querySelector(".action-target-line") as HTMLElement;
+    expect(line).not.toBeNull();
+    expect(line).toHaveTextContent(/Target:/);
+    const code = line.querySelector("code") as HTMLElement;
+    expect(code).toHaveAttribute("title", longTarget);
+    expect(code).toHaveTextContent(`${longTarget.slice(0, 80)}…`);
+    // The target line renders above the arguments disclosure.
+    const details = container.querySelector(".action-args-details") as HTMLElement;
+    expect(details).not.toBeNull();
+    expect(
+      line.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("renders the legacy argument fallback target when no displayTarget is stored", async () => {
+    stubApi([makeApproval({ id: "appr-1", toolName: "git.push" })]);
+
+    const { container } = render(<NeedsActionQueue />);
+
+    await screen.findByRole("button", { name: /Approve once/i });
+    const code = container.querySelector(".action-target-line code") as HTMLElement;
+    expect(code).not.toBeNull();
+    expect(code).toHaveTextContent("origin/main");
+    expect(code).toHaveAttribute("title", "origin/main");
+  });
+
+  it("labels the quick actions Approve once and Deny with the duration consequence visible", async () => {
     stubApi([makeApproval({ id: "appr-1", toolName: "git.push" })]);
 
     const { container } = render(<NeedsActionQueue />);
 
     await screen.findByRole("button", { name: /Approve once/i });
     expect(screen.getByRole("button", { name: /Deny git.push/i })).toBeInTheDocument();
-    // The consequence line names what the decision covers and where the
-    // durable tiers live.
+    expect(
+      screen.getByRole("button", { name: /Allow options for git.push/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Deny options for git.push/i }),
+    ).toBeInTheDocument();
+    // The consequence line names the duration behavior and where scope lives.
     const note = container.querySelector(".action-card-once-note");
     expect(note).not.toBeNull();
-    expect(note).toHaveTextContent(/One shot/i);
-    expect(note).toHaveTextContent(/Open in Inbox/i);
-    // A dashboard decision never mints durable trust: no duration picker and no
-    // scope editor render on the card.
-    const card = container.querySelector(".action-card") as HTMLElement;
-    expect(within(card).queryByRole("combobox")).toBeNull();
-    expect(within(card).queryByRole("checkbox")).toBeNull();
+    expect(note).toHaveTextContent(/Duration applies to this target only/i);
+    expect(note).toHaveTextContent(/Scope editing lives in the Inbox/i);
   });
 
   it("links every card to the Approvals Inbox", async () => {
@@ -289,7 +543,7 @@ describe("NeedsActionQueue", () => {
 
     await waitFor(() => expect(decideCalls).toHaveLength(1));
     expect(decideCalls[0].path).toBe("/approvals/brake-1/decide");
-    expect(decideCalls[0].body).toEqual({ approved: true, duration: "thisTime" });
+    expect(decideCalls[0].body).toEqual({ approved: true, duration: "thisTime", surface: "dashboard" });
   });
 
   it("keeps the brake paused with the one-shot payload", async () => {
@@ -307,7 +561,7 @@ describe("NeedsActionQueue", () => {
     await user.click(await screen.findByRole("button", { name: "Keep paused" }));
 
     await waitFor(() => expect(decideCalls).toHaveLength(1));
-    expect(decideCalls[0].body).toEqual({ approved: false, duration: "thisTime" });
+    expect(decideCalls[0].body).toEqual({ approved: false, duration: "thisTime", surface: "dashboard" });
   });
 
   it("orders cards by severity descending then filing time descending", async () => {

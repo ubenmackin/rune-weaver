@@ -1,18 +1,15 @@
-// Rune Weaver Dashboard — Tests pinning the inline approval banner's allow
-// options, scope popover output, egress mapping, and keyboard contract to the
-// shared trust-duration tiers and the unified decision payload.
+// Rune Weaver Dashboard — Tests pinning the inline approval banner's
+// duration-only allow chevron, deny split, egress mapping, standing-rules
+// link, and keyboard contract to the shared duration tiers.
 
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import InlineApprovalBanner, {
-  buildInlineScope,
   isEgressBlocked,
   resolveEgressHost,
-  scopeKindOptions,
-  splitAllowOptions,
-  splitEgressOptions,
 } from "./InlineApprovalBanner";
+import { durationOptionsFor } from "../approvalsShared";
 import { trustDurationOptions, type PermissionRequest } from "../api";
 
 // Explicit per-test DOM teardown: several suites below query generic controls
@@ -57,67 +54,58 @@ function egressRequest(
   };
 }
 
-async function openScopePopover(
+async function openAllowMenu(
   user: ReturnType<typeof userEvent.setup>,
   toolName = "files.write",
-  id = "app-tool-1",
 ) {
   const chevron = screen.getByRole("button", {
     name: `Allow options for ${toolName}`,
   });
   await user.click(chevron);
-  await user.click(screen.getByRole("menuitem", { name: "For these targets…" }));
-  return screen.getByTestId(`inline-scope-${id}`);
+  return screen.getByRole("menu");
+}
+
+async function openDenyMenu(
+  user: ReturnType<typeof userEvent.setup>,
+  toolName = "files.write",
+) {
+  const chevron = screen.getByRole("button", {
+    name: `Deny options for ${toolName}`,
+  });
+  await user.click(chevron);
+  return screen.getByRole("menu");
 }
 
 describe("InlineApprovalBanner allow options", () => {
-  it("mirrors every shared trust duration in the base option set", () => {
-    const base = splitAllowOptions.filter((option) => !option.widen);
-    // Base values and labels must come from trustDurationOptions verbatim so a
-    // new or renamed tier can never be omitted from the inline banner while
-    // the inbox and engine still offer it.
-    expect(base.map((option) => option.value)).toEqual(
-      trustDurationOptions.map((option) => option.value),
+  it("lists exactly the 7 shared durations for a plain request", async () => {
+    const onDecide = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <InlineApprovalBanner
+        request={toolRequest()}
+        deciding={false}
+        onDecide={onDecide}
+      />,
     );
-    for (const tier of trustDurationOptions) {
-      expect(base.find((option) => option.value === tier.value)?.label).toBe(
-        tier.label,
-      );
-    }
+
+    await openAllowMenu(user);
+    const items = screen.getAllByRole("menuitem");
+    expect(items).toHaveLength(7);
+    expect(items.map((item) => item.textContent)).toEqual(
+      trustDurationOptions.map((option) => option.label),
+    );
+    expect(
+      screen.queryByText(/\(all targets\)/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: "For these targets…" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("inline-scope-app-tool-1"),
+    ).not.toBeInTheDocument();
   });
 
-  it("offers an all-targets variant for every non-one-shot tier", () => {
-    const widen = splitAllowOptions.filter((option) => option.widen);
-    // The one-shot `thisTime` grant persists nothing, so it must never appear
-    // as a widenable option; every other tier gets exactly one widen variant.
-    const expected = trustDurationOptions.filter(
-      (option) => option.value !== "thisTime",
-    );
-    expect(widen.map((option) => option.value)).toEqual(
-      expected.map((option) => option.value),
-    );
-    for (const tier of expected) {
-      expect(widen.find((option) => option.value === tier.value)?.label).toBe(
-        `${tier.label} (all targets)`,
-      );
-    }
-  });
-
-  it("keeps exactly thirteen quick options plus the scope row", () => {
-    // The thirteen quick picks stay byte-for-byte; the scope popover is the
-    // only addition to the menu.
-    expect(splitAllowOptions).toHaveLength(13);
-    expect(scopeKindOptions.map((option) => option.value)).toEqual([
-      "thisTarget",
-      "allTargets",
-      "recipients",
-      "paths",
-      "hosts",
-      "pattern",
-    ]);
-  });
-
-  it("sends the unified payload for every one of the 13 quick options", async () => {
+  it("sends duration-only payloads for every one of the 7 quick options", async () => {
     const onDecide = vi.fn();
     const user = userEvent.setup();
     render(
@@ -131,18 +119,19 @@ describe("InlineApprovalBanner allow options", () => {
     const chevron = screen.getByRole("button", {
       name: "Allow options for files.write",
     });
-    for (const option of splitAllowOptions) {
+    for (const option of trustDurationOptions) {
       await user.click(chevron);
       await user.click(screen.getByRole("menuitem", { name: option.label }));
-      // Per-target picks let the engine resolve the request's own target, so
-      // they carry no scope; the all-targets variants widen to one tool-wide
-      // scope. Either way the payload is the single unified decision.
+      // Quick surfaces send duration only: the server resolves the request's
+      // own target, so no scope ever rides a banner decision.
       expect(onDecide).toHaveBeenCalledWith(
         "app-tool-1",
         true,
         option.value,
-        option.widen ? { kind: "tool" } : undefined,
       );
+    }
+    for (const call of onDecide.mock.calls) {
+      expect(call).toHaveLength(3);
     }
   });
 
@@ -162,398 +151,52 @@ describe("InlineApprovalBanner allow options", () => {
 
     await user.click(screen.getByRole("button", { name: "Deny" }));
     expect(onDecide).toHaveBeenCalledWith("app-tool-1", false, "thisTime");
+    for (const call of onDecide.mock.calls) {
+      expect(call).toHaveLength(3);
+    }
   });
-});
 
-describe("InlineApprovalBanner scope popover", () => {
-  it("builds valid scopes for every kind the selector offers", () => {
-    // Unit-level pin of the popover's payload shapes: one canonical scope per
-    // kind, and a refusal when the entries name nothing.
-    expect(buildInlineScope("thisTarget", [" /tmp/a.txt "], false)).toEqual({
-      kind: "exactTarget",
-      target: "/tmp/a.txt",
-    });
-    expect(buildInlineScope("allTargets", [], false)).toEqual({ kind: "tool" });
+  it("offers exactly one Deny chevron item that denies forever", async () => {
+    const onDecide = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <InlineApprovalBanner
+        request={toolRequest()}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    await openDenyMenu(user);
+    const items = screen.getAllByRole("menuitem");
+    expect(items).toHaveLength(1);
+    await user.click(
+      screen.getByRole("menuitem", { name: "Deny always" }),
+    );
+    expect(onDecide).toHaveBeenCalledWith("app-tool-1", false, "forever");
+    expect(onDecide.mock.calls[0]).toHaveLength(3);
+  });
+
+  it("links to the standing rules pane after the Deny group", async () => {
+    const onDecide = vi.fn();
+    render(
+      <InlineApprovalBanner
+        request={toolRequest()}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    const link = screen.getByRole("link", { name: "Manage standing rules" });
+    expect(link).toHaveAttribute("href", "#settings?access=rules");
+    expect(link.className).toContain("ghost");
+    const denyButton = screen.getByRole("button", { name: "Deny" });
     expect(
-      buildInlineScope("recipients", ["alice@example.com", "bob@example.com"], false),
-    ).toEqual({
-      kind: "recipientSet",
-      handles: ["alice@example.com", "bob@example.com"],
-    });
-    expect(buildInlineScope("paths", ["/etc/runeweaver"], false)).toEqual({
-      kind: "pathPrefix",
-      prefix: "/etc/runeweaver",
-    });
-    expect(buildInlineScope("hosts", ["API.example.com"], true)).toEqual({
-      kind: "domain",
-      host: "API.example.com",
-      subdomains: true,
-    });
-    expect(buildInlineScope("pattern", ["rm -rf /tmp/*"], false)).toEqual({
-      kind: "glob",
-      pattern: "rm -rf /tmp/*",
-    });
-    // Blank or whitespace-only entries name no target and fail closed.
-    expect(buildInlineScope("thisTarget", [], false)).toBeNull();
-    expect(buildInlineScope("thisTarget", ["   "], false)).toBeNull();
-    expect(buildInlineScope("recipients", ["", "  "], false)).toBeNull();
-  });
-
-  it("replaces the chevron menu and focuses the kind selector", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <InlineApprovalBanner
-        request={toolRequest()}
-        deciding={false}
-        onDecide={onDecide}
-      />,
-    );
-
-    const popover = await openScopePopover(user);
-    // The popover takes the menu's place instead of stacking over it.
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    expect(popover).toHaveAttribute("data-placement", "bottom");
-    expect(screen.getByLabelText("Scope kind for files.write")).toHaveFocus();
-    expect(
-      screen.getByRole("button", { name: "Allow options for files.write" }),
-    ).toHaveAttribute("aria-expanded", "true");
-  });
-
-  it("sends an exactTarget scope for this target on the standing tier", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <InlineApprovalBanner
-        request={toolRequest()}
-        deciding={false}
-        onDecide={onDecide}
-      />,
-    );
-
-    await openScopePopover(user);
-    await user.type(
-      screen.getByLabelText("This target for files.write"),
-      "/tmp/notes.txt",
-    );
-    await user.click(
-      screen.getByRole("button", { name: "Allow for these targets" }),
-    );
-    // The popover opens on the standing tier; one pick still changes it.
-    expect(onDecide).toHaveBeenCalledWith("app-tool-1", true, "forever", {
-      kind: "exactTarget",
-      target: "/tmp/notes.txt",
-    });
-  });
-
-  it("sends the chosen duration beside the scope", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <InlineApprovalBanner
-        request={toolRequest()}
-        deciding={false}
-        onDecide={onDecide}
-      />,
-    );
-
-    const popover = await openScopePopover(user);
-    const durations = screen.getByLabelText(
-      "Scope duration for files.write",
-    ) as HTMLSelectElement;
-    // The duration select is single-sourced from the shared tiers.
-    expect(Array.from(durations.options).map((option) => option.value)).toEqual(
-      trustDurationOptions.map((option) => option.value),
-    );
-    await user.selectOptions(durations, "oneDay");
-    await user.type(
-      screen.getByLabelText("This target for files.write"),
-      "/tmp/picked.txt",
-    );
-    await user.click(
-      within(popover).getByRole("button", { name: "Allow for these targets" }),
-    );
-    expect(onDecide).toHaveBeenCalledWith("app-tool-1", true, "oneDay", {
-      kind: "exactTarget",
-      target: "/tmp/picked.txt",
-    });
-  });
-
-  it("sends a tool-wide scope for all targets without any entry", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <InlineApprovalBanner
-        request={toolRequest()}
-        deciding={false}
-        onDecide={onDecide}
-      />,
-    );
-
-    await openScopePopover(user);
-    await user.selectOptions(
-      screen.getByLabelText("Scope kind for files.write"),
-      "allTargets",
-    );
-    const submit = screen.getByRole("button", {
-      name: "Allow for these targets",
-    });
-    // Tool-wide trust names no entry, so it submits straight away.
-    expect(submit).toBeEnabled();
-    await user.click(submit);
-    expect(onDecide).toHaveBeenCalledWith("app-tool-1", true, "forever", {
-      kind: "tool",
-    });
-  });
-
-  it("collects a recipient list and sends a recipientSet scope", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <InlineApprovalBanner
-        request={toolRequest({ toolName: "messages.send" })}
-        deciding={false}
-        onDecide={onDecide}
-      />,
-    );
-
-    const chevron = screen.getByRole("button", {
-      name: "Allow options for messages.send",
-    });
-    await user.click(chevron);
-    await user.click(
-      screen.getByRole("menuitem", { name: "For these targets…" }),
-    );
-    await user.selectOptions(
-      screen.getByLabelText("Scope kind for messages.send"),
-      "recipients",
-    );
-    const addInput = screen.getByLabelText("Add recipients for messages.send");
-    await user.type(addInput, "alice@example.com");
-    await user.click(screen.getByRole("button", { name: "Add" }));
-    await user.type(addInput, "bob@example.com");
-    await user.click(screen.getByRole("button", { name: "Add" }));
-    // Both entries render as removable chips; removing one narrows the set.
-    expect(screen.getByText("alice@example.com")).toBeInTheDocument();
-    expect(screen.getByText("bob@example.com")).toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: "Remove alice@example.com" }),
-    );
-    await user.click(
-      screen.getByRole("button", { name: "Allow for these targets" }),
-    );
-    expect(onDecide).toHaveBeenCalledWith("app-tool-1", true, "forever", {
-      kind: "recipientSet",
-      handles: ["bob@example.com"],
-    });
-  });
-
-  it("sends a pathPrefix scope for a paths kind", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <InlineApprovalBanner
-        request={toolRequest()}
-        deciding={false}
-        onDecide={onDecide}
-      />,
-    );
-
-    await openScopePopover(user);
-    await user.selectOptions(
-      screen.getByLabelText("Scope kind for files.write"),
-      "paths",
-    );
-    await user.type(
-      screen.getByLabelText("Paths for files.write"),
-      "/etc/runeweaver",
-    );
-    await user.click(
-      screen.getByRole("button", { name: "Allow for these targets" }),
-    );
-    expect(onDecide).toHaveBeenCalledWith("app-tool-1", true, "forever", {
-      kind: "pathPrefix",
-      prefix: "/etc/runeweaver",
-    });
-  });
-
-  it("sends a domain scope with the subdomains toggle", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <InlineApprovalBanner
-        request={toolRequest()}
-        deciding={false}
-        onDecide={onDecide}
-      />,
-    );
-
-    await openScopePopover(user);
-    await user.selectOptions(
-      screen.getByLabelText("Scope kind for files.write"),
-      "hosts",
-    );
-    await user.type(
-      screen.getByLabelText("Hosts / domains for files.write"),
-      "api.example.com",
-    );
-    const toggle = screen.getByLabelText(
-      "Include subdomains of api.example.com",
-    );
-    // Off by default: a bare host covers the host alone.
-    expect(toggle).not.toBeChecked();
-    await user.click(toggle);
-    await user.click(
-      screen.getByRole("button", { name: "Allow for these targets" }),
-    );
-    expect(onDecide).toHaveBeenCalledWith("app-tool-1", true, "forever", {
-      kind: "domain",
-      host: "api.example.com",
-      subdomains: true,
-    });
-  });
-
-  it("sends a glob scope for a pattern kind", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <InlineApprovalBanner
-        request={toolRequest({ toolName: "bash.exec" })}
-        deciding={false}
-        onDecide={onDecide}
-      />,
-    );
-
-    const chevron = screen.getByRole("button", {
-      name: "Allow options for bash.exec",
-    });
-    await user.click(chevron);
-    await user.click(
-      screen.getByRole("menuitem", { name: "For these targets…" }),
-    );
-    await user.selectOptions(
-      screen.getByLabelText("Scope kind for bash.exec"),
-      "pattern",
-    );
-    await user.type(
-      screen.getByLabelText("Pattern for bash.exec"),
-      "rm -rf /tmp/build-*",
-    );
-    await user.click(
-      screen.getByRole("button", { name: "Allow for these targets" }),
-    );
-    expect(onDecide).toHaveBeenCalledWith("app-tool-1", true, "forever", {
-      kind: "glob",
-      pattern: "rm -rf /tmp/build-*",
-    });
-  });
-
-  it("refuses to submit while the entries name no target", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <InlineApprovalBanner
-        request={toolRequest()}
-        deciding={false}
-        onDecide={onDecide}
-      />,
-    );
-
-    await openScopePopover(user);
-    const submit = screen.getByRole("button", {
-      name: "Allow for these targets",
-    });
-    // Empty and whitespace-only entries alike name no target, so the popover
-    // never decides on a scope that would match nothing.
-    expect(submit).toBeDisabled();
-    await user.type(
-      screen.getByLabelText("This target for files.write"),
-      "   ",
-    );
-    expect(submit).toBeDisabled();
-    await user.clear(screen.getByLabelText("This target for files.write"));
-    await user.type(
-      screen.getByLabelText("This target for files.write"),
-      "/tmp/ok.txt",
-    );
-    expect(submit).toBeEnabled();
-    await user.click(submit);
-    expect(onDecide).toHaveBeenCalledWith("app-tool-1", true, "forever", {
-      kind: "exactTarget",
-      target: "/tmp/ok.txt",
-    });
-  });
-
-  it("starts the entry list clean when the kind switches", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <InlineApprovalBanner
-        request={toolRequest()}
-        deciding={false}
-        onDecide={onDecide}
-      />,
-    );
-
-    await openScopePopover(user);
-    const kindSelect = screen.getByLabelText("Scope kind for files.write");
-    await user.selectOptions(kindSelect, "recipients");
-    const addInput = screen.getByLabelText("Add recipients for files.write");
-    await user.type(addInput, "alice@example.com");
-    await user.click(screen.getByRole("button", { name: "Add" }));
-    expect(screen.getByText("alice@example.com")).toBeInTheDocument();
-
-    // A recipient handle is not a path prefix, so the switch carries nothing.
-    await user.selectOptions(kindSelect, "paths");
-    expect(screen.queryByText("alice@example.com")).not.toBeInTheDocument();
-    expect(
-      (screen.getByLabelText("Paths for files.write") as HTMLInputElement).value,
-    ).toBe("");
-    const submit = screen.getByRole("button", {
-      name: "Allow for these targets",
-    });
-    expect(submit).toBeDisabled();
-    expect(onDecide).not.toHaveBeenCalled();
-  });
-
-  it("closes on Escape and returns focus to the chevron", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <InlineApprovalBanner
-        request={toolRequest()}
-        deciding={false}
-        onDecide={onDecide}
-      />,
-    );
-
-    await openScopePopover(user);
-    await user.keyboard("{Escape}");
-    expect(screen.queryByTestId("inline-scope-app-tool-1")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Allow options for files.write" }),
-    ).toHaveFocus();
-    expect(onDecide).not.toHaveBeenCalled();
-  });
-
-  it("closes on the Cancel button and returns focus to the chevron", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <InlineApprovalBanner
-        request={toolRequest()}
-        deciding={false}
-        onDecide={onDecide}
-      />,
-    );
-
-    await openScopePopover(user);
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByTestId("inline-scope-app-tool-1")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Allow options for files.write" }),
-    ).toHaveFocus();
-    expect(onDecide).not.toHaveBeenCalled();
+      Boolean(
+        denyButton.compareDocumentPosition(link) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
   });
 });
 
@@ -628,6 +271,44 @@ describe("InlineApprovalBanner desktop resume approval", () => {
 
     await user.click(cancelBtn);
     expect(onDecide).toHaveBeenCalledWith("app-desk-1", false, "thisTime");
+  });
+});
+
+describe("InlineApprovalBanner one-shot deny", () => {
+  it("renders Deny with no Deny always item for a session-tagged brake request", async () => {
+    const onDecide = vi.fn();
+    const user = userEvent.setup();
+    const request: PermissionRequest = {
+      id: "app-brake-1",
+      toolName: "behavior.brake",
+      description:
+        "Behavior brake engaged: email.send executed 18 times in the trailing hour (baseline 3).",
+      sessionID: "sess-chat",
+      input: { toolName: "behavior.brake", argumentsJSON: "{}", callID: "c-brake" },
+      suggestedDurations: ["thisTime"],
+    };
+
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    // The one-shot deny stays available while the standing deny stays off the
+    // card: its durable tier coerces to thisTime and mints no rule.
+    expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Deny options for behavior.brake" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: "Deny always" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Deny" }));
+    expect(onDecide).toHaveBeenCalledWith("app-brake-1", false, "thisTime");
+    expect(onDecide.mock.calls[0]).toHaveLength(3);
   });
 });
 
@@ -866,20 +547,37 @@ describe("InlineApprovalBanner pending assessment", () => {
 });
 
 describe("InlineApprovalBanner network egress approval", () => {
-  it("pins the four egress items onto (approved, duration) pairs", () => {
-    // The egress menu keeps its four items; each maps onto the unified
-    // payload's approved flag plus duration, with no tier riding the wire.
+  it("lists exactly the 3 egress durations with no scope row", async () => {
+    const onDecide = vi.fn();
+    const user = userEvent.setup();
+    const request = egressRequest();
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    const chevronBtn = screen.getByRole("button", {
+      name: "Allow options for web.fetch to api.github.com",
+    });
+    await user.click(chevronBtn);
+
+    const expected = durationOptionsFor(request);
+    expect(expected).toHaveLength(3);
+    const items = screen.getAllByRole("menuitem");
+    expect(items).toHaveLength(3);
+    expect(items.map((item) => item.textContent)).toEqual(
+      expected.map((option) => option.label),
+    );
     expect(
-      splitEgressOptions.map((option) => [option.label, option.approved, option.value]),
-    ).toEqual([
-      ["Allow Once", true, "thisTime"],
-      ["Allow During Session", true, "forSession"],
-      ["Always Allow", true, "forever"],
-      ["Deny Always", false, "forever"],
-    ]);
+      screen.queryByRole("menuitem", { name: "For these targets…" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/\(all targets\)/)).not.toBeInTheDocument();
   });
 
-  it("renders egress badge and the four-item split combo for unlisted domain", async () => {
+  it("renders egress badge and the duration chevron for unlisted domain", async () => {
     const onDecide = vi.fn();
     const request = egressRequest();
 
@@ -909,35 +607,23 @@ describe("InlineApprovalBanner network egress approval", () => {
     await user.click(denyBtn);
     expect(onDecide).toHaveBeenCalledWith("app-egress-1", false, "thisTime");
 
-    // Open chevron menu: exactly the four egress items, no scope row.
+    // Open chevron menu: exactly the three egress durations, no scope row.
     const chevronBtn = screen.getByRole("button", {
       name: "Allow options for web.fetch to api.github.com",
     });
-    await user.click(chevronBtn);
+    const expected = durationOptionsFor(request);
+    for (const option of expected) {
+      await user.click(chevronBtn);
+      await user.click(screen.getByRole("menuitem", { name: option.label }));
+      expect(onDecide).toHaveBeenCalledWith("app-egress-1", true, option.value);
+    }
 
-    const items = screen.getAllByRole("menuitem");
-    expect(items).toHaveLength(4);
-    expect(screen.getByRole("menuitem", { name: "Allow Once" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Allow During Session" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Always Allow" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Deny Always" })).toBeInTheDocument();
-    expect(
-      screen.queryByRole("menuitem", { name: "For these targets…" }),
-    ).not.toBeInTheDocument();
-
-    // Each pick closes the menu, so the remaining tiers reopen the chevron.
-    // Session trust is the forSession duration, not a one-shot with a tier.
-    await user.click(screen.getByRole("menuitem", { name: "Allow During Session" }));
-    expect(onDecide).toHaveBeenCalledWith("app-egress-1", true, "forSession");
-
-    // Reopen and pick Always Allow
-    await user.click(chevronBtn);
-    await user.click(screen.getByRole("menuitem", { name: "Always Allow" }));
-    expect(onDecide).toHaveBeenCalledWith("app-egress-1", true, "forever");
-
-    // Reopen and pick Deny Always
-    await user.click(chevronBtn);
-    await user.click(screen.getByRole("menuitem", { name: "Deny Always" }));
+    // Deny always mints the durable deny through the shared contract.
+    const denyChevron = screen.getByRole("button", {
+      name: "Deny options for web.fetch to api.github.com",
+    });
+    await user.click(denyChevron);
+    await user.click(screen.getByRole("menuitem", { name: "Deny always" }));
     expect(onDecide).toHaveBeenCalledWith("app-egress-1", false, "forever");
 
     // Every egress path sent the same single payload — no scope, no tier.
@@ -1062,7 +748,7 @@ describe("InlineApprovalBanner split menu keyboard and positioning", () => {
 
     // Focus lands on the first choice without an extra tab stop.
     const items = screen.getAllByRole("menuitem");
-    expect(items).toHaveLength(14);
+    expect(items).toHaveLength(7);
     expect(items[0]).toHaveFocus();
 
     await user.keyboard("{ArrowDown}");
@@ -1071,7 +757,7 @@ describe("InlineApprovalBanner split menu keyboard and positioning", () => {
     await user.keyboard("{ArrowUp}");
     expect(items[0]).toHaveFocus();
 
-    // Arrow up from the first row wraps to the scope row.
+    // Arrow up from the first row wraps to the last duration row.
     await user.keyboard("{ArrowUp}");
     expect(items[items.length - 1]).toHaveFocus();
 
@@ -1080,7 +766,7 @@ describe("InlineApprovalBanner split menu keyboard and positioning", () => {
 
     await user.keyboard("{End}");
     expect(items[items.length - 1]).toHaveFocus();
-    expect(items[items.length - 1]).toHaveTextContent("For these targets…");
+    expect(items[items.length - 1]).toHaveTextContent("Forever");
 
     await user.keyboard("{Home}");
     expect(items[0]).toHaveFocus();
@@ -1089,6 +775,30 @@ describe("InlineApprovalBanner split menu keyboard and positioning", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(chevronBtn).toHaveFocus();
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it("closes the deny menu on Escape and returns focus to its chevron", async () => {
+    const onDecide = vi.fn();
+    const user = userEvent.setup();
+
+    render(
+      <InlineApprovalBanner
+        request={positionRequest}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    const denyChevron = screen.getByRole("button", {
+      name: "Deny options for files.write",
+    });
+    await user.click(denyChevron);
+    expect(screen.getAllByRole("menuitem")).toHaveLength(1);
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(denyChevron).toHaveFocus();
     expect(onDecide).not.toHaveBeenCalled();
   });
 
@@ -1117,25 +827,8 @@ describe("InlineApprovalBanner split menu keyboard and positioning", () => {
     // Option clicking works as expected
     const optionBtn = screen.getByRole("menuitem", { name: "Next hour" });
     await user.click(optionBtn);
-    expect(onDecide).toHaveBeenCalledWith("app-pos-1", true, "oneHour", undefined);
-  });
-
-  it("renders the scope popover upward with the same placement contract", async () => {
-    const onDecide = vi.fn();
-    const user = userEvent.setup();
-
-    render(
-      <InlineApprovalBanner
-        request={positionRequest}
-        deciding={false}
-        onDecide={onDecide}
-        menuPlacement="up"
-      />,
-    );
-
-    const popover = await openScopePopover(user, "files.write", "app-pos-1");
-    expect(popover).toHaveClass("split-allow-menu-up");
-    expect(popover).toHaveAttribute("data-placement", "top");
+    expect(onDecide).toHaveBeenCalledWith("app-pos-1", true, "oneHour");
+    expect(onDecide.mock.calls[0]).toHaveLength(3);
   });
 
   it("renders downward with data-placement='bottom' when menuPlacement='down'", async () => {

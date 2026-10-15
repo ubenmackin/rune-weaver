@@ -109,6 +109,8 @@ public final class ServerContext: Sendable {
     public let permissionGate: PermissionGate
     /// Pending approval prompts shared by REST and WebSocket.
     public let approvals: ApprovalQueue
+    /// Resolved decision audit trail shared by every decision surface.
+    public let approvalDecisions: any ApprovalDecisionRecording
     /// Scheduler job registry.
     public let scheduler: SchedulerStore
     /// Run audit trail for chat turns and scheduler firings.
@@ -186,9 +188,10 @@ public final class ServerContext: Sendable {
     /// provider doubles as the background reviewer so review quality tracks
     /// the active model posture instead of minting a second backend.
     public let fanOut: FanOutEngine
-    /// Active chat provider backing vision description for live index rebuilds.
-    /// Stored at boot so a settings save can resolve the vision stage the same
-    /// way boot does without reaching back into the orchestrator.
+    /// Active chat provider backing goal planning, ideas, fan-out review, and
+    /// the proactive judge. Stored at boot so a settings save can live-reload
+    /// it the same way boot resolves it without reaching back into the
+    /// orchestrator.
     private let servingLLMBox: OSAllocatedUnfairLock<(any LLMProvider)?>
     public var servingLLM: (any LLMProvider)? {
         get { servingLLMBox.withLock { $0 } }
@@ -372,7 +375,8 @@ public final class ServerContext: Sendable {
         workspaceStore: WorkspaceStore? = nil,
         persona: PersonaConfig = PersonaConfig(),
         watchdog: BehaviorWatchdog? = nil,
-        sovereignLedger: SovereignLedger? = nil
+        sovereignLedger: SovereignLedger? = nil,
+        approvalDecisions: (any ApprovalDecisionRecording)? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -382,6 +386,7 @@ public final class ServerContext: Sendable {
         self.embedder = embedder
         self.permissionGate = permissionGate
         self.approvals = approvals
+        self.approvalDecisions = approvalDecisions ?? InMemoryApprovalDecisionLog()
         self.scheduler = scheduler
         self.runs = runs
         self.hub = hub
@@ -1153,7 +1158,8 @@ extension ServerContext {
             mediaConfig: toolConfigs.media, llmServerURLs: toolConfigs.llmServerURLs,
             workspaceConfig: workspaceConfig, workspaceStore: resolvedWorkspaceStore,
             persona: persona,
-            watchdog: watchdog, sovereignLedger: resolvedSovereignLedger
+            watchdog: watchdog, sovereignLedger: resolvedSovereignLedger,
+            approvalDecisions: ApprovalDecisionLogStore(dbPath: dbPath)
         )
         // Await the verified-pulse wiring before serving so early tool calls
         // observe watchdog counts and goal/policy changes invalidate the

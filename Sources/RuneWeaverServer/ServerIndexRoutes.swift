@@ -196,9 +196,10 @@ private func registerIndexStorageRoute(_ app: Application) {
 
 /// Registers the on-demand run route behind `POST /index/run`.
 ///
-/// The run is awaited like a chat turn: it can take minutes, and the matching
-/// `POST /index/cancel` arrives on a concurrent request to stop it, so the
-/// response always carries the terminal summary the dashboard renders.
+/// The run is initiated asynchronously: it returns immediately (~5ms) with
+/// in-flight run metadata so reverse proxies, web browsers, and clients never
+/// hold an idle network connection open across long-running index passes.
+/// Progress and completion stream via WebSocket frames and `GET /index/status`.
 /// - Parameter app: Application receiving the route.
 private func registerIndexRunRoute(_ app: Application) {
     let index = app.grouped(PathComponent.constant(ServerPaths.index))
@@ -208,8 +209,15 @@ private func registerIndexRunRoute(_ app: Application) {
         guard let coordinator = context.indexCoordinator else {
             throw Abort(.serviceUnavailable, reason: "Indexing is not configured.")
         }
-        let summary = await coordinator.run(trigger: .onDemand)
-        return IndexRunResponse(summary)
+        let outcome = await coordinator.start(trigger: .onDemand)
+        switch outcome {
+        case let .started(sessionID, startedAt, _):
+            return IndexRunResponse.started(sessionID: sessionID, trigger: .onDemand, startedAt: startedAt)
+        case .alreadyRunning:
+            return IndexRunResponse.skipped(trigger: .onDemand, reason: "An index run is already in progress.")
+        case let .disabled(reason):
+            return IndexRunResponse.skipped(trigger: .onDemand, reason: reason)
+        }
     }
 }
 

@@ -25,6 +25,7 @@ import {
   deleteJob,
   deleteSecret,
   deleteSessionEpisodes,
+  extractHtmlErrorDetail,
   formatGoalNextAdvance,
   formatRunDuration,
   formatToolProgressElapsedMs,
@@ -1206,6 +1207,75 @@ describe("dashboard api client", () => {
     const failure = await getHealth().catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).status).toBe(404);
+  });
+
+  it("extracts clean human-readable error text from HTML error pages", () => {
+    const apacheHtml =
+      '<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN"> <html><head> <title>502 Proxy Error</title> </head><body> <h1>Proxy Error</h1> <p>The proxy server received an invalid response from an upstream server.<br /> The proxy server could not handle the request<p>Reason: <strong>Error reading from remote server</strong></p></p> <hr> <address>Apache/2.4.58 (Ubuntu) Server at runeweaver.int.volcrypt.com Port 443</address> </body></html>';
+    expect(extractHtmlErrorDetail(apacheHtml, 502, "Proxy Error")).toBe(
+      "502 Proxy Error: Error reading from remote server",
+    );
+
+    const nginxHtml =
+      "<html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center><hr><center>nginx</center></body></html>";
+    expect(extractHtmlErrorDetail(nginxHtml, 502, "Bad Gateway")).toBe(
+      "502 Bad Gateway",
+    );
+
+    const genericHtml = "<html><body><h1>Service Down</h1><p>Under maintenance</p></body></html>";
+    expect(extractHtmlErrorDetail(genericHtml, 503, "Service Unavailable")).toBe(
+      "503 Service Unavailable: Service Down",
+    );
+  });
+
+  it("caps a multi-kilobyte extracted segment at the shared bound", () => {
+    // A hostile proxy page with an oversized <title>: the whole capture can
+    // never flow into the detail unbounded.
+    const longTail = "x".repeat(5000);
+    const html = `<html><head><title>502 ${longTail}</title></head><body></body></html>`;
+    // The title carries the status, so it returns alone — cut at the 150-char
+    // bound exactly.
+    expect(extractHtmlErrorDetail(html, 502, "Bad Gateway")).toBe(
+      `502 ${"x".repeat(146)}`,
+    );
+  });
+
+  it("caps the Reason and h1 captures the same way", () => {
+    const longReason = "y".repeat(5000);
+    const reasonHtml = `<html><body><p>Reason: ${longReason}</p></body></html>`;
+    expect(extractHtmlErrorDetail(reasonHtml, 502, "Bad Gateway")).toBe(
+      `502 Bad Gateway: ${"y".repeat(150)}`,
+    );
+
+    const longHeading = "z".repeat(5000);
+    const h1Html = `<html><body><h1>${longHeading}</h1></body></html>`;
+    expect(extractHtmlErrorDetail(h1Html, 503, "Service Unavailable")).toBe(
+      `503 Service Unavailable: ${"z".repeat(150)}`,
+    );
+  });
+
+  it("sanitizes HTML error response bodies without leaking markup into ApiError", async () => {
+    const apacheHtml =
+      '<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN"> <html><head> <title>502 Proxy Error</title> </head><body> <h1>Proxy Error</h1> <p>Reason: <strong>Error reading from remote server</strong></p> </body></html>';
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(apacheHtml, {
+            status: 502,
+            statusText: "Proxy Error",
+            headers: { "Content-Type": "text/html; charset=iso-8859-1" },
+          }),
+      ),
+    );
+    const failure = await getHealth().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(502);
+    expect((failure as ApiError).message).toBe(
+      "502 Proxy Error: Error reading from remote server",
+    );
+    expect((failure as ApiError).message).not.toContain("<!DOCTYPE");
+    expect((failure as ApiError).message).not.toContain("<html");
   });
 
   it("keeps web default mirrors pinned to the Swift single source", () => {

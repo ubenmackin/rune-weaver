@@ -499,7 +499,7 @@ struct IndexCoordinatorTests {
     @Test
     func `Cancel interrupts a slow batch within one batch`() async {
         // Staged double with a slow cancellable batch per item, standing in for
-        // an IMAP fetch, an embedding batch, or a vision turn: each batch awaits
+        // an IMAP fetch or an embedding batch: each batch awaits
         // a cancellable sleep so task cancellation throws at the next checkpoint
         // instead of running to stage end.
         let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, isCancelled in

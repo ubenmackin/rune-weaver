@@ -386,10 +386,12 @@ describe("ApprovalsInbox", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].path).toContain("/decide");
     // The scope stays omitted so the engine resolves the request's own
-    // target, and the one-shot tier stores nothing.
+    // target, the one-shot tier stores nothing, and the surface tag names
+    // the inbox card as the deciding origin.
     expect(JSON.parse(calls[0].body)).toEqual({
       approved: true,
       duration: "thisTime",
+      surface: "inbox",
     });
   });
 
@@ -417,7 +419,176 @@ describe("ApprovalsInbox", () => {
       approved: false,
       duration: "thisTime",
       scope: { kind: "tool" },
+      surface: "inbox",
     });
+  });
+
+  it("renders no Edit scope button on any card", async () => {
+    stubEngine({
+      approvals: [
+        pendingRequest({ id: "req-one" }),
+        pendingRequest({
+          id: "req-egress-no-edit",
+          toolName: "api.request",
+          egressHost: "api.example.com",
+          input: {
+            toolName: "api.request",
+            argumentsJSON: '{"method":"GET","url":"https://api.example.com/v1"}',
+            callID: "call-egress-no-edit",
+          },
+        }),
+      ],
+    });
+    const { container } = render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    // The Custom scope radio opens the editor on select, so no separate
+    // ghost button survives on any card.
+    expect(
+      screen.queryByRole("button", { name: "Edit scope" }),
+    ).toBeNull();
+    for (const card of Array.from(
+      container.querySelectorAll('[data-testid^="approval-card-"]'),
+    )) {
+      expect(
+        within(card as HTMLElement).queryByRole("button", {
+          name: "Edit scope",
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("renders the engine-derived target truncated at 80 chars with full title", async () => {
+    const longTarget = `file-${"a".repeat(100)}.txt`;
+    stubEngine({
+      approvals: [
+        pendingRequest({
+          id: "req-derived",
+          toolName: "files.read",
+          displayTarget: "short-target.txt",
+          input: {
+            toolName: "files.read",
+            argumentsJSON: '{"path":"/other.txt"}',
+            callID: "call-derived",
+          },
+        }),
+        pendingRequest({
+          id: "req-long",
+          toolName: "files.read",
+          displayTarget: longTarget,
+          input: {
+            toolName: "files.read",
+            argumentsJSON: '{"path":"/other.txt"}',
+            callID: "call-long",
+          },
+        }),
+      ],
+    });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByTestId("approval-card-req-derived")).toBeInTheDocument();
+    });
+    // The stored displayTarget wins over the arguments fallback.
+    const shortCode = within(
+      screen.getByTestId("approval-card-req-derived"),
+    ).getByText("short-target.txt");
+    expect(shortCode).toHaveClass("approval-scope-target");
+    expect(shortCode).toHaveAttribute("title", "short-target.txt");
+    // Longer values cut at 80 chars with an ellipsis while the title keeps
+    // the full value for hover.
+    const longCode = screen
+      .getByTestId("approval-card-req-long")
+      .querySelector(".approval-scope-target");
+    expect(longCode).not.toBeNull();
+    expect(longCode).toHaveTextContent(`${longTarget.slice(0, 80)}…`);
+    expect(longCode).toHaveAttribute("title", longTarget);
+  });
+
+  it("opens the scope editor when Custom scope is selected", async () => {
+    const user = userEvent.setup();
+    stubEngine({ approvals: [pendingRequest()] });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("dialog", { name: "Edit decision scope" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "Custom scope" }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("dialog", { name: "Edit decision scope" }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("reopens the scope editor from the checked Custom radio after a cancel", async () => {
+    const user = userEvent.setup();
+    stubEngine({ approvals: [pendingRequest()] });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("radio", { name: "Custom scope" }));
+    const dialog = () =>
+      screen.queryByRole("dialog", { name: "Edit decision scope" });
+    await waitFor(() => {
+      expect(dialog()).not.toBeNull();
+    });
+    // Cancelling stages nothing, so the card stays on Custom with no scope.
+    await user.click(
+      within(screen.getByRole("dialog", { name: "Edit decision scope" })).getByRole(
+        "button",
+        { name: "Cancel" },
+      ),
+    );
+    await waitFor(() => {
+      expect(dialog()).toBeNull();
+    });
+    expect(screen.getByRole("radio", { name: "Custom scope" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeDisabled();
+    // The already-checked radio fires no onChange on a re-click, so the
+    // click handler itself must reopen the editor or Custom could never be
+    // described after a cancel.
+    await user.click(screen.getByRole("radio", { name: "Custom scope" }));
+    await waitFor(() => {
+      expect(dialog()).not.toBeNull();
+    });
+  });
+
+  it("pins the disabled decision tooltip to the Custom scope radio after a cancel", async () => {
+    const user = userEvent.setup();
+    stubEngine({ approvals: [pendingRequest()] });
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("radio", { name: "Custom scope" }));
+    await user.click(
+      within(
+        screen.getByRole("dialog", { name: "Edit decision scope" }),
+      ).getByRole("button", { name: "Cancel" }),
+    );
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Edit decision scope" }),
+      ).not.toBeInTheDocument();
+    });
+    // Custom is selected with nothing staged, so both decisions stay locked
+    // and the tooltip points at the Custom scope radio, the sole entry point.
+    const expected =
+      "Pick a custom scope first — select the Custom scope radio to open the editor.";
+    expect(screen.getByRole("button", { name: "Allow" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Allow" })).toHaveAttribute(
+      "title",
+      expected,
+    );
+    expect(screen.getByRole("button", { name: "Deny" })).toHaveAttribute(
+      "title",
+      expected,
+    );
   });
 
   it("ships the edited recipient set from the scope editor", async () => {
@@ -473,6 +644,7 @@ describe("ApprovalsInbox", () => {
         kind: "recipientSet",
         handles: ["+15551234567", "ops@example.com"],
       },
+      surface: "inbox",
     });
   });
 
@@ -503,7 +675,7 @@ describe("ApprovalsInbox", () => {
       expect(screen.getByText("api.request")).toBeInTheDocument();
     });
     const card = screen.getByTestId("approval-card-req-egress-edit");
-    await user.click(within(card).getByRole("button", { name: "Edit scope" }));
+    await user.click(within(card).getByRole("radio", { name: "Custom scope" }));
     const dialog = screen.getByRole("dialog", { name: "Edit decision scope" });
     const editor = within(dialog).getByLabelText("Hosts / domains");
     // The editor opens on the parked host, and the owner narrows or moves the
@@ -524,6 +696,7 @@ describe("ApprovalsInbox", () => {
       approved: true,
       duration: "thisTime",
       scope: { kind: "domain", host: "cdn.example.com" },
+      surface: "inbox",
     });
   });
 
@@ -553,7 +726,7 @@ describe("ApprovalsInbox", () => {
       expect(screen.getByText("files.write")).toBeInTheDocument();
     });
     const card = screen.getByTestId("approval-card-req-paths");
-    await user.click(within(card).getByRole("button", { name: "Edit scope" }));
+    await user.click(within(card).getByRole("radio", { name: "Custom scope" }));
     const dialog = screen.getByRole("dialog", { name: "Edit decision scope" });
     const editor = within(dialog).getByLabelText("Paths");
     expect(editor).toHaveValue("/tmp/a.txt");
@@ -575,6 +748,7 @@ describe("ApprovalsInbox", () => {
       approved: true,
       duration: "thisTime",
       scope: { kind: "exactTarget", target: "/tmp/x.txt" },
+      surface: "inbox",
     });
   });
 
@@ -604,10 +778,10 @@ describe("ApprovalsInbox", () => {
       expect(screen.getByText("bash.exec")).toBeInTheDocument();
     });
     const card = screen.getByTestId("approval-card-req-pattern");
-    await user.click(within(card).getByRole("button", { name: "Edit scope" }));
+    await user.click(within(card).getByRole("radio", { name: "Custom scope" }));
     const dialog = screen.getByRole("dialog", { name: "Edit decision scope" });
-    // A command carries none of the target keys, so the editor opens blank.
-    expect(within(dialog).getByLabelText("Pattern")).toHaveValue("");
+    // The editor prefills from the engine-derived command.
+    expect(within(dialog).getByLabelText("Pattern")).toHaveValue("ls /tmp");
     fireEvent.change(within(dialog).getByLabelText("Pattern"), {
       target: { value: "ls *" },
     });
@@ -625,6 +799,7 @@ describe("ApprovalsInbox", () => {
       approved: true,
       duration: "thisTime",
       scope: { kind: "exactTarget", target: "ls *" },
+      surface: "inbox",
     });
   });
 
@@ -701,6 +876,7 @@ describe("ApprovalsInbox", () => {
       approved: true,
       duration: "forSession",
       scope: { kind: "domain", host: "api.example.com" },
+      surface: "inbox",
     });
   });
 
@@ -745,6 +921,7 @@ describe("ApprovalsInbox", () => {
       approved: false,
       duration: "forever",
       scope: { kind: "domain", host: "blocked.example.com" },
+      surface: "inbox",
     });
   });
 
@@ -800,6 +977,7 @@ describe("ApprovalsInbox", () => {
     expect(JSON.parse(calls[0].body)).toEqual({
       approved: true,
       duration: "thisTime",
+      surface: "inbox",
     });
   });
 
@@ -831,6 +1009,7 @@ describe("ApprovalsInbox", () => {
     expect(JSON.parse(calls[0].body)).toEqual({
       approved: false,
       duration: "thisTime",
+      surface: "inbox",
     });
   });
 
@@ -1231,5 +1410,120 @@ describe("ApprovalsInbox", () => {
         String(url).startsWith("/approvals/session-trust"),
       ),
     ).toHaveLength(1);
+  });
+
+  it("defaults to Pending and swaps the groups for History on the segmented control", async () => {
+    const user = userEvent.setup();
+    const historyEntries = [
+      {
+        id: "hist-1",
+        toolName: "email.send",
+        scopeKind: "exactTarget",
+        scopeData: "ops@example.com",
+        allowed: true,
+        duration: "thisTime",
+        surface: "inbox",
+        sessionID: null,
+        displayTarget: "ops@example.com",
+        decidedAt: new Date(Date.now() - 60_000).toISOString(),
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, _init?: RequestInit) => {
+        const path = String(input);
+        if (path === "/sessions") {
+          return jsonResponse({ sessions: [], count: 0 });
+        }
+        if (path.startsWith("/approvals/history")) {
+          return jsonResponse({
+            entries: historyEntries,
+            count: historyEntries.length,
+          });
+        }
+        return jsonResponse({ approvals: [pendingRequest()], count: 1 });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    // Pending is the default view.
+    expect(screen.getByTestId("inbox-view-pending")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByTestId("inbox-view-history")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByText("1 pending")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeInTheDocument();
+    await user.click(screen.getByTestId("inbox-view-history"));
+    expect(screen.getByTestId("inbox-view-history")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByTestId("inbox-view-pending")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    // History replaces the pending queue while the header row stays.
+    await waitFor(() => {
+      expect(screen.getByTestId("approval-history")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: "Allow" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
+    expect(screen.getByText("Inbox")).toBeInTheDocument();
+    // Back to Pending restores the queue.
+    await user.click(screen.getByTestId("inbox-view-pending"));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Allow" })).toBeInTheDocument();
+    });
+    expect(screen.getByText("1 pending")).toBeInTheDocument();
+    expect(screen.queryByTestId("approval-history")).not.toBeInTheDocument();
+  });
+
+  it("hides the ephemeral chip on the History view", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async (input: string) => {
+      const path = String(input);
+      if (path.startsWith("/approvals/session-trust")) {
+        return jsonResponse({
+          sessionID: "sess-a",
+          grants: [
+            {
+              toolName: "email.send",
+              scope: { kind: "exactTarget", target: "bob@x.com" },
+              duration: "forSession",
+              grantedAt: "2026-01-01T00:00:00Z",
+              expiresAt: null,
+            },
+          ],
+          count: 1,
+        });
+      }
+      if (path.startsWith("/approvals/history")) {
+        return jsonResponse({ entries: [], count: 0 });
+      }
+      if (path === "/sessions") {
+        return jsonResponse({ sessions: [], count: 0 });
+      }
+      return jsonResponse({ approvals: [], count: 0 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ApprovalsInbox sessionID="sess-a" />);
+    await waitFor(() => {
+      expect(screen.getByTestId("ephemeral-trust-chip")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("inbox-view-history"));
+    await waitFor(() => {
+      expect(screen.getByText("No recorded decisions.")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByTestId("ephemeral-trust-chip"),
+    ).not.toBeInTheDocument();
   });
 });

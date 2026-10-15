@@ -476,6 +476,10 @@ export interface PermissionRequest {
   intent?: string | null;
   assessment?: ImpactAssessment | null;
   egressHost?: string | null;
+  // Engine-derived display target naming what "this target" covers. Optional
+  // because payloads written before the field carry no key; absent degrades to
+  // the legacy argument scan in approvalsShared.
+  displayTarget?: string | null;
   sandboxSummary?: string | null;
 }
 
@@ -1583,6 +1587,57 @@ export class ApiError extends Error {
   }
 }
 
+// Extracts clean, human-readable error text from an HTML response (such as an
+// Apache, Nginx, or Cloudflare reverse proxy error page) to prevent raw HTML markup
+// from leaking into user-facing error notices. Every extracted segment is
+// capped so a hostile or misbehaving proxy cannot flood the detail (and the
+// ApiError.message built from it) with a multi-kilobyte title, reason, or
+// heading — the bound is the whole point of the tag-strip fallback applied
+// uniformly to every capture.
+const maxHtmlErrorSegmentChars = 150;
+export function extractHtmlErrorDetail(
+  html: string,
+  status: number,
+  statusText: string,
+): string {
+  const fallback = `${status} ${statusText}`.trim() || `HTTP ${status}`;
+  if (!html || typeof html !== "string") return fallback;
+
+  // Extract explicit reason if present (e.g. Apache "Reason: <strong>...</strong>")
+  const reasonMatch = html.match(/Reason:\s*(?:<[^>]+>)*\s*([^<\r\n]+)/i);
+  const reason = reasonMatch
+    ? reasonMatch[1].trim().slice(0, maxHtmlErrorSegmentChars)
+    : null;
+
+  // Extract title if present
+  const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+  const title = titleMatch
+    ? titleMatch[1].trim().slice(0, maxHtmlErrorSegmentChars)
+    : null;
+
+  if (reason) {
+    const prefix = title && /^\d{3}\b/.test(title) ? title : fallback;
+    return `${prefix}: ${reason}`;
+  }
+  if (title) {
+    return title.includes(String(status)) ? title : `${fallback}: ${title}`;
+  }
+
+  // Extract h1 if present
+  const h1Match = html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
+  if (h1Match) {
+    const h1 = h1Match[1].trim().slice(0, maxHtmlErrorSegmentChars);
+    return h1.includes(String(status)) ? h1 : `${fallback}: ${h1}`;
+  }
+
+  // Strip all HTML tags and collapse whitespace as a last resort
+  const stripped = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  if (stripped) {
+    return `${fallback}: ${stripped.slice(0, maxHtmlErrorSegmentChars)}`;
+  }
+  return fallback;
+}
+
 // Validates an orchestrator turn before it enters chat state: the engine always emits text,
 // session, and tool actions together, so a partial object must never render as a completed reply.
 // The parked flag stays optional for back-compat and defaults to not parked when absent.
@@ -1893,7 +1948,16 @@ async function fetchJsonWithHeaders<T>(
               ? reason.trim().slice(0, 500)
               : text.slice(0, 500);
         } catch {
-          detail = text.slice(0, 500);
+          const isHtml =
+            text.includes("<html") ||
+            text.includes("<!DOCTYPE") ||
+            text.includes("<!doctype") ||
+            (response.headers?.get("content-type") ?? "").includes("text/html");
+          if (isHtml) {
+            detail = extractHtmlErrorDetail(text, response.status, response.statusText);
+          } else {
+            detail = text.slice(0, 500);
+          }
         }
       }
     } catch {
@@ -2029,10 +2093,14 @@ export async function decideApproval(
   approved: boolean,
   duration: TrustDuration = "thisTime",
   scope?: AccessScopeDTO,
+  surface?: string,
 ): Promise<ApprovalDecisionResponse> {
   if (scope !== undefined && !isAccessScope(scope)) {
     throw new ApiError("Decision scope is malformed", 0);
   }
+  // A blank surface tag names no origin, so it stays omitted rather than
+  // stored as an empty string the audit trail would have to interpret.
+  const trimmedSurface = typeof surface === "string" ? surface.trim() : "";
   return fetchJson<ApprovalDecisionResponse>(
     `/approvals/${encodeURIComponent(id)}/decide`,
     {
@@ -2041,6 +2109,7 @@ export async function decideApproval(
         approved,
         duration,
         ...(scope !== undefined ? { scope } : {}),
+        ...(trimmedSurface ? { surface: trimmedSurface } : {}),
       }),
     },
   );
@@ -2058,6 +2127,69 @@ export function respondToQuestion(
       body: JSON.stringify({ answer, cancelled }),
     },
   );
+}
+
+// Decision-surface filter for the audit trail: an allow entry resolved the
+// parked call while a deny entry refused it. Kept as action words so the
+// query reads as the owner chose rather than as a wire boolean.
+export type ApprovalHistoryAction = "allowed" | "denied";
+
+// One resolved decision in the audit trail, mirroring the server DTO: the
+// request identity plus the tool, the recorded scope split into kind and
+// data, the verdict, the tier, the deciding surface, and the resolution time
+// in either wire shape the engine emits.
+export interface ApprovalHistoryEntry {
+  id: string;
+  toolName: string;
+  scopeKind?: string | null;
+  scopeData?: string | null;
+  allowed: boolean;
+  duration: string;
+  surface: string;
+  sessionID?: string | null;
+  displayTarget?: string | null;
+  decidedAt: string | number;
+}
+
+export interface ApprovalHistoryResponse {
+  entries: ApprovalHistoryEntry[];
+  count: number;
+}
+
+export interface ApprovalHistoryParams {
+  limit?: number;
+  tool?: string;
+  action?: ApprovalHistoryAction;
+}
+
+// Lists resolved approval decisions newest first through the shared JSON
+// path. Every filter stays optional so the default call reads the recent
+// window; a blank tool or an out-of-range limit is omitted rather than sent.
+export function listApprovalHistory(
+  params?: ApprovalHistoryParams,
+): Promise<ApprovalHistoryResponse> {
+  const query = new URLSearchParams();
+  const limit = params?.limit;
+  if (typeof limit === "number" && Number.isFinite(limit) && limit > 0) {
+    query.set("limit", String(Math.floor(limit)));
+  }
+  const tool = params?.tool?.trim();
+  if (tool) query.set("tool", tool);
+  if (params?.action === "allowed" || params?.action === "denied") {
+    query.set("action", params.action);
+  }
+  const suffix = query.toString();
+  return fetchJson<ApprovalHistoryResponse>(
+    suffix ? `/approvals/history?${suffix}` : "/approvals/history",
+  );
+}
+
+// Clears the resolved-decision audit trail. Pending approvals stay parked;
+// only settled rows drop, so the inbox never loses a decidable entry.
+export function clearApprovalHistory(): Promise<void> {
+  return fetchJson<void>("/approvals/history", {
+    method: "DELETE",
+  });
 }
 
 // Normalizes a rule expiry into a Date while preserving the forever contract: null stays

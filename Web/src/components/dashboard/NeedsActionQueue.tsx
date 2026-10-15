@@ -7,14 +7,17 @@
 // 4. Booked scheduled sends awaiting their fire time (monitoring only: Cancel
 //    plus a Manage shortcut, no approval semantics of any kind).
 //
-// Every quick action on this surface is one-shot: a decision carries the single
-// decide payload with the thisTime tier and no scope, so nothing decided from
-// the dashboard can mint durable trust. Duration and scope editing live in the
-// Approvals Inbox, which every approval card links to, and there is no batch or
-// bulk control anywhere — each card is decided on its own. Scheduled sends sit
-// outside the attention count entirely: they never move the badge, the subtitle,
-// or the greeting caption, and the all-clear card requires approvals, goals,
-// and sends to all be empty.
+// Every quick decision on this surface is duration-only: the Allow chevron
+// lists the shared duration tiers for the request and the decision carries
+// no scope, so the engine resolves the request's own target. One-shot
+// (coerced-tool) requests — continuation, desktop resume — carry no standing
+// deny either, because their durable tier coerces to thisTime and mints no
+// rule; the decision tags surface "dashboard" for the audit trail. Scope
+// editing lives in the Approvals Inbox, which every approval card links to,
+// and there is no batch or bulk control anywhere — each card is decided on
+// its own. Scheduled sends sit outside the attention count entirely: they
+// never move the badge, the subtitle, or the greeting caption, and the
+// all-clear card requires approvals, goals, and sends to all be empty.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -32,12 +35,19 @@ import {
   type ImpactSeverity,
   type PermissionRequest,
   type ScheduledSend,
+  type TrustDuration,
 } from "../../api";
 import { formatRelativeIn } from "../../relativeTime";
 import { useSharedWebSocket, type WSIncomingFrame } from "../../hooks/useSharedWebSocket";
 import InlineQuestionCard from "../InlineQuestionCard";
 import BashTierLine from "../BashTierLine";
 import { resolveSandboxSummary } from "../InlineApprovalBanner";
+import {
+  deriveRequestTarget,
+  durationOptionsFor,
+  truncateTarget,
+} from "../../approvalsShared";
+import { useSplitMenu } from "../../useSplitMenu";
 import {
   AlertTriangleIcon,
   ApprovalsIcon,
@@ -59,6 +69,20 @@ interface NeedsActionQueueProps {
 // it renders a dedicated Resume / Keep paused branch with no duration control
 // instead of the generic approve or deny pair.
 const BRAKE_TOOL_NAME = "behavior.brake";
+
+// One-shot (coerced-tool) requests, mirroring the engine's oneShotToolNames in
+// ApprovalQueue: any durable tier on them coerces to thisTime and mints no
+// rule, so a standing deny on one is a dead vote. The chat banner gates them
+// behind dedicated Continue/Stop and Resume/Cancel branches with no standing
+// deny at all; the dashboard card matches by hiding the Deny-always chevron
+// for these tools. question.ask and behavior.brake never reach the generic
+// card (own branches above) but stay in the set for contract parity.
+const ONE_SHOT_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "engine.continue",
+  "question.ask",
+  "desktop.resume",
+  "behavior.brake",
+]);
 
 // One ordering scale shared by tool approvals, questions, and brake cards, so a
 // consequential card never sinks below a quieter one.
@@ -113,6 +137,228 @@ function OpenInboxLink({ req }: { req: PermissionRequest }) {
       <ApprovalsIcon size={13} />
       <span>Open in Inbox</span>
     </a>
+  );
+}
+
+interface DashboardApprovalCardProps {
+  req: PermissionRequest;
+  severity: ImpactSeverity;
+  severityBadgeText: string;
+  toolBadgeText: string;
+  descriptionText: string;
+  argSummary: string | null;
+  cardClassName?: string;
+  isBusy: boolean;
+  onOpenSession?: (sessionId: string) => void;
+  onDecide: (req: PermissionRequest, approved: boolean, duration: TrustDuration) => void;
+}
+
+// Generic approval card with duration-only Allow / Deny split buttons sharing
+// the chat banner's split-allow class structure, so menu styling stays shared.
+// The Allow chevron lists exactly the shared tiers for the request and sends
+// no scope. The Deny chevron offers only the standing deny, and only for
+// ordinary tools: a one-shot (coerced-tool) request resolves a single parked
+// batch, so its standing-deny control is hidden exactly like the chat
+// banner's dedicated one-shot branches. Open, dismissal, focus, and keyboard
+// semantics come from the shared useSplitMenu machine both decision surfaces
+// consume.
+function DashboardApprovalCard({
+  req,
+  severity,
+  severityBadgeText,
+  toolBadgeText,
+  descriptionText,
+  argSummary,
+  cardClassName,
+  isBusy,
+  onOpenSession,
+  onDecide,
+}: DashboardApprovalCardProps) {
+  // A one-shot request can only deny once: its durable tier coerces to
+  // thisTime inside the shared decision contract and mints no rule, so the
+  // standing-deny control stays off the card entirely, matching the chat
+  // banner's dedicated one-shot branches.
+  const isOneShot = ONE_SHOT_TOOL_NAMES.has(req.toolName);
+  const allowOptions = durationOptionsFor(req);
+  const derivedTarget = deriveRequestTarget(req);
+  // Shared split-menu machine: open state, outside-pointer-down dismissal,
+  // focus-on-open, and the allow/deny keyboard flow come from the same hook
+  // the chat banner consumes, so both quick surfaces stay one vocabulary.
+  const {
+    allowOpen,
+    denyOpen,
+    allowGroupRef,
+    denyGroupRef,
+    allowChevronRef,
+    denyChevronRef,
+    allowItemRefs,
+    denyItemRef,
+    toggleAllow,
+    toggleDeny,
+    closeAllowMenu,
+    closeDenyMenu,
+    handleAllowMenuKeyDown,
+    handleDenyMenuKeyDown,
+    setFocusedIndex,
+  } = useSplitMenu(allowOptions.length);
+
+  function handlePickAllow(value: TrustDuration) {
+    closeAllowMenu(false);
+    onDecide(req, true, value);
+  }
+
+  function handlePickDenyAlways() {
+    closeDenyMenu(false);
+    onDecide(req, false, "forever");
+  }
+
+  return (
+    <article className={`action-card severity-${severity}${cardClassName ? ` ${cardClassName}` : ""}`}>
+      <div className="action-card-header">
+        <div className="action-card-title-row">
+          <span className={`badge severity-badge severity-${severity}`}>
+            {severityBadgeText}
+          </span>
+          <span className="tool-name-badge">{toolBadgeText}</span>
+        </div>
+        {req.sessionID ? (
+          <button
+            type="button"
+            className="btn-link open-session-link"
+            onClick={() => onOpenSession?.(req.sessionID!)}
+            title="Open chat thread for this approval"
+          >
+            <MessageSquareIcon size={13} />
+            <span>Open Thread</span>
+          </button>
+        ) : null}
+        <OpenInboxLink req={req} />
+      </div>
+
+      <div className="action-card-body">
+        <p className="action-card-desc">{descriptionText}</p>
+        <BashTierLine summary={resolveSandboxSummary(req)} />
+        {derivedTarget ? (
+          <p className="action-target-line">
+            <span className="action-target-label">Target:</span>{" "}
+            <code className="action-target-value" title={derivedTarget}>
+              {truncateTarget(derivedTarget)}
+            </code>
+          </p>
+        ) : null}
+        {argSummary ? (
+          <details className="action-args-details">
+            <summary className="action-args-summary">
+              <span>View arguments</span>
+            </summary>
+            <div className="action-args-preview">
+              <code>{argSummary}</code>
+            </div>
+          </details>
+        ) : null}
+      </div>
+
+      <div className="action-card-buttons">
+        <div
+          className="split-allow-group"
+          ref={allowGroupRef}
+          onKeyDown={handleAllowMenuKeyDown}
+        >
+          <button
+            type="button"
+            className="btn btn-primary approve-action-btn split-allow-main"
+            onClick={() => onDecide(req, true, "thisTime")}
+            disabled={isBusy}
+            aria-label={`Approve once for ${req.toolName}`}
+          >
+            <CheckIcon size={15} />
+            <span>{isBusy ? "Approving…" : "Approve once"}</span>
+          </button>
+          <button
+            ref={allowChevronRef}
+            type="button"
+            className="btn btn-primary split-allow-chevron"
+            disabled={isBusy}
+            aria-haspopup="menu"
+            aria-expanded={allowOpen}
+            aria-label={`Allow options for ${req.toolName}`}
+            onClick={toggleAllow}
+          >
+            <span aria-hidden="true">▾</span>
+          </button>
+          {allowOpen && !isBusy ? (
+            <ul className="split-allow-menu" role="menu">
+              {allowOptions.map((option, index) => (
+                <li key={option.value} role="none">
+                  <button
+                    ref={(node) => {
+                      allowItemRefs.current[index] = node;
+                    }}
+                    type="button"
+                    role="menuitem"
+                    className="split-allow-menu-item"
+                    onClick={() => handlePickAllow(option.value)}
+                    onFocus={() => setFocusedIndex(index)}
+                  >
+                    {option.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+
+        <div
+          className="split-deny-group"
+          ref={denyGroupRef}
+          onKeyDown={handleDenyMenuKeyDown}
+        >
+          <button
+            type="button"
+            className="btn reject-action-btn split-deny-main"
+            onClick={() => onDecide(req, false, "thisTime")}
+            disabled={isBusy}
+            aria-label={`Deny ${req.toolName}`}
+          >
+            <CloseIcon size={15} />
+            <span>{isBusy ? "Denying…" : "Deny"}</span>
+          </button>
+          {!isOneShot ? (
+            <button
+              ref={denyChevronRef}
+              type="button"
+              className="btn reject-action-btn split-deny-chevron"
+              disabled={isBusy}
+              aria-haspopup="menu"
+              aria-expanded={denyOpen}
+              aria-label={`Deny options for ${req.toolName}`}
+              onClick={toggleDeny}
+            >
+              <span aria-hidden="true">▾</span>
+            </button>
+          ) : null}
+          {denyOpen && !isBusy && !isOneShot ? (
+            <ul className="split-allow-menu" role="menu">
+              <li role="none">
+                <button
+                  ref={denyItemRef}
+                  type="button"
+                  role="menuitem"
+                  className="split-allow-menu-item split-allow-menu-item-danger"
+                  onClick={handlePickDenyAlways}
+                >
+                  Deny always
+                </button>
+              </li>
+            </ul>
+          ) : null}
+        </div>
+      </div>
+
+      <p className="action-card-once-note">
+        Duration applies to this target only. Scope editing lives in the Inbox.
+      </p>
+    </article>
   );
 }
 
@@ -193,13 +439,13 @@ export default function NeedsActionQueue({
     return () => document.removeEventListener("visibilitychange", handleVisibility);
   }, [fetchActionItems]);
 
-  async function handleDecision(req: PermissionRequest, approved: boolean) {
+  async function handleDecision(req: PermissionRequest, approved: boolean, duration: TrustDuration = "thisTime") {
     try {
       setDecidingId(req.id);
-      // One-shot by construction: thisTime persists nothing and the scope is
-      // omitted, so a dashboard decision covers exactly this call. The durable
-      // tiers stay reachable only from the Approvals Inbox.
-      await decideApproval(req.id, approved, "thisTime");
+      // Duration-only quick surface: the decision carries the picked tier with
+      // surface "dashboard" and no scope, so the engine resolves the request's
+      // own target. Scope editing stays in the Approvals Inbox.
+      await decideApproval(req.id, approved, duration, undefined, "dashboard");
       setApprovals((prev) => prev.filter((a) => a.id !== req.id));
       onActionDecided?.();
     } catch (err) {
@@ -369,72 +615,19 @@ export default function NeedsActionQueue({
                 : "Approval requested for tool execution.");
 
             return (
-              <article key={req.id} className={`action-card severity-${severity} ${isContinuation ? "action-card-continuation" : ""} ${isDesktopResume ? "action-card-desktop-resume" : ""}`}>
-                <div className="action-card-header">
-                  <div className="action-card-title-row">
-                    <span className={`badge severity-badge severity-${severity}`}>
-                      {severityBadgeText}
-                    </span>
-                    <span className="tool-name-badge">{toolBadgeText}</span>
-                  </div>
-                  {req.sessionID ? (
-                    <button
-                      type="button"
-                      className="btn-link open-session-link"
-                      onClick={() => onOpenSession?.(req.sessionID!)}
-                      title="Open chat thread for this approval"
-                    >
-                      <MessageSquareIcon size={13} />
-                      <span>Open Thread</span>
-                    </button>
-                  ) : null}
-                  <OpenInboxLink req={req} />
-                </div>
-
-                <div className="action-card-body">
-                  <p className="action-card-desc">{descriptionText}</p>
-                  <BashTierLine summary={resolveSandboxSummary(req)} />
-                  {argSummary ? (
-                    <details className="action-args-details">
-                      <summary className="action-args-summary">
-                        <span>View arguments</span>
-                      </summary>
-                      <div className="action-args-preview">
-                        <code>{argSummary}</code>
-                      </div>
-                    </details>
-                  ) : null}
-                </div>
-
-                <div className="action-card-buttons">
-                  <button
-                    type="button"
-                    className="btn btn-primary approve-action-btn"
-                    onClick={() => handleDecision(req, true)}
-                    disabled={isBusy}
-                    aria-label={`Approve once for ${req.toolName}`}
-                  >
-                    <CheckIcon size={15} />
-                    <span>{isBusy ? "Approving…" : "Approve once"}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    className="btn reject-action-btn"
-                    onClick={() => handleDecision(req, false)}
-                    disabled={isBusy}
-                    aria-label={`Deny ${req.toolName}`}
-                  >
-                    <CloseIcon size={15} />
-                    <span>{isBusy ? "Denying…" : "Deny"}</span>
-                  </button>
-                </div>
-
-                <p className="action-card-once-note">
-                  One shot: this decision covers this call only and stays allowed
-                  nowhere. Use Open in Inbox for a duration or a scope.
-                </p>
-              </article>
+              <DashboardApprovalCard
+                key={req.id}
+                req={req}
+                severity={severity}
+                severityBadgeText={severityBadgeText}
+                toolBadgeText={toolBadgeText}
+                descriptionText={descriptionText}
+                argSummary={argSummary}
+                cardClassName={`${isContinuation ? "action-card-continuation" : ""} ${isDesktopResume ? "action-card-desktop-resume" : ""}`.trim()}
+                isBusy={isBusy}
+                onOpenSession={onOpenSession}
+                onDecide={(target, approved, duration) => void handleDecision(target, approved, duration)}
+              />
             );
           })}
 
