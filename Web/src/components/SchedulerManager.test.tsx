@@ -1,10 +1,16 @@
 // Rune Weaver Dashboard — Component tests for SchedulerManager job creation, update, and manual run.
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SchedulerManager from "./SchedulerManager";
 import { jsonResponse } from "../test-utils/http";
+import {
+  createMockWebSocket,
+  createMockWebSocketCapture,
+  dispatchFrameOrThrow,
+  resetSharedSocket,
+} from "../test-utils/mockWebSocket";
 
 function job(overrides: Record<string, unknown> = {}) {
   return {
@@ -22,6 +28,11 @@ function job(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+// The Schedules surface reads booked sends on mount beside the jobs list, so
+// the jobs-focused mocks answer that read here instead of letting it fall
+// through to a write recorder or an unrelated payload.
+const EMPTY_SENDS_RESPONSE = { sends: [], count: 0 };
 
 describe("SchedulerManager", () => {
   beforeEach(() => {
@@ -74,6 +85,9 @@ describe("SchedulerManager", () => {
         if (input === "/scheduler/jobs" && !init?.method) {
           return jsonResponse({ jobs: [], count: 0 });
         }
+        if (input === "/scheduler/sends" && !init?.method) {
+          return jsonResponse(EMPTY_SENDS_RESPONSE);
+        }
         if (input.startsWith("/runs") && !init?.method) {
           return jsonResponse({ runs: [], count: 0 });
         }
@@ -119,6 +133,9 @@ describe("SchedulerManager", () => {
         }
         if (input === "/scheduler/jobs" && !init?.method) {
           return jsonResponse({ jobs: [], count: 0 });
+        }
+        if (input === "/scheduler/sends" && !init?.method) {
+          return jsonResponse(EMPTY_SENDS_RESPONSE);
         }
         if (input.startsWith("/runs") && !init?.method) {
           return jsonResponse({ runs: [], count: 0 });
@@ -175,6 +192,9 @@ describe("SchedulerManager", () => {
         }
         if (input === "/scheduler/jobs" && !init?.method) {
           return jsonResponse({ jobs: [job()], count: 1 });
+        }
+        if (input === "/scheduler/sends" && !init?.method) {
+          return jsonResponse(EMPTY_SENDS_RESPONSE);
         }
         if (input.startsWith("/runs") && !init?.method) {
           return jsonResponse({ runs: [], count: 0 });
@@ -401,5 +421,302 @@ describe("SchedulerManager", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByText("Default (25)")).toBeInTheDocument();
+  });
+});
+
+describe("SchedulerManager scheduled sends", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  function send(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "66666666-6666-6666-6666-666666666666",
+      channel: "email",
+      status: "queued",
+      account: null,
+      recipient: "sam@example.com",
+      subject: "Hello",
+      bodyText: "hi",
+      bodyHtml: null,
+      fireAt: new Date(Date.now() + 3_600_000).toISOString(),
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+      settledAt: null,
+      failureReason: null,
+      ...overrides,
+    };
+  }
+
+  function stubSchedulerFetch(
+    sendsPayload: unknown[] | (() => unknown[]),
+    calls: string[] = [],
+  ) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({});
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (input === "/scheduler/jobs" && !init?.method) {
+          return jsonResponse({ jobs: [], count: 0 });
+        }
+        if (input === "/scheduler/sends" && !init?.method) {
+          const sends =
+            typeof sendsPayload === "function" ? sendsPayload() : sendsPayload;
+          return jsonResponse({ sends, count: sends.length });
+        }
+        if (
+          input.startsWith("/scheduler/sends/") &&
+          init?.method === "DELETE"
+        ) {
+          calls.push(`DELETE ${input}`);
+          return jsonResponse(send({ status: "cancelled" }));
+        }
+        return jsonResponse({});
+      }),
+    );
+    return calls;
+  }
+
+  function installSocket() {
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    return capture;
+  }
+
+  it("lists pending sends earliest first with channel, recipient, fire time, and status", async () => {
+    installSocket();
+    stubSchedulerFetch([
+      send({
+        id: "77777777-7777-7777-7777-777777777777",
+        recipient: "later@example.com",
+        channel: "messages",
+        status: "sending",
+        fireAt: new Date(Date.now() + 7_200_000).toISOString(),
+      }),
+      send({
+        id: "66666666-6666-6666-6666-666666666666",
+        recipient: "sam@example.com",
+        channel: "email",
+        status: "queued",
+        fireAt: new Date(Date.now() + 3_600_000).toISOString(),
+      }),
+    ]);
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(screen.getByText("Scheduled sends")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("sam@example.com")).toBeInTheDocument();
+    });
+    expect(screen.getByText("later@example.com")).toBeInTheDocument();
+    expect(screen.getByText("Email")).toBeInTheDocument();
+    expect(screen.getByText("Messages")).toBeInTheDocument();
+    expect(screen.getByText("queued")).toBeInTheDocument();
+    expect(screen.getByText("sending")).toBeInTheDocument();
+    const rows = screen.getAllByText(/@example\.com/);
+    expect(rows[0]).toHaveTextContent("sam@example.com");
+    expect(rows[1]).toHaveTextContent("later@example.com");
+  });
+
+  it("drops terminal sends from the list and shows the empty state", async () => {
+    installSocket();
+    stubSchedulerFetch([
+      send({
+        id: "88888888-8888-8888-8888-888888888888",
+        recipient: "gone@example.com",
+        status: "sent",
+      }),
+      send({
+        id: "99999999-9999-9999-9999-999999999999",
+        recipient: "bounced@example.com",
+        status: "failed",
+      }),
+      send({
+        id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        recipient: "stopped@example.com",
+        status: "cancelled",
+      }),
+    ]);
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(screen.getByText("No scheduled sends")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("gone@example.com")).not.toBeInTheDocument();
+    expect(screen.queryByText("bounced@example.com")).not.toBeInTheDocument();
+    expect(screen.queryByText("stopped@example.com")).not.toBeInTheDocument();
+  });
+
+  it("cancels a send with one click, names it in the toast, and refetches", async () => {
+    const user = userEvent.setup();
+    installSocket();
+    let cancelled = false;
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({});
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (input === "/scheduler/jobs" && !init?.method) {
+          return jsonResponse({ jobs: [], count: 0 });
+        }
+        if (input === "/scheduler/sends" && !init?.method) {
+          const sends = cancelled ? [] : [send()];
+          return jsonResponse({ sends, count: sends.length });
+        }
+        if (
+          input === "/scheduler/sends/66666666-6666-6666-6666-666666666666" &&
+          init?.method === "DELETE"
+        ) {
+          calls.push(`DELETE ${input}`);
+          cancelled = true;
+          return jsonResponse(send({ status: "cancelled" }));
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(screen.getByText("sam@example.com")).toBeInTheDocument();
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Cancel send to sam@example.com" }),
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Cancelled send to sam@example.com")).toBeInTheDocument();
+    });
+    expect(calls).toContain(
+      "DELETE /scheduler/sends/66666666-6666-6666-6666-666666666666",
+    );
+    await waitFor(() => {
+      expect(screen.getByText("No scheduled sends")).toBeInTheDocument();
+    });
+  });
+
+  it("renders no Edit control and no booking entry point in the sends section", async () => {
+    installSocket();
+    stubSchedulerFetch([send()]);
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(screen.getByText("sam@example.com")).toBeInTheDocument();
+    });
+    const section = screen.getByLabelText("Scheduled sends");
+    expect(
+      within(section).queryByRole("button", { name: /edit/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(section).queryByRole("button", { name: /book/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(section).queryByRole("button", { name: /new send/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(section).queryByRole("button", { name: /schedule send/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(section).getByRole("button", { name: "Cancel send to sam@example.com" }),
+    ).toBeInTheDocument();
+  });
+
+  it("refetches sends on run_completed frames, foreground returns, and socket reopen", async () => {
+    const capture = installSocket();
+    let sendsCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({});
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (input === "/scheduler/jobs" && !init?.method) {
+          return jsonResponse({ jobs: [], count: 0 });
+        }
+        if (input === "/scheduler/sends" && !init?.method) {
+          sendsCalls += 1;
+          return jsonResponse({ sends: [send()], count: 1 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const view = render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(screen.getByText("sam@example.com")).toBeInTheDocument();
+    });
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    const settledCalls = sendsCalls;
+    expect(settledCalls).toBeGreaterThan(0);
+
+    await dispatchFrameOrThrow(capture.onMessage, { type: "run_completed" });
+    await waitFor(() => {
+      expect(sendsCalls).toBeGreaterThan(settledCalls);
+    });
+
+    const afterFrameCalls = sendsCalls;
+    const visibilitySpy = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("visible");
+    fireEvent(document, new Event("visibilitychange"));
+    await waitFor(() => {
+      expect(sendsCalls).toBeGreaterThan(afterFrameCalls);
+    });
+    visibilitySpy.mockRestore();
+
+    const afterForegroundCalls = sendsCalls;
+    view.unmount();
+    resetSharedSocket();
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(sendsCalls).toBeGreaterThan(afterForegroundCalls);
+    });
+  });
+
+  it("retains the sends list when a lifecycle refetch fails", async () => {
+    const capture = installSocket();
+    let shouldFail = false;
+    let sendsCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/settings" && !init?.method) {
+          return jsonResponse({});
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (input === "/scheduler/jobs" && !init?.method) {
+          return jsonResponse({ jobs: [], count: 0 });
+        }
+        if (input === "/scheduler/sends" && !init?.method) {
+          sendsCalls += 1;
+          if (shouldFail) throw new Error("sends unreachable");
+          return jsonResponse({ sends: [send()], count: 1 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(screen.getByText("sam@example.com")).toBeInTheDocument();
+    });
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    const settledCalls = sendsCalls;
+    shouldFail = true;
+    await dispatchFrameOrThrow(capture.onMessage, { type: "run_completed" });
+    await waitFor(() => {
+      expect(sendsCalls).toBeGreaterThan(settledCalls);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByText("sam@example.com")).toBeInTheDocument();
   });
 });

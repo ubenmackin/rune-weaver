@@ -530,9 +530,10 @@ public struct EmailSendTool: Tool, Sendable {
     public let description =
         "Sends an email via SMTP through the configured account. "
             + "Use when the user asks to send or compose mail. "
-            + "From always defaults to the account username with no From override; sends immediately on approval with no scheduled or delayed send. "
-            + "For a delayed send, request a scheduled send through the Schedules surface instead of passing scheduleAt: "
-            + "the schedule stores the exact approved bytes and fires them once at the approved time. "
+            + "From always defaults to the account username with no From override; without scheduleAt the send goes immediately on approval, "
+            + "while a scheduleAt fire time books a scheduled send for that time: "
+            + "approval stores the exact bytes and fires them once at the approved time. "
+            + "Scheduled sends carry a single to recipient with no attachments or replies. "
             + "Markdown or plain text in bodyText is standard and is automatically rendered into styled HTML with a plain-text fallback; "
             + "raw bodyHtml is optional for custom HTML overrides; "
             + "attachments must be workspace-guarded absolute paths, and replyToId threads a reply. "
@@ -556,17 +557,20 @@ public struct EmailSendTool: Tool, Sendable {
                 + #""attachmentPaths":{"type":"array","description":"Optional workspace-guarded "#
                 + #"absolute attachment paths (10 MB each, 25 MB total)","items":{"type":"string"}},"replyToId":{"type":"string","description":"Optional "#
                 + #"IMAP id of the message being replied to"},"mailbox":{"type":"string","description":"Mailbox holding the replied-to "#
-                + #"message (omitted means INBOX)"},"scheduleAt":{"type":["number","string"],"description":"Optional fire time "#
+                + #"message (omitted means INBOX)"},"scheduleAt":{"type":["number","string"],"description":"Fire time "#
                 + #"for a scheduled send as epoch seconds or an ISO-8601 datetime (5 minutes to 365 days out, minute-aligned). "#
-                + #"A scheduled send is filed through the Schedules surface; email.send itself still sends immediately on approval."}}"#
+                + #"Approval books the send for that fire time; scheduled sends carry a single to recipient with no attachments "#
+                + #"or replies; omit to send immediately on approval."}}"#
                 + #","required":["account","to","subject"],"additionalProperties":false}"#
         )
     /// Gated: sending leaves the machine and always prompts without a trust grant.
     public let permissionLevel = PermissionLevel.requiresApproval
 
-    /// Fail-closed refusal for a delayed-send request: this tool never delays.
-    private static let scheduledSendRefusalNote =
-        "A scheduleAt fire time requests a scheduled send, and email.send always sends immediately on approval. "
+    /// Fail-closed guidance when a delayed-send request arrives where no
+    /// booking is wired: the approval cannot store the send, so it refuses
+    /// rather than sending immediately and silently dropping the fire time.
+    private static let bookingUnavailableNote =
+        "A scheduleAt fire time requests a scheduled send, and scheduled-send booking is not wired in this context. "
             + "Book the send through the Schedules surface (`POST /scheduler/sends`) so the approved bytes are "
             + "stored and fired exactly once at the requested time."
 
@@ -576,32 +580,34 @@ public struct EmailSendTool: Tool, Sendable {
     private let smtpGateway: any EmailSMTPGateway
     /// IMAP gateway for threading fetches and Sent appends (subprocess by default, stub in tests).
     private let imapGateway: any EmailIMAPGateway
+    /// Booking seam storing approved scheduled sends; nil fails closed with guidance.
+    private let booking: (any ScheduledSendBooking)?
 
     /// Creates a send tool.
     public init(
         emailConfig: EmailConfig,
         smtpGateway: (any EmailSMTPGateway)? = nil,
-        gateway: (any EmailIMAPGateway)? = nil
+        gateway: (any EmailIMAPGateway)? = nil,
+        booking: (any ScheduledSendBooking)? = nil
     ) {
         self.emailConfig = emailConfig
         self.smtpGateway = smtpGateway ?? SubprocessSMTPGateway()
         self.imapGateway = gateway ?? SubprocessIMAPGateway()
+        self.booking = booking
     }
 
     /// Validates, resolves credentials, and sends (or previews under dry-run).
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         do {
             let args = try decodedArgs(from: input)
-            // A fire time makes this a scheduled send, which the deterministic
-            // scheduler owns: an approval on this tool sends immediately, so
-            // honoring the schedule here would silently drop the requested fire
-            // time. Validate the bounds first so a past or out-of-horizon date
-            // is answered with its own reason, then refuse with guidance.
-            if args.scheduleAt != nil {
-                _ = try args.validateScheduleAt()
-                return .failure(Self.scheduledSendRefusalNote, callID: input.callID)
-            }
+            // A fire time makes this a scheduled send: validate the bounds
+            // first so a past or out-of-horizon date is answered with its own
+            // reason, then book the exact approved bytes through the seam.
+            let scheduledFireAt = try args.validateScheduleAt()
             let target = try validatedTarget(from: args)
+            if let scheduledFireAt {
+                return await bookedSendOutput(target: target, fireAt: scheduledFireAt, callID: input.callID, context: context)
+            }
             let account = try resolvedAccount(named: target.accountName)
             let credentials = try await EmailCredentialResolver.resolvedCredentials(for: account)
             let from = credentials.username
@@ -1018,6 +1024,124 @@ extension EmailSendTool {
             bodyHtmlBytes: target.bodyHtml?.utf8.count,
             dryRun: true,
             note: "Dry run: would send to \(total) recipient(s) via \(accountName) without network use.",
+            attachmentPaths: staged.isEmpty ? nil : staged.map(\.path),
+            attachmentBytes: staged.isEmpty ? nil : staged.reduce(0) { $0 + $1.data.count },
+            inReplyTo: target.replyToId,
+            references: target.replyToId,
+            bodyPreview: preview,
+            appendWarning: nil
+        )
+        return successEnvelope(envelope, callID: callID)
+    }
+
+    /// Books a validated scheduled send, or previews the booking under dry-run.
+    ///
+    /// Booking stores the exact approved bytes without touching the network, so
+    /// no credential resolution runs here; the fire worker replays the stored
+    /// bytes through this same tool with re-validation. Booking and validation
+    /// errors stay caller-visible as failures, never silent.
+    private func bookedSendOutput(target: EmailSendTarget, fireAt: Date, callID: String, context: ToolContext) async -> ToolOutput {
+        guard let booking else {
+            return .failure(Self.bookingUnavailableNote, callID: callID)
+        }
+        // The store carries one recipient string plus text/HTML bodies only,
+        // so shapes the replay cannot reproduce fail closed here rather than
+        // booking a success that fires different bytes: attachments, CC/BCC,
+        // multi-to, and reply threading each refuse with their own reason.
+        guard target.attachmentPaths.isEmpty else {
+            return .failure(
+                "Scheduled sends do not support attachments: remove 'attachmentPaths' or send immediately without scheduleAt.",
+                callID: callID
+            )
+        }
+        guard target.cc.isEmpty, target.bcc.isEmpty else {
+            return .failure(
+                "Scheduled sends carry to-only recipients: remove 'cc'/'bcc' or send immediately without scheduleAt.",
+                callID: callID
+            )
+        }
+        // The fire worker replays the stored recipient as one address, so a
+        // comma-joined multi-to would fail validation at fire time.
+        guard target.to.count == 1 else {
+            return .failure(
+                "Scheduled sends carry a single to recipient: pass exactly one address in 'to' or send immediately without scheduleAt.",
+                callID: callID
+            )
+        }
+        guard target.replyToId == nil else {
+            return .failure(
+                "Scheduled sends do not support replies: remove 'replyToId' or send immediately without scheduleAt.",
+                callID: callID
+            )
+        }
+        let account: EmailAccount
+        do {
+            account = try resolvedAccount(named: target.accountName)
+        } catch {
+            return .failure(error.localizedDescription, callID: callID)
+        }
+        // Only the single approved `to` address reaches the store, so what
+        // books is what fires.
+        let recipient = target.to.joined(separator: ", ")
+        if context.dryRun {
+            return scheduledDryRunEnvelope(target: target, accountName: account.name, recipient: recipient, fireAt: fireAt, callID: callID)
+        }
+        let booked: BookedScheduledSend
+        do {
+            booked = try await booking.book(ScheduledSendDraft(
+                channel: .email,
+                recipient: recipient,
+                subject: target.subject,
+                text: target.bodyText,
+                html: target.bodyHtml,
+                fireAt: fireAt,
+                account: account.name
+            ))
+        } catch {
+            return .failure(error.localizedDescription, callID: callID)
+        }
+        let note = "Booked scheduled send \(booked.id.uuidString) to '\(recipient)' via '\(account.name)' for "
+            + "\(ScheduledSendFireTimeText.describe(booked.fireAt)). Approval stored the exact bytes; the send fires once at that time."
+        let payload: [String: Any] = [
+            "account": account.name,
+            "booked": true,
+            "fireAt": booked.fireAt.timeIntervalSince1970,
+            "id": booked.id.uuidString,
+            "note": note,
+            "recipient": recipient
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8)
+        else {
+            return .failure("Scheduled send booked \(booked.id.uuidString) but the confirmation could not be encoded.", callID: callID)
+        }
+        return .success(json, callID: callID)
+    }
+
+    /// Previews a scheduled booking without writing: reachable only for
+    /// single-to sends with no attachments or replies, so the preview mirrors
+    /// the exact bytes booking would store.
+    private func scheduledDryRunEnvelope(target: EmailSendTarget, accountName: String, recipient: String, fireAt: Date, callID: String) -> ToolOutput {
+        let staged: [StagedSendAttachment]
+        do {
+            staged = try stagedAttachments(paths: target.attachmentPaths)
+        } catch {
+            return .failure(error.localizedDescription, callID: callID)
+        }
+        let effectiveSubject = target.replyToId == nil ? target.subject : EmailSendValidation.replySubject(for: target.subject)
+        let preview = EmailSendValidation.bodyPreview(for: target.bodyText)
+        let envelope = EmailSendEnvelope(
+            account: accountName,
+            from: accountName,
+            to: target.to,
+            cc: target.cc,
+            bcc: target.bcc,
+            subject: effectiveSubject,
+            bodyTextBytes: target.bodyText.utf8.count,
+            bodyHtmlBytes: target.bodyHtml?.utf8.count,
+            dryRun: true,
+            note: "Dry run: would book a scheduled send to '\(recipient)' via '\(accountName)' for "
+                + "\(ScheduledSendFireTimeText.describe(fireAt)) without writing.",
             attachmentPaths: staged.isEmpty ? nil : staged.map(\.path),
             attachmentBytes: staged.isEmpty ? nil : staged.reduce(0) { $0 + $1.data.count },
             inReplyTo: target.replyToId,

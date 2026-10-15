@@ -11,9 +11,10 @@
 // `/health/sovereign/reattest` route. Firing, expiry, and run-row audit stay
 // with the scheduled-send worker; ceremony verification stays with the
 // sovereign ledger.
-// Architectural role: the booking surface the send tools refuse toward —
-// `email.send` and `messages.send` always send immediately and guide delayed
-// sends here — so a `scheduleAt` request has a production route to land on.
+// Architectural role: the booking surface sharing the seam the send tools
+// book through — a `scheduleAt` send-tool call stores the same immutable row
+// an explicit `POST /scheduler/sends` booking writes — so delayed sends land
+// on one contract from either path.
 
 import Foundation
 import RuneWeaverCore

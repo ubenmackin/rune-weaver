@@ -203,7 +203,8 @@ private func sendPayload(
     bodyHtml: String? = nil,
     attachmentPaths: [String]? = nil,
     replyToId: String? = nil,
-    mailbox: String? = nil
+    mailbox: String? = nil,
+    scheduleAt: Any? = nil
 ) throws -> String {
     var doc: [String: Any] = [
         "account": account,
@@ -231,8 +232,64 @@ private func sendPayload(
     if let mailbox {
         doc["mailbox"] = mailbox
     }
+    if let scheduleAt {
+        doc["scheduleAt"] = scheduleAt
+    }
     let data = try JSONSerialization.data(withJSONObject: doc)
     return String(bytes: data, encoding: .utf8) ?? "{}"
+}
+
+/// Minute-aligned future fire time so the stored instant equals the requested one.
+private func minuteAlignedFutureFireAt(hoursAhead: Double = 1) -> Date {
+    let raw = Date().addingTimeInterval(hoursAhead * 3600)
+    let epoch = raw.timeIntervalSince1970
+    return Date(timeIntervalSince1970: epoch - epoch.truncatingRemainder(dividingBy: 60))
+}
+
+/// Locked box recording booking drafts without touching a store.
+private final class BookingBox: Sendable {
+    private struct State: Sendable {
+        var drafts: [ScheduledSendDraft] = []
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    var count: Int {
+        state.withLock { $0.drafts.count }
+    }
+
+    var drafts: [ScheduledSendDraft] {
+        state.withLock { $0.drafts }
+    }
+
+    /// Records one booking draft.
+    /// - Parameter draft: Draft passed to the seam.
+    func record(_ draft: ScheduledSendDraft) {
+        state.withLock { $0.drafts.append(draft) }
+    }
+}
+
+/// Stub booking seam recording drafts or throwing a canned failure.
+private struct StubBooking: ScheduledSendBooking, Sendable {
+    /// Box receiving drafts, when set.
+    let box: BookingBox?
+    /// Failure thrown by `book`, when set.
+    let failure: String?
+
+    /// Creates a stub booking.
+    init(box: BookingBox? = nil, failure: String? = nil) {
+        self.box = box
+        self.failure = failure
+    }
+
+    /// Records the draft and returns a receipt, or throws the canned failure.
+    func book(_ draft: ScheduledSendDraft) async throws -> BookedScheduledSend {
+        if let failure {
+            throw EmailIMAPError.bridgeFailed(failure)
+        }
+        box?.record(draft)
+        return BookedScheduledSend(id: UUID(), fireAt: draft.fireAt)
+    }
 }
 
 /// Serialized plus `testCredentialEnvLock`: send tests install the stub account password via
@@ -992,6 +1049,223 @@ struct EmailSendTests {
             let sent = try #require(box.lastMessage)
             #expect(sent.bodyHtml == customHtml)
         }
+    }
+
+    @Test
+    func `Scheduled send books exactly one send without SMTP use`() async throws {
+        let smtpBox = SendBox()
+        let bookingBox = BookingBox()
+        let tool = EmailSendTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            smtpGateway: StubSMTPGateway(box: smtpBox),
+            gateway: StubSendIMAPGateway(mailboxes: ["INBOX", "Sent"]),
+            booking: StubBooking(box: bookingBox)
+        )
+        let fireAt = minuteAlignedFutureFireAt()
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "email.send",
+                argumentsJSON: sendPayload(scheduleAt: fireAt.timeIntervalSince1970)
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == false)
+        #expect(smtpBox.calls == 0)
+        #expect(bookingBox.count == 1)
+        let draft = try #require(bookingBox.drafts.first)
+        #expect(draft.channel == .email)
+        #expect(draft.recipient == "friend@example.com")
+        #expect(draft.subject == "Hello")
+        #expect(draft.text == "Hi there")
+        #expect(draft.account == "personal")
+        #expect(draft.fireAt == fireAt)
+        #expect(output.content.contains("Booked"))
+        #expect(output.content.contains("friend@example.com"))
+        #expect(output.content.contains(SharedDateFormatters.isoInternetTimeUTCString(from: fireAt)))
+        let body = try #require(JSONSerialization.jsonObject(with: Data(output.content.utf8)) as? [String: Any])
+        let bookedID = try #require(body["id"] as? String)
+        #expect(!bookedID.isEmpty)
+        #expect(output.content.contains(bookedID))
+    }
+
+    @Test
+    func `Scheduled send rejects past fire time with its reason`() async throws {
+        let smtpBox = SendBox()
+        let bookingBox = BookingBox()
+        let tool = EmailSendTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            smtpGateway: StubSMTPGateway(box: smtpBox),
+            booking: StubBooking(box: bookingBox)
+        )
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "email.send",
+                argumentsJSON: sendPayload(scheduleAt: Date().addingTimeInterval(-60).timeIntervalSince1970)
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(output.content.contains("at least 5 minutes"))
+        #expect(bookingBox.count == 0)
+        #expect(smtpBox.calls == 0)
+    }
+
+    @Test
+    func `Scheduled send rejects far-future fire time with its reason`() async throws {
+        let smtpBox = SendBox()
+        let bookingBox = BookingBox()
+        let tool = EmailSendTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            smtpGateway: StubSMTPGateway(box: smtpBox),
+            booking: StubBooking(box: bookingBox)
+        )
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "email.send",
+                argumentsJSON: sendPayload(scheduleAt: Date().addingTimeInterval(400 * 24 * 3600).timeIntervalSince1970)
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(output.content.contains("at most 365 days"))
+        #expect(bookingBox.count == 0)
+        #expect(smtpBox.calls == 0)
+    }
+
+    @Test
+    func `Scheduled send rejects malformed fire time without booking`() async throws {
+        let smtpBox = SendBox()
+        let bookingBox = BookingBox()
+        let tool = EmailSendTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            smtpGateway: StubSMTPGateway(box: smtpBox),
+            booking: StubBooking(box: bookingBox)
+        )
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "email.send",
+                argumentsJSON: sendPayload(scheduleAt: "not-a-date")
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(bookingBox.count == 0)
+        #expect(smtpBox.calls == 0)
+    }
+
+    @Test
+    func `Scheduled send without wired booking refuses with guidance`() async throws {
+        let smtpBox = SendBox()
+        let tool = EmailSendTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            smtpGateway: StubSMTPGateway(box: smtpBox),
+            gateway: StubSendIMAPGateway(mailboxes: ["INBOX", "Sent"])
+        )
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "email.send",
+                argumentsJSON: sendPayload(scheduleAt: minuteAlignedFutureFireAt().timeIntervalSince1970)
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(output.content.contains("Schedules surface"))
+        #expect(smtpBox.calls == 0)
+    }
+
+    @Test
+    func `Scheduled dry run previews booking without writing`() async throws {
+        let smtpBox = SendBox()
+        let bookingBox = BookingBox()
+        let tool = EmailSendTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            smtpGateway: StubSMTPGateway(box: smtpBox),
+            gateway: StubSendIMAPGateway(mailboxes: ["INBOX", "Sent"]),
+            booking: StubBooking(box: bookingBox)
+        )
+        let fireAt = minuteAlignedFutureFireAt()
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "email.send",
+                argumentsJSON: sendPayload(scheduleAt: fireAt.timeIntervalSince1970)
+            ),
+            context: ToolContext(conversationID: UUID(), dryRun: true)
+        )
+        #expect(output.isError == false)
+        #expect(bookingBox.count == 0)
+        #expect(smtpBox.calls == 0)
+        #expect(output.content.contains("Dry run"))
+        #expect(output.content.contains("book"))
+        #expect(output.content.contains(SharedDateFormatters.isoInternetTimeUTCString(from: fireAt)))
+    }
+
+    @Test
+    func `Scheduled send through bus parks for approval without booking`() async {
+        let smtpBox = SendBox()
+        let bookingBox = BookingBox()
+        let config = ToolsTestSupport.testEmailConfig()
+        let bus = ToolBus(permissionGate: PermissionGate())
+        for tool in EmailTools.makeTools(
+            emailConfig: config,
+            smtpGateway: StubSMTPGateway(box: smtpBox),
+            booking: StubBooking(box: bookingBox)
+        ) {
+            await bus.register(tool: tool)
+        }
+        await ToolsTestSupport.withTestPassword {
+            let input = ToolInput(toolName: "email.send", argumentsJSON: (try? sendPayload(scheduleAt: minuteAlignedFutureFireAt().timeIntervalSince1970)) ?? "{}")
+            let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
+            #expect(result.isError == true)
+            #expect(result.content.contains("requires approval"))
+            #expect(bookingBox.count == 0)
+            #expect(smtpBox.calls == 0)
+        }
+    }
+
+    @Test
+    func `Scheduled booking failure stays caller-visible`() async throws {
+        let smtpBox = SendBox()
+        let tool = EmailSendTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            smtpGateway: StubSMTPGateway(box: smtpBox),
+            booking: StubBooking(failure: "store unavailable: disk full")
+        )
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "email.send",
+                argumentsJSON: sendPayload(scheduleAt: minuteAlignedFutureFireAt().timeIntervalSince1970)
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(output.content.contains("store unavailable"))
+        #expect(smtpBox.calls == 0)
+    }
+
+    @Test
+    func `Scheduled send rejects multiple to recipients without booking`() async throws {
+        let smtpBox = SendBox()
+        let bookingBox = BookingBox()
+        let tool = EmailSendTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            smtpGateway: StubSMTPGateway(box: smtpBox),
+            gateway: StubSendIMAPGateway(mailboxes: ["INBOX", "Sent"]),
+            booking: StubBooking(box: bookingBox)
+        )
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "email.send",
+                argumentsJSON: sendPayload(
+                    to: ["a@example.com", "b@example.com"],
+                    scheduleAt: minuteAlignedFutureFireAt().timeIntervalSince1970
+                )
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(output.content.contains("single to recipient"))
+        #expect(bookingBox.count == 0)
+        #expect(smtpBox.calls == 0)
     }
 
     @Test

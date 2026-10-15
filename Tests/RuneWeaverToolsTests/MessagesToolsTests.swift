@@ -91,6 +91,59 @@ final class StubMessagesGateway: MessagesGateway, Sendable {
     }
 }
 
+/// Minute-aligned future fire time so the stored instant equals the requested one.
+private func messagesMinuteAlignedFireAt(hoursAhead: Double = 1) -> Date {
+    let raw = Date().addingTimeInterval(hoursAhead * 3600)
+    let epoch = raw.timeIntervalSince1970
+    return Date(timeIntervalSince1970: epoch - epoch.truncatingRemainder(dividingBy: 60))
+}
+
+/// Locked box recording booking drafts without touching a store.
+private final class MessagesBookingBox: Sendable {
+    private struct State: Sendable {
+        var drafts: [ScheduledSendDraft] = []
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    var count: Int {
+        state.withLock { $0.drafts.count }
+    }
+
+    var drafts: [ScheduledSendDraft] {
+        state.withLock { $0.drafts }
+    }
+
+    /// Records one booking draft.
+    /// - Parameter draft: Draft passed to the seam.
+    func record(_ draft: ScheduledSendDraft) {
+        state.withLock { $0.drafts.append(draft) }
+    }
+}
+
+/// Stub booking seam recording drafts or throwing a canned failure.
+private struct StubMessagesBooking: ScheduledSendBooking, Sendable {
+    /// Box receiving drafts, when set.
+    let box: MessagesBookingBox?
+    /// Failure thrown by `book`, when set.
+    let failure: String?
+
+    /// Creates a stub booking.
+    init(box: MessagesBookingBox? = nil, failure: String? = nil) {
+        self.box = box
+        self.failure = failure
+    }
+
+    /// Records the draft and returns a receipt, or throws the canned failure.
+    func book(_ draft: ScheduledSendDraft) async throws -> BookedScheduledSend {
+        if let failure {
+            throw MessagesToolError.scriptFailed(failure)
+        }
+        box?.record(draft)
+        return BookedScheduledSend(id: UUID(), fireAt: draft.fireAt)
+    }
+}
+
 @Suite("Messages Tools")
 struct MessagesToolsTests {
     @Test
@@ -291,5 +344,161 @@ struct MessagesToolsTests {
         )
         #expect(searched.isError == false)
         #expect(searched.content.contains("Flight confirmed"))
+    }
+
+    @Test
+    func `Messages scheduled send books exactly one send without gateway use`() async throws {
+        let stub = StubMessagesGateway()
+        let bookingBox = MessagesBookingBox()
+        let tool = MessagesSendTool(gateway: stub, booking: StubMessagesBooking(box: bookingBox))
+        let fireAt = messagesMinuteAlignedFireAt()
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "messages.send",
+                argumentsJSON: #"{"recipient":"+15551234567","text":"See you soon!","scheduleAt":\#(fireAt.timeIntervalSince1970)}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == false)
+        #expect(stub.sentMessages.isEmpty)
+        #expect(bookingBox.count == 1)
+        let draft = try #require(bookingBox.drafts.first)
+        #expect(draft.channel == .messages)
+        #expect(draft.recipient == "+15551234567")
+        #expect(draft.text == "See you soon!")
+        #expect(draft.fireAt == fireAt)
+        #expect(output.content.contains("Booked"))
+        #expect(output.content.contains("+15551234567"))
+        #expect(output.content.contains(SharedDateFormatters.isoInternetTimeUTCString(from: fireAt)))
+        let envelope = try JSONDecoder().decode(MessagesSendEnvelope.self, from: Data(output.content.utf8))
+        #expect(envelope.success == true)
+        #expect((envelope.note ?? "").contains("+15551234567"))
+    }
+
+    @Test
+    func `Messages scheduled send rejects past fire time with its reason`() async throws {
+        let stub = StubMessagesGateway()
+        let bookingBox = MessagesBookingBox()
+        let tool = MessagesSendTool(gateway: stub, booking: StubMessagesBooking(box: bookingBox))
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "messages.send",
+                argumentsJSON: #"{"recipient":"+15551234567","text":"Hi","scheduleAt":\#(Date().addingTimeInterval(-60).timeIntervalSince1970)}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(output.content.contains("at least 5 minutes"))
+        #expect(bookingBox.count == 0)
+        #expect(stub.sentMessages.isEmpty)
+    }
+
+    @Test
+    func `Messages scheduled send rejects far-future fire time with its reason`() async throws {
+        let stub = StubMessagesGateway()
+        let bookingBox = MessagesBookingBox()
+        let tool = MessagesSendTool(gateway: stub, booking: StubMessagesBooking(box: bookingBox))
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "messages.send",
+                argumentsJSON: #"{"recipient":"+15551234567","text":"Hi","scheduleAt":\#(Date().addingTimeInterval(400 * 24 * 3600).timeIntervalSince1970)}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(output.content.contains("at most 365 days"))
+        #expect(bookingBox.count == 0)
+        #expect(stub.sentMessages.isEmpty)
+    }
+
+    @Test
+    func `Messages scheduled send rejects malformed fire time without booking`() async throws {
+        let stub = StubMessagesGateway()
+        let bookingBox = MessagesBookingBox()
+        let tool = MessagesSendTool(gateway: stub, booking: StubMessagesBooking(box: bookingBox))
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "messages.send",
+                argumentsJSON: #"{"recipient":"+15551234567","text":"Hi","scheduleAt":"not-a-date"}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(bookingBox.count == 0)
+        #expect(stub.sentMessages.isEmpty)
+    }
+
+    @Test
+    func `Messages scheduled send without wired booking refuses with guidance`() async throws {
+        let stub = StubMessagesGateway()
+        let tool = MessagesSendTool(gateway: stub)
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "messages.send",
+                argumentsJSON: #"{"recipient":"+15551234567","text":"Hi","scheduleAt":\#(messagesMinuteAlignedFireAt().timeIntervalSince1970)}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(output.content.contains("Schedules surface"))
+        #expect(stub.sentMessages.isEmpty)
+    }
+
+    @Test
+    func `Messages scheduled dry run previews booking without writing`() async throws {
+        let stub = StubMessagesGateway()
+        let bookingBox = MessagesBookingBox()
+        let tool = MessagesSendTool(gateway: stub, booking: StubMessagesBooking(box: bookingBox))
+        let fireAt = messagesMinuteAlignedFireAt()
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "messages.send",
+                argumentsJSON: #"{"recipient":"+15551234567","text":"See you soon!","scheduleAt":\#(fireAt.timeIntervalSince1970)}"#
+            ),
+            context: ToolContext(conversationID: UUID(), dryRun: true)
+        )
+        #expect(output.isError == false)
+        #expect(bookingBox.count == 0)
+        #expect(stub.sentMessages.isEmpty)
+        #expect(output.content.contains("Dry run"))
+        #expect(output.content.contains("book"))
+        #expect(output.content.contains(SharedDateFormatters.isoInternetTimeUTCString(from: fireAt)))
+    }
+
+    @Test
+    func `Messages scheduled send through bus parks for approval without booking`() async {
+        let stub = StubMessagesGateway()
+        let bookingBox = MessagesBookingBox()
+        let bus = ToolBus(permissionGate: PermissionGate())
+        for tool in MessagesTools.makeTools(gateway: stub, booking: StubMessagesBooking(box: bookingBox)) {
+            await bus.register(tool: tool)
+        }
+        let result = await bus.execute(
+            toolCall: ToolInput(
+                toolName: "messages.send",
+                argumentsJSON: #"{"recipient":"+15551234567","text":"Hi","scheduleAt":\#(messagesMinuteAlignedFireAt().timeIntervalSince1970)}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(result.isError == true)
+        #expect(result.content.contains("requires approval"))
+        #expect(bookingBox.count == 0)
+        #expect(stub.sentMessages.isEmpty)
+    }
+
+    @Test
+    func `Messages scheduled booking failure stays caller-visible`() async throws {
+        let stub = StubMessagesGateway()
+        let tool = MessagesSendTool(gateway: stub, booking: StubMessagesBooking(failure: "store unavailable: disk full"))
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "messages.send",
+                argumentsJSON: #"{"recipient":"+15551234567","text":"Hi","scheduleAt":\#(messagesMinuteAlignedFireAt().timeIntervalSince1970)}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(output.content.contains("store unavailable"))
+        #expect(stub.sentMessages.isEmpty)
     }
 }
