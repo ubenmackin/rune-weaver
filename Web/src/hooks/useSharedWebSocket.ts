@@ -260,6 +260,13 @@ export interface WSRunFrame {
   sessionID?: string;
 }
 
+export interface WSEmbeddingsStatusFrame {
+  type: "embeddings_status";
+  status: "idle" | "downloading_binary" | "downloading_model" | "starting" | "ready" | "error";
+  message?: string | null;
+  error?: string | null;
+}
+
 export interface WSApprovalLifecycleFrame {
   type:
     | "approval_decided"
@@ -307,7 +314,8 @@ export type WSIncomingFrame =
   | WSFileAcceptedFrame
   | WSFileDiscardedFrame
   | WSLiveResolvedFrame
-  | WSFileSupersededFrame;
+  | WSFileSupersededFrame
+  | WSEmbeddingsStatusFrame;
 
 export type MessageHandler = (data: WSIncomingFrame) => void;
 

@@ -131,6 +131,9 @@ public final class AppModel {
     /// Best-effort search warmup flight started after boot goes live; stored
     /// so quit can cancel it instead of leaving a detached ensure running.
     private var searchWarmupTask: Task<Void, Never>?
+    /// Best-effort local embedding warmup flight started after boot goes live; stored
+    /// so quit can cancel it instead of leaving a detached ensure running.
+    private var embeddingWarmupTask: Task<Void, Never>?
     /// The menu label can appear again each time the menu opens, so startup
     /// must be idempotent instead of binding the loopback port twice.
     private var hasStartedBoot = false
@@ -341,6 +344,22 @@ extension AppModel {
         searchWarmupTask = Self.makeSearchWarmupTask(browserConfig: captured, ensurer: ensurer)
     }
 
+    /// Warms the local llama.cpp embeddings backend in the background after the server goes live.
+    /// Best-effort so failures never block the menu bar or fail the boot.
+    private func startEmbeddingWarmup(memoryConfig: MemoryConfig) {
+        guard memoryConfig.embeddingBackend == MemoryConfig.embeddingBackendLocal else { return }
+        embeddingWarmupTask?.cancel()
+        embeddingWarmupTask = Task(priority: .utility) {
+            do {
+                try await LlamaEmbeddingSupervisor.shared.ensureRunning()
+            } catch is CancellationError {
+                RuneWeaverLog.stores.debug("Local embedding warmup cancelled.")
+            } catch {
+                RuneWeaverLog.stores.warning("Local embedding warmup failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// Creates the warmup flight off MainActor isolation.
     /// Nonisolated so the minutes-budget ensure never blocks the menu bar while
     /// still inheriting task-locals and priority (unlike a detached task);
@@ -545,6 +564,7 @@ extension AppModel {
             // Boot is already live at this point, so warm search detached:
             // a down engine must never block the menu bar or fail the boot.
             startSearchWarmup(browserConfig: config.browser)
+            startEmbeddingWarmup(memoryConfig: config.memory)
         } catch {
             await cleanupBootFailure(bootGate: bootGate, error: error)
         }
@@ -903,6 +923,8 @@ extension AppModel {
         // Cancel the detached search flight up front so quit reaps any in-flight ensure.
         searchWarmupTask?.cancel()
         searchWarmupTask = nil
+        embeddingWarmupTask?.cancel()
+        embeddingWarmupTask = nil
         let context = serverContext
         let app = vaporApp
         let task = serverTask
@@ -912,7 +934,8 @@ extension AppModel {
 
         async let stopServer: Void = runner.shutdown(context: context, app: app)
         async let stopSearch: Void = ensurer.stop()
-        _ = await (stopServer, stopSearch)
+        async let stopSupervisor: Void = LlamaEmbeddingSupervisor.shared.stop()
+        _ = await (stopServer, stopSearch, stopSupervisor)
         task?.cancel()
     }
 

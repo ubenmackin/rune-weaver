@@ -90,7 +90,6 @@ const indexConfig = {
   maxFileMB: 20,
   mailVectorWindow: "2y",
   iCloudEvicted: "skip",
-  describeImagesWithLLM: false,
   nightlyBudget: 0,
   dbPath: "~/.runeweaver/index.db",
 };

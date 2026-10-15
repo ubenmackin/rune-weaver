@@ -83,7 +83,6 @@ describe("MemoryBrowser", () => {
               max_file_mb: 20,
               mail_vector_window: "2y",
               icloud_evicted: "skip",
-              describe_images_with_llm: false,
               nightly_budget: 0,
               db_path: "~/.runeweaver/index.db",
             },

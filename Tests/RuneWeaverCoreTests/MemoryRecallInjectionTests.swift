@@ -138,7 +138,7 @@ struct MemoryRecallInjectionTests {
         #expect(clamped.perTierLimit == 1)
         #expect(clamped.autoLimit == 1)
         #expect(clamped.threshold == 0.0)
-        #expect(clamped.maxChars == 200)
+        #expect(clamped.maxChars == 500)
         #expect(clamped.perHitChars == 100)
         #expect(clamped.docPoolMultiplier == 1)
         #expect(clamped.episodicWeight == 0.0)
@@ -151,15 +151,15 @@ struct MemoryRecallInjectionTests {
             autoLimit: 99,
             threshold: 2.0,
             maxChars: 99999,
-            perHitChars: 5000,
+            perHitChars: 99999,
             docPoolMultiplier: 20,
             episodicWeight: 5.0
         ).clamped()
         #expect(clamped.perTierLimit == 50)
         #expect(clamped.autoLimit == 50)
         #expect(clamped.threshold == 1.0)
-        #expect(clamped.maxChars == 16000)
-        #expect(clamped.perHitChars == 2000)
+        #expect(clamped.maxChars == 32000)
+        #expect(clamped.perHitChars == 8000)
         #expect(clamped.docPoolMultiplier == 8)
         #expect(clamped.episodicWeight == 1.0)
     }
@@ -190,11 +190,37 @@ struct MemoryRecallInjectionTests {
         #expect(config.memory.recallBudgets.perTierLimit == 1)
         #expect(config.memory.recallBudgets.autoLimit == 50)
         #expect(config.memory.recallBudgets.threshold == 1.0)
-        #expect(config.memory.recallBudgets.maxChars == 200)
+        #expect(config.memory.recallBudgets.maxChars == 500)
         #expect(config.memory.recallBudgets.perHitChars == 100)
         #expect(config.memory.recallBudgets.docPoolMultiplier == 8)
         #expect(config.memory.recallBudgets.episodicWeight == 0.0)
         try config.validate()
+    }
+
+    @Test
+    func `packRecallHits drops candidate hits that do not fit completely without ellipsis amputation`() {
+        let hit1 = MemoryResult(content: "First memory item: " + String(repeating: "A", count: 350), score: 0.9, source: .profile)
+        let hit2 = MemoryResult(content: "Second memory item: " + String(repeating: "B", count: 350), score: 0.8, source: .profile)
+        let hit3 = MemoryResult(content: "Third memory item: " + String(repeating: "C", count: 350), score: 0.7, source: .profile)
+
+        // With maxChars 500: header (68) + line1 (~370) = ~438 <= 500.
+        // line2 cannot fit in the remaining ~62 chars, so it must be dropped without chopping line1.
+        let budgetFittingOnlyOne = RecallBudgets(
+            perTierLimit: 5,
+            autoLimit: 5,
+            threshold: 0.1,
+            maxChars: 500,
+            perHitChars: 2000
+        )
+
+        let packed = MemoryEngine.packRecallHits(from: [hit1, hit2, hit3], budgets: budgetFittingOnlyOne, labelingEnabled: false)
+        #expect(packed.injectedHits.count == 1)
+        #expect(packed.injectedHits.first?.content == hit1.content)
+        #expect(packed.contextText != nil)
+        #expect(packed.contextText?.contains("First memory item") == true)
+        #expect(packed.contextText?.contains("Second memory item") == false)
+        #expect(packed.contextText?.hasSuffix("…") == false)
+        #expect(packed.injectedChars == (packed.contextText?.count ?? 0))
     }
 
     @Test

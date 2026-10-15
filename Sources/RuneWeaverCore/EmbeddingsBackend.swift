@@ -1,5 +1,7 @@
 // Rune Weaver Core — Pluggable vector-embedding seam for semantic memory.
 
+import Foundation
+
 /// Failures raised by an ``EmbeddingsBackend``.
 public enum EmbeddingsError: Error, Sendable, Equatable {
     /// No embeddings model is configured or reachable.
@@ -12,7 +14,7 @@ public enum EmbeddingsError: Error, Sendable, Equatable {
 
 /// Abstraction over a vector-embedding backend.
 public protocol EmbeddingsBackend: Sendable {
-    /// Stable model identifier (e.g. `"all-MiniLM-L6-v2"`, `"disabled"`).
+    /// Stable model identifier (e.g. `"embeddinggemma-2"`, `"disabled"`).
     var modelID: String { get }
 
     /// Embedding width, or nil when unknown until the first output.
@@ -20,9 +22,17 @@ public protocol EmbeddingsBackend: Sendable {
 
     /// Embeds a batch of texts.
     func embed(_ texts: [String]) async throws -> [[Float]]
+
+    /// Embeds an image file at the specified URL into a vector representation.
+    func embedImage(at imageURL: URL) async throws -> [Float]
 }
 
 extension EmbeddingsBackend {
+    /// Default implementation for backends without native multimodal support.
+    public func embedImage(at _: URL) async throws -> [Float] {
+        throw EmbeddingsError.unavailable
+    }
+
     /// Embeds one query best-effort, preserving cancellation.
     public func embedQuery(_ text: String) async throws -> [Float]? {
         do {

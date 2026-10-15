@@ -41,7 +41,11 @@ import os
         /// Binding always uses the resolved document identifier so a rewrite
         /// that preserved the stable row keeps its foreign keys valid without
         /// a second lookup, and FTS entries follow through the insert
-        /// triggers in the same commit.
+        /// triggers in the same commit. Every vector width is enforced on
+        /// write: a recorded dimension rejects mismatched chunks, and when no
+        /// dimension is recorded yet the first-seen width is pinned into
+        /// `schema_meta` so later writes (including provider-backend rows,
+        /// whose pre-run guard is skipped) cannot silently mix widths.
         /// - Parameters:
         ///   - documentID: Resolved document owning every chunk.
         ///   - chunks: Chunks to store, in extraction order.
@@ -56,7 +60,38 @@ import os
                 throw DocIndexError.persistenceFailed("Could not prepare chunk insert")
             }
             defer { sqlite3_finalize(statement) }
+            var effectiveDim = (try? readEmbeddingMeta(handle: handle))?.dimension
+            if effectiveDim == nil,
+               let firstWidth = chunks.first(where: { $0.isVector && !$0.embedding.isEmpty })?.embedding.count,
+               firstWidth > 0
+            {
+                for chunk in chunks where chunk.isVector && !chunk.embedding.isEmpty {
+                    guard chunk.embedding.count == firstWidth else {
+                        throw DocIndexError.persistenceFailed(
+                            "Vector dimension mismatch: chunk has \(chunk.embedding.count), store requires \(firstWidth)"
+                        )
+                    }
+                }
+                var pinStatement: OpaquePointer?
+                let pinSQL = "INSERT INTO schema_meta(key, value) VALUES('embedding_dimension', ?) "
+                    + "ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
+                if sqlite3_prepare_v2(handle, pinSQL, -1, &pinStatement, nil) == SQLITE_OK {
+                    SQLiteHelpers.bindText(pinStatement, index: 1, value: String(firstWidth))
+                    _ = sqlite3_step(pinStatement)
+                    sqlite3_finalize(pinStatement)
+                } else if pinStatement != nil {
+                    sqlite3_finalize(pinStatement)
+                }
+                effectiveDim = firstWidth
+            }
             for chunk in chunks {
+                if chunk.isVector, !chunk.embedding.isEmpty, let expected = effectiveDim {
+                    guard chunk.embedding.count == expected else {
+                        throw DocIndexError.persistenceFailed(
+                            "Vector dimension mismatch: chunk has \(chunk.embedding.count), store requires \(expected)"
+                        )
+                    }
+                }
                 // The hook fires inside the transaction so a failure after an
                 // earlier row proves the whole commit rolls back together.
                 if let hook, hook(chunk) {

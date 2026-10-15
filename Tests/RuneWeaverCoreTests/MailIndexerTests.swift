@@ -1174,6 +1174,94 @@ struct MailIndexerTests {
     }
 
     @Test
+    func `Audio attachment speech is transcribed into searchable chunks`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let bytes = Data("fake-audio".utf8)
+        let info = MailIndexAttachmentInfo(filename: "voice.m4a", contentType: "audio/x-m4a", sizeBytes: bytes.count)
+        let attachment = MailIndexAttachmentData(
+            filename: "voice.m4a",
+            contentType: "audio/x-m4a",
+            sizeBytes: bytes.count,
+            data: bytes
+        )
+
+        try await MediaTextExtractor.withAudioTranscription({ _ in "Speech transcription voicemail text" }) {
+            try await withTestPassword {
+                let indexer = makeIndexer(
+                    gateway: StubMailGateway(
+                        messages: [makeMessage(id: "1", body: "Email body note", attachments: [info])],
+                        attachments: [attachment]
+                    ),
+                    store: store,
+                    checkpoints: MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+                )
+                let report = try await indexer.run()
+                #expect(report.attachmentsStaged == 1)
+                let hits = try await store.searchKeyword(query: "voicemail", limit: 5)
+                #expect(!hits.isEmpty)
+                #expect(hits.contains { $0.text.contains("Speech transcription voicemail text") })
+            }
+        }
+    }
+
+    @Test
+    func `Image attachment acquires visual embedding vector`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+
+        let bytes = Data("fake-image".utf8)
+        let info = MailIndexAttachmentInfo(filename: "photo.png", contentType: "image/png", sizeBytes: bytes.count)
+        let attachment = MailIndexAttachmentData(
+            filename: "photo.png",
+            contentType: "image/png",
+            sizeBytes: bytes.count,
+            data: bytes
+        )
+
+        struct VisualStubEmbedder: EmbeddingsBackend {
+            let modelID = "visual-stub"
+            let dimension: Int? = 3
+
+            func embed(_ texts: [String]) async throws -> [[Float]] {
+                texts.map { _ in [0.1, 0.2, 0.3] }
+            }
+
+            func embedImage(at _: URL) async throws -> [Float] {
+                [0.7, 0.8, 0.9]
+            }
+        }
+
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: StubMailGateway(
+                    messages: [makeMessage(id: "1", body: "Email body note", date: Date(), attachments: [info])],
+                    attachments: [attachment]
+                ),
+                store: store,
+                checkpoints: MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path),
+                window: "all",
+                embedder: VisualStubEmbedder()
+            )
+            let report = try await indexer.run()
+            #expect(report.attachmentsStaged == 1)
+            #expect(report.vectorsWritten >= 1)
+
+            let externalID = MailIndexer.documentExternalID(
+                account: testAccount.name,
+                mailbox: "INBOX",
+                messageID: "1"
+            )
+            let document = try await store.document(source: .mail, externalID: externalID)
+            #expect(document != nil)
+            let vectors = try await store.chunkVectors(limit: 10)
+            #expect(vectors.contains { $0.embedding == [0.7, 0.8, 0.9] })
+        }
+    }
+
+    @Test
     func `Attachments that fail text extraction are marked for the vision path`() async throws {
         let base = makeTempBase()
         defer { try? FileManager.default.removeItem(at: base) }

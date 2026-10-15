@@ -615,7 +615,7 @@ extension RuneWeaverConfig {
         // Absent backend keeps the local-first default; present values are
         // validated later so a typo surfaces with the dotted field name.
         if let backend = try memory.strictString("embedding_backend", field: "memory.embedding_backend") {
-            config.memory.embeddingBackend = backend
+            config.memory.embeddingBackend = MemoryConfig.migratedEmbeddingBackend(backend)
         }
         // Recall budgets stay flat `recall_*` keys under `[memory]` so the
         // file shape mirrors the surrounding scalar knobs; absent keys keep
@@ -784,9 +784,6 @@ extension RuneWeaverConfig {
         }
         if let evicted = try index.strictString("icloud_evicted", field: "index.icloud_evicted") {
             config.index.iCloudEvicted = evicted
-        }
-        if let describe = try index.strictBool("describe_images_with_llm", field: "index.describe_images_with_llm") {
-            config.index.describeImagesWithLLM = describe
         }
         if let budget = try index.strictInt("nightly_budget", field: "index.nightly_budget") {
             config.index.nightlyBudget = budget

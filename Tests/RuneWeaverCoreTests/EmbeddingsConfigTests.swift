@@ -6,13 +6,13 @@ import Testing
 @Suite("Embeddings Config")
 struct EmbeddingsConfigTests {
     @Test
-    func `MemoryConfig defaults to apple backend`() {
-        #expect(MemoryConfig().embeddingBackend == "apple")
-        #expect(RuneWeaverConfig.default.memory.embeddingBackend == "apple")
+    func `MemoryConfig defaults to local backend`() {
+        #expect(MemoryConfig().embeddingBackend == "local")
+        #expect(RuneWeaverConfig.default.memory.embeddingBackend == "local")
     }
 
     @Test
-    func `Absent embedding_backend decodes to apple`() throws {
+    func `Absent embedding_backend decodes to local`() throws {
         let text = """
         [llm]
         default_provider = "mlx"
@@ -30,13 +30,24 @@ struct EmbeddingsConfigTests {
         let root = try TOMLParser.parse(text)
         let config = try RuneWeaverConfig(decoding: root)
         // Absent key preserves local-first behavior for existing installs.
-        #expect(config.memory.embeddingBackend == "apple")
+        #expect(config.memory.embeddingBackend == "local")
         try config.validate()
     }
 
     @Test
-    func `Apple backend round-trips`() throws {
-        try assertBackendRoundTrips("apple")
+    func `Local backend round-trips`() throws {
+        try assertBackendRoundTrips("local")
+    }
+
+    @Test
+    func `Legacy apple backend auto-migrates to local`() throws {
+        let text = """
+        [memory]
+        embedding_backend = "apple"
+        """
+        let root = try TOMLParser.parse(text)
+        let config = try RuneWeaverConfig(decoding: root)
+        #expect(config.memory.embeddingBackend == "local")
     }
 
     @Test

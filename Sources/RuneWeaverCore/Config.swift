@@ -349,9 +349,9 @@ public struct RecallBudgets: Sendable, Codable, Equatable {
     public var autoLimit: Int
     /// Minimum calibrated score for an injected recall hit. Clamped `0...1`.
     public var threshold: Double
-    /// Maximum characters for the injected recall block, header included. Clamped `200...16000`.
+    /// Maximum characters for the injected recall block, header included. Clamped `500...32000`.
     public var maxChars: Int
-    /// Maximum characters kept per hit before ellipsis truncation. Clamped `100...2000`.
+    /// Maximum characters kept per hit before ellipsis truncation. Clamped `100...8000`.
     public var perHitChars: Int
     /// Widening factor for the document candidate pool beyond the returned
     /// page: the vector leg scans `pool * 10` with a 500-row floor and the
@@ -366,9 +366,9 @@ public struct RecallBudgets: Sendable, Codable, Equatable {
     /// Bounds for `threshold` and `episodicWeight`.
     public static let scoreBounds = 0.0 ... 1.0
     /// Bounds for `maxChars`.
-    public static let maxCharsBounds = 200 ... 16000
+    public static let maxCharsBounds = 500 ... 32000
     /// Bounds for `perHitChars`.
-    public static let perHitCharsBounds = 100 ... 2000
+    public static let perHitCharsBounds = 100 ... 8000
     /// Bounds for `docPoolMultiplier`.
     public static let docPoolMultiplierBounds = 1 ... 8
 
@@ -379,9 +379,9 @@ public struct RecallBudgets: Sendable, Codable, Equatable {
     /// Default minimum calibrated score for an injected recall hit.
     public static let defaultThreshold = 0.1
     /// Default maximum characters for the injected recall block.
-    public static let defaultMaxChars = 2000
+    public static let defaultMaxChars = 8000
     /// Default maximum characters kept per hit before truncation.
-    public static let defaultPerHitChars = 500
+    public static let defaultPerHitChars = 2000
     /// Default widening factor for the document candidate pool, mirrored in
     /// width by the keyword leg.
     public static let defaultDocPoolMultiplier = 4
@@ -467,13 +467,18 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
 
     /// `embedding_backend` selector that disables vectors (keyword-only recall).
     public static let embeddingBackendNone = "none"
-    /// `embedding_backend` selector that keeps vectors on-device via NaturalLanguage.
-    public static let embeddingBackendApple = "apple"
+    /// `embedding_backend` selector that keeps vectors on-device via EmbeddingGemma 2 on Metal.
+    public static let embeddingBackendLocal = "local"
     /// `embedding_backend` selector that reuses the configured LLM embeddings endpoint.
     public static let embeddingBackendProvider = "provider"
 
     /// Closed set of valid `embedding_backend` selectors.
-    public static let allowedEmbeddingBackends = [embeddingBackendApple, embeddingBackendProvider, embeddingBackendNone]
+    public static let allowedEmbeddingBackends = [embeddingBackendLocal, embeddingBackendProvider, embeddingBackendNone]
+
+    /// Migrates a stored `embedding_backend` value, mapping legacy `apple` to `local`.
+    public static func migratedEmbeddingBackend(_ raw: String) -> String {
+        (raw == "apple") ? embeddingBackendLocal : raw
+    }
 
     /// Default SQLite database path for episodic memory, run logs, and scheduler jobs.
     public static let defaultEpisodesDBPath = "~/.runeweaver/memory/episodes.db"
@@ -483,7 +488,7 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
         vectorDBPath: String = "~/.runeweaver/memory/vectors",
         episodesDBPath: String = MemoryConfig.defaultEpisodesDBPath,
         embeddingModel: String = "all-MiniLM-L6-v2",
-        embeddingBackend: String = MemoryConfig.embeddingBackendApple,
+        embeddingBackend: String = MemoryConfig.embeddingBackendLocal,
         recallBudgets: RecallBudgets = RecallBudgets()
     ) {
         self.vectorDBPath = vectorDBPath
@@ -501,13 +506,14 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
         case recallBudgets
     }
 
-    /// Decodes a memory config, defaulting an absent backend to `apple`.
+    /// Decodes a memory config, defaulting an absent backend to `local` and migrating legacy `apple` to `local`.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.vectorDBPath = try container.decode(String.self, forKey: .vectorDBPath)
         self.episodesDBPath = try container.decode(String.self, forKey: .episodesDBPath)
         self.embeddingModel = try container.decode(String.self, forKey: .embeddingModel)
-        self.embeddingBackend = try container.decodeIfPresent(String.self, forKey: .embeddingBackend) ?? Self.embeddingBackendApple
+        let rawBackend = try container.decodeIfPresent(String.self, forKey: .embeddingBackend) ?? Self.embeddingBackendLocal
+        self.embeddingBackend = Self.migratedEmbeddingBackend(rawBackend)
         self.recallBudgets = try container.decodeIfPresent(RecallBudgets.self, forKey: .recallBudgets) ?? RecallBudgets()
     }
 }

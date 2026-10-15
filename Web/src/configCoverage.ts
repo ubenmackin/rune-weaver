@@ -94,7 +94,6 @@ export const CONFIG_SETTINGS_COVERAGE: Record<string, SettingsSurface> = {
   "index.max_file_mb": "index-pane",
   "index.mail_vector_window": "index-pane",
   "index.icloud_evicted": "index-pane",
-  "index.describe_images_with_llm": "index-pane",
   "index.nightly_budget": "index-pane",
   "index.db_path": "index-pane",
   "index.effort": "index-pane",

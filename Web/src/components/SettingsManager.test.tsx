@@ -6,11 +6,9 @@
 // in the shared tab-form banner, the accent picker round-trips all four
 // colorways and degrades an unknown stored key to violet, and every settings
 // read republishes the persona so identity surfaces mirror the owner's edit.
-// The Tools tab owns the workspace scratch and promoted-tool surfaces in this
-// file's scope: usage bars read GET /workspace/usage, tmp pruning confirms
-// through the shared modal, promoted rows toggle through PATCH
-// /agent-tools/:id, and the promote form validates the workspace/tools/
-// prefix before any network write.
+// The Tools tab owns the workspace scratch surface in this
+// file's scope: usage bars read GET /workspace/usage and tmp pruning confirms
+// through the shared modal.
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -58,14 +56,11 @@ import {
   DEFAULT_WORKSPACE_QUOTA_MB,
   DEFAULT_WORKSPACE_TMP_TTL_DAYS,
   formatWorkspaceBytes,
-  isPromotableScriptPath,
   MAX_PERSONA_ASSISTANT_NAME_LENGTH,
   MAX_PERSONA_STYLE_LENGTH,
   MAX_PERSONA_USER_NAME_LENGTH,
   PERSONA_AVATAR_COLORS,
   PERSONA_TONES,
-  shortAgentToolHash,
-  validateAgentToolPromote,
   WORKSPACE_QUOTA_FILES_MAX,
   WORKSPACE_QUOTA_FILES_MIN,
   WORKSPACE_QUOTA_MB_MAX,
@@ -73,7 +68,6 @@ import {
   WORKSPACE_TMP_TTL_MAX_DAYS,
   WORKSPACE_TMP_TTL_MIN_DAYS,
   workspaceQuotaPercent,
-  WORKSPACE_TOOLS_PREFIX,
 } from "../api";
 import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
@@ -103,7 +97,7 @@ const mockSettings = {
   memoryVectorDBPath: "memory/vectors",
   memoryEpisodesDBPath: "memory/episodes.db",
   memoryEmbeddingModel: "bge-small-en-v1.5",
-  memoryEmbeddingBackend: "apple",
+  memoryEmbeddingBackend: "local",
   voiceSTTProvider: "whisper",
   voiceWhisperModel: "base.en",
   voiceTTSProvider: "system",
@@ -323,10 +317,10 @@ describe("SettingsManager", () => {
 
     // Backend select reflects the loaded value.
     const backendSelect = screen.getByLabelText(/Embedding Backend/i) as HTMLSelectElement;
-    expect(backendSelect.value).toBe("apple");
+    expect(backendSelect.value).toBe("local");
 
-    // No editable model input: provider follows the chat model and apple is
-    // fixed on-device, so the prior value stays hidden but persisted.
+    // No editable model input: provider follows the chat model and local is
+    // managed on-device, so the prior value stays hidden but persisted.
     expect(screen.queryByLabelText(/Embedding Model/i)).toBeNull();
     expect(screen.queryByDisplayValue("bge-small-en-v1.5")).toBeNull();
 
@@ -347,10 +341,9 @@ describe("SettingsManager", () => {
     ).toBe(true);
 
     // Help text explains each backend without an editable model field.
-    expect(screen.getByText(/no model config/i)).toBeDefined();
+    expect(screen.getAllByText(/EmbeddingGemma 2/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/active chat model/i)).toBeDefined();
     expect(screen.getByText(/keyword-only/i)).toBeDefined();
-    expect(screen.getByText(/vector reset/i)).toBeDefined();
 
     await user.selectOptions(backendSelect, "provider");
     expect(backendSelect.value).toBe("provider");
@@ -4316,7 +4309,7 @@ describe("persona defaults and bounds contract", () => {
   });
 });
 
-describe("SettingsManager workspace and promoted tools", () => {
+describe("SettingsManager workspace", () => {
   const workspaceUsagePayload = {
     bytes: 12 * 1024 * 1024,
     files: 120,
@@ -4324,22 +4317,11 @@ describe("SettingsManager workspace and promoted tools", () => {
     quotaMB: 500,
     quotaFiles: 10000,
   };
-  const agentToolRow = {
-    id: "11111111-1111-4111-8111-111111111111",
-    name: "cleanup",
-    scriptPath: "/Users/test/.runeweaver/workspace/tools/cleanup.sh",
-    sha256: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-    status: "enabled",
-    createdAt: "2026-01-01T00:00:00Z",
-    updatedAt: "2026-01-01T00:00:00Z",
-  };
 
   function stubWorkspaceFetch(overrides: {
     onFetch?: (url: string, init?: RequestInit) => Response | Promise<Response> | null;
-    agentTools?: unknown[];
   } = {}) {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
-    const tools = overrides.agentTools ?? [agentToolRow];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const urlStr = String(url);
       calls.push({ url: urlStr, init });
@@ -4349,19 +4331,7 @@ describe("SettingsManager workspace and promoted tools", () => {
       if (urlStr === "/workspace/tmp/prune" && init?.method === "POST") {
         return jsonResponse({ removed: 3 });
       }
-      if (urlStr === "/agent-tools") return jsonResponse({ tools, count: (tools as unknown[]).length });
-      if (urlStr === "/agent-tools/promote" && init?.method === "POST") {
-        const body = JSON.parse(String(init.body)) as { name: string; script_path: string };
-        return jsonResponse({ ...agentToolRow, name: body.name, scriptPath: body.script_path });
-      }
-      if (urlStr.startsWith("/agent-tools/") && urlStr.endsWith("/run") && init?.method === "POST") {
-        return jsonResponse({ toolCallID: "call_1", content: "ok", isError: false });
-      }
-      if (urlStr.startsWith("/agent-tools/") && init?.method === "PATCH") {
-        const body = JSON.parse(String(init.body)) as { status: string };
-        return jsonResponse({ ...agentToolRow, status: body.status ?? "disabled" });
-      }
-      if (urlStr.includes("/tools") && !urlStr.includes("agent-tools")) {
+      if (urlStr.includes("/tools")) {
         return jsonResponse({ tools: [] });
       }
       if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });
@@ -4413,80 +4383,7 @@ describe("SettingsManager workspace and promoted tools", () => {
     });
   });
 
-  it("toggles a promoted tool through PATCH /agent-tools/:id", async () => {
-    const { calls } = stubWorkspaceFetch();
-    const user = await openToolsTab();
-
-    await waitFor(() => {
-      expect(screen.getByText("cleanup")).toBeDefined();
-    });
-    expect(screen.getByText("abcdef123456")).toBeDefined();
-    const toggle = screen.getByRole("switch", { name: /cleanup Enabled/i });
-    await user.click(toggle);
-    await waitFor(() => {
-      expect(
-        calls.some((c) => c.url === `/agent-tools/${agentToolRow.id}` && c.init?.method === "PATCH"),
-      ).toBe(true);
-    });
-    const patch = calls.find((c) => c.url === `/agent-tools/${agentToolRow.id}` && c.init?.method === "PATCH");
-    expect(String(patch?.init?.body)).toContain("disabled");
-  });
-
-  it("validates the tools/ prefix before any promote write", async () => {
-    const { calls } = stubWorkspaceFetch({ agentTools: [] });
-    const user = await openToolsTab();
-
-    await waitFor(() => {
-      expect(screen.getByLabelText("Tool name")).toBeDefined();
-    });
-    await user.type(screen.getByLabelText("Tool name"), "cleanup");
-    await user.type(screen.getByLabelText("Script path"), "workspace/other/cleanup.sh");
-    await user.click(screen.getByRole("button", { name: /Promote tool/i }));
-    await waitFor(() => {
-      // The static form hint, the live prefix warning, and the validation
-      // error share the same canonical prefix copy, so scope to all matches
-      // and pin the one naming the rejected path.
-      const matches = screen.getAllByText(/Only scripts inside tools\//);
-      expect(matches.length).toBeGreaterThanOrEqual(1);
-      expect(matches.some((el) => el.textContent?.includes("workspace/other/cleanup.sh"))).toBe(
-        true,
-      );
-    });
-    expect(calls.some((c) => c.url === "/agent-tools/promote")).toBe(false);
-
-    await user.clear(screen.getByLabelText("Script path"));
-    await user.type(screen.getByLabelText("Script path"), "workspace/tools/cleanup.sh");
-    await user.click(screen.getByRole("button", { name: /Promote tool/i }));
-    await waitFor(() => {
-      expect(calls.some((c) => c.url === "/agent-tools/promote" && c.init?.method === "POST")).toBe(true);
-    });
-  });
-
-  it("pins the workspace CLI matrix on the shared client validators", () => {
-    // Mirrors the `workspace tools` command grammar the CLI enforces
-    // direct-core: only the eligible directory promotes, names stay in the
-    // store slug set, and quota math never divides by zero on older payloads.
-    expect(WORKSPACE_TOOLS_PREFIX).toBe("tools/");
-    expect(isPromotableScriptPath("tools/cleanup.sh")).toBe(true);
-    expect(isPromotableScriptPath("workspace/tools/cleanup.sh")).toBe(true);
-    expect(isPromotableScriptPath("workspace/other/cleanup.sh")).toBe(false);
-    expect(isPromotableScriptPath("tools/")).toBe(false);
-    expect(isPromotableScriptPath("workspace/tools/")).toBe(false);
-    expect(isPromotableScriptPath("/Users/test/.runeweaver/workspace/tools/cleanup.sh")).toBe(true);
-    expect(isPromotableScriptPath("~/.runeweaver/workspace/tools/cleanup.sh")).toBe(true);
-    expect(isPromotableScriptPath("~/.runeweaver/workspace/tools/")).toBe(false);
-    // Bare `/workspace/tools/` segments outside `~/.runeweaver/workspace/`
-    // must not hint-promotable: the store would refuse them with 400.
-    expect(isPromotableScriptPath("~/workspace/tools/cleanup.sh")).toBe(false);
-    expect(isPromotableScriptPath("/tmp/workspace/tools/cleanup.sh")).toBe(false);
-    expect(isPromotableScriptPath("/workspace/tools/cleanup.sh")).toBe(false);
-    expect(validateAgentToolPromote("cleanup", "tools/cleanup.sh")).toBeNull();
-    expect(validateAgentToolPromote("cleanup", "workspace/tools/cleanup.sh")).toBeNull();
-    expect(validateAgentToolPromote("cleanup", "workspace/other/x.sh")).toContain("tools/");
-    expect(validateAgentToolPromote("cleanup", "/tmp/workspace/tools/x.sh")).toContain("tools/");
-    expect(validateAgentToolPromote("cleanup", "~/workspace/tools/x.sh")).toContain("tools/");
-    expect(validateAgentToolPromote("bad name!", "tools/x.sh")).toContain("only letters");
-    expect(shortAgentToolHash(agentToolRow.sha256)).toBe("abcdef123456");
+  it("pins the workspace formatters and quota calculations", () => {
     expect(formatWorkspaceBytes(12 * 1024 * 1024)).toBe("12.0 MB");
     expect(workspaceQuotaPercent(12 * 1024 * 1024, 500 * 1024 * 1024)).toBe(2);
     expect(workspaceQuotaPercent(1, 0)).toBe(0);
@@ -4515,7 +4412,7 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
   };
 
   // Opens the Tools tab with one stubbed fetch so settings, tools, plugins,
-  // usage, and agent-tools all answer without a second stub. PUT bodies are
+  // and usage all answer without a second stub. PUT bodies are
   // captured for the delta assertions while the response echoes the merged
   // request the way the engine partial merge does.
   function stubBoundFetch(settings: Record<string, unknown>, onPut?: (body: Record<string, unknown>) => Response) {
@@ -4531,8 +4428,7 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
         return jsonResponse({ ...settings, ...body });
       }
       if (urlStr === "/workspace/usage") return jsonResponse(usagePayload);
-      if (urlStr === "/agent-tools") return jsonResponse({ tools: [], count: 0 });
-      if (urlStr.includes("/tools") && !urlStr.includes("agent-tools")) {
+      if (urlStr.includes("/tools")) {
         return jsonResponse({ tools: [bashToolRow] });
       }
       if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });
@@ -4608,8 +4504,7 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
         return jsonResponse({ ...settingsWithWorkspace, ...body });
       }
       if (urlStr === "/workspace/usage") return jsonResponse(usagePayload);
-      if (urlStr === "/agent-tools") return jsonResponse({ tools: [], count: 0 });
-      if (urlStr.includes("/tools") && !urlStr.includes("agent-tools")) {
+      if (urlStr.includes("/tools")) {
         return jsonResponse({ tools: [bashToolRow] });
       }
       if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });
@@ -4663,8 +4558,7 @@ describe("SettingsManager bash bounds and workspace quotas", () => {
           return jsonResponse({ ...settingsWithWorkspace });
         }
         if (urlStr === "/workspace/usage") return jsonResponse(usagePayload);
-        if (urlStr === "/agent-tools") return jsonResponse({ tools: [], count: 0 });
-        if (urlStr.includes("/tools") && !urlStr.includes("agent-tools")) {
+        if (urlStr.includes("/tools")) {
           return jsonResponse({ tools: [bashToolRow] });
         }
         if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });
@@ -4771,8 +4665,7 @@ describe("SettingsManager workspace machine control", () => {
         return jsonResponse({ ...machineState });
       }
       if (urlStr === "/workspace/usage") return jsonResponse(usagePayload);
-      if (urlStr === "/agent-tools") return jsonResponse({ tools: [], count: 0 });
-      if (urlStr.includes("/tools") && !urlStr.includes("agent-tools")) {
+      if (urlStr.includes("/tools")) {
         return jsonResponse({ tools: [] });
       }
       if (urlStr.includes("/plugins")) return jsonResponse({ plugins: [] });

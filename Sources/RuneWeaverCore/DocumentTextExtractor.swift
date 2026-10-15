@@ -14,6 +14,13 @@
 // ZIP reading in `DocumentZipArchive.swift`.
 
 import Foundation
+import os
+#if canImport(AppKit)
+    import AppKit
+#endif
+#if canImport(UniformTypeIdentifiers)
+    import UniformTypeIdentifiers
+#endif
 
 // MARK: - Public types
 
@@ -33,6 +40,8 @@ public enum DocumentFormat: String, Sendable, Codable, Equatable, CaseIterable {
     case numbers
     /// Apple Keynote package.
     case keynote
+    /// Rich Text Format (.rtf).
+    case rtf
     /// Plain text such as `.txt`, `.text`, or `.log`.
     case plainText
     /// Markdown source.
@@ -45,6 +54,12 @@ public enum DocumentFormat: String, Sendable, Codable, Equatable, CaseIterable {
     case eml
     /// Hypertext Markup Language.
     case html
+    /// Image document (PNG, JPEG, HEIC, TIFF, WebP, GIF, BMP, SVG).
+    case image
+    /// Audio file (MP3, M4A, WAV, AAC, FLAC, CAF).
+    case audio
+    /// Video file (MP4, MOV, M4V, MKV, AVI, WebM).
+    case video
     /// Format outside the supported set.
     case unsupported
 }
@@ -128,6 +143,31 @@ public protocol DocumentTextExtracting: Sendable {
     ///   - contentType: Optional MIME type or UTI used when the extension is unknown.
     /// - Returns: Extraction result; never throws for an unsupported format.
     func extract(data: Data, fileName: String, contentType: String?) -> DocumentExtraction
+
+    /// Extracts text from a file URL asynchronously.
+    /// - Parameters:
+    ///   - fileURL: Document file location on disk.
+    ///   - contentType: Optional MIME type or UTI used when the extension is unknown.
+    /// - Returns: Extraction result; never throws for an unsupported format.
+    func extract(fileURL: URL, contentType: String?) async -> DocumentExtraction
+}
+
+extension DocumentTextExtracting {
+    /// Default async extraction from file URL delegating to data extraction.
+    public func extract(fileURL: URL, contentType: String? = nil) async -> DocumentExtraction {
+        let fileName = fileURL.lastPathComponent
+        guard let data = try? Data(contentsOf: fileURL, options: [.mappedIfSafe]) else {
+            return DocumentExtraction(
+                status: .failed,
+                format: .unsupported,
+                chunks: [],
+                reason: "Could not read file at \(fileURL.path)",
+                byteCount: 0,
+                truncated: false
+            )
+        }
+        return extract(data: data, fileName: fileName, contentType: contentType)
+    }
 }
 
 // MARK: - Extractor
@@ -188,7 +228,7 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
     ///   - fileURL: Document location.
     ///   - contentType: Optional MIME type or UTI used when the extension is unknown.
     /// - Returns: Extraction result; never throws for an unreadable file.
-    public func extract(fileURL: URL, contentType: String? = nil) -> DocumentExtraction {
+    public func extract(fileURL: URL, contentType: String? = nil) async -> DocumentExtraction {
         let fileName = fileURL.lastPathComponent
         let format = Self.detectFormat(fileName: fileName, contentType: contentType)
         let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
@@ -211,6 +251,28 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
                 format: format,
                 reason: "The document at '\(fileName)' could not be read: \(error.localizedDescription).",
                 byteCount: 0
+            )
+        }
+        if format == .audio || format == .video {
+            let transcript = await (try? MediaTextExtractor.transcribeAudio(fileURL: fileURL))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !transcript.isEmpty {
+                return makeTextResult(
+                    text: transcript,
+                    format: format,
+                    byteCount: (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? data.count,
+                    missingReason: "The media contains no extractable speech transcript."
+                )
+            }
+            // The file-backed path attempted on-device transcription and found
+            // nothing, so this reason honestly reports an attempt was made. The
+            // in-memory data path below reports the opposite because a sync
+            // bytes-only call cannot route through the async recognizer.
+            return makeResult(
+                status: .metadataOnly,
+                format: format,
+                reason: "Audio/video media: stored metadata-only; on-device speech transcription detected no speech.",
+                byteCount: data.count
             )
         }
         return extract(data: data, fileName: fileName, contentType: contentType)
@@ -248,6 +310,8 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
                 byteCount: data.count,
                 missingReason: "The HTML document contains no extractable text."
             )
+        case .rtf:
+            return extractRTF(data: data)
         case .pdf:
             return extractPDF(data: data)
         case .docx:
@@ -258,6 +322,39 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
             return extractPPTX(data: data)
         case .pages, .numbers, .keynote:
             return extractIWork(data: data, format: format, fileName: fileName)
+        case .image:
+            let ocrText = MediaTextExtractor.recognizeTextSync(in: data)
+            let trimmed = ocrText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return makeTextResult(
+                    text: trimmed,
+                    format: .image,
+                    byteCount: data.count,
+                    missingReason: "The image contains no extractable text."
+                )
+            } else {
+                // OCR found no text, so extraction stays interim: callers attempt
+                // visual embedding separately and promote to `.extracted` only
+                // after it succeeds, instead of claiming visual work up front.
+                let fallbackText = fileName.isEmpty ? "Image" : fileName
+                let tokens = max(1, fallbackText.count / 4)
+                return makeResult(
+                    status: .partial,
+                    format: .image,
+                    chunks: [DocumentChunk(index: 0, text: fallbackText, estimatedTokens: tokens)],
+                    reason: "Image contains no OCR text; visual embedding pending.",
+                    byteCount: data.count
+                )
+            }
+        case .audio, .video:
+            // Bytes-only extraction cannot reach the async on-device recognizer,
+            // so the reason honestly reports that transcription requires on-disk file URL.
+            return makeResult(
+                status: .metadataOnly,
+                format: format,
+                reason: "Audio/video media: stored metadata-only; speech transcription requires on-disk file URL.",
+                byteCount: data.count
+            )
         case .unsupported:
             return makeResult(
                 status: .unsupported,
@@ -266,6 +363,31 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
                 byteCount: data.count
             )
         }
+    }
+
+    /// Extracts text from Rich Text Format (RTF) data.
+    private func extractRTF(data: Data) -> DocumentExtraction {
+        #if canImport(AppKit)
+            if let attributed = try? NSAttributedString(
+                data: data,
+                options: [.documentType: NSAttributedString.DocumentType.rtf],
+                documentAttributes: nil
+            ) {
+                let text = attributed.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                return makeTextResult(
+                    text: text,
+                    format: .rtf,
+                    byteCount: data.count,
+                    missingReason: "The RTF document contains no extractable text."
+                )
+            }
+        #endif
+        return makeTextResult(
+            text: Self.decodeText(data),
+            format: .rtf,
+            byteCount: data.count,
+            missingReason: "The RTF document contains no extractable text."
+        )
     }
 
     /// Builds a result with explicit fields.
@@ -361,7 +483,7 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
 // MARK: - Format dispatch
 
 extension DocumentTextExtractor {
-    /// Extension-to-format map used for primary dispatch.
+    /// Extension-to-format map used for primary dispatch and fallback.
     fileprivate static let formatByExtension: [String: DocumentFormat] = [
         "pdf": .pdf,
         "docx": .docx,
@@ -371,6 +493,7 @@ extension DocumentTextExtractor {
         "numbers": .numbers,
         "key": .keynote,
         "keynote": .keynote,
+        "rtf": .rtf,
         "txt": .plainText,
         "text": .plainText,
         "log": .plainText,
@@ -380,7 +503,31 @@ extension DocumentTextExtractor {
         "json": .json,
         "eml": .eml,
         "html": .html,
-        "htm": .html
+        "htm": .html,
+        "png": .image,
+        "jpg": .image,
+        "jpeg": .image,
+        "heic": .image,
+        "heif": .image,
+        "tiff": .image,
+        "tif": .image,
+        "webp": .image,
+        "gif": .image,
+        "bmp": .image,
+        "svg": .image,
+        "mp3": .audio,
+        "m4a": .audio,
+        "wav": .audio,
+        "aac": .audio,
+        "flac": .audio,
+        "caf": .audio,
+        "aiff": .audio,
+        "mp4": .video,
+        "mov": .video,
+        "m4v": .video,
+        "mkv": .video,
+        "avi": .video,
+        "webm": .video
     ]
 
     /// MIME type and UTI-to-format map used when the extension is unknown.
@@ -396,6 +543,9 @@ extension DocumentTextExtractor {
         "com.apple.iwork.pages.pages": .pages,
         "com.apple.iwork.numbers.numbers": .numbers,
         "com.apple.iwork.keynote.key": .keynote,
+        "public.rtf": .rtf,
+        "text/rtf": .rtf,
+        "application/rtf": .rtf,
         "public.plain-text": .plainText,
         "text/plain": .plainText,
         "net.daringfireball.markdown": .markdown,
@@ -407,30 +557,201 @@ extension DocumentTextExtractor {
         "public.html": .html,
         "text/html": .html,
         "message/rfc822": .eml,
-        "public.email-message": .eml
+        "public.email-message": .eml,
+        "image/png": .image,
+        "image/jpeg": .image,
+        "image/heic": .image,
+        "image/tiff": .image,
+        "image/webp": .image,
+        "image/gif": .image,
+        "image/bmp": .image,
+        "image/svg+xml": .image,
+        "audio/mpeg": .audio,
+        "audio/mp4": .audio,
+        "audio/wav": .audio,
+        "audio/x-m4a": .audio,
+        "audio/x-caf": .audio,
+        "audio/aiff": .audio,
+        "video/mp4": .video,
+        "video/quicktime": .video,
+        "video/x-matroska": .video,
+        "video/webm": .video
     ]
 
-    /// Resolves a format from the file extension first, then the content type.
+    /// Developer source code and configuration extensions recognized from DigUp catalog.
+    fileprivate static let developerCodeExtensions: Set<String> = [
+        "py", "pyi", "pyx", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx", "m", "mm",
+        "swift", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "go", "rs",
+        "java", "kt", "kts", "scala", "groovy", "rb", "php", "cs", "fs",
+        "sh", "bash", "zsh", "fish", "ps1", "lua", "pl", "pm", "r", "jl", "dart",
+        "sql", "vue", "svelte", "astro", "css", "scss", "sass", "less",
+        "gradle", "cmake", "mk", "proto", "graphql", "gql", "tf", "hcl",
+        "nix", "zig", "hs", "ex", "exs", "erl", "clj", "cljs", "elm", "ml", "mli",
+        "vim", "el", "lisp", "asm", "s", "metal", "glsl", "hlsl", "wgsl", "cu", "cuh",
+        "ino", "v", "sv", "tex", "toml", "yaml", "yml", "xml", "plist",
+        "ini", "cfg", "conf", "lock", "rst", "adoc", "org", "txt", "text", "log"
+    ]
+
+    /// Known developer filenames without file extensions.
+    fileprivate static let developerCodeFileNames: Set<String> = [
+        "makefile", "gnumakefile", "dockerfile", "containerfile", "justfile",
+        "rakefile", "gemfile", "podfile", "brewfile", "procfile", "vagrantfile", "jenkinsfile"
+    ]
+
+    /// Security & archive guard: checks whether a file is a credential/secret or unsafe archive.
+    public static func isSecretOrUnsafeFile(fileName: String) -> Bool {
+        let lower = fileName.lowercased()
+        let fileExtension = (lower as NSString).pathExtension
+
+        let secretExtensions: Set = [
+            "pem", "key", "p12", "pfx", "keystore", "jks", "ppk", "kdbx", "gpg", "asc",
+            "crt", "cer", "der", "p8", "mobileprovision"
+        ]
+        if secretExtensions.contains(fileExtension) {
+            return true
+        }
+
+        let secretPrefixes = [
+            "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".env", "secret", "credential",
+            ".netrc", ".npmrc", ".pypirc", "htpasswd", ".htpasswd"
+        ]
+        if secretPrefixes.contains(where: { lower.hasPrefix($0) }) {
+            return true
+        }
+
+        let unsafeArchiveExtensions: Set = [
+            "zip", "tar", "gz", "tgz", "7z", "rar", "bz2", "xz",
+            "exe", "dmg", "pkg", "app", "bin", "iso"
+        ]
+        if unsafeArchiveExtensions.contains(fileExtension) {
+            return true
+        }
+
+        return false
+    }
+
+    /// Resolves explicit primary document formats from extension.
+    private static func detectPrimaryDocumentFormat(fileExtension: String) -> DocumentFormat? {
+        switch fileExtension {
+        case "pdf": .pdf
+        case "docx": .docx
+        case "xlsx": .xlsx
+        case "pptx": .pptx
+        case "pages": .pages
+        case "numbers": .numbers
+        case "key", "keynote": .keynote
+        case "md", "markdown": .markdown
+        case "csv": .csv
+        case "json": .json
+        case "eml": .eml
+        case "html", "htm": .html
+        case "rtf": .rtf
+        default: nil
+        }
+    }
+
+    #if canImport(UniformTypeIdentifiers)
+        /// Resolves document format from Apple UTType conformance.
+        private static func detectUTTypeFormat(_ utType: UTType) -> DocumentFormat? {
+            if utType.conforms(to: .image) {
+                return .image
+            }
+            if utType.conforms(to: .audio) {
+                return .audio
+            }
+            if utType.conforms(to: .movie) {
+                return .video
+            }
+            if utType.conforms(to: .sourceCode) || utType.conforms(to: .plainText) {
+                return .plainText
+            }
+            if utType.conforms(to: .pdf) {
+                return .pdf
+            }
+            if utType.conforms(to: .rtf) {
+                return .rtf
+            }
+            if utType.conforms(to: .html) {
+                return .html
+            }
+            if utType.conforms(to: .json) {
+                return .json
+            }
+            return nil
+        }
+    #endif
+
+    /// Resolves document format from MIME type or UTI string.
+    private static func detectContentTypeFormat(_ contentType: String) -> DocumentFormat? {
+        let normalized = contentType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let format = formatByContentType[normalized] {
+            return format
+        }
+        if let base = normalized.split(separator: ";").first.map(String.init),
+           let format = formatByContentType[base]
+        {
+            return format
+        }
+        #if canImport(UniformTypeIdentifiers)
+            if let resolvedType = UTType(mimeType: normalized) ?? UTType(normalized),
+               let format = detectUTTypeFormat(resolvedType)
+            {
+                return format
+            }
+        #endif
+        return nil
+    }
+
+    /// Resolves document format using the 3-Tier Classification Model:
+    /// Tier 1: Security & Archive Guard (fail-closed on secrets and archives).
+    /// Tier 2: Developer Code/Config Catalog (preserves code from Spotlight misclassification).
+    /// Tier 3: Apple `UTType` system taxonomy with fallback static maps.
     /// - Parameters:
     ///   - fileName: File name carrying the extension.
     ///   - contentType: Optional MIME type or UTI.
     /// - Returns: Recognized format, or `.unsupported`.
-    fileprivate static func detectFormat(fileName: String, contentType: String?) -> DocumentFormat {
-        let fileExtension = (fileName as NSString).pathExtension.lowercased()
-        if let format = formatByExtension[fileExtension] {
+    public static func detectFormat(fileName: String, contentType: String? = nil) -> DocumentFormat {
+        // Tier 1: Security & Archive Guard (Fail Closed)
+        if isSecretOrUnsafeFile(fileName: fileName) {
+            return .unsupported
+        }
+
+        let lowerName = fileName.lowercased()
+        let fileExtension = (lowerName as NSString).pathExtension
+
+        // DigUp known developer text file names without extension
+        if developerCodeFileNames.contains(lowerName) || lowerName.hasPrefix("dockerfile") {
+            return .plainText
+        }
+
+        // Explicit primary document formats
+        if let format = detectPrimaryDocumentFormat(fileExtension: fileExtension) {
             return format
         }
-        if let contentType {
-            let normalized = contentType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if let format = formatByContentType[normalized] {
-                return format
-            }
-            // A UTI may arrive with a parameter suffix (for example `text/plain; charset=utf-8`).
-            if let base = normalized.split(separator: ";").first.map(String.init),
-               let format = formatByContentType[base]
+
+        // Developer Code & Config catalog (mapped before UTType to avoid
+        // macOS Spotlight treating .ts / .mts / etc. as movie/video)
+        if developerCodeExtensions.contains(fileExtension) {
+            return .plainText
+        }
+
+        // Tier 2: Apple UniformTypeIdentifiers (UTType) Conformance
+        #if canImport(UniformTypeIdentifiers)
+            if !fileExtension.isEmpty, let utType = UTType(filenameExtension: fileExtension),
+               let format = detectUTTypeFormat(utType)
             {
                 return format
             }
+        #endif
+
+        // Fallback to static mapping by extension
+        if let format = formatByExtension[fileExtension] {
+            return format
+        }
+
+        // Content type / MIME dispatch
+        if let contentType, let format = detectContentTypeFormat(contentType) {
+            return format
         }
         return .unsupported
     }

@@ -1056,7 +1056,11 @@ export function isIndexProgressFrame(
 export function resolveIndexLiveStageTitle(
   phase: string | null | undefined,
   stage: string | null | undefined,
+  current?: string | null | undefined,
 ): string {
+  if (typeof current === "string" && (current.startsWith("Downloading") || current.startsWith("Starting local"))) {
+    return current.endsWith("…") ? current : `${current}…`;
+  }
   const title = resolveIndexLiveTitle(phase, stage);
   return title === "Running…" ? "Indexing…" : title;
 }
@@ -1093,7 +1097,7 @@ export function formatIndexLiveHeader(
       ? live.elapsedMs
       : 0;
   const label = indexRunTriggerLabel(live.trigger);
-  const stageTitle = resolveIndexLiveStageTitle(live.phase, live.stage);
+  const stageTitle = resolveIndexLiveStageTitle(live.phase, live.stage, live.current);
   const rate = formatIndexRate(
     typeof live.rate === "number" ? live.rate : null,
     elapsedMs,
@@ -2921,7 +2925,6 @@ export function IndexPolicyPanel() {
         maxFileMB: config.maxFileMB,
         mailVectorWindow: config.mailVectorWindow,
         iCloudEvicted: config.iCloudEvicted,
-        describeImagesWithLLM: config.describeImagesWithLLM,
         nightlyBudget: config.nightlyBudget,
         dbPath: config.dbPath.trim(),
         effort,
@@ -3542,21 +3545,6 @@ export function IndexPolicyPanel() {
 
         <p className="muted text-sm index-attachment-cap">
           Attachment / file size cap: {config.maxFileMB} MB per file.
-        </p>
-
-        <label className="toggle-label">
-          <input
-            type="checkbox"
-            checked={config.describeImagesWithLLM}
-            onChange={(event) =>
-              updateConfig({ describeImagesWithLLM: event.target.checked })
-            }
-          />
-          <span>Describe images with the language model</span>
-        </label>
-        <p className="muted text-xs index-vision-disclosure">
-          When enabled, image files are sent to your configured LLM provider to
-          generate a description. Leave this off to keep images on-device.
         </p>
 
         <div className="settings-footer">

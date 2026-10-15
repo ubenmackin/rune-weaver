@@ -199,15 +199,14 @@ public actor WorkspaceStore {
         }
     }
 
-    /// Creates the workspace root (plus `tmp/` and `tools/`) with owner-only permissions.
+    /// Creates the workspace root (plus `tmp/`) with owner-only permissions.
     ///
     /// Creation is idempotent: an existing directory is re-secured to `0700`
     /// so a permissive `umask` or a restored backup cannot leave scratch
     /// world-readable. Failures throw instead of falling back to another
     /// directory, because a silent fallback would run commands in an
-    /// unexpected location. A symlinked root, `tmp/`, or `tools/` refuses
-    /// fail-closed before any create or chmod follows the link outside the
-    /// workspace.
+    /// unexpected location. A symlinked root or `tmp/` refuses fail-closed
+    /// before any create or chmod follows the link outside the workspace.
     /// - Returns: The secured workspace root.
     /// - Throws: ``WorkspaceError/ensureFailed(reason:)`` when creation fails.
     @discardableResult
@@ -216,12 +215,8 @@ public actor WorkspaceStore {
         do {
             try Self.refuseSymlinkedRoot(rootURL)
             let tmpURL = rootURL.appendingPathComponent(Self.tmpDirectoryName)
-            let toolsURL = rootURL.appendingPathComponent(AgentToolStore.toolsDirectoryName)
             if WorkspaceContainment.isSymlink(at: tmpURL) {
                 throw WorkspaceError.ensureFailed(reason: "Workspace tmp unavailable at \(tmpURL.path): tmp directory is a symlink and will not be followed")
-            }
-            if WorkspaceContainment.isSymlink(at: toolsURL) {
-                throw WorkspaceError.ensureFailed(reason: "Workspace unavailable at \(toolsURL.path): tools directory is a symlink and will not be followed")
             }
             // Re-validate after symlink resolution so a swapped intermediate
             // (`~/.runeweaver -> /`) cannot steer creation outside the
@@ -230,8 +225,6 @@ public actor WorkspaceStore {
             try verifyCanonicalContainment(canonical: canonicalRoot, lexical: rootURL)
             let canonicalTmp = WorkspaceContainment.canonical(tmpURL)
             try verifyCanonicalContainment(canonical: canonicalTmp, lexical: tmpURL)
-            let canonicalTools = WorkspaceContainment.canonical(toolsURL)
-            try verifyCanonicalContainment(canonical: canonicalTools, lexical: toolsURL)
             try FileManager.default.createDirectory(
                 at: rootURL,
                 withIntermediateDirectories: true,
@@ -248,16 +241,6 @@ public actor WorkspaceStore {
                 attributes: [.posixPermissions: 0o700]
             )
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: tmpURL.path)
-            // `tools/` hosts promotable agent scripts: a fresh boot has no
-            // directory yet, so `promote` would fail with `fileMissing`
-            // before pinning. Create alongside `tmp/` with the same
-            // owner-only posture, re-securing when it already exists.
-            try FileManager.default.createDirectory(
-                at: toolsURL,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: toolsURL.path)
             return rootURL
         } catch let error as WorkspaceError {
             throw error

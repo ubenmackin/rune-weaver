@@ -38,9 +38,6 @@ public struct IndexConfig: Sendable, Codable, Equatable {
     /// Policy for iCloud files whose bytes are evicted: `skip` or `download`.
     /// Defaults to `skip` so an index run never silently pulls a file down.
     public var iCloudEvicted: String
-    /// Whether image files are described with the configured LLM. Off by
-    /// default; enabling it sends image content to the active provider.
-    public var describeImagesWithLLM: Bool
     /// Maximum number of items processed per nightly index run. `0` means
     /// unlimited. Defaults to unlimited.
     public var nightlyBudget: Int
@@ -194,7 +191,6 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         maxFileMB: Int = defaultMaxFileMB,
         mailVectorWindow: String = defaultMailVectorWindow,
         iCloudEvicted: String = defaultICloudEvicted,
-        describeImagesWithLLM: Bool = false,
         nightlyBudget: Int = defaultNightlyBudget,
         dbPath: String = defaultDBPath,
         effort: String = defaultEffort,
@@ -215,7 +211,6 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         self.maxFileMB = maxFileMB
         self.mailVectorWindow = mailVectorWindow
         self.iCloudEvicted = iCloudEvicted
-        self.describeImagesWithLLM = describeImagesWithLLM
         self.nightlyBudget = nightlyBudget
         self.dbPath = dbPath
         self.effort = effort
@@ -239,7 +234,6 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         case maxFileMB
         case mailVectorWindow
         case iCloudEvicted
-        case describeImagesWithLLM
         case nightlyBudget
         case dbPath
         case effort
@@ -266,7 +260,6 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         maxFileMB = try container.decodeIfPresent(Int.self, forKey: .maxFileMB) ?? Self.defaultMaxFileMB
         mailVectorWindow = try container.decodeIfPresent(String.self, forKey: .mailVectorWindow) ?? Self.defaultMailVectorWindow
         iCloudEvicted = try container.decodeIfPresent(String.self, forKey: .iCloudEvicted) ?? Self.defaultICloudEvicted
-        describeImagesWithLLM = try container.decodeIfPresent(Bool.self, forKey: .describeImagesWithLLM) ?? false
         nightlyBudget = try container.decodeIfPresent(Int.self, forKey: .nightlyBudget) ?? Self.defaultNightlyBudget
         dbPath = try container.decodeIfPresent(String.self, forKey: .dbPath) ?? Self.defaultDBPath
         effort = try container.decodeIfPresent(String.self, forKey: .effort) ?? Self.defaultEffort
@@ -296,7 +289,6 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         try container.encode(maxFileMB, forKey: .maxFileMB)
         try container.encode(mailVectorWindow, forKey: .mailVectorWindow)
         try container.encode(iCloudEvicted, forKey: .iCloudEvicted)
-        try container.encode(describeImagesWithLLM, forKey: .describeImagesWithLLM)
         try container.encode(nightlyBudget, forKey: .nightlyBudget)
         try container.encode(dbPath, forKey: .dbPath)
         try container.encode(effort, forKey: .effort)

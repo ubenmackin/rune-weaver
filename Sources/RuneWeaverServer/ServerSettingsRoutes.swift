@@ -894,8 +894,7 @@ private func probedIndexComponents(savedConfig: RuneWeaverConfig, context: Serve
         config: savedConfig,
         runs: context.runs,
         hub: context.hub,
-        embedder: context.embedder,
-        visionLLM: context.servingLLM
+        embedder: context.embedder
     ) else {
         throw Abort(.badRequest, reason: "Indexing is disabled in [index].")
     }

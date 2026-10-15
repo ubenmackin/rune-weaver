@@ -188,9 +188,6 @@ extension IndexCoordinator {
         }
         let present = Set(reports.map(\.kind))
         for kind in IndexSourceKind.runOrder {
-            if kind == .vision {
-                continue
-            }
             if present.contains(kind) {
                 continue
             }
@@ -239,8 +236,6 @@ extension IndexCoordinator {
             "Calendar indexing is enabled but did not run in this pass."
         case .reminders:
             "Reminders indexing is enabled but did not run in this pass."
-        case .vision:
-            "Vision description is enabled but did not run in this pass."
         }
     }
 
@@ -259,8 +254,6 @@ extension IndexCoordinator {
             "Calendar indexing is disabled in [index]."
         case .reminders:
             "Reminders indexing is disabled in [index]."
-        case .vision:
-            "Vision description is disabled in [index]."
         }
     }
 }

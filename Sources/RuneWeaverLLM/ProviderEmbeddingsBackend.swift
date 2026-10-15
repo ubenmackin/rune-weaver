@@ -58,8 +58,8 @@ public enum EmbeddingsBackendFactory: Sendable {
         switch memoryEmbeddingBackend {
         case MemoryConfig.embeddingBackendNone:
             nil
-        case MemoryConfig.embeddingBackendApple:
-            AppleNLEmbeddingsBackend()
+        case MemoryConfig.embeddingBackendLocal:
+            LlamaCppEmbeddingsBackend(supervisor: LlamaEmbeddingSupervisor.shared)
         case MemoryConfig.embeddingBackendProvider:
             ProviderEmbeddingsBackend(router: router)
         default:

@@ -1108,8 +1108,8 @@ public extension GoalsConfig {
 public extension RecallBudgets {
     /// Returns a copy clamped into the documented ranges.
     /// - Returns: Budgets with limits pulled inside `1...50`, threshold and
-    ///   weight inside `0...1`, `maxChars` inside `200...16000`,
-    ///   `perHitChars` inside `100...2000`, and multiplier inside `1...8`.
+    ///   weight inside `0...1`, `maxChars` inside `500...32000`,
+    ///   `perHitChars` inside `100...8000`, and multiplier inside `1...8`.
     func clamped() -> RecallBudgets {
         RecallBudgets(
             perTierLimit: min(max(perTierLimit, Self.limitBounds.lowerBound), Self.limitBounds.upperBound),

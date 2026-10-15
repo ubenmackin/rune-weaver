@@ -122,13 +122,13 @@ vector_db_path = "~/.runeweaver/memory/vectors"
 episodes_db_path = "~/.runeweaver/memory/episodes.db"
 embedding_model = "all-MiniLM-L6-v2"
 # embedding_model is retained for forward compatibility but currently unused:
-# "apple" uses the fixed on-device model with no model config, "provider"
+# "local" uses on-device Metal via EmbeddingGemma 2 (768-dim), "provider"
 # reuses the active chat model via /v1/embeddings, and "none" stays
 # keyword-only with no vectors.
-# embedding_backend selects the vector backend: "apple" (on-device, local-first default),
+# embedding_backend selects the vector backend: "local" (on-device Metal via EmbeddingGemma 2, default),
 # "provider" (active chat model embeddings), or "none" (keyword-only, no vectors).
 # Switching chat models under "provider" may require a vector reset due to width pinning.
-embedding_backend = "apple"
+embedding_backend = "local"
 # Recall budgets bounding automatic and explicit recall fan-out. Flat keys under
 # [memory]; absent keys keep the documented defaults. Out-of-range values clamp
 # to the nearest bound instead of refusing to boot.
@@ -226,9 +226,6 @@ mail_vector_window = "2y"
 # iCloud files whose bytes are evicted: "skip" (default) or "download".
 # Skip avoids silently pulling a file down during an index run.
 icloud_evicted = "skip"
-# Describe image files with the configured LLM. Off by default; enabling it
-# sends image content to the active provider.
-describe_images_with_llm = false
 # Maximum items processed per nightly run; 0 means unlimited (0-100000).
 nightly_budget = 0
 # Maximum chunks per document that carry vectors (1-4096, default 128). Longer

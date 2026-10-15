@@ -68,7 +68,8 @@ public actor FilesIndexer {
         "node_modules",
         "DerivedData",
         "__pycache__",
-        ".venv"
+        ".venv",
+        ".fastlane"
     ]
 
     /// Longest relative path retained on a progress frame, bounding frame size.
@@ -200,6 +201,14 @@ public actor FilesIndexer {
     public func run() async -> FilesIndexRunReport {
         guard config.enabled, config.files else {
             return FilesIndexRunReport(skippedReason: "File indexing is disabled in [index].")
+        }
+        if let embedder, let dim = await embedder.dimension {
+            _ = try? await store.ensureEmbeddingDimensionMatch(
+                activeModelID: embedder.modelID,
+                activeDimension: dim,
+                mailCheckpointPath: MailIndexCheckpointStore.defaultPath,
+                messagesStatePath: MessagesIndexer.defaultStatePath
+            )
         }
         let workers = resolvedWorkerCount()
         guard workers > 1 else {
@@ -613,7 +622,7 @@ extension FilesIndexer {
         guard let enumerator = FileManager.default.enumerator(
             at: rootURL,
             includingPropertiesForKeys: Self.entryKeys,
-            options: [],
+            options: [.skipsPackageDescendants],
             errorHandler: { _, _ in true }
         ) else {
             counters.hasUnreadableRoot = true
@@ -876,6 +885,7 @@ extension FilesIndexer {
         if filename.hasPrefix("._") {
             return .skip(countSkipped: true, prune: isItemDirectory)
         }
+
         // Scoped scratch prune on the absolute path: covers walks rooted
         // inside `.runeweaver/workspace` itself, where the relative path no
         // longer carries the prefix but the absolute path still does.
@@ -1179,13 +1189,77 @@ extension FilesIndexer {
     ///
     /// Single-sourced so sequential and parallel embedding agree: a width or
     /// count mismatch degrades to keyword-only instead of pairing a wrong
-    /// vector with a chunk.
+    /// vector with a chunk. Widths must be uniform within the batch and match
+    /// the backend's known dimension when one is advertised; provider backends
+    /// with an unknown dimension still enforce intra-batch uniformity so a
+    /// mid-run model switch cannot silently mix widths. The store re-enforces
+    /// the pinned width on write.
     /// - Parameters:
     ///   - vectors: Vectors returned by the backend.
     ///   - expectedCount: Number of texts sent for embedding.
-    /// - Returns: Vectors when the count matches, or nil to stay keyword-only.
-    static func validatedEmbedVectors(_ vectors: [[Float]], expectedCount: Int) -> [[Float]]? {
-        vectors.count == expectedCount ? vectors : nil
+    ///   - expectedDimension: Backend's known dimension, or nil when unknown.
+    /// - Returns: Vectors when count and widths agree, or nil to stay keyword-only.
+    static func validatedEmbedVectors(
+        _ vectors: [[Float]],
+        expectedCount: Int,
+        expectedDimension: Int? = nil
+    ) -> [[Float]]? {
+        guard vectors.count == expectedCount else { return nil }
+        guard !vectors.isEmpty else { return vectors }
+        guard let firstWidth = vectors.first?.count, firstWidth > 0 else { return nil }
+        guard vectors.allSatisfy({ $0.count == firstWidth }) else { return nil }
+        if let expected = expectedDimension, firstWidth != expected {
+            return nil
+        }
+        return vectors
+    }
+
+    /// Reports the stored status for an image after the visual-embedding attempt.
+    ///
+    /// Extraction stays interim (pending visual work) so the stored row never
+    /// claims visual success up front; only a successful visual vector promotes
+    /// the row to `.extracted`, while a visual miss or text-only fallback keeps
+    /// the interim outcome.
+    /// - Parameters:
+    ///   - extraction: Extracted document body.
+    ///   - visualSucceeded: Whether the visual multimodal vector landed.
+    /// - Returns: `.extracted` for a visually embedded image, else the interim status.
+    static func effectiveImageStatus(extraction: DocumentExtraction, visualSucceeded: Bool) -> ExtractStatus {
+        guard extraction.format == .image else { return extraction.status }
+        return visualSucceeded ? .extracted : extraction.status
+    }
+
+    /// Embeds a single image file via visual multimodal embedding, verifying vector width against expected dimension.
+    /// - Parameters:
+    ///   - fileURL: Location of the image file on disk.
+    ///   - fileName: Display name for logging.
+    ///   - expectedDimension: Target embedding dimension (defaults to 768 if nil).
+    ///   - embedImage: Closure performing the image embedding.
+    /// - Returns: A single vector wrapped in an array, or nil to fall back to text extraction.
+    static func embedImageVisualVector(
+        fileURL _: URL,
+        fileName: String,
+        expectedDimension: Int?,
+        embedImage: () async throws -> [Float]
+    ) async throws -> [[Float]]? {
+        do {
+            let vector = try await embedImage()
+            let targetDim = expectedDimension ?? 768
+            if vector.count == targetDim {
+                return [vector]
+            }
+            RuneWeaverLog.stores.warning(
+                "FilesIndexer: Visual embedding dimension mismatch for \(fileName): got \(vector.count), expected \(targetDim)."
+            )
+            return nil
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            RuneWeaverLog.stores.info(
+                "FilesIndexer: Visual embedding unavailable for \(fileName), falling back to text OCR: \(error.localizedDescription)"
+            )
+            return nil
+        }
     }
 
     /// Reports whether components hold the scoped scratch prefix.

@@ -683,6 +683,66 @@ public actor DocIndexStore {
     }
 }
 
+// MARK: - Embedding Metadata
+
+extension DocIndexStore {
+    /// Reads the recorded embedding model and dimension from the store's schema_meta table.
+    public func readEmbeddingMeta() async throws -> (modelID: String?, dimension: Int?) {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run(lane: .interactive) {
+            let handle = try SQLiteDocIndexStore.open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            return try SQLiteDocIndexStore.readEmbeddingMeta(handle: handle)
+        }
+    }
+
+    /// Records the embedding model and dimension into the store's schema_meta table.
+    public func writeEmbeddingMeta(modelID: String, dimension: Int) async throws {
+        let dbPath = self.dbPath
+        try await SQLiteSerialIO.run(lane: .indexing) {
+            let handle = try SQLiteDocIndexStore.open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            try SQLiteDocIndexStore.writeEmbeddingMeta(handle: handle, modelID: modelID, dimension: dimension)
+        }
+    }
+
+    /// Verifies that the store's embedded vectors match the active embedder's dimension.
+    /// If there is an existing dimension recorded that differs from activeDimension,
+    /// a full reset is performed so all documents are cleanly re-embedded.
+    /// - Returns: True if a reset occurred due to dimension mismatch.
+    public func ensureEmbeddingDimensionMatch(
+        activeModelID: String,
+        activeDimension: Int,
+        mailCheckpointPath: String,
+        messagesStatePath: String
+    ) async throws -> Bool {
+        let meta = try await readEmbeddingMeta()
+        if let storedDimension = meta.dimension, storedDimension != activeDimension {
+            RuneWeaverLog.stores.warning(
+                "DocIndexStore: embedding dimension mismatch (stored: \(storedDimension), active: \(activeDimension)); triggering re-index reset."
+            )
+            try await reset(mailCheckpointPath: mailCheckpointPath, messagesStatePath: messagesStatePath)
+            try await writeEmbeddingMeta(modelID: activeModelID, dimension: activeDimension)
+            return true
+        }
+        if meta.dimension == nil {
+            let stats = try await SQLiteSerialIO.run(lane: .indexing) {
+                try DocIndexStoreIO.fastStats(dbPath: self.dbPath)
+            }
+            if stats.vectorChunks > 0 {
+                RuneWeaverLog.stores.warning(
+                    "DocIndexStore: unversioned vector chunks detected without dimension metadata; resetting to dimension \(activeDimension)."
+                )
+                try await reset(mailCheckpointPath: mailCheckpointPath, messagesStatePath: messagesStatePath)
+                try await writeEmbeddingMeta(modelID: activeModelID, dimension: activeDimension)
+                return true
+            }
+            try await writeEmbeddingMeta(modelID: activeModelID, dimension: activeDimension)
+        }
+        return false
+    }
+}
+
 // MARK: - Store I/O
 
 /// SQLite I/O for the document index, falling back to an unavailable error
@@ -1368,6 +1428,55 @@ enum DocIndexStoreIO {
             SQLiteHelpers.bindText(statement, index: 1, value: String(version))
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 throw DocIndexError.persistenceFailed("Could not persist schema version")
+            }
+        }
+
+        /// Reads recorded embedding model and dimension metadata.
+        static func readEmbeddingMeta(handle: OpaquePointer?) throws -> (modelID: String?, dimension: Int?) {
+            var modelID: String?
+            var dimension: Int?
+            var statement: OpaquePointer?
+            let sql = "SELECT key, value FROM schema_meta WHERE key IN ('embedding_model_id', 'embedding_dimension');"
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not read embedding metadata")
+            }
+            defer { sqlite3_finalize(statement) }
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let key = SQLiteHelpers.columnText(statement, index: 0),
+                   let val = SQLiteHelpers.columnText(statement, index: 1)
+                {
+                    if key == "embedding_model_id" {
+                        modelID = val
+                    } else if key == "embedding_dimension" {
+                        dimension = Int(val)
+                    }
+                }
+            }
+            return (modelID, dimension)
+        }
+
+        /// Writes recorded embedding model and dimension metadata.
+        static func writeEmbeddingMeta(handle: OpaquePointer?, modelID: String, dimension: Int) throws {
+            var statement1: OpaquePointer?
+            let write1 = "INSERT INTO schema_meta(key, value) VALUES('embedding_model_id', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
+            guard sqlite3_prepare_v2(handle, write1, -1, &statement1, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not prepare embedding model write")
+            }
+            defer { sqlite3_finalize(statement1) }
+            SQLiteHelpers.bindText(statement1, index: 1, value: modelID)
+            guard sqlite3_step(statement1) == SQLITE_DONE else {
+                throw DocIndexError.persistenceFailed("Could not persist embedding model")
+            }
+
+            var statement2: OpaquePointer?
+            let write2 = "INSERT INTO schema_meta(key, value) VALUES('embedding_dimension', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value;"
+            guard sqlite3_prepare_v2(handle, write2, -1, &statement2, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not prepare embedding dimension write")
+            }
+            defer { sqlite3_finalize(statement2) }
+            SQLiteHelpers.bindText(statement2, index: 1, value: String(dimension))
+            guard sqlite3_step(statement2) == SQLITE_DONE else {
+                throw DocIndexError.persistenceFailed("Could not persist embedding dimension")
             }
         }
 

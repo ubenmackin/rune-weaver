@@ -20,7 +20,12 @@ private struct ControlledEmbeddingsBackend: EmbeddingsBackend, Sendable {
     /// - Parameter texts: Texts to embed.
     /// - Returns: One vector per input, scripted or fallback.
     func embed(_ texts: [String]) async throws -> [[Float]] {
-        texts.map { vectorsByText[$0] ?? fallback }
+        texts.map { text in
+            if let match = vectorsByText.first(where: { text.contains($0.key) }) {
+                return match.value
+            }
+            return vectorsByText[text] ?? fallback
+        }
     }
 }
 

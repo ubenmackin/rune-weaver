@@ -91,6 +91,12 @@ public enum ServerPaths {
     public static let browserHealth = "health"
     /// Browser ensure subpath under `/browser`.
     public static let browserEnsure = "ensure"
+    /// Embeddings group serving the local EmbeddingGemma 2 lifecycle.
+    public static let embeddings = "embeddings"
+    /// Embeddings status subpath under `/embeddings`.
+    public static let embeddingsStatus = "status"
+    /// Embeddings ensure subpath under `/embeddings`.
+    public static let embeddingsEnsure = "ensure"
     /// Run log group.
     public static let runs = "runs"
     /// Fan-out cancellation subpath under `/runs/:id`.
@@ -183,15 +189,6 @@ public enum ServerPaths {
     public static let workspaceMachineStop = "stop"
     /// Machine recycle subpath under `/workspace/machine`.
     public static let workspaceMachineRecycle = "recycle"
-    /// Hash-pinned agent script registry group.
-    /// Kebab spelling matches the multi-word route convention (`tool-actions`,
-    /// `review-status`, `live-accept`) rather than the single `tool_cancel`
-    /// snake outlier, so dashboards build the path with one rule.
-    public static let agentTools = "agent-tools"
-    /// Promotion subpath under `/agent-tools`.
-    public static let agentToolsPromote = "promote"
-    /// Verified run subpath under `/agent-tools/:id`.
-    public static let agentToolsRun = "run"
     /// Engine API version served on `/health`.
     /// Single-sourced through `RuneWeaverVersion` so health, User-Agents,
     /// and providers cannot drift.
@@ -1402,7 +1399,45 @@ public struct ToolCancelResponse: Content, Equatable {
     }
 }
 
-// MARK: - Workspace + Agent Tools live in ServerDTOsAgentTools.swift
+// MARK: - Workspace DTOs
+
+/// Usage snapshot for `GET /workspace/usage`.
+///
+/// Carries the bounded walk counts alongside the configured quotas so the
+/// dashboard renders a quota bar from one fetch; the walk never follows
+/// symlinks, and `truncated` tells the viewer the counts are lower bounds.
+public struct WorkspaceUsageResponse: Content, Equatable {
+    /// Total bytes across counted regular files.
+    public let bytes: Int
+    /// Total regular files counted.
+    public let files: Int
+    /// Whether the walk stopped at the entry cap before covering the tree.
+    public let truncated: Bool
+    /// Configured size cap in megabytes.
+    public let quotaMB: Int
+    /// Configured file cap.
+    public let quotaFiles: Int
+
+    /// Creates a usage response.
+    public init(bytes: Int, files: Int, truncated: Bool, quotaMB: Int, quotaFiles: Int) {
+        self.bytes = bytes
+        self.files = files
+        self.truncated = truncated
+        self.quotaMB = quotaMB
+        self.quotaFiles = quotaFiles
+    }
+}
+
+/// Prune receipt for `POST /workspace/tmp/prune`.
+public struct WorkspacePruneResponse: Content, Equatable {
+    /// Number of top-level `tmp/` entries removed.
+    public let removed: Int
+
+    /// Creates a prune receipt.
+    public init(removed: Int) {
+        self.removed = removed
+    }
+}
 
 // MARK: - Goals + Proactive Settings Patches and Merge live in ServerDTOsGoals.swift
 

@@ -829,8 +829,7 @@ extension BashTool {
     /// refuse with the configured roots named, while the omitted case
     /// ensures the workspace (failing closed on error, never falling back
     /// to home) so every shell starts in bounded scratch. The inside-workspace
-    /// fast path resolves symlinks before the prefix check (mirroring
-    /// `AgentToolStore.isContainedInTools`), so a symlinked parent such as
+    /// fast path resolves symlinks before the prefix check, so a symlinked parent such as
     /// `workspace/link -> /tmp` with `cwd: link` falls through to the guard
     /// instead of pinning `currentDirectoryURL` to the symlink and bypassing
     /// `FilesAccessGuard` plus quota/Seatbelt assumptions. Inside-workspace

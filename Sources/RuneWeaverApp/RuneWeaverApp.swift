@@ -1,6 +1,7 @@
 // Rune Weaver App — macOS Menu Bar Agent Application.
 
 import AppKit
+import RuneWeaverCore
 import RuneWeaverTools
 import SwiftUI
 
@@ -13,6 +14,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     override init() {
         super.init()
         Self.shared = self
+        atexit {
+            LlamaEmbeddingSupervisor.shared.stopSync()
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -29,11 +33,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         Task {
             await SearXNGEnsurer.bestEffortStop()
+            LlamaEmbeddingSupervisor.shared.stopSync()
             await MainActor.run {
                 sender.reply(toApplicationShouldTerminate: true)
             }
         }
         return .terminateLater
+    }
+
+    func applicationWillTerminate(_: Notification) {
+        LlamaEmbeddingSupervisor.shared.stopSync()
     }
 }
 

@@ -230,7 +230,6 @@ extension RuneWeaverConfig {
             "max_file_mb = \(index.maxFileMB)",
             "mail_vector_window = \(Self.tomlQuoted(index.mailVectorWindow))",
             "icloud_evicted = \(Self.tomlQuoted(index.iCloudEvicted))",
-            "describe_images_with_llm = \(index.describeImagesWithLLM ? "true" : "false")",
             "nightly_budget = \(index.nightlyBudget)",
             "db_path = \(Self.tomlQuoted(index.dbPath))",
             "effort = \(Self.tomlQuoted(index.effort))",

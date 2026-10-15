@@ -78,7 +78,6 @@ const EXPECTED_LEAF_KEYS: readonly string[] = [
   "index.max_file_mb",
   "index.mail_vector_window",
   "index.icloud_evicted",
-  "index.describe_images_with_llm",
   "index.nightly_budget",
   "index.db_path",
   "index.effort",

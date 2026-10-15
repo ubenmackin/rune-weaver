@@ -311,11 +311,12 @@ struct MemoryRecallMergeTests {
         #expect(roomyContext.contains("note-1.md"))
         #expect(!roomyContext.contains("note-5.md"))
 
-        // Tight total budget truncates the block with an ellipsis.
-        let tight = RecallBudgets(perTierLimit: 5, autoLimit: 5, threshold: 0.1, maxChars: 300, perHitChars: 100)
+        // Tight total budget cleanly drops candidate #2 when it exceeds remaining budget, without trailing ellipsis.
+        let tight = RecallBudgets(perTierLimit: 5, autoLimit: 5, threshold: 0.1, maxChars: 500, perHitChars: 100)
         let tightContext = try #require(MemoryEngine.automaticRecallContext(for: Array(hits.prefix(2)), budgets: tight))
-        #expect(tightContext.count <= 300)
-        #expect(tightContext.hasSuffix("…"))
+        #expect(tightContext.count <= 500)
+        #expect(tightContext.contains("note-0.md"))
+        #expect(!tightContext.hasSuffix("…"))
         #expect(tightContext.contains(MemoryEngine.automaticRecallHeader))
     }
 
@@ -648,7 +649,7 @@ struct MemoryRecallMergeTests {
         // overlap for the scattered body, half overlap for the partial one.
         let first = try #require(fused.first?.score)
         let last = try #require(fused.last?.score)
-        #expect(abs(first - (0.3 + 1.6 / 61.0)) < 1e-6)
-        #expect(abs(last - (0.1 + 1.6 / 62.0)) < 1e-6)
+        #expect(abs(first - (0.9 + 1.0 / 61.0)) < 1e-6)
+        #expect(abs(last - (0.6 * (61.0 / 62.0) + 0.1 + 1.0 / 62.0)) < 1e-6)
     }
 }

@@ -178,6 +178,27 @@ extension FilesIndexer {
         let extraction: DocumentExtraction
         /// One vector per embedded chunk, or nil when keyword-only.
         let vectors: [[Float]]?
+        /// Whether the visual multimodal path produced the vectors.
+        let visualSucceeded: Bool
+
+        /// Creates a committable payload, defaulting visual success to false
+        /// so keyword-only and text-embedded rows keep the interim image
+        /// outcome unless the visual path explicitly succeeded.
+        init(
+            modificationDate: Date?,
+            data: Data,
+            contentHash: String,
+            extraction: DocumentExtraction,
+            vectors: [[Float]]?,
+            visualSucceeded: Bool = false
+        ) {
+            self.modificationDate = modificationDate
+            self.data = data
+            self.contentHash = contentHash
+            self.extraction = extraction
+            self.vectors = vectors
+            self.visualSucceeded = visualSucceeded
+        }
     }
 
     /// Prerequisites resolved during preflight for candidate reading and extraction.
@@ -394,9 +415,8 @@ extension FilesIndexer {
         if state.cancellation.isSet || Task.isCancelled {
             return .finished(FileOutcome(kind: .cancelled, relative: resolved.relative))
         }
-        let extraction = services.extractor.extract(
-            data: data,
-            fileName: resolved.filename,
+        let extraction = await services.extractor.extract(
+            fileURL: identity.fileURL,
             contentType: nil
         )
         if let terminal = await checkExtractionTerminal(
@@ -414,24 +434,31 @@ extension FilesIndexer {
             return .finished(FileOutcome(kind: .cancelled, relative: resolved.relative))
         }
         let vectors: [[Float]]?
+        let visualSucceeded: Bool
         do {
-            vectors = try await resolveCandidateVectors(
+            let embedded = try await resolveCandidateVectors(
                 services: services,
                 policy: policy,
                 extraction: extraction,
+                fileURL: identity.fileURL,
+                fileName: resolved.filename,
                 byteCount: data.count
             )
+            vectors = embedded.vectors
+            visualSucceeded = embedded.visualSucceeded
         } catch is CancellationError {
             return .finished(FileOutcome(kind: .cancelled, relative: resolved.relative))
         } catch {
             vectors = nil
+            visualSucceeded = false
         }
         let payload = CandidatePayload(
             modificationDate: preflight.modificationDate,
             data: data,
             contentHash: hash,
             extraction: extraction,
-            vectors: vectors
+            vectors: vectors,
+            visualSucceeded: visualSucceeded
         )
         return .ready(payload)
     }
@@ -706,7 +733,9 @@ extension FilesIndexer {
     ///
     /// A policy miss or missing backend stays keyword-only; embedding
     /// failures degrade the same way through the shared helper instead of
-    /// failing the file. Cancellation is never degraded: it escapes as an
+    /// failing the file. OCR-empty images bypass the status gate (keeping the
+    /// byte bound) so the visual path is still attempted from its interim
+    /// outcome. Cancellation is never degraded: it escapes as an
     /// error so the worker returns `.cancelled` before claiming budget or
     /// committing a keyword-only row.
     /// - Parameters:
@@ -714,21 +743,30 @@ extension FilesIndexer {
     ///   - policy: Index policy carrying the per-document vector cap.
     ///   - extraction: Extracted document body.
     ///   - byteCount: Bytes considered for the document.
-    /// - Returns: One vector per embedded chunk, or nil when keyword-only.
+    /// - Returns: Vectors plus whether the visual path produced them.
     static func resolveCandidateVectors(
         services: CandidateServices,
         policy: CandidatePolicy,
         extraction: DocumentExtraction,
+        fileURL: URL,
+        fileName: String,
         byteCount: Int
-    ) async throws -> [[Float]]? {
-        guard services.vectorPolicy.shouldEmbed(status: extraction.status, byteCount: byteCount) else {
-            return nil
+    ) async throws -> (vectors: [[Float]]?, visualSucceeded: Bool) {
+        let shouldAttempt: Bool = if extraction.format == .image {
+            services.vectorPolicy.enabled && byteCount <= services.vectorPolicy.maxBytes
+        } else {
+            services.vectorPolicy.shouldEmbed(status: extraction.status, byteCount: byteCount)
+        }
+        guard shouldAttempt else {
+            return (nil, false)
         }
         guard services.embedder != nil || services.embeddingsPool != nil else {
-            return nil
+            return (nil, false)
         }
-        return try await embedCandidate(
+        return try await embedCandidateWithVisual(
             extraction: extraction,
+            fileURL: fileURL,
+            fileName: fileName,
             config: policy.config,
             embedder: services.embedder,
             embeddingsPool: services.embeddingsPool
@@ -776,7 +814,10 @@ extension FilesIndexer {
             sizeBytes: Int64(payload.data.count),
             contentHash: payload.contentHash,
             mime: nil,
-            extractStatus: payload.extraction.status,
+            extractStatus: FilesIndexer.effectiveImageStatus(
+                extraction: payload.extraction,
+                visualSucceeded: payload.visualSucceeded
+            ),
             indexedAt: Date()
         )
         // Chunks bind the fresh identifier up front; the atomic commit remaps
@@ -861,32 +902,96 @@ extension FilesIndexer {
     /// - Returns: One vector per embedded chunk, or nil when the document stays keyword-only.
     static func embedCandidate(
         extraction: DocumentExtraction,
+        fileURL: URL,
+        fileName: String,
         config: IndexConfig,
         embedder: (any EmbeddingsBackend)?,
         embeddingsPool: EmbeddingsBackendPool?
     ) async throws -> [[Float]]? {
-        guard !extraction.chunks.isEmpty else { return nil }
+        let embedded = try await embedCandidateWithVisual(
+            extraction: extraction,
+            fileURL: fileURL,
+            fileName: fileName,
+            config: config,
+            embedder: embedder,
+            embeddingsPool: embeddingsPool
+        )
+        return embedded.vectors
+    }
+
+    /// Embeds a document's chunks while reporting whether the visual path produced them.
+    ///
+    /// Shares the same visual-first then text-fallback sequence as
+    /// `embedCandidate` so the commit can promote an interim image row to
+    /// `.extracted` only after a visual vector lands; text-only vectors keep
+    /// the interim outcome.
+    /// - Parameters:
+    ///   - extraction: Extracted document body.
+    ///   - config: Index policy carrying the per-document vector cap.
+    ///   - embedder: Shared backend, or nil when only the pool is configured.
+    ///   - embeddingsPool: Pooled backends, or nil to share `embedder`.
+    /// - Returns: Vectors plus whether the visual multimodal path produced them.
+    static func embedCandidateWithVisual(
+        extraction: DocumentExtraction,
+        fileURL: URL,
+        fileName: String,
+        config: IndexConfig,
+        embedder: (any EmbeddingsBackend)?,
+        embeddingsPool: EmbeddingsBackendPool?
+    ) async throws -> (vectors: [[Float]]?, visualSucceeded: Bool) {
+        guard !extraction.chunks.isEmpty else { return (nil, false) }
+
+        // Multimodal image path: if format is image, attempt visual embedding
+        if extraction.format == .image {
+            if let embeddingsPool {
+                let dim = try? await embeddingsPool.withBackend { await $0.dimension }
+                if let visual = try await FilesIndexer.embedImageVisualVector(
+                    fileURL: fileURL,
+                    fileName: fileName,
+                    expectedDimension: dim,
+                    embedImage: { try await embeddingsPool.embedImage(at: fileURL) }
+                ) {
+                    return (visual, true)
+                }
+            } else if let embedder {
+                let dim = await embedder.dimension
+                if let visual = try await FilesIndexer.embedImageVisualVector(
+                    fileURL: fileURL,
+                    fileName: fileName,
+                    expectedDimension: dim,
+                    embedImage: { try await embedder.embedImage(at: fileURL) }
+                ) {
+                    return (visual, true)
+                }
+            }
+        }
+
         let texts = FilesVectorPolicy.cappedEmbeddingTexts(
-            extraction.chunks.map(\.text),
+            extraction.chunks.map { chunk in
+                EmbeddingGemmaPrompts.document(title: fileName, text: chunk.text)
+            },
             cap: config.maxVectorChunksPerDocument
         )
         do {
             if let embeddingsPool {
+                let dim = try? await embeddingsPool.withBackend { await $0.dimension }
                 let vectors = try await embeddingsPool.withBackend { backend in
                     try await backend.embed(texts)
                 }
-                return FilesIndexer.validatedEmbedVectors(vectors, expectedCount: texts.count)
+                return (FilesIndexer.validatedEmbedVectors(vectors, expectedCount: texts.count, expectedDimension: dim), false)
             }
             if let embedder {
                 let vectors = try await embedder.embed(texts)
-                return FilesIndexer.validatedEmbedVectors(vectors, expectedCount: texts.count)
+                let dim = await embedder.dimension
+                return (FilesIndexer.validatedEmbedVectors(vectors, expectedCount: texts.count, expectedDimension: dim), false)
             }
-            return nil
+            return (nil, false)
         } catch {
             if error is CancellationError {
                 throw error
             }
-            return nil
+            RuneWeaverLog.stores.error("FilesIndexer: Failed to generate embeddings for candidate: \(error.localizedDescription)")
+            return (nil, false)
         }
     }
 }

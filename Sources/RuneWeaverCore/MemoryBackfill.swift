@@ -84,7 +84,9 @@ extension MemoryEngine {
             let end = min(index + effectiveBatchSize, pending.count)
             let batch = Array(pending[index ..< end])
             index = end
-            let contents = batch.map(\.content)
+            let contents = batch.map { fact in
+                EmbeddingGemmaPrompts.document(title: "fact", text: fact.content)
+            }
             let vectors: [[Float]]
             do {
                 vectors = try await embedder.embed(contents)

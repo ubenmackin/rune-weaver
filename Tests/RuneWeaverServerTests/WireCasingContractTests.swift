@@ -260,16 +260,7 @@ struct WireCasingContractTests {
     }
 
     @Test
-    func `Workspace and AgentTool DTOs encode with camelCase keys only`() throws {
-        let tool = AgentToolDTO(
-            id: UUID(),
-            name: "customScript",
-            scriptPath: "/path/to/script.sh",
-            sha256: "abcdef123456",
-            status: "enabled"
-        )
-        try verifyCasing(tool, label: "AgentToolDTO")
-
+    func `Workspace DTOs encode with camelCase keys only`() throws {
         let usage = WorkspaceUsageResponse(
             bytes: 1024,
             files: 5,

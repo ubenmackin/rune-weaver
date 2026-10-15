@@ -23,6 +23,7 @@
 
 import Foundation
 import RuneWeaverCore
+import RuneWeaverLLM
 import RuneWeaverTools
 import Vapor
 #if canImport(EventKit)
@@ -44,6 +45,7 @@ func registerIndexRoutes(_ app: Application) {
     registerIndexResetRoute(app)
     registerIndexReclaimRoute(app)
     registerIndexRequestAccessRoute(app)
+    registerEmbeddingsRoutes(app)
 }
 
 /// Registers the fast status probe behind `GET /index/status`.
@@ -868,4 +870,79 @@ private func firstCountDetailToken(prefix: String, in response: String) -> Int? 
         }
     }
     return nil
+}
+
+/// Resolves the active embedding backend identifier from the live server context.
+private func activeEmbeddingBackend(from context: ServerContext) -> String {
+    guard let embedder = context.embedder else {
+        return MemoryConfig.embeddingBackendNone
+    }
+    if embedder is LlamaCppEmbeddingsBackend {
+        return MemoryConfig.embeddingBackendLocal
+    }
+    if embedder is ProviderEmbeddingsBackend {
+        return MemoryConfig.embeddingBackendProvider
+    }
+    if embedder is DisabledEmbeddingsBackend {
+        return MemoryConfig.embeddingBackendNone
+    }
+    return MemoryConfig.embeddingBackendLocal
+}
+
+/// Registers local embedding status and lifecycle routes behind `/embeddings`.
+func registerEmbeddingsRoutes(_ app: Application) {
+    let embeddings = app.grouped(PathComponent.constant(ServerPaths.embeddings))
+
+    embeddings.get(PathComponent.constant(ServerPaths.embeddingsStatus)) { req async throws -> EmbeddingsStatusResponse in
+        let backendChoice = activeEmbeddingBackend(from: req.application.runeWeaver)
+        let supervisor = LlamaEmbeddingSupervisor.shared
+        let isRunning = await supervisor.isRunning
+        let status = await supervisor.status.rawValue
+        let stage = await supervisor.statusMessage
+        let lastError = await supervisor.lastError
+        let socketPath = supervisor.resolvedSocketURL.path
+        let modelName = supervisor.resolvedModelURL.lastPathComponent
+
+        return EmbeddingsStatusResponse(
+            backend: backendChoice,
+            status: status,
+            stage: stage,
+            model: modelName,
+            dimensions: 768,
+            acceleration: "Apple Silicon Metal GPU",
+            endpoint: socketPath,
+            isRunning: isRunning,
+            error: lastError
+        )
+    }
+
+    embeddings.post(PathComponent.constant(ServerPaths.embeddingsEnsure)) { req async throws -> EmbeddingsStatusResponse in
+        let supervisor = LlamaEmbeddingSupervisor.shared
+        Task(priority: .utility) {
+            do {
+                try await supervisor.ensureRunning()
+            } catch {
+                RuneWeaverLog.stores.error("Embeddings ensure failed: \(error.localizedDescription)")
+            }
+        }
+        let backendChoice = activeEmbeddingBackend(from: req.application.runeWeaver)
+        let isRunning = await supervisor.isRunning
+        let status = await supervisor.status.rawValue
+        let stage = await supervisor.statusMessage
+        let lastError = await supervisor.lastError
+        let socketPath = supervisor.resolvedSocketURL.path
+        let modelName = supervisor.resolvedModelURL.lastPathComponent
+
+        return EmbeddingsStatusResponse(
+            backend: backendChoice,
+            status: status,
+            stage: stage,
+            model: modelName,
+            dimensions: 768,
+            acceleration: "Apple Silicon Metal GPU",
+            endpoint: socketPath,
+            isRunning: isRunning,
+            error: lastError
+        )
+    }
 }

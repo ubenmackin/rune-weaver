@@ -142,20 +142,108 @@ extension MemoryEngine {
     /// suffix `[date|path|display_name]` outside that truncation budget, and
     /// the whole block keeps the header plus `maxChars` total truncation.
     /// Labeling mirrors the threshold-based helper above.
+    /// Result of packing recall hits into a bounded context block.
+    public struct PackedRecall: Sendable, Equatable {
+        /// Candidate memory hits successfully included in the context block.
+        public let injectedHits: [MemoryResult]
+        /// Assembled system context string, or nil when no hits fit.
+        public let contextText: String?
+        /// Character count of `contextText` (0 when nil).
+        public let injectedChars: Int
+
+        public init(injectedHits: [MemoryResult], contextText: String?, injectedChars: Int) {
+            self.injectedHits = injectedHits
+            self.contextText = contextText
+            self.injectedChars = injectedChars
+        }
+    }
+
+    /// Packs complete recall hits into an injected system context block using "Drop, Don't Chop".
+    ///
+    /// Candidates are evaluated in score-descending order up to `clamped.autoLimit`.
+    /// Each candidate's formatted line is added if and only if the ENTIRE line fits within the
+    /// remaining `clamped.maxChars` budget. If a candidate cannot fit completely, it is dropped
+    /// (along with any lower-ranked items) rather than amputating text with trailing ellipses.
+    public static func packRecallHits(
+        from results: [MemoryResult],
+        budgets: RecallBudgets,
+        labelingEnabled: Bool = true
+    ) -> PackedRecall {
+        let clamped = budgets.clamped()
+        guard clamped.maxChars > 0 else {
+            return PackedRecall(injectedHits: [], contextText: nil, injectedChars: 0)
+        }
+        let relevant = results.filter { $0.score >= clamped.threshold }
+        guard !relevant.isEmpty else {
+            return PackedRecall(injectedHits: [], contextText: nil, injectedChars: 0)
+        }
+        let candidates = Array(relevant.prefix(clamped.autoLimit))
+        guard !candidates.isEmpty else {
+            return PackedRecall(injectedHits: [], contextText: nil, injectedChars: 0)
+        }
+
+        let header = automaticRecallHeader
+        guard header.count <= clamped.maxChars else {
+            return PackedRecall(injectedHits: [], contextText: nil, injectedChars: 0)
+        }
+
+        var lines: [String] = []
+        var injected: [MemoryResult] = []
+        var currentChars = header.count
+
+        for candidate in candidates {
+            let line = recallLine(for: candidate, perHitChars: clamped.perHitChars, labelingEnabled: labelingEnabled)
+            guard !line.isEmpty else { continue }
+            let neededChars = 1 + line.count // \n delimiter + line
+            if currentChars + neededChars <= clamped.maxChars {
+                lines.append(line)
+                injected.append(candidate)
+                currentChars += neededChars
+            } else {
+                // Drop, Don't Chop: candidate does not fit in its entirety.
+                // Stop packing to preserve complete memory boundaries.
+                break
+            }
+        }
+
+        guard !lines.isEmpty else {
+            return PackedRecall(injectedHits: [], contextText: nil, injectedChars: 0)
+        }
+
+        let block = ([header] + lines).joined(separator: "\n")
+        return PackedRecall(injectedHits: injected, contextText: block, injectedChars: block.count)
+    }
+
+    /// Builds source-labeled recall context bounded by recall budgets using "Drop, Don't Chop".
     public static func automaticRecallContext(
         for results: [MemoryResult],
         budgets: RecallBudgets,
         labelingEnabled: Bool = true
     ) -> String? {
-        let clamped = budgets.clamped()
-        guard clamped.maxChars > 0 else { return nil }
-        let relevant = results.filter { $0.score >= clamped.threshold }
-        guard !relevant.isEmpty else { return nil }
-        let capped = Array(relevant.prefix(clamped.autoLimit))
-        guard !capped.isEmpty else { return nil }
-        let lines = capped.map { recallLine(for: $0, perHitChars: clamped.perHitChars, labelingEnabled: labelingEnabled) }
-        let block = ([automaticRecallHeader] + lines).joined(separator: "\n")
-        return truncateRecallBlock(block, maxChars: clamped.maxChars)
+        packRecallHits(from: results, budgets: budgets, labelingEnabled: labelingEnabled).contextText
+    }
+
+    /// Formats recall content, collapsing excessive blank runs and bounding to `perHitChars`.
+    ///
+    /// Preserves internal structure (newlines and tabs) for structured document chunks and
+    /// multi-line facts while collapsing excessive blank runs (`\n\n\n+` -> `\n\n`) and trimming
+    /// outer whitespace.
+    public static func formattedHitContent(_ content: String, perHitChars: Int, isDocument: Bool = false) -> String {
+        let text: String
+        if isDocument {
+            var collapsed = content
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+            while collapsed.contains("\n\n\n") {
+                collapsed = collapsed.replacingOccurrences(of: "\n\n\n", with: "\n\n")
+            }
+            text = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            text = singleLineSquashed(content)
+        }
+        guard text.count > perHitChars else { return text }
+        guard perHitChars > 1 else { return "…" }
+        return String(text.prefix(perHitChars)) + "…"
     }
 
     /// One recall line with per-hit truncation plus a preserved citation suffix.
@@ -166,8 +254,7 @@ extension MemoryEngine {
     /// the `[source]` prefix and the trailing citation stay outside as
     /// engine-authored routing.
     public static func recallLine(for result: MemoryResult, perHitChars: Int, labelingEnabled: Bool) -> String {
-        let singleLine = singleLineSquashed(result.content)
-        let compact = singleLine.count > perHitChars ? String(singleLine.prefix(perHitChars)) + "…" : singleLine
+        let compact = formattedHitContent(result.content, perHitChars: perHitChars, isDocument: result.source == .docIndex)
         let citation = citationSuffix(for: result)
         if labelingEnabled, shouldLabelRecallResult(result) {
             if isUntrustedRecallSource(result.source) {
@@ -269,18 +356,9 @@ extension MemoryEngine {
         return Message(role: .system, content: text)
     }
 
-    /// Injected subset of retrieved hits in rank order.
-    ///
-    /// Single source for recall observability: threshold-filtered plus
-    /// `autoLimit`-capped, matching what `automaticRecallContext(for:budgets:)`
-    /// and `automaticRecallMessage(for:budgets:)` actually inject. Retrieved
-    /// hits stay pre-threshold (deduped, up to `perTier * 4`); diagnostics
-    /// report this injected subset so `recallWithDiagnostics` and
-    /// `recallMessageWithDiagnostics` log the same injected set by path.
+    /// Injected subset of retrieved hits in rank order matching the packed context block.
     public static func injectedRecallHits(from results: [MemoryResult], budgets: RecallBudgets) -> [MemoryResult] {
-        let clamped = budgets.clamped()
-        let relevant = results.filter { $0.score >= clamped.threshold }
-        return Array(relevant.prefix(clamped.autoLimit))
+        packRecallHits(from: results, budgets: budgets).injectedHits
     }
 }
 
@@ -422,14 +500,10 @@ extension MemoryEngine {
                 results
             }
             let filtered = Self.filteredRecallResults(windowed, query: query, sessionID: sessionID)
-            let message = Self.automaticRecallMessage(for: filtered, budgets: effectiveBudgets, labelingEnabled: labelingEnabled)
-            let injectedChars = message?.content.count ?? 0
-            // When the block is nil (no relevant hits) report zero hits so
-            // silent-nil turns still emit a zero-hit line. The injected set
-            // shares `injectedRecallHits` with `recallWithDiagnostics` so both
-            // paths report the same threshold plus `autoLimit` capped hits.
-            let reported: [MemoryResult] = message == nil ? [] : Self.injectedRecallHits(from: filtered, budgets: effectiveBudgets)
-            let diagnostics = Self.recallDiagnostics(for: reported, injectedChars: injectedChars, skippedDocIndex: skipped)
+            let packed = Self.packRecallHits(from: filtered, budgets: effectiveBudgets, labelingEnabled: labelingEnabled)
+            let message = packed.contextText.map { Message(role: .system, content: $0) }
+            let reported: [MemoryResult] = message == nil ? [] : packed.injectedHits
+            let diagnostics = Self.recallDiagnostics(for: reported, injectedChars: packed.injectedChars, skippedDocIndex: skipped)
             return (message, diagnostics)
         } catch let error as CancellationError {
             throw error
