@@ -547,58 +547,6 @@ public protocol SchedulerNotifier: Sendable {
     func notify(title: String, body: String) async
 }
 
-/// macOS notification via `osascript`, best-effort.
-public struct MacOSSchedulerNotifier: SchedulerNotifier {
-    /// Creates a macOS notifier.
-    public init() {}
-
-    /// Posts a macOS notification without blocking the caller.
-    public func notify(title: String, body: String) async {
-        let capturedTitle = title
-        let capturedBody = body
-        DispatchQueue.global(qos: .utility).async {
-            MacOSSchedulerNotifier.post(title: capturedTitle, body: capturedBody)
-        }
-    }
-
-    /// Posts a macOS notification synchronously, best-effort.
-    public static func post(title: String, body: String) {
-        let executable = "/usr/bin/osascript"
-        guard FileManager.default.isExecutableFile(atPath: executable) else { return }
-        // Use osascript on run argv to pass title and body as positional
-        // arguments so that shell metacharacters and AppleScript syntax cannot
-        // escape or inject into the script.
-        let preview = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        let truncated = preview.count > 300 ? String(preview.prefix(300)) + "…" : preview
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = [
-            "-e", "on run argv",
-            "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
-            "-e", "end run",
-            title,
-            truncated
-        ]
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            return
-        }
-        process.waitUntilExit()
-    }
-}
-
-/// No-op notifier for tests and headless CI.
-public struct NoOpSchedulerNotifier: SchedulerNotifier {
-    /// Creates a no-op notifier.
-    public init() {}
-
-    /// Discards the notification.
-    public func notify(title _: String, body _: String) async {}
-}
-
 /// Outcome of one scheduler job execution.
 public struct SchedulerRunResult: Sendable, Equatable {
     /// Job name that was attempted.

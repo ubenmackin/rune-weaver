@@ -1165,32 +1165,6 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     }
 }
 
-/// Explicit stub used when Playwright is unavailable and in tests.
-public struct StubBrowserGateway: BrowserPlaywrightGateway, Sendable {
-    /// Message surfaced instead of the marketplace canned stubs.
-    public let message: String
-
-    /// Creates a stub gateway.
-    /// - Parameter message: Explicit missing-dependency message, defaulting to
-    ///   the managed-venv copy naming the venv path plus manual fallback.
-    public init(message: String? = nil) {
-        self.message = message ?? PlaywrightPythonEnsurer.missingMessage(
-            stage: nil,
-            detail: "Playwright is not installed"
-        )
-    }
-
-    /// Always throws the explicit missing-dependency error.
-    public func navigate(url _: String, includeScreenshot _: Bool = false) async throws -> BrowserSnapshot {
-        throw BrowserError.playwrightMissing(message)
-    }
-
-    /// Always throws the explicit missing-dependency error.
-    public func act(action _: BrowserActAction, ref _: String, text _: String?, url _: String) async throws -> BrowserActResult {
-        throw BrowserError.playwrightMissing(message)
-    }
-}
-
 /// Runs blocking Playwright subprocess I/O off the async executor.
 enum BrowserSubprocessIO {
     /// Process-wide serial queue for helper spawns.

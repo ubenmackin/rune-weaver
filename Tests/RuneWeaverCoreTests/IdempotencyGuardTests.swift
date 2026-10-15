@@ -25,17 +25,6 @@ struct IdempotencyGuardTests {
         }
     }
 
-    private struct MockReadTool: Tool, Sendable {
-        let name = "files.read"
-        let description = "Mock read-only tool"
-        let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
-        let permissionLevel = PermissionLevel.readOnly
-
-        func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
-            .success("Read data content", callID: input.callID)
-        }
-    }
-
     @Test
     func `tracker records and blocks identical mutating action within TTL`() async {
         let tracker = UncertainActionTracker(ttl: 60)

@@ -1871,20 +1871,6 @@ struct HostParityContractTests {
     }
 }
 
-#if canImport(Security)
-    import Security
-
-    /// Deletes a generic password from the Keychain if one was written during tests.
-    private func deleteTestKeychainItem(service: String, account: String = AuthConfig.defaultTokenKey) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        SecItemDelete(query as CFDictionary)
-    }
-#endif
-
 @Suite("SecretsManager In-Memory and Keychain Isolation Tests")
 struct SecretsManagerInMemoryTests {
     @Test

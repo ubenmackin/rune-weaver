@@ -8,13 +8,13 @@ import UserNotifications
 #endif
 
 /// Category identifiers for native notifications.
-public enum NotificationCategories {
-    public static let schedulerRun = "SCHEDULER_RUN"
+enum NotificationCategories {
+    static let schedulerRun = "SCHEDULER_RUN"
 }
 
 /// Action identifiers for native notifications.
-public enum NotificationActions {
-    public static let openDashboard = "OPEN_DASHBOARD_ACTION"
+enum NotificationActions {
+    static let openDashboard = "OPEN_DASHBOARD_ACTION"
 }
 
 /// User-info marker that distinguishes an approval-attention notification,

@@ -80,14 +80,6 @@ public enum BoundedProcessRunner: Sendable {
         return env
     }
 
-    /// Outcome of one incremental capped pipe read.
-    struct CappedRead: Sendable {
-        /// Bytes retained up to the cap.
-        var data = Data()
-        /// Whether the child produced more than the cap.
-        var didExceed = false
-    }
-
     /// Box holding the live child so cancellation can terminate it.
     /// Single-use per invocation: `cancelled` latches once set so a reused box
     /// would immediately terminate the next child published via `set`. Create a
@@ -447,29 +439,6 @@ extension BoundedProcessRunner {
             }
             throw error
         }
-    }
-
-    /// Reads one pipe in small chunks, terminating the child past the cap.
-    static func cappedRead(handle: FileHandle, limit: Int, process: Process) -> CappedRead {
-        var result = CappedRead()
-        while true {
-            let chunk: Data?
-            do {
-                chunk = try handle.read(upToCount: 16384)
-            } catch {
-                break
-            }
-            guard let chunk, !chunk.isEmpty else { break }
-            result.data.append(chunk)
-            if result.data.count > limit {
-                if process.isRunning {
-                    process.terminate()
-                }
-                result.didExceed = true
-                break
-            }
-        }
-        return result
     }
 
     /// Marks a descriptor non-blocking so the sync readiness loop never parks

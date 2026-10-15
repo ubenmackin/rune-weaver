@@ -13,7 +13,6 @@
 // never reaches logs, URLs, or any store besides the auth persistence.
 
 import AppKit
-import RuneWeaverServer
 import SwiftUI
 
 /// First-run sheet shown when boot resolves no owner token.
@@ -23,7 +22,7 @@ import SwiftUI
 /// Keychain/0600-file persistence rather than reimplementing either — so this
 /// view only presents the once-only value and gates the adopting restart behind
 /// an explicit saved-it acknowledgement.
-public struct OwnerOnboardingView: View {
+struct OwnerOnboardingView: View {
     /// Live menu-bar model owning the onboarding flag plus the once-only value.
     @Bindable var model: AppModel
     /// Local confirmation that the owner captured the secret; kept in the view
@@ -34,11 +33,11 @@ public struct OwnerOnboardingView: View {
 
     /// Creates the onboarding sheet.
     /// - Parameter model: Menu-bar model driving generation and restart.
-    public init(model: AppModel) {
+    init(model: AppModel) {
         self.model = model
     }
 
-    public var body: some View {
+    var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Set Up Owner Access")
                 .font(.headline)
@@ -116,7 +115,7 @@ public struct OwnerOnboardingView: View {
 /// support comparisons never need the credential itself. Generate and Rotate
 /// both route to the same `ServerAuthTokenStore`-backed mint in the menu model,
 /// keeping the stored-value precedence identical to the terminal flow.
-public struct OwnerTokenSettingsSection: View {
+struct OwnerTokenSettingsSection: View {
     /// Live menu-bar model owning fingerprint, source, and mint entry points.
     @Bindable var model: AppModel
     /// Local saved-it confirmation scoped to this section's once-only display.
@@ -126,11 +125,11 @@ public struct OwnerTokenSettingsSection: View {
 
     /// Creates the settings section.
     /// - Parameter model: Menu-bar model driving status plus minting.
-    public init(model: AppModel) {
+    init(model: AppModel) {
         self.model = model
     }
 
-    public var body: some View {
+    var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Owner Access")
                 .font(.headline)

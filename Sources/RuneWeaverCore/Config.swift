@@ -1445,6 +1445,4 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
 
 // MARK: - Validation lives in Config+Validation.swift
 
-// MARK: - Hot-reloading loader lives in ConfigLoader.swift
-
 // MARK: - TOML decoding lives in ConfigTOML.swift

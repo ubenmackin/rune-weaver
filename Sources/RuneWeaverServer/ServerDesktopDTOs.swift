@@ -44,12 +44,6 @@ public struct DesktopSettingsUpdate: Content, Equatable {
         self.jpegQuality = config.jpegQuality
         self.blockedApps = config.blockedApps
     }
-
-    private enum CodingKeys: String, CodingKey {
-        case maxImageDimension
-        case jpegQuality
-        case blockedApps
-    }
 }
 
 extension UpdateSettingsRequest {

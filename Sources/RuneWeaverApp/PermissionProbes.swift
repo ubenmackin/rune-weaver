@@ -40,11 +40,9 @@ public protocol PermissionSystemActing: Sendable {
 /// Opening jumps straight to the privacy pane so the owner never hunts from
 /// the top level; relaunch spawns a fresh instance before terminating so a
 /// newly granted Screen Recording or Accessibility grant takes effect.
-public struct LivePermissionSystemActions: PermissionSystemActing {
-    public init() {}
-
+struct LivePermissionSystemActions: PermissionSystemActing {
     @MainActor
-    public func open(_ pane: PermissionPane) {
+    func open(_ pane: PermissionPane) {
         // A missing link shape opens nothing rather than a wrong section;
         // the pane URLs are versioned by the vocabulary file.
         guard let url = pane.url else { return }
@@ -52,7 +50,7 @@ public struct LivePermissionSystemActions: PermissionSystemActing {
     }
 
     @MainActor
-    public func relaunchApp() {
+    func relaunchApp() {
         // A new instance first, then terminate: Screen Recording and
         // Accessibility grants only apply at launch, so terminating without
         // spawning would leave the owner with no running app.
@@ -71,10 +69,8 @@ public struct LivePermissionSystemActions: PermissionSystemActing {
 /// database in an isolated probe; Automation queries Messages without asking.
 /// Request paths switch to the prompting variants, except Full Disk Access
 /// which has no prompt and simply re-reads.
-public struct LivePermissionProbes: PermissionProbing {
-    public init() {}
-
-    public func status(_ kind: PermissionKind) async -> PermissionStatus {
+struct LivePermissionProbes: PermissionProbing {
+    func status(_ kind: PermissionKind) async -> PermissionStatus {
         switch kind {
         case .contacts:
             // Cached authorization only; never prompts, so safe on appear
@@ -108,7 +104,7 @@ public struct LivePermissionProbes: PermissionProbing {
         }
     }
 
-    public func request(_ kind: PermissionKind) async -> PermissionStatus {
+    func request(_ kind: PermissionKind) async -> PermissionStatus {
         switch kind {
         case .contacts:
             // Prompt once, then re-read the cached state so the row reflects

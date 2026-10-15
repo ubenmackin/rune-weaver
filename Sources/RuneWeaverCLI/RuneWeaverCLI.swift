@@ -23,20 +23,6 @@ enum TerminalStyle {
         return "\u{001B}[\(code)m\(text)\u{001B}[0m"
     }
 
-    /// Styles user prompts and labels (green, bold).
-    /// - Parameter text: Text to style.
-    /// - Returns: Styled text.
-    static func user(_ text: String) -> String {
-        wrap(text, "32;1")
-    }
-
-    /// Styles assistant output labels (cyan, bold).
-    /// - Parameter text: Text to style.
-    /// - Returns: Styled text.
-    static func assistant(_ text: String) -> String {
-        wrap(text, "36;1")
-    }
-
     /// Styles tool-call visibility lines (yellow).
     /// - Parameter text: Text to style.
     /// - Returns: Styled text.
@@ -144,13 +130,6 @@ enum CLIProviderBuilder {
         config: LLMConfig
     ) -> (any LLMProvider)? {
         LLMProviderFactory.selectProvider(named: override, from: providers, config: config)
-    }
-
-    /// Whether a provider matches a configured/CLI name, including the
-    /// local-backend aliases (`llamacpp`, `llama-cpp`, `llama_cpp`,
-    /// `local` all match each other). Comparison is case-insensitive.
-    static func matchesProvider(_ provider: any LLMProvider, wanted: String) -> Bool {
-        LLMProviderFactory.matchesProvider(provider, wanted: wanted)
     }
 }
 

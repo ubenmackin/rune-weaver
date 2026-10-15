@@ -9,7 +9,7 @@ mkdir -p ~/.runeweaver
 cp Config/config.toml.example ~/.runeweaver/config.toml
 ```
 
-If the file is absent, the engine uses built-in defaults (`RuneWeaverConfig.default`). If it exists, it is parsed and validated on load — invalid files throw a descriptive `ConfigError` (file, line, or dotted field path) instead of silently falling back. `ConfigLoader` can hot-reload the file: invalid reloads keep the last good snapshot and report the error via `onError`.
+If the file is absent, the engine uses built-in defaults (`RuneWeaverConfig.default`). If it exists, it is parsed and validated on load — invalid files throw a descriptive `ConfigError` (file, line, or dotted field path) instead of silently falling back. The file is read once at engine startup by `CLIConfigLoader.loadConfig(path:)`; there is no file-watching hot reload, so hand edits take effect on the next engine start.
 
 Secrets (API keys, passwords, tokens) are **never** stored in this file. See [Secrets Management](#secrets-management) below.
 
