@@ -423,10 +423,10 @@ struct IndexCoordinatorTests {
                 files: true,
                 mail: true,
                 messages: true,
-                roots: [],
-                describeImagesWithLLM: true
+                calendars: true,
+                roots: []
             ),
-            stages: [staged(.messages), staged(.vision), staged(.files), staged(.mail)],
+            stages: [staged(.messages), staged(.calendars), staged(.files), staged(.mail)],
             stateStore: stateStore
         )
 
@@ -435,10 +435,10 @@ struct IndexCoordinatorTests {
         #expect(summary.status == .ok)
         let recorded = await calls.snapshot()
         // Files plus mail plus messages overlap, so their start order races while
-        // vision stays sequential after the join in canonical order.
+        // calendars stays sequential after the join in canonical order.
         #expect(recorded.count == 4)
         #expect(Set(recorded.prefix(3)) == [.files, .mail, .messages])
-        #expect(Array(recorded.suffix(1)) == [.vision])
+        #expect(Array(recorded.suffix(1)) == [.calendars])
     }
 
     @Test
@@ -573,14 +573,29 @@ struct IndexCoordinatorTests {
         let nightlyStarted = await nightlyEvents.startedEvents()
         #expect(nightlyStarted.first?.trigger == .nightly)
 
-        // A later same-day launch with fresh state selects the catch-up trigger,
+        // Fresh state without any prior completed run ignores catch-up
+        let freshDirectory = makeIndexTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: freshDirectory) }
+        let freshCoordinator = makeCoordinator(
+            statePath: freshDirectory.appendingPathComponent("state.json").path,
+            events: IndexRunEventRecorder()
+        )
+        let freshSummary = await freshCoordinator.fireNightly(now: catchUpDate)
+        #expect(freshSummary == nil)
+
+        // A later same-day launch with a prior completed run selects the catch-up trigger,
         // and a second same-day fire is a no-op under the same-day guard.
         let catchUpDirectory = makeIndexTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: catchUpDirectory) }
         let catchUpEvents = IndexRunEventRecorder()
-        let catchUpCoordinator = makeCoordinator(
-            statePath: catchUpDirectory.appendingPathComponent("state.json").path,
-            events: catchUpEvents
+        let catchUpStateStore = IndexRunStateStore(path: catchUpDirectory.appendingPathComponent("state.json").path)
+        try? await catchUpStateStore.recordCompleted(at: beforeDate)
+        let catchUpCoordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: []),
+            stages: [IndexClosureStage(kind: .files, isEnabled: true) { _, _, _ in IndexSourceRunReport(kind: .files) }],
+            stateStore: catchUpStateStore,
+            reporter: catchUpEvents,
+            nightlyHour: nightlyHour
         )
         let catchUpSummary = await catchUpCoordinator.fireNightly(now: catchUpDate)
         #expect(catchUpSummary?.trigger == .catchUp)
@@ -655,16 +670,18 @@ struct IndexCoordinatorTests {
         let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, _ in
             IndexSourceRunReport(kind: .files, scanned: 1, indexed: 1)
         }
+        let stateStore = IndexRunStateStore(path: directory.appendingPathComponent("state.json").path)
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: Date())
+        try? await stateStore.recordCompleted(at: startOfDay.addingTimeInterval(3600))
         let coordinator = IndexCoordinator(
             config: IndexConfig(enabled: true, files: true, roots: []),
             stages: [stage],
-            stateStore: IndexRunStateStore(path: directory.appendingPathComponent("state.json").path),
+            stateStore: stateStore,
             reporter: events,
             nightlyHour: nightlyHour
         )
 
-        let calendar = Calendar.current
-        let startOfDay = calendar.startOfDay(for: Date())
         let catchUpDate = startOfDay.addingTimeInterval(TimeInterval((nightlyHour + 2) * 3600))
 
         // First fire at catch-up hour runs catch-up
@@ -739,6 +756,62 @@ struct IndexCoordinatorTests {
         let startedEvents = await events.startedEvents()
         #expect(startedEvents.count == 1)
         #expect(startedEvents.first?.trigger == .onDemand)
+    }
+
+    @Test
+    func `Cancelled catch-up run records lastNightlyStart so subsequent launches on the same day do not retry`() async {
+        let directory = makeIndexTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let events = IndexRunEventRecorder()
+        let recorder = IndexPolicyRecorder()
+        let statePath = directory.appendingPathComponent("state.json").path
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, _ in
+            await recorder.markStarted()
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            return IndexSourceRunReport(kind: .files, scanned: 1, indexed: 1)
+        }
+        let nightlyHour = 3
+        let stateStore1 = IndexRunStateStore(path: statePath)
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: Date())
+        try? await stateStore1.recordCompleted(at: startOfDay.addingTimeInterval(3600))
+        let coordinator1 = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: []),
+            stages: [stage],
+            stateStore: stateStore1,
+            reporter: events,
+            nightlyHour: nightlyHour
+        )
+
+        let catchUpDate = startOfDay.addingTimeInterval(TimeInterval((nightlyHour + 2) * 3600))
+
+        let runTask = Task { await coordinator1.fireNightly(now: catchUpDate) }
+        for _ in 0 ..< 100 {
+            if await recorder.isStarted() {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(await coordinator1.isRunning == true)
+
+        await coordinator1.cancel()
+        let summary = await runTask.value
+        #expect(summary?.status == .cancelled)
+
+        let stateStore = IndexRunStateStore(path: statePath)
+        let snapshot = await stateStore.snapshot()
+        #expect(snapshot.lastNightlyStart != nil)
+
+        let coordinator2 = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: []),
+            stages: [stage],
+            stateStore: IndexRunStateStore(path: statePath),
+            reporter: events,
+            nightlyHour: nightlyHour
+        )
+
+        let secondLaunchResult = await coordinator2.fireNightly(now: catchUpDate.addingTimeInterval(60))
+        #expect(secondLaunchResult == nil)
     }
 
     @Test
@@ -1198,14 +1271,14 @@ struct IndexCoordinatorTests {
                 files: true,
                 mail: true,
                 messages: true,
-                roots: [],
-                describeImagesWithLLM: true
+                calendars: true,
+                roots: []
             ),
             stages: [
                 staged(.files, delay: 300_000_000),
                 staged(.mail, delay: 600_000_000),
                 staged(.messages, delay: 100_000_000),
-                staged(.vision, delay: 0)
+                staged(.calendars, delay: 0)
             ]
         )
 
@@ -1218,10 +1291,10 @@ struct IndexCoordinatorTests {
         let starts = await started.snapshot()
         #expect(starts.count == 4)
         #expect(Set(starts.prefix(3)) == [.files, .mail, .messages])
-        #expect(starts.last == .vision)
+        #expect(starts.last == .calendars)
         let completions = await finished.snapshot()
         #expect(completions.count == 4)
-        #expect(completions.last == .vision)
+        #expect(completions.last == .calendars)
         // The light local peer completes while the network-bound peer still runs.
         let messagesIndex = completions.firstIndex(of: .messages)
         let mailIndex = completions.firstIndex(of: .mail)

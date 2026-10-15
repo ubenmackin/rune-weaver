@@ -1,16 +1,14 @@
 // Rune Weaver Core — Single-sourced workspace containment plus immutable staging.
 //
 // Purpose: own the `lstat` symlink probe, slash-boundary prefix check, and
-// canonical containment used by the scratch workspace and the hash-pinned
-// agent-tool registry, so a swapped `workspace -> /` or `tmp -> /` refuses
+// canonical containment used by the scratch workspace, so a swapped `workspace -> /` or `tmp -> /` refuses
 // identically on every path and verified bytes never observe a writable window.
 // Scope: symlink probing without following links, boundary-aware prefix
-// checks, canonical resolution, eligible-directory containment, relative
-// `workspace/` prefix stripping, and atomic owner-execute-only staging writes
+// checks, canonical resolution, eligible-directory containment, and atomic owner-execute-only staging writes
 // only; quotas, SQLite persistence, and HTTP routing live with the owning
 // stores and server layers.
 // Architectural role: shared Core helper beside the goal and policy stores,
-// called by `WorkspaceStore` and `AgentToolStore` instead of triplicated
+// called by `WorkspaceStore` instead of triplicated
 // private helpers, so containment agrees byte-for-byte.
 
 import Foundation
@@ -20,10 +18,9 @@ import Foundation
     import Glibc
 #endif
 
-/// Single source for workspace boundary checks shared by the scratch store
-/// and the hash-pinned agent-tool registry.
+/// Single source for workspace boundary checks used by the scratch store.
 ///
-/// Both stores guard the same adversary: a sandboxed writer swapping
+/// The scratch store guards the same adversary: a sandboxed writer swapping
 /// `workspace -> /` or `tmp -> /` between turns. The probe never follows the
 /// final component, the prefix check never lets `workspace-evil/` match the
 /// root, and both sides of every containment test resolve symlinks first so
@@ -112,26 +109,6 @@ public enum WorkspaceContainment {
             return url
         }
         return nil
-    }
-
-    /// Strips the redundant `workspace/` lead from a workspace-relative spelling.
-    ///
-    /// Relative promotion spellings resolve against the workspace root with a
-    /// canonical `tools/` base, so `tools/cleanup.sh` and its absolute form
-    /// agree. A legacy `workspace/tools/cleanup.sh` spelling strips to
-    /// `tools/cleanup.sh` instead of nesting under `<root>/workspace/tools/`
-    /// outside the eligible directory. Absolute and tilde spellings pass
-    /// through untouched; the caller branches on the leading slash first.
-    /// - Parameter path: Caller-supplied relative path.
-    /// - Returns: Path without a leading `workspace/` segment when present.
-    public static func stripWorkspacePrefix(_ path: String) -> String {
-        if path == "workspace" {
-            return ""
-        }
-        if path.hasPrefix("workspace/") {
-            return String(path.dropFirst("workspace/".count))
-        }
-        return path
     }
 
     /// Writes bytes to a fresh file that is never writable.

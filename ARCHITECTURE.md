@@ -202,7 +202,7 @@ Three tiers plus routed automatic injection:
 
 **Memory Flow**: user text enters working memory and mirrors clean into episodic (`Used <tool>:` records); context overflow folds into rolling summary; `/remember` captures deterministically; facts persist with vectors and mirror into profile; future turns see routed recall plus starter pack plus live-tool fallback.
 
-**Embeddings**: Via `EmbeddingsBackend` (`apple` default, `provider` opt-in, `none` keyword-only). Failures fall back to keyword; cancellation propagates. Backfill gains vectors for older rows.
+**Embeddings**: Via `EmbeddingsBackend` (`local` default via llama.cpp Metal, `provider` opt-in, `none` keyword-only). Failures fall back to keyword; cancellation propagates. Backfill gains vectors for older rows.
 
 **Document recall**: Via `recallDocuments`, pairing FTS chunks with parents through `DocIndexStore.documents(ids:)` with source metadata and `index_as_of` watermark.
 
@@ -374,12 +374,12 @@ Phase 1 Foundation — shipped. Phase 2 Memory — shipped (routed recall with b
 vector_db_path = "~/.runeweaver/memory/vectors"
 episodes_db_path = "~/.runeweaver/memory/episodes.db"
 embedding_model = "all-MiniLM-L6-v2"
-embedding_backend = "apple"
+embedding_backend = "local"
 recall_per_tier_limit = 5
 recall_auto_limit = 5
 recall_threshold = 0.1
-recall_max_chars = 2000
-recall_per_hit_chars = 500
+recall_max_chars = 8000
+recall_per_hit_chars = 2000
 recall_doc_pool_multiplier = 4
 recall_episodic_weight = 0.25
 
@@ -393,7 +393,6 @@ exclude = [".git", "node_modules", ".build", "DerivedData", "Library", ".Trash",
 max_file_mb = 20
 mail_vector_window = "2y"
 icloud_evicted = "skip"
-describe_images_with_llm = false
 nightly_budget = 0
 db_path = "~/.runeweaver/index.db"
 

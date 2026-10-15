@@ -287,10 +287,6 @@ public final class ServerContext: Sendable {
     /// Scratch workspace owning the default shell directory, the eligible
     /// `tools/` promotion directory, and the quota plus retention policy.
     public let workspaceStore: WorkspaceStore
-    /// Hash-pinned agent script registry backing promotion plus verified runs.
-    public let agentTools: AgentToolStore
-    /// Single-flight lock serializing agent-tool runs within this process.
-    public let agentRunLock: AgentToolRunLock
     /// Owner persona configured at boot.
     public let persona: PersonaConfig
     /// Trusted-tool anomaly watchdog counting executions and denials.
@@ -374,8 +370,6 @@ public final class ServerContext: Sendable {
         policyWriteLock: PolicyWriteLock = PolicyWriteLock(),
         workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
         workspaceStore: WorkspaceStore? = nil,
-        agentTools: AgentToolStore? = nil,
-        agentRunLock: AgentToolRunLock? = nil,
         persona: PersonaConfig = PersonaConfig(),
         watchdog: BehaviorWatchdog? = nil,
         sovereignLedger: SovereignLedger? = nil
@@ -489,13 +483,8 @@ public final class ServerContext: Sendable {
         self.desktopCaptureBridge = desktopCaptureBridge
         self.desktopControlBridge = desktopControlBridge
         self.desktopConfigBox = OSAllocatedUnfairLock(initialState: desktopConfig)
-        // Scratch plus pins resolve over the same episodes file as goals so
-        // the dashboard and the CLI observe one registry; an explicit store
-        // wins untouched for tests that hand-build an isolated workspace.
         let resolvedWorkspace = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
         self.workspaceStore = resolvedWorkspace
-        self.agentTools = agentTools ?? AgentToolStore(dbPath: defaultDBPath, workspaceStore: resolvedWorkspace)
-        self.agentRunLock = agentRunLock ?? AgentToolRunLock()
         Self.requireMatchingSteeringQueue(orchestrator: orchestrator, steeringQueue: steeringQueue)
         // Verified-pulse collaborators resolve through the helpers below so the
         // body stays within the type-length budget; behavior is unchanged.
@@ -810,9 +799,6 @@ extension ServerContext {
         let stagedFiles: StagedFilesStore
         /// Workspace store backing the shell default directory and quota gate.
         let workspaceStore: WorkspaceStore?
-        /// Hash-pinned agent script store; nil keeps `tool.promote`/`tool.run`
-        /// unregistered, mirroring the goal-tools invariant.
-        let agentToolStore: AgentToolStore?
         /// Propagation hook reporting a live write that superseded a staged
         /// review, so the serve process broadcasts `file_superseded` to live
         /// dashboards; nil keeps the tool silent.
@@ -865,8 +851,7 @@ extension ServerContext {
             policyStore: args.policyStore,
             egressSupervisor: args.egressSupervisor,
             workspaceConfig: args.configs.workspace,
-            workspaceStore: args.workspaceStore,
-            agentToolStore: args.agentToolStore
+            workspaceStore: args.workspaceStore
         )
     }
 
@@ -1040,8 +1025,6 @@ extension ServerContext {
         policyStore: PolicyStore? = nil,
         workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
         workspaceStore: WorkspaceStore? = nil,
-        agentTools: AgentToolStore? = nil,
-        agentRunLock: AgentToolRunLock? = nil,
         persona: PersonaConfig = PersonaConfig(),
         watchdog: BehaviorWatchdog? = nil,
         sovereignLedger: SovereignLedger? = nil
@@ -1098,10 +1081,6 @@ extension ServerContext {
         )
         let dbPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
         let stagedFilesStore = StagedFilesStore(dbPath: dbPath)
-        // Agent pins share the same episodes file as goals so the dashboard
-        // and the CLI observe one registry; an injected store wins untouched
-        // for tests that hand-build an isolated registry.
-        let resolvedAgentTools = agentTools ?? AgentToolStore(dbPath: dbPath, workspaceStore: resolvedWorkspaceStore)
         // The sovereign ceremony recomputes from the configured episode ledger
         // file, so a custom path still corroborates live truth; an injected
         // instance wins untouched for tests.
@@ -1143,7 +1122,6 @@ extension ServerContext {
             memoryEngine: memoryEngine, embedder: embedder,
             goals: goalComponents, stagedFiles: stagedFilesStore,
             workspaceStore: resolvedWorkspaceStore,
-            agentToolStore: resolvedAgentTools,
             supersededReviewNotifier: makeStagedSupersedeNotifier(hub: services.durable.hub),
             goalUpdatedNotifier: { [hub = services.durable.hub] goal, steps in
                 await hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
@@ -1167,7 +1145,7 @@ extension ServerContext {
             fanOut: engines.fanOutEngine, policyStore: resolvedPolicyStore, egressSupervisor: egressSupervisor,
             mediaConfig: toolConfigs.media, llmServerURLs: toolConfigs.llmServerURLs,
             workspaceConfig: workspaceConfig, workspaceStore: resolvedWorkspaceStore,
-            agentTools: resolvedAgentTools, agentRunLock: agentRunLock, persona: persona,
+            persona: persona,
             watchdog: watchdog, sovereignLedger: resolvedSovereignLedger
         )
         // Await the verified-pulse wiring before serving so early tool calls
@@ -1375,6 +1353,10 @@ private func finalizeServerContext(
         }
     } catch {
         RuneWeaverLog.server.warning("ServerContext: boot goal reconciliation failed: \(error.localizedDescription)")
+    }
+    let hub = context.hub
+    await LlamaEmbeddingSupervisor.shared.setStatusHandler { status, message, error in
+        await hub.broadcastEmbeddingsStatus(status: status, message: message, error: error)
     }
     // Warm fills the 60s TTL snapshot so the first dashboard poll finds slow fields cached.
     let store = context.indexStore

@@ -118,12 +118,12 @@ Episodic memory, semantic memory vectors, and recall fan-out budgets.
 | `vector_db_path` | string | `"~/.runeweaver/memory/vectors"` | JSON store path for semantic memory (LanceDB-compatible shape) holding keyword-only rows plus optional embedding vectors. |
 | `episodes_db_path` | string | `"~/.runeweaver/memory/episodes.db"` | SQLite database path for episodic memory, conversation history, run logs, and scheduled jobs. |
 | `embedding_model` | string | `"all-MiniLM-L6-v2"` | Retained for forward compatibility; reserved for future model selection. |
-| `embedding_backend` | string | `"apple"` | Vector backend: `"apple"` (on-device NaturalLanguage framework), `"provider"` (chat model `/v1/embeddings`), or `"none"` (keyword-only). |
+| `embedding_backend` | string | `"local"` | Vector backend: `"local"` (on-device EmbeddingGemma 2 on Metal via llama.cpp), `"provider"` (chat model `/v1/embeddings`), or `"none"` (keyword-only). |
 | `recall_per_tier_limit` | integer | `5` | Maximum hits fetched per tier before merging (`1`–`50`). |
 | `recall_auto_limit` | integer | `5` | Maximum hits injected as system context per auto turn (`1`–`50`). |
 | `recall_threshold` | double | `0.1` | Minimum calibrated score for an injected recall hit (`0.0`–`1.0`). |
-| `recall_max_chars` | integer | `2000` | Maximum total characters for the injected recall block, header included (`200`–`16000`). |
-| `recall_per_hit_chars` | integer | `500` | Maximum characters kept per individual hit before ellipsis truncation (`100`–`2000`). |
+| `recall_max_chars` | integer | `8000` | Maximum total characters for the injected recall block, header included (`500`–`32000`). |
+| `recall_per_hit_chars` | integer | `2000` | Maximum characters kept per individual hit before boundary truncation (`100`–`8000`). |
 | `recall_doc_pool_multiplier` | integer | `4` | Widening factor for the document candidate pool: the pool widens to `page * multiplier`, the vector leg scans `min(max(pool * 10, 500), maxPerTierResults)` chunks from it, and the keyword leg reads at the same width. Inert at the default page size — it only moves the vector leg once `pool * 10` clears the 500-row floor (`1`–`8`). |
 | `recall_episodic_weight` | double | `0.25` | Weight mapping episodic rank scores onto the shared recall scale (`0.0`–`1.0`). |
 
@@ -131,10 +131,10 @@ Episodic memory, semantic memory vectors, and recall fan-out budgets.
 [memory]
 vector_db_path = "~/.runeweaver/memory/vectors"
 episodes_db_path = "~/.runeweaver/memory/episodes.db"
-embedding_backend = "apple"
+embedding_backend = "local"
 # recall_auto_limit = 5
 # recall_threshold = 0.1
-# recall_max_chars = 2000
+# recall_max_chars = 8000
 ```
 
 ### `[voice]`
@@ -200,7 +200,6 @@ Local background indexer for files, mail, and Apple Messages. Off by default so 
 | `max_file_mb` | integer | `20` | Maximum file size in MB the indexer will read (`1`–`10240`). |
 | `mail_vector_window` | string | `"2y"` | How far back mail is vectorized: `"30d"`, `"6m"`, `"1y"`, `"2y"`, or `"all"`. Older mail remains keyword-searchable. |
 | `icloud_evicted` | string | `"skip"` | Policy for iCloud files whose bytes are evicted: `"skip"` (leave out) or `"download"` (pull down before indexing). |
-| `describe_images_with_llm` | bool | `false` | Use configured LLM to describe scanned PDFs and images. |
 | `nightly_budget` | integer | `0` | Maximum items processed per nightly run; `0` means unlimited (`0`–`100000`). |
 | `max_vector_chunks_per_document` | integer | `128` | Maximum chunks per document that carry vectors (`1`–`4096`). Remaining chunks stay keyword-searchable. |
 | `mailbox_deny` | array of strings | `["Trash", "Junk", "Spam", "Deleted*"]` | Mailboxes skipped without dialing. |

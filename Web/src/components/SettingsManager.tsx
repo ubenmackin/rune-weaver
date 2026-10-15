@@ -30,6 +30,9 @@ import {
   validateServerHostname,
   ensureSearch,
   getSearchHealth,
+  getEmbeddingsStatus,
+  ensureEmbeddings,
+  type EmbeddingsStatusResponse,
   hasActiveRuns,
   listRuns,
   removeSearch,
@@ -134,19 +137,10 @@ import {
   formatWorkspaceBytes,
   getWorkspaceMachine,
   getWorkspaceUsage,
-  isPromotableScriptPath,
-  listAgentTools,
-  promoteAgentTool,
   pruneWorkspaceTmp,
   recycleWorkspaceMachine,
-  runAgentTool,
-  setAgentToolStatus,
-  shortAgentToolHash,
   stopWorkspaceMachine,
-  validateAgentToolPromote,
   workspaceQuotaPercent,
-  WORKSPACE_TOOLS_PREFIX,
-  type AgentTool,
   type WorkspaceMachineResponse,
   type WorkspaceUsageResponse,
 } from "../api";
@@ -195,6 +189,7 @@ import {
 import { useRunningRuns } from "../hooks/useRunningRuns";
 import { useToastStack } from "../hooks/useToastStack";
 import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
+import { useSharedWebSocket, type WSIncomingFrame } from "../hooks/useSharedWebSocket";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 // Vertical navigation keeps every category visible without horizontal scrolling; Access leads
@@ -255,7 +250,7 @@ const SETTINGS_TAB_KEYWORDS: Record<SettingsTab, string> = {
   persona: "persona identity tone style avatar assistant name",
   goals: "goals pursuit cadence plan steps triggers",
   engine: "engine logs name compaction tool rounds proactive ideas interruption",
-  tools: "tools runes plugins builtin agents workspace promoted scripts marketplace",
+  tools: "tools runes plugins builtin agents workspace scripts marketplace",
   security: "security containers sandbox files allow roots deny approval blocked paths token rotation",
   memory: "memory storage vectors episodes embeddings recall",
   voice: "voice whisper speech stt tts",
@@ -798,7 +793,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const [memoryVectorDBPath, setMemoryVectorDBPath] = useState("");
   const [memoryEpisodesDBPath, setMemoryEpisodesDBPath] = useState("");
   const [memoryEmbeddingModel, setMemoryEmbeddingModel] = useState("");
-  const [memoryEmbeddingBackend, setMemoryEmbeddingBackend] = useState("apple");
+  const [memoryEmbeddingBackend, setMemoryEmbeddingBackend] = useState("local");
   const [voiceSTTProvider, setVoiceSTTProvider] = useState("");
   const [voiceWhisperModel, setVoiceWhisperModel] = useState("");
   const [voiceTTSProvider, setVoiceTTSProvider] = useState("");
@@ -867,6 +862,10 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   );
   const [browserHealthLoading, setBrowserHealthLoading] = useState(false);
   const [browserAction, setBrowserAction] = useState<"ensure" | null>(null);
+  // Local embedding supervisor health for the Memory pane
+  const [embeddingsStatus, setEmbeddingsStatus] = useState<EmbeddingsStatusResponse | null>(null);
+  const [embeddingsLoading, setEmbeddingsLoading] = useState(false);
+  const [embeddingsActionBusy, setEmbeddingsActionBusy] = useState(false);
   // Synchronous guard for the ensure flight: state commits asynchronously, so
   // a double-click before re-render would otherwise start two provisions. The
   // ref flips immediately and the state mirrors it for rendering.
@@ -1186,13 +1185,11 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   // Tracks the single builtin tool row with an in-flight toggle so sibling
   // rows stay interactive while one request is pending.
   const [togglingToolName, setTogglingToolName] = useState<string | null>(null);
-  // Agent scratch workspace usage plus the hash-pinned script registry live on
+  // Agent scratch workspace usage lives on
   // the Tools tab beside the builtin switches. Usage bars read the live tree
   // from GET /workspace/usage while the quota editors below seed from
   // GET /settings [workspace] and persist through the tab save, so the bars
-  // stay honest about the tree even while an edit is in flight. The registry
-  // stays separate from plugin runes so a promoted shell script never shares
-  // fate with an external package.
+  // stay honest about the tree even while an edit is in flight.
   const [workspaceUsage, setWorkspaceUsage] = useState<WorkspaceUsageResponse | null>(null);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
@@ -1216,16 +1213,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
   const [workspaceMachineLoading, setWorkspaceMachineLoading] = useState(false);
   const [workspaceMachineError, setWorkspaceMachineError] = useState<string | null>(null);
   const [workspaceMachineAction, setWorkspaceMachineAction] = useState<"stop" | "recycle" | null>(null);
-  const [agentTools, setAgentTools] = useState<AgentTool[]>([]);
-  const [agentToolsLoading, setAgentToolsLoading] = useState(false);
-  const [agentToolsError, setAgentToolsError] = useState<string | null>(null);
-  const [togglingAgentToolId, setTogglingAgentToolId] = useState<string | null>(null);
-  const [runningAgentToolId, setRunningAgentToolId] = useState<string | null>(null);
-  const [agentRunOutput, setAgentRunOutput] = useState<Record<string, string>>({});
-  const [promoteName, setPromoteName] = useState("");
-  const [promoteScriptPath, setPromoteScriptPath] = useState("");
-  const [promoteError, setPromoteError] = useState<string | null>(null);
-  const [promotingTool, setPromotingTool] = useState(false);
 
   const loadPluginsData = useCallback(async () => {
     try {
@@ -1463,6 +1450,43 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       setBrowserAction(null);
     }
   };
+
+  // Local embedding supervisor health for the Memory pane
+  const refreshEmbeddingsStatus = useCallback(async () => {
+    setEmbeddingsLoading(true);
+    try {
+      const res = await getEmbeddingsStatus();
+      setEmbeddingsStatus(res);
+    } catch {
+      // Degrades silently
+    } finally {
+      setEmbeddingsLoading(false);
+    }
+  }, []);
+
+  const handleEnsureEmbeddings = useCallback(async () => {
+    setEmbeddingsActionBusy(true);
+    try {
+      const res = await ensureEmbeddings();
+      setEmbeddingsStatus(res);
+      pushSuccessToast("Initializing local embedding engine…");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      pushErrorToast(`Failed to initialize embedding engine: ${message}`);
+    } finally {
+      setEmbeddingsActionBusy(false);
+    }
+  }, [pushSuccessToast, pushErrorToast]);
+
+  const handleEmbeddingsWSFrame = useCallback(
+    (frame: WSIncomingFrame) => {
+      if (frame.type === "embeddings_status" && activeTab === "memory") {
+        void refreshEmbeddingsStatus();
+      }
+    },
+    [activeTab, refreshEmbeddingsStatus],
+  );
+  useSharedWebSocket(handleEmbeddingsWSFrame);
 
   // Single lifecycle toggle mirroring the TopNav shape: unknown and stopped
   // both start, running stops. The direction is captured up front so the busy
@@ -1784,23 +1808,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   }, []);
 
-  // Loads the pinned-script registry for the Tools-tab section. Unknown rows
-  // stay listed so a tampered script remains visible behind its disabled pill
-  // instead of vanishing from review.
-  const refreshAgentTools = useCallback(async () => {
-    setAgentToolsLoading(true);
-    setAgentToolsError(null);
-    try {
-      const res = await listAgentTools();
-      setAgentTools(Array.isArray(res?.tools) ? res.tools : []);
-    } catch (err) {
-      setAgentTools([]);
-      setAgentToolsError(err instanceof Error ? err.message : "Failed to load promoted tools.");
-    } finally {
-      setAgentToolsLoading(false);
-    }
-  }, []);
-
   const refreshWorkspaceMachine = useCallback(async () => {
     setWorkspaceMachineLoading(true);
     setWorkspaceMachineError(null);
@@ -1870,76 +1877,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
       pushErrorToast(err instanceof Error ? err.message : "Failed to prune workspace tmp.");
     } finally {
       setPruningWorkspace(false);
-    }
-  };
-
-  // Flips one promoted script without touching siblings. The PATCH body
-  // carries the canonical status spelling; the updated row replaces one entry
-  // instead of refetching the list so a concurrent promotion never vanishes.
-  const handleToggleAgentTool = async (tool: AgentTool) => {
-    const nextEnabled = tool.status !== "enabled";
-    setTogglingAgentToolId(tool.id);
-    try {
-      const updated = await setAgentToolStatus(tool.id, nextEnabled);
-      setAgentTools((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
-      pushSuccessToast(
-        nextEnabled ? `Enabled agent tool '${tool.name}'.` : `Disabled agent tool '${tool.name}'.`
-      );
-    } catch (err) {
-      pushErrorToast(err instanceof Error ? err.message : `Failed to update agent tool '${tool.name}'.`);
-    } finally {
-      setTogglingAgentToolId(null);
-    }
-  };
-
-  // Runs one pinned script with no extra argv. Verification re-hashes before
-  // dispatch, so a tampered row answers 400 and lands disabled; the output
-  // stores per tool id so concurrent runs never overwrite each other.
-  const handleRunAgentTool = async (tool: AgentTool) => {
-    if (runningAgentToolId !== null) return;
-    setRunningAgentToolId(tool.id);
-    try {
-      const result = await runAgentTool(tool.id, []);
-      const content = typeof result?.content === "string" ? result.content : "";
-      setAgentRunOutput((prev) => ({ ...prev, [tool.id]: content || "(no output)" }));
-      if (result?.isError) {
-        pushErrorToast(content || `Agent tool '${tool.name}' reported an error.`);
-      } else {
-        pushSuccessToast(`Ran agent tool '${tool.name}'.`);
-      }
-    } catch (err) {
-      pushErrorToast(err instanceof Error ? err.message : `Failed to run agent tool '${tool.name}'.`);
-    } finally {
-      setRunningAgentToolId(null);
-    }
-  };
-
-  // Promotes a workspace/tools/ script after the client-side prefix check.
-  // The form validates before any network write so an outside path fails
-  // with the same words the store would refuse, without a round trip.
-  const handlePromoteAgentTool = async () => {
-    const problem = validateAgentToolPromote(promoteName, promoteScriptPath);
-    if (problem) {
-      setPromoteError(problem);
-      return;
-    }
-    if (promotingTool) return;
-    setPromotingTool(true);
-    setPromoteError(null);
-    try {
-      const created = await promoteAgentTool(promoteName.trim(), promoteScriptPath.trim());
-      setAgentTools((prev) => {
-        const next = prev.filter((t) => t.id !== created.id && t.name !== created.name);
-        return [...next, created].sort((a, b) => a.name.localeCompare(b.name));
-      });
-      setPromoteName("");
-      setPromoteScriptPath("");
-      pushSuccessToast(`Promoted agent tool '${created.name}'.`);
-      await refreshWorkspaceUsage();
-    } catch (err) {
-      setPromoteError(err instanceof Error ? err.message : "Failed to promote agent tool.");
-    } finally {
-      setPromotingTool(false);
     }
   };
 
@@ -2613,7 +2550,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     setMemoryVectorDBPath(data.memoryVectorDBPath);
     setMemoryEpisodesDBPath(data.memoryEpisodesDBPath);
     setMemoryEmbeddingModel(data.memoryEmbeddingModel);
-    setMemoryEmbeddingBackend(data.memoryEmbeddingBackend ?? "apple");
+    setMemoryEmbeddingBackend(data.memoryEmbeddingBackend ?? "local");
     setVoiceSTTProvider(data.voiceSTTProvider);
     setVoiceWhisperModel(data.voiceWhisperModel);
     setVoiceTTSProvider(data.voiceTTSProvider);
@@ -2799,8 +2736,10 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     if (activeTab === "search") {
       void refreshSearchHealth();
       void refreshBrowserHealth();
+    } else if (activeTab === "memory") {
+      void refreshEmbeddingsStatus();
     }
-  }, [activeTab, refreshSearchHealth, refreshBrowserHealth]);
+  }, [activeTab, refreshSearchHealth, refreshBrowserHealth, refreshEmbeddingsStatus]);
 
   // Re-anchors the boot snapshot when the Network pane opens so a restart
   // performed outside the dashboard (file now converges with the new boot)
@@ -2812,17 +2751,16 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
     }
   }, [activeTab, refreshBootBind]);
 
-  // Loads scratch quotas plus the pinned registry when the Tools tab opens so
+  // Loads scratch quotas when the Tools tab opens so
   // the bars reflect the live tree rather than a stale mount. Runs on tab
-  // entry only; prune, toggle, run, and promote refresh their own slice
-  // without an extra probe so the pane never flashes empty mid-action.
+  // entry only; prune refreshes its own slice without an extra probe so
+  // the pane never flashes empty mid-action.
   useEffect(() => {
     if (activeTab === "tools") {
       void refreshWorkspaceUsage();
-      void refreshAgentTools();
       void refreshWorkspaceMachine();
     }
-  }, [activeTab, refreshWorkspaceUsage, refreshAgentTools, refreshWorkspaceMachine]);
+  }, [activeTab, refreshWorkspaceUsage, refreshWorkspaceMachine]);
 
   // Clears the sticky restart flag once the saved file converges with the
   // re-anchored boot: the health poll moves live to the new boot after an
@@ -3341,7 +3279,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
 
     try {
       // The embedding model has no editable input: provider reuses the active
-      // chat model and apple uses its fixed on-device model, so resend the
+      // chat model and local uses EmbeddingGemma 2 on Metal, so resend the
       // loaded value untouched to keep older configs valid (never blank it).
       const preservedEmbeddingModel =
         memoryEmbeddingModel || settings?.memoryEmbeddingModel || "";
@@ -5750,185 +5688,6 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
               );
             })()}
 
-            {/* Promoted agent tools: hash-pinned workspace/tools/ scripts the
-                owner blessed for later runs. Promotion pins exact bytes, runs
-                re-hash before dispatch, and a changed script lands disabled
-                instead of executing silently. */}
-            <section aria-label="Promoted agent tools" style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid var(--border-color, #2d3748)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "8px", marginBottom: "8px" }}>
-                <div className="settings-section-title-group">
-                  <h4 style={{ margin: "0 0 4px 0" }}>Promoted Agent Tools</h4>
-                  <p className="settings-section-hint" style={{ margin: 0 }}>
-                    Owner-blessed scripts from {WORKSPACE_TOOLS_PREFIX}. Only that directory is eligible; every run verifies the pinned hash first.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  className="ghost icon-text-btn"
-                  onClick={() => void refreshAgentTools()}
-                  disabled={agentToolsLoading}
-                >
-                  <RefreshIcon size={14} className={agentToolsLoading ? "spin" : ""} />
-                  <span>{agentToolsLoading ? "Loading…" : "Refresh"}</span>
-                </button>
-              </div>
-              {agentToolsError ? (
-                <div className="error-banner" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                  <AlertTriangleIcon size={16} />
-                  <span>{agentToolsError}</span>
-                </div>
-              ) : agentToolsLoading && agentTools.length === 0 ? (
-                <p className="muted text-sm">Loading promoted tools…</p>
-              ) : agentTools.length === 0 ? (
-                <div className="empty-state-box" style={{ padding: "20px", textAlign: "center" }}>
-                  <WrenchIcon size={28} />
-                  <p>No agent tools promoted yet.</p>
-                  <p className="muted text-sm" style={{ marginTop: "4px" }}>
-                    Promote a script from {WORKSPACE_TOOLS_PREFIX} below to bless it for later runs.
-                  </p>
-                </div>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                  {agentTools.map((tool) => {
-                    const enabled = tool.status === "enabled";
-                    const busy = togglingAgentToolId === tool.id || runningAgentToolId === tool.id;
-                    const output = agentRunOutput[tool.id];
-                    return (
-                      <div
-                        key={tool.id}
-                        style={{ padding: "12px 14px", borderRadius: "8px", backgroundColor: "var(--bg-card, #1e2533)", border: "1px solid var(--border-color, #2d3748)" }}
-                      >
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                            <code style={{ fontWeight: 600 }}>{tool.name}</code>
-                            <span style={{ fontSize: "0.72rem", padding: "2px 6px", borderRadius: "4px", backgroundColor: "#2d3748", color: "#a0aec0" }} title={tool.sha256}>
-                              {shortAgentToolHash(tool.sha256) || "no-pin"}
-                            </span>
-                            <span
-                              style={{
-                                fontSize: "0.72rem",
-                                padding: "2px 8px",
-                                borderRadius: "4px",
-                                fontWeight: 600,
-                                backgroundColor: enabled ? "rgba(72, 187, 120, 0.2)" : "rgba(160, 174, 192, 0.2)",
-                                color: enabled ? "#48bb78" : "#a0aec0",
-                              }}
-                            >
-                              {enabled ? "ENABLED" : "DISABLED"}
-                            </span>
-                          </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                            <label className="toggle-label tool-switch" style={{ display: "flex", alignItems: "center", gap: "8px", cursor: busy ? "wait" : "pointer" }}>
-                              <input
-                                type="checkbox"
-                                role="switch"
-                                className="tool-switch-input"
-                                aria-label={`${tool.name} ${enabled ? "Enabled" : "Disabled"}`}
-                                aria-checked={enabled}
-                                checked={enabled}
-                                onChange={() => void handleToggleAgentTool(tool)}
-                                disabled={busy}
-                              />
-                              <span className="tool-switch-track" data-on={enabled ? "true" : "false"} aria-hidden="true">
-                                <span className="tool-switch-thumb" />
-                              </span>
-                              <span className="tool-switch-state">
-                                {togglingAgentToolId === tool.id ? "Updating…" : enabled ? "Enabled" : "Disabled"}
-                              </span>
-                            </label>
-                            <button
-                              type="button"
-                              className="ghost icon-text-btn"
-                              onClick={() => void handleRunAgentTool(tool)}
-                              disabled={busy || !enabled}
-                              title={enabled ? `Run ${tool.name}` : `Re-enable ${tool.name} before running`}
-                            >
-                              <span>{runningAgentToolId === tool.id ? "Running…" : "Run"}</span>
-                            </button>
-                          </div>
-                        </div>
-                        <div className="muted text-sm" style={{ marginTop: "4px", fontSize: "0.78rem" }}>
-                          <code>{tool.scriptPath}</code>
-                        </div>
-                        {output ? (
-                          <pre style={{ margin: "8px 0 0 0", padding: "8px 10px", borderRadius: "6px", background: "var(--bg-secondary, #141822)", fontSize: "0.78rem", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                            {output}
-                          </pre>
-                        ) : null}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              {/* Promote editor is a div, not a form: the Tools tab already
-                  lives inside the shared settings <form>, and a nested form
-                  is invalid HTML (validateDOMNesting) that would also bubble
-                  Enter to the outer Save. Enter is handled via onKeyDown
-                  below so keyboard submit still promotes. */}
-              <div
-                style={{ marginTop: "14px", padding: "12px", borderRadius: "8px", background: "var(--bg-secondary, #141822)", border: "1px solid var(--border-color, #2d3748)" }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !promotingTool) {
-                    e.preventDefault();
-                    void handlePromoteAgentTool();
-                  }
-                }}
-              >
-                <h5 style={{ margin: "0 0 8px 0" }}>Promote a script</h5>
-                <div className="form-row" style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-                  <div className="form-group" style={{ flex: "1 1 160px" }}>
-                    <label htmlFor="promote-tool-name">Tool name</label>
-                    <input
-                      id="promote-tool-name"
-                      type="text"
-                      className="input-field"
-                      placeholder="cleanup"
-                      value={promoteName}
-                      onChange={(e) => {
-                        setPromoteName(e.target.value);
-                        if (promoteError) setPromoteError(null);
-                      }}
-                      disabled={promotingTool}
-                    />
-                  </div>
-                  <div className="form-group" style={{ flex: "2 1 240px" }}>
-                    <label htmlFor="promote-tool-path">Script path</label>
-                    <input
-                      id="promote-tool-path"
-                      type="text"
-                      className="input-field"
-                      placeholder="workspace/tools/cleanup.sh"
-                      value={promoteScriptPath}
-                      onChange={(e) => {
-                        setPromoteScriptPath(e.target.value);
-                        if (promoteError) setPromoteError(null);
-                      }}
-                      disabled={promotingTool}
-                    />
-                    <span className="form-group-hint">
-                      Only scripts inside {WORKSPACE_TOOLS_PREFIX} can be promoted.
-                    </span>
-                  </div>
-                </div>
-                {promoteScriptPath.trim() && !isPromotableScriptPath(promoteScriptPath) ? (
-                  <p className="muted text-sm" style={{ color: "#ed8936", margin: "6px 0 0 0" }}>
-                    Only scripts inside {WORKSPACE_TOOLS_PREFIX} can be promoted.
-                  </p>
-                ) : null}
-                {promoteError ? (
-                  <div className="error-banner" style={{ marginTop: "8px", display: "flex", alignItems: "center", gap: "8px" }}>
-                    <AlertTriangleIcon size={16} />
-                    <span>{promoteError}</span>
-                  </div>
-                ) : null}
-                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "10px" }}>
-                  <button type="button" className="primary" disabled={promotingTool} onClick={() => void handlePromoteAgentTool()}>
-                    {promotingTool ? "Promoting…" : "Promote tool"}
-                  </button>
-                </div>
-              </div>
-            </section>
-
             {/* Plugin Configuration */}
             <div style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid var(--border-color, #2d3748)" }}>
               <div className="settings-section-title-group">
@@ -6146,7 +5905,7 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
               </p>
             </div>
             {/* Backend leads because it decides whether any model choice
-                applies: apple is fixed on-device, provider follows the chat
+                applies: local is EmbeddingGemma 2 on Metal, provider follows the chat
                 model, and none disables vectors entirely. */}
             <div className="form-group">
               <label htmlFor="embedding-backend">Embedding Backend</label>
@@ -6156,18 +5915,76 @@ export default function SettingsManager({ onSettingsSaved }: SettingsManagerProp
                 value={memoryEmbeddingBackend}
                 onChange={(e) => setMemoryEmbeddingBackend(e.target.value)}
               >
-                <option value="apple">apple</option>
+                <option value="local">local (EmbeddingGemma 2)</option>
                 <option value="provider">provider</option>
                 <option value="none">none</option>
               </select>
               <span className="form-group-hint">
-                Apple keeps vectors on-device with no model config, provider
-                uses the active chat model for embeddings via /v1/embeddings,
-                and none stays keyword-only with no vectors. Switching chat
-                models under provider may require a vector reset due to width
-                pinning.
+                Local runs EmbeddingGemma 2 on Apple Silicon Metal via llama.cpp
+                for on-device 768-dim embeddings, provider uses the active chat
+                model for embeddings via /v1/embeddings, and none stays
+                keyword-only with no vectors.
               </span>
             </div>
+            {memoryEmbeddingBackend === "local" && (
+              <div className="card" style={{ marginTop: "1rem", padding: "1rem", background: "var(--card-bg-subtle, rgba(255,255,255,0.03))" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <span style={{ fontWeight: 600 }}>Local Embedding Engine</span>
+                    {embeddingsStatus?.status === "ready" ? (
+                      <span className="badge badge-success" data-testid="embeddings-status-ready">Ready (Metal GPU)</span>
+                    ) : embeddingsStatus?.status === "downloading_binary" || embeddingsStatus?.status === "downloading_model" ? (
+                      <span className="badge badge-warning" data-testid="embeddings-status-downloading">
+                        {embeddingsStatus.stage ?? "Downloading Assets…"}
+                      </span>
+                    ) : embeddingsStatus?.status === "starting" ? (
+                      <span className="badge badge-warning" data-testid="embeddings-status-starting">Starting…</span>
+                    ) : embeddingsStatus?.status === "error" ? (
+                      <span className="badge badge-error" data-testid="embeddings-status-error">Error</span>
+                    ) : (
+                      <span className="badge badge-muted" data-testid="embeddings-status-stopped">Stopped</span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: "0.5rem" }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => void refreshEmbeddingsStatus()}
+                      disabled={embeddingsLoading}
+                      title="Refresh status"
+                    >
+                      {embeddingsLoading ? "Refreshing…" : "Refresh"}
+                    </button>
+                    {(!embeddingsStatus?.isRunning || embeddingsStatus?.status === "error") && (
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        onClick={() => void handleEnsureEmbeddings()}
+                        disabled={embeddingsActionBusy}
+                        data-testid="embeddings-initialize-btn"
+                      >
+                        {embeddingsActionBusy ? "Starting…" : embeddingsStatus?.status === "error" ? "Retry" : "Initialize"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {embeddingsStatus?.error && (
+                  <p className="text-danger text-xs" style={{ margin: "0.5rem 0" }} data-testid="embeddings-error-msg">
+                    {embeddingsStatus.error}
+                  </p>
+                )}
+
+                <div className="text-xs muted" style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "0.25rem 1rem", marginTop: "0.5rem" }}>
+                  <span>Model:</span>
+                  <span style={{ fontFamily: "monospace" }}>{embeddingsStatus?.model ?? "embeddinggemma-2-Q8_0.gguf"} (768 dimensions)</span>
+                  <span>Acceleration:</span>
+                  <span>{embeddingsStatus?.acceleration ?? "Apple Silicon Metal GPU"}</span>
+                  <span>Endpoint:</span>
+                  <span style={{ fontFamily: "monospace" }}>{embeddingsStatus?.endpoint ?? "~/.runeweaver/run/embedding.sock"}</span>
+                </div>
+              </div>
+            )}
             <div className="form-group">
               <label htmlFor="episodes-path">Episodes SQLite Database Path</label>
               <input

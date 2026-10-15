@@ -593,7 +593,6 @@ struct IndexSettingsDTOTests {
             maxFileMB: 20,
             mailVectorWindow: "2y",
             iCloudEvicted: "skip",
-            describeImagesWithLLM: false,
             nightlyBudget: 0,
             dbPath: "~/.runeweaver/index.db",
             effort: "balanced",
@@ -629,7 +628,6 @@ struct IndexSettingsDTOTests {
         #expect(config.index.roots == ["~/Documents"])
         #expect(config.index.mailVectorWindow == "2y")
         #expect(config.index.iCloudEvicted == "skip")
-        #expect(config.index.describeImagesWithLLM == false)
         #expect(config.index.nightlyBudget == 0)
         #expect(config.index.dbPath == "~/.runeweaver/index.db")
         #expect(config.index.workers == 0)
@@ -665,7 +663,6 @@ struct IndexSettingsDTOTests {
             maxFileMB: 64,
             mailVectorWindow: "1y",
             iCloudEvicted: "download",
-            describeImagesWithLLM: true,
             nightlyBudget: 500,
             dbPath: "~/.runeweaver/index.db",
             effort: "performance",
@@ -696,7 +693,6 @@ struct IndexSettingsDTOTests {
             maxFileMB: 50,
             mailVectorWindow: "all",
             iCloudEvicted: "download",
-            describeImagesWithLLM: true,
             effort: "custom",
             workers: 2,
             thermalBackoff: false,
@@ -708,7 +704,6 @@ struct IndexSettingsDTOTests {
         #expect(object["maxFileMB"] as? Int == 50)
         #expect(object["mailVectorWindow"] as? String == "all")
         #expect(object["iCloudEvicted"] as? String == "download")
-        #expect(object["describeImagesWithLLM"] as? Bool == true)
         #expect(object["effort"] as? String == "custom")
         #expect(object["workers"] as? Int == 2)
         #expect(object["thermalBackoff"] as? Bool == false)
@@ -1340,6 +1335,8 @@ struct FilesEmbeddingPoolTests {
         // workers never fall back to serializing on the shared instance.
         let vectors = try await FilesIndexer.embedCandidate(
             extraction: extraction,
+            fileURL: URL(fileURLWithPath: "/tmp/doc.txt"),
+            fileName: "doc.txt",
             config: config,
             embedder: shared,
             embeddingsPool: pool
@@ -1375,8 +1372,7 @@ struct IndexBootReporterWiringTests {
             config: config,
             runs: runs,
             hub: hub,
-            embedder: nil,
-            visionLLM: nil
+            embedder: nil
         )
         #expect(components != nil)
         guard let components else { return }
@@ -1765,6 +1761,43 @@ struct IndexReporterCompletionTimestampTests {
             // the row opened with, so a long run still reads as just finished.
             let endInterval = try #require(strip.finishedAt?.timeIntervalSince1970)
             #expect(abs(endInterval - finishedAt.timeIntervalSince1970) < 1.0)
+        }
+    }
+
+    @Test
+    func `GET embeddings status returns configured supervisor details`() async throws {
+        try await withIndexTestApp { app in
+            app.runeWeaver = makeIndexTestContext()
+            registerRuneWeaverRoutes(app)
+            let res = try await indexRequest(app: app, method: .GET, path: "/embeddings/status")
+            #expect(res.status == .ok)
+            let status = try res.content.decode(EmbeddingsStatusResponse.self)
+            #expect(status.dimensions == 768)
+            #expect(status.acceleration == "Apple Silicon Metal GPU")
+            #expect(status.endpoint.contains("embedding.sock"))
+        }
+    }
+
+    @Test
+    func `POST embeddings ensure triggers supervisor and returns status`() async throws {
+        await LlamaEmbeddingSupervisor.shared.setTestRunner {
+            // Mock test runner to prevent live provisioning or downloading
+        }
+        do {
+            try await withIndexTestApp { app in
+                app.runeWeaver = makeIndexTestContext()
+                registerRuneWeaverRoutes(app)
+                let res = try await indexRequest(app: app, method: .POST, path: "/embeddings/ensure")
+                #expect(res.status == .ok)
+                let status = try res.content.decode(EmbeddingsStatusResponse.self)
+                #expect(status.dimensions == 768)
+            }
+            await LlamaEmbeddingSupervisor.shared.setTestRunner(nil)
+            await LlamaEmbeddingSupervisor.shared.stop()
+        } catch {
+            await LlamaEmbeddingSupervisor.shared.setTestRunner(nil)
+            await LlamaEmbeddingSupervisor.shared.stop()
+            throw error
         }
     }
 }

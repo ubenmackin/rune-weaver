@@ -123,6 +123,21 @@ struct ServeCommand: AsyncParsableCommand {
             searxngStageWatcher.cancel()
             print(TerminalStyle.dim("Search engine unavailable: \(error.localizedDescription)"))
         }
+        var embeddingWarmupTask: Task<Void, Never>?
+        if loaded.config.memory.embeddingBackend == MemoryConfig.embeddingBackendLocal {
+            embeddingWarmupTask = Task(priority: .utility) {
+                do {
+                    try await LlamaEmbeddingSupervisor.shared.ensureRunning()
+                } catch is CancellationError {
+                    // Ignored on cancel
+                } catch {
+                    RuneWeaverLog.server.warning("Local embedding warmup failed: \(error.localizedDescription)")
+                }
+            }
+        }
+        defer {
+            embeddingWarmupTask?.cancel()
+        }
         try await runServerLoop(
             app: app,
             context: context,
@@ -495,7 +510,7 @@ extension ServeCommand {
     private func makeIndexComponents(
         loaded: CLIConfigLoader.LoadedConfig,
         allProviders: [any LLMProvider],
-        selected: any LLMProvider,
+        selected _: any LLMProvider,
         runs: RunLogStore,
         hub: WSHub,
         embedder: (any EmbeddingsBackend)?
@@ -510,7 +525,6 @@ extension ServeCommand {
             runs: runs,
             hub: hub,
             embedder: embedder,
-            visionLLM: selected,
             makeEmbeddingsBackend: makeEmbeddingsBackend
         )
     }
@@ -520,10 +534,7 @@ extension ServeCommand {
         deps: ToolBootstrapDependencies,
         seed: ToolBuildSeed
     ) async throws -> [any Tool] {
-        // Agent pins share the preview registry with the served bus so the
-        // startup prompt snapshot never drifts from the live tools.
         let previewWorkspace = WorkspaceStore(config: loaded.config.workspace)
-        let previewAgents = AgentToolStore(dbPath: loaded.config.memory.episodesDBPath, workspaceStore: previewWorkspace)
         return try await CLIShared.pluginTools(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
@@ -543,8 +554,7 @@ extension ServeCommand {
             policyStore: seed.policyStore,
             recipientAliasStore: deps.recipientAliasStore,
             workspaceConfig: loaded.config.workspace,
-            workspaceStore: previewWorkspace,
-            agentToolStore: previewAgents
+            workspaceStore: previewWorkspace
         )
     }
 
@@ -616,11 +626,13 @@ extension ServeCommand {
             await permissionGate.stopPeriodicCleanup()
             await context.sandboxCleanup.stop()
             await context.hub.closeAll()
+            await LlamaEmbeddingSupervisor.shared.stop()
             try await app.asyncShutdown()
         } catch {
             await permissionGate.stopPeriodicCleanup()
             await context.sandboxCleanup.stop()
             await context.hub.closeAll()
+            await LlamaEmbeddingSupervisor.shared.stop()
             do {
                 try await app.asyncShutdown()
             } catch {

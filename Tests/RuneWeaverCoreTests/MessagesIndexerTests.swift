@@ -508,6 +508,48 @@ struct MessagesIndexerTests {
     }
 
     @Test
+    func `Voice memo attachment speech is transcribed and indexed`() async throws {
+        let paths = makeMessagesPaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        let attachmentURL = paths.base.appendingPathComponent("voicememo.m4a")
+        try "audio-bytes".write(to: attachmentURL, atomically: true, encoding: .utf8)
+
+        try createMessagesFixture(at: paths.database)
+        let handle = try openMessagesFixture(at: paths.database)
+        try insertMessagesFixtureMessage(
+            into: handle,
+            rowID: 1,
+            guid: "guid-voicememo",
+            text: "Listen: \u{FFFC}",
+            date: 700_000_000_000_030_000,
+            isFromMe: false
+        )
+        try joinMessagesFixtureChat(into: handle, chatID: 1, messageID: 1)
+        try execMessagesFixture(
+            handle,
+            "INSERT INTO attachment(ROWID, filename, transfer_name, mime_type, total_bytes) "
+                + "VALUES(1, '\(attachmentURL.path)', 'voicememo.m4a', 'audio/x-m4a', 11);"
+        )
+        try execMessagesFixture(handle, "INSERT INTO message_attachment_join(message_id, attachment_id) VALUES(1, 1);")
+        sqlite3_close(handle)
+
+        try await MediaTextExtractor.withAudioTranscription({ _ in "Voice memo transcription content" }) {
+            let store = DocIndexStore(dbPath: paths.store)
+            let indexer = MessagesIndexer(
+                chatDatabasePath: paths.database,
+                store: store,
+                statePath: paths.state
+            )
+            let result = try await indexer.indexNewMessages()
+            #expect(result.indexed == 1)
+
+            let hits = try await store.searchKeyword(query: "transcription", limit: 5)
+            #expect(hits.contains { $0.text.contains("Voice memo transcription content") })
+            #expect(hits.contains { $0.text.contains("[voicememo.m4a]") })
+        }
+    }
+
+    @Test
     func `Missing snapshot database surfaces permission denial`() {
         let missing = FileManager.default.temporaryDirectory
             .appendingPathComponent("runeweaver-missing-\(UUID().uuidString).db").path

@@ -83,6 +83,26 @@ private struct FilesIndexerStubEmbedder: EmbeddingsBackend {
     }
 }
 
+/// Multimodal embeddings backend returning a 768-dim vector for image inputs.
+private struct FilesIndexerMultimodalEmbedder: EmbeddingsBackend {
+    let modelID = "multimodal-stub"
+    let dimension: Int? = 768
+
+    func embed(_ texts: [String]) async throws -> [[Float]] {
+        texts.enumerated().map { index, _ in
+            var vec = [Float](repeating: 0, count: 768)
+            vec[0] = Float(index)
+            return vec
+        }
+    }
+
+    func embedImage(at _: URL) async throws -> [Float] {
+        var vec = [Float](repeating: 0, count: 768)
+        vec[0] = 42.0
+        return vec
+    }
+}
+
 /// Embeddings backend stamping each vector with its instance identifier so pool vending is observable.
 private struct FilesIndexerIDEmbedder: EmbeddingsBackend {
     /// Instance identifier assigned by the pool factory.
@@ -317,7 +337,8 @@ struct FilesIndexerTests {
         // missing prune would show up as an extra indexed document.
         for directory in [
             "Music", "Pictures", "Movies", "Library", ".Trash",
-            ".runeweaver", ".git", "node_modules", "DerivedData", "__pycache__", ".venv"
+            ".runeweaver", ".git", "node_modules", "DerivedData", "__pycache__", ".venv",
+            ".fastlane"
         ] {
             writeFile("ignored", at: base.appendingPathComponent(directory).appendingPathComponent("ignored.txt"))
         }
@@ -1423,5 +1444,41 @@ struct FilesIndexerTests {
 
         #expect(report.filesIndexed == 1)
         #expect(report.errors == 0)
+    }
+
+    @Test
+    func `Image candidates receive visual embeddings via embedImage`() async throws {
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let imagePath = base.appendingPathComponent("diagram.png")
+        try Data(repeating: 0x89, count: 64).write(to: imagePath)
+
+        let config = IndexConfig(enabled: true, files: true, roots: [base.path])
+        let embedder = FilesIndexerMultimodalEmbedder()
+        let indexer = FilesIndexer(
+            store: store,
+            embedder: embedder,
+            accessGuard: FilesIndexerStubGuard(),
+            config: config,
+            homeDirectoryURL: base
+        )
+        let report = await indexer.run()
+        #expect(report.filesIndexed == 1)
+
+        let doc = try await store.document(source: .files, externalID: imagePath.path)
+        #expect(doc != nil)
+        #expect(doc?.extractStatus == .extracted)
+
+        let stats = try await store.fastStats()
+        #expect(stats.vectorChunks == 1)
+
+        let chunks = try await store.chunkVectors(limit: 10)
+        #expect(chunks.count == 1)
+        #expect(chunks[0].isVector)
+        #expect(chunks[0].embedding.count == 768)
+        #expect(chunks[0].embedding[0] == 42.0)
     }
 }

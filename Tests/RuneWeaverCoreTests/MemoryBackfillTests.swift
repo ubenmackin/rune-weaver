@@ -44,7 +44,10 @@ private struct VaryingWidthBackfillBackend: EmbeddingsBackend, Sendable {
     func embed(_ texts: [String]) async throws -> [[Float]] {
         guard !texts.isEmpty else { return [] }
         return texts.map { text in
-            Array(repeating: 1.0, count: widthsByText[text] ?? 3)
+            if let match = widthsByText.first(where: { text.contains($0.key) }) {
+                return Array(repeating: 1.0, count: match.value)
+            }
+            return Array(repeating: 1.0, count: widthsByText[text] ?? 3)
         }
     }
 }

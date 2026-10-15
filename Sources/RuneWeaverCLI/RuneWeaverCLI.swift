@@ -320,9 +320,7 @@ enum CLIShared {
     /// Goal tools join only when both the engine and store arrive (nil keeps them
     /// unregistered); a disabled `[goals]` section still registers through the same
     /// path and fails closed inside each tool so the surface stays inspectable.
-    /// Agent script tools join only when the pin store arrives (nil keeps them
-    /// unregistered) and share the live shell plus workspace so the CLI and the
-    /// service observe one hash-pinned registry. Fan-out tools follow the ships-disabled invariant: the tool joins only when
+    /// Fan-out tools follow the ships-disabled invariant: the tool joins only when
     /// the fan-out engine arrives (nil keeps it unregistered), and it registers
     /// disabled behind the tool-state toggle with no config gate overriding it.
     ///
@@ -357,8 +355,7 @@ enum CLIShared {
         policyStore: PolicyStore? = nil,
         recipientAliasStore: (any MessageAliasStoring)? = nil,
         workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
-        workspaceStore: WorkspaceStore? = nil,
-        agentToolStore: AgentToolStore? = nil
+        workspaceStore: WorkspaceStore? = nil
     ) async throws -> [any Tool] {
         let browser = browserConfig ?? BrowserConfig()
         let baseOrigins = llmServerURLs
@@ -391,8 +388,7 @@ enum CLIShared {
                 fanOutEngine: fanOutEngine,
                 policyStore: policyStore,
                 workspaceConfig: workspaceConfig,
-                workspaceStore: resolvedWorkspaceStore,
-                agentToolStore: agentToolStore
+                workspaceStore: resolvedWorkspaceStore
             )
         } catch {
             cliPrintError(TerminalStyle.error("Security policy rejected: \(error.localizedDescription)"))
@@ -456,8 +452,7 @@ enum CLIShared {
         policyStore: PolicyStore? = nil,
         recipientAliasStore: (any MessageAliasStoring)? = nil,
         workspaceConfig: WorkspaceConfig = WorkspaceConfig(),
-        workspaceStore: WorkspaceStore? = nil,
-        agentToolStore: AgentToolStore? = nil
+        workspaceStore: WorkspaceStore? = nil
     ) async throws -> ToolBus {
         let bus = ToolBus(
             approvalHandler: approvalHandler,
@@ -480,12 +475,7 @@ enum CLIShared {
         // records confirmed name sends without a second wiring step, and
         // construction is path-only, so callers that never send pay no I/O.
         let effectiveAliasStore = recipientAliasStore ?? RecipientAliasStore(dbPath: rawPath)
-        // Agent pins share the same episodes file as goals so the dashboard
-        // and the CLI observe one registry; an explicit store wins untouched
-        // for tests that hand-build an isolated registry, otherwise one builds
-        // over the resolved path with the effective workspace.
         let effectiveWorkspace = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
-        let effectiveAgentStore = agentToolStore ?? AgentToolStore(dbPath: rawPath, workspaceStore: effectiveWorkspace)
         let shipsDisabled = BuiltinToolPlugins.shipsDisabledToolNames
         for tool in try await pluginTools(
             emailConfig: emailConfig,
@@ -509,8 +499,7 @@ enum CLIShared {
             policyStore: policyStore,
             recipientAliasStore: effectiveAliasStore,
             workspaceConfig: workspaceConfig,
-            workspaceStore: effectiveWorkspace,
-            agentToolStore: effectiveAgentStore
+            workspaceStore: effectiveWorkspace
         ) {
             await bus.register(tool: tool, isEnabled: !shipsDisabled.contains(tool.name))
         }

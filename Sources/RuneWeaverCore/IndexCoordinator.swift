@@ -241,15 +241,12 @@ public actor IndexCoordinator {
             if let last = snapshot.lastNightlyStart, calendar.isDate(last, inSameDayAs: date) {
                 return nil
             }
-            let summary = await run(trigger: .nightly)
-            if summary.status != .skipped {
-                do {
-                    try await stateStore.recordNightlyStart(at: date)
-                } catch {
-                    RuneWeaverLog.stores.error("IndexCoordinator: failed to record nightly start: \(error.localizedDescription)")
-                }
+            do {
+                try await stateStore.recordNightlyStart(at: date)
+            } catch {
+                RuneWeaverLog.stores.error("IndexCoordinator: failed to record nightly start: \(error.localizedDescription)")
             }
-            return summary
+            return await run(trigger: .nightly)
         } else {
             guard !didAttemptLaunchCatchUp else { return nil }
             didAttemptLaunchCatchUp = true
@@ -257,18 +254,27 @@ public actor IndexCoordinator {
 
             guard hour > nightlyHour else { return nil }
             let snapshot = await stateStore.snapshot()
+            // Catch-up only fires if at least 1 index run has previously completed.
+            guard snapshot.lastCompletedAt != nil else { return nil }
+
+            // If a document store is wired, ensure the database file exists and is non-empty.
+            if let store {
+                let expanded = (store.dbPath as NSString).expandingTildeInPath
+                guard FileManager.default.fileExists(atPath: expanded) else { return nil }
+                if let stats = try? await store.fastStats(), stats.documents == 0 {
+                    return nil
+                }
+            }
+
             if let last = snapshot.lastNightlyStart, calendar.isDate(last, inSameDayAs: date) {
                 return nil
             }
-            let summary = await run(trigger: .catchUp)
-            if summary.status != .skipped {
-                do {
-                    try await stateStore.recordNightlyStart(at: date)
-                } catch {
-                    RuneWeaverLog.stores.error("IndexCoordinator: failed to record nightly start: \(error.localizedDescription)")
-                }
+            do {
+                try await stateStore.recordNightlyStart(at: date)
+            } catch {
+                RuneWeaverLog.stores.error("IndexCoordinator: failed to record nightly start: \(error.localizedDescription)")
             }
-            return summary
+            return await run(trigger: .catchUp)
         }
     }
 
@@ -727,7 +733,7 @@ extension IndexCoordinator {
     ) async -> Bool {
         let activeBaseCount = activeStages.count
         activeStages.append(stage)
-        let phase: IndexPhase = stage.kind == .vision ? .embedding : .extracting
+        let phase: IndexPhase = .extracting
         livePhase = phase
         liveStage = stage.kind
         await emit(phase: phase, stage: stage.kind, totals: totals, startedAt: startedAt, force: true)

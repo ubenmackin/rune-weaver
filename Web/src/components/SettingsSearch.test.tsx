@@ -28,7 +28,7 @@ const mockSettings = {
   memoryVectorDBPath: "memory/vectors",
   memoryEpisodesDBPath: "memory/episodes.db",
   memoryEmbeddingModel: "all-MiniLM-L6-v2",
-  memoryEmbeddingBackend: "apple",
+  memoryEmbeddingBackend: "local",
   voiceSTTProvider: "whisper",
   voiceWhisperModel: "base",
   voiceTTSProvider: "system",

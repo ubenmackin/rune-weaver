@@ -26,6 +26,7 @@ import {
 } from "../api";
 import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
 import { useToastStack } from "../hooks/useToastStack";
+import { useSharedWebSocket, type WSIncomingFrame } from "../hooks/useSharedWebSocket";
 import { ToastStack } from "./Toast";
 import {
   peekPersonaSignals,
@@ -222,6 +223,34 @@ export default function TopNav({
   // on handheld widths, keeping desktop and mobile behavior identical.
   const { toasts, pushSuccessToast, pushErrorToast, dismissToast } =
     useToastStack();
+
+  // Listen for embedding engine status updates and surface transient toasts
+  const lastEmbeddingStatusRef = useRef<string | null>(null);
+  const handleWSFrame = useCallback(
+    (frame: WSIncomingFrame) => {
+      if (frame.type === "embeddings_status") {
+        const { status, message, error } = frame;
+        if (lastEmbeddingStatusRef.current === status) return;
+        lastEmbeddingStatusRef.current = status;
+
+        if (status === "downloading_binary" || status === "downloading_model") {
+          pushSuccessToast(
+            message ?? "Setting up local embedding engine (EmbeddingGemma 2)…",
+            8000,
+          );
+        } else if (status === "ready") {
+          pushSuccessToast("Local embeddings ready (Metal GPU accelerated).", 4000);
+        } else if (status === "error") {
+          pushErrorToast(
+            error ?? "Failed to initialize embedding engine.",
+            8000,
+          );
+        }
+      }
+    },
+    [pushSuccessToast, pushErrorToast],
+  );
+  useSharedWebSocket(handleWSFrame);
 
   // Every tap acknowledges with a toast, even when the Notification API is
   // missing or blocked. Granted taps with pending warnings route to chat (the

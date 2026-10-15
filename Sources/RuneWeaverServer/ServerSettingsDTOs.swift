@@ -258,7 +258,7 @@ public struct SettingsResponse: Content, Equatable {
         memoryVectorDBPath = try container.decodeIfPresent(String.self, forKey: .memoryVectorDBPath) ?? ""
         memoryEpisodesDBPath = try container.decodeIfPresent(String.self, forKey: .memoryEpisodesDBPath) ?? ""
         memoryEmbeddingModel = try container.decodeIfPresent(String.self, forKey: .memoryEmbeddingModel) ?? ""
-        memoryEmbeddingBackend = try container.decodeIfPresent(String.self, forKey: .memoryEmbeddingBackend) ?? "apple"
+        memoryEmbeddingBackend = try container.decodeIfPresent(String.self, forKey: .memoryEmbeddingBackend) ?? MemoryConfig.embeddingBackendLocal
         memoryRecallPerTierLimit = try container.decodeIfPresent(Int.self, forKey: .memoryRecallPerTierLimit) ?? RecallBudgets.defaultPerTierLimit
         memoryRecallAutoLimit = try container.decodeIfPresent(Int.self, forKey: .memoryRecallAutoLimit) ?? RecallBudgets.defaultAutoLimit
         memoryRecallThreshold = try container.decodeIfPresent(Double.self, forKey: .memoryRecallThreshold) ?? RecallBudgets.defaultThreshold

@@ -324,6 +324,24 @@ public actor WSHub {
         await fanOut(text)
     }
 
+    /// Broadcasts local embedding supervisor status to every connected socket.
+    public func broadcastEmbeddingsStatus(status: LlamaSupervisorStatus, message: String?, error: String?) async {
+        struct WSEmbeddingsStatusPayload: Encodable {
+            let type = "embeddings_status"
+            let status: String
+            let message: String?
+            let error: String?
+        }
+        let payload = WSEmbeddingsStatusPayload(status: status.rawValue, message: message, error: error)
+        do {
+            let data = try JSONEncoder().encode(payload)
+            guard let encodedText = String(data: data, encoding: .utf8) else { return }
+            await fanOut(encodedText)
+        } catch {
+            RuneWeaverLog.server.error("WSHub: failed to encode embeddings status frame: \(error.localizedDescription)")
+        }
+    }
+
     /// Broadcasts an arbitrary text frame to every connected socket.
     ///
     /// Terminal `done` frames ride this generic path carrying the content-free

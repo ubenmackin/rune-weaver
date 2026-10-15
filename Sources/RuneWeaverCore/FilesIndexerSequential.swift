@@ -37,7 +37,7 @@ extension FilesIndexer {
         guard let enumerator = FileManager.default.enumerator(
             at: rootURL,
             includingPropertiesForKeys: Self.entryKeys,
-            options: [],
+            options: [.skipsPackageDescendants],
             errorHandler: { _, _ in true }
         ) else {
             counters.hasUnreadableRoot = true
@@ -178,7 +178,7 @@ extension FilesIndexer {
             return
         }
 
-        let extraction = extractor.extract(data: data, fileName: filename, contentType: nil)
+        let extraction = await extractor.extract(fileURL: canonicalURL, contentType: nil)
         switch extraction.status {
         case .unsupported:
             counters.skipped += 1
@@ -362,13 +362,22 @@ extension FilesIndexer {
     ) async {
         let filename = (pending.canonicalPath as NSString).lastPathComponent
         let vectors: [[Float]]?
-        if vectorPolicy.shouldEmbed(status: pending.extraction.status, byteCount: pending.byteCount),
+        let visualSucceeded: Bool
+        // OCR-empty images stay interim (`.partial`, visual pending) yet must
+        // still reach the visual path, so images bypass the status gate while
+        // keeping the byte bound; other formats follow the shared policy.
+        let shouldAttemptVectors: Bool = if pending.extraction.format == .image {
+            vectorPolicy.enabled && pending.byteCount <= vectorPolicy.maxBytes
+        } else {
+            vectorPolicy.shouldEmbed(status: pending.extraction.status, byteCount: pending.byteCount)
+        }
+        if shouldAttemptVectors,
            embedder != nil || embeddingsPool != nil
         {
-            // Prefers the pooled backend when one is configured so a
-            // single-worker run with a pool still uses its distinct backend
-            // instead of bypassing it.
-            vectors = await embedChunksResolvingPool(of: pending.extraction)
+            let fileURL = URL(fileURLWithPath: pending.canonicalPath)
+            let embedded = await embedChunksResolvingPool(of: pending.extraction, fileURL: fileURL, fileName: filename)
+            vectors = embedded.vectors
+            visualSucceeded = embedded.visualSucceeded
             // Honor cancellation per embedding batch: a cancelled batch stops
             // before its document commits, bounding overrun to one file.
             if isCancelled || cancelBox.isSet || Task.isCancelled {
@@ -378,6 +387,7 @@ extension FilesIndexer {
             }
         } else {
             vectors = nil
+            visualSucceeded = false
         }
         // Keyword-only files still honor a stop between files so a cancel
         // arriving during hashing or extraction never commits another row.
@@ -396,7 +406,7 @@ extension FilesIndexer {
             sizeBytes: Int64(pending.byteCount),
             contentHash: pending.contentHash,
             mime: nil,
-            extractStatus: pending.extraction.status,
+            extractStatus: Self.effectiveImageStatus(extraction: pending.extraction, visualSucceeded: visualSucceeded),
             indexedAt: Date()
         )
         let written: [IndexedChunk]
@@ -485,17 +495,45 @@ extension FilesIndexer {
     /// - Parameters:
     ///   - extraction: Extracted document body.
     ///   - embedder: Backend to consult.
-    /// - Returns: One vector per embedded chunk, or nil when the document stays keyword-only.
-    func embedChunks(of extraction: DocumentExtraction, embedder: any EmbeddingsBackend) async -> [[Float]]? {
-        guard !extraction.chunks.isEmpty else { return nil }
+    /// - Returns: Vectors plus whether the visual multimodal path produced them.
+    func embedChunks(
+        of extraction: DocumentExtraction,
+        fileURL: URL,
+        fileName: String,
+        embedder: any EmbeddingsBackend
+    ) async -> (vectors: [[Float]]?, visualSucceeded: Bool) {
+        guard !extraction.chunks.isEmpty else { return (nil, false) }
         if isCancelled || cancelBox.isSet || Task.isCancelled {
             isCancelled = true
             cancelBox.set()
-            return nil
+            return (nil, false)
         }
+
+        if extraction.format == .image {
+            let dim = await embedder.dimension
+            do {
+                if let visual = try await Self.embedImageVisualVector(
+                    fileURL: fileURL,
+                    fileName: fileName,
+                    expectedDimension: dim,
+                    embedImage: { try await embedder.embedImage(at: fileURL) }
+                ) {
+                    return (visual, true)
+                }
+            } catch is CancellationError {
+                isCancelled = true
+                cancelBox.set()
+                return (nil, false)
+            } catch {
+                // Handled in embedImageVisualVector
+            }
+        }
+
         do {
             let texts = FilesVectorPolicy.cappedEmbeddingTexts(
-                extraction.chunks.map(\.text),
+                extraction.chunks.map { chunk in
+                    EmbeddingGemmaPrompts.document(title: fileName, text: chunk.text)
+                },
                 cap: config.maxVectorChunksPerDocument
             )
             let vectors = try await embedder.embed(texts)
@@ -503,58 +541,81 @@ extension FilesIndexer {
             if isCancelled || cancelBox.isSet || Task.isCancelled {
                 isCancelled = true
                 cancelBox.set()
-                return nil
+                return (nil, false)
             }
-            return Self.validatedEmbedVectors(vectors, expectedCount: texts.count)
+            let dim = await embedder.dimension
+            return (Self.validatedEmbedVectors(vectors, expectedCount: texts.count, expectedDimension: dim), false)
         } catch is CancellationError {
             isCancelled = true
             cancelBox.set()
-            return nil
+            return (nil, false)
         } catch {
-            return nil
+            RuneWeaverLog.stores.error("FilesIndexer: Failed to generate embeddings: \(error.localizedDescription)")
+            return (nil, false)
         }
     }
 
     /// Embeds a document's chunks preferring the pooled backend when present.
-    ///
-    /// Mirrors `embedChunks(of:embedder:)` including cancellation and
-    /// degrade-to-keyword-only semantics, but checks out a pooled backend
-    /// first so the sequential path never bypasses a configured pool. A pool
-    /// failure degrades the same way without falling back to the shared
-    /// backend, matching the parallel worker preference.
-    /// - Parameter extraction: Extracted document body.
-    /// - Returns: One vector per embedded chunk, or nil when keyword-only.
-    func embedChunksResolvingPool(of extraction: DocumentExtraction) async -> [[Float]]? {
+    func embedChunksResolvingPool(
+        of extraction: DocumentExtraction,
+        fileURL: URL,
+        fileName: String
+    ) async -> (vectors: [[Float]]?, visualSucceeded: Bool) {
         if let pool = embeddingsPool {
-            guard !extraction.chunks.isEmpty else { return nil }
+            guard !extraction.chunks.isEmpty else { return (nil, false) }
             if isCancelled || cancelBox.isSet || Task.isCancelled {
                 isCancelled = true
                 cancelBox.set()
-                return nil
+                return (nil, false)
             }
+
+            if extraction.format == .image {
+                let dim = try? await pool.withBackend { await $0.dimension }
+                do {
+                    if let visual = try await Self.embedImageVisualVector(
+                        fileURL: fileURL,
+                        fileName: fileName,
+                        expectedDimension: dim,
+                        embedImage: { try await pool.embedImage(at: fileURL) }
+                    ) {
+                        return (visual, true)
+                    }
+                } catch is CancellationError {
+                    isCancelled = true
+                    cancelBox.set()
+                    return (nil, false)
+                } catch {
+                    // Handled in embedImageVisualVector
+                }
+            }
+
             do {
                 let texts = FilesVectorPolicy.cappedEmbeddingTexts(
-                    extraction.chunks.map(\.text),
+                    extraction.chunks.map { chunk in
+                        EmbeddingGemmaPrompts.document(title: fileName, text: chunk.text)
+                    },
                     cap: config.maxVectorChunksPerDocument
                 )
+                let dim = try? await pool.withBackend { await $0.dimension }
                 let vectors = try await pool.withBackend { backend in
                     try await backend.embed(texts)
                 }
                 if isCancelled || cancelBox.isSet || Task.isCancelled {
                     isCancelled = true
                     cancelBox.set()
-                    return nil
+                    return (nil, false)
                 }
-                return Self.validatedEmbedVectors(vectors, expectedCount: texts.count)
+                return (Self.validatedEmbedVectors(vectors, expectedCount: texts.count, expectedDimension: dim), false)
             } catch is CancellationError {
                 isCancelled = true
                 cancelBox.set()
-                return nil
+                return (nil, false)
             } catch {
-                return nil
+                RuneWeaverLog.stores.error("FilesIndexer: Failed to generate embeddings from pool: \(error.localizedDescription)")
+                return (nil, false)
             }
         }
-        guard let embedder else { return nil }
-        return await embedChunks(of: extraction, embedder: embedder)
+        guard let embedder else { return (nil, false) }
+        return await embedChunks(of: extraction, fileURL: fileURL, fileName: fileName, embedder: embedder)
     }
 }

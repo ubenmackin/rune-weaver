@@ -13,6 +13,8 @@
 // extra workers mainly overlap file I/O, extraction, and store writes rather
 // than multiplying vector throughput.
 
+import Foundation
+
 /// Actor vending one embeddings backend per parallel worker.
 ///
 /// The pool holds `count` backend instances built up front and hands them out
@@ -104,5 +106,12 @@ public actor EmbeddingsBackendPool {
         let backend = await acquire()
         defer { release(backend) }
         return try await body(backend)
+    }
+
+    /// Embeds an image file using an acquired backend from the pool.
+    public func embedImage(at imageURL: URL) async throws -> [Float] {
+        try await withBackend { backend in
+            try await backend.embedImage(at: imageURL)
+        }
     }
 }

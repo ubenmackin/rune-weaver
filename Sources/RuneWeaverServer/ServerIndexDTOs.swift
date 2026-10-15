@@ -1116,8 +1116,6 @@ public struct IndexSettingsUpdate: Content, Equatable {
     public var mailVectorWindow: String?
     /// Policy for iCloud files whose bytes are evicted.
     public var iCloudEvicted: String?
-    /// Whether image files are described with the configured LLM.
-    public var describeImagesWithLLM: Bool?
     /// Maximum items processed per nightly run; `0` means unlimited.
     public var nightlyBudget: Int?
     /// SQLite path for the index database.
@@ -1155,7 +1153,6 @@ public struct IndexSettingsUpdate: Content, Equatable {
     ///   - maxFileMB: Per-file size cap in megabytes.
     ///   - mailVectorWindow: Mail vectorization window.
     ///   - iCloudEvicted: Evicted-iCloud-file policy.
-    ///   - describeImagesWithLLM: Image description toggle.
     ///   - nightlyBudget: Nightly item budget.
     ///   - dbPath: Index database path.
     ///   - effort: Effort preset.
@@ -1177,7 +1174,6 @@ public struct IndexSettingsUpdate: Content, Equatable {
         maxFileMB: Int? = nil,
         mailVectorWindow: String? = nil,
         iCloudEvicted: String? = nil,
-        describeImagesWithLLM: Bool? = nil,
         nightlyBudget: Int? = nil,
         dbPath: String? = nil,
         effort: String? = nil,
@@ -1199,7 +1195,6 @@ public struct IndexSettingsUpdate: Content, Equatable {
         self.maxFileMB = maxFileMB
         self.mailVectorWindow = mailVectorWindow
         self.iCloudEvicted = iCloudEvicted
-        self.describeImagesWithLLM = describeImagesWithLLM
         self.nightlyBudget = nightlyBudget
         self.dbPath = dbPath
         self.effort = effort
@@ -1226,7 +1221,6 @@ public struct IndexSettingsUpdate: Content, Equatable {
         self.maxFileMB = config.maxFileMB
         self.mailVectorWindow = config.mailVectorWindow
         self.iCloudEvicted = config.iCloudEvicted
-        self.describeImagesWithLLM = config.describeImagesWithLLM
         self.nightlyBudget = config.nightlyBudget
         self.dbPath = config.dbPath
         self.effort = config.effort
@@ -1250,7 +1244,6 @@ public struct IndexSettingsUpdate: Content, Equatable {
         case maxFileMB
         case mailVectorWindow
         case iCloudEvicted
-        case describeImagesWithLLM
         case nightlyBudget
         case dbPath
         case effort
@@ -1277,7 +1270,6 @@ public struct IndexSettingsUpdate: Content, Equatable {
         maxFileMB = try container.decodeIfPresent(Int.self, forKey: .maxFileMB)
         mailVectorWindow = try container.decodeIfPresent(String.self, forKey: .mailVectorWindow)
         iCloudEvicted = try container.decodeIfPresent(String.self, forKey: .iCloudEvicted)
-        describeImagesWithLLM = try container.decodeIfPresent(Bool.self, forKey: .describeImagesWithLLM)
         nightlyBudget = try container.decodeIfPresent(Int.self, forKey: .nightlyBudget)
         dbPath = try container.decodeIfPresent(String.self, forKey: .dbPath)
         effort = try container.decodeIfPresent(String.self, forKey: .effort)
@@ -1304,7 +1296,6 @@ public struct IndexSettingsUpdate: Content, Equatable {
         try container.encodeIfPresent(maxFileMB, forKey: .maxFileMB)
         try container.encodeIfPresent(mailVectorWindow, forKey: .mailVectorWindow)
         try container.encodeIfPresent(iCloudEvicted, forKey: .iCloudEvicted)
-        try container.encodeIfPresent(describeImagesWithLLM, forKey: .describeImagesWithLLM)
         try container.encodeIfPresent(nightlyBudget, forKey: .nightlyBudget)
         try container.encodeIfPresent(dbPath, forKey: .dbPath)
         try container.encodeIfPresent(effort, forKey: .effort)
@@ -1406,9 +1397,6 @@ extension UpdateSettingsRequest {
         if let iCloudEvicted = update.iCloudEvicted {
             index.iCloudEvicted = iCloudEvicted
         }
-        if let describeImagesWithLLM = update.describeImagesWithLLM {
-            index.describeImagesWithLLM = describeImagesWithLLM
-        }
         if let nightlyBudget = update.nightlyBudget {
             index.nightlyBudget = nightlyBudget
         }
@@ -1437,5 +1425,49 @@ extension UpdateSettingsRequest {
         if let mailboxDeny = update.mailboxDeny {
             index.mailboxDeny = mailboxDeny
         }
+    }
+}
+
+/// Embedding engine status response for `GET /embeddings/status`.
+public struct EmbeddingsStatusResponse: Content, Equatable {
+    /// Active embedding backend (`"local"`, `"provider"`, or `"none"`).
+    public let backend: String
+    /// Supervisor status (`"idle"`, `"downloading_binary"`, `"downloading_model"`, `"starting"`, `"ready"`, or `"error"`).
+    public let status: String
+    /// Human-readable active stage message.
+    public let stage: String?
+    /// Configured GGUF model file name.
+    public let model: String
+    /// Embedding vector dimensionality (768 for EmbeddingGemma 2).
+    public let dimensions: Int
+    /// Hardware acceleration type (`"Apple Silicon Metal GPU"`).
+    public let acceleration: String
+    /// Socket path or host endpoint.
+    public let endpoint: String
+    /// Whether the supervisor process is currently alive.
+    public let isRunning: Bool
+    /// Last error encountered during provisioning or launch.
+    public let error: String?
+
+    public init(
+        backend: String,
+        status: String,
+        stage: String? = nil,
+        model: String,
+        dimensions: Int = 768,
+        acceleration: String = "Apple Silicon Metal GPU",
+        endpoint: String,
+        isRunning: Bool,
+        error: String? = nil
+    ) {
+        self.backend = backend
+        self.status = status
+        self.stage = stage
+        self.model = model
+        self.dimensions = dimensions
+        self.acceleration = acceleration
+        self.endpoint = endpoint
+        self.isRunning = isRunning
+        self.error = error
     }
 }

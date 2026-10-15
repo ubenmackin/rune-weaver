@@ -517,6 +517,7 @@ public actor MessagesIndexer {
         /// - Returns: Counts plus the new watermark.
         /// - Throws: ``MessagesIndexError`` on a missing permission or snapshot failure.
         public func indexNewMessages(limit: Int? = nil) async throws -> MessagesIndexResult {
+            await ensureDimensionMatch()
             let directory = try snapshotDatabase()
             defer { try? FileManager.default.removeItem(at: directory) }
             let snapshotPath = directory.appendingPathComponent("chat.db").path
@@ -550,6 +551,7 @@ public actor MessagesIndexer {
         /// - Throws: ``MessagesIndexError`` on a missing permission or snapshot
         ///   failure; cancellation propagates with finished batches already committed.
         public func indexAllNewMessages(reporter: ToolProgressReporter = ToolContext.noProgress) async throws -> MessagesIndexResult {
+            await ensureDimensionMatch()
             let directory = try snapshotDatabase()
             defer { try? FileManager.default.removeItem(at: directory) }
             let snapshotPath = directory.appendingPathComponent("chat.db").path
@@ -603,6 +605,18 @@ public actor MessagesIndexer {
             )
         }
 
+        /// Verifies that any existing vector embeddings match the active embedder dimension,
+        /// purging mismatched chunks and resetting state if the dimension changed.
+        private func ensureDimensionMatch() async {
+            guard let embedder, let dim = await embedder.dimension else { return }
+            _ = try? await store.ensureEmbeddingDimensionMatch(
+                activeModelID: embedder.modelID,
+                activeDimension: dim,
+                mailCheckpointPath: MailIndexCheckpointStore.defaultPath,
+                messagesStatePath: MessagesIndexer.defaultStatePath
+            )
+        }
+
         /// Indexes one ROWID-ordered batch from an already-open snapshot.
         ///
         /// The caller owns snapshot lifetime and watermark persistence, so the
@@ -636,7 +650,7 @@ public actor MessagesIndexer {
                 // one item instead of draining the whole batch bound.
                 try Task.checkCancellation()
                 let attachments = try MessagesDatabaseIO.attachments(handle: handle, messageID: row.rowID)
-                let payload = makePayload(from: row, attachments: attachments, names: names)
+                let payload = await makePayload(from: row, attachments: attachments, names: names)
                 if !payload.combinedText.isEmpty {
                     prepared.append(PreparedMessage(payload: payload))
                 }
@@ -646,7 +660,12 @@ public actor MessagesIndexer {
             var embeddings: [[Float]] = []
             if let embedder, !prepared.isEmpty {
                 do {
-                    let texts = prepared.map(\.payload.combinedText)
+                    let texts = prepared.map { item in
+                        EmbeddingGemmaPrompts.document(
+                            title: item.payload.document.displayName,
+                            text: item.payload.combinedText
+                        )
+                    }
                     embeddings = try await embedder.embed(texts)
                 } catch let cancel as CancellationError {
                     throw cancel
@@ -792,9 +811,9 @@ extension MessagesIndexer {
         from row: MessagesDatabaseRow,
         attachments: [MessagesAttachmentRow],
         names: [String: String]
-    ) -> MessagesPayload {
+    ) async -> MessagesPayload {
         let resolved = Self.resolveText(for: row)
-        let attachmentResults = attachmentResults(for: attachments)
+        let attachmentResults = await attachmentResults(for: attachments)
         let attachmentNames = attachmentResults.map(\.name)
 
         var parts: [String] = []
@@ -851,7 +870,7 @@ extension MessagesIndexer {
     /// - Parameter attachments: Attachments joined to the message.
     /// - Returns: Display name plus extracted text per attachment (text nil when
     ///   the file is missing, oversized, or carries no extractable text).
-    func attachmentResults(for attachments: [MessagesAttachmentRow]) -> [(name: String, text: String?)] {
+    func attachmentResults(for attachments: [MessagesAttachmentRow]) async -> [(name: String, text: String?)] {
         var results: [(name: String, text: String?)] = []
         for attachment in attachments {
             let name = Self.attachmentName(for: attachment)
@@ -868,17 +887,9 @@ extension MessagesIndexer {
                 results.append((name: name, text: nil))
                 continue
             }
-            let data: Data
-            do {
-                data = try Data(contentsOf: URL(fileURLWithPath: expanded), options: [.mappedIfSafe])
-            } catch {
-                RuneWeaverLog.stores.debug("MessagesIndexer: failed to read attachment at \(expanded): \(error.localizedDescription)")
-                results.append((name: name, text: nil))
-                continue
-            }
-            let extraction = extractor.extract(
-                data: data,
-                fileName: (expanded as NSString).lastPathComponent,
+            let fileURL = URL(fileURLWithPath: expanded)
+            let extraction = await extractor.extract(
+                fileURL: fileURL,
                 contentType: attachment.mimeType
             )
             results.append((name: name, text: NormalizedText.value(extraction.text)))

@@ -96,13 +96,9 @@ extension MemoryEngine {
         // `perTier * 4` cannot overflow.
         let cap = perTier * 4
         let hits = Array(Self.dedupe(sorted).prefix(cap))
-        let context = Self.automaticRecallContext(for: hits, budgets: clampedBudgets)
-        let injectedChars = context?.count ?? 0
-        // Diagnostics report the injected set so this path logs the same
-        // `hits/ids/scores` as `recallMessageWithDiagnostics`; a nil block
-        // reports zero hits for silent-nil parity.
-        let injected: [MemoryResult] = context == nil ? [] : Self.injectedRecallHits(from: hits, budgets: clampedBudgets)
-        let diagnostics = Self.recallDiagnostics(for: injected, injectedChars: injectedChars, skippedDocIndex: skipped)
+        let packed = Self.packRecallHits(from: hits, budgets: clampedBudgets)
+        let injected: [MemoryResult] = packed.contextText == nil ? [] : packed.injectedHits
+        let diagnostics = Self.recallDiagnostics(for: injected, injectedChars: packed.injectedChars, skippedDocIndex: skipped)
         return (hits, diagnostics)
     }
 
@@ -422,7 +418,7 @@ extension MemoryEngine {
         }
         func keywordScore(for chunk: IndexedChunk) -> Double {
             guard let rank = keywordRanks[chunk.id] else { return 0 }
-            return rrfScore(rank: rank)
+            return (docIndexRRFK + 1.0) / (docIndexRRFK + Double(rank))
         }
         var scoredVectors: [(chunk: IndexedChunk, cosine: Double)] = []
         if let queryEmbedding, !queryEmbedding.isEmpty {

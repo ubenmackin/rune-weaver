@@ -121,6 +121,14 @@ public actor MailIndexer {
         guard indexConfig.enabled, indexConfig.mail else {
             return MailIndexRunReport(skippedReason: "Mail indexing is disabled in [index].")
         }
+        if let embedder, let dim = await embedder.dimension {
+            _ = try? await store.ensureEmbeddingDimensionMatch(
+                activeModelID: embedder.modelID,
+                activeDimension: dim,
+                mailCheckpointPath: MailIndexCheckpointStore.defaultPath,
+                messagesStatePath: MessagesIndexer.defaultStatePath
+            )
+        }
         let runDate = now()
         let window = MailVectorWindow(token: indexConfig.mailVectorWindow)
         let attachmentCap = max(1, indexConfig.maxFileMB) * 1_048_576
@@ -1078,15 +1086,31 @@ extension MailIndexer {
         var metadata = ["account": context.account.name]
         var degraded = bodyExtraction.status != .extracted
 
-        var staging = AttachmentStaging(chunks: chunks, metadata: metadata, outcome: outcome, degraded: degraded)
-        try await collectAttachmentChunks(message: message, context: context, staging: &staging)
+        let eligible = context.window.includes(date: message.date, now: context.runDate)
+        var staging = AttachmentStaging(
+            chunks: chunks,
+            precomputedVectors: [:],
+            metadata: metadata,
+            outcome: outcome,
+            degraded: degraded
+        )
+        try await collectAttachmentChunks(
+            message: message,
+            context: context,
+            eligible: eligible,
+            staging: &staging
+        )
         chunks = staging.chunks
         metadata = staging.metadata
         outcome = staging.outcome
         degraded = staging.degraded
 
-        let eligible = context.window.includes(date: message.date, now: context.runDate)
-        let embeddings = try await embeddings(for: chunks, eligible: eligible)
+        let embeddings = try await embeddings(
+            for: chunks,
+            title: message.subject,
+            eligible: eligible,
+            precomputed: staging.precomputedVectors
+        )
         let document = IndexedDocument(
             source: .mail,
             externalID: externalID,
@@ -1116,6 +1140,8 @@ extension MailIndexer {
     private struct AttachmentStaging {
         /// Body plus attachment chunks.
         var chunks: [DocumentChunk]
+        /// Precomputed vectors for multimodal attachments (e.g., visual image vectors).
+        var precomputedVectors: [Int: [Float]]
         /// Document metadata to annotate.
         var metadata: [String: String]
         /// Counts for staged, oversize, and vision parts.
@@ -1128,11 +1154,13 @@ extension MailIndexer {
     /// - Parameters:
     ///   - message: Message whose attachments are processed.
     ///   - context: Per-mailbox indexing context.
+    ///   - eligible: Whether the message falls inside the vector window.
     ///   - staging: Chunks, metadata, outcome, and degraded flag updated in place.
     /// - Throws: Cancellation.
     private func collectAttachmentChunks(
         message: MailIndexMessage,
         context: MailboxContext,
+        eligible: Bool,
         staging: inout AttachmentStaging
     ) async throws {
         for (index, info) in message.attachments.enumerated() {
@@ -1177,21 +1205,36 @@ extension MailIndexer {
                 continue
             }
             defer { discardStaged(at: staged.directory) }
-            let stagedBytes: Data
-            do {
-                stagedBytes = try Data(contentsOf: staged.file)
-            } catch {
-                RuneWeaverLog.stores.debug(
-                    "MailIndexer: failed reading back staged file at \(staged.file.path): \(error.localizedDescription); falling back to raw bytes"
-                )
-                stagedBytes = attachmentData.data
-            }
-            let extraction = extractor.extract(
-                data: stagedBytes,
-                fileName: staged.file.lastPathComponent,
-                contentType: NormalizedText.value(info.contentType) ?? attachmentData.contentType
+
+            let contentType = NormalizedText.value(info.contentType) ?? attachmentData.contentType
+            let extraction = await extractor.extract(
+                fileURL: staged.file,
+                contentType: contentType
             )
             staging.outcome.staged += 1
+
+            // Multimodal image path: if format is image, attempt visual embedding before discarding staged file
+            if extraction.format == .image, eligible, let embedder {
+                let dim = await embedder.dimension
+                if let visual = try? await FilesIndexer.embedImageVisualVector(
+                    fileURL: staged.file,
+                    fileName: filename,
+                    expectedDimension: dim,
+                    embedImage: { try await embedder.embedImage(at: staged.file) }
+                ), let vector = visual.first {
+                    let chunkIndex = staging.chunks.count
+                    let chunkText = extraction.chunks.first?.text ?? filename
+                    let chunk = DocumentChunk(
+                        index: chunkIndex,
+                        text: chunkText,
+                        estimatedTokens: max(1, chunkText.count / 4)
+                    )
+                    staging.chunks.append(chunk)
+                    staging.precomputedVectors[chunkIndex] = vector
+                    continue
+                }
+            }
+
             // An empty text layer (scanned or password-protected PDF) yields
             // metadata only, so the original bytes are flagged for the vision path.
             if extraction.status == .metadataOnly || extraction.status == .failed || extraction.status == .unsupported {
@@ -1219,33 +1262,54 @@ extension MailIndexer {
     /// remainder keep an empty embedding so they stay fully keyword-searchable.
     /// - Parameters:
     ///   - chunks: Chunks to embed.
+    ///   - title: Subject or title of the mail message for task prompt steering.
     ///   - eligible: Whether the message falls inside the vector window.
+    ///   - precomputed: Precomputed multimodal vectors by chunk index.
     /// - Returns: One vector per chunk, empty for keyword-only chunks.
-    private func embeddings(for chunks: [DocumentChunk], eligible: Bool) async throws -> [[Float]] {
+    private func embeddings(
+        for chunks: [DocumentChunk],
+        title: String? = nil,
+        eligible: Bool,
+        precomputed: [Int: [Float]] = [:]
+    ) async throws -> [[Float]] {
         guard !chunks.isEmpty else { return [] }
         guard eligible, let embedder else {
-            return Array(repeating: [], count: chunks.count)
+            var result: [[Float]] = Array(repeating: [], count: chunks.count)
+            for (idx, vec) in precomputed where idx < chunks.count {
+                result[idx] = vec
+            }
+            return result
         }
         try Task.checkCancellation()
-        do {
-            let texts = FilesVectorPolicy.cappedEmbeddingTexts(
-                chunks.map(\.text),
-                cap: indexConfig.maxVectorChunksPerDocument
-            )
-            let vectors = try await embedder.embed(texts)
-            guard vectors.count == texts.count else {
-                return Array(repeating: [], count: chunks.count)
-            }
-            var expanded: [[Float]] = Array(repeating: [], count: chunks.count)
-            for position in vectors.indices {
-                expanded[position] = vectors[position].isEmpty ? [] : vectors[position]
-            }
-            return expanded
-        } catch let cancel as CancellationError {
-            throw cancel
-        } catch {
-            return Array(repeating: [], count: chunks.count)
+        var expanded: [[Float]] = Array(repeating: [], count: chunks.count)
+        for (idx, vec) in precomputed where idx < chunks.count {
+            expanded[idx] = vec
         }
+
+        let maxChunks = indexConfig.maxVectorChunksPerDocument
+        var indicesToEmbed: [Int] = []
+        var textsToEmbed: [String] = []
+
+        for index in 0 ..< min(chunks.count, maxChunks) where expanded[index].isEmpty {
+            indicesToEmbed.append(index)
+            textsToEmbed.append(EmbeddingGemmaPrompts.document(title: title, text: chunks[index].text))
+        }
+
+        if !textsToEmbed.isEmpty {
+            do {
+                let vectors = try await embedder.embed(textsToEmbed)
+                if vectors.count == textsToEmbed.count {
+                    for (pos, chunkIndex) in indicesToEmbed.enumerated() {
+                        expanded[chunkIndex] = vectors[pos].isEmpty ? [] : vectors[pos]
+                    }
+                }
+            } catch let cancel as CancellationError {
+                throw cancel
+            } catch {
+                RuneWeaverLog.stores.info("MailIndexer: embedding failed for message: \(error.localizedDescription)")
+            }
+        }
+        return expanded
     }
 
     /// Writes attachment bytes into Seatbelt-confined temp.

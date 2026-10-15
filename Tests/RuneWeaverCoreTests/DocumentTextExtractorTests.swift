@@ -77,6 +77,86 @@ struct DocumentTextExtractorTests {
     }
 
     @Test
+    func `Secrets and credentials fail closed as unsupported`() {
+        let secretFiles = [
+            ".env", ".env.local", "id_rsa", "id_ed25519", "cert.pem", "auth.key",
+            "server.crt", "keystore.p12", "credentials.json", "secret.token"
+        ]
+        for name in secretFiles {
+            let result = extractor.extract(data: Data("secret-content".utf8), fileName: name)
+            #expect(result.status == .unsupported, "Expected \(name) to fail closed as unsupported")
+            #expect(result.format == .unsupported)
+        }
+    }
+
+    @Test
+    func `Archives and executables fail closed as unsupported`() {
+        let unsafeFiles = [
+            "data.zip", "bundle.tar.gz", "archive.tgz", "archive.7z", "backup.rar",
+            "setup.exe", "installer.dmg", "package.pkg", "binary.bin"
+        ]
+        for name in unsafeFiles {
+            let result = extractor.extract(data: Data("archive-content".utf8), fileName: name)
+            #expect(result.status == .unsupported, "Expected \(name) to fail closed as unsupported")
+            #expect(result.format == .unsupported)
+        }
+    }
+
+    @Test
+    func `Developer source code and config files classify as plainText`() {
+        let devFiles = [
+            "main.rs", "App.tsx", "index.ts", "script.py", "Component.vue",
+            "schema.sql", "config.toml", "settings.yaml", "manifest.xml", "build.zig",
+            "Makefile", "Dockerfile"
+        ]
+        for name in devFiles {
+            let result = extractor.extract(data: Data("let x = 1;".utf8), fileName: name)
+            #expect(result.format == .plainText, "Expected \(name) to be plainText")
+            #expect(result.status == .extracted)
+            #expect(result.text.contains("let x = 1;"))
+        }
+    }
+
+    @Test
+    func `Rich Text Format (.rtf) classifies as rtf and extracts text`() {
+        let rtfData = Data(#"{\rtf1\ansi\deff0 {\fonttbl {\f0 Courier;}}\f0\fs24 Hello RTF world!}"#.utf8)
+        let result = extractor.extract(data: rtfData, fileName: "document.rtf")
+        #expect(result.format == .rtf)
+        #expect(result.status == .extracted)
+        #expect(result.text.contains("Hello RTF world!"))
+    }
+
+    @Test
+    func `UTType image formats classify as image`() {
+        let imageFiles = ["icon.gif", "graphic.bmp", "vector.svg", "photo.webp"]
+        for name in imageFiles {
+            let format = DocumentTextExtractor.detectFormat(fileName: name)
+            #expect(format == .image, "Expected \(name) to classify as .image")
+        }
+    }
+
+    @Test
+    func `Audio honest reasons report accurately for in-memory and on-disk paths`() async throws {
+        // In-memory data path honestly states speech transcription requires on-disk file URL
+        let dataResult = extractor.extract(data: Data("audio-bytes".utf8), fileName: "memo.m4a")
+        #expect(dataResult.format == .audio)
+        #expect(dataResult.status == .metadataOnly)
+        #expect(dataResult.reason == "Audio/video media: stored metadata-only; speech transcription requires on-disk file URL.")
+
+        // On-disk file URL path where speech recognizer finds no speech honestly reports attempt
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("empty-audio.m4a")
+        try "silent-bytes".write(to: tempURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let fileResult = await MediaTextExtractor.withAudioTranscription({ _ in "" }) {
+            await extractor.extract(fileURL: tempURL)
+        }
+        #expect(fileResult.format == .audio)
+        #expect(fileResult.status == .metadataOnly)
+        #expect(fileResult.reason == "Audio/video media: stored metadata-only; on-device speech transcription detected no speech.")
+    }
+
+    @Test
     func `Oversized document reports partial before parsing`() {
         let small = DocumentTextExtractor(maxFileBytes: 8)
         let result = small.extract(data: Data("0123456789".utf8), fileName: "big.txt")

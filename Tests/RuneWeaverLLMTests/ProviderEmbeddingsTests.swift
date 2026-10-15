@@ -151,11 +151,13 @@ struct ProviderEmbeddingsTests {
             return
         }
 
-        let apple = EmbeddingsBackendFactory.makeBackend(memoryEmbeddingBackend: "apple", router: router)
-        guard let apple, apple is AppleNLEmbeddingsBackend else {
-            Issue.record("Expected an AppleNLEmbeddingsBackend for 'apple'")
+        let local = EmbeddingsBackendFactory.makeBackend(memoryEmbeddingBackend: "local", router: router)
+        guard let local, local is LlamaCppEmbeddingsBackend else {
+            Issue.record("Expected a LlamaCppEmbeddingsBackend for 'local'")
             return
         }
+
+        #expect(EmbeddingsBackendFactory.makeBackend(memoryEmbeddingBackend: "apple", router: router) == nil)
     }
 
     @Test

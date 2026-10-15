@@ -1038,20 +1038,21 @@ extension MemoryEngine {
     ) async throws -> UserFact {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         if let embedder {
-            if let vector = try await embedder.embedQuery(trimmed) {
-                do {
+            let steeredFact = EmbeddingGemmaPrompts.document(title: "fact", text: trimmed)
+            do {
+                if let vector = try await embedder.embed([steeredFact]).first, !vector.isEmpty {
                     return try await storeSemantic(
                         fact: trimmed,
                         embedding: vector,
                         metadata: ["source": source],
                         source: source
                     )
-                } catch let error as CancellationError {
-                    throw error
-                } catch {
-                    RuneWeaverLog.memory.info("MemoryEngine: Semantic store failed, falling back to keyword storage: \(error)")
-                    // Fall through to keyword-only storage below.
                 }
+            } catch let error as CancellationError {
+                throw error
+            } catch {
+                RuneWeaverLog.memory.info("MemoryEngine: Semantic store failed, falling back to keyword storage: \(error)")
+                // Fall through to keyword-only storage below.
             }
         }
         return try await storeProfileFact(content: trimmed, source: source)

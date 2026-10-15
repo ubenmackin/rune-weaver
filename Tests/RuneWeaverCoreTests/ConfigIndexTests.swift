@@ -17,7 +17,6 @@ struct ConfigIndexTests {
         #expect(config.maxFileMB == 20)
         #expect(config.mailVectorWindow == "2y")
         #expect(config.iCloudEvicted == "skip")
-        #expect(config.describeImagesWithLLM == false)
         #expect(config.nightlyBudget == 0)
         #expect(config.dbPath == "~/.runeweaver/index.db")
         #expect(config.mailboxDeny == ["Trash", "Junk", "Spam", "Deleted*"])
@@ -92,7 +91,6 @@ struct ConfigIndexTests {
         max_file_mb = 50
         mail_vector_window = "all"
         icloud_evicted = "download"
-        describe_images_with_llm = true
         nightly_budget = 250
         db_path = "~/.runeweaver/index/custom.db"
         """
@@ -107,7 +105,6 @@ struct ConfigIndexTests {
         #expect(config.index.maxFileMB == 50)
         #expect(config.index.mailVectorWindow == "all")
         #expect(config.index.iCloudEvicted == "download")
-        #expect(config.index.describeImagesWithLLM == true)
         #expect(config.index.nightlyBudget == 250)
         #expect(config.index.dbPath == "~/.runeweaver/index/custom.db")
         try config.validate()
@@ -126,7 +123,6 @@ struct ConfigIndexTests {
             maxFileMB: 64,
             mailVectorWindow: "1y",
             iCloudEvicted: "download",
-            describeImagesWithLLM: true,
             nightlyBudget: 500,
             dbPath: "~/.runeweaver/index.db"
         )
@@ -160,7 +156,6 @@ struct ConfigIndexTests {
             maxFileMB: 20,
             mailVectorWindow: "2y",
             iCloudEvicted: "skip",
-            describeImagesWithLLM: false,
             nightlyBudget: 0,
             dbPath: "~/.runeweaver/index.db",
             effort: "balanced",
@@ -193,7 +188,7 @@ struct ConfigIndexTests {
         for key in [
             "enabled", "files", "mail", "messages", "calendars", "reminders",
             "roots", "exclude", "max_file_mb", "mail_vector_window",
-            "icloud_evicted", "describe_images_with_llm", "nightly_budget",
+            "icloud_evicted", "nightly_budget",
             "db_path", "effort", "workers", "thermal_backoff",
             "pause_on_battery", "max_vector_chunks_per_document",
             "mailbox_deny"
@@ -395,7 +390,6 @@ struct ConfigIndexTests {
             maxFileMB: 20,
             mailVectorWindow: "2y",
             iCloudEvicted: "skip",
-            describeImagesWithLLM: false,
             nightlyBudget: 0,
             dbPath: "~/.runeweaver/index.db",
             effort: "custom",
@@ -467,7 +461,6 @@ struct ConfigIndexTests {
             maxFileMB: 20,
             mailVectorWindow: "2y",
             iCloudEvicted: "skip",
-            describeImagesWithLLM: false,
             nightlyBudget: 0,
             dbPath: "~/.runeweaver/index.db",
             effort: "balanced",

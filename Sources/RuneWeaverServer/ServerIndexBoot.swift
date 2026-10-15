@@ -52,7 +52,6 @@ public enum ServerIndexBoot {
     ///   - runs: Durable run audit trail the status probe reads; receives the start plus completion rows.
     ///   - hub: Live sockets receiving the run start plus completion broadcasts.
     ///   - embedder: Embeddings backend shared with recall, or nil for keyword-only.
-    ///   - visionLLM: Active provider backing image description, or nil to skip vision.
     ///   - makeEmbeddingsBackend: Per-slot backend factory for the files pool, or nil to share `embedder`.
     /// - Returns: Store plus coordinator, or nil when `[index] enabled` is false.
     public static func makeComponents(
@@ -60,7 +59,6 @@ public enum ServerIndexBoot {
         runs: RunLogStore,
         hub: WSHub,
         embedder: (any EmbeddingsBackend)?,
-        visionLLM: (any LLMProvider)?,
         makeEmbeddingsBackend: (@Sendable () -> (any EmbeddingsBackend)?)? = nil
     ) -> ServerIndexComponents? {
         guard config.index.enabled else { return nil }
@@ -95,23 +93,7 @@ public enum ServerIndexBoot {
             reminderStore: liveStore,
             embedder: embedder
         )
-        var stages: [any IndexSourceStage] = [filesStage, mailStage, messagesStage, calendarsStage, remindersStage]
-        if indexConfig.describeImagesWithLLM, let visionLLM {
-            // The store exposes no pending-image listing, so boot wires an empty
-            // backlog: the stage stays toggle-gated and reports an honest empty
-            // pass until explicit backlog plumbing supplies candidates. An LLM-only
-            // settings save refreshes `servingLLM` without rebuilding these stages,
-            // so this adapter stays on the boot provider until the next index enable
-            // or `db_path` rebuild; the empty backlog keeps the window harmless
-            // because the stage never reaches `describeImage`.
-            stages.append(IndexClosureStage.vision(
-                config: indexConfig,
-                store: store,
-                provider: LLMVisionDescribeAdapter(llm: visionLLM),
-                pendingDocuments: { [] },
-                imageData: { _ in nil }
-            ))
-        }
+        let stages: [any IndexSourceStage] = [filesStage, mailStage, messagesStage, calendarsStage, remindersStage]
         let coordinator = IndexCoordinator(
             config: indexConfig,
             stages: stages,
@@ -119,55 +101,5 @@ public enum ServerIndexBoot {
             reporter: ServerIndexRunReporter(runs: runs, hub: hub)
         )
         return ServerIndexComponents(store: store, coordinator: coordinator, docIndexDBPath: dbPath)
-    }
-}
-
-/// Adapts the active chat provider to the vision description seam.
-///
-/// The seam lives in core beside the indexer so no module boundary is crossed:
-/// the adapter only forwards `modelInfo` and the bounded image URL the indexer
-/// already prepared, collecting one chat turn into description text. A text-only
-/// provider never reaches the network because the indexer applies the shared
-/// vision gate before calling.
-private struct LLMVisionDescribeAdapter: VisionDescribeProvider {
-    /// Active provider answering description requests.
-    private let llm: any LLMProvider
-
-    /// Creates an adapter over the active provider.
-    fileprivate init(llm: any LLMProvider) {
-        self.llm = llm
-    }
-
-    /// Metadata for the active model.
-    var modelInfo: ModelInfo {
-        llm.modelInfo
-    }
-
-    /// Describes one bounded image via a single chat turn.
-    /// - Parameters:
-    ///   - imageDataURL: Bounded `data:image/jpeg;base64,...` content.
-    ///   - prompt: Instruction describing the desired output.
-    /// - Returns: Description text, or nil when the provider cannot answer.
-    func describeImage(_ imageDataURL: String, prompt: String) async -> String? {
-        guard llm.modelInfo.supportsVision else { return nil }
-        guard !Task.isCancelled else { return nil }
-        let trimmedURL = imageDataURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedURL.isEmpty else { return nil }
-        let messages = [Message(role: .user, content: prompt + "\n" + trimmedURL)]
-        var collected = ""
-        for await chunk in llm.chat(messages: messages, tools: []) {
-            if Task.isCancelled {
-                return nil
-            }
-            if chunk.isError {
-                break
-            }
-            collected += chunk.delta
-            if chunk.isFinished {
-                break
-            }
-        }
-        let text = collected.trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? nil : text
     }
 }

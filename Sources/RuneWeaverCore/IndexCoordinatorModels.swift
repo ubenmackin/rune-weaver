@@ -40,11 +40,9 @@ public enum IndexSourceKind: String, Sendable, Hashable, CaseIterable {
     case calendars
     /// Reminder rows.
     case reminders
-    /// Opt-in LLM descriptions for bodyless documents.
-    case vision
 
     /// Canonical order sources run in, so every pass is deterministic.
-    public static let runOrder: [IndexSourceKind] = [.files, .mail, .messages, .calendars, .reminders, .vision]
+    public static let runOrder: [IndexSourceKind] = [.files, .mail, .messages, .calendars, .reminders]
 }
 
 extension IndexSourceKind {
@@ -68,8 +66,6 @@ extension IndexSourceKind {
             return policy.calendars
         case .reminders:
             return policy.reminders
-        case .vision:
-            return policy.describeImagesWithLLM
         }
     }
 }
