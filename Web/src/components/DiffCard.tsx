@@ -1,15 +1,4 @@
 // Rune Weaver Dashboard — In-chat DiffCard for files.write tool actions.
-// Renders the unified diff, hydrates the card's stored outcome from the durable
-// review ledger (batched by the rendered surface when one is provided, with a
-// self-contained per-card read as the standalone fallback), and resolves staged
-// or live edits inline with live WebSocket reconciliation. Staged cards accept
-// or discard; live cards accept plus
-// decline, where an existing-file review reverts to its rollback copy and a
-// new-file review discards the created file. A single status pill is the
-// card's one status indicator, and only the newest card per (path, envelope
-// kind) owns the review controls so an older card never races a newer write's
-// ledger row. The diff body collapses behind a header chevron so chat can start
-// write cards compact while run details keep full diffs.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -27,11 +16,9 @@ import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import { ChevronDownIcon, ChevronRightIcon } from "./icons";
 import UnifiedDiffView from "./UnifiedDiffView";
 
-// Client-side bound for inline review mutations: HTTP 200 is the accepted /
-// discarded / reverted truth, so a hung engine walk must surface a retryable
-// timeout instead of leaving the card in a perpetual loading state. WebSocket
-// file_accepted / file_discarded / file_superseded / live_resolved frames stay
-// passive reconcilers only.
+// Client-side bound for inline review mutations: HTTP 200 is the accepted / discarded / reverted
+// truth, so a hung engine walk must surface a retryable timeout instead of leaving the card in a
+// perpetual loading state.
 export const DIFF_CARD_ACTION_TIMEOUT_MS = 10_000;
 
 // Timeout copy doubles as the error text so the banner reads identically
@@ -71,12 +58,7 @@ interface DiffCardProps {
   // Whether the diff body starts expanded. Chat threads the chat-settings
   // default here; run details pass nothing so their diffs stay expanded.
   defaultExpanded?: boolean;
-  // Batched ledger posture hydrated by the rendered surface in one request per
-  // card-set change. `undefined` means no surface provided a batch, so the card
-  // falls back to its own single-path read; `null` means a batch is in flight
-  // or failed, which keeps the pending UI and skips the fallback; maps are read
-  // by envelope kind and path. Defaults to undefined so standalone cards keep
-  // their self-contained behavior.
+  // Batched ledger posture hydrated by the rendered surface in one request per card-set change.
   fileReviewStates?: FileReviewStates | null;
 }
 
@@ -124,22 +106,16 @@ function parseWriteReviewTarget(
   return { kind, path: payload.path };
 }
 
-// Envelope kind plus live path for the review ledger, or null when the result
-// has no reviewable envelope. Surfaces use it to collect the write-card paths
-// they render for one batched hydration request, sharing the card's own
-// staged/live gate so a batch can never request a path the card would not read
-// or skip one it would.
+// Envelope kind plus live path for the review ledger, or null when the result has no reviewable
+// envelope.
 export function writeReviewTarget(
   result: ToolResult | null | undefined,
 ): { kind: "staged" | "live"; path: string } | null {
   return parseWriteReviewTarget(result);
 }
 
-// Ownership key for the newest-card rule: two cards share one review exactly
-// when their live path and envelope kind match. A NUL separator cannot appear
-// in a POSIX path, so a crafted filename can never collapse two distinct keys
-// into one. It shares `parseWriteReviewTarget` with `writeReviewTarget` above,
-// so a list owner's key can never drift from the card's own staged/live gate.
+// Ownership key for the newest-card rule: two cards share one review exactly when their live path
+// and envelope kind match.
 export function writeReviewKey(
   result: ToolResult | null | undefined,
 ): string | null {
@@ -148,9 +124,6 @@ export function writeReviewKey(
 }
 
 // Maps the envelope kind plus hydrated resolution to the single status pill.
-// null resolution (hydration still in flight) folds into pending so the round
-// trip never hides an actionable card; `unknown` means the ledger has no row,
-// which reads differently for a staged card than for a live one.
 function reviewStatusPill(
   status: FilesWritePayload["status"],
   resolution: FileReviewState | null,
@@ -204,13 +177,8 @@ export default function DiffCard({
 
   const payload = useMemo(() => parseFilesWritePayload(result), [result.content]);
 
-  // Hydrate the stored outcome once per card so a reload shows Accepted,
-  // Discarded, or another terminal state instead of a fresh actionable card.
-  // Only staged and live envelopes have ledger rows; a failed status lookup is
-  // deliberately silent because the ledger is best-effort hydration and a
-  // transient error must leave the actionable card intact. A surface that
-  // batches the read for its whole card set passes the result down instead, so
-  // this single-path fallback runs only when no batch was provided at all.
+  // Hydrate the stored outcome once per card so a reload shows Accepted, Discarded, or another
+  // terminal state instead of a fresh actionable card.
   useEffect(() => {
     if (!payload) return;
     if (fileReviewStates !== undefined) return;
@@ -237,10 +205,7 @@ export default function DiffCard({
     };
   }, [payload, fileReviewStates]);
 
-  // Adopt the surface's batched posture for this card's own ledger row. First
-  // write wins, so a click or WebSocket frame that already settled the card is
-  // never downgraded by a late batch; a null batch (in flight or failed) and a
-  // path the batch omitted both leave the pending UI alone.
+  // Adopt the surface's batched posture for this card's own ledger row.
   useEffect(() => {
     if (!payload || !fileReviewStates) return;
     const kind = envelopeKind(payload.status);
@@ -254,12 +219,7 @@ export default function DiffCard({
     setResolution((prev) => (prev === null ? mapped : prev));
   }, [fileReviewStates, payload]);
 
-  // Synchronize with external actions via WebSocket. Each file_* frame names
-  // one ledger row's terminal state, so only the card kind whose ledger that
-  // frame reports may consume it: staged resolutions arrive as file_accepted,
-  // file_discarded, and file_superseded, while live resolutions arrive as
-  // live_resolved. A mixed-kind transcript (a live card and a staged card for
-  // one path) therefore keeps each card's review posture independent.
+  // Synchronize with external actions via WebSocket.
   useSharedWebSocket((frame) => {
     if (!payload) return;
     if (frame.type === "file_accepted" && payload.status === "staged") {
@@ -276,10 +236,9 @@ export default function DiffCard({
         setResolution("discarded");
       }
     } else if (frame.type === "file_superseded") {
-      // A superseding live write resolves the staged ledger row inside the
-      // write tool rather than a route, so the mounted staged card must settle
-      // to the terminal pill without a reload; a live card for the same path
-      // tracks a different review and keeps its own posture.
+      // A superseding live write resolves the staged ledger row inside the write tool rather than a
+      // route, so the mounted staged card must settle to the terminal pill without a reload; a live
+      // card for the same path tracks a different review and keeps its own posture.
       if (payload.status !== "staged") return;
       const supersededPath = frame.path;
       const supersededState = frame.state;
@@ -296,11 +255,9 @@ export default function DiffCard({
     } else if (frame.type === "live_resolved" && payload.status === "live") {
       const resolvedPath = frame.path;
       const resolvedState = frame.state;
-      // Only live cards consume the live-ledger terminal event: a staged card
-      // for the same path tracks a different review, so adopting a live
-      // outcome would contradict what its own ledger row reads on reload.
-      // Exact path match plus a closed state set, so a drifted frame can never
-      // pin an unrelated card or a resolution the pill cannot render.
+      // Only live cards consume the live-ledger terminal event: a staged card for the same path
+      // tracks a different review, so adopting a live outcome would contradict what its own ledger
+      // row reads on reload.
       if (
         resolvedPath &&
         resolvedPath === payload.path &&
@@ -429,10 +386,8 @@ export default function DiffCard({
   const handleLiveDecline = async () => {
     if (!payload || loading) return;
     const targetPath = payload.path;
-    // The envelope's rollback posture names the outcome this decline produces:
-    // an existing-file review restores its copy, a new-file review deletes the
-    // created file. Reading it once here keeps the pending label, the HTTP 200
-    // resolution, and the server's own branch in agreement.
+    // The envelope's rollback posture names the outcome this decline produces: an existing-file
+    // review restores its copy, a new-file review deletes the created file.
     const hasRollbackCopy = Boolean(payload.backupPath);
     const declineAction = hasRollbackCopy ? "revert" : "discard";
     const controller = new AbortController();
@@ -538,10 +493,8 @@ export default function DiffCard({
             </div>
           </div>
         ) : payload.status === "live" && reviewPending && ownsFileReview ? (
-          // A live decline only reads as Revert when the envelope proves a
-          // rollback copy exists; a new-file review has nothing to restore, so
-          // the same handler is labeled Discard instead. The discard tone
-          // styles both because neither action is the green keep path.
+          // A live decline only reads as Revert when the envelope proves a rollback copy exists; a
+          // new-file review has nothing to restore, so the same handler is labeled Discard instead.
           <div className="diff-card-actions">
             <div className="diff-btn-group">
               <button

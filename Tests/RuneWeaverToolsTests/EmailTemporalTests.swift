@@ -1,13 +1,4 @@
 // Rune Weaver Tools Tests — Temporal window coverage for email.search.
-//
-// Purpose: pin the shared since/until contract for email.search so dated
-// windows, fail-closed rejection, IMAP date shaping, and Swift post-filtering
-// stay identical across gateways and scripts.
-// Scope: args decoding with blank-as-omitted, parse-before-credentials,
-// IMAP payload dates, Python criteria shapes, Swift post-filtering with
-// unparseable handling, and fan-out merge newest-first under the existing cap.
-// Architectural role: guards the email side of the single TemporalFilter choke
-// point without re-implementing date math.
 
 import Foundation
 @testable import RuneWeaverCore

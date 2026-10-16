@@ -47,11 +47,8 @@ public struct WSDecisionMessage: Codable, Sendable, Equatable {
         duration ?? .thisTime
     }
 
-    /// Whether to grant tool-wide trust matching any target, defaulting to
-    /// `false` so an omitted flag never silently widens a grant. Clients may
-    /// omit the key, so the narrow default lives here instead of at each call
-    /// site where it could drift.
-    /// - Returns: Resolved widen flag.
+    /// Whether to grant tool-wide trust matching any target, defaulting to `false` so an omitted
+    /// flag never silently widens a grant.
     public var resolvedWiden: Bool {
         widen ?? false
     }
@@ -123,11 +120,7 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
     /// Completion time as Unix seconds since 1970 on the server clock. Optional so
     /// older dashboards that omit it still decode; clients fall back to receipt time.
     public var completedAt: Double?
-    /// Late steering still queued server-side at turn completion. Lets dashboards
-    /// keep exactly the newest retained bubbles for the next turn and release the
-    /// consumed ones answered here; nil on older engines where clients clear as
-    /// answered. Counted at done construction so the terminal frame and the queue
-    /// agree without an extra round trip.
+    /// Late steering still queued server-side at turn completion.
     public var retainedSteerCount: Int?
     /// Content-free recall counts plus source names plus skip flag for the chip.
     /// Nil on frames from engines predating the chip, which render no chip.
@@ -216,12 +209,9 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         case recallDiagnostics
     }
 
-    /// Decodes a terminal frame, defaulting a missing parked flag for back-compat
-    /// while rejecting negative token counters so a drifted payload fails here
-    /// exactly where the live progress frame drops it, instead of reconciling to
-    /// a negative total. Integer decoding already rejects fractional counters; the
-    /// explicit guards below reject negatives to match `WSTurnTokensFrame`.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes a terminal frame, defaulting a missing parked flag for back-compat while rejecting
+    /// negative token counters so a drifted payload fails here exactly where the live progress frame
+    /// drops it, instead of reconciling to a negative total.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "done"
@@ -388,10 +378,8 @@ public struct WSToolStartFrame: Codable, Sendable, Equatable {
         case roundIndex
     }
 
-    /// Decodes a tool start frame, defaulting a missing round for back-compat
-    /// while rejecting blank identity so a drifted payload fails here exactly
-    /// where the live progress frame drops it.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes a tool start frame, defaulting a missing round for back-compat while rejecting blank
+    /// identity so a drifted payload fails here exactly where the live progress frame drops it.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "tool_start"
@@ -465,10 +453,9 @@ public struct WSToolEndFrame: Codable, Sendable, Equatable {
         case roundIndex
     }
 
-    /// Decodes a tool end frame, defaulting a missing round for back-compat
-    /// while rejecting blank identity so a drifted payload fails here exactly
-    /// where the live progress frame drops it.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes a tool end frame, defaulting a missing round for back-compat while rejecting blank
+    /// identity so a drifted payload fails here exactly where the live progress frame drops it. -
+    /// Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "tool_end"
@@ -514,12 +501,9 @@ public struct WSCancelMessage: Codable, Sendable, Equatable {
     }
 }
 
-/// Per-tool cancellation message sent by a WebSocket client.
-///
-/// Distinct from ``WSCancelMessage``: this aborts exactly one named tool call
-/// while its owning turn keeps running, so the model can re-scope and continue.
-/// The session identifier scopes the request so one session can never cancel
-/// another's in-flight call, even if call identifiers collide.
+/// Per-tool cancellation message sent by a WebSocket client. The session identifier scopes the
+/// request so one session can never cancel another's in-flight call, even if call identifiers
+/// collide.
 public struct WSToolCancelMessage: Codable, Sendable, Equatable {
     /// Always `"tool_cancel"`.
     public let type: String
@@ -553,16 +537,6 @@ public struct WSToolCancelMessage: Codable, Sendable, Equatable {
 }
 
 /// Non-terminal acknowledgement that a per-tool cancel found nothing to stop.
-///
-/// A successful per-tool cancel needs no acknowledgement: the bus injects the
-/// call's failure result and the normal `tool_end` frame proves the stop landed.
-/// A miss has no such terminal frame, so the engine reports it here rather than
-/// through ``WSErrorFrame``. A session-tagged `error` frame is a terminal turn
-/// failure to the dashboard, so routing a per-tool miss through it tears down a
-/// turn that is still running; this frame only clears the row's optimistic
-/// cancel mark and may carry a non-terminal note. Older clients drop the unknown
-/// `type`, which leaves their mark until the next turn frame instead of failing
-/// a turn that never stopped.
 public struct WSToolCancelMissFrame: Codable, Sendable, Equatable {
     /// Always `"tool_cancel_miss"`.
     public let type: String
@@ -593,13 +567,9 @@ public struct WSToolCancelMissFrame: Codable, Sendable, Equatable {
         case message
     }
 
-    /// Decodes a miss frame, defaulting a missing discriminator for back-compat.
-    /// The call identity stays required so a partial payload throws here instead
-    /// of clearing an unrelated row in the dashboard. A blank identifier is
-    /// preserved verbatim so the blank-rejection miss the shared cancel path
-    /// emits still decodes; the dashboard and client guards drop blank identity
-    /// before clearing any row, so preserving it here never clears unrelated state.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes a miss frame, defaulting a missing discriminator for back-compat. The call identity
+    /// stays required so a partial payload throws here instead of clearing an unrelated row in the
+    /// dashboard.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "tool_cancel_miss"
@@ -697,11 +667,8 @@ public struct WSErrorFrame: Codable, Sendable, Equatable {
     }
 }
 
-/// Session-tagged liveness heartbeat proving a turn is still processing while
-/// prompt evaluation produces no deltas to stream. Older dashboards decode an
-/// unknown `type` as ignorable, so they drop this without rendering while newer
-/// clients re-arm their inactivity timer on it. Lives here so REST and WebSocket
-/// turns share one encoding; the TypeScript `WSTurnAliveFrame` mirrors this shape.
+/// Session-tagged liveness heartbeat proving a turn is still processing while prompt evaluation
+/// produces no deltas to stream.
 public struct WSTurnAliveFrame: Codable, Sendable, Equatable {
     /// Always `"turn_alive"`.
     public let type: String
@@ -753,14 +720,9 @@ public enum WSTurnAlive: Sendable {
     }
 }
 
-/// Per-round token usage progress for the in-flight turn. Lets dashboards show a
-/// running turn total and a live session estimate without waiting for the terminal
-/// done frame, which stays authoritative for reconciliation. Session-tagged like
-/// the heartbeat so multiplexed views only apply their own turn and older clients
-/// drop the unknown `type` without rendering. Counters stay required so a partial
-/// payload never renders as zeroed progress. Lives here so REST and WebSocket
-/// turns share one encoding; the TypeScript `WSTurnTokensFrame` mirrors this shape
-/// with the same required integer counters and drops frames missing any of them.
+/// Per-round token usage progress for the in-flight turn. Lets dashboards show a running turn total
+/// and a live session estimate without waiting for the terminal done frame, which stays
+/// authoritative for reconciliation.
 public struct WSTurnTokensFrame: Codable, Sendable, Equatable {
     /// Always `"turn_tokens"`.
     public let type: String
@@ -805,13 +767,9 @@ public struct WSTurnTokensFrame: Codable, Sendable, Equatable {
         case contextTokens
     }
 
-    /// Decodes a token progress frame, defaulting a missing discriminator for back-compat
-    /// while requiring every counter so a partial payload throws and the caller drops
-    /// it instead of rendering zeroed progress.
-    /// Counters must stay non-negative integers so a drifted fractional or negative
-    /// payload fails here exactly where the dashboard guard drops it, instead of
-    /// decoding in tests while vanishing live.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes a token progress frame, defaulting a missing discriminator for back-compat while
+    /// requiring every counter so a partial payload throws and the caller drops it instead of
+    /// rendering zeroed progress.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "turn_tokens"
@@ -839,14 +797,7 @@ public struct WSTurnTokensFrame: Codable, Sendable, Equatable {
     }
 }
 
-/// Generic indeterminate progress reported by any tool while it runs. Session-tagged
-/// like the heartbeat and token frames so multiplexed views only apply their own
-/// turn, and older clients drop the unknown `type` without rendering. Identity must
-/// be a non-blank string and counters non-negative integers so a partial or drifted
-/// payload fails decoding here exactly where the dashboard guard drops it, rather
-/// than rendering zeroed or mis-attributed progress. The display path stays
-/// relative-only so a frame can never disclose an absolute filesystem location.
-/// Lives here so REST and WebSocket turns share one encoding.
+/// Generic indeterminate progress reported by any tool while it runs.
 public struct WSToolProgressFrame: Codable, Sendable, Equatable {
     /// Always `"tool_progress"`.
     public let type: String
@@ -859,9 +810,6 @@ public struct WSToolProgressFrame: Codable, Sendable, Equatable {
     /// Human-readable status line.
     public var message: String
     /// Advisory broad-scope warning for ``message``, when the emitter has one.
-    /// A dedicated field keeps the scope line intact for patterns that contain
-    /// the separator the old folded form relied on; optional so older frames
-    /// without a warning decode unchanged.
     public var warning: String?
     /// Items examined so far. Required so a missing key drops the frame instead
     /// of rendering a zeroed count.
@@ -899,9 +847,7 @@ public struct WSToolProgressFrame: Codable, Sendable, Equatable {
     }
 
     /// Creates a frame from a tool-emitted value, preserving its sanitized path.
-    /// - Parameters:
-    ///   - progress: Emitted progress, already attributed by the bus.
-    ///   - sessionID: Owning session for multiplexed views.
+    /// progress: Emitted progress, already attributed by the bus.
     public init(_ progress: ToolProgress, sessionID: UUID? = nil) {
         self.init(
             sessionID: sessionID,
@@ -940,24 +886,16 @@ public struct WSToolProgressFrame: Codable, Sendable, Equatable {
         case current
     }
 
-    /// Decodes a progress frame, defaulting a missing discriminator for back-compat
-    /// while requiring identity and every numeric field so a partial payload throws
-    /// and the caller drops it instead of rendering mis-attributed progress. Identity
-    /// must be a non-blank string, and every numeric field, `elapsedMs` included,
-    /// must stay a non-negative integer, so a blank identity or a drifted fractional
-    /// or negative payload fails here exactly where the dashboard guard drops it. The
-    /// optional display fields (`warning`, `current`) degrade to absent on any drifted
-    /// shape instead of costing an otherwise complete progress line.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes a progress frame, defaulting a missing discriminator for back-compat while requiring
+    /// identity and every numeric field so a partial payload throws and the caller drops it instead
+    /// of rendering mis-attributed progress.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "tool_progress"
         self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
-        // Identity is the attribution anchor: a frame with a blank call or tool
-        // cannot be matched to a live row, so it fails here exactly where the
-        // dashboard guard rejects blank identity instead of rendering
-        // mis-attributed progress. Padding around a real value is not blank and
-        // survives untouched on both sides.
+        // Identity is the attribution anchor: a frame with a blank call or tool cannot be matched
+        // to a live row, so it fails here exactly where the dashboard guard rejects blank identity
+        // instead of rendering mis-attributed progress.
         let callID = try container.decode(String.self, forKey: .callID)
         guard !callID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw DecodingError.dataCorruptedError(forKey: .callID, in: container, debugDescription: "callID must be non-blank")
@@ -969,11 +907,9 @@ public struct WSToolProgressFrame: Codable, Sendable, Equatable {
         }
         self.toolName = toolName
         self.message = try container.decode(String.self, forKey: .message)
-        // Optional like the relative tail: a frame without a warning is valid,
-        // and a blank, drifted, or non-string warning degrades to absent instead
-        // of dropping an otherwise complete progress line. The lenient decode
-        // matches the dashboard, which trims a string warning and treats every
-        // other shape as absent rather than rejecting the frame.
+        // Optional like the relative tail: a frame without a warning is valid, and a blank,
+        // drifted, or non-string warning degrades to absent instead of dropping an otherwise
+        // complete progress line.
         let rawWarning = try? container.decode(String.self, forKey: .warning)
         self.warning = ToolProgress.normalizedWarning(rawWarning)
         let scanned = try container.decode(Int.self, forKey: .scanned)
@@ -991,41 +927,19 @@ public struct WSToolProgressFrame: Codable, Sendable, Equatable {
             throw DecodingError.dataCorruptedError(forKey: .elapsedMs, in: container, debugDescription: "elapsedMs must be non-negative")
         }
         self.elapsedMs = elapsedMs
-        // Sanitize on the way in as well as out so a peer cannot smuggle an
-        // absolute path into view state through a handcrafted frame. A lenient
-        // decode keeps the frame when `current` arrives as a non-string shape,
-        // matching the dashboard, which degrades such a tail to absent rather
-        // than dropping the otherwise complete line.
+        // Sanitize on the way in as well as out so a peer cannot smuggle an absolute path into view
+        // state through a handcrafted frame.
         self.current = ToolProgress.relativeCurrent(try? container.decode(String.self, forKey: .current))
     }
 }
 
 // MARK: - Goal pursuit and proactive outreach frames
 
-// Outbound live kinds beyond chat turns: `goal_updated` carries the current
-// goal snapshot so dashboards refresh one row without refetching the list,
-// while `proactive_message` carries an owner-visible nudge (kind, title,
-// headline) that the engine volunteers outside any turn. Both ride the shared
-// broadcast fan-out so ordering and best-effort delivery stay single-sourced
-// with every other hub event; older clients drop the unknown `type` without
-// rendering. The snapshot is the single-sourced goal row: the REST layer
-// aliases it instead of redeclaring the fields, so live frames and list
-// reloads reconcile to the same row. Kept in core so REST and worker turns
-// share one encoding.
-//
-// Canonical wire spellings per identifier family: goal identifiers encode as
-// `goalId`, origin sessions as `originSessionId`, sessions as `sessionID`,
-// and runs as `runID`. Every alias-tolerant decode routes through the shared
-// `BrowserNavigateWire.decodeFirst` helper so the three historical spellings
-// (`goalId`/`goalID`/`goal_id`, and likewise for sessions and origins) converge
-// without triplicating the fallback chain per type; encode uses only the
-// canonical key.
+// Outbound live kinds beyond chat turns: `goal_updated` carries the current goal snapshot so
+// dashboards refresh one row without refetching the list, while `proactive_message` carries an
+// owner-visible nudge (kind, title, headline) that the engine volunteers outside any turn.
 
 /// Finished-versus-planned tally for one goal.
-///
-/// Done counts only `done` steps so a blocked or skipped step never inflates
-/// the numerator; the denominator is the whole plan so an empty plan reads as
-/// 0/0 instead of a misleading 100%.
 public struct WSGoalProgress: Codable, Sendable, Equatable {
     /// Steps finished.
     public let done: Int
@@ -1041,10 +955,6 @@ public struct WSGoalProgress: Codable, Sendable, Equatable {
 }
 
 /// Wire snapshot of one goal for `goal_updated` frames.
-///
-/// Mirrors the REST goal shape so live pushes and list reloads agree on keys.
-/// Dates travel as server instants; the origin session stays optional because
-/// headless and imported goals may have no owning conversation.
 public struct WSGoalSnapshot: Codable, Sendable, Equatable {
     /// Stable goal identifier.
     public let id: UUID
@@ -1124,11 +1034,8 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
         case isPlanning
     }
 
-    /// Decodes tolerantly across the origin-session spellings so payloads
-    /// written with either of the two historical keys land on one field instead
-    /// of failing the push. Routes through the shared alias helper so the
-    /// snapshot and the REST row converge without duplicating the fallback.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes tolerantly across the origin-session spellings so payloads written with either of
+    /// the two historical keys land on one field instead of failing the push.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(UUID.self, forKey: .id)
@@ -1168,12 +1075,6 @@ public struct WSGoalSnapshot: Codable, Sendable, Equatable {
 }
 
 /// Goal change broadcast sent by the engine over WebSocket.
-///
-/// Emitted on create, plan-ready, step progress, status flips, and advancement
-/// turns so dashboards patch one row instead of refetching the list. The goal
-/// rides whole (not as an identifier) because the push is the refresh: a row
-/// that only carried an identifier would force the extra fetch the push was
-/// meant to avoid.
 public struct WSGoalUpdatedFrame: Codable, Sendable, Equatable {
     /// Always `"goal_updated"`.
     public let type: String
@@ -1203,13 +1104,9 @@ public struct WSGoalUpdatedFrame: Codable, Sendable, Equatable {
     }
 }
 
-/// Owner-visible nudge volunteered by the engine outside any turn.
-///
-/// Kind names the trigger family (for example a due goal or a parked wait)
-/// while title plus headline carry the one-line card the dashboard renders;
-/// the optional session and goal links let the card deep-link without a second
-/// lookup. Blank kind, title, or headline fail decoding here exactly where the
-/// dashboard guard drops them, instead of rendering an empty card.
+/// Owner-visible nudge volunteered by the engine outside any turn. Blank kind, title, or headline
+/// fail decoding here exactly where the dashboard guard drops them, instead of rendering an empty
+/// card.
 public struct WSProactiveMessageFrame: Codable, Sendable, Equatable {
     /// Always `"proactive_message"`.
     public let type: String
@@ -1234,11 +1131,8 @@ public struct WSProactiveMessageFrame: Codable, Sendable, Equatable {
         self.goalID = goalID
     }
 
-    /// Coding keys for the proactive frame.
-    ///
-    /// Canonical spellings per identifier family: sessions encode as
-    /// `sessionID`, goals as `goalId`. The remaining cases stay decode-only
-    /// so historical payloads still land without forking the encoded shape.
+    /// Coding keys for the proactive frame. The remaining cases stay decode-only so historical
+    /// payloads still land without forking the encoded shape.
     enum CodingKeys: String, CodingKey {
         /// Frame discriminator.
         case type
@@ -1256,11 +1150,8 @@ public struct WSProactiveMessageFrame: Codable, Sendable, Equatable {
         case goalID
     }
 
-    /// Decodes a proactive frame, defaulting a missing discriminator while
-    /// rejecting blank card text so a drifted payload fails here exactly where
-    /// the dashboard guard drops it. Goal aliases converge through the shared
-    /// helper so the frame and the snapshot share one fallback.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes a proactive frame, defaulting a missing discriminator while rejecting blank card
+    /// text so a drifted payload fails here exactly where the dashboard guard drops it.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "proactive_message"
@@ -1303,11 +1194,5 @@ public struct WSProactiveMessageFrame: Codable, Sendable, Equatable {
 
 extension WSProactiveMessageFrame {
     /// Kind naming a proactive card that announces a freshly proposed idea.
-    ///
-    /// Ideas ride the existing `proactive_message` frame rather than a new
-    /// transport: emitting this kind lets the dashboard raise the goals
-    /// attention badge exactly as it does for a goal parked on owner input,
-    /// with the suggestion title and a one-line headline carried in the
-    /// existing `title` and `headline` fields.
     public static let ideaProposedKind = "idea_proposed"
 }

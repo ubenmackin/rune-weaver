@@ -1,3 +1,5 @@
+// Rune Weaver Core — Persisted coordinator index run state and watermark store.
+
 import Foundation
 
 // MARK: - Watermark state
@@ -11,11 +13,7 @@ public struct IndexRunState: Sendable, Codable, Equatable {
     /// Instant the nightly trigger last started a run.
     public var lastNightlyStart: Date?
 
-    /// Creates run state.
-    /// - Parameters:
-    ///   - indexAsOf: Last successful watermark.
-    ///   - lastCompletedAt: Last successful completion instant.
-    ///   - lastNightlyStart: Last nightly trigger instant.
+    /// Creates run state. indexAsOf: Last successful watermark.
     public init(indexAsOf: Date? = nil, lastCompletedAt: Date? = nil, lastNightlyStart: Date? = nil) {
         self.indexAsOf = indexAsOf
         self.lastCompletedAt = lastCompletedAt
@@ -24,9 +22,6 @@ public struct IndexRunState: Sendable, Codable, Equatable {
 }
 
 /// JSON-backed store for the coordinator watermark and trigger times.
-///
-/// The state is tiny and read on demand, so a JSON sidecar keeps the watermark
-/// independent of the document store schema and survives restarts.
 public actor IndexRunStateStore {
     /// Default state path, kept beside the other durable memory stores.
     public static let defaultPath = "~/.runeweaver/index/coordinator-state.json"

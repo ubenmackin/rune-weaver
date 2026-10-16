@@ -1,35 +1,13 @@
 // Rune Weaver Core — Formal policy invariant verifier.
-//
-// Statically proves safety invariants on a SecurityPolicy before it is
-// activated. Runs at engine boot and before any policy mutation.
-// Violations fall back to the safe factory posture — the engine never runs
-// with a broken policy.
-//
-// Two formal invariants are enforced over the network-plus-credentials scope,
-// plus a local-exemption safety check for declarative local-network grants:
-//   1. Credential Binding Confinement — no credential targets wildcards beyond
-//      a single leading `*.` subdomain edge, metadata hosts, loopback,
-//      link-local, or private ranges.
-//   2. Rule Shadow Prevention — broad allows cannot shadow specific denies.
-//   3. Local Exemption Safety — no blank, TOML-breaking, malformed, metadata,
-//      link-local, or embedded-translation entry can become an exemption;
-//      loopback, private, CGNAT, and ULA hosts remain allowed by design.
 
 import Foundation
 
-/// Deterministic formal validator proving security policy invariants.
-///
-/// Every method is `static` and side-effect-free: the verifier reads
-/// a `SecurityPolicy` and returns a list of human-readable violation
-/// descriptions. An empty list means all invariants hold.
+/// Deterministic formal validator proving security policy invariants. Every method is `static` and
+/// side-effect-free: the verifier reads a `SecurityPolicy` and returns a list of human-readable
+/// violation descriptions.
 public enum PolicyInvariantVerifier: Sendable {
-    /// Exact hosts that must never appear as credential binding targets.
-    ///
-    /// Cloud metadata endpoints, wildcard patterns, and special addresses
-    /// that would allow credential exfiltration if bound. Range-based
-    /// refusals (loopback, link-local, private, unique-local, mapped tails,
-    /// and IPv4-embedded translation prefixes) are decided by the shared
-    /// `SensitiveAddressRanges` table rather than enumerated here.
+    /// Exact hosts that must never appear as credential binding targets. Cloud metadata endpoints,
+    /// wildcard patterns, and special addresses that would allow credential exfiltration if bound.
     public static let forbiddenCredentialHosts: Set<String> = [
         "*",
         "169.254.169.254", // AWS/GCP metadata
@@ -41,10 +19,7 @@ public enum PolicyInvariantVerifier: Sendable {
     ]
 
     /// Runs all invariant checks and returns violation descriptions.
-    ///
     /// - Parameter policy: The security policy to verify.
-    /// - Returns: Empty array when all invariants hold, or human-readable
-    ///   violation descriptions for each failure.
     public static func verify(_ policy: SecurityPolicy) -> [String] {
         var violations: [String] = []
         violations.append(contentsOf: verifyCredentialConfinement(policy))
@@ -55,24 +30,9 @@ public enum PolicyInvariantVerifier: Sendable {
 
     // MARK: - Invariant 1: Credential Binding Confinement
 
-    /// Guarantees credentials can never be bound to wildcards (other than a
-    /// single leading `*.` edge, whose base is checked like an exact host),
-    /// loopback, link-local, private, or cloud metadata targets.
-    ///
-    /// Formally: ∀ c ∈ credentials, ∀ h ∈ allowedHosts(c):
-    ///   h ∉ WildcardShapes ∪ ForbiddenHosts and Base(h) ∉ Metadata ∪ Loopback
-    ///   ∪ LinkLocal ∪ PrivateRanges
-    ///
-    /// Hosts classify through the shared address parser and sensitive-range
-    /// table, so IPv6 loopback (`::1`), IPv4-mapped sensitive tails
-    /// (`::ffff:127.0.0.1`), IPv4-embedded translation spellings (NAT64
-    /// `64:ff9b::/96`, 6to4 `2002::/16`, and IPv4-compatible `::/96` forms
-    /// such as `64:ff9b::a9fe:a9fe`), link-local `fe80::/10`, unique-local
-    /// `fc00::/7`, and decimal/hex/octal/short IPv4 spellings fail like their
-    /// canonical twins instead of slipping past string prefixes. DNS names
-    /// stay allowed because the runtime SSRF guard vets their resolved
-    /// addresses; this invariant refuses only targets that are provably
-    /// non-public at storage time.
+    /// Guarantees credentials can never be bound to wildcards (other than a single leading `*.`
+    /// edge, whose base is checked like an exact host), loopback, link-local, private, or cloud
+    /// metadata targets.
     public static func verifyCredentialConfinement(_ policy: SecurityPolicy) -> [String] {
         var violations: [String] = []
 
@@ -80,12 +40,8 @@ public enum PolicyInvariantVerifier: Sendable {
             for host in binding.allowedHosts {
                 let lowered = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-                // A single leading `*.` is the only meaningful credential
-                // wildcard: it authorizes the base domain plus subdomains at
-                // runtime. The base re-enters the exact and range checks below
-                // so `*.localhost` or `*.169.254.169.254` cannot smuggle a
-                // forbidden suffix past confinement; every other star shape is
-                // refused outright.
+                // A single leading `*.` is the only meaningful credential wildcard: it authorizes
+                // the base domain plus subdomains at runtime.
                 let target: String
                 switch AllowedOriginPattern.classifyWildcard(lowered) {
                 case .none:
@@ -137,11 +93,8 @@ public enum PolicyInvariantVerifier: Sendable {
         return violations
     }
 
-    /// Human-readable category for a host the range table classified sensitive.
-    /// Wording only — the sensitive/clean verdict comes from the shared table.
-    /// A decoded IPv4-embedded spelling labels as the embedded address's
-    /// category, so the message names what the literal actually dials instead
-    /// of just echoing the translation prefix.
+    /// Human-readable category for a host the range table classified sensitive. Wording only — the
+    /// sensitive/clean verdict comes from the shared table.
     private static func sensitiveTargetLabel(_ host: String) -> String {
         if let embedded = SensitiveAddressRanges.embeddedIPv4Literal(host) {
             return sensitiveTargetLabel(embedded)
@@ -200,20 +153,8 @@ public enum PolicyInvariantVerifier: Sendable {
 
     // MARK: - Invariant 3: Local Exemption Safety
 
-    /// Guarantees every `[network].local_exemptions` entry is a well-formed,
-    /// TOML-safe grant that names no never-dialable target.
-    ///
-    /// Formally: ∀ e ∈ localExemptions, e ∉ Blank ∪ TOMLBreaking ∪
-    /// MalformedShapes, and Target(e) ∉ Metadata ∪ LinkLocal, where Target
-    /// strips a single leading `*.` or trailing `.*` edge because a wildcard
-    /// authorizes through the base or stem it names. Loopback, private RFC
-    /// 1918, shared/CGNAT, and unique-local addresses stay allowed by design:
-    /// an exemption exists precisely to reach a local service, while metadata
-    /// and link-local are never dialable through any spelling — including a
-    /// NAT64, 6to4, or IPv4-compatible literal that embeds one.
-    /// - Parameter policy: The security policy to verify.
-    /// - Returns: Empty array when every exemption is safe, or human-readable
-    ///   violation descriptions for each failing entry.
+    /// Guarantees every `[network].local_exemptions` entry is a well-formed, TOML-safe grant that
+    /// names no never-dialable target.
     public static func verifyLocalExemptions(_ policy: SecurityPolicy) -> [String] {
         var violations: [String] = []
 
@@ -270,10 +211,9 @@ public enum PolicyInvariantVerifier: Sendable {
                 )
                 continue
             }
-            // A decoded link-local or metadata address refuses even for an
-            // allowlisted name, exactly like its direct spelling, so a
-            // translation literal cannot smuggle a never-dialable target past
-            // the exemption gate.
+            // A decoded link-local or metadata address refuses even for an allowlisted name,
+            // exactly like its direct spelling, so a translation literal cannot smuggle a
+            // never-dialable target past the exemption gate.
             if let embedded = SensitiveAddressRanges.embeddedIPv4Literal(target),
                SensitiveAddressRanges.isMetadataHost(embedded) || SensitiveAddressRanges.isLinkLocalIPv4(embedded)
             {

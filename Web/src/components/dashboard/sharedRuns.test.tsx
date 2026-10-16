@@ -1,16 +1,4 @@
 // Rune Weaver Dashboard — Shared Recent Runs Fetcher Tests.
-//
-// Purpose: guard the single-flight cache that lets the Working Right Now stream
-// and the Recent Reports cards share one `GET /runs` instead of polling twice.
-//
-// Scope: unit coverage for request collapsing, TTL expiry, failure handling,
-// and per-caller slicing, plus widget-level checks that both cards render a
-// loading skeleton first and only show their empty copy after the fetch
-// settles.
-//
-// Architectural role: regression net for the dashboard's run-log read path —
-// the shared fetcher owns timing while each widget owns filtering, so these
-// tests pin the timing contract without duplicating filter logic.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";

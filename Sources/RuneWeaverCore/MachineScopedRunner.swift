@@ -1,11 +1,4 @@
 // Rune Weaver Core — Machine scoped persistent runner.
-//
-// Purpose: own the long-lived workspace container for repeated turns without
-// per-turn churn.
-// Scope: shared-shape create plus exec builders, ensure plus status plus stop
-// plus recycle lifecycle, and inspect parsing for the dashboard control.
-// Architectural role: single owner for machine scoped execution beside the
-// strict runner; every builder delegates to the shared runner.
 
 import CryptoKit
 import Foundation
@@ -26,11 +19,8 @@ public enum MachineScopedRunner: Sendable {
         StrictContainerRunner.defaultMemory
     }
 
-    /// Derives the expected label value for one workspace root.
-    /// - Parameters:
-    ///   - workspaceRoot: Workspace root mounted into the machine.
-    ///   - networkDenied: Whether the machine runs without DNS.
-    /// - Returns: Hex digest over the shared image plus the mount path plus the network flag.
+    /// Derives the expected label value for one workspace root. workspaceRoot:
+    /// Workspace root mounted into the machine.
     public static func expectedConfigValue(workspaceRoot: URL, networkDenied: Bool) -> String {
         let mount = workspaceRoot.standardizedFileURL.path
         let seed = StrictContainerRunner.defaultImage + "\n" + mount + "\n" + (networkDenied ? "denied" : "allowed")
@@ -39,17 +29,11 @@ public enum MachineScopedRunner: Sendable {
     }
 
     /// Builds `container create` arguments for the machine container.
-    /// - Parameters:
-    ///   - workspaceRoot: Workspace root mounted at the same guest path.
-    ///   - networkDenied: When true the container gets no DNS.
-    ///   - memory: Guest memory cap.
-    /// - Returns: Shared create shape plus the config label placed before the image.
+    /// workspaceRoot: Workspace root mounted at the same guest path.
     public static func createArguments(workspaceRoot: URL, networkDenied: Bool, memory: String = sharedMemoryCap) -> [String] {
         let mount = workspaceRoot.standardizedFileURL.path
-        // The guest workdir pins to the mounted workspace root so getcwd
-        // observes the workspace rather than `/`, matching the exec workdir
-        // that runs at the same mounted path. Strict keeps scratch `tmp`
-        // while machine keeps the root; neither tier mounts HOME.
+        // The guest workdir pins to the mounted workspace root so getcwd observes the workspace
+        // rather than `/`, matching the exec workdir that runs at the same mounted path.
         return StrictContainerRunner.containerCreateArguments(
             name: workspaceMachineName,
             hostPath: mount,
@@ -61,11 +45,8 @@ public enum MachineScopedRunner: Sendable {
         )
     }
 
-    /// Builds `container exec` arguments for the machine container.
-    /// - Parameters:
-    ///   - workdir: Working directory inside the guest.
-    ///   - command: Already resource-limited shell command.
-    /// - Returns: Exact argument sequence for the runtime.
+    /// Builds `container exec` arguments for the machine container. workdir:
+    /// Working directory inside the guest.
     public static func execArguments(workdir: String, command: String) -> [String] {
         StrictContainerRunner.containerExecArguments(name: workspaceMachineName, workdir: workdir, command: command)
     }
@@ -137,11 +118,8 @@ public enum MachineScopedRunner: Sendable {
         return try? JSONSerialization.jsonObject(with: data, options: [])
     }
 
-    /// Recursively collects the first string under one of the given keys.
-    /// - Parameters:
-    ///   - keys: Logical keys matched case-insensitively.
-    ///   - value: Decoded inspect array or object.
-    /// - Returns: First matching string, nil when absent.
+    /// Recursively collects the first string under one of the given keys. keys:
+    /// Logical keys matched case-insensitively.
     public static func firstString(forKeys keys: [String], in value: Any) -> String? {
         let wanted = Set(keys.map { $0.lowercased() })
         if let dict = value as? [String: Any] {
@@ -220,11 +198,8 @@ public enum MachineScopedRunner: Sendable {
         return cleaned.isEmpty ? nil : cleaned
     }
 
-    /// Whether a status string reports a live container.
-    ///
-    /// Single-sourced on the shared runner so list plus inspect agree.
-    /// - Parameter status: Raw status text or full inspect dump.
-    /// - Returns: True only for an affirmative live marker.
+    /// Whether a status string reports a live container. - Returns: True only for an affirmative
+    /// live marker.
     public static func isRunningStatus(_ status: String) -> Bool {
         StrictContainerRunner.isRunningStatus(status)
     }
@@ -270,34 +245,18 @@ public enum MachineScopedRunner: Sendable {
     }
 
     /// Reuses the shared runtime capability probe via the live client.
-    ///
-    /// Single-sourced on the injected client so the static and hermetic paths
-    /// cannot drift on required flags.
     public static func probeRuntime() throws {
         try MachineContainerClient.live.probe()
     }
 
-    /// Ensures the long-lived workspace container exists plus runs.
-    ///
-    /// Delegates to the live client so static and injected paths share one
-    /// ensure implementation differing only by runtime source.
-    /// - Parameters:
-    ///   - workspaceRoot: Workspace root mounted at the same guest path.
-    ///   - networkDenied: When true the container gets no DNS.
-    ///   - memory: Guest memory cap.
+    /// Ensures the long-lived workspace container exists plus runs. Delegates to the live client so
+    /// static and injected paths share one ensure implementation differing only by runtime source.
     public static func ensureMachine(workspaceRoot: URL, networkDenied: Bool, memory: String = sharedMemoryCap) async throws {
         try await MachineContainerClient.live.ensureMachine(workspaceRoot: workspaceRoot, networkDenied: networkDenied, memory: memory)
     }
 
-    /// Executes an already resource-limited command in the machine container.
-    ///
-    /// Delegates to the live client so static and injected paths share one
-    /// exec implementation.
-    /// - Parameters:
-    ///   - workdir: Working directory inside the guest.
-    ///   - command: Already resource-limited shell command.
-    ///   - timeoutSeconds: Wall-clock budget.
-    /// - Returns: Bounded result.
+    /// Executes an already resource-limited command in the machine container. - Returns: Bounded
+    /// result.
     public static func exec(
         workdir: String,
         command: String,
@@ -306,18 +265,14 @@ public enum MachineScopedRunner: Sendable {
         try await MachineContainerClient.live.exec(workdir: workdir, command: command, timeoutSeconds: timeoutSeconds)
     }
 
-    /// Reports machine state for the dashboard control.
-    /// Delegates to the live client so static and injected paths share one
-    /// status implementation.
-    /// - Returns: Four-member status; `configMatch` is nil without a network expectation.
+    /// Reports machine state for the dashboard control. Delegates to the live client so static and
+    /// injected paths share one status implementation.
     public static func machineStatus() async -> MachineStatus {
         await MachineContainerClient.live.machineStatus(workspaceRoot: WorkspaceStore.resolveRoot())
     }
 
-    /// Reports machine state against one workspace root.
-    /// Delegates to the live client so static and injected paths share one
-    /// status implementation.
-    /// - Returns: Four-member status; `configMatch` is nil without a network expectation.
+    /// Reports machine state against one workspace root. Delegates to the live client so static and
+    /// injected paths share one status implementation.
     public static func machineStatus(workspaceRoot: URL, networkDenied: Bool? = nil) async -> MachineStatus {
         await MachineContainerClient.live.machineStatus(workspaceRoot: workspaceRoot, networkDenied: networkDenied)
     }
@@ -334,10 +289,6 @@ public enum MachineScopedRunner: Sendable {
 }
 
 /// Injected machine client sharing builders with the live statics.
-///
-/// Production uses the statics on the live runtime, keeping long-lived reuse;
-/// hermetic tests inject `HermeticContainerRuntime` so `ensureMachine` stubs
-/// creation and teardown reaps without ever spawning.
 public struct MachineContainerClient: Sendable {
     private let runtime: any ContainerHostRuntime
 
@@ -445,10 +396,8 @@ public struct MachineContainerClient: Sendable {
         await stopAndRemove()
     }
 
-    /// Best-effort stop plus delete, never throwing.
-    ///
-    /// Runs even when the calling task is cancelled, so failure, cancellation,
-    /// or early return cannot orphan the workspace container.
+    /// Best-effort stop plus delete, never throwing. Runs even when the calling task is cancelled,
+    /// so failure, cancellation, or early return cannot orphan the workspace container.
     public func stopAndRemove(timeoutSeconds: TimeInterval = 5) async {
         do {
             _ = try await runtime.run(

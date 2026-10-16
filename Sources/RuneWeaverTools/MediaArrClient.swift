@@ -1,14 +1,4 @@
 // Rune Weaver Tools — Client for Sonarr & Radarr v3 REST API.
-//
-// Purpose: executes search, queue, status, and add flows against self-hosted
-// Sonarr/Radarr with bounded timeouts, byte caps, and manual redirect chains.
-// Scope: HTTP shaping plus response parsing only; tool gating, schemas, and
-// approval policy live with the tool layer. Architectural role: the single
-// execution path shared by the read and write tools so both dial identically.
-// Secrets resolve via `SecretsManager` (environment or Keychain) and never
-// enter logs or model output; every hop re-validates as absolute http(s) and
-// refuses metadata, link-local, unspecified, and credentialed targets so a LAN
-// base URL cannot launder an unsafe redirect.
 
 import Foundation
 import RuneWeaverCore
@@ -71,10 +61,9 @@ public struct MediaArrClient: Sendable {
             )
         }
 
-        // Fail closed before any dial: the configured base must be absolute
-        // http(s) without credentials, and never a metadata, link-local, or
-        // unspecified target in any obfuscated spelling. Loopback and private
-        // LAN ranges stay allowed so self-hosted instances keep working.
+        // Fail closed before any dial: the configured base must be absolute http(s) without
+        // credentials, and never a metadata, link-local, or unspecified target in any obfuscated
+        // spelling.
         try Self.validateBaseURL(config.url, service: args.service)
         guard let baseURL = URL(string: config.url) else {
             throw ToolExecutionError.invalidURL(
@@ -158,11 +147,6 @@ extension MediaArrClient {
     }
 
     /// Sends one request through the no-follow transport, resolving redirects manually.
-    /// Each hop is re-validated as absolute http(s) before dialing and the API key
-    /// is stripped on cross-host moves so a compromised instance cannot exfiltrate
-    /// it via 302; over-cap bodies fail closed before any JSON decoding. Hop
-    /// validation vets DNS-resolved addresses through the shared range helpers
-    /// so a redirect hostname cannot launder a link-local or unspecified dial.
     private func sendFollowingRedirects(request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         var current = request
         if current.timeoutInterval < 1 {
@@ -170,11 +154,9 @@ extension MediaArrClient {
             bounded.timeoutInterval = requestTimeoutSeconds
             current = bounded
         }
-        // Fail closed on the initial hop before any dial: a safe config cannot
-        // launder an unsafe first URL, and metadata/link-local/unspecified
-        // literals fail here even when the shared allowlist passes them.
-        // Resolved addresses vet through the shared helpers so a LAN hostname
-        // rebound to never-dialable space still fails before dialing.
+        // Fail closed on the initial hop before any dial: a safe config cannot launder an unsafe
+        // first URL, and metadata/link-local/unspecified literals fail here even when the shared
+        // allowlist passes them.
         if let initialURL = current.url {
             try await Self.validateMediaHopURLAsync(initialURL.absoluteString)
         }
@@ -199,11 +181,9 @@ extension MediaArrClient {
             guard let currentURL = current.url,
                   let next = HTTPRedirectFollower.redirectTarget(http: response, currentURL: currentURL)
             else {
-                // `redirectTarget` returns nil for both a missing Location and a
-                // present-but-unsafe one the resolver refused; distinguish here so
-                // an unsafe hop fails closed instead of reading as a plain error.
-                // The raw Location is redacted so embedded userinfo never reaches
-                // model output or logs.
+                // `redirectTarget` returns nil for both a missing Location and a present-but-unsafe
+                // one the resolver refused; distinguish here so an unsafe hop fails closed instead
+                // of reading as a plain error.
                 if let rawLocation = response.value(forHTTPHeaderField: "Location")?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                     !rawLocation.isEmpty
@@ -217,12 +197,9 @@ extension MediaArrClient {
                     body: "Redirect without a valid Location header (status \(response.statusCode))."
                 )
             }
-            // Each redirect target re-enters the same never-dialable check as the
-            // base URL so a LAN instance cannot bounce the key into metadata,
-            // link-local, or unspecified space; resolved addresses vet through
-            // the shared helpers so a hostname rebound to such space still
-            // fails. The redacted form keeps any embedded userinfo out of the
-            // thrown message.
+            // Each redirect target re-enters the same never-dialable check as the base URL so a LAN
+            // instance cannot bounce the key into metadata, link-local, or unspecified space;
+            // resolved addresses vet through the shared helpers so a hostname rebound to such space.
             do {
                 try await Self.validateMediaHopURLAsync(next.absoluteString)
             } catch {
@@ -263,10 +240,8 @@ extension MediaArrClient {
         return String(data: capped, encoding: .utf8) ?? ""
     }
 
-    /// Validates the configured base URL before any dial, without echoing it.
-    /// - Parameters:
-    ///   - raw: Configured base URL string.
-    ///   - service: Owning service for the field-name hint.
+    /// Validates the configured base URL before any dial, without echoing it. raw:
+    /// Configured base URL string.
     static func validateBaseURL(_ raw: String, service: MediaArrService) throws {
         do {
             try validateMediaHopURL(raw)
@@ -280,12 +255,6 @@ extension MediaArrClient {
     }
 
     /// Validates one media hop URL without dialing.
-    /// Literal-only stage: LAN bases legitimately use loopback and private
-    /// ranges, so the full API deny would break self-hosting; only the
-    /// never-dialable set fails here: non-http(s), credentialed authorities,
-    /// metadata hosts, link-local, and unspecified 0.0.0.0/8 in any obfuscated
-    /// spelling. Hostnames needing DNS vet through `validateMediaHopURLAsync`,
-    /// which reuses this stage plus the shared resolved-range helpers.
     static func validateMediaHopURL(_ raw: String) throws {
         guard WebURLSafety.isSafeUrl(raw) else {
             throw ToolExecutionError.invalidURL("Unsafe media URL: expected an absolute http(s) URL without credentials.")
@@ -305,15 +274,6 @@ extension MediaArrClient {
     }
 
     /// Validates one media hop URL including DNS-resolved vetting.
-    /// Literal checks run inline; a hostname that is not an IP literal must
-    /// prove every resolved address stays outside link-local and unspecified
-    /// space through the shared helpers. Loopback and private-LAN resolutions
-    /// stay allowed so self-hosted instances keep working — the exemption is
-    /// intentional and narrow: only the never-dialable set fails, cross-host
-    /// moves still strip the API key, and the verdict stays point-in-time (a
-    /// hostname can rebind between this check and the connection, so a
-    /// compromised LAN host remains bounded by the redirect budget rather
-    /// than fully pinned at dial time).
     static func validateMediaHopURLAsync(_ raw: String) async throws {
         try validateMediaHopURL(raw)
         guard let url = URL(string: raw), let host = url.host, !host.isEmpty else {
@@ -339,12 +299,6 @@ extension MediaArrClient {
     }
 
     /// Resolves a media hostname off the cooperative pool.
-    /// The system resolver blocks its thread with no kernel cancellation, so
-    /// the lookup hops to a utility queue while the caller suspends; hermetic
-    /// debug suites resolve through the effective canned proof instead of the
-    /// network so redirect vetting stays deterministic under test. A
-    /// task-scoped binding wins over the process-global hook, matching the
-    /// SSRF guard's resolution order.
     private static func resolveMediaHostAddresses(_ host: String) async -> [String] {
         #if DEBUG
             if let stub = ApiSSRFGuard.activeTestDNSResolver {
@@ -390,9 +344,6 @@ extension MediaArrClient {
     }
 
     /// Whether a host dials unspecified 0.0.0.0/8 in any resolver spelling.
-    /// Canonical octets collapse decimal, hex, octal, and short forms so `0`,
-    /// `0x0`, and `0.0.0.0` share one verdict; mapped IPv6 tails decode through
-    /// the same path.
     private static func isUnspecifiedIPv4(_ host: String) -> Bool {
         guard let octets = ApiSSRFGuard.canonicalIPv4Octets(host) else { return false }
         return octets.firstOctet == 0
@@ -716,12 +667,6 @@ extension MediaArrClient {
     }
 
     /// Validates an explicit root-folder override as an absolute POSIX path.
-    /// Trims surrounding whitespace, requires a leading slash, and rejects
-    /// empty values plus `.`/`..` path segments so a caller cannot escape the
-    /// library root. The segment check alone decides traversal so folder names
-    /// carrying `..` as a substring (for example `my..folder`) stay allowed.
-    /// Returns nil when no override was provided so callers fall through to
-    /// the server list.
     private func validatedRootFolderOverride(_ override: String?) throws -> String? {
         guard let override else { return nil }
         let trimmed = override.trimmingCharacters(in: .whitespacesAndNewlines)

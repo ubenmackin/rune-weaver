@@ -1,6 +1,4 @@
 // Rune Weaver LLM — Provider circuit breaker and rate-limit cooldown tracker.
-// Tracks consecutive provider outages and rate-limit signals (HTTP 429, 5xx, timeouts)
-// across turns to temporarily rest failing backends and route around them cleanly.
 
 import Foundation
 import RuneWeaverCore

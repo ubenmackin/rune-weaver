@@ -1,11 +1,4 @@
 // Rune Weaver Tests — Goal linkage migration for sessions and run history.
-//
-// Covers the additive goal_id migrations on the shared episodes database:
-// pre-migration tables gain the column on reopen, legacy rows survive with a
-// nil link, session linking round-trips through persistence, and goal-scoped
-// listing keeps working. The run-history half pins the exact fixture shape and
-// filter SQL both the session and run stores agree on, since they share one
-// SQLite file but migrate their own tables.
 
 import Foundation
 @testable import RuneWeaverCore

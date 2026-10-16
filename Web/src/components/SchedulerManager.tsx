@@ -1,5 +1,4 @@
 // Rune Weaver Dashboard — Scheduler manager for automated jobs with Wizard creation and embedded run history.
-// Supports exclusive Recurring Schedules or Email Event Watchers with full run inspection.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -462,10 +461,8 @@ export default function SchedulerManager() {
                         </span>
                       </span>
                     ) : (
-                      // Single-line cron badge: the visible text truncates with
-                      // ellipsis via CSS while title preserves the full schedule
-                      // for hover and assistive reading. Empty schedules fall
-                      // back to the "Cron" label so the badge never renders blank.
+                      // Single-line cron badge: the visible text truncates with ellipsis via CSS
+                      // while title preserves the full schedule for hover and assistive reading.
                       <span
                         className="trigger-badge cron font-mono"
                         title={job.schedule || "Cron"}

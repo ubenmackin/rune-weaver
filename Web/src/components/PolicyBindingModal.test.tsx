@@ -1,14 +1,4 @@
 // Rune Weaver Dashboard — Component tests for the binding wizard modal.
-//
-// Purpose: Pins the four-step key to hosts to scope to review flow that keeps
-// one key paired with hosts, methods, and path prefixes with per-step gating,
-// so the secret is sent only when host, method, and effective path all match.
-// Scope: Step progression, per-step Continue gating, review summary, probe,
-// coverage shortcut, and the onSave draft shape only; TOML persistence,
-// Keychain writes, and network allowlist updates stay with the owning pane.
-// Architectural role: Guards the visual editor over the declarative
-// credential-binding contract, so a wizard edit cannot persist unvalidated
-// text or a mismatched draft shape.
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

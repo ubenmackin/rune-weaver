@@ -1,8 +1,4 @@
 // Rune Weaver Dashboard — Component tests for honest pending indicators.
-// Covers approvals filtering by session, the session/run pending badges, the
-// no-ghost-chip narration rule, debug identifiers in the run detail modal, and
-// the run detail's surface-batched write-review hydration (one review-status
-// request per rendered card set, with each card reading its own entry).
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

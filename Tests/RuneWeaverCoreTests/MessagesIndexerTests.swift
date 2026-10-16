@@ -1,10 +1,4 @@
 // Rune Weaver Core Tests — Apple Messages indexer snapshot, decoding, watermark, and permissions.
-//
-// Exercises the Messages reader against isolated fixture databases that mimic
-// the `chat.db` shape: snapshot isolation, attributed-body decoding, incremental
-// ROWID watermarking across fresh indexer instances, tapback interpretation,
-// attachment text extraction, and the missing-permission open path. No test
-// touches the real `~/Library/Messages` store.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -52,10 +46,8 @@ private func openMessagesFixture(at path: String) throws -> OpaquePointer {
     #endif
 }
 
-/// Executes a multi-statement SQL string against a fixture.
-/// - Parameters:
-///   - handle: Open fixture handle.
-///   - sql: SQL to execute.
+/// Executes a multi-statement SQL string against a fixture. handle: Open fixture
+/// handle.
 private func execMessagesFixture(_ handle: OpaquePointer?, _ sql: String) throws {
     #if canImport(SQLite3)
         var message: UnsafeMutablePointer<CChar>?
@@ -100,11 +92,7 @@ private func createMessagesFixture(at path: String) throws {
     )
 }
 
-/// Binds optional text, mapping nil to NULL.
-/// - Parameters:
-///   - statement: Statement being built.
-///   - index: Bind index.
-///   - value: Text value.
+/// Binds optional text, mapping nil to NULL. statement: Statement being built.
 private func bindMessagesFixtureText(_ statement: OpaquePointer?, index: Int32, value: String?) {
     #if canImport(SQLite3)
         if let value {
@@ -117,17 +105,7 @@ private func bindMessagesFixtureText(_ statement: OpaquePointer?, index: Int32, 
     #endif
 }
 
-/// Inserts one message row.
-/// - Parameters:
-///   - handle: Open fixture handle.
-///   - rowID: Message ROWID.
-///   - guid: Message GUID.
-///   - text: Plain body text.
-///   - attributedBody: Serialized body bytes.
-///   - date: Mac-epoch tick.
-///   - isFromMe: Direction flag.
-///   - associatedType: Tapback code.
-///   - threadOriginator: Reply target GUID.
+/// Inserts one message row. handle: Open fixture handle.
 private func insertMessagesFixtureMessage(
     into handle: OpaquePointer?,
     rowID: Int64,
@@ -179,22 +157,12 @@ private func insertMessagesFixtureMessage(
     #endif
 }
 
-/// Links one message to the fixture chat.
-/// - Parameters:
-///   - handle: Open fixture handle.
-///   - chatID: Chat ROWID.
-///   - messageID: Message ROWID.
+/// Links one message to the fixture chat. handle: Open fixture handle.
 private func joinMessagesFixtureChat(into handle: OpaquePointer?, chatID: Int64, messageID: Int64) throws {
     try execMessagesFixture(handle, "INSERT INTO chat_message_join(chat_id, message_id) VALUES(\(chatID), \(messageID));")
 }
 
 /// Builds a legacy typedstream body carrying one string payload.
-///
-/// The layout mirrors the bytes Messages writes: class metadata followed by an
-/// object reference, a class reference, the `0x84` data-block indicator, the `+`
-/// string type tag, a length byte, and the UTF-8 payload.
-/// - Parameter text: Body text to embed.
-/// - Returns: Serialized body blob.
 private func typedStreamBody(_ text: String) -> Data {
     var data = Data()
     data.append(contentsOf: Array("streamtyped".utf8))

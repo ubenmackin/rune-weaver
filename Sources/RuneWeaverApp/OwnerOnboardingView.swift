@@ -1,27 +1,9 @@
 // Rune Weaver App — First-run owner-token onboarding sheet and Settings access section.
-//
-// Purpose: Lets the owner mint the single bearer token from the menu-bar app on
-// first run, without opening Terminal, while keeping the secret visible exactly
-// once and adopting it through a controlled restart.
-// Scope: Two SwiftUI surfaces sharing one once-only secret view — the first-run
-// sheet shown when boot finds no stored token, and the Settings access section
-// for later status checks plus rotation. Minting itself delegates to the menu
-// model, which routes through ServerAuth and ServerAuthTokenStore so randomness
-// plus Keychain/0600-file persistence stay single-sourced.
-// Architectural role: Keeps the menu-bar service loopback-usable before a token
-// exists, surfaces fingerprint-prefix-only status, and guarantees the raw secret
-// never reaches logs, URLs, or any store besides the auth persistence.
 
 import AppKit
 import SwiftUI
 
 /// First-run sheet shown when boot resolves no owner token.
-///
-/// Generation delegates to the menu model — which mints through `ServerAuth`
-/// rotation over `ServerAuthTokenStore`, reusing the shared CSPRNG plus
-/// Keychain/0600-file persistence rather than reimplementing either — so this
-/// view only presents the once-only value and gates the adopting restart behind
-/// an explicit saved-it acknowledgement.
 struct OwnerOnboardingView: View {
     /// Live menu-bar model owning the onboarding flag plus the once-only value.
     @Bindable var model: AppModel
@@ -54,10 +36,9 @@ struct OwnerOnboardingView: View {
                     isRestarting: model.isRestarting,
                     onCopy: { copyOnceToken(onceToken) },
                     onAcknowledge: {
-                        // Clearing plus restart live in the model so the secret
-                        // leaves memory in the same hop that adopts the stored
-                        // credential; the view only forwards the owner's word
-                        // that the copy is safe to drop.
+                        // Clearing plus restart live in the model so the secret leaves memory in
+                        // the same hop that adopts the stored credential; the view only forwards the
+                        // owner's word that the copy is safe to drop.
                         acknowledgedSaved = false
                         didCopy = false
                         model.acknowledgeGeneratedToken()
@@ -96,11 +77,8 @@ struct OwnerOnboardingView: View {
         .frame(minWidth: 420)
     }
 
-    /// Copies the once-only value to the clipboard without logging it.
-    ///
-    /// The pasteboard is the only copy outside the auth store; nothing here
-    /// writes the secret to disk or the console.
-    /// - Parameter token: Once-only value currently displayed.
+    /// Copies the once-only value to the clipboard without logging it. The pasteboard is the only
+    /// copy outside the auth store; nothing here writes the secret to disk or the console.
     private func copyOnceToken(_ token: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -109,12 +87,9 @@ struct OwnerOnboardingView: View {
     }
 }
 
-/// Settings access section for token status plus rotation without Terminal.
-///
-/// Status renders the non-secret fingerprint prefix and source label only, so
-/// support comparisons never need the credential itself. Generate and Rotate
-/// both route to the same `ServerAuthTokenStore`-backed mint in the menu model,
-/// keeping the stored-value precedence identical to the terminal flow.
+/// Settings access section for token status plus rotation without Terminal. Status renders the
+/// non-secret fingerprint prefix and source label only, so support comparisons never need the
+/// credential itself.
 struct OwnerTokenSettingsSection: View {
     /// Live menu-bar model owning fingerprint, source, and mint entry points.
     @Bindable var model: AppModel
@@ -225,10 +200,6 @@ struct OwnerTokenSettingsSection: View {
 }
 
 /// Once-only secret presentation shared by onboarding and Settings.
-///
-/// Shown in monospace with an explicit Copy action, a lose-means-rotate
-/// warning, and a saved-it gate before the adopting restart, so the secret's
-/// single display cannot drift into a persistent or logged copy.
 private struct OwnerOnceTokenView: View {
     /// Once-only secret held in memory by the menu model, never persisted here.
     let onceToken: String

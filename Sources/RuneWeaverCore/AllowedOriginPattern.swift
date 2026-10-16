@@ -1,11 +1,4 @@
 // Rune Weaver Core — Shared allowed-origin wildcard policy for validation and matching.
-//
-// Purpose: single source for host-pattern rules and the `[network].local_exemptions`
-// entry shape gate, so the SSRF matcher and the policy verifier cannot drift on
-// what a wildcard means. Scope: pure string predicates over lowercased patterns only;
-// URL parsing, IPv6 bracket handling, and origin-key comparison stay with their
-// callers. Architectural role: owned by `RuneWeaverCore` so both the policy verifier
-// and `RuneWeaverTools` resolve the same universal, glob, and single-edge decisions.
 
 import Foundation
 
@@ -20,30 +13,23 @@ public enum AllowedOriginPattern: Sendable {
         lowered == "*"
     }
 
-    /// Whether a lowercased pattern is a universal star-dot shape (`*.*`, `**`).
-    /// Star and dot characters alone can never name a host, so such shapes stay
-    /// denied even when a forged exemption set carries them.
-    /// - Parameter lowered: Lowercased, trimmed pattern.
-    /// - Returns: True when only `*`, `.`, and whitespace remain.
+    /// Whether a lowercased pattern is a universal star-dot shape (`*.*`, `**`). Star and dot
+    /// characters alone can never name a host, so such shapes stay denied even when a forged
+    /// exemption set carries them.
     public static func isUniversalWildcardShape(_ lowered: String) -> Bool {
         lowered.replacingOccurrences(of: "*", with: "").replacingOccurrences(of: ".", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// Whether a lowercased pattern is any universal wildcard.
-    /// Covers the bare star and every star-dot shape through one predicate so
-    /// validation and matching share the same closed set.
-    /// - Parameter lowered: Lowercased, trimmed pattern.
-    /// - Returns: True for `*` and star-dot-only shapes.
+    /// Whether a lowercased pattern is any universal wildcard. Covers the bare star and every
+    /// star-dot shape through one predicate so validation and matching share the same closed set.
     public static func isUniversalWildcard(_ lowered: String) -> Bool {
         isBareUniversal(lowered) || isUniversalWildcardShape(lowered)
     }
 
-    /// Whether a lowercased pattern carries file-glob syntax with no host meaning.
-    /// Question marks, classes, and extra stars belong to file globs; host
-    /// patterns honor only a single leading `*.` or trailing `.*` edge.
-    /// - Parameter lowered: Lowercased, trimmed pattern.
-    /// - Returns: True when `?`, `[`, or `]` is present.
+    /// Whether a lowercased pattern carries file-glob syntax with no host meaning. Question marks,
+    /// classes, and extra stars belong to file globs; host patterns honor only a single leading `*.`
+    /// or trailing `.*` edge.
     public static func containsGlobSyntax(_ lowered: String) -> Bool {
         lowered.contains("?") || lowered.contains("[") || lowered.contains("]")
     }
@@ -64,15 +50,9 @@ public enum AllowedOriginPattern: Sendable {
         case invalidStem
     }
 
-    /// Classifies the wildcard shape of a lowercased pattern.
-    /// A single exclusive edge is required: one star, either a leading `*.` or a
-    /// trailing `.*`, with a named remainder free of further stars. File-glob
-    /// syntax inside a wildcard pattern invalidates the shape so `?` and classes
-    /// can never ride a wildcard edge into an exemption. Port qualifiers also
-    /// invalidate wildcards: host matching compares port-less names, so a
-    /// port-qualified wildcard could never authorize yet would read as allowed.
-    /// - Parameter lowered: Lowercased, trimmed pattern.
-    /// - Returns: Placement, or the specific invalid reason.
+    /// Classifies the wildcard shape of a lowercased pattern. A single exclusive edge is required:
+    /// one star, either a leading `*.` or a trailing `.*`, with a named remainder free of further
+    /// stars.
     public static func classifyWildcard(_ lowered: String) -> WildcardClassification {
         let starCount = lowered.filter { $0 == "*" }.count
         guard starCount > 0 else { return .none }
@@ -106,16 +86,6 @@ public enum AllowedOriginPattern: Sendable {
     }
 
     /// Whether a lowercased, trimmed pattern is a valid `local_exemptions` entry.
-    ///
-    /// The shape gate for owner-declared local-network grants: a valid entry
-    /// names an exact host, an IPv4/IPv6 literal, a single leading `*.` edge,
-    /// a single trailing `.*` edge, or the bare universal `*`. URL syntax,
-    /// file-glob syntax, userinfo, fragments, ports, and whitespace are refused
-    /// so an entry that could never match the host comparison cannot persist as
-    /// a configured grant; never-dialable classification stays with the policy
-    /// verifier so shape and range decisions remain separate gates.
-    /// - Parameter lowered: Lowercased, trimmed entry text.
-    /// - Returns: True when the entry has to-be-classified exemption shape.
     public static func isValidExemptionEntry(_ lowered: String) -> Bool {
         guard !lowered.isEmpty else { return false }
         // Whitespace never survives host comparison, so an entry carrying it
@@ -144,14 +114,6 @@ public enum AllowedOriginPattern: Sendable {
     }
 
     /// Whether a non-wildcard entry names an exact host or address literal.
-    ///
-    /// Resolver-accepted IPv4 spellings (decimal, hex, octal, and short) and
-    /// IPv6 literals — including mixed dotted tails whose prefix proves out —
-    /// pass as addresses; every other entry must be a dot-separated DNS name
-    /// with non-empty labels. A trailing root dot is tolerated because the
-    /// shared normalizer strips it before comparison.
-    /// - Parameter lowered: Lowercased, trimmed exact entry.
-    /// - Returns: True when the text names a host or address literal.
     private static func isExactHostShape(_ lowered: String) -> Bool {
         let cleaned = SensitiveAddressNormalization.cleanedHostBase(lowered)
         guard !cleaned.isEmpty else { return false }

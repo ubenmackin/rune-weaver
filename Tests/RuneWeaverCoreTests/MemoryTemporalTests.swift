@@ -1,13 +1,4 @@
 // Rune Weaver Core Tests — Dated-window recall across episodic and indexed memory.
-//
-// Purpose: prove memories.recall honors the shared since/until window on both
-// the episodic store and the document index, filtering candidates before any
-// ranking while leaving calibration untouched.
-// Scope: args blank handling, fail-closed parsing, keyword and vector mtime
-// joins, NULL exclusion, FTS plus LIKE timestamp filtering, watermark and
-// per-tier caps, and unbounded order preservation.
-// Architectural role: guards the temporal contract at the recall boundary so
-// calendar-bounded questions return only in-window hits.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -46,13 +37,7 @@ private func augustMid() throws -> Date {
     return try #require(range.since)
 }
 
-/// Stores one document with a single chunk.
-/// - Parameters:
-///   - store: Index to write through.
-///   - externalID: Source-scoped identifier.
-///   - text: Chunk body.
-///   - mtime: Parent event time, or nil for undated.
-///   - embedding: Chunk embedding; empty stays keyword-only.
+/// Stores one document with a single chunk. store: Index to write through.
 @discardableResult
 private func storeTemporalDoc(
     in store: DocIndexStore,

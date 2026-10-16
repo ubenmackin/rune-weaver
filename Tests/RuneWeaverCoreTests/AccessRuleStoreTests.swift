@@ -1,15 +1,4 @@
 // Rune Weaver Core Tests — Access rule store persistence and the legacy trust-grant migration.
-//
-// Pins the durable contract behind the permission gate's rules: the SQLite
-// store round-trips every scope shape, action, and usage counter so a second
-// store instance sees exactly what the first saved; the legacy `trust_grants`
-// table is carried forward exactly once with byte-for-byte matching and is
-// never deleted or re-read; an upgraded narrow `access_rules` table gains its
-// additive columns so durable rules — including permanent deny rules — survive
-// the schema widening; poison rows skip without aborting the rule set;
-// expired allow rules prune while deny rules never expire; and a failed save
-// rolls back to the pre-save contents. The in-memory store pins the same
-// load/save/prune contract without a database.
 
 import Foundation
 @testable import RuneWeaverCore

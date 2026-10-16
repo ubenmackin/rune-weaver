@@ -1,20 +1,4 @@
 // Rune Weaver Tests — Settings REST API integration and configuration tests.
-//
-// Purpose: pins the settings config merge and DTO contracts plus the
-// security-critical `/settings/policy` HTTP surface: the structured GET shape
-// without raw TOML, structured PUT validation (field gates then the two
-// formal invariants) before any file write, the shared-store visibility that
-// lets a rebuilt egress supervisor observe an accepted write with no restart,
-// and the structured candidate verify route. Also pins the `/settings/secrets`
-// store and delete routes to their bodyless `204 No Content` contract, the
-// only success shape the dashboard JSON client accepts.
-// Scope: route status codes, DTO shapes, and policy file/store effects;
-// invariant math and the supervisor gate internals stay with their own suites.
-// Architectural role: guards the one owner surface whose writes steer the
-// mandatory egress choke-point, so a route edit cannot persist an unverified
-// policy or claim a write that never landed; the secrets acknowledgement is
-// guarded the same way — a bare `200` reads as failure to the owner even after
-// the Keychain write landed.
 
 import Foundation
 import RuneWeaverCore
@@ -494,10 +478,8 @@ struct SettingsRouteTests {
 
     @Test
     func `Secret status cap stays pinned to the dashboard chunk contract`() {
-        // Single cross-language contract: the server owns `maxSecretStatusKeys`
-        // and the dashboard mirrors `SECRET_STATUS_CHUNK_SIZE` in
-        // `Web/src/components/SettingsManager.tsx`. Both pin 500 so badge-probe
-        // chunks never trip the status gate; update both together.
+        // Single cross-language contract: the server owns `maxSecretStatusKeys` and the dashboard
+        // mirrors `SECRET_STATUS_CHUNK_SIZE` in `Web/src/components/SettingsManager.tsx`.
         #expect(maxSecretStatusKeys == 500)
     }
 
@@ -1113,10 +1095,8 @@ struct SettingsRouteTests {
         let beforeBash = config.bash
         let beforeWorkspace = config.workspace
 
-        // A full-form PUT carrying unrelated keys must not disturb either
-        // section: the merge is a no-op for absent patches. Compare decoded
-        // values rather than encoded bytes so the test pins the merge
-        // contract instead of encoder key order.
+        // A full-form PUT carrying unrelated keys must not disturb either section: the merge is a
+        // no-op for absent patches.
         try UpdateSettingsRequest(engineName: "Kept Sections").apply(to: &config)
         #expect(config.bash == beforeBash)
         #expect(config.workspace == beforeWorkspace)
@@ -1466,11 +1446,9 @@ struct SettingsRouteTests {
         let gateway = try #require(navigate.browserGateway as? SubprocessPlaywrightGateway)
         #expect(gateway.egressSupervisor === bootSupervisor)
 
-        // ...and so must api.request: triage files ephemeral grants on the
-        // boot actor, so binding a freshly built supervisor would make an
-        // approved allowOnce/allowSession retry check a different actor and
-        // fail as unlisted. A dry run takes the same network gate without a
-        // dial, making the split observable without a socket.
+        // ...and so must api.request: triage files ephemeral grants on the boot actor, so binding a
+        // freshly built supervisor would make an approved allowOnce/allowSession retry check a
+        // different actor and fail as unlisted.
         await bootSupervisor.allowDomainOnce(domain: "93.184.216.34", sessionID: nil)
         let apiTool = try #require(await context.toolBus.tool(named: "api.request"))
         let output = try await apiTool.execute(
@@ -1548,10 +1526,9 @@ struct SettingsRouteTests {
 
     @Test
     func `Non-network settings update triggers no live network reload`() async throws {
-        // A PUT carrying only non-network fields must not rebuild network
-        // tools and must not write exemptions: no gateway may appear on a
-        // fresh bus, the store keeps no exemption, and a later rebuild for a
-        // network knob carries only expected entries.
+        // A PUT carrying only non-network fields must not rebuild network tools and must not write
+        // exemptions: no gateway may appear on a fresh bus, the store keeps no exemption, and a
+        // later rebuild for a network knob carries only expected entries.
         let (store, _, directory) = try await makePolicyRouteStore()
         defer { try? FileManager.default.removeItem(at: directory) }
         let bootSupervisor = try await OutboundEgressSupervisor.make(policyStore: store)
@@ -1719,19 +1696,6 @@ struct SettingsRouteTests {
 // MARK: - Shared Settings Route Helpers
 
 /// Builds the lean route context for the settings policy and secrets surfaces.
-///
-/// Borrows the fallback context's collaborators — each settings route group
-/// reads only its injected collaborator, so no turn machinery is involved — and
-/// injects the isolated policy store and/or secrets manager under test as the
-/// instances the app serves. Live-reload regressions may additionally inject
-/// the boot supervisor the save path must preserve and a fresh bus so their
-/// tool registrations stay off the shared fallback registry.
-/// - Parameters:
-///   - store: The one policy store this app's routes must serve; defaults to the fallback store.
-///   - egressSupervisor: Boot supervisor the context exposes for triage and gate decisions.
-///   - toolBus: Fresh registry for tests that rebuild tools; defaults to the fallback bus.
-///   - secrets: The secrets manager this app's routes must serve; nil leaves secrets unwired.
-/// - Returns: A context wired for the `/settings/policy` and `/settings/secrets` routes.
 private func makeRouteContext(
     store: PolicyStore? = nil,
     egressSupervisor: OutboundEgressSupervisor? = nil,
@@ -1754,12 +1718,8 @@ private func makeRouteContext(
     )
 }
 
-/// Runs one test body against an application serving the settings routes.
-/// - Parameters:
-///   - store: The policy store the routes must serve; defaults to the fallback store.
-///   - secrets: The secrets manager the routes must serve; nil leaves secrets unwired.
-///   - body: Test body receiving the configured app.
-/// - Returns: Whatever `body` returns.
+/// Runs one test body against an application serving the settings routes. store:
+/// The policy store the routes must serve; defaults to the fallback store.
 private func withRouteApp<T>(
     store: PolicyStore? = nil,
     secrets: SecretsManager? = nil,
@@ -1778,13 +1738,8 @@ private func withRouteApp<T>(
     }
 }
 
-/// Sends one in-process request through the registered settings routes.
-/// - Parameters:
-///   - app: Configured application.
-///   - method: HTTP verb.
-///   - path: Request path.
-///   - body: Content JSON body for POST and PUT probes; nil sends no body.
-/// - Returns: The route response, without binding a socket.
+/// Sends one in-process request through the registered settings routes. app:
+/// Configured application.
 private func settingsRequest(
     app: Application,
     method: HTTPMethod,
@@ -1804,11 +1759,7 @@ private func settingsRequest(
 }
 
 /// Sends one in-process bodyless request through the registered settings routes.
-/// - Parameters:
-///   - app: Configured application.
-///   - method: HTTP verb.
-///   - path: Request path.
-/// - Returns: The route response, without binding a socket.
+/// app: Configured application.
 private func settingsRequest(
     app: Application,
     method: HTTPMethod,
@@ -1829,11 +1780,8 @@ private func settingsRequest(
 struct SettingsSecretsRouteTests {
     @Test
     func `POST /settings/secrets stores the secret and answers 204`() async throws {
-        // The dashboard accepts only a bodyless 204 as success, so the bare 200
-        // this route used to answer surfaced as `Invalid JSON response` even
-        // after the Keychain write landed. Pin the acknowledged status, the
-        // non-cacheable header every secret-bearing response must keep, and the
-        // effect the owner was waiting on.
+        // The dashboard accepts only a bodyless 204 as success, so the bare 200 this route used to
+        // answer surfaced as `Invalid JSON response` even after the Keychain write landed.
         let secrets = SecretsManager(inMemory: true)
         let key = "RW_TEST_SECRET_" + UUID().uuidString.replacingOccurrences(of: "-", with: "_")
 
@@ -1853,10 +1801,8 @@ struct SettingsSecretsRouteTests {
 
     @Test
     func `DELETE /settings/secrets/:key removes the secret and answers 204`() async throws {
-        // A pre-seeded value proves the route removed bytes rather than only
-        // answering a status; the unique key keeps a same-named environment
-        // variable from faking a retrieval. The acknowledgement must stay as
-        // bodyless and as non-cacheable as the store response.
+        // A pre-seeded value proves the route removed bytes rather than only answering a status;
+        // the unique key keeps a same-named environment variable from faking a retrieval.
         let secrets = SecretsManager(inMemory: true)
         let key = "RW_TEST_SECRET_" + UUID().uuidString.replacingOccurrences(of: "-", with: "_")
         try await secrets.store(key: key, secret: "to-delete")
@@ -1979,14 +1925,9 @@ private struct StubFanOutRunLogger: FanOutRunLogging, Sendable {
     func updateFanOutRow(id _: UUID, status _: String) async {}
 }
 
-/// Builds an isolated policy store over a throwaway directory and loads it.
-///
-/// The route tests must exercise the real file read/write boundary, so the
-/// store points at a temp `policy.toml` instead of the operator's file. The
-/// load mirrors boot: a missing file seeds the factory-safe default and still
-/// counts as accepted, so the routes always start from a verified posture.
-/// - Parameter contents: Optional file contents written before the load.
-/// - Returns: The loaded store, the policy file URL, and the temp directory.
+/// Builds an isolated policy store over a throwaway directory and loads it. The route tests must
+/// exercise the real file read/write boundary, so the store points at a temp `policy.toml` instead
+/// of the operator's file.
 private func makePolicyRouteStore(contents: String? = nil) async throws -> (store: PolicyStore, fileURL: URL, directory: URL) {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("rw-policy-routes-\(UUID().uuidString)")
@@ -2008,15 +1949,8 @@ private struct RetiredRawTOMLPolicyBody: Content {
     let raw_toml: String
 }
 
-/// Builds one structured policy DTO for PUT and verify probes.
-/// - Parameters:
-///   - mode: Wire mode string.
-///   - allowed: Allowlist entries.
-///   - blocked: Blocklist entries.
-///   - credentials: Per-key bindings.
-///   - version: Schema version carried verbatim.
-///   - localExemptions: Client-supplied exemptions, ignored by the server.
-/// - Returns: DTO mirroring the REST wire shape.
+/// Builds one structured policy DTO for PUT and verify probes. mode: Wire mode
+/// string.
 private func structuredPolicyDTO(
     mode: String = "allowlist_only",
     allowed: [String] = ["93.184.216.34"],
@@ -2432,10 +2366,8 @@ struct SettingsPolicyRouteTests {
 
     @Test
     func `GET surfaces rejection diagnostics instead of a false healthy banner`() async throws {
-        // A present-but-rejected file keeps the safe fallback in `current`,
-        // so verifying the fallback would report zero violations while the
-        // CLI exits nonzero for the same file. The route must surface the
-        // store diagnostics so the dashboard banner stays red.
+        // A present-but-rejected file keeps the safe fallback in `current`, so verifying the
+        // fallback would report zero violations while the CLI exits nonzero for the same file.
         let violating = "[credentials.LEAK]\nallowed_hosts = [\"*\"]\n"
         let (store, fileURL, directory) = try await makePolicyRouteStore(contents: violating)
         defer { try? FileManager.default.removeItem(at: directory) }

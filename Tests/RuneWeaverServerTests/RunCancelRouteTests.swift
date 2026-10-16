@@ -1,15 +1,4 @@
 // Rune Weaver Server Tests — Fan-out run cancellation route.
-//
-// Purpose: pins the `POST /runs/:id/cancel` contract end to end through the
-// registered Vapor surface: which rows may be stopped (fan-out parent versus
-// worker versus immutable history), which status codes honest refusals map to,
-// and that an accepted stop settles the audit rows the Runs tab renders.
-// Scope: route status codes, the cancel response shape, and the resulting
-// run-log row statuses; the engine's own cancellation semantics stay with the
-// core fan-out suite, and the dashboard control stays with the web suite.
-// Architectural role: guards the thin HTTP adapter over `FanOutEngine.cancel`
-// so future edits cannot widen what is cancellable or let a refusal masquerade
-// as a successful stop.
 
 import Foundation
 import os
@@ -35,10 +24,9 @@ private final class RunCancelStubLLM: LLMProvider, Sendable {
     }
 }
 
-/// Cancellable orchestrator seam: each worker turn counts itself in flight and
-/// parks until cancelled (or its hold elapses), so a route cancel is observable
-/// end to end while a held swarm stays live for the test to stop. State lives
-/// behind a lock so concurrent workers never race the test.
+/// Cancellable orchestrator seam: each worker turn counts itself in flight and parks until
+/// cancelled (or its hold elapses), so a route cancel is observable end to end while a held swarm
+/// stays live for the test to stop.
 private final class HeldFanOutSeam: OrchestratorFanOutSeam, Sendable {
     /// Guarded in-flight count.
     private struct State: Sendable {
@@ -69,10 +57,7 @@ private final class HeldFanOutSeam: OrchestratorFanOutSeam, Sendable {
         _ = try await processCollecting(input)
     }
 
-    /// Runs one worker turn: counts itself in flight, parks, then returns real
-    /// output. `Task.sleep` throws on cancellation, which is exactly how a
-    /// stopped worker surfaces — the engine's settle path reads that error as
-    /// an owner stop rather than a failure.
+    /// Runs one worker turn: counts itself in flight, parks, then returns real output.
     func processCollecting(_ input: UserInput) async throws -> FanOutWorkerOutput {
         state.withLock { $0.inFlight += 1 }
         defer { state.withLock { $0.inFlight -= 1 } }
@@ -97,15 +82,8 @@ private struct RunCancelHarness {
     let orchestrator: HeldFanOutSeam
 }
 
-/// Builds a configured application over an isolated run log and a fan-out
-/// engine driven by the blocking seam. The temporary database keeps rows off
-/// the real engine data directory.
-/// - Parameters:
-///   - orchestrator: Seam driving worker turns.
-///   - fanOutConfig: Swarm policy; the default keeps an unlimited worker
-///     timeout so a held turn only ends through cancellation.
-///   - body: Test body receiving the harness.
-/// - Returns: Whatever `body` returns.
+/// Builds a configured application over an isolated run log and a fan-out engine driven by the
+/// blocking seam. The temporary database keeps rows off the real engine data directory.
 private func withRunCancelApp<T>(
     orchestrator: HeldFanOutSeam = HeldFanOutSeam(),
     fanOutConfig: FanOutConfig = FanOutConfig(),
@@ -131,11 +109,8 @@ private func withRunCancelApp<T>(
             llm: RunCancelStubLLM(),
             memoryEngine: memory
         )
-        // The route reads liveness from the engine, not the row, so the run
-        // store must be the same instance the engine records through and both
-        // must ride the context under test. The hub-aware adapter carries that
-        // store plus the hub the context serves, mirroring production wiring so
-        // cancellation settles broadcast to live sockets.
+        // The route reads liveness from the engine, not the row, so the run store must be the same
+        // instance the engine records through and both must ride the context under test.
         let runs = RunLogStore()
         let hub = WSHub()
         let engine = FanOutEngine(
@@ -172,12 +147,8 @@ private func withRunCancelApp<T>(
     }
 }
 
-/// Sends one request through the full registered surface.
-/// - Parameters:
-///   - app: Configured application.
-///   - method: HTTP method.
-///   - path: Request path.
-/// - Returns: Route response.
+/// Sends one request through the full registered surface. app: Configured
+/// application.
 private func runCancelRequest(app: Application, method: HTTPMethod, path: String) async throws -> Response {
     let request = Request(
         application: app,
@@ -188,11 +159,8 @@ private func runCancelRequest(app: Application, method: HTTPMethod, path: String
     return try await app.responder.respond(to: request).get()
 }
 
-/// Polls a condition until it holds or the deadline passes, so tests order
-/// themselves against live worker state instead of racing fixed sleeps.
-/// - Parameters:
-///   - timeoutSeconds: Longest wait before the caller's assertions fire.
-///   - condition: Condition to poll.
+/// Polls a condition until it holds or the deadline passes, so tests order themselves against live
+/// worker state instead of racing fixed sleeps.
 private func waitUntil(
     timeoutSeconds: Double = 5,
     _ condition: @escaping @Sendable () async -> Bool

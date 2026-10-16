@@ -1,4 +1,5 @@
 // Rune Weaver Core Tests — Merge-rank regression coverage for recall tiers.
+
 import Foundation
 @testable import RuneWeaverCore
 import Testing
@@ -510,11 +511,9 @@ struct MemoryRecallMergeTests {
         let (engine, store, base) = makeKeywordCurveEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // The series parent is the named entity: its display name carries both
-        // salient tokens and its body carries the whole salient phrase, so it
-        // earns two structural bonuses on top of full overlap. The birthday doc
-        // matches only one salient token and the sixteen chatter docs match a
-        // single repeated token, so neither earns either bonus.
+        // The series parent is the named entity: its display name carries both salient tokens and
+        // its body carries the whole salient phrase, so it earns two structural bonuses on top of
+        // full overlap.
         let filler = (0 ..< 120).map { "filler\($0)" }.joined(separator: " ")
         try await storeKeywordCurveDoc(
             in: store,
@@ -567,11 +566,8 @@ struct MemoryRecallMergeTests {
         let (engine, store, base) = makeKeywordCurveEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // Identical token counts and term frequencies keep the BM25 order equal
-        // for both targets, so they sit adjacent in the union and only the
-        // contiguous phrase separates them. Single-token decoys rank strictly
-        // below the two-token targets, which holds the recency gap between the
-        // targets small enough for the phrase bonus to decide.
+        // Identical token counts and term frequencies keep the BM25 order equal for both targets,
+        // so they sit adjacent in the union and only the contiguous phrase separates them.
         try await storeKeywordCurveDoc(
             in: store,
             externalID: "phrase-contiguous",
@@ -616,10 +612,8 @@ struct MemoryRecallMergeTests {
         let (engine, store, base) = makeKeywordCurveEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // No display name holds both salient tokens, so the entity bonus is
-        // silent; the scattered body holds both tokens non-adjacently, so the
-        // phrase bonus is silent too. The ordering therefore rests on the
-        // unchanged blend: overlap first, then the recency prior.
+        // No display name holds both salient tokens, so the entity bonus is silent; the scattered
+        // body holds both tokens non-adjacently, so the phrase bonus is silent too.
         try await storeKeywordCurveDoc(
             in: store,
             externalID: "series-scattered",

@@ -1,12 +1,4 @@
 // Rune Weaver Core — Sandbox container reclamation.
-//
-// Purpose: reclaim stopped plus orphaned ephemeral containers the immediate
-// teardown missed, so crashed turns never leak containers or scratch.
-// Scope: the hourly pass over the strict name prefix plus the detonation
-// names (the machine singleton workspace container excluded), parked-session
-// exemption, scratch following its owner, and the JSONL audit trail.
-// Architectural role: single owner for sandbox reclamation; the sweep engine
-// lives on the strict turn registry and this pass drives it on a cadence.
 
 import Dispatch
 import Foundation
@@ -112,20 +104,6 @@ public enum FileSandboxAuditLog {
 /// Reclaims stopped plus orphaned ephemeral containers.
 public enum SandboxCleaner {
     /// Sweeps stopped plus orphaned strict and detonation containers.
-    ///
-    /// The strict turn registry owns the sweep engine; this pass drives it
-    /// with the `[containers]` idle TTL so the operator-configured window
-    /// governs reclamation. Parked sessions keep their containers at any
-    /// age, the machine singleton workspace container is never matched, and
-    /// every swept container's scratch follows it.
-    /// - Parameters:
-    ///   - config: Live containers policy supplying the reclamation TTL.
-    ///   - approvals: Approval queue deriving parked-session exemptions.
-    ///   - registry: Turn registry to sweep; nil sweeps the shared live one.
-    ///   - workspaceTmp: Scratch root for orphan aging; nil resolves the
-    ///     default workspace `tmp/`.
-    ///   - now: Current instant for aging.
-    /// - Returns: Aggregate outcome of the pass.
     public static func cleanup(
         config: ContainersConfig,
         approvals: ApprovalQueue,

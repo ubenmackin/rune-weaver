@@ -388,11 +388,8 @@ extension TOMLNode {
         return text
     }
 
-    /// Strict optional array-of-tables: nil when absent, throws when present
-    /// under any other shape so a malformed spelling never silently defaults
-    /// the list. Only `[[key]]` entries parse into the array dictionary, so an
-    /// inline value or a singular `[key]` table both reject here with the
-    /// same reject-on-malformed semantics as ``strictString(_:field:)``.
+    /// Strict optional array-of-tables: nil when absent, throws when present under any other shape
+    /// so a malformed spelling never silently defaults the list.
     func strictArrayOfTables(_ key: String, field: String) throws -> [TOMLNode]? {
         guard arrays[key] != nil else {
             guard has(key) || tables[key] != nil else { return nil }
@@ -422,10 +419,7 @@ extension TOMLNode {
         return number
     }
 
-    /// Strict optional number: nil when absent, throws when present but
-    /// not a number. Integers widen to `Double` (so `recall_threshold = 1`
-    /// reads as `1.0`) while strings, booleans, and arrays throw instead of
-    /// silently defaulting, matching the `jpeg_quality` number agreement.
+    /// Strict optional number: nil when absent, throws when present but not a number.
     func strictDouble(_ key: String, field: String) throws -> Double? {
         guard let value = values[key] else { return nil }
         switch value {
@@ -510,10 +504,8 @@ extension RuneWeaverConfig {
     private static func decodeServer(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let server = root.tables["server"] else { return }
         // Absent keys keep the loopback default; the strict accessors reject
-        // present-but-wrong-typed values instead of silently defaulting, and
-        // range checks land in validation so decode stays type-only. Hostname
-        // stays trimmed-only so a `:port` suffix still fails in validation
-        // instead of being stripped away here.
+        // present-but-wrong-typed values instead of silently defaulting, and range checks land in
+        // validation so decode stays type-only.
         if let hostname = try server.strictString("hostname", field: "server.hostname") {
             config.server.hostname = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -528,10 +520,9 @@ extension RuneWeaverConfig {
             // shape: stripping first would carve `http` from `http://evil.com`
             // and let a scheme slip through as an exact host.
             try Self.validateAllowedHosts(trimmed)
-            // Single-sourced through `dedupeNormalizedHosts` so file-load, the
-            // settings PUT, the health snapshot, and the Host gate store
-            // identically (lowercased, port-stripped, deduped first-seen order
-            // plus IPv6 counterparts) instead of diverging on casing or `:port`.
+            // Normalized through `dedupeNormalizedHosts` so file-load, settings PUT, health,
+            // and Host gate store identically (lowercased, port-stripped, deduped plus IPv6)
+            // instead of diverging on casing or :port.
             config.server.allowedHosts = ServerEndpointConfig.dedupeNormalizedHosts(trimmed)
         }
     }
@@ -617,12 +608,8 @@ extension RuneWeaverConfig {
         if let backend = try memory.strictString("embedding_backend", field: "memory.embedding_backend") {
             config.memory.embeddingBackend = MemoryConfig.migratedEmbeddingBackend(backend)
         }
-        // Recall budgets stay flat `recall_*` keys under `[memory]` so the
-        // file shape mirrors the surrounding scalar knobs; absent keys keep
-        // the documented defaults. Decode stays type-only for wrong-typed
-        // values, then fail-open clamps here so a stray digit degrades to the
-        // nearest bound instead of refusing to boot; live engine paths clamp
-        // again at use via `RecallBudgets.clamped()`.
+        // Recall budgets stay flat `recall_*` keys under `[memory]` so the file shape mirrors the
+        // surrounding scalar knobs; absent keys keep the documented defaults.
         if let perTier = try memory.strictInt("recall_per_tier_limit", field: "memory.recall_per_tier_limit") {
             config.memory.recallBudgets.perTierLimit = perTier
         }
@@ -664,12 +651,6 @@ extension RuneWeaverConfig {
     }
 
     /// Decodes the additive `[containers]` section, defaulting omitted keys.
-    ///
-    /// An absent table keeps the documented defaults so existing files load
-    /// untouched; present-but-wrong-typed values throw via the strict
-    /// accessors instead of silently defaulting, matching the `[workspace]`
-    /// decode style, and range checks land in validation so decode stays
-    /// type-only.
     private static func decodeContainers(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let containers = root.tables["containers"] else { return }
         if let memoryMB = try containers.strictInt("memory_mb", field: "containers.memory_mb") {
@@ -683,12 +664,9 @@ extension RuneWeaverConfig {
         }
     }
 
-    /// Logs the legacy `[sandbox]` table as ignored.
-    ///
-    /// The unified container policy lives in `[containers]`; legacy `[sandbox]`
-    /// keys are never read and never migrated, and a resave sheds the table.
-    /// A bare `[sandbox]` header with no keys logs too, because the header
-    /// itself reads as legacy shape.
+    /// Logs the legacy `[sandbox]` table as ignored. The unified container policy lives in
+    /// `[containers]`; legacy `[sandbox]` keys are never read and never migrated, and a resave sheds
+    /// the table.
     private static func ignoreLegacySandbox(_ root: TOMLNode) {
         guard root.tables["sandbox"] != nil else { return }
         RuneWeaverLog.stores.warning(
@@ -721,12 +699,6 @@ extension RuneWeaverConfig {
     }
 
     /// Decodes the `[[files.write_paths]]` entries into write-path rules.
-    ///
-    /// Every entry needs a non-blank `path` and a closed-set `posture`, and the
-    /// list plus each path stay bounded so a hand-edited file cannot fan
-    /// classification work or carry an unbounded pattern. A malformed entry
-    /// throws naming `files.write_paths` so the load fails on the entry itself
-    /// rather than silently defaulting the whole list.
     private static func decodeWritePathRules(_ nodes: [TOMLNode]) throws -> [FilesWritePathRule] {
         guard nodes.count <= FilesWritePathRule.maxRuleCount else {
             throw ConfigError.validationError(
@@ -996,11 +968,6 @@ extension RuneWeaverConfig {
     }
 
     /// Decodes one `[media.<service>]` table onto an Arr entry.
-    ///
-    /// Absent keys keep the caller's stock values (enabled plus the conventional
-    /// key name) so an empty section never resets to nil; present values land
-    /// verbatim and blank-vs-missing normalization stays with the serialization
-    /// layer where persistence decisions are made.
     private static func decodeArrSection(_ node: TOMLNode, fieldPrefix: String, into config: inout ArrInstanceConfig) throws {
         config.enabled = try node.strictBool("enabled", field: "\(fieldPrefix).enabled") ?? config.enabled
         if let url = try node.strictString("url", field: "\(fieldPrefix).url") {

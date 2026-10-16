@@ -1,19 +1,4 @@
 // Rune Weaver Tools Tests — messages.resolveRecipient tool behavior.
-//
-// Purpose: pin the read-only resolution tool end to end — argument validation
-// (blank and over-length names, limit clamping, the `query` alias), envelope
-// projection of a resolution (`resolved`, `ambiguous`, ranked candidates, and
-// the zero-match guidance note), handle passthrough, and the encoded JSON shape
-// callers decode.
-//
-// Scope: hermetic tool-level tests over `StubMessagesRecipientResolver`, plus
-// one factory-wiring test that exercises the default resolver against a bogus
-// `chat.db` path and an alias stub; the resolver's own ranking, scoring, and
-// identity rules are covered by the Core recipient-resolver suite.
-//
-// Architectural role: guards the contract the model relies on before
-// `messages.send`, including the guidance note that turns a zero-match into an
-// owner question instead of a guessed handle.
 
 import Foundation
 @testable import RuneWeaverCore

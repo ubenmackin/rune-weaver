@@ -1,16 +1,4 @@
 // Rune Weaver Dashboard — Component tests for SessionSidebar.
-//
-// Covers the submit-plus-blur single-save guard so one rename issues one PATCH,
-// plus the live session-list invalidation contract: run lifecycle frames,
-// foreground returns, and socket reopens revalidate the history through one
-// coalesced refetch while a detached sidebar leaves no pending timer behind.
-// Also pins the shell activation contract: the kept-mounted sidebar refetches
-// exactly once per false→true Chat-tab transition and never on mount, repeated
-// active renders, or a render that omits the activation flag.
-// Finally pins the fan-out tree: workers nest behind a collapsed disclosure,
-// expansion is per-parent and ephemeral, the active session's whole ancestor
-// chain force-opens so a nested worker never vanishes, malformed parent cycles
-// terminate safely, and orphaned workers fall back to top-level rows.
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -30,12 +18,9 @@ import {
   resetSharedSocket,
 } from "../test-utils/mockWebSocket";
 
-// Spread the real module so every export the component tree reaches keeps a
-// value — notably the `subscribeAuthState`/`getAuthToken`/`toNonNegativeInt`
-// trio the shared WebSocket singleton reads during construction and dialing.
-// A hand-listed partial mock silently breaks the moment a consumer picks up a
-// new API export, so only the network helpers this suite drives directly are
-// overridden below.
+// Spread the real module so every export the component tree reaches keeps a value — notably the
+// `subscribeAuthState`/`getAuthToken`/`toNonNegativeInt` trio the shared WebSocket singleton reads
+// during construction and dialing.
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
@@ -64,11 +49,7 @@ const sessionsPayload = {
   count: 1,
 };
 
-// Fan-out tree fixture. The parent's id is lowercase while its workers spell
-// the same parent in uppercase, mirroring the engine's uppercase UUIDs against
-// the dashboard's lowercase mint; the workers are declared newest-first so the
-// rendered order can only come from the createdAt sort, and the orphan points
-// at a parent absent from the list so it must fall back to a top-level row.
+// Fan-out tree fixture.
 const fanOutSessionsPayload = {
   sessions: [
     {
@@ -119,12 +100,8 @@ const fanOutSessionsPayload = {
   count: 5,
 };
 
-// Deep-nesting fixture: a worker that itself spawned workers, which the engine
-// permits when the fan-out tool runs with the full tool registry. The active
-// session's ancestor chain spans two links, so only a transitive force-open
-// keeps the viewed grandchild on screen. Uppercase parent spellings mirror the
-// engine's UUID formatting so normalization is exercised at both depths, and
-// the newest row is the grandchild so a collapsed default would bury it.
+// Deep-nesting fixture: a worker that itself spawned workers, which the engine permits when the
+// fan-out tool runs with the full tool registry.
 const nestedFanOutSessionsPayload = {
   sessions: [
     {
@@ -169,10 +146,8 @@ const nestedFanOutSessionsPayload = {
   count: 4,
 };
 
-// Malformed parent metadata: `cycle-a` and `cycle-b` name each other and
-// `self-parent` names itself. The ancestor walk must terminate at the first
-// repeated key so a corrupt chain cannot spin the render, and a self-link is
-// not nesting, so that row keeps its top-level fallback rather than detaching.
+// Malformed parent metadata: `cycle-a` and `cycle-b` name each other and `self-parent` names
+// itself.
 const cyclicParentSessionsPayload = {
   sessions: [
     {
@@ -654,12 +629,7 @@ describe("SessionSidebar", () => {
   });
 });
 
-// Fan-out session tree. A chat that spawned workers stays one row until its
-// disclosure is opened; children then nest indented under it, the active
-// session's whole ancestor chain stays open, and a worker whose parent is gone
-// falls back to a top-level row. The suite pins the collapsed default, the
-// ephemeral expansion state, the shared row handler used by both tree levels,
-// and that malformed parent links never spin the ancestor walk.
+// Fan-out session tree.
 describe("fan-out session tree", () => {
   beforeEach(() => {
     resetSharedRunsForTesting();
@@ -885,27 +855,19 @@ describe("fan-out session tree", () => {
   });
 });
 
-// Live session-list invalidation. The sidebar revalidates history on run
-// lifecycle frames, foreground returns, and socket reopens, but a swarm's
-// parent/child bursts must collapse into one `listSessions()` call and no
-// pending tick may survive unmount. Every case drives the real shared socket
-// singleton through a stubbed transport so the production message path is
-// exercised instead of a pre-sanitized handler.
+// Live session-list invalidation.
 describe("live session invalidation", () => {
   let capture: ReturnType<typeof createMockWebSocketCapture>;
 
   beforeEach(() => {
-    // The preceding describes drive the same shared socket singleton (their
-    // renders subscribe), so detach any handle or pending reconnect before
-    // stubbing this case's transport; a stale dial's open event would add a
-    // refetch these cases would misattribute to their own trigger.
+    // The preceding describes drive the same shared socket singleton (their renders subscribe), so
+    // detach any handle or pending reconnect before stubbing this case's transport; a stale dial's
+    // open event would add a refetch these cases would misattribute to their own trigger.
     vi.unstubAllGlobals();
     resetSharedSocket();
-    // The fan-out suite's Scheduled click persists `rw_session_filter` and
-    // leaves its own mock payloads installed, so this suite clears storage and
-    // reseeds the API mocks its mount path reads instead of inheriting either:
-    // the saved scheduler filter would hide the chat fixture, and an
-    // unconfigured `listRuns` would reject before anything renders.
+    // The fan-out suite's Scheduled click persists `rw_session_filter` and leaves its own mock
+    // payloads installed, so this suite clears storage and reseeds the API mocks its mount path
+    // reads instead of inheriting either: the saved scheduler filter would hide the chat fixture.
     resetSharedRunsForTesting();
     vi.clearAllMocks();
     localStorage.clear();

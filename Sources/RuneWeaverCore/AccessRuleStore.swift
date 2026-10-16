@@ -1,20 +1,4 @@
 // Rune Weaver Core — Persistence contract and storage implementations for access rules.
-//
-// Purpose: own what the permission gate's durable rules save, load, and retire, so
-// a graduated decision ("allow this recipient set", "deny this command") survives
-// restarts instead of degrading to a fresh prompt. The gate decides live; this
-// file owns the durable copy beside it, including the one-time carry-forward of
-// the legacy `trust_grants` table into the richer rule model.
-// Scope: the `AccessRuleStoring` protocol plus an in-memory store and a SQLite
-// (`episodes.db`, table `access_rules`) store. Scope comparison is never this
-// file's job — `AccessScope.matches` is the single matcher — so rows store only
-// the canonical shape the creation gate already proved. Saves replace the table
-// atomically, the legacy migration is copy-forward only (`trust_grants` is never
-// deleted and never re-read after success), and an unreadable store yields an
-// empty rule set so a failure re-prompts rather than fabricating trust.
-// Architectural role: storage adapter beside the permission gate, following the
-// shared Core store idiom (serialized SQLite access via `SQLiteSerialIO`) so serve,
-// CLI, and the menu-bar app share one persistence path.
 
 import Foundation
 #if canImport(SQLite3)
@@ -32,11 +16,9 @@ public protocol AccessRuleStoring: Sendable {
     /// Deletes expired allow rules; deny rules never expire.
     /// - Parameter date: Threshold date.
     func pruneExpired(at date: Date) async throws
-    /// Copies legacy `trust_grants` rows forward once, idempotently.
-    ///
-    /// The legacy table is read here and only here: after the migration flag is
-    /// set it is never read again, and it is never deleted. A failure leaves the
-    /// flag unset so a later call retries the copy.
+    /// Copies legacy `trust_grants` rows forward once, idempotently. The legacy table is read here
+    /// and only here: after the migration flag is set it is never read again, and it is never
+    /// deleted.
     func migrateLegacyIfNeeded() async throws
 }
 
@@ -81,9 +63,6 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
         }
 
         /// Scope envelope tags for the `scope_kind` column.
-        ///
-        /// The tags mirror the ``AccessScope`` cases so a decoder can rebuild a
-        /// scope from the column pair without the tags drifting from the model.
         private enum ScopeKind: String {
             case toolWide
             case exactTarget
@@ -136,20 +115,8 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
             return handle
         }
 
-        /// Adds the rule columns that arrived additively to older `access_rules`
-        /// schemas, mirroring the session-store migration idiom.
-        ///
-        /// Runs before `CREATE TABLE IF NOT EXISTS` because that statement is a
-        /// no-op on an existing table: without this probe-and-`ALTER`, an
-        /// upgraded database would keep its narrow schema and every save and
-        /// load would fail to prepare against the missing columns — silently
-        /// degrading durable rules, including permanent deny rules, to
-        /// process-lifetime memory. A fresh database probes empty (the table
-        /// does not exist yet), which skips the `ALTER`s and lets the following
-        /// `CREATE` establish the full schema; an upgraded database probes
-        /// non-empty, so only the missing columns are added and a replay is
-        /// idempotent. The empty-probe case also covers a probe that cannot
-        /// prepare, leaving the `CREATE` as the schema authority.
+        /// Adds the rule columns that arrived additively to older `access_rules` schemas, mirroring
+        /// the session-store migration idiom.
         private static func migrateColumnsIfNeeded(handle: OpaquePointer?) throws {
             let existing = SQLiteHelpers.columnNames(handle: handle, table: .accessRules)
             guard !existing.isEmpty else { return }
@@ -166,10 +133,9 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
                         failure: { AccessRuleStorageError(message: $0) }
                     )
                 } catch {
-                    // Concurrent opens can race the probe onto the same
-                    // `ALTER`; only that duplicate-column case is safe to
-                    // ignore, every other failure surfaces so a broken
-                    // migration cannot masquerade as migrated.
+                    // Concurrent opens can race the probe onto the same `ALTER`; only that
+                    // duplicate-column case is safe to ignore, every other failure surfaces so a
+                    // broken migration cannot masquerade as migrated.
                     var engineDetail = ""
                     if let message = sqlite3_errmsg(handle) {
                         engineDetail = String(cString: message)
@@ -225,10 +191,6 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
         }
 
         /// Projects one stored row into a rule, or nil when the row is unusable.
-        ///
-        /// An unknown scope tag, an unparseable scope payload, a non-allow/deny
-        /// action, or a duration the creation gate refuses all skip the row
-        /// instead of degrading into trust nobody approved.
         private static func rule(from statement: OpaquePointer?) -> AccessRule? {
             guard let idText = SQLiteHelpers.columnText(statement, index: 0),
                   let id = UUID(uuidString: idText),
@@ -268,11 +230,6 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
         }
 
         /// Rebuilds a scope from its stored column pair.
-        ///
-        /// Payload-bearing kinds round-trip their own spelling — the exact
-        /// target byte-for-byte — and every rebuilt scope passes the same
-        /// canonical gate creation uses, so a row that cannot canonicalize is
-        /// malformed data rather than a scope the matcher must refuse later.
         private static func decodeScope(kind: ScopeKind, data: String) -> AccessScope? {
             switch kind {
             case .toolWide:
@@ -297,12 +254,8 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
             }
         }
 
-        /// Encodes a scope into its stored column pair.
-        ///
-        /// String payloads store the canonical spelling verbatim; structured
-        /// payloads store JSON so the members and host shapes survive the split
-        /// across the two columns. The envelope owns shape here — this function
-        /// never compares or re-canonicalizes anything.
+        /// Encodes a scope into its stored column pair. The envelope owns shape here — this
+        /// function never compares or re-canonicalizes anything.
         private static func encodeScope(_ scope: AccessScope) -> (kind: ScopeKind, data: String) {
             switch scope {
             case .toolWide:
@@ -410,11 +363,6 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
     }
 
     /// Internal SQLite helper for the one-time legacy trust-grant carry-forward.
-    ///
-    /// Reads `trust_grants` — the pre-rule grant table — and copies its durable
-    /// rows into `access_rules`. The legacy table is never written and never
-    /// deleted: migration is copy-forward only, and the `access_rule_meta` flag
-    /// is what stops a second read.
     enum SQLiteAccessRuleMigration {
         private struct MigrationError: Error {
             let message: String
@@ -487,12 +435,6 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
         }
 
         /// Maps one legacy grant row to a rule, or nil when it cannot survive.
-        ///
-        /// The target becomes ``AccessScope/exactTarget`` verbatim — the only
-        /// scope that reproduces what the legacy grant covered — and the shared
-        /// creation gate refuses the rest, so a non-durable duration, a blank
-        /// tool name, and a blank target all skip here rather than becoming
-        /// rules that trust something nobody approved.
         private static func rule(from row: LegacyTrustGrantRow) -> AccessRule? {
             guard var rule = AccessRule(
                 id: row.id,
@@ -599,11 +541,6 @@ public actor InMemoryAccessRuleStore: AccessRuleStoring {
 #endif
 
 /// SQLite-backed ``AccessRuleStoring`` persisted in `episodes.db` under `access_rules`.
-///
-/// The legacy `trust_grants` table is carried forward through
-/// ``migrateLegacyIfNeeded()`` exactly once and never written, so a database
-/// written by the pre-rule engine keeps its trust after the copy with the same
-/// matching, and a second migration is a no-op.
 public struct SQLiteAccessRuleStore: AccessRuleStoring, Sendable {
     /// Filesystem path of the SQLite database (`episodes.db`).
     public let dbPath: String
@@ -614,10 +551,8 @@ public struct SQLiteAccessRuleStore: AccessRuleStoring, Sendable {
         self.dbPath = dbPath
     }
 
-    /// Loads stored rules from SQLite.
-    ///
-    /// A store failure folds to an empty rule set rather than throwing: an
-    /// unreadable database must re-prompt everything, never fabricate trust.
+    /// Loads stored rules from SQLite. A store failure folds to an empty rule set rather than
+    /// throwing: an unreadable database must re-prompt everything, never fabricate trust.
     public func load() async throws -> [AccessRule] {
         #if canImport(SQLite3)
             return await SQLiteSerialIO.runUncancellable {
@@ -630,8 +565,6 @@ public struct SQLiteAccessRuleStore: AccessRuleStoring, Sendable {
 
     /// Replaces the persisted rules in SQLite.
     /// - Parameter rules: Rules to persist.
-    /// - Throws: When the save cannot be completed, leaving the previously
-    ///   stored rules in place.
     public func save(_ rules: [AccessRule]) async throws {
         #if canImport(SQLite3)
             try await SQLiteSerialIO.run {

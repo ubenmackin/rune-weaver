@@ -1,9 +1,4 @@
 // Rune Weaver Server — Goals and proactive settings patches plus merge logic.
-//
-// Extracted from ServerDTOs.swift to keep file length within lint bounds.
-// The partial `[goals]` and `[proactive]` patches for `PUT /settings` and the
-// merge helpers live beside the settings DTOs so the pursuit and interruption
-// policies stay single-sourced.
 
 import Foundation
 import RuneWeaverCore
@@ -11,16 +6,8 @@ import Vapor
 
 // MARK: - Goals + Proactive Settings Patches
 
-/// Partial `[goals]` patch for `PUT /settings`.
-///
-/// Every field stays optional so a request carrying only one key leaves the
-/// rest of the stored pursuit policy untouched instead of resetting it.
-/// Covers the dashboard-owned `GoalsConfig` surface in full — enablement,
-/// cadence, active cap, plan step/timeout bounds, and the per-goal trigger
-/// cap — so the settings form decides how far planning and trigger fan-out
-/// may widen, with range checks single-sourced in the config validation layer.
-/// A caller holding a complete policy builds the patch through `init(_:)` and
-/// reuses the merge path without hand-mapping fields.
+/// Partial `[goals]` patch for `PUT /settings`. Every field stays optional so a request carrying
+/// only one key leaves the rest of the stored pursuit policy untouched instead of resetting it.
 public struct GoalsUpdate: Content, Sendable, Equatable {
     /// Whether goal creation and advancement run at all. Nil preserves the stored value.
     public var enabled: Bool?
@@ -36,13 +23,6 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
     public var maxTriggersPerGoal: Int?
 
     /// Creates a partial goals patch.
-    /// - Parameters:
-    ///   - enabled: Whether goal pursuit runs.
-    ///   - stepIntervalMinutes: Cadence hint in minutes.
-    ///   - maxActiveGoals: Active-goal cap.
-    ///   - maxStepsPerGoal: Plan step cap.
-    ///   - planTimeoutSeconds: Planning model timeout.
-    ///   - maxTriggersPerGoal: Per-goal event-trigger cap.
     public init(
         enabled: Bool? = nil,
         stepIntervalMinutes: Int? = nil,
@@ -72,13 +52,9 @@ public struct GoalsUpdate: Content, Sendable, Equatable {
     }
 }
 
-/// Partial `[proactive]` patch for `PUT /settings`.
-///
-/// Every field stays optional so a request carrying only one key leaves the
-/// rest of the stored interruption policy untouched instead of resetting it.
-/// The mode rides as its raw string so an unknown value fails with the same
-/// clear 400 the file loader reports instead of a bare decode error; range
-/// and closed-set checks stay single-sourced in the config validation layer.
+/// Partial `[proactive]` patch for `PUT /settings`. Every field stays optional so a request
+/// carrying only one key leaves the rest of the stored interruption policy untouched instead of
+/// resetting it.
 public struct ProactiveUpdate: Content, Sendable, Equatable {
     /// Surfacing mode raw value (`all`, `milestones`, `guarded`, `off`). Nil preserves the stored value.
     public var mode: String?
@@ -86,9 +62,6 @@ public struct ProactiveUpdate: Content, Sendable, Equatable {
     public var judgeTimeoutSeconds: Int?
 
     /// Creates a partial proactive patch.
-    /// - Parameters:
-    ///   - mode: Surfacing mode raw value.
-    ///   - judgeTimeoutSeconds: Guarded judge budget in seconds.
     public init(
         mode: String? = nil,
         judgeTimeoutSeconds: Int? = nil
@@ -114,9 +87,8 @@ extension UpdateSettingsRequest {
         self.init(goals: GoalsUpdate(goals))
     }
 
-    /// Builds a request from a full proactive snapshot, routing through the
-    /// same merge path so snapshot callers keep working without hand-mapping
-    /// fields.
+    /// Builds a request from a full proactive snapshot, routing through the same merge path so
+    /// snapshot callers keep working without hand-mapping fields.
     /// - Parameter proactive: Complete interruption policy.
     public init(proactive: ProactiveConfig) {
         self.init(proactive: ProactiveUpdate(proactive))
@@ -126,14 +98,9 @@ extension UpdateSettingsRequest {
 // MARK: - Goals + Proactive Settings Merge
 
 extension UpdateSettingsRequest {
-    /// Merges a partial goals patch onto the stored policy, preserving every
-    /// field the request omits. A nil patch is a no-op, so a dashboard edit
-    /// elsewhere never resets the `[goals]` section. Values land verbatim
-    /// because range checks stay single-sourced in `RuneWeaverConfig.validate`,
-    /// which runs before the merged config persists.
-    ///
-    /// Internal so the shared settings `apply(to:)` keeps one merge path while
-    /// the goals-specific logic lives beside its DTOs.
+    /// Merges a partial goals patch onto the stored policy, preserving every field the request
+    /// omits. A nil patch is a no-op, so a dashboard edit elsewhere never resets the `[goals]`
+    /// section.
     func applyGoals(to goals: inout GoalsConfig) {
         guard let update = self.goals else { return }
         if let enabled = update.enabled {
@@ -156,16 +123,9 @@ extension UpdateSettingsRequest {
         }
     }
 
-    /// Merges a partial proactive patch onto the stored policy, preserving
-    /// every field the request omits. A nil patch is a no-op, so a dashboard
-    /// edit elsewhere never resets the `[proactive]` section. The mode string
-    /// resolves against the closed `ProactiveMode` set here so an unknown
-    /// value fails with a clear 400 naming the dotted field instead of
-    /// persisting a mode the gate could never match; the timeout range stays
-    /// single-sourced in `RuneWeaverConfig.validate`.
-    ///
-    /// Internal so the shared settings `apply(to:)` keeps one merge path while
-    /// the proactive-specific logic lives beside its DTOs.
+    /// Merges a partial proactive patch onto the stored policy, preserving every field the request
+    /// omits. A nil patch is a no-op, so a dashboard edit elsewhere never resets the `[proactive]`
+    /// section.
     func applyProactive(to proactive: inout ProactiveConfig) throws {
         guard let update = self.proactive else { return }
         if let mode = update.mode {

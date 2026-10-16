@@ -132,10 +132,6 @@ struct ServerSchedulerWorkerTests {
     }
 
     /// Seeds one legacy marker fact straight into the semantic store.
-    ///
-    /// Every agent- and owner-writable memory boundary now rejects
-    /// marker-shaped text, so the legacy migration tests stage pre-guard
-    /// artifacts the way an upgraded install still carries them on disk.
     private func seedLegacyMarker(_ content: String, into engine: MemoryEngine) async throws {
         try await engine.semanticStoreUpsert(
             StoredFact(
@@ -150,9 +146,6 @@ struct ServerSchedulerWorkerTests {
     }
 
     /// Asserts one cursor still reads as the seeded instant.
-    ///
-    /// Durable round-trips store the cursor as a SQLite real, so the comparison
-    /// is tolerant to floating-point rendering rather than exact equality.
     private func expectCursor(_ cursor: Date?, stays seeded: Date) {
         guard let cursor else {
             Issue.record("cursor must survive the sweep")
@@ -439,10 +432,9 @@ struct ServerSchedulerWorkerTests {
         }
         #expect(await scheduler.job(id: calendarJob.id)?.lastSuccessfulRunEndedAt == nil)
         let remaining = await memoryEngine.allSemanticFacts()
-        // The reserved shape is the deletable unit, so the unparseable
-        // "pending review" marker is swept beside the dated ones instead of
-        // being stranded to compete in recall; a freeform note that merely
-        // mentions the marker words is not a marker and survives.
+        // The reserved shape is the deletable unit, so the unparseable "pending review" marker is
+        // swept beside the dated ones instead of being stranded to compete in recall; a freeform
+        // note that merely mentions the marker words is not a marker and survives.
         let markersLeft = remaining.filter { SchedulerStore.isEmailReportMarker($0.content) }
         #expect(markersLeft.isEmpty)
         #expect(remaining.contains(where: { $0.content == "Discussing the email report from last run planning" }))

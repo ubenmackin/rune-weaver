@@ -1,15 +1,4 @@
 // Rune Weaver Core Tests — Persona injection into the composed system prompt.
-//
-// Covers the identity block contract: the default persona renders today's
-// stock prompt with the exact legacy prefix and the composed marker still on
-// line two, a customized persona rewrites only the identity line with the
-// exact static preset sentence plus style and owner-name clauses, every tone
-// preset contributes its documented sentence in chat and scheduled branches,
-// the prompt cache key carries the canonical persona string so no persona
-// change can ever serve another persona's cached bytes, and owner-authored
-// freeform text is squashed to one control-free line at injection so a
-// multi-line or control-character-bearing value can never splice the composed
-// prompt structure.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -193,10 +182,9 @@ struct PersonaComposerTests {
             currentDate: date,
             persona: PersonaConfig(style: "\n\u{0001}\u{000B}\r", userName: "\u{0000}\u{007F}")
         )
-        // Sanitization is a no-op on the empty defaults, and copy that holds
-        // nothing after the scrub reads as absent through the shared absence
-        // agreement, so a noise-only persona renders today's prompt exactly
-        // rather than a blank-clause variant of the custom identity.
+        // Sanitization is a no-op on the empty defaults, and copy that holds nothing after the
+        // scrub reads as absent through the shared absence agreement, so a noise-only persona
+        // renders today's prompt exactly rather than a blank-clause variant of the custom identity.
         #expect(noise == legacy)
         #expect(SystemPromptComposer.isComposedPrompt(noise))
     }

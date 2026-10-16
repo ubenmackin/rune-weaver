@@ -1,15 +1,4 @@
 // Rune Weaver Server — Local index status, control, and settings DTOs.
-//
-// Purpose: carries the `/index` status plus run, cancel, prune, and reset
-// request/response shapes and the partial `[index]` patch for `PUT /settings`,
-// so the dashboard can read counts, per-source enablement, and recent failures
-// while edits preserve every field the request omits.
-// Scope: REST bodies only; run coordination stays with `IndexCoordinator`,
-// persistence with `DocIndexStore`, and range/closed-set checks with the config
-// validation layer.
-// Architectural role: keeps the Vapor index adapters decoupled from the engine
-// core by mirroring the engine's index shapes in version-tolerant Codable
-// contracts, so a dashboard built against an older engine still decodes.
 
 import Foundation
 import RuneWeaverCore
@@ -19,24 +8,13 @@ import Vapor
 public struct IndexSourceStatus: Content, Equatable {
     /// Source kind (`"files"`, `"mail"`, `"messages"`, `"calendars"`, or `"reminders"`).
     public let kind: String
-    /// Whether the source is enabled under the active policy. Global
-    /// enablement gates every source, matching the coordinator's stage
-    /// eligibility so the dashboard never shows a source as live while the
-    /// indexer as a whole is off.
+    /// Whether the source is enabled under the active policy.
     public let enabled: Bool
-    /// Access posture observed with silent reads at status build time
-    /// (`"granted"`, `"denied"`, `"notDetermined"`, or `"unavailable"`).
-    /// Files and mail always report `"granted"`; messages maps the read-only
-    /// chat-database probe to `"granted"` or `"denied"`; calendars and
-    /// reminders mirror the silent EventKit authorization read.
+    /// Access posture observed with silent reads at status build time (`"granted"`, `"denied"`,
+    /// `"notDetermined"`, or `"unavailable"`).
     public let access: String
 
-    /// Creates a source enablement row.
-    /// - Parameters:
-    ///   - kind: Source kind token.
-    ///   - enabled: Whether the source is effectively enabled.
-    ///   - access: Access posture token; defaults to granted so rows built
-    ///     without an access read keep today's colors.
+    /// Creates a source enablement row. kind: Source kind token.
     public init(kind: String, enabled: Bool, access: String = "granted") {
         self.kind = kind
         self.enabled = enabled
@@ -83,12 +61,7 @@ public struct IndexSourceCounts: Content, Equatable {
     /// never a mid-run pending sentinel.
     public let bytes: Int64
 
-    /// Creates a per-source content row.
-    /// - Parameters:
-    ///   - kind: Source kind token.
-    ///   - documents: Indexed document count.
-    ///   - chunks: Stored chunk count.
-    ///   - bytes: Total chunk text bytes from the persisted row.
+    /// Creates a per-source content row. kind: Source kind token.
     public init(kind: String, documents: Int = 0, chunks: Int = 0, bytes: Int64 = 0) {
         self.kind = kind
         self.documents = documents
@@ -104,10 +77,7 @@ public struct IndexExtractStatusCounts: Content, Equatable {
     /// Number of indexed documents with this outcome.
     public let documents: Int
 
-    /// Creates an extraction-outcome row.
-    /// - Parameters:
-    ///   - status: Extraction outcome token.
-    ///   - documents: Indexed document count.
+    /// Creates an extraction-outcome row. status: Extraction outcome token.
     public init(status: String, documents: Int = 0) {
         self.status = status
         self.documents = documents
@@ -127,13 +97,7 @@ public struct IndexSourceRunOutcome: Content, Equatable {
     /// Why the source did not run, when it was skipped.
     public let skippedReason: String?
 
-    /// Creates a per-source outcome row.
-    /// - Parameters:
-    ///   - kind: Source kind token.
-    ///   - didRun: Whether the stage ran.
-    ///   - scanned: Items examined.
-    ///   - indexed: Documents written.
-    ///   - skippedReason: Why the source did not run, when known.
+    /// Creates a per-source outcome row. kind: Source kind token.
     public init(
         kind: String,
         didRun: Bool = true,
@@ -226,18 +190,7 @@ public struct IndexLastRunStatus: Content, Equatable {
     /// absent degrades to no per-source notes instead of failing.
     public let sources: [IndexSourceRunOutcome]?
 
-    /// Creates a last-run row.
-    /// - Parameters:
-    ///   - status: Run state token.
-    ///   - indexed: Documents written.
-    ///   - scanned: Items examined.
-    ///   - errors: Items that could not be processed.
-    ///   - finishedAt: Instant the run finished.
-    ///   - trigger: What caused the run, when known.
-    ///   - skippedReason: Why the run did not execute, when known.
-    ///   - retiredCount: Documents retired, when known.
-    ///   - truncatedCount: Documents truncated by the vector cap, when known.
-    ///   - sources: Per-source outcomes, or nil for payloads predating them.
+    /// Creates a last-run row. status: Run state token.
     public init(
         status: String,
         indexed: Int? = nil,
@@ -280,14 +233,8 @@ public struct IndexLastRunStatus: Content, Equatable {
         case outcomes
     }
 
-    /// Decodes a last-run row, defaulting absent counts and the skip reason to
-    /// nil so payloads built against an older engine still decode. Accepts the
-    /// `retired`/`truncated` aliases some engines emit; the canonical
-    /// `retiredCount`/`truncatedCount` keys win when both are present. The
-    /// per-source list accepts `sources`, `sourceOutcomes`, or `outcomes`
-    /// with the first present winning, so older payloads without the list
-    /// degrade to nil instead of failing.
-    /// - Parameter decoder: Decoder carrying the row.
+    /// Decodes a last-run row, defaulting absent counts and the skip reason to nil so payloads
+    /// built against an older engine still decode.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         status = try container.decode(String.self, forKey: .status)
@@ -309,10 +256,9 @@ public struct IndexLastRunStatus: Content, Equatable {
         sources = canonicalSources ?? aliasOutcomes ?? legacyOutcomes
     }
 
-    /// Encodes a last-run row, omitting absent counts and the skip reason.
-    /// retired and truncated counts ride the canonical keys so current
-    /// dashboards render from one fetch; the aliases are not re-emitted.
-    /// - Parameter encoder: Encoder receiving the row.
+    /// Encodes a last-run row, omitting absent counts and the skip reason. retired and truncated
+    /// counts ride the canonical keys so current dashboards render from one fetch; the aliases are
+    /// not re-emitted.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(status, forKey: .status)
@@ -353,18 +299,7 @@ public struct IndexLiveStatus: Content, Equatable {
     /// Last relative item reported, for the display `current` field.
     public let current: String?
 
-    /// Creates a live snapshot row.
-    /// - Parameters:
-    ///   - trigger: What caused the run.
-    ///   - phase: Active phase token.
-    ///   - stage: Active source stage token, or nil.
-    ///   - scanned: Items examined.
-    ///   - indexed: Documents written.
-    ///   - skipped: Items deliberately skipped.
-    ///   - errors: Items that could not be processed.
-    ///   - rate: Documents per second.
-    ///   - elapsedMs: Milliseconds elapsed since the run began.
-    ///   - current: Last relative item reported.
+    /// Creates a live snapshot row. trigger: What caused the run.
     public init(
         trigger: String,
         phase: String,
@@ -415,11 +350,7 @@ public struct IndexEffortStatus: Content, Equatable {
     /// Logical core count observed when the snapshot was built.
     public let activeProcessors: Int
 
-    /// Creates an effort row.
-    /// - Parameters:
-    ///   - preset: Stored effort preset.
-    ///   - resolvedWorkers: Worker count the next run will use.
-    ///   - activeProcessors: Logical core count observed.
+    /// Creates an effort row. preset: Stored effort preset.
     public init(preset: String, resolvedWorkers: Int, activeProcessors: Int) {
         self.preset = preset
         self.resolvedWorkers = resolvedWorkers
@@ -477,30 +408,8 @@ public struct IndexStatusResponse: Content, Equatable {
     /// preset.
     public let effort: IndexEffortStatus?
 
-    /// Creates an index status snapshot.
-    /// - Parameters:
-    ///   - enabled: Whether the background indexer runs at all.
-    ///   - running: Whether a run is in flight.
-    ///   - documents: Indexed document count.
-    ///   - chunks: Stored chunk count.
-    ///   - vectorChunks: Chunks carrying an embedding.
-    ///   - keywordChunks: Keyword-only chunks.
-    ///   - bytes: Total chunk text bytes.
-    ///   - dbFileBytes: Main file size.
-    ///   - walBytes: Write-ahead log size.
-    ///   - textBytes: Chunk text bytes.
-    ///   - vectorBytes: Embedding bytes.
-    ///   - ftsBytes: Full-text index bytes.
-    ///   - freeBytes: Freelist bytes.
-    ///   - contentBytes: Logical content bytes.
-    ///   - indexAsOf: Last successful watermark, or nil.
-    ///   - sources: Per-source enablement rows.
-    ///   - lastErrors: Recent run failures, newest first.
-    ///   - bySource: Per-source content aggregates.
-    ///   - byExtractStatus: Extraction-outcome breakdown.
-    ///   - lastRun: Latest run outcome, or nil.
-    ///   - live: Live in-flight snapshot, or nil when idle.
-    ///   - effort: Resolved effort block, or nil for payloads predating it.
+    /// Creates an index status snapshot. enabled: Whether the background indexer
+    /// runs at all.
     public init(
         enabled: Bool = false,
         running: Bool = false,
@@ -634,13 +543,6 @@ public struct IndexStatusResponse: Content, Equatable {
 }
 
 /// Storage breakdown for `GET /index/storage`.
-///
-/// Owned by the index routes: carries byte-exact totals plus per-source
-/// document, chunk, and byte rows from the slow aggregate pass, so the
-/// dashboard merges slow sizes over the fast status snapshot. Every size is
-/// non-optional with a zero default so a missing store reports an honest
-/// zeroed payload rather than failing, and decoding stays tolerant via
-/// `decodeIfPresent` so older dashboards keep decoding.
 public struct IndexStorageResponse: Content, Equatable {
     /// Total chunk text bytes held by the index.
     public let bytes: Int64
@@ -661,17 +563,7 @@ public struct IndexStorageResponse: Content, Equatable {
     /// Per-source document/chunk/byte aggregates, one row per origin corpus.
     public let bySource: [IndexSourceCounts]
 
-    /// Creates a storage breakdown snapshot.
-    /// - Parameters:
-    ///   - bytes: Total chunk text bytes.
-    ///   - textBytes: Chunk text bytes.
-    ///   - vectorBytes: Embedding bytes.
-    ///   - ftsBytes: Full-text index bytes.
-    ///   - freeBytes: Freelist bytes.
-    ///   - dbFileBytes: Main file size.
-    ///   - walBytes: Write-ahead log size.
-    ///   - contentBytes: Logical content bytes.
-    ///   - bySource: Per-source content aggregates.
+    /// Creates a storage breakdown snapshot. bytes: Total chunk text bytes.
     public init(
         bytes: Int64 = 0,
         textBytes: Int64 = 0,
@@ -739,37 +631,8 @@ public struct IndexStorageResponse: Content, Equatable {
     }
 }
 
-/// Builds the `/index/status` shape from engine policy, aggregate stats, live
-/// run state, and recent failures.
-///
-/// Kept as a free function so the shape has one definition independent of the
-/// transport: the route only gathers inputs, and callers without a document
-/// store or coordinator report an honest empty/stopped snapshot instead of
-/// failing. The `live` snapshot is additive: existing callers omit it and
-/// report an idle strip, while the route passes the coordinator's live totals
-/// through when a run is in flight. Stats flow through the existing `stats`
-/// parameter with true counts, watermark, and true sizes from the persisted
-/// single row; sizes prefer the optional `storage` breakdown and fall back to
-/// `stats` true sizes, so the TTL never gates correctness and only a
-/// genuinely absent row renders fail-closed zeros. Effort resolves from the
-/// stored preset on this machine so the dashboard renders workers without a
-/// second fetch.
-///
-/// - Parameters:
-///   - config: Active index policy driving enablement and effort.
-///   - stats: Persisted aggregate stats with true sizes, or nil when no store is wired.
-///   - running: Whether a run is in flight.
-///   - lastErrors: Recent run failures, newest first.
-///   - lastRun: Latest run outcome, or nil when no run has been recorded.
-///   - live: Live in-flight snapshot, or nil when idle.
-///   - storage: Persisted slow breakdown, or nil for fail-closed zeros when absent.
-///   - calendarAccess: Silent EventKit calendars posture; defaults to granted
-///     so callers without an access read keep today's colors.
-///   - remindersAccess: Silent EventKit reminders posture; defaults to granted
-///     so callers without an access read keep today's colors.
-///   - messagesAccess: Read-only Messages database posture; defaults to granted
-///     so callers without an access read keep today's colors.
-/// - Returns: The status snapshot.
+/// Builds the `/index/status` shape from engine policy, aggregate stats, live run state, and recent
+/// failures.
 func makeIndexStatusResponse(
     config: IndexConfig,
     stats: IndexStats?,
@@ -830,13 +693,8 @@ func makeIndexStatusResponse(
     )
 }
 
-/// Partial index patch for `PUT /settings`.
-///
-/// Every field is optional so a request carrying only one key leaves the rest
-/// of the stored `[index]` section untouched instead of resetting it. Covers the
-/// same field set as the full ``IndexConfig`` snapshot, so a caller holding a
-/// complete policy can build the patch through `init(_:)` and reuse the merge
-/// path without hand-mapping fields.
+/// Partial index patch for `PUT /settings`. Every field is optional so a request carrying only one
+/// key leaves the rest of the stored `[index]` section untouched instead of resetting it.
 public struct IndexSettingsUpdate: Content, Equatable {
     /// Whether the background indexer runs at all.
     public var enabled: Bool?
@@ -877,35 +735,10 @@ public struct IndexSettingsUpdate: Content, Equatable {
     public var maxVectorChunksPerDocument: Int?
     /// Trash-class mailbox denylist skipped without dialing.
     public var mailboxDeny: [String]?
-    /// Directory and file names the walker always skips, even when absent from
-    /// `exclude`. Read-only: populated from the walker's prune list when a patch
-    /// is built from a snapshot and ignored when a patch is applied, so the
-    /// dashboard copy cannot drift. The `[files]` deny patterns stay out of this
-    /// list and are described generically in the UI.
+    /// Directory and file names the walker always skips, even when absent from `exclude`.
     public var alwaysSkipped: [String]?
 
-    /// Creates a partial index patch.
-    /// - Parameters:
-    ///   - enabled: Whether the indexer runs.
-    ///   - files: Files source toggle.
-    ///   - mail: Mail source toggle.
-    ///   - messages: Messages source toggle.
-    ///   - calendars: Calendars source toggle.
-    ///   - reminders: Reminders source toggle.
-    ///   - roots: File roots.
-    ///   - exclude: File exclude patterns.
-    ///   - maxFileMB: Per-file size cap in megabytes.
-    ///   - mailVectorWindow: Mail vectorization window.
-    ///   - iCloudEvicted: Evicted-iCloud-file policy.
-    ///   - nightlyBudget: Nightly item budget.
-    ///   - dbPath: Index database path.
-    ///   - effort: Effort preset.
-    ///   - workers: Explicit worker count for `custom`.
-    ///   - thermalBackoff: Thermal backoff toggle.
-    ///   - pauseOnBattery: Pause-on-battery toggle.
-    ///   - maxVectorChunksPerDocument: Per-document vector chunk cap.
-    ///   - mailboxDeny: Trash-class mailbox denylist.
-    ///   - alwaysSkipped: Read-only walker prune names, ignored on apply.
+    /// Creates a partial index patch. enabled: Whether the indexer runs.
     public init(
         enabled: Bool? = nil,
         files: Bool? = nil,
@@ -1085,14 +918,9 @@ extension ServerPaths {
 // MARK: - Index Settings Merge
 
 extension UpdateSettingsRequest {
-    /// Merges a partial index patch onto the stored policy, preserving every
-    /// field the request omits. A nil patch is a no-op, so a dashboard edit to
-    /// one knob never resets the rest of the `[index]` section. Values land
-    /// verbatim because range and closed-set checks stay single-sourced in
-    /// `RuneWeaverConfig.validate`, which runs before the merged config persists.
-    ///
-    /// Internal so the shared settings `apply(to:)` keeps one merge path while
-    /// the index-specific logic lives beside its DTOs.
+    /// Merges a partial index patch onto the stored policy, preserving every field the request
+    /// omits. A nil patch is a no-op, so a dashboard edit to one knob never resets the rest of the
+    /// `[index]` section.
     func applyIndex(to index: inout IndexConfig) {
         guard let update = self.index else { return }
         applyIndexSources(update, to: &index)

@@ -1,13 +1,4 @@
 // Rune Weaver Core Tests — Proactive surfacing gate decision coverage.
-//
-// Exercises the interruption filter guarding background scheduler and goal
-// outcomes: the mode-by-kind decision table, fail-open judging for guarded
-// routine successes, headline and preview bounds shared with the notify
-// short-text, proactive config defaults with TOML round-trip and validation,
-// and the dashboard interruption frame encoding. Scope is the gate in
-// isolation; run history and approval inbox recording stay unconditional by
-// contract, so these tests assert the gate still returns loggable headlines
-// when it suppresses.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -70,10 +61,9 @@ struct OutcomeGateTests {
 
     @Test
     func `Idea nudges surface only under all mode`() async {
-        // A volunteered suggestion is not a milestone, so it follows the same
-        // suppression contract as a routine step completion: surfaced by `all`,
-        // hidden by `off` and `milestones`, and quiet under guarded without a
-        // dedicated judge branch.
+        // A volunteered suggestion is not a milestone, so it follows the same suppression contract
+        // as a routine step completion: surfaced by `all`, hidden by `off` and `milestones`, and
+        // quiet under guarded without a dedicated judge branch.
         let all = await OutcomeGate(mode: .all).decide(event: event(kind: .ideaProposed, outcome: "Try a shorter loop"))
         #expect(all.surface == true)
         #expect(all.headline == "Try a shorter loop")
@@ -123,10 +113,9 @@ struct OutcomeGateTests {
 
     @Test
     func `Guarded never judges ideas or step completions`() async {
-        // The guarded judge only weighs scheduler successes: a throwing judge
-        // proves the gate never consults it for volunteered suggestions or
-        // routine step completions, because a consulted judge would fail open
-        // to surfacing while the correct path stays suppressed.
+        // The guarded judge only weighs scheduler successes: a throwing judge proves the gate never
+        // consults it for volunteered suggestions or routine step completions, because a consulted
+        // judge would fail open to surfacing while the correct path stays suppressed.
         struct JudgeBoom: Error {}
         let gate = OutcomeGate(
             mode: .guarded,

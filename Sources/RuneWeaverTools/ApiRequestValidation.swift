@@ -1,8 +1,4 @@
 // Rune Weaver Tools — Validation and output policy for constrained API requests.
-//
-// Holds the header allowlist with secret redaction, body and output caps, and
-// content classification for `api.request`, single-sourced so the tool chain
-// and the fetch classifier cannot diverge on what counts as text.
 
 import Foundation
 import RuneWeaverCore
@@ -12,10 +8,6 @@ public enum ApiHeaderPolicy: Sendable {
     /// Lowercased header names the model may supply.
     public static let allowedHeaders: Set<String> = ["accept", "content-type", "authorization"]
     /// Placeholder standing in for the secret in logs and previews.
-    ///
-    /// Single-sourced through `SecretsManager` so header redaction and output
-    /// sweeping agree on one redacted shape; the dependency runs tools → core
-    /// only, never the reverse, so no import cycle is introduced.
     public static var redactedPlaceholder: String {
         SecretsManager.redactedPlaceholder
     }
@@ -53,15 +45,6 @@ public enum ApiHeaderPolicy: Sendable {
     }
 
     /// Redacts secrets for logs and preview envelopes, sweeping echoes.
-    ///
-    /// `Authorization` values always redact to the placeholder, except a
-    /// still-unresolved surrogate reference (`rwsecret:<key>`), which carries
-    /// no secret bytes and stays visible so dry-run previews keep the
-    /// reference the model authored. Any resolved value echoing in a
-    /// non-`Authorization` header sweeps to the same placeholder, giving
-    /// belt-and-suspenders parity with the transport output sweep.
-    /// Delegates to the shared core rule so the tools preview and the
-    /// approval-target summary cannot diverge on surrogate visibility.
     public static func redacted(_ headers: [String: String], resolvedSecrets: [String] = []) -> [String: String] {
         var sanitized: [String: String] = [:]
         sanitized.reserveCapacity(headers.count)
@@ -72,23 +55,14 @@ public enum ApiHeaderPolicy: Sendable {
         return sanitized
     }
 
-    /// Sweeps resolved secret values out of one header value.
-    ///
-    /// Delegates to the shared core sweep so header and output echoes follow
-    /// one longest-first rule with one placeholder.
-    /// - Parameters:
-    ///   - value: Header value possibly echoing a resolved secret.
-    ///   - secrets: Live values inserted at the transport boundary.
-    /// - Returns: Value with every non-empty secret replaced by the placeholder.
+    /// Sweeps resolved secret values out of one header value. - secrets: Live values inserted at
+    /// the transport boundary.
     static func sweepResolved(_ value: String, secrets: [String]) -> String {
         SecretsManager.sweepResolved(value, secrets: secrets)
     }
 
     /// Single-line log-safe header summary with the secret already redacted.
-    /// - Parameters:
-    ///   - headers: Validated headers.
-    ///   - resolvedSecrets: Live values to sweep from echoed headers.
-    /// - Returns: Compact `Name:value` pairs joined by commas, or `(none)`.
+    /// headers: Validated headers.
     public static func logSummary(_ headers: [String: String], resolvedSecrets: [String] = []) -> String {
         let sanitized = redacted(headers, resolvedSecrets: resolvedSecrets)
         guard !sanitized.isEmpty else { return "(none)" }

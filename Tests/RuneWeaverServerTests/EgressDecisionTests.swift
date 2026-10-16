@@ -1,20 +1,4 @@
 // Rune Weaver Tests — Decision contract for parked approvals on REST and WebSocket.
-//
-// Purpose: pin the single decision path every transport shares. Egress tiers
-// are gone from the wire, so the mapping reads the parked request's host plus
-// the requested duration: a one-shot allow spends a supervisor grant, a session
-// allow trusts the domain for the conversation, a durable allow mints a
-// domain-scoped rule, a one-shot deny refuses the call alone, and a durable
-// deny blocks the domain in policy beside the rule it mints. Fail-closed is the
-// invariant under test: an allow side effect that fails never approves a call
-// nothing recorded, and a wildcard-shaped host is never allowed because the
-// domain matcher would read it as covering every destination it names.
-// Scope: the server-side mapping and both transports' rejection behavior.
-// Scope canonicalization, deny-outranks evaluation, and policy invariant math
-// stay with their own suites.
-// Architectural role: regression coverage for the one decide-plus-map function
-// the REST route and WebSocket triage share, so a transport-local edit cannot
-// reopen broad, attacker-steerable egress or let the two paths drift.
 
 import Foundation
 import NIOWebSocket
@@ -97,16 +81,8 @@ private struct DecisionHarness {
     }
 }
 
-/// Builds an isolated context whose policy file, store, and supervisor are the
-/// exact instances the REST and WebSocket handlers read.
-///
-/// The fallback context supplies the shared turn machinery because these tests
-/// exercise the decision handler alone: no boot, no auth, no tool registration.
-/// Borrowing it keeps one construction path for lean route tests, while the
-/// per-test hub and approval queue keep frames and pending state isolated.
-/// - Parameter supervisor: When false the context is born without the mandatory
-///   choke-point, so the supervisor-less fail-closed branch is observable.
-/// - Returns: The harness with its loaded store and live supervisor.
+/// Builds an isolated context whose policy file, store, and supervisor are the exact instances the
+/// REST and WebSocket handlers read.
 private func makeDecisionHarness(wiredSupervisor: Bool = true) async throws -> DecisionHarness {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("rw-decision-\(UUID().uuidString)")
@@ -130,10 +106,9 @@ private func makeDecisionHarness(wiredSupervisor: Bool = true) async throws -> D
         policyStore: store,
         egressSupervisor: supervisor
     )
-    // Wire the gate and supervisor both ways like production boot: the gate
-    // consults the supervisor for host status and the supervisor honors the
-    // gate's covering domain allows, so a durable or task-tier approval keeps
-    // the next identical call auto-approved at both layers.
+    // Wire the gate and supervisor both ways like production boot: the gate consults the supervisor
+    // for host status and the supervisor honors the gate's covering domain allows, so a durable or
+    // task-tier approval keeps the next identical call auto-approved at both layers.
     if let supervisor {
         await gate.setEgressEvaluator(supervisor)
         await supervisor.setPermissionGate(gate)
@@ -141,16 +116,9 @@ private func makeDecisionHarness(wiredSupervisor: Bool = true) async throws -> D
     return DecisionHarness(context: context, store: store, fileURL: fileURL, directory: directory)
 }
 
-/// Enqueues one unlisted `api.request` approval carrying the given host.
-///
-/// The host is passed explicitly so the guard under test is exercised against
-/// a deterministic wildcard shape rather than URL-parser spelling. A tagged
-/// session lets callers prove the session-tier mapping resolves against it.
-/// - Parameters:
-///   - host: Egress host filed on the pending request.
-///   - sessionID: Owning conversation, when the caller needs a session tier.
-///   - context: Context owning the approval queue.
-/// - Returns: The pending request awaiting a decision.
+/// Enqueues one unlisted `api.request` approval carrying the given host. The host is passed
+/// explicitly so the guard under test is exercised against a deterministic wildcard shape rather
+/// than URL-parser spelling.
 private func enqueueEgressRequest(
     host: String,
     sessionID: UUID? = nil,
@@ -182,12 +150,9 @@ private func waitForDecisionFrames(_ socket: DecisionRecordingSocket) async -> [
     return await socket.sent
 }
 
-/// Runs one test body against an application serving the full engine routes
-/// over the isolated context, shutting the app down on every exit path.
-/// - Parameters:
-///   - context: Context the routes must serve.
-///   - body: Test body receiving the configured app.
-/// - Returns: Whatever `body` returns.
+/// Runs one test body against an application serving the full engine routes over the isolated
+/// context, shutting the app down on every exit path. context: Context the routes
+/// must serve.
 private func withDecisionRouteApp<T>(
     context: ServerContext,
     _ body: (Application) async throws -> T
@@ -205,13 +170,8 @@ private func withDecisionRouteApp<T>(
     }
 }
 
-/// Runs one approval decision through the real REST route surface.
-/// - Parameters:
-///   - app: Configured application.
-///   - id: Pending approval identifier.
-///   - approved: Approval polarity sent in the JSON body.
-///   - duration: Trust tier sent in the JSON body.
-/// - Returns: The route response, without binding a socket.
+/// Runs one approval decision through the real REST route surface. app: Configured
+/// application.
 private func decideViaREST(
     app: Application,
     id: UUID,
@@ -238,11 +198,8 @@ private struct RESTDecisionBody: Content {
     let duration: String
 }
 
-/// Drives one decision frame through the real WebSocket inbound path.
-/// - Parameters:
-///   - text: Raw decision frame text.
-///   - context: Context owning the hub and approval queue.
-/// - Returns: The socket that received the response frames.
+/// Drives one decision frame through the real WebSocket inbound path. text: Raw
+/// decision frame text.
 private func decideViaWebSocket(_ text: String, context: ServerContext) async -> DecisionRecordingSocket {
     let socket = DecisionRecordingSocket()
     let connectionID = UUID()
@@ -259,24 +216,14 @@ private func decideViaWebSocket(_ text: String, context: ServerContext) async ->
     return socket
 }
 
-/// Renders one decision frame for the WebSocket transport.
-/// - Parameters:
-///   - id: Pending approval identifier.
-///   - approved: Approval polarity.
-///   - duration: Trust tier.
-/// - Returns: Encoded frame text.
+/// Renders one decision frame for the WebSocket transport. id: Pending approval
+/// identifier.
 private func decisionFrame(id: UUID, approved: Bool, duration: TrustDuration) -> String {
     #"{"id":"\#(id.uuidString)","approved":\#(approved ? "true" : "false"),"duration":"\#(duration.rawValue)"}"#
 }
 
-/// Applies one decision through the shared contract and returns its outcome.
-/// - Parameters:
-///   - id: Pending approval identifier.
-///   - approved: Approval polarity the client sent.
-///   - duration: Requested trust tier.
-///   - pending: Pending request captured before the resolve removes it.
-///   - context: Live server context owning the queue and side effects.
-/// - Returns: The outcome the shared function produced.
+/// Applies one decision through the shared contract and returns its outcome. id:
+/// Pending approval identifier.
 private func decideShared(
     id: UUID,
     approved: Bool,
@@ -430,10 +377,9 @@ struct EgressDecisionContractTests {
         #expect(summary?.oneShotDomains.isEmpty == true)
         #expect(harness.persistedPolicy()?.contains("api.github.com") != true)
 
-        // The rule authorizes the next identical call: the gate allows it and
-        // the supervisor reports the host allowed, in a session that never
-        // approved anything, proving the trust is durable rather than
-        // session-bound.
+        // The rule authorizes the next identical call: the gate allows it and the supervisor
+        // reports the host allowed, in a session that never approved anything, proving the trust is
+        // durable rather than session-bound.
         let nextCall = ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://api.github.com/repos"}"#)
         #expect(await harness.context.permissionGate.checkPermission(toolCall: nextCall, tool: EgressGateProbeTool(name: "api.request"), sessionID: UUID()) == .allowed)
         #expect(await harness.context.egressSupervisor?.evaluateHostStatus(for: "api.github.com", sessionID: UUID()) == .allowed)
@@ -903,11 +849,9 @@ struct EgressDecisionTransportTests {
         let policy = try await harness.store.snapshot()
         #expect(policy.network.blockedDomains.contains("blocked.example.com"))
         #expect(harness.persistedPolicy()?.contains("blocked.example.com") == true)
-        // A durable deny mint refreshes dashboards exactly like a durable
-        // allow mint: approved=false plus forever stores a standing deny rule
-        // inside `decide`, so the deciding socket receives exactly one
-        // access_rules_changed frame — no acknowledgement and no error frame
-        // may arrive. A non-minting deny (thisTime) stays silent instead.
+        // A durable deny mint refreshes dashboards exactly like a durable allow mint:
+        // approved=false plus forever stores a standing deny rule inside `decide`, so the deciding
+        // socket receives exactly one access_rules_changed frame — no acknowledgement and no error.
         var frames = await waitForDecisionFrames(socket)
         // Let a duplicate broadcast or stray ack/error land before pinning
         // the count, so a late straggler cannot dodge the assertion.

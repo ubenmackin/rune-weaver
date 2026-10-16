@@ -1,10 +1,4 @@
 // Rune Weaver Core Tests — Document index store schema, hashing, search, and maintenance.
-//
-// Exercises the SQLite-backed document index end to end against isolated
-// temporary databases: schema creation and additive migration, content-hash
-// skip behavior, FTS5 keyword retrieval, vector chunk accounting, pruning
-// with vacuum, deletion, and reset. Tests never touch the real
-// `~/.runeweaver/memory` store.
 
 import Foundation
 import os
@@ -24,10 +18,9 @@ private func makeIndexPath() -> (path: String, base: URL) {
     return (base.appendingPathComponent("docindex.db").path, base)
 }
 
-/// Names the isolated sidecar targets a store reset must take so the test
-/// never deletes the operator's real mail checkpoint or Messages watermark.
-/// - Parameter base: Test-owned scratch directory.
-/// - Returns: Mail checkpoint and Messages watermark paths under `base`.
+/// Names the isolated sidecar targets a store reset must take so the test never deletes the
+/// operator's real mail checkpoint or Messages watermark. - Parameter base: Test-owned scratch
+/// directory.
 private func makeIndexResetSidecars(base: URL) -> (mailCheckpointPath: String, messagesStatePath: String) {
     (
         mailCheckpointPath: base.appendingPathComponent("mail-index-checkpoint.json").path,
@@ -73,14 +66,9 @@ private enum LegacyIndexError: Error {
 }
 
 #if canImport(SQLite3)
-    /// Opens a raw probe handle with the production busy-timeout.
-    ///
-    /// Mirrors `SQLiteHelpers.openHandle`'s `busy_timeout = 5000` so a probe racing
-    /// a parallel aggregate refresh waits instead of failing with `SQLITE_BUSY`.
-    /// Probes stay read-only and never change `journal_mode`, so only the timeout
-    /// is shared.
-    /// - Parameter path: Database file path.
-    /// - Returns: Open handle. Throws when the database cannot be opened.
+    /// Opens a raw probe handle with the production busy-timeout. Mirrors
+    /// `SQLiteHelpers.openHandle`'s `busy_timeout = 5000` so a probe racing a parallel aggregate
+    /// refresh waits instead of failing with `SQLITE_BUSY`.
     private func openIndexProbe(atPath path: String) throws -> OpaquePointer {
         var handle: OpaquePointer?
         guard sqlite3_open(path, &handle) == SQLITE_OK, let opened = handle else {
@@ -131,11 +119,8 @@ private func createLegacyIndex(atPath path: String) throws {
     #endif
 }
 
-/// Creates a database with the v1 full-text schema to exercise the
-/// contentless migration: a porter-tokenized FTS table that stores a second
-/// copy of every chunk plus plain rowid triggers.
-/// - Parameter path: Database file path.
-/// - Returns: Seeded document and chunk identifiers.
+/// Creates a database with the v1 full-text schema to exercise the contentless migration: a
+/// porter-tokenized FTS table that stores a second copy of every chunk plus plain rowid triggers.
 private func createV1Index(atPath path: String) throws -> (documentID: UUID, chunkIDs: [UUID]) {
     let documentID = UUID()
     let firstChunkID = UUID()
@@ -232,11 +217,8 @@ private func readIndexSchemaVersion(atPath path: String) throws -> Int? {
     #endif
 }
 
-/// Reports whether a table exists in a raw index database.
-/// - Parameters:
-///   - path: Database file path.
-///   - name: Table name to probe.
-/// - Returns: True when a table with that name exists.
+/// Reports whether a table exists in a raw index database. path: Database file
+/// path.
 private func indexTableExists(atPath path: String, name: String) throws -> Bool {
     #if canImport(SQLite3)
         let handle = try openIndexProbe(atPath: path)
@@ -275,12 +257,8 @@ private func indexFTSDefinition(atPath path: String) throws -> String? {
     #endif
 }
 
-/// Counts direct FTS matches, bypassing the LIKE fallback so trigger sync is
-/// observable instead of being masked by the content-table scan.
-/// - Parameters:
-///   - path: Database file path.
-///   - query: Bare FTS query text without surrounding quotes.
-/// - Returns: Number of FTS rows matching the query.
+/// Counts direct FTS matches, bypassing the LIKE fallback so trigger sync is observable instead of
+/// being masked by the content-table scan. path: Database file path.
 private func ftsMatchCount(atPath path: String, query: String) throws -> Int {
     #if canImport(SQLite3)
         let handle = try openIndexProbe(atPath: path)
@@ -299,11 +277,8 @@ private func ftsMatchCount(atPath path: String, query: String) throws -> Int {
     #endif
 }
 
-/// Fetches FTS rank values in `ORDER BY rank` order for a query.
-/// - Parameters:
-///   - path: Database file path.
-///   - query: Bare FTS query text without surrounding quotes.
-/// - Returns: Rank values in the order SQLite returned them.
+/// Fetches FTS rank values in `ORDER BY rank` order for a query. path: Database
+/// file path.
 private func ftsRanks(atPath path: String, query: String) throws -> [Double] {
     #if canImport(SQLite3)
         let handle = try openIndexProbe(atPath: path)
@@ -325,11 +300,8 @@ private func ftsRanks(atPath path: String, query: String) throws -> [Double] {
     #endif
 }
 
-/// Rewrites a chunk body through raw SQL so the `AFTER UPDATE` trigger fires.
-/// - Parameters:
-///   - path: Database file path.
-///   - chunkID: Chunk row to rewrite.
-///   - text: Replacement body without single quotes.
+/// Rewrites a chunk body through raw SQL so the `AFTER UPDATE` trigger fires. path:
+/// Database file path.
 private func updateIndexedChunkText(atPath path: String, chunkID: UUID, text: String) throws {
     #if canImport(SQLite3)
         let handle = try openIndexProbe(atPath: path)
@@ -346,14 +318,6 @@ private func updateIndexedChunkText(atPath path: String, chunkID: UUID, text: St
 }
 
 /// Removes one document row through raw SQL, leaving its chunks orphaned.
-///
-/// The probe connection leaves `foreign_keys` at SQLite's default off, so the
-/// parent row disappears without `ON DELETE CASCADE` taking its chunks — the
-/// exact state a pragma-off writer, a legacy file, or a manual edit leaves
-/// behind for the recall paths to reckon with.
-/// - Parameters:
-///   - path: Database file path.
-///   - documentID: Document row to remove.
 private func deleteIndexedDocumentRow(atPath path: String, documentID: UUID) throws {
     #if canImport(SQLite3)
         let handle = try openIndexProbe(atPath: path)
@@ -369,11 +333,6 @@ private func deleteIndexedDocumentRow(atPath path: String, documentID: UUID) thr
 }
 
 /// Reads the schema-change counter without running any store ensure.
-///
-/// A second open that issues zero DDL writes leaves this value unchanged,
-/// so the test proves the fast path performs no schema writes.
-/// - Parameter path: Database file path.
-/// - Returns: Current `PRAGMA data_version` value.
 private func readIndexDataVersion(atPath path: String) throws -> Int {
     #if canImport(SQLite3)
         let handle = try openIndexProbe(atPath: path)
@@ -405,12 +364,6 @@ private struct AggregateSingleRow: Equatable {
 }
 
 /// Reads the single `index_aggregates` row through raw SQL.
-///
-/// Probing the table directly proves the refresh wrote durable rows instead
-/// of only warming the in-memory snapshot, and keeps the assertion independent
-/// of the store's cache.
-/// - Parameter path: Database file path.
-/// - Returns: The stored aggregate row, or nil when no refresh has run.
 private func readAggregateSingle(atPath path: String) throws -> AggregateSingleRow? {
     #if canImport(SQLite3)
         let handle = try openIndexProbe(atPath: path)
@@ -490,11 +443,6 @@ private func readAggregateByStatus(atPath path: String) throws -> [String: Int] 
 }
 
 /// Clears the persisted aggregate rows without touching actor state.
-///
-/// Deletes directly through raw SQL so the store still believes its tables
-/// are clean; the next reader must observe the absent row and repair once
-/// through the single writer instead of serving stale content.
-/// - Parameter path: Database file path.
 private func clearAggregateRows(atPath path: String) throws {
     #if canImport(SQLite3)
         let handle = try openIndexProbe(atPath: path)
@@ -510,13 +458,6 @@ private func clearAggregateRows(atPath path: String) throws {
 }
 
 /// Seeds one document per extraction outcome across all three sources.
-///
-/// Covers every `ExtractStatus` case plus multi-source fan-out so the refresh
-/// test proves each string-keyed row lands instead of only the happy-path
-/// statuses. Chunk bodies give the text and vector legs non-zero totals while
-/// one chunk-less row proves zero-chunk sources still record documents.
-/// - Parameter store: Store to seed.
-/// - Returns: Seeded documents in insertion order.
 private func seedAggregateFixture(store: DocIndexStore) async throws {
     let extractedFiles = try await store.upsertDocument(makeDocument(externalID: "agg-files-extracted", contentHash: "hash-agg-extracted", extractStatus: .extracted))
     _ = try await store.upsertChunks(documentID: extractedFiles.id, chunks: [
@@ -620,11 +561,9 @@ struct DocIndexStoreTests {
             chunks: [IndexedChunk(documentID: newer.id, ordinal: 0, text: "newer vector", embedding: [0.0, 1.0])]
         )
 
-        // Pool order is event time — the parent `mtime` descending with NULL
-        // parents last — so the bounded semantic pool favors recently happening
-        // documents at scale instead of recently written rows. These fixtures
-        // carry no `mtime`, so the rowid tie-break decides and the latest
-        // insertion leads, which is what the capped reads below pin down.
+        // Pool order is event time — the parent `mtime` descending with NULL parents last — so the
+        // bounded semantic pool favors recently happening documents at scale instead of recently
+        // written rows.
         let newestOnly = try await store.chunkVectors(limit: 1)
         #expect(newestOnly.count == 1)
         #expect(newestOnly.first?.documentID == newer.id)
@@ -675,10 +614,9 @@ struct DocIndexStoreTests {
         // recall path must still treat that chunk as a candidate.
         try deleteIndexedDocumentRow(atPath: path, documentID: doomed.id)
 
-        // The unbounded read left-joins the parent to reach `mtime`, so a chunk
-        // whose document row is missing stays a semantic candidate; its NULL
-        // event time sorts last behind every dated parent, so undated rows
-        // never crowd out recently happening documents.
+        // The unbounded read left-joins the parent to reach `mtime`, so a chunk whose document row
+        // is missing stays a semantic candidate; its NULL event time sorts last behind every dated
+        // parent, so undated rows never crowd out recently happening documents.
         let pool = try await store.chunkVectors(limit: 10)
         #expect(pool.count == 3)
         #expect(pool.first?.documentID == recent.id)
@@ -1541,10 +1479,8 @@ struct DocIndexStoreTests {
             #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 1)
         #endif
 
-        // Freeze-then-jump: writes invalidate the memory snapshot, so the
-        // next poll serves the persisted row frozen with zero aggregate
-        // passes. The concurrent write stays invisible until an explicit
-        // refresh jumps the persisted row forward.
+        // Freeze-then-jump: writes invalidate the memory snapshot, so the next poll serves the
+        // persisted row frozen with zero aggregate passes.
         _ = try await store.upsertDocument(makeDocument(externalID: "cached-doc-2", contentHash: "hash-cached-2"))
         let fresh = try await store.stats()
         #expect(fresh == first)
@@ -1763,10 +1699,8 @@ struct DocIndexStoreTests {
             let linkPath = base.appendingPathComponent("docindex-link.db").path
             try? FileManager.default.removeItem(atPath: linkPath)
             try FileManager.default.createSymbolicLink(atPath: linkPath, withDestinationPath: path)
-            // Both spellings name the same file, so the ensure gate must see
-            // one entry instead of ensuring twice. The link target does not
-            // exist yet, so the canonicalizer must resolve the dangling leaf
-            // itself instead of relying on the URL pass alone.
+            // Both spellings name the same file, so the ensure gate must see one entry instead of
+            // ensuring twice.
             #expect(SQLiteDocIndexStore.canonicalDBPath(linkPath) == SQLiteDocIndexStore.canonicalDBPath(path))
             SQLiteDocIndexStore.removeEnsuredPath(path)
             SQLiteDocIndexStore.removeEnsuredPath(linkPath)
@@ -1894,10 +1828,8 @@ struct DocIndexStoreTests {
             let beforeByStatus = try readAggregateByStatus(atPath: path)
             #expect(beforeSingle?.documents == 6)
 
-            // Force the replacement transaction to throw after the compute so
-            // the rollback path is exercised instead of a pre-compute open failure.
-            // Scoped to this file so parallel suites over other files never
-            // observe the injected failure.
+            // Force the replacement transaction to throw after the compute so the rollback path is
+            // exercised instead of a pre-compute open failure.
             SQLiteDocIndexStore.setAggregateWriteFailureHook({ true }, for: path)
             defer { SQLiteDocIndexStore.clearAggregateWriteFailureHook(for: path) }
             do {
@@ -2263,10 +2195,8 @@ struct DocIndexStoreTests {
             SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
         #endif
 
-        // Same-store warm reads ride the memory snapshot plus the persisted
-        // rows with no content scan, so every projection stays at zero passes.
-        // Freeze-then-jump: the persisted snapshot now correctly carries true
-        // sizes, so the fast projection serves true bytes, not pending zeros.
+        // Same-store warm reads ride the memory snapshot plus the persisted rows with no content
+        // scan, so every projection stays at zero passes.
         let stats = try await store.stats()
         #expect(stats.documents == 6)
         let breakdown = try await store.storageBreakdown()
@@ -2371,10 +2301,9 @@ struct DocIndexStoreTests {
             let breakdown = try await store.storageBreakdown()
             #expect(breakdown == live.makeBreakdown())
             let fast = try await store.fastStats()
-            // Freeze-then-jump: the persisted snapshot now correctly carries
-            // true sizes, so the fast projection equals the live snapshot's
-            // stats projection, not the fail-closed pending-zero shape from
-            // the cheap COUNT path used only when no row exists.
+            // Freeze-then-jump: the persisted snapshot now correctly carries true sizes, so the
+            // fast projection equals the live snapshot's stats projection, not the fail-closed
+            // pending-zero shape from the cheap COUNT path used only when no row exists.
             let liveFast = live.makeStats()
             #expect(fast == liveFast)
             #expect(fast.documents == live.documents)

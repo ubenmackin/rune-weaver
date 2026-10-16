@@ -1,10 +1,4 @@
 // Rune Weaver Tools — Adapter binding the shared IMAP gateway to the mail indexer seam.
-//
-// The core mail indexer enumerates mail through a read-only protocol seam so it
-// stays free of the tool layer. This adapter maps that seam onto the existing
-// `EmailIMAPGateway`: it lists selectable mailboxes, reads the newest message page
-// via batched one-shot fetch, and reads attachment parts. Every read flows through
-// the bridge's `BODY.PEEK` path, so indexing never marks mail as seen.
 
 import Foundation
 import RuneWeaverCore

@@ -1,6 +1,4 @@
 // Rune Weaver Dashboard — Audit log viewer for inspecting chat turns and scheduler job runs.
-// Features filter chips, clear status badges, duration/token metrics, in-flight fan-out
-// cancellation with honest swarm-versus-worker scope copy, and full detail modal.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -44,12 +42,7 @@ export interface RunRowGroup {
   children: RunLogEntry[];
 }
 
-// Groups fan-out worker rows under their parent swarm record. Worker rows are
-// appended immediately after their parent in the audit trail, so walking the
-// newest-first list and flushing buffered worker rows at the next parent row
-// reproduces the swarm shape without a run-id link on child rows. Orphaned
-// worker rows (parent pruned past retention) render as standalone rows rather
-// than vanishing, so the audit trail stays complete.
+// Groups fan-out worker rows under their parent swarm record.
 export function groupFanOutRows(runs: RunLogEntry[]): RunRowGroup[] {
   const groups: RunRowGroup[] = [];
   let pendingWorkers: RunLogEntry[] = [];
@@ -130,12 +123,7 @@ export function runPendingApprovals(
   });
 }
 
-// Reports whether one row's in-flight work can be stopped from the runs
-// surface. Only fan-out rows carry the engine's swarm-aware cancel route:
-// stopping a parent stops the whole swarm and stopping a worker row stops that
-// worker alone, while chat and scheduler turns stop through their own surfaces.
-// Status must still be running — a settled row has nothing left to stop, and a
-// button there would only earn the engine's honest 409.
+// Reports whether one row's in-flight work can be stopped from the runs surface.
 export function canCancelRun(run: RunLogEntry): boolean {
   return (
     isActiveRunStatus(run.status) &&
@@ -163,10 +151,8 @@ export default function RunLogViewer() {
   // currently render; one swarm stays expanded at a time so the list never
   // collapses into an unreadable wall of worker rows.
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
-  // Stop affordances for in-flight fan-out work: the parent row stages a
-  // confirmation because it stops the whole swarm, while a worker row fires
-  // directly for a one-click narrow stop. `cancellingId` disables the clicked
-  // control and swaps its label while the request and refetch settle.
+  // Stop affordances for in-flight fan-out work: the parent row stages a confirmation because it
+  // stops the whole swarm, while a worker row fires directly for a one-click narrow stop.
   const [pendingCancelRun, setPendingCancelRun] = useState<RunLogEntry | null>(
     null,
   );
@@ -315,10 +301,9 @@ export default function RunLogViewer() {
     };
   }, []);
 
-  // Live badges track only in-flight turns while parked approvals surface
-  // through the approvals badge, so the poller separates the two: running
-  // rows keep history fresh and parked rows keep approvals fresh without
-  // double-badging one blocked turn.
+  // Live badges track only in-flight turns while parked approvals surface through the approvals
+  // badge, so the poller separates the two: running rows keep history fresh and parked rows keep
+  // approvals fresh without double-badging one blocked turn.
   const hasRunning = runs.some((r) => isActiveRunStatus(r.status));
   const hasParked = runs.some((r) => r.status === "awaiting_approval");
   useEffect(() => {
@@ -349,12 +334,9 @@ export default function RunLogViewer() {
     }
   }, [runs, selected]);
 
-  // Fires one stop request and refetches so settled badges appear as workers
-  // stop. Scope copy names how far the stop reaches (whole swarm versus one
-  // worker) so the operator never has to infer it from the row kind. A failure
-  // surfaces the server's honest reason (409 when the run already settled, 404
-  // when the row is gone) and leaves local state untouched — the next refetch
-  // stays the single source of truth instead of an optimistic flip.
+  // Fires one stop request and refetches so settled badges appear as workers stop. Scope copy names
+  // how far the stop reaches (whole swarm versus one worker) so the operator never has to infer it
+  // from the row kind.
   async function performCancel(run: RunLogEntry, scope: "run" | "worker") {
     setCancellingId(run.id);
     try {

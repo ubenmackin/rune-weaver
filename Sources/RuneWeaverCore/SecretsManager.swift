@@ -29,11 +29,7 @@ public actor SecretsManager {
     /// Whether secrets are held in-memory rather than written to the system Keychain.
     public let inMemory: Bool
 
-    /// Creates a secrets manager.
-    /// - Parameters:
-    ///   - service: Keychain service namespace. Defaults to
-    ///     `com.runeweaver.secrets`.
-    ///   - inMemory: When true, secrets are kept in-memory and never touch the system Keychain.
+    /// Creates a secrets manager. service: Keychain service namespace.
     public init(service: String = SecretsManager.defaultService, inMemory: Bool = false) {
         self.service = service
         self.inMemory = inMemory
@@ -160,13 +156,9 @@ public actor SecretsManager {
         fallbackStore.remove(keyed: key, service: namespace)
     }
 
-    /// Lists stored key names for the service namespace without reading values.
-    ///
-    /// Queries attributes only so no secret bytes are loaded, then returns the
-    /// sorted account names capped to the listing bound. A Keychain failure
-    /// throws without attaching any stored value.
-    /// - Parameter service: Keychain namespace override.
-    /// - Returns: Sorted key names, at most the listing bound.
+    /// Lists stored key names for the service namespace without reading values. Queries attributes
+    /// only so no secret bytes are loaded, then returns the sorted account names capped to the
+    /// listing bound.
     public func listKeys(service: String? = nil) throws -> [String] {
         let namespace = service ?? self.service
         #if canImport(Security)
@@ -217,30 +209,12 @@ public actor SecretsManager {
     // MARK: - Surrogates (agent-visible references)
 
     /// Prefix marking an agent-visible surrogate for a stored secret.
-    ///
-    /// The surrogate carries only the key name (for example
-    /// `rwsecret:MY_API_KEY`); the value stays in the environment or
-    /// Keychain until the transport boundary swaps it back. The surrogate
-    /// itself is safe to show the model, log, and persist because it reveals
-    /// nothing beyond which slot will be used.
     public static let surrogatePrefix = "rwsecret:"
 
     /// Placeholder standing in for a resolved value swept from output.
-    ///
-    /// Mirrors the API header redaction marker so logs and envelopes agree
-    /// on one redacted shape without the core depending on the tools layer.
     public static let redactedPlaceholder = "[redacted]"
 
     /// Issues an agent-visible surrogate for a stored key.
-    ///
-    /// The surrogate is a reference, not a copy: no secret bytes are read or
-    /// stored here, so a later rotation is picked up at resolution time.
-    /// Issuance validates so every issued reference round-trips through
-    /// `containsSurrogate` and `surrogateKey`: an empty or non-name key would
-    /// otherwise produce an unresolvable `rwsecret:` reference with no error.
-    /// - Parameter key: Secret key (environment / Keychain name).
-    /// - Returns: `rwsecret:<key>` reference for model-visible arguments.
-    /// - Throws: `invalidInput` when the key is empty or holds non-name characters.
     public nonisolated func surrogate(for key: String) throws -> String {
         guard !key.isEmpty else {
             throw SecretsError.invalidInput(reason: "key must not be empty")
@@ -259,31 +233,11 @@ public actor SecretsManager {
     }
 
     /// Whether a value mentions the surrogate prefix in any form.
-    ///
-    /// Single source for fail-closed transport: well-formed references parse
-    /// through `surrogates(in:)`, while bare or malformed occurrences
-    /// (`rwsecret:`, `rwsecret: `, `rwsecret:!`) still mention the prefix and
-    /// must throw instead of forwarding the literal to the wire.
-    /// - Parameter value: Candidate header value or free text.
-    /// - Returns: True when `rwsecret:` occurs anywhere in the value.
     public static func containsSurrogatePrefix(_ value: String) -> Bool {
         value.contains(surrogatePrefix)
     }
 
     /// Extracts the key from an exact surrogate reference.
-    ///
-    /// Only the whole-value form qualifies (`rwsecret:KEY` with optional
-    /// surrounding whitespace); embedded forms like `Bearer rwsecret:KEY`
-    /// resolve through the header-value path instead. Inner whitespace after
-    /// the prefix disqualifies the exact form so this path agrees with
-    /// `surrogates(in:)`, which requires immediate name characters: a value
-    /// like `rwsecret: KEY` parses as malformed on both paths instead of
-    /// succeeding here while yielding no keys there. The key shares the
-    /// single-source name alphabet with `surrogates(in:)`: any trailing text
-    /// after the maximal name run disqualifies the exact form so both paths
-    /// agree on where the key ends.
-    /// - Parameter value: Candidate exact reference.
-    /// - Returns: Trimmed key, or nil when the value is not an exact surrogate.
     public static func surrogateKey(from value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix(surrogatePrefix) else { return nil }
@@ -298,15 +252,6 @@ public actor SecretsManager {
     }
 
     /// Lists every surrogate key referenced inside a value.
-    ///
-    /// Keys are maximal runs of secret-name characters (`A-Z`, `a-z`,
-    /// `0-9`, `_`, `-`, `.`) following each prefix occurrence, so trailing
-    /// prose punctuation never joins the key. The cursor advances past the
-    /// prefix (not past the consumed key) so a chained prefix inside the key
-    /// run (`rwsecret:rwsecret:KEY`) still reports both references instead of
-    /// swallowing the second.
-    /// - Parameter value: Header value or free text to scan.
-    /// - Returns: Referenced keys in encounter order, duplicates preserved.
     public static func surrogates(in value: String) -> [String] {
         var keys: [String] = []
         var cursor = value.startIndex
@@ -331,22 +276,11 @@ public actor SecretsManager {
     /// Bounds enumeration so one request cannot stream an unbounded Keychain.
     public static let maxListKeys = 2000
 
-    /// Maximum secret key characters accepted as a surrogate name.
-    ///
-    /// Bounds Keychain and memory pressure from unbounded key strings.
-    /// Single source for the length rule so issuance and the settings
-    /// secrets routes agree on one bound without duplicating the number.
+    /// Maximum secret key characters accepted as a surrogate name. Bounds Keychain and memory
+    /// pressure from unbounded key strings.
     public static let maxSurrogateKeyLength = 256
 
     /// Whether a raw secret key is usable as a surrogate name.
-    ///
-    /// Single owner for the settings secrets shape: trims surrounding
-    /// whitespace, then enforces a non-empty key within the length bound
-    /// using only secret-name characters. Key names never carry secret
-    /// bytes, so callers report only the shape rule on failure.
-    /// - Parameter rawKey: Untrimmed candidate key.
-    /// - Returns: True when the trimmed key is non-empty, within bounds,
-    ///   and holds only name characters.
     public static func isValidSurrogateKey(_ rawKey: String) -> Bool {
         let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty, key.count <= maxSurrogateKeyLength else { return false }
@@ -366,15 +300,6 @@ public actor SecretsManager {
     }
 
     /// Resolves one exact surrogate reference to its live secret.
-    ///
-    /// Reads through the same environment-first, Keychain-second path as
-    /// `retrieve`, so rotation between issuance and use is honored.
-    /// - Parameters:
-    ///   - surrogate: Exact `rwsecret:<key>` reference.
-    ///   - service: Keychain namespace override.
-    /// - Returns: Live secret value.
-    /// - Throws: `invalidInput` when the value is not an exact surrogate;
-    ///   `unknownSurrogate` when the key holds no secret.
     public func resolveSurrogate(_ surrogate: String, service: String? = nil) throws -> String {
         guard let key = Self.surrogateKey(from: surrogate) else {
             throw SecretsError.invalidInput(reason: "value is not a secret surrogate (expected rwsecret:<key>)")
@@ -386,19 +311,6 @@ public actor SecretsManager {
     }
 
     /// Resolves every surrogate embedded in a value just-in-time.
-    ///
-    /// Header values may carry a bare reference (`rwsecret:KEY`) or embed it
-    /// in a scheme (`Bearer rwsecret:KEY`); each reference is swapped for its
-    /// live secret at the transport boundary, keeping agent-authored arguments
-    /// free of real values. A bare prefix with no well-formed key fails closed
-    /// instead of forwarding the literal to the wire.
-    /// - Parameters:
-    ///   - value: Header value possibly holding surrogates.
-    ///   - service: Keychain namespace override.
-    /// - Returns: Resolved value plus the live secrets that were inserted,
-    ///   in encounter order, for output sweeping.
-    /// - Throws: `invalidInput` when the value mentions the prefix without a
-    ///   well-formed key; `unknownSurrogate` naming the first key with no secret.
     public func resolveValueContainingSurrogates(
         _ value: String,
         service: String? = nil
@@ -426,17 +338,8 @@ public actor SecretsManager {
         return (resolved, secrets)
     }
 
-    /// Sweeps resolved secret values out of a value with longest-first ordering.
-    ///
-    /// Single source for every longest-first secret sweep: the instance
-    /// `redactResolved` and the tools-layer header sweep both delegate here so
-    /// the ordering rule and the shared redacted marker cannot diverge.
-    /// Longest values sweep first so overlapping secrets cannot leave a suffix
-    /// behind.
-    /// - Parameters:
-    ///   - content: Value possibly echoing secrets.
-    ///   - secrets: Live values inserted at the transport boundary.
-    /// - Returns: Content with every non-empty secret replaced by the shared marker.
+    /// Sweeps resolved secret values out of a value with longest-first ordering. Longest values
+    /// sweep first so overlapping secrets cannot leave a suffix behind.
     public static func sweepResolved(_ content: String, secrets: [String]) -> String {
         let ordered = secrets.filter { !$0.isEmpty }.sorted(by: { $0.count > $1.count })
         guard !ordered.isEmpty else { return content }
@@ -447,36 +350,14 @@ public actor SecretsManager {
         return swept
     }
 
-    /// Sweeps resolved secret values out of output content.
-    ///
-    /// Defense against echo: when a server reflects a credential (an
-    /// `Authorization` value bounced in a body, for example), every inserted
-    /// value is replaced with the shared redacted marker before the envelope
-    /// reaches the model. Delegates to the shared sweep so the instance path
-    /// and the header path stay identical.
-    /// - Parameters:
-    ///   - content: Tool output content possibly echoing secrets.
-    ///   - secrets: Live values inserted at the transport boundary.
-    /// - Returns: Content with every non-empty secret replaced by `[redacted]`.
+    /// Sweeps resolved secret values out of output content. - secrets: Live values inserted at the
+    /// transport boundary.
     public nonisolated func redactResolved(_ content: String, secrets: [String] = []) -> String {
         Self.sweepResolved(content, secrets: secrets)
     }
 
-    /// Redacts one header value with the single-sourced surrogate rule.
-    ///
-    /// Single source for the approval-target summary and the tools-layer
-    /// preview policy so both agree on surrogate visibility: an
-    /// `Authorization` value carrying a well-formed `rwsecret:<key>`
-    /// reference stays visible while unresolved (no secret bytes to hide),
-    /// every other `Authorization` value redacts to the shared placeholder,
-    /// and non-`Authorization` values sweep resolved echoes. The dependency
-    /// runs tools to core only, so the gate and the tools layer both
-    /// delegate here without an import cycle.
-    /// - Parameters:
-    ///   - value: Raw header value.
-    ///   - isAuthorization: True for the `Authorization` header (case-insensitive match by callers).
-    ///   - resolvedSecrets: Live values inserted at the transport boundary.
-    /// - Returns: Visible surrogate reference, swept value, or the shared placeholder.
+    /// Redacts one header value with the single-sourced surrogate rule. The dependency runs tools
+    /// to core only, so the gate and the tools layer both delegate here without an import cycle.
     public static func redactedHeaderValue(_ value: String, isAuthorization: Bool, resolvedSecrets: [String] = []) -> String {
         if isAuthorization {
             if resolvedSecrets.isEmpty, containsSurrogate(value) {
@@ -491,15 +372,9 @@ public actor SecretsManager {
 
     // MARK: - Env-name resolution
 
-    /// Resolves an `api_key_env`-style reference or an exact surrogate.
-    ///
-    /// Surrogate inputs (`rwsecret:KEY`) swap back to the live secret and
-    /// throw a typed error when the slot is empty; plain names keep the
-    /// historical environment-first, Keychain-second lookup returning nil
-    /// when absent. Malformed surrogate-like inputs (bare prefix or trailing
-    /// text) fail closed instead of falling through to a plain lookup.
-    /// Embedded forms (`Bearer rwsecret:KEY`) resolve through
-    /// `resolveValueContainingSurrogates` instead.
+    /// Resolves an `api_key_env`-style reference or an exact surrogate. Malformed surrogate-like
+    /// inputs (bare prefix or trailing text) fail closed instead of falling through to a plain
+    /// lookup.
     public func resolve(_ envVar: String?, service: String? = nil) throws -> String? {
         guard let envVar, !envVar.isEmpty else { return nil }
         if Self.surrogateKey(from: envVar) != nil {

@@ -1,13 +1,4 @@
 // Rune Weaver Tools - Desktop control contract for live bridge and stubs.
-//
-// Purpose: own the DesktopControlling protocol plus the stub-safe default
-// batches so tests can inject a double without reimplementing session and
-// declared-host plumbing on every conformer.
-// Scope: protocol requirements and extension defaults only; live CGEvent
-// dispatch, safety checks, and egress screening live with the bridge.
-// Architectural role: seam beside the bridge following the tool seam idiom,
-// so the live bridge stays the grant-aware implementation while stubs inherit
-// fail-closed defaults that cannot bypass network_hosts scoping.
 
 import Foundation
 import RuneWeaverCore
@@ -25,9 +16,6 @@ public protocol DesktopControlling: Sendable {
     ) async throws -> [DesktopActionStepResult]
 
     /// Session-aware batch entry point threading the egress session grant.
-    /// Declared as a requirement (not an extension-only helper) so the live
-    /// bridge's grant-aware implementation dispatches dynamically; stubs
-    /// inherit the session-less fallback below.
     func executeBatch(
         actions: [DesktopAction],
         scaleX: Double,
@@ -37,10 +25,6 @@ public protocol DesktopControlling: Sendable {
     ) async throws -> [DesktopActionStepResult]
 
     /// Declared-hosts batch entry point for URL-typing scoping.
-    ///
-    /// Mirrors `bash.exec` `network_hosts`: every host typed in the batch
-    /// must appear in `declaredHosts`, and the bridge denies undeclared dials
-    /// through the shared supervisor check rather than a parallel checker.
     func executeBatch(
         actions: [DesktopAction],
         scaleX: Double,
@@ -66,10 +50,6 @@ extension DesktopControlling {
     }
 
     /// Default declared-hosts batch for stubs without scoping.
-    /// Fail-closed on typed URLs: collects the batch hosts first and refuses
-    /// only when a typed host lacks a declaration, so a host-free batch with
-    /// a non-empty claim still delegates while a batch that types URLs cannot
-    /// silently bypass `network_hosts` scoping on an unscreened stub.
     func executeBatch(
         actions: [DesktopAction],
         scaleX: Double,
@@ -113,10 +93,6 @@ extension DesktopControlling {
     }
 
     /// Collects typed hosts for the stub declared-hosts gate.
-    ///
-    /// Mirrors the live bridge batch scan (link plus schemeless hosts in
-    /// first-seen order) so a host-free batch delegates even with a non-empty
-    /// claim while any typed host still faces the declaration check.
     private func stubBatchHosts(from actions: [DesktopAction]) -> [String] {
         var hosts: [String] = []
         var seen = Set<String>()

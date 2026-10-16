@@ -1,19 +1,4 @@
 // Rune Weaver App — Live permission probes and system actions.
-//
-// Reads the current TCC posture without prompting on any status call and
-// initiates consent only from an explicit request call wired to a button.
-// Status reads stay silent so background refreshes and window-appear checks
-// never steal focus; request calls use the prompting variants because the
-// owner just pressed Enable. Full Disk Access has no prompt API, so its
-// request re-reads the snapshot probe and lets the rationale point at
-// System Settings instead.
-//
-// Scope: live reads plus explicit requests plus Settings deep links and
-// relaunch. No window layout, no persistence, no copy — those belong to the
-// vocabulary and the onboarding store.
-// Architectural role: the single TCC-query owner in the app target, keeping
-// every consent prompt behind explicit user intent while tools and background
-// work never initiate prompts.
 
 import AppKit
 import ApplicationServices
@@ -37,10 +22,6 @@ public protocol PermissionSystemActing: Sendable {
 }
 
 /// Live Settings navigation and relaunch.
-///
-/// Opening jumps straight to the privacy pane so the owner never hunts from
-/// the top level; relaunch spawns a fresh instance before terminating so a
-/// newly granted Screen Recording or Accessibility grant takes effect.
 struct LivePermissionSystemActions: PermissionSystemActing {
     @MainActor
     func open(_ pane: PermissionPane) {
@@ -63,13 +44,6 @@ struct LivePermissionSystemActions: PermissionSystemActing {
 }
 
 /// Live TCC reads honoring the no-prompt-on-status invariant.
-///
-/// Contacts reads the cached authorization; Calendars and Reminders read the
-/// silent EventKit authorization; Accessibility and Screen Recording
-/// use their silent preflights; Full Disk Access snapshots the Messages
-/// database in an isolated probe; Automation queries Messages without asking.
-/// Request paths switch to the prompting variants, except Full Disk Access
-/// which has no prompt and simply re-reads.
 struct LivePermissionProbes: PermissionProbing {
     func status(_ kind: PermissionKind) async -> PermissionStatus {
         switch kind {
@@ -163,20 +137,12 @@ struct LivePermissionProbes: PermissionProbing {
     }
 
     /// Reads one EventKit capability without prompting.
-    ///
-    /// Calendars and reminders differ only by entity type, so both status
-    /// branches funnel through this silent read; the shared mapper keeps the
-    /// interpretation identical when the system adds new authorization cases.
     private func eventKitStatus(for entity: EKEntityType) -> PermissionStatus {
         let current = EKEventStore.authorizationStatus(for: entity)
         return PermissionStatusMapping.eventKit(current)
     }
 
     /// Requests one EventKit capability from the explicit Enable press.
-    ///
-    /// The prompting variant is reserved for user intent, so status reads stay
-    /// silent; re-reading through the shared status helper keeps the row
-    /// reflecting what the system recorded rather than the transient Bool.
     private func requestEventKitAccess(for entity: EKEntityType) async -> PermissionStatus {
         switch entity {
         case .event:
@@ -202,12 +168,6 @@ struct LivePermissionProbes: PermissionProbing {
     }
 
     /// Snapshots the Messages database to prove Full Disk Access readability.
-    ///
-    /// Runs on the caller's task with cooperative cancellation checkpoints
-    /// before and after the snapshot, and removes the snapshot directory
-    /// immediately so the probe leaves no residue. There is no unstructured
-    /// task here, so closing the window cancels the awaiting refresh at the
-    /// next checkpoint instead of leaving snapshot IO running past close.
     private func fullDiskAccessStatus() async -> PermissionStatus {
         do {
             // Checkpoint before touching the filesystem so a close that lands
@@ -235,11 +195,6 @@ struct LivePermissionProbes: PermissionProbing {
     }
 
     /// Queries Automation consent for Messages without touching other targets.
-    ///
-    /// The address descriptor targets the Messages bundle only; asking stays
-    /// false on status reads so activation refreshes never prompt, and true
-    /// only on the explicit Enable press hopped to the main actor by the
-    /// caller, because TCC dialogs expect main-thread execution.
     private static func automationStatus(askUserIfNeeded ask: Bool) -> PermissionStatus {
         var target = AEAddressDesc()
         let bundleID = "com.apple.MobileSMS"

@@ -1,10 +1,4 @@
 // Rune Weaver Dashboard — Component tests for tabbed Memory search, facts paging, and episodic recency.
-// Purpose: pins the three inner tabs, Title Case headings, windowed reads,
-// search timing, and scoped deletes without an unbounded list.
-// Scope: tab labels with live counts, hash deep links, paged facts preview
-// with More, and episodic cleanup behind modals only.
-// Architectural role: guards the thin dashboard client so future edits cannot
-// widen reads, lose timing, or collapse per-tab isolated state.
 
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

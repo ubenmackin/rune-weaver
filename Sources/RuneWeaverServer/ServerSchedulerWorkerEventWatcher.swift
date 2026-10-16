@@ -1,8 +1,4 @@
 // Rune Weaver Server — Event Watcher multi-source polling and rule evaluation.
-//
-// Implements event watching for Email, Apple Messages, and Calendar triggers.
-// Evaluates ordered deterministic EventRules, dispatching either direct tool
-// actions (zero LLM inference) or scoped agent turns with context injection.
 
 import Foundation
 import Logging
@@ -77,11 +73,8 @@ extension ServerSchedulerWorker {
     /// Default calendar lead time when the stored job carries none.
     static let defaultCalendarLeadTimeMinutes = 15
 
-    /// Evaluates an event watcher job for its configured watcher source.
-    /// - Parameters:
-    ///   - job: Scheduled job under evaluation.
-    ///   - now: Current tick timestamp.
-    /// - Returns: Run results if the watcher was due and fired, nil if not due.
+    /// Evaluates an event watcher job for its configured watcher source. job:
+    /// Scheduled job under evaluation.
     func evaluateEventWatcherJob(job: SchedulerJob, now: Date) async -> [SchedulerRunResult]? {
         switch job.watcherSource {
         case .calendar:

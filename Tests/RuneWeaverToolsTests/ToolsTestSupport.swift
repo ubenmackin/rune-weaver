@@ -105,12 +105,6 @@ enum ToolsTestSupport {
     }
 
     /// Builds a verified policy store backed by a throwaway file path.
-    ///
-    /// Registry tests must never read or seed the operator's real
-    /// `~/.runeweaver/policy.toml`, so every factory call injects this store
-    /// instead of taking the nil (factory default) path. `update` commits the
-    /// safe default posture without touching disk, which mirrors a successful
-    /// load and gives the supervisor factory a verified snapshot.
     static func makeTestPolicyStore() async -> PolicyStore {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("rw-test-policy-\(UUID().uuidString).toml")
@@ -222,13 +216,7 @@ enum ToolsTestSupport {
         }
 
         /// Canned move honoring failure and capturing routing for assertions.
-        /// - Parameters:
-        ///   - credentials: Ignored resolved credentials.
-        ///   - mailbox: Source folder.
-        ///   - messageID: Message being relocated.
-        ///   - destination: Target folder.
-        ///   - markAsRead: Whether `\Seen` is set on the resulting message.
-        /// - Returns: Move result reporting relocation and read flag.
+        /// credentials: Ignored resolved credentials.
         func move(
             credentials _: ResolvedEmailCredentials,
             mailbox sourceMailbox: String,

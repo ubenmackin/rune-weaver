@@ -1,24 +1,5 @@
 // Rune Weaver Dashboard — Shared host normalization plus wildcard and TOML guards.
-//
-// Purpose: Single source for host canonicalization, wildcard-shape classification,
-// and TOML-breaking scalar detection so the binding preview, the binding
-// validation helpers, the policy pane, and the binding modal cannot drift on
-// what a host means. Trimming, lowercasing, bracket stripping, zone folding,
-// and trailing-dot dropping live here once; the wildcard edge mirrors the
-// engine AllowedOriginPattern leading-edge contract; the TOML guard mirrors the
-// store containsTOMLBreakingScalar alphabet exactly.
-// Scope: Pure string helpers only — canonical host forms, numeric IP folding,
-// wildcard classification, and TOML-breaking detection. Network allowlist
-// coverage, binding Decisions, Keychain state, and TOML persistence stay with
-// their owners.
-// Architectural role: Shared pure helpers imported by the preview, validation,
-// pane, and modal layers, keeping client verdicts honest with the egress
-// supervisor without duplicating its enforcement or touching the network.
 
-// Lowercases, strips brackets and zones, and drops trailing dots for network
-// comparison so `API.Example.COM.` matches its stored form. Single owner for
-// the trim/lowercase/bracket/zone/dot rule previously duplicated across the
-// validation and preview layers.
 export function canonicalHostLower(host: string): string {
   let cleaned = (host ?? "").trim().toLowerCase();
   if (cleaned.startsWith("[") && cleaned.endsWith("]") && cleaned.length >= 2) {
@@ -140,10 +121,7 @@ export function normalizeMixedIPv6(cleaned: string): string | null {
   return normalizeIPv6Hextets(combined);
 }
 
-// Normalizes a URL host for binding comparison. Dotted numeric spellings
-// converge on canonical octets and IPv6 hextets fold to minimal hex so casing,
-// trailing dots, and alternate numeric spellings agree; unproven forms stay
-// distinct and fail closed via mismatch rather than laundering onto a tail.
+// Normalizes a URL host for binding comparison.
 export function normalizedHost(host: string): string {
   const cleaned = canonicalHostLower(host);
   if (!cleaned) return "";
@@ -171,11 +149,7 @@ export type WildcardClassification =
   | "invalidSuffix"
   | "invalidStem";
 
-// Classifies the wildcard shape of a lowercased pattern. Exactly one exclusive
-// edge (`*.` or `.*`) with a named remainder is meaningful; every other star
-// shape, glob syntax, or port qualifier refuses so a typo fails closed.
-// Mirrors the engine AllowedOriginPattern.classifyWildcard leading-edge
-// contract so the pane, modal, and preview share one shape verdict.
+// Classifies the wildcard shape of a lowercased pattern.
 export function classifyWildcard(lowered: string): WildcardClassification {
   const starCount = lowered.split("").filter((ch) => ch === "*").length;
   if (starCount === 0) return "none";
@@ -196,11 +170,8 @@ export function classifyWildcard(lowered: string): WildcardClassification {
   return "trailing";
 }
 
-// Whether policy text carries scalars a TOML basic string must escape: the
-// double quote, C0 controls, and DEL. Mirrors the store
-// containsTOMLBreakingScalar alphabet exactly — only `"` breaks quoting, so
-// single quotes and backticks stay allowed and every layer refuses the same
-// bytes instead of keeping parallel copies that could drift.
+// Whether policy text carries scalars a TOML basic string must escape: the double quote, C0
+// controls, and DEL.
 export function containsTOMLBreakingScalar(value: string): boolean {
   const text = value ?? "";
   if (text.includes('"')) return true;
@@ -211,11 +182,8 @@ export function containsTOMLBreakingScalar(value: string): boolean {
   return false;
 }
 
-// Coerces an array-or-set binding list into a plain string array without
-// mutating the caller, so DTO sets and modal arrays probe identically.
-// Single owner for the array-or-set coercion previously duplicated across the
-// preview and validation layers; non-string entries drop so a drifted payload
-// cannot smuggle a non-string into matching.
+// Coerces an array-or-set binding list into a plain string array without mutating the caller, so
+// DTO sets and modal arrays probe identically.
 export function toStringList(
   value: ReadonlyArray<string> | ReadonlySet<string> | unknown,
 ): string[] {
@@ -224,11 +192,8 @@ export function toStringList(
   return [];
 }
 
-// Single owner for textarea list parsing: blank lines drop so an accidental
-// newline never becomes a stored entry, while trimming keeps the editor and
-// the supervisor comparison in agreement. Both hosts and prefixes share this
-// rule so the two fields cannot drift apart; callers apply case folding
-// (domains lower, hosts as-is) on top of this split/trim/filter base.
+// Single owner for textarea list parsing: blank lines drop so an accidental newline never becomes a
+// stored entry, while trimming keeps the editor and the supervisor comparison in agreement.
 export function parseTrimmedLines(text: string): string[] {
   return (text ?? "")
     .split("\n")
@@ -236,12 +201,9 @@ export function parseTrimmedLines(text: string): string[] {
     .filter((line) => line.length > 0);
 }
 
-// Best-effort IPv4 numeric value for confinement checks, accepting decimal,
-// octal, and hex spellings plus 1-4 part forms so `2130706433` refuses like
-// `127.0.0.1` instead of reading as a public name. Delegates to
-// canonicalHostLower plus canonicalIPv4String so alternate spellings,
-// casing, and all trailing dots converge before range checks instead of
-// keeping a parallel parser that could drift from the shared owner.
+// Best-effort IPv4 numeric value for confinement checks, accepting decimal, octal, and hex
+// spellings plus 1-4 part forms so `2130706433` refuses like `127.0.0.1` instead of reading as a
+// public name.
 export function ipv4NumericValue(host: string): number | null {
   const cleaned = canonicalHostLower(host ?? "");
   if (!cleaned) return null;
@@ -253,14 +215,6 @@ export function ipv4NumericValue(host: string): number | null {
 }
 
 // Whether a literal IPv4 value sits in a range bindings can never target.
-// Mirrors the engine SensitiveAddressRanges.isSensitiveIPv4Value table exactly
-// (loopback 127/8, unspecified 0/8, link-local 169.254/16, private RFC 1918,
-// shared 100.64/10, 192.0.0/24, TEST-NET-1 192.0.2/24, deprecated 6to4 relay
-// 192.88.99/24, benchmarking 198.18/15, TEST-NET-2 198.51.100/24, TEST-NET-3
-// 203.0.113/24, multicast 224/4, reserved 240/4) so the client refuses what
-// the server refuses instead of allowing a subset. Client preview only: the
-// server remains authoritative and the egress supervisor plus storage-boundary
-// invariants enforce this same table on every write.
 export function isSensitiveIPv4Value(value: number): boolean {
   const v = (value >>> 0);
   if (((v & 0xff000000) >>> 0) === 0x7f000000) return true;

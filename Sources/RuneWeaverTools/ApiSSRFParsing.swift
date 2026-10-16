@@ -1,11 +1,4 @@
 // Rune Weaver Tools — SSRF parsing façade over the shared Core classification.
-//
-// Purpose: keep the SSRF guard's established helper names while the parser and
-// sensitive-range table live in `RuneWeaverCore`, so the egress guard and the
-// policy invariant verifier classify hosts from one implementation. Scope:
-// name aliases only — no parsing or range logic lives here. Architectural
-// role: binds the Tools-side call sites to the shared Core layer; any new
-// parsing or classification behavior belongs in the Core file, never here.
 
 import RuneWeaverCore
 

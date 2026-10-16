@@ -10,12 +10,6 @@ import RuneWeaverTools
 import Vapor
 
 /// Starts the local engine API service.
-///
-/// Binding is fail-closed: loopback always serves, while a non-loopback
-/// `--hostname` or `[server] hostname` is allowed only when an owner bearer
-/// token resolves from the configured sources. The resolved verifier is
-/// threaded into the context and config so the bind policy and the request gate
-/// can never disagree.
 struct ServeCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(
@@ -87,11 +81,7 @@ struct ServeCommand: AsyncParsableCommand {
         await context.sandboxCleanup.start(config: loaded.config.containers, approvals: context.approvals)
         // Ensure the local search engine before accepting turns so first searches stay warm; a down
         // engine never blocks boot — the failure surfaces as closed guidance on the next search
-        // instead. The container is left running after quit by design.
-        // Stream the owner flight's live stage plus elapsed time so a minutes-long pull stays
-        // visible instead of hanging silently on one line; the snapshot's Start time is pinned
-        // at flight creation, so elapsed counts the whole Start across stage moves.
-        // The watcher only reads actor snapshots and never drives the flight.
+        // instead.
         let searxngURL = loaded.config.browser.searxngURL
         let searxngStageWatcher = Task {
             var lastStage: SearXNGEnsurer.StartStage?
@@ -148,15 +138,6 @@ struct ServeCommand: AsyncParsableCommand {
     }
 
     /// Loads config, resolves owner auth, and validates the requested bind.
-    ///
-    /// An explicit flag wins; otherwise `[server] hostname`/`port` supply the
-    /// bind defaults so the documented endpoint actually takes effect, and a
-    /// config with no `[server]` block keeps the built-in loopback address.
-    /// Resolution runs before serving so a token that is declared but unreadable
-    /// (for example a loose-permissioned file) fails here instead of surfacing at
-    /// the request gate. A non-loopback hostname is accepted only once a token
-    /// resolves; otherwise the same loopback-only `ValidationError` is thrown,
-    /// never a silent downgrade to an unauthenticated LAN bind.
     private func validateAndLoadConfig() async throws -> ResolvedServeConfiguration {
         // Check an explicit flag before the config can supply a fallback; a
         // configured port was already range-checked by `validate()` at load.
@@ -169,10 +150,9 @@ struct ServeCommand: AsyncParsableCommand {
         }
         let bindHostname = hostname ?? loaded.config.server.hostname
         let bindPort = port ?? loaded.config.server.port
-        // Validate the effective bind hostname shape before the bind policy so a
-        // `--hostname` carrying a widening shape fails with a clear message
-        // rather than a bind-time or gate-time surprise. File values were
-        // already checked by `validate()` at load; the flag bypasses that path.
+        // Validate the effective bind hostname shape before the bind policy so a `--hostname`
+        // carrying a widening shape fails with a clear message rather than a bind-time or gate-time
+        // surprise.
         do {
             try RuneWeaverConfig.validateServerHostname(bindHostname)
         } catch {
@@ -237,11 +217,6 @@ extension ServeCommand {
     }
 
     /// Shared seed for the preview and served tool registries.
-    ///
-    /// Bundles the resolved media policy, the one secrets instance, and the one
-    /// security policy store per serve invocation so the preview bus, the
-    /// served registry, and the settings policy routes observe the same
-    /// instances instead of diverging on per-path defaults.
     private struct ToolBuildSeed {
         /// Resolved `[media]` policy feeding Sonarr/Radarr tool registration.
         let mediaConfig: MediaConfig
@@ -275,10 +250,9 @@ extension ServeCommand {
             pluginsDir: URL(fileURLWithPath: (pluginsDir as NSString).expandingTildeInPath)
         )
         await gate.updateBashConfig(bashConfig)
-        // The write posture is decided ahead of the tool, so the served
-        // `[files]` policy reaches the gate: a staged or live write runs
-        // without a second approval request while an ask-postured write
-        // parks exactly as before.
+        // The write posture is decided ahead of the tool, so the served `[files]` policy reaches
+        // the gate: a staged or live write runs without a second approval request while an
+        // ask-postured write parks exactly as before.
         await gate.updateFilesConfig(filesConfig)
         await gate.updateWorkspaceRoot(WorkspaceStore(config: workspaceConfig).root())
         return gate
@@ -344,10 +318,9 @@ extension ServeCommand {
         effectiveSystemPrompt: String
     ) async {
         for tool in plugins {
-            // Preserve live enabled state across re-registration: a bare
-            // register would reset every tool to enabled, and desktop tools
-            // ship disabled — without this, a fresh install would flip them
-            // live between registration and the restore below.
+            // Preserve live enabled state across re-registration: a bare register would reset every
+            // tool to enabled, and desktop tools ship disabled — without this, a fresh install would
+            // flip them live between registration and the restore below.
             let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
             await context.toolBus.register(tool: tool, isEnabled: isEnabled)
         }
@@ -396,12 +369,9 @@ extension ServeCommand {
             memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
             router: LLMRouter(providers: allProviders)
         )
-        // Build the document index pipeline once so served recall, the nightly
-        // trigger, and the `/index` routes share one store and coordinator; nil
-        // when disabled keeps routes failing closed and recall unchanged. The
-        // run reporter writes into the same run store the status probe reads
-        // plus the same hub the sockets fan out from, so a manual run leaves
-        // one start row updated in place by its completion.
+        // Build the document index pipeline once so served recall, the nightly trigger, and the
+        // `/index` routes share one store and coordinator; nil when disabled keeps routes failing
+        // closed and recall unchanged.
         let runs = await RunLogStore.load(dbPath: loaded.config.memory.episodesDBPath)
         let hub = WSHub()
         let indexComponents = makeIndexComponents(
@@ -419,12 +389,9 @@ extension ServeCommand {
         // the plugin snapshot, and the served context observe one fallback
         // store instead of minting per-tool instances that diverge.
         let sharedSecrets = SecretsManager()
-        // One security policy store per serve process: the preview bus, the
-        // served registry, and the settings policy routes read this same
-        // instance, so an HTTP policy write is visible to the egress
-        // supervisor without a restart. Loading here seeds the factory-safe
-        // posture on a missing file and leaves corruption to fail the first
-        // tool build closed below.
+        // One security policy store per serve process: the preview bus, the served registry, and
+        // the settings policy routes read this same instance, so an HTTP policy write is visible to
+        // the egress supervisor without a restart.
         let policyStore = await PolicyStore.makeLoaded(
             injected: nil
         )
@@ -644,11 +611,6 @@ extension ServeCommand {
 }
 
 /// Resolved inputs for a single `serve` invocation.
-///
-/// Grouping the loaded config, the optional owner verifier, and the validated
-/// bind policy keeps the auth-to-bind handoff legible at the call site; named
-/// members also make it unambiguous which value is the credential verifier
-/// rather than yet another config field.
 private struct ResolvedServeConfiguration {
     /// Loaded config plus its source URL for operator messaging.
     let loaded: CLIConfigLoader.LoadedConfig

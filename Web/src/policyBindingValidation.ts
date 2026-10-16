@@ -1,19 +1,5 @@
 // Rune Weaver Dashboard — Credential binding list helpers for the policy pane.
-//
-// Purpose: Owns the pure row-level summaries and attention signal behind the
-// searchable credentials list, so dozens of bindings stay scannable without
-// opening an editor: one binding pairs one key with hosts, methods, and path
-// prefixes, and the secret is sent only when all three match. Empty hosts
-// means the credential can never be sent while empty methods or prefixes mean
-// Any, and every prefix applies to every host in the same binding.
-// Scope: Key-shape validation, compact host and scope summaries, and the
-// needs-attention verdict (uncovered hosts, empty hosts, field errors) only;
-// network allowlist editing, Keychain presence probing, and TOML persistence
-// stay with the owning pane and the server.
-// Architectural role: Shared pure helpers imported by the credentials list and
-// the binding modal for badges, filters, and host-coverage verdicts, mirroring
-// the egress supervisor without duplicating its enforcement or touching the
-// network.
+
 import { canonicalHostLower, toStringList } from "./policyHostNormalize";
 
 // Binding shape accepted from the policy DTO or the binding modal draft. Both
@@ -143,11 +129,7 @@ function canonicalNetworkEntry(entry: string): string {
   return canonicalHostLower(trimmed);
 }
 
-// Whether one binding host pattern is covered by the network allowlist. Exact
-// patterns are covered by an exact entry or a wildcard above them; wildcard
-// patterns need a wildcard at or above their base since one exact entry
-// cannot cover a whole subtree. Uncovered bindings stay denied at runtime, so
-// the list surfaces them before the owner probes.
+// Whether one binding host pattern is covered by the network allowlist.
 export function isBindingHostCoveredByNetwork(
   bindingPattern: string,
   allowedDomains: ReadonlyArray<string> | null | undefined,
@@ -184,10 +166,7 @@ export function isBindingHostCoveredByNetwork(
   return false;
 }
 
-// Attention verdict for one row. Flags uncovered hosts (would stay denied),
-// empty hosts (can never send), and field errors the save gate would refuse
-// (key shape, blank entries, unknown methods, unrooted prefixes) so the dot
-// marks exactly the rows worth opening.
+// Attention verdict for one row.
 export interface BindingAttentionResult {
   needsAttention: boolean;
   reasons: string[];

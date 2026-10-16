@@ -1,21 +1,5 @@
 // Rune Weaver Dashboard — Component tests for TopNav health surfacing, group
 // dropdowns, and the profile menu.
-//
-// Covers the SearXNG tri-state row, the Work group menu (membership active
-// state, child selection, roll-up badges, and a deliberately absent hover-open
-// path), and the profile contract: the top bar owns section groups while
-// Settings stays inside the icon-only profile menu, so the menu must preserve
-// navigation, health detail, and badge behavior even when the handheld
-// stylesheet collapses the trigger to its glyph.
-//
-// The operator describe pins the operator-only profile identity contract: the
-// trigger keeps a static "Profile" label in every persona state, the menu
-// header shows the stored owner name (or "Operator" when absent or blank),
-// and the assistant name never renders in this bar — it lives in the greeting
-// row plus the chat header plus settings only. Zero avatar images render here
-// (the Wisp lives exactly once in the dashboard greeting cluster), and the
-// shared store subscription stays so attention signals still publish for the
-// greeting row.
 
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -679,10 +663,9 @@ describe("TopNav Work group menu", () => {
   });
 
   it("pushes the rolled-up total down to each unread Work child", async () => {
-    // Collapsed and expanded readings stay auditable together: the trigger
-    // keeps the rolled-up total while the open menu attributes the same
-    // unread share to its owning child, so the driver of the count is
-    // visible without opening another surface.
+    // Collapsed and expanded readings stay auditable together: the trigger keeps the rolled-up
+    // total while the open menu attributes the same unread share to its owning child, so the driver
+    // of the count is visible without opening another surface.
     const user = userEvent.setup();
     renderGroupNav({ runsBadge: 3 });
     const trigger = screen.getByRole("button", { name: "Work, 3 unread" });

@@ -111,10 +111,6 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
     public static let maxAllowedResults = 50
 
     /// Environment variable overriding the browser Python executable.
-    /// Single source for the override name so the gateway, the managed venv
-    /// ensurer, and health copy never drift; pipx and Homebrew installs do not
-    /// satisfy `import playwright` for the server python, so an explicit path
-    /// here always wins over the managed venv and the PATH fallback.
     public static let pythonBinEnvVar = "RUNEWEAVER_PYTHON_BIN"
     /// Managed virtual-environment directory for browser automation.
     /// Kept under `~/.runeweaver` so provisioning never touches a user-owned
@@ -193,15 +189,6 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
 // MARK: - Desktop vision and control
 
 /// `[desktop]` — macOS desktop vision and control capture policy.
-///
-/// Both desktop tools always register so they stay visible in `GET /tools`,
-/// but they ship disabled and go live only through the persisted tool-state
-/// toggle, which is the sole authority for enablement. The `[desktop]`
-/// section carries only capture knobs (dimensions, quality, blocklist), so
-/// a stock install exposes no approval-free capture until an operator
-/// enables `desktop.screenshot`. The screenshot tool is read-only, while
-/// `desktop.action` requires approval per-invocation through the permission
-/// gate.
 public struct DesktopConfig: Sendable, Equatable {
     /// Longest edge of the downscaled screenshot in pixels. Bounds token cost.
     public var maxImageDimension: Int
@@ -263,10 +250,8 @@ public struct DesktopConfig: Sendable, Equatable {
 }
 
 extension DesktopConfig: Codable {
-    /// Decodes a desktop config, defaulting omitted keys.
-    /// Unknown keys (including retired allow toggles) are ignored so old
-    /// files load without migration.
-    /// - Parameter decoder: Decoder for the config document.
+    /// Decodes a desktop config, defaulting omitted keys. Unknown keys (including retired allow
+    /// toggles) are ignored so old files load without migration.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         maxImageDimension = try container.decodeIfPresent(Int.self, forKey: .maxImageDimension) ?? Self.defaultMaxImageDimension
@@ -287,14 +272,6 @@ extension DesktopConfig: Codable {
 // MARK: - Untrusted-content labeling policy
 
 /// `[security]` — harness-level defense policy for external content.
-///
-/// Labeling stays default-ON: untrusted tool output is wrapped as data so the
-/// model cannot mistake it for instructions, at roughly twenty tokens per
-/// result. The labeling key is a debugging off-switch, not a hardening knob —
-/// turning it off restores the pre-labeling context shape byte-identically.
-/// The credential filter stays default-ON so one-time codes, magic links, and
-/// password-reset links never reach the agent; the human inbox is untouched
-/// and only agent-visible mail plus the local index carry the redacted form.
 public struct SecurityConfig: Sendable, Equatable {
     /// Whether untrusted external tool output is wrapped before model context.
     /// Defaults to true; false disables labeling for debugging only.
@@ -343,15 +320,8 @@ extension SecurityConfig: Codable {
 
 // MARK: - Long-horizon goal pursuit
 
-/// `[goals]` — steady pursuit of long-horizon goals.
-///
-/// Goals stay opt-in so a fresh install never schedules background
-/// advancement or spends planning calls until the owner enables them.
-/// `stepIntervalMinutes` is the cadence hint stored on each new goal and
-/// reused when the engine bumps `next_due_at` after a run; the remaining
-/// caps bound how many goals stay active at once, how long a decomposed
-/// plan may grow, and how long planning may wait on the model before the
-/// goal settles to `unplanned` with empty steps plus an audit note.
+/// `[goals]` — steady pursuit of long-horizon goals. Goals stay opt-in so a fresh install never
+/// schedules background advancement or spends planning calls until the owner enables them.
 public struct GoalsConfig: Sendable, Equatable {
     /// Whether goal creation and advancement run at all. Off by default.
     public var enabled: Bool
@@ -482,10 +452,6 @@ extension GoalsConfig: Codable {
 // MARK: - Proactive surfacing policy
 
 /// Surfacing mode for proactive background interruptions.
-///
-/// The gate filters macOS notifications and dashboard interruption frames
-/// only; run history, WebSocket run frames, and the approvals inbox always
-/// record regardless of mode so auditing never loses a turn.
 public enum ProactiveMode: String, Sendable, Codable, CaseIterable, Equatable {
     /// Surface every background outcome.
     case all
@@ -498,13 +464,6 @@ public enum ProactiveMode: String, Sendable, Codable, CaseIterable, Equatable {
 }
 
 /// `[proactive]` — interruption policy for background scheduler and goal turns.
-///
-/// Stock installs surface everything so behavior matches the pre-gate
-/// notifier byte-for-byte; owners quiet routine successes by moving to
-/// `milestones` (milestones plus errors plus parked only) or `guarded`
-/// (milestones plus one judge call for routine scheduler successes), or
-/// silence interruptions entirely with `off`. The judge timeout bounds the
-/// single model call the guarded path may spend before failing open.
 public struct ProactiveConfig: Sendable, Equatable {
     /// Surfacing mode. Defaults to `all` for byte-for-byte legacy behavior.
     public var mode: ProactiveMode
@@ -557,16 +516,6 @@ extension ProactiveConfig: Codable {
 
 extension RuneWeaverConfig {
     /// Derives the configured-service egress candidates for policy auto-population.
-    ///
-    /// Single owner of the SearXNG/Sonarr/Radarr/mail-host derivation so the
-    /// boot supervisor wiring and the settings save path pre-authorize exactly
-    /// the same origins: a service source added for one path can no longer
-    /// drift from the other.
-    /// - Parameters:
-    ///   - browser: Browser policy carrying the SearXNG base URL.
-    ///   - media: Optional media policy; absent contributes no Arr URLs.
-    ///   - email: Optional mail policy; absent contributes no account hosts.
-    /// - Returns: URLs or hostnames to merge into the declarative allowlist.
     public static func serviceEgressCandidates(
         browser: BrowserConfig,
         media: MediaConfig? = nil,

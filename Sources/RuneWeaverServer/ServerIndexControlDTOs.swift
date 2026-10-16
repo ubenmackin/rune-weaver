@@ -1,13 +1,4 @@
 // Rune Weaver Server — Local index control request/response DTOs.
-//
-// Purpose: carries the run, cancel, prune, reset, and reclaim request/response
-// shapes for the `/index` control endpoints, decoupled from the core coordinator.
-// Scope: REST bodies only; run coordination and sequencing stay with
-// `IndexCoordinator`, persistence with `DocIndexStore`, and route wiring stays
-// with the Vapor index routes.
-// Architectural role: keeps the Vapor `/index` control adapters decoupled from
-// the engine core by mirroring the engine's index shapes in version-tolerant
-// Codable contracts, so a dashboard built against an older engine still decodes.
 
 import Foundation
 import RuneWeaverCore
@@ -100,9 +91,6 @@ public struct IndexRunResponse: Content, Equatable {
     }
 
     /// Maps a coordinator summary onto the wire shape with explicit outcomes.
-    /// - Parameters:
-    ///   - summary: Completed run summary.
-    ///   - sources: Per-source outcomes to expose, or nil to derive from the summary.
     public init(_ summary: IndexRunSummary, sources: [IndexSourceRunOutcome]?) {
         self.sessionID = summary.sessionID
         self.trigger = summary.trigger.rawValue
@@ -208,13 +196,9 @@ public struct IndexRunResponse: Content, Equatable {
         )
     }
 
-    /// Decodes a run response, defaulting retired and truncated counts to zero
-    /// so payloads built against an older engine still decode. Accepts the
-    /// `retired`/`truncated` aliases; the canonical keys win when both are
-    /// present. The per-source list accepts `sources`, `sourceOutcomes`, or
-    /// `outcomes` with the first present winning, so older payloads without
-    /// the list degrade to nil instead of failing.
-    /// - Parameter decoder: Decoder carrying the response.
+    /// Decodes a run response, defaulting retired and truncated counts to zero so payloads built
+    /// against an older engine still decode. Accepts the `retired`/`truncated` aliases; the
+    /// canonical keys win when both are present.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sessionID = try container.decode(UUID.self, forKey: .sessionID)
@@ -301,9 +285,6 @@ public struct IndexPruneResponse: Content, Equatable {
     public let before: Date
 
     /// Creates a prune response.
-    /// - Parameters:
-    ///   - removed: Documents removed.
-    ///   - before: Applied cutoff.
     public init(removed: Int, before: Date) {
         self.removed = removed
         self.before = before
@@ -323,9 +304,6 @@ public struct IndexResetResponse: Content, Equatable {
 }
 
 /// Outcome of `POST /index/reclaim`.
-///
-/// Carries the on-disk total before and after `VACUUM` plus the reclaimed
-/// delta so the dashboard renders the saved bytes without recomputing them.
 public struct IndexReclaimResponse: Content, Equatable {
     /// On-disk total before `VACUUM`, in bytes.
     public let beforeBytes: Int64
@@ -335,10 +313,6 @@ public struct IndexReclaimResponse: Content, Equatable {
     public let reclaimedBytes: Int64
 
     /// Creates a reclaim response.
-    /// - Parameters:
-    ///   - beforeBytes: On-disk total before.
-    ///   - afterBytes: On-disk total after.
-    ///   - reclaimedBytes: Bytes reclaimed.
     public init(beforeBytes: Int64, afterBytes: Int64, reclaimedBytes: Int64) {
         self.beforeBytes = beforeBytes
         self.afterBytes = afterBytes

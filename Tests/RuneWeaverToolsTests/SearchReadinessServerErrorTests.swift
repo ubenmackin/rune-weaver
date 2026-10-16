@@ -1,13 +1,4 @@
 // Rune Weaver Tools Tests — Readiness sick fail-fast on persistent HTTP 5xx.
-//
-// Purpose: pins the consecutive-5xx threshold trip, the success reset, and the
-// distinct crash, sick, and stuck message shapes so a wedged engine fails fast
-// with its body tail instead of burning the minutes-scale backstop.
-// Scope: pure `SearXNGEnsurer` counting plus banner helpers and hermetic
-// `watchReadiness` loops with stubbed probes; no processes are spawned and no
-// network is touched.
-// Architectural role: guards the waiting-stage contract shared by the engine
-// cascade, the CLI watcher, the dashboard watch, and the escape-hatch script.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -48,10 +39,9 @@ struct SearchReadinessServerErrorTests {
 
     @Test
     func `Empty unparseable and non-5xx bodies keep waiting without tripping`() {
-        // Gaps (bare, blank, undecodable, or empty 5xx) preserve the streak while
-        // a definitive non-5xx answer such as 404 breaks consecutiveness and
-        // clears it; neither trips the threshold alone, so the watch keeps
-        // waiting instead of failing fast on noise or on an interleaved 404.
+        // Gaps preserve streaks while non-5xx answers (e.g. 404) break consecutiveness; neither
+        // trips the threshold alone, so the watch continues waiting instead of failing fast on
+        // noise or an interleaved 404.
         #expect(SearXNGEnsurer.isCountableServerErrorBody("") == false)
         #expect(SearXNGEnsurer.isCountableServerErrorBody("   \n  ") == false)
         #expect(SearXNGEnsurer.isCountableServerErrorBody("boom") == true)

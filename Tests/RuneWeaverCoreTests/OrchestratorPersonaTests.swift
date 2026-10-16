@@ -1,9 +1,4 @@
 // Rune Weaver Core Tests — Orchestrator Persona prompt injection.
-//
-// Verifies that Orchestrator honors the configured PersonaConfig on turn execution:
-// - Custom persona reflects assistantName, tone, style, and userName in the system prompt.
-// - Default persona preserves the legacy identity line byte-for-byte.
-// - Background execution preserves the customized identity line alongside scheduled guidance.
 
 import Foundation
 import os

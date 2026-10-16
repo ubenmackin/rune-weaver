@@ -1,9 +1,4 @@
 // Rune Weaver Core — Container operation errors.
-//
-// Purpose: single error shape for container CLI lifecycle failures.
-// Scope: missing runtime plus failed operation causes.
-// Architectural role: shared error beside the other Core sandbox helpers;
-// every container caller throws these instead of minting local errors.
 
 import Foundation
 

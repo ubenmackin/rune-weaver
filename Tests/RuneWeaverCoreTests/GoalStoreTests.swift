@@ -1,12 +1,4 @@
 // Rune Weaver Core Tests — Goal model persistence, due advancement, and audit trail.
-//
-// Exercises the SQLite-backed goal store end to end against isolated
-// temporary databases: creation with ordered steps, filtered listing,
-// plan replacement that preserves finished history, lifecycle transitions
-// with their audit events, inclusive due-date math, actionable-step
-// selection, cascading deletes, and additive migration over databases that
-// already carry conversation and scheduler rows. Tests never touch the real
-// `~/.runeweaver/memory` store.
 
 import Foundation
 @testable import RuneWeaverCore

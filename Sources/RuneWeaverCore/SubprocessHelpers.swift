@@ -1,7 +1,4 @@
 // Rune Weaver Core — Subprocess JSON-RPC drain helpers for plugin execution.
-// Isolates capped pipe accumulation, budget mapping, and timeout plumbing so the
-// bridge stays within type-length budgets while preserving sandboxing, caps,
-// and cancellation distinguishability.
 
 import Foundation
 import os

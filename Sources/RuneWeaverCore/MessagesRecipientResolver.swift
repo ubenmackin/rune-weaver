@@ -1,76 +1,30 @@
 // Rune Weaver Core — Deterministic recipient resolution across contacts, history, and aliases.
-//
-// Purpose: every Messages surface that turns a typed recipient into a send
-// target must agree on who that recipient is. This file owns that decision end
-// to end: the resolving seam tools depend on, the alias-store contract the send
-// flow writes through, and the production resolver that blends address-book
-// matches, recent direct-chat history, and recorded aliases into one ranked
-// resolution.
-//
-// Scope: composition over injected sources. The resolver never throws, never
-// caches, and never opens a database itself — an unavailable history source
-// degrades to un-enriched candidates, and every call reads its sources live so
-// a just-messaged handle is reflected immediately. Ranking, identity grouping,
-// and ambiguity are fixed here, and contact name quality is read from the
-// matcher's single shared score table, so the tool, the server, and the
-// confirmation prompt cannot disagree about who "Rebecca" is.
-//
-// Architectural role: the recipient resolution surface consumed by Messages
-// tools, built on the shared recipient value types plus the contacts and
-// history seams.
 
 import Foundation
 
 // MARK: - Seams
 
-/// Seam for resolving a raw recipient query into a ranked resolution.
-///
-/// Tools and their tests depend on this protocol instead of the concrete
-/// resolver so resolution can be exercised without an address book, a chat
-/// database, or an alias store. Implementations never throw: a surface that is
-/// unavailable contributes nothing rather than failing the lookup.
+/// Seam for resolving a raw recipient query into a ranked resolution. Implementations never throw:
+/// a surface that is unavailable contributes nothing rather than failing the lookup.
 public protocol MessagesRecipientResolving: Sendable {
-    /// Resolves a recipient query against every available lookup surface.
-    /// - Parameters:
-    ///   - name: Raw recipient text: a name, an email address, or a phone number.
-    ///   - limit: Requested maximum candidates; implementations clamp it to `1...10`.
-    /// - Returns: A deterministic resolution; an empty candidate list is a value, never an error.
+    /// Resolves a recipient query against every available lookup surface. name: Raw
+    /// recipient text: a name, an email address, or a phone number.
     func resolve(name: String, limit: Int) async -> MessageRecipientResolution
 }
 
 /// Seam for the durable name-to-handle aliases the send flow writes.
-///
-/// Aliases are the only recipient surface the engine writes: after a send, the
-/// resolved name is remembered so the next "Rebecca" resolves without a full
-/// address-book search. Implementations never throw, because a store failure
-/// must not turn a completed send into a reported error; both methods degrade
-/// to an empty result or a no-op.
 public protocol MessageAliasStoring: Sendable {
-    /// Returns stored alias candidates for a normalized name key.
-    /// - Parameters:
-    ///   - nameKey: Normalized name (see ``MessageRecipientNameNormalizer/normalize(_:)``).
-    ///   - limit: Maximum candidates requested.
-    /// - Returns: Alias candidates, or an empty array when none are stored.
+    /// Returns stored alias candidates for a normalized name key. nameKey:
+    /// Normalized name (see ``MessageRecipientNameNormalizer/normalize(_:)``).
     func aliases(nameKey: String, limit: Int) async -> [MessageRecipientCandidate]
 
-    /// Records one name-to-handle alias after a send.
-    /// - Parameters:
-    ///   - name: Raw name the owner typed.
-    ///   - handle: Canonical handle the message was sent to.
-    ///   - service: Messaging service label, when known.
-    ///   - displayName: Friendly name to show on later resolutions.
+    /// Records one name-to-handle alias after a send. name: Raw name the owner
+    /// typed.
     func recordAlias(name: String, handle: String, service: String?, displayName: String?) async
 }
 
 #if canImport(SQLite3)
     /// Deterministic recipient resolution over contacts, history, and aliases.
-    ///
-    /// One pipeline serves every Messages surface: a typed handle short-circuits
-    /// to a single passthrough candidate, while a typed name is scored across
-    /// aliases and address-book matches, enriched with recent direct-chat
-    /// history, de-duplicated by handle identity, and ranked by the shared
-    /// contract. The resolver owns no storage and no cache, so a caller can
-    /// resolve speculatively on every turn without stale answers.
     public struct MessagesRecipientResolver: MessagesRecipientResolving {
         /// Candidate budget used when the caller supplies none.
         public static let defaultLimit = 5
@@ -98,12 +52,8 @@ public protocol MessageAliasStoring: Sendable {
         /// Alias store, or nil when aliases are not wired.
         private let aliasStore: (any MessageAliasStoring)?
 
-        /// Creates a recipient resolver.
-        /// - Parameters:
-        ///   - chatDatabasePath: Live `chat.db` path used to build the default history source.
-        ///   - contacts: Address-book name search surface.
-        ///   - history: History surface; nil builds a snapshot-backed source over `chatDatabasePath`.
-        ///   - aliasStore: Alias store, or nil when aliases are unavailable.
+        /// Creates a recipient resolver. chatDatabasePath: Live `chat.db` path used
+        /// to build the default history source.
         public init(
             chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath,
             contacts: any MessagesContactSearching = MessagesContactNameResolver(),
@@ -116,16 +66,6 @@ public protocol MessageAliasStoring: Sendable {
         }
 
         /// Resolves one recipient query against every available surface.
-        ///
-        /// A handle query is returned immediately as a passthrough candidate
-        /// (enriched with a display name and history) because the caller already
-        /// supplied an exact address; a name query runs the full ranking
-        /// pipeline. Unclassifiable input resolves empty rather than throwing,
-        /// and a zero-candidate resolution is a normal value.
-        /// - Parameters:
-        ///   - name: Raw recipient text: a name, an email address, or a phone number.
-        ///   - limit: Requested maximum candidates; clamped to `1...10`.
-        /// - Returns: The deterministic resolution for `name`.
         public func resolve(name: String, limit: Int = Self.defaultLimit) async -> MessageRecipientResolution {
             let cappedLimit = min(max(limit, 1), Self.maximumLimit)
             guard let classified = MessageRecipientClassification.classify(name) else {
@@ -148,15 +88,6 @@ public protocol MessageAliasStoring: Sendable {
         }
 
         /// Builds the handle passthrough resolution for an exact-address query.
-        ///
-        /// A typed handle is already the identity the caller means, so the
-        /// candidate is never compared against other surfaces: it only gains a
-        /// friendly name from the address book and the freshest history row.
-        /// - Parameters:
-        ///   - handle: Canonical handle from classification.
-        ///   - query: Raw query, preserved on the resolution.
-        ///   - stats: Best history row per handle key.
-        /// - Returns: A single-candidate, unambiguous resolution.
         private func handleResolution(
             handle: String,
             query: String,
@@ -186,17 +117,6 @@ public protocol MessageAliasStoring: Sendable {
         }
 
         /// Runs the name ranking pipeline: aliases, contacts, history, merge, rank.
-        ///
-        /// Sources are read in a fixed order — aliases, then address-book
-        /// matches, then one history read — so equal-scored duplicates merge
-        /// deterministically and every candidate sees the same recency snapshot.
-        /// - Parameters:
-        ///   - query: Raw query, preserved on the resolution.
-        ///   - nameKey: Normalized query used for alias lookup and scoring.
-        ///   - limit: Clamped candidate budget.
-        ///   - stats: Best history row per handle key.
-        ///   - now: Single timestamp used for every recency bonus in this call.
-        /// - Returns: The deterministic resolution.
         private func nameResolution(
             query: String,
             nameKey: String,
@@ -267,11 +187,6 @@ public protocol MessageAliasStoring: Sendable {
         }
 
         /// Reads recent direct-chat stats and folds them to one best row per handle key.
-        ///
-        /// A history failure is swallowed deliberately: history only enriches
-        /// other surfaces, so an unavailable database must leave contact and
-        /// alias resolution intact rather than failing the whole lookup.
-        /// - Returns: Best stat per normalized handle key; empty on any failure.
         private func bestHistoryStats() async -> [String: MessageHandleStats] {
             let stats: [MessageHandleStats]
             do {
@@ -311,10 +226,6 @@ public protocol MessageAliasStoring: Sendable {
 
     extension MessagesRecipientResolver {
         /// Applies the best history row and the recency bonus to one candidate.
-        ///
-        /// History wins over a source-provided service or date because it is the
-        /// live recency truth; a source date still earns its bonus when no
-        /// history row exists, so an alias recorded with a date is not penalized.
         private static func enriched(
             _ item: RankedCandidate,
             stats: [String: MessageHandleStats],
@@ -338,10 +249,6 @@ public protocol MessageAliasStoring: Sendable {
         }
 
         /// Whether `candidate` should replace `current` for the same handle key.
-        ///
-        /// Newest wins because recency drives the resolution bonus; when two rows
-        /// carry the same instant, the stronger transport wins so a handle known
-        /// on both iMessage and SMS reports its primary service.
         fileprivate static func isBetterStat(_ candidate: MessageHandleStats, than current: MessageHandleStats) -> Bool {
             switch (candidate.lastMessageAt, current.lastMessageAt) {
             case let (lhs?, rhs?):
@@ -359,12 +266,6 @@ public protocol MessageAliasStoring: Sendable {
         }
 
         /// Merges candidates that denote the same handle.
-        ///
-        /// Identity for dedupe is the normalized handle key, so a contact row, an
-        /// alias row, and a typed handle for the same address collapse to one
-        /// candidate. The highest score wins the row (its source and contact link
-        /// travel with it), while the most informative display name across the
-        /// group is kept so a nickname-only alias never hides a full contact name.
         private static func dedupe(_ candidates: [RankedCandidate]) -> [RankedCandidate] {
             var best: [String: RankedCandidate] = [:]
             var unkeyed: [RankedCandidate] = []
@@ -394,10 +295,6 @@ public protocol MessageAliasStoring: Sendable {
         }
 
         /// Picks the more informative of two display names.
-        ///
-        /// A present name always beats nil, and between two present names the
-        /// longer one carries more identifying text; equal lengths fall back to
-        /// lexicographic order so a merge is reproducible.
         fileprivate static func richerDisplayName(_ lhs: String?, _ rhs: String?) -> String? {
             switch (lhs, rhs) {
             case (nil, nil): return nil
@@ -411,12 +308,8 @@ public protocol MessageAliasStoring: Sendable {
             }
         }
 
-        /// Deterministic ranking: score, recency, service, then handle.
-        ///
-        /// A nil `lastMessageAt` sorts after every dated candidate because
-        /// unknown recency must never outrank known recency. The service rank
-        /// prefers iMessage over SMS over anything unrecognized, so a handle
-        /// reachable on multiple transports presents its primary one first.
+        /// Deterministic ranking: score, recency, service, then handle. A nil `lastMessageAt` sorts
+        /// after every dated candidate because unknown recency must never outrank known recency.
         private static func isOrderedBefore(_ lhs: RankedCandidate, _ rhs: RankedCandidate) -> Bool {
             if lhs.score != rhs.score {
                 return lhs.score > rhs.score
@@ -442,9 +335,6 @@ public protocol MessageAliasStoring: Sendable {
         }
 
         /// Transport preference for equal-recency candidates.
-        ///
-        /// Matching is case-insensitive so a database row spelling "imessage" or
-        /// "sms" still ranks as the transport it names.
         fileprivate static func serviceRank(_ service: String?) -> Int {
             switch service?.lowercased() {
             case "imessage": 0
@@ -454,11 +344,6 @@ public protocol MessageAliasStoring: Sendable {
         }
 
         /// Whether every top-scored candidate belongs to one identity.
-        ///
-        /// Two candidates are the same person when they share a non-empty
-        /// address-book identifier or the same handle key. Candidates that share
-        /// neither stay separate groups, so the resolver asks the owner instead
-        /// of guessing between two different "Rebecca"s.
         private static func formsOneIdentity(_ candidates: [RankedCandidate]) -> Bool {
             guard candidates.count > 1 else { return true }
             var groups: [[RankedCandidate]] = []
@@ -489,9 +374,6 @@ public protocol MessageAliasStoring: Sendable {
         }
 
         /// Score bump for a recently exchanged handle.
-        ///
-        /// Recency breaks name-quality ties toward the handle the owner actually
-        /// messages; a stale or undated handle earns nothing.
         fileprivate static func recencyBonus(for lastMessageAt: Date?, now: Date) -> Int {
             guard let lastMessageAt else { return 0 }
             let age = now.timeIntervalSince(lastMessageAt)

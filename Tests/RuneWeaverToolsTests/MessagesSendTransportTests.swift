@@ -1,19 +1,4 @@
 // Rune Weaver Tools Tests — Service-aware send transport and send payloads.
-//
-// Purpose: pin the send details that are easy to get silently wrong — the
-// AppleScript must target the service history observed (and keep the recovery
-// fallback when it did not), `osascript` failures must map to typed
-// owner-actionable errors, the result and envelope payloads must carry service
-// and confirmation fields without breaking older JSON, and the tool must
-// surface an unconfirmed delivery as a caveat rather than a silent success.
-//
-// Scope: pure helpers, codable payloads, and gateway stubs. No test invokes
-// `osascript` or touches the real Messages database; the production gateway
-// paths exercised are rejections that fail before any process launch or
-// database read.
-//
-// Architectural role: guards `MessagesSendTransport` and the send payload
-// types, so a transport regression surfaces here instead of in a live send.
 
 import Foundation
 @testable import RuneWeaverCore

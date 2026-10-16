@@ -1,11 +1,4 @@
 // Rune Weaver Tools — Bash execution models plus capped output buffering.
-//
-// Holds the `bash.exec` argument and envelope documents plus the kill-reason
-// contract and the thread-safe capped output buffer feeding process
-// stdout/stderr collection. Separated from the `bash.exec` tool definition so
-// the tool file stays within the file-length budget while decode, policy
-// gating, tier routing, egress screening, dry-run preview, and spawn keep one
-// shared model surface.
 
 import Foundation
 import os
@@ -27,10 +20,6 @@ public struct BashArgs: Codable, Sendable, Equatable {
     /// Optional flag to request network access in Seatbelt sandbox.
     public let requestNetwork: Bool
     /// Declared egress hosts constraining this call's network dials (max 10).
-    ///
-    /// Empty means no host claim; a non-empty set must cover every host the
-    /// command dials, and the supervisor denies undeclared dials even when
-    /// the policy would otherwise allow them.
     public let networkHosts: [String]
 
     public init(
@@ -63,10 +52,9 @@ public struct BashArgs: Codable, Sendable, Equatable {
         self.commandArgs = BashCommandArgs(command: command)
         self.cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
         self.timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
-        // Strict wire carries only snake `request_network`; the provider
-        // rejects the camel spelling via additionalProperties false while the
-        // decoder ignores unknown keys and defaults fail-closed to `false`,
-        // so a camel `true` never enables network.
+        // Strict wire carries only snake `request_network`; the provider rejects the camel spelling
+        // via additionalProperties false while the decoder ignores unknown keys and defaults
+        // fail-closed to `false`, so a camel `true` never enables network.
         let snakeNet = try container.decodeIfPresent(Bool.self, forKey: .requestNetworkSnake)
         self.requestNetwork = snakeNet ?? false
         // Strict wire carries only snake `network_hosts` for the same reason:
@@ -90,20 +78,6 @@ public struct BashArgs: Codable, Sendable, Equatable {
 }
 
 /// How a shell run ended, distinguishing policy refusal from process fate.
-///
-/// `clean` means the process exited on its own (any exit code) without a
-/// timeout or resource kill; `wall_timeout` means the wall-clock watchdog
-/// terminated it; `resource_limit` is CPU-only — it means the CPU `ulimit`
-/// killed it: a SIGXCPU signal death (24), or its `128 + signal` wrapper
-/// spelling (152) with the shell's `cpu time limit` diagnostic on stderr
-/// proving the limiter fired rather than a voluntary `exit 152`. A bare
-/// diagnostic without a limiter-implying status stays `clean` so a voluntary
-/// phrase on stderr (for example echoing `cpu time limit` then `exit 1`)
-/// never reads as a resource bound; `denied` means policy refused to spawn
-/// it at all. Memory-limit deaths stay `clean`: SIGKILL (9 / 137) shares its
-/// status across OOM, manual, and sandbox kills, and `ulimit -v` malloc
-/// failures surface as ordinary non-zero exits, so neither reads as a
-/// resource bound without CPU-limit corroboration.
 public enum BashKillReason: String, Sendable, Codable, Equatable {
     /// The process exited on its own without a timeout or resource kill.
     case clean
@@ -248,26 +222,9 @@ final class BashOutputBuffer: Sendable {
 // MARK: - BashTool Static Helpers
 
 extension BashTool {
-    /// Classifies how a run ended from its wait status.
-    ///
-    /// The timeout flag wins because a signal death landing near the deadline
-    /// still reads as a wall kill only when the watchdog set the flag. The
-    /// contract is CPU-only: only a SIGXCPU signal death (24, CPU limit)
-    /// maps outright; its `128 + signal` wrapper spelling (152) maps only
-    /// with the shell's `cpu time limit` diagnostic on stderr proving the
-    /// limiter fired rather than a voluntary `exit 152`. The diagnostic never
-    /// maps on its own: it is scoped to the wrapper spelling so a voluntary
-    /// phrase on stderr with any other status (for example `exit 1`) stays
-    /// `clean`. Memory-limit deaths stay `clean`: SIGKILL (9 / 137) shares
-    /// its status across OOM, manual, and sandbox kills, and `ulimit -v`
-    /// malloc failures surface as ordinary non-zero exits, so neither reads
-    /// as a resource bound without CPU-limit corroboration.
-    /// - Parameters:
-    ///   - didTimeOut: Whether the wall-clock watchdog terminated the run.
-    ///   - terminationReason: Exit versus uncaught-signal from the wait status.
-    ///   - terminationStatus: Signal number or exit code from the wait status.
-    ///   - stderr: Captured stderr corroborating the wrapper spelling.
-    /// - Returns: The matching kill reason.
+    /// Classifies how a run ended from its wait status. The timeout flag wins because a signal
+    /// death landing near the deadline still reads as a wall kill only when the watchdog set the
+    /// flag.
     public static func killReason(
         didTimeOut: Bool,
         terminationReason: Process.TerminationReason,
@@ -277,21 +234,16 @@ extension BashTool {
         if didTimeOut {
             return .wallTimeout
         }
-        // Raw signal numbers avoid a Darwin/Glibc import split; 24 is SIGXCPU
-        // (CPU limit). The signal death itself is the corroboration, so no
-        // diagnostic is required. SIGKILL (9) is deliberately excluded: it
-        // may be OOM, manual, or sandbox action.
+        // Raw signal numbers avoid a Darwin/Glibc import split; 24 is SIGXCPU (CPU limit). The
+        // signal death itself is the corroboration, so no diagnostic is required.
         if terminationReason == .uncaughtSignal,
            terminationStatus == 24
         {
             return .resourceLimit
         }
-        // Wrappers report signals as 128 + signal instead of a signal death;
-        // only the SIGXCPU spelling (152) counts, never the SIGKILL one (137),
-        // and only with the shell diagnostic so a voluntary `exit 152` stays
-        // clean. Scoping the substring to this status keeps a voluntary
-        // `cpu time limit` phrase with any other exit (for example `exit 1`)
-        // from reading as a limiter kill.
+        // Wrappers report signals as 128 + signal instead of a signal death; only the SIGXCPU
+        // spelling (152) counts, never the SIGKILL one (137), and only with the shell diagnostic so
+        // a voluntary `exit 152` stays clean.
         if terminationReason == .exit,
            terminationStatus == 152,
            !stderr.isEmpty,

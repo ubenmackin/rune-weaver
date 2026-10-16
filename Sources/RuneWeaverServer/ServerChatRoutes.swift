@@ -1,7 +1,4 @@
 // Rune Weaver Server — REST chat routes.
-//
-// Owns the HTTP POST /chat, /chat/cancel, and /chat/tool-cancel routes backing
-// clients when WebSocket is unavailable or for headless scripting turns.
 
 import Foundation
 import RuneWeaverCore
@@ -17,14 +14,9 @@ func registerChatRoute(_ app: Application) {
         let sessionID = body.resolvedSessionID
         let startTime = Date()
 
-        // Bound parallel turns the same way as the WebSocket path so the REST
-        // fallback cannot stack unbounded: the acquire and the registration
-        // happen in one tracker hop, so concurrent fresh sessions cannot both
-        // slip past the cap. A replacement turn for the same session always
-        // fits (it supersedes the prior slot). Register before spawning so a
-        // fast turn can never finish before its slot exists; the box bridges
-        // a cancel arriving in that gap to the task created just below,
-        // matching `handleWebSocketChat`.
+        // Bound parallel turns the same way as the WebSocket path so the REST fallback cannot stack
+        // unbounded: the acquire and the registration happen in one tracker hop, so concurrent fresh
+        // sessions cannot both slip past the cap.
         let taskBox = TurnTaskBox()
         guard let registration = await context.activeTurns.tryAcquire(sessionID: sessionID, onCancel: { taskBox.cancel() }) else {
             throw Abort(
@@ -32,10 +24,9 @@ func registerChatRoute(_ app: Application) {
                 reason: "Already running \(ActiveTurnTracker.maxConcurrentTurns) chat turns — wait for one to finish or cancel it, then retry."
             )
         }
-        // Publish the running row immediately so dashboards badge the session
-        // from the run log even before inference streams; every terminal path
-        // below updates this same row instead of appending a second, keeping
-        // one audit entry per turn like the WebSocket path.
+        // Publish the running row immediately so dashboards badge the session from the run log even
+        // before inference streams; every terminal path below updates this same row instead of
+        // appending a second, keeping one audit entry per turn like the WebSocket path.
         let initialEntry = await context.runs.append(
             kind: "chat",
             status: "running",
@@ -137,10 +128,6 @@ func registerChatRoute(_ app: Application) {
 }
 
 /// Inputs for handling a failed REST chat turn without growing the handler signature.
-///
-/// Bundles the per-turn audit row plus the accumulated partial snapshot so the
-/// error handler stays inside the parameter budget while keeping the same
-/// single-entry audit shape as success.
 struct RESTChatErrorTurn: Sendable {
     /// Owning session the failed turn belongs to.
     let sessionID: UUID
@@ -154,11 +141,8 @@ struct RESTChatErrorTurn: Sendable {
     let audit: ChatTurnAuditSnapshot
 }
 
-/// Handles errors raised during a REST chat turn, persisting an error message and updating run status.
-///
-/// Error rows keep the same single-entry shape as success: partial assistant text when streamed
-/// (else the error detail so the row is never response-less) plus the tools that already ran and
-/// their billed total, so the audit entry matches the tools the client already rendered live.
+/// Handles errors raised during a REST chat turn, persisting an error message and updating run
+/// status.
 private func handleRESTChatError(
     _ error: Error,
     context: ServerContext,
@@ -199,16 +183,6 @@ private func handleRESTChatError(
 }
 
 /// Forwards a REST turn's mid-turn progress to dashboard WebSocket clients.
-///
-/// REST has no stream, but dashboard WebSocket clients still deserve mid-turn
-/// progress. Forward session-tagged warnings, per-round token usage, and generic
-/// tool progress through the shared broadcast helper so REST and resume share one
-/// session-filtered path and clients ignore other sessions; failures never fail the
-/// turn. The terminal response stays authoritative for reconciliation.
-/// - Parameters:
-///   - event: Orchestrator event emitted by the running turn.
-///   - sessionID: Session the turn belongs to, kept for client-side filtering.
-///   - context: Server context owning the broadcast hub.
 private func forwardRESTChatEvent(_ event: OrchestratorEvent, sessionID: UUID, context: ServerContext) async {
     switch event {
     case .warning, .turnTokens, .toolProgress:
@@ -219,16 +193,6 @@ private func forwardRESTChatEvent(_ event: OrchestratorEvent, sessionID: UUID, c
 }
 
 /// Moves one REST turn's running audit row to its terminal state and broadcasts it.
-/// Every terminal path funnels through this single update so the run log keeps
-/// one entry per turn and REST stays in parity with the WebSocket path, which
-/// updates the same initial row instead of appending a second.
-/// - Parameters:
-///   - context: Server context owning the run store and broadcast hub.
-///   - initialEntry: Running row published before inference started.
-///   - startTime: Turn start for duration accounting.
-///   - status: Terminal status (`ok`, `awaiting_approval`, `cancelled`, or `error`).
-///   - response: Successful turn output, when the turn produced one.
-///   - fallback: Partial text, tool actions, and billed total for failure paths without a response.
 private func updateRESTChatRunAndBroadcast(
     context: ServerContext,
     initialEntry: RunLogEntry,
@@ -267,12 +231,6 @@ private func registerChatCancelRoute(_ app: Application) {
 }
 
 /// Registers the REST per-tool cancellation endpoint.
-///
-/// Distinct from the turn-wide cancel route above: this aborts exactly one
-/// running tool and leaves its turn alive, so the injected failure can steer the
-/// model instead of ending the request. The tool bus owns the call registry and
-/// the injected result, keeping REST and WebSocket cancellations on one path.
-/// - Parameter app: Application receiving the route.
 private func registerChatToolCancelRoute(_ app: Application) {
     app.post(
         PathComponent.constant(ServerPaths.chat),
@@ -293,17 +251,12 @@ private func registerChatToolCancelRoute(_ app: Application) {
     }
 }
 
-/// Spawns the REST liveness heartbeat broadcast for one in-flight turn.
-/// - Parameters:
-///   - context: Server context owning the WebSocket hub.
-///   - sessionID: Session tagging the heartbeat frames.
-/// - Returns: Heartbeat task cancelling with the turn.
+/// Spawns the REST liveness heartbeat broadcast for one in-flight turn. context:
+/// Server context owning the WebSocket hub.
 private func startRESTChatHeartbeat(context: ServerContext, sessionID: UUID) -> Task<Void, Never> {
     Task { [context, sessionID] in
-        // REST has no owning socket for multi-viewer turns so it broadcasts the
-        // session-tagged heartbeat while the WebSocket path targets one socket.
-        // Exactly one timer runs per REST turn; the caller cancels it on every
-        // terminal path so concurrent heartbeats stay bounded to one per turn.
+        // REST has no owning socket for multi-viewer turns so it broadcasts the session-tagged
+        // heartbeat while the WebSocket path targets one socket.
         while !Task.isCancelled {
             do {
                 try await Task.sleep(nanoseconds: WSTurnAlive.intervalNanoseconds)

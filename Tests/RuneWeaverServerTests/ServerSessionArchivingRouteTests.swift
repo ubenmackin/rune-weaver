@@ -1,11 +1,4 @@
 // Rune Weaver Server Tests — Session archiving and filtering routes.
-//
-// Covers:
-// 1. GET /sessions filters out archived sessions by default.
-// 2. GET /sessions?include_archived=true returns archived sessions.
-// 3. POST /sessions/:id/archive archives the session (204).
-// 4. POST /sessions/:id/unarchive unarchives the session (204).
-// 5. Unknown UUIDs return 404.
 
 import Foundation
 import NIOCore

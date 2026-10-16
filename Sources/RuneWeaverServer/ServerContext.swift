@@ -1,7 +1,4 @@
 // Rune Weaver Server — Server execution context and bootstrap wiring.
-//
-// Holds shared engine collaborators, orchestrator, tools, and background workers
-// for the HTTP and WebSocket API service.
 
 import Foundation
 import os
@@ -18,9 +15,6 @@ private struct LiveIndexPair: Sendable {
 }
 
 /// Atomic shell plus workspace policy pair refreshed by settings saves.
-/// Bash carries the working-directory guard from the files policy, so the two
-/// must move together: a split write would let a fresh bash tool enforce a
-/// stale allow-root set (or vice versa) for the window between writes.
 private struct BashFilesPair: Sendable {
     /// Shell execution policy carrying enablement, rules, and timeouts.
     var bash: BashConfig
@@ -29,9 +23,6 @@ private struct BashFilesPair: Sendable {
 }
 
 /// Stand-in provider for goal engine defaults when no serving model is wired.
-/// Direct contexts in tests often pass no `servingLLM`; planning through this
-/// backend yields no text so the engine keeps its resilient fallback plan
-/// instead of failing creation.
 private struct DefaultGoalLLM: LLMProvider, Sendable {
     /// Stable placeholder model metadata.
     let modelInfo = ModelInfo(name: "goal-default", provider: "test", contextLength: 2048)
@@ -48,12 +39,6 @@ private struct DefaultGoalLLM: LLMProvider, Sendable {
 }
 
 /// Single-flight lock serializing policy read-classify-write passes.
-/// An actor alone still interleaves when the operation awaits: a second caller
-/// can enter while the first is suspended on classification or file I/O, so the
-/// flag carries ownership across those awaits and the queue preserves arrival
-/// order. Waiting is intentionally non-cancellable so a cancelled waiter can
-/// never steal the handoff and strand the queue; the generation check remains
-/// the correctness backstop, so a slow holder only delays the next writer.
 public actor PolicyWriteLock {
     /// True while one writer owns the read-classify-write window.
     private var isLocked = false
@@ -133,11 +118,8 @@ public final class ServerContext: Sendable {
     public let toolStates: ToolStateStore
     /// Staged files metadata store tracking edited files awaiting review.
     public let stagedFiles: StagedFilesStore
-    /// Container admission policy bounding guest memory, concurrency, and
-    /// idle TTL for isolated runs. Settings PUTs persist it to the file and
-    /// thread it into the rebuilt tool generation, so the next admission
-    /// observes the new bounds while in-flight runs finish under the prior
-    /// ones.
+    /// Container admission policy bounding guest memory, concurrency, and idle TTL for isolated
+    /// runs.
     private let containersBox: OSAllocatedUnfairLock<ContainersConfig>
     public var containersConfig: ContainersConfig {
         get { containersBox.withLock { $0 } }
@@ -145,9 +127,6 @@ public final class ServerContext: Sendable {
     }
 
     /// Atomic bash plus files policy pair refreshed by settings saves.
-    /// One lock covers both so concurrent readers never observe a fresh bash
-    /// policy beside a stale files guard (or vice versa) mid-save, mirroring
-    /// `liveIndexBox`.
     private let bashFilesBox: OSAllocatedUnfairLock<BashFilesPair>
     /// Live `[files]` access policy bounding read/write operations.
     /// Settings PUTs refresh it in place so saved deny patterns, allow
@@ -177,21 +156,12 @@ public final class ServerContext: Sendable {
     public let goalEngine: GoalEngine
     /// Durable proactive idea registry backing the `/ideas` routes.
     public let ideas: IdeasStore
-    /// Proactive suggestion engine composing the ideas store with the serving
-    /// provider, or nil when `[ideas]` is disabled. Shares the serving provider
-    /// so suggestion quality tracks the active model posture; the engine never
-    /// mints its own backend.
+    /// Proactive suggestion engine composing the ideas store with the serving provider, or nil when
+    /// `[ideas]` is disabled.
     public let ideasEngine: IdeasEngine?
-    /// Parallel worker fan-out engine backing the `fanout.run` tool. Always
-    /// built so fanout.run registers disabled behind the tool-state toggle
-    /// with no config gate, mirroring the goal-tools invariant; the serving
-    /// provider doubles as the background reviewer so review quality tracks
-    /// the active model posture instead of minting a second backend.
+    /// Parallel worker fan-out engine backing the `fanout.run` tool.
     public let fanOut: FanOutEngine
-    /// Active chat provider backing goal planning, ideas, fan-out review, and
-    /// the proactive judge. Stored at boot so a settings save can live-reload
-    /// it the same way boot resolves it without reaching back into the
-    /// orchestrator.
+    /// Active chat provider backing goal planning, ideas, fan-out review, and the proactive judge.
     private let servingLLMBox: OSAllocatedUnfairLock<(any LLMProvider)?>
     public var servingLLM: (any LLMProvider)? {
         get { servingLLMBox.withLock { $0 } }
@@ -202,29 +172,19 @@ public final class ServerContext: Sendable {
     /// the store and coordinator in place while this class stays Sendable,
     /// mirroring `desktopConfigBox`.
     private let liveIndexBox: OSAllocatedUnfairLock<LiveIndexPair>
-    /// Local document index coordinator backing the `/index` routes, or nil when
-    /// indexing is not wired. Swapped live by settings saves without a restart.
-    /// Read-only by design: the store and coordinator always move as one
-    /// generation through `setLiveIndex`, and readers needing both together
-    /// use `liveIndexSnapshot`, so no caller can land a half-swapped pair.
+    /// Local document index coordinator backing the `/index` routes, or nil when indexing is not
+    /// wired. Swapped live by settings saves without a restart.
     public var indexCoordinator: IndexCoordinator? {
         liveIndexBox.withLock { $0.coordinator }
     }
 
-    /// Local document index store backing status, prune, and reset, or nil when
-    /// indexing is not wired. Swapped live by settings saves without a restart.
-    /// Read-only by design: the store and coordinator always move as one
-    /// generation through `setLiveIndex`, and readers needing both together
-    /// use `liveIndexSnapshot`, so no caller can land a half-swapped pair.
+    /// Local document index store backing status, prune, and reset, or nil when indexing is not
+    /// wired. Swapped live by settings saves without a restart.
     public var indexStore: DocIndexStore? {
         liveIndexBox.withLock { $0.store }
     }
 
     /// Persisted Messages watermark the index reset route clears.
-    ///
-    /// Owned by the context so a test-wired context can point a reset at a
-    /// scratch file instead of the operator's live watermark; production
-    /// contexts seed the real default.
     public let indexMessagesStatePath: String
     /// Persisted mail checkpoint the index reset route clears. Mirrors
     /// `indexMessagesStatePath` so a test-wired reset can never delete the
@@ -251,12 +211,6 @@ public final class ServerContext: Sendable {
     /// Shared secrets backing surrogate resolution preserved across live-reloads.
     public let secrets: SecretsManager?
     /// The one verified security policy store for this process.
-    ///
-    /// Backs the mandatory `api.request` egress supervisor and the
-    /// `GET/PUT /settings/policy` routes, so an HTTP policy write is visible
-    /// to the supervisor immediately through actor state with no filesystem
-    /// watcher and no restart. Held even when the tools were injected (app and
-    /// serve build their own registry), so every route reads one instance.
     public let policyStore: PolicyStore
     /// Mandatory outbound egress supervisor backing runtime domain triage and dynamic allows.
     public let egressSupervisor: OutboundEgressSupervisor?
@@ -293,28 +247,11 @@ public final class ServerContext: Sendable {
     /// Owner persona configured at boot.
     public let persona: PersonaConfig
     /// Trusted-tool anomaly watchdog counting executions and denials.
-    ///
-    /// Owned here so the tool bus, the health probe, and the approvals resume
-    /// path share one brake: the bus ingests at the trusted-tool boundary,
-    /// the probe evaluates on cadence, and resume clears through the inbox.
     public let watchdog: BehaviorWatchdog
     /// Sovereign ledger verifier proving the episode history unedited.
-    ///
-    /// Recomputes its chain from the memory engine's primary episode store;
-    /// ceremonies record into the system pulse on the boot, nightly, and
-    /// on-demand cadences, and re-attestation stays an explicit act.
     public let sovereignLedger: SovereignLedger
 
     /// Creates a server context.
-    /// The `steeringQueue` must be the identical instance handed to
-    /// `orchestrator` at its creation: routes enqueue through the context
-    /// while the turn loop dequeues through the orchestrator, so a mismatched
-    /// pair accepts steering yet never delivers it. Prefer `make`, which wires
-    /// one shared queue into both; direct callers sharing a queue by hand can
-    /// verify with `await orchestrator.sharedSteeringQueue === steeringQueue`.
-    /// - Precondition: When the orchestrator was built with a steering queue,
-    ///   the queue passed here is that same instance (identity, not equality).
-    ///   An orchestrator built without a queue leaves steering inert.
     public init(
         config: ServerConfig = .default,
         conversations: ConversationManager,
@@ -399,10 +336,8 @@ public final class ServerContext: Sendable {
         // carry them; an explicit worker still wins untouched for tests that
         // hand-build one without goals.
         let resolvedGoals = goals ?? GoalStore(dbPath: defaultDBPath)
-        // Ideas default over the same `episodes.db` as goals so one database
-        // carries both; an explicit store wins untouched. The engine is built
-        // only when `[ideas]` is enabled and no explicit engine was handed in,
-        // so a disabled install stays inert without spending provider memory.
+        // Ideas default over the same `episodes.db` as goals so one database carries both; an
+        // explicit store wins untouched.
         let resolvedIdeas = ideas ?? IdeasStore(dbPath: resolvedGoals.dbPath)
         let resolvedIdeasEngine = ideasEngine ?? (ideasConfig.enabled ? IdeasEngine(
             store: resolvedIdeas,
@@ -422,13 +357,9 @@ public final class ServerContext: Sendable {
         self.goalEngine = resolvedEngine
         self.ideas = resolvedIdeas
         self.ideasEngine = resolvedIdeasEngine
-        // Fan-out resolves over the shared orchestrator and run-log store so
-        // workers observe the same model posture as chat, with the serving
-        // provider as the background reviewer; a hand-built engine still wins
-        // untouched for tests that wire their own collaborators. Rows travel
-        // through the hub-aware adapter so the swarm's audit trail broadcasts
-        // like every other run kind. Always built so fanout.run registers
-        // disabled behind the tool-state toggle with no config gate.
+        // Fan-out resolves over the shared orchestrator and run-log store so workers observe the
+        // same model posture as chat, with the serving provider as the background reviewer; a
+        // hand-built engine still wins untouched for tests that wire their own collaborators.
         self.fanOut = fanOut ?? FanOutEngine(
             orchestrator: orchestrator,
             runLogs: FanOutRunLogAdapter(runs: runs, hub: hub),
@@ -476,10 +407,8 @@ public final class ServerContext: Sendable {
         self.searchEnsurer = searchEnsurer
         self.mediaSecrets = mediaSecrets
         self.secrets = secrets
-        // A direct init defaults to a fresh unloaded store; `make` always
-        // injects the resolved instance so the supervisor and the policy
-        // routes share one store. Read-only fallback contexts never register
-        // `api.request`, so the unloaded default is never a supervisor source.
+        // A direct init defaults to a fresh unloaded store; `make` always injects the resolved
+        // instance so the supervisor and the policy routes share one store.
         self.policyStore = policyStore ?? PolicyStore()
         self.egressSupervisor = egressSupervisor
         self.policyWriteLock = policyWriteLock
@@ -500,12 +429,9 @@ public final class ServerContext: Sendable {
 
     // MARK: - Verified-Pulse Construction Wiring
 
-    /// Fails fast when the context would enqueue through a different queue
-    /// than the turn loop dequeues through; such a pair accepts steering yet
-    /// never delivers it, so the wiring mistake surfaces at construction.
-    /// - Parameters:
-    ///   - orchestrator: Turn loop owning the dequeue side.
-    ///   - steeringQueue: Queue the routes enqueue through.
+    /// Fails fast when the context would enqueue through a different queue than the turn loop
+    /// dequeues through; such a pair accepts steering yet never delivers it, so the wiring mistake
+    /// surfaces at construction.
     private static func requireMatchingSteeringQueue(orchestrator: Orchestrator, steeringQueue: SteeringQueue) {
         precondition(
             orchestrator.sharedSteeringQueue == nil || orchestrator.sharedSteeringQueue === steeringQueue,
@@ -513,16 +439,9 @@ public final class ServerContext: Sendable {
         )
     }
 
-    /// Resolves the behavior watchdog: a hand-built instance wins untouched
-    /// for tests, while production boots count from the first tool call with
-    /// parking through the shared turn tracker and filing into the shared
-    /// inbox.
-    /// - Parameters:
-    ///   - watchdog: Injected instance, or nil to build the production one.
-    ///   - approvals: Inbox the brake card files into.
-    ///   - steeringQueue: Steering the brake clears for every parked session.
-    ///   - activeTurns: Tracker the brake parks every running turn through.
-    /// - Returns: The watchdog this context owns.
+    /// Resolves the behavior watchdog: a hand-built instance wins untouched for tests, while
+    /// production boots count from the first tool call with parking through the shared turn tracker
+    /// and filing into the shared inbox.
     private static func resolveWatchdog(
         watchdog: BehaviorWatchdog?,
         approvals: ApprovalQueue,
@@ -536,25 +455,14 @@ public final class ServerContext: Sendable {
         )
     }
 
-    /// Resolves the sovereign ledger over the primary episode ledger file, so
-    /// the copy corroborates live truth; an injected instance wins untouched
-    /// for tests.
-    /// - Parameters:
-    ///   - ledger: Injected instance, or nil to build over `dbPath`.
-    ///   - dbPath: Episode ledger file the ceremony recomputes from.
-    /// - Returns: The ledger this context owns.
+    /// Resolves the sovereign ledger over the primary episode ledger file, so the copy corroborates
+    /// live truth; an injected instance wins untouched for tests.
     private static func resolveLedger(_ ledger: SovereignLedger?, dbPath: String) -> SovereignLedger {
         ledger ?? SovereignLedger(episodeStore: EpisodeStore(dbPath: dbPath))
     }
 
-    /// Fans the shared semantic answer cache out to the goal engine, the
-    /// policy store, and the tool bus, so goal changes, policy changes, and
-    /// trusted-tool outcomes all land without a restart. The production
-    /// `make` path awaits the async form before serving so early tool calls
-    /// cannot miss watchdog counts and goal/policy changes cannot miss
-    /// invalidation; the synchronous wrapper keeps direct-init callers wired
-    /// best-effort.
-    /// - Parameter goalEngine: Engine cleared on every goal mutation.
+    /// Fans the shared semantic answer cache out to the goal engine, the policy store, and the tool
+    /// bus, so goal changes, policy changes, and trusted-tool outcomes all land without a restart.
     private func wireVerifiedPulse(goalEngine: GoalEngine) {
         Task {
             await wireVerifiedPulseAsync(goalEngine: goalEngine)
@@ -562,10 +470,6 @@ public final class ServerContext: Sendable {
     }
 
     /// Awaitable verified-pulse wiring for the serving path.
-    ///
-    /// Idempotent with the detached wrapper above, so `make` awaiting it
-    /// after construction closes the wiring race before the first turn.
-    /// - Parameter goalEngine: Engine cleared on every goal mutation.
     func wireVerifiedPulseAsync(goalEngine: GoalEngine) async {
         let sharedCache = await memoryEngine.answerCache
         await goalEngine.setAnswerCache(sharedCache)
@@ -587,44 +491,35 @@ public final class ServerContext: Sendable {
         }
     }
 
-    /// Swaps the live document index pair atomically so status, run, cancel,
-    /// prune, and reset observe one consistent generation without a restart.
-    /// - Parameters:
-    ///   - store: Document store to serve, or nil to unwire.
-    ///   - coordinator: Coordinator to serve, or nil to unwire.
+    /// Swaps the live document index pair atomically so status, run, cancel, prune, and reset
+    /// observe one consistent generation without a restart. store: Document store to
+    /// serve, or nil to unwire.
     public func setLiveIndex(store: DocIndexStore?, coordinator: IndexCoordinator?) {
         liveIndexBox.withLock { $0 = LiveIndexPair(store: store, coordinator: coordinator) }
     }
 
-    /// Atomically snapshots the live document index pair so concurrent PUTs
-    /// observe one consistent generation: the coordinator and store always
-    /// belong together, never coordinator from gen A with store from gen B.
-    /// - Returns: The live store and coordinator as one generation.
+    /// Atomically snapshots the live document index pair so concurrent PUTs observe one consistent
+    /// generation: the coordinator and store always belong together, never coordinator from gen A
+    /// with store from gen B.
     public func liveIndexSnapshot() -> (store: DocIndexStore?, coordinator: IndexCoordinator?) {
         liveIndexBox.withLock { ($0.store, $0.coordinator) }
     }
 
-    /// Swaps the live bash and files policies atomically so concurrent turns
-    /// never observe a fresh shell policy beside a stale workspace guard.
-    /// - Parameters:
-    ///   - bash: Shell policy to serve.
-    ///   - files: Workspace policy to serve.
+    /// Swaps the live bash and files policies atomically so concurrent turns never observe a fresh
+    /// shell policy beside a stale workspace guard. bash: Shell policy to serve.
     public func setBashFiles(bash: BashConfig, files: FilesConfig) {
         bashFilesBox.withLock { $0 = BashFilesPair(bash: bash, files: files) }
     }
 
-    /// Atomically snapshots the live bash and files policies so a reload
-    /// builds its tools from one consistent generation, mirroring
-    /// `liveIndexSnapshot`.
-    /// - Returns: The live shell and workspace policies as one generation.
+    /// Atomically snapshots the live bash and files policies so a reload builds its tools from one
+    /// consistent generation, mirroring `liveIndexSnapshot`. - Returns: The live shell and workspace
+    /// policies as one generation.
     public func bashFilesSnapshot() -> (bash: BashConfig, files: FilesConfig) {
         bashFilesBox.withLock { ($0.bash, $0.files) }
     }
 
-    /// Schedules a background task to await completion of goal planning and broadcast the updated goal.
-    ///
-    /// Managed within the server context lifecycle at background priority so the creating HTTP route
-    /// can return immediately without unmonitored detached spawns.
+    /// Schedules a background task to await completion of goal planning and broadcast the updated
+    /// goal.
     public func schedulePlanReadyBroadcast(goalID: UUID) {
         let hub = self.hub
         let store = self.goals
@@ -730,9 +625,6 @@ extension ServerContext {
     }
 
     /// Boot-time configuration resolved before durable stores open.
-    /// Groups the shared database path plus the config bundles that seed
-    /// goal, ideas, plugin, and scheduler hydration, so `bootstrapServices`
-    /// carries one seed instead of a long positional tail.
     private struct BootstrapConfig: Sendable {
         let scheduler: SchedulerConfig
         let episodesDBPath: String?
@@ -912,12 +804,8 @@ extension ServerContext {
             proactiveConfig: args.proactiveConfig,
             judgeLLM: args.llm
         )
-        // Fan-out resolves over the shared orchestrator and run-log store so
-        // workers observe the same model posture as chat, with the serving
-        // provider as the background reviewer. Rows travel through the
-        // hub-aware adapter so the swarm's audit trail broadcasts like every
-        // other run kind. Always built so fanout.run registers disabled behind
-        // the tool-state toggle with no config gate.
+        // Fan-out resolves over the shared orchestrator and run-log store so workers observe the
+        // same model posture as chat, with the serving provider as the background reviewer.
         let fanOutEngine = FanOutEngine(
             orchestrator: orchestrator,
             runLogs: FanOutRunLogAdapter(runs: args.durable.runs, hub: args.durable.hub),
@@ -933,16 +821,6 @@ extension ServerContext {
     }
 
     /// Derives the configured-service egress candidates for the boot supervisor.
-    ///
-    /// Exposed internally so the live-reload regression can pin that boot and
-    /// settings saves consume the same derivation; the settings path reads the
-    /// same `RuneWeaverConfig.serviceEgressCandidates` accessor, so a service
-    /// source added to one path can never drift from the other.
-    /// - Parameters:
-    ///   - browser: Browser policy carrying the SearXNG base URL.
-    ///   - media: Optional media policy carrying Sonarr/Radarr URLs.
-    ///   - email: Optional mail policy carrying IMAP and SMTP hosts.
-    /// - Returns: URLs or hosts to seed into the declarative allowlist.
     static func configuredServiceEgressCandidates(
         browser: BrowserConfig,
         media: MediaConfig?,
@@ -981,14 +859,7 @@ extension ServerContext {
     }
 
     /// Builds a context wired for live approval prompts over WebSocket.
-    ///
-    /// - Parameter policyStore: The one security policy store for this
-    ///   process. An injected store is used as-is so a caller that already
-    ///   built tools keeps one instance; nil constructs and loads the factory
-    ///   default before any tool registers, which fails closed when the file
-    ///   cannot be verified.
-    /// - Throws: `PolicyInvariantError` when no verified policy is available,
-    ///   so a boot can never leave an unsupervised `api.request` serving.
+    /// - Parameter policyStore: The one security policy store for this process.
     public static func make(
         config: ServerConfig = .default,
         conversations: ConversationManager,
@@ -1039,10 +910,9 @@ extension ServerContext {
         watchdog: BehaviorWatchdog? = nil,
         sovereignLedger: SovereignLedger? = nil
     ) async throws -> ServerContext {
-        // Resolve the one store for this process before any tool registers:
-        // an injected store is authoritative, while the factory default is
-        // loaded here so the same instance feeds both the egress supervisor
-        // and the settings policy routes.
+        // Resolve the one store for this process before any tool registers: an injected store is
+        // authoritative, while the factory default is loaded here so the same instance feeds both
+        // the egress supervisor and the settings policy routes.
         let resolvedPolicyStore = await PolicyStore.makeLoaded(
             injected: policyStore
         )
@@ -1051,10 +921,9 @@ extension ServerContext {
         // `[files]` policy reaches it here: a `write_mode` change then behaves
         // identically in the verdict and in the tool that executes the call.
         await permissionGate.updateFilesConfig(filesConfig)
-        // Scratch workspace boots beside the other durable stores so a fresh
-        // boot creates the 0700 root and clears expired `tmp/` before any
-        // shell turn runs; failures stay best-effort with a log because the
-        // per-turn quota gate still fails closed when the directory is missing.
+        // Scratch workspace boots beside the other durable stores so a fresh boot creates the 0700
+        // root and clears expired `tmp/` before any shell turn runs; failures stay best-effort with
+        // a log because the per-turn quota gate still fails closed when the directory is missing.
         let resolvedWorkspaceStore = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
         await permissionGate.updateWorkspaceRoot(resolvedWorkspaceStore.root())
         do {
@@ -1097,10 +966,9 @@ extension ServerContext {
         let resolvedSovereignLedger = sovereignLedger ?? SovereignLedger(
             episodeStore: EpisodeStore(dbPath: dbPath)
         )
-        // Execution engines build before tool registration so the fan-out
-        // engine can ride the live orchestrator into the fanout.run tool;
-        // engine construction is side-effect free, so the earlier position
-        // changes nothing else about boot.
+        // Execution engines build before tool registration so the fan-out engine can ride the live
+        // orchestrator into the fanout.run tool; engine construction is side-effect free, so the
+        // earlier position changes nothing else about boot.
         let activeTurns = ActiveTurnTracker()
         let engines = makeExecutionEngines(args: RuntimeEngineArgs(
             conversations: conversations, bus: services.bus, llm: llm,
@@ -1114,13 +982,8 @@ extension ServerContext {
             proactiveConfig: proactiveConfig, fanOutConfig: fanOutConfig,
             activeTurns: activeTurns, persona: persona
         ))
-        // One-shot legacy marker seeding before the first tick so upgraded
-        // installs carry their email window instead of rescanning from nil.
-        // The sweep rides the scheduler worker so production and tests share
-        // one call path; the report is the audit record for the seeded
-        // cursors: it is logged here and persisted beside the one-shot latch
-        // rather than discarded, and the latch keeps a post-migration fact
-        // write from moving a cursor.
+        // One-shot legacy marker seeding before the first tick so upgraded installs carry their
+        // email window instead of rescanning from nil.
         let markerMigration = await engines.schedulerWorker.migrateEmailReportMarkers(memoryEngine: memoryEngine)
         RuneWeaverLog.scheduler.info("Scheduler legacy marker migration: \(markerMigration.auditSummary)")
         let egressSupervisor = try await setupEgressAndPolicy(
@@ -1214,10 +1077,8 @@ private func reclaimOrphanedContainers(config: ContainersConfig, approvals: Appr
     FileSandboxAuditLog.append(bootSummary)
 }
 
-/// Installs the live approval prompt path as the backstop for direct bus executions.
-/// Broadcasts each filed request and waits with a timeout, keeping the bus wiring single-sourced for boot.
-/// Structured turns park before the bus in the common case and never reach this handler; it remains
-/// the fail-safe for executions escaping the partition plus dry-run previews, denying on timeout.
+/// Installs the live approval prompt path as the backstop for direct bus executions. Broadcasts
+/// each filed request and waits with a timeout, keeping the bus wiring single-sourced for boot.
 private func installLiveApprovalHandler(
     bus: ToolBus,
     approvals: ApprovalQueue,
@@ -1229,11 +1090,8 @@ private func installLiveApprovalHandler(
     let handlerHub = hub
     let handlerWorkspace = workspaceStore
     await bus.setApprovalHandler { tool, call, toolContext in
-        // Two-phase filing path: file the pending request immediately with a
-        // nil assessment so the inbox renders without awaiting the model, then
-        // broadcast and wait with a timeout. The enrichment hook rebroadcasts
-        // the updated request on the identical id through the same channel
-        // without re-parking, so live views replace the pending card in place.
+        // Two-phase filing path: file the pending request immediately with a nil assessment so the
+        // inbox renders without awaiting the model, then broadcast and wait with a timeout.
         let owningSession = toolContext.conversationID
         let bashSnapshot = (tool as? BashTool)?.bashConfig
         let workspaceSnapshot = await handlerWorkspace.root()
@@ -1283,10 +1141,8 @@ private struct ResolvedPluginStack: Sendable {
     let discovery: PluginDiscoveryService
 }
 
-/// Loads durable scheduler and run stores off the cooperative pool so actor init never blocks on SQLite.
-/// Groups the four independent boot collaborators so durable hydration stays single-sourced.
-/// Callers proving the same run store plus hub to the index reporter pass them here so the
-/// status probe, the socket hub, and the reporter share one instance instead of forking memory state.
+/// Loads durable scheduler and run stores off the cooperative pool so actor init never blocks on
+/// SQLite. Groups the four independent boot collaborators so durable hydration stays single-sourced.
 private func loadDurableServerStores(
     schedulerConfig: SchedulerConfig,
     episodesDBPath: String?,
@@ -1322,14 +1178,6 @@ private func resolvePluginStack(
 }
 
 /// Wires live approval prompts and restores persisted tool toggles on a built context.
-/// Keeps `make` within the body-length gate by owning the boot tail that must run
-/// after construction: orphaned container reclamation, bus approval handler
-/// install, stored-toggle restore so restarts honor operator intent, then one
-/// best-effort index snapshot warm so the first dashboard storage poll hits cache.
-/// Ownership: this is the sole warm site shared by every boot path, so callers
-/// stay duplication-free. Edge cases: the warm never blocks boot and never
-/// throws; a nil store (index disabled) is a no-op, and a missing database
-/// reports an empty breakdown cheaply through the already-covered status path.
 private func finalizeServerContext(
     _ context: ServerContext,
     containersConfig: ContainersConfig,
@@ -1389,10 +1237,9 @@ private struct ServerContextKey: StorageKey {
 }
 
 extension Application {
-    /// Shared engine context for every route.
-    /// A missing configuration logs and serves an ephemeral fallback so one
-    /// misconfigured route cannot crash the process; routes needing a strict
-    /// 500 use `requireRuneWeaver()` instead.
+    /// Shared engine context for every route. A missing configuration logs and serves an ephemeral
+    /// fallback so one misconfigured route cannot crash the process; routes needing a strict 500 use
+    /// `requireRuneWeaver()` instead.
     var runeWeaver: ServerContext {
         get {
             if let context = storage[ServerContextKey.self] {

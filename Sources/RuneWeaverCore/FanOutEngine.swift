@@ -1,59 +1,10 @@
 // Rune Weaver Core — Parallel worker fan-out engine.
-//
-// Runs explicit subtasks as bounded concurrent worker turns through the
-// orchestrator. The engine is multi-agent by design: subtasks execute in
-// parallel under a configured worker cap, each worker owns a fresh session
-// so histories never interleave, and every worker turn is recorded in the run
-// audit trail so the swarm stays auditable. Subtask prompts are composed by
-// the CALLING agent — the engine never decomposes a task, it only executes
-// the explicit list it is handed. Workers default to the read-only tool
-// subset the caller chose; the subset is only widened to the full registry
-// when the fanout policy explicitly allows it, so research fan-out cannot
-// mutate state.
-//
-// Merge pass: after every subtask settles, a deterministic overlap check runs
-// FIRST — exact file-path/URL collisions across the collected worker outputs
-// are flagged conflict without spending a model round — then ONE background
-// reviewer LLM call over those collected outputs produces a merged summary
-// plus per-subtask verdicts. The reviewer judges content quality, never
-// permissions or policy. The pass fails open by contract: a reviewer error
-// or timeout degrades the summary to the raw concatenation with an honest
-// note, so worker output is never lost because review was flaky.
-//
-// Cancellation: the engine owns an active-run registry so an owner can stop a
-// swarm mid-flight through `cancel(rowID:)` — keyed by run-log row, the same
-// vocabulary the Runs tab speaks. The parent row stops every worker; a child
-// row stops exactly one worker and leaves its siblings running. A subtask the
-// owner marked cancelled settles `cancelled` with an honest note whatever the
-// worker reports, and an owner stop outranks a worker failure in the digest: a
-// cancelled swarm must read as a deliberate stop, never as `error`. A cancel
-// racing startup still lands because the run registers before its worker group
-// starts and late workers settle cancelled without being awaited. Whole-call
-// cancellation (the chat per-tool stop) reaches the same settle path, so
-// stopped workers produce cancelled statuses instead of failures. The registry
-// deregisters with the swarm, so a settled run never accepts a late cancel.
-//
-// Concurrency invariant: the orchestrator is an actor whose turns interleave
-// at await points without corrupting per-call state, each worker owns its own
-// session, and the shared stores (conversations, tool bus, run logs) are
-// actors already — so workers run CONCURRENTLY via a task group. A positive
-// wall-clock timeout bounds a worker that never observes cancellation: each
-// turn races the configured budget and the first side of the race settles the
-// worker while the losing task is abandoned. A zero timeout means no race at
-// all — the worker awaits under the cancellation handler, so an unlimited
-// worker can hold the parent run open until it finishes or is cancelled,
-// intentional for slow local models and bounded by cancellation. The parent
-// run never stays running past the last subtask settle; all-done reads
-// completed and any failure reads failed so the digest stays honest.
 
 import Foundation
 import os
 
-/// Collected output of one worker turn: the final assistant text plus whether
-/// the turn parked waiting on approval. The text feeds the deterministic
-/// overlap check and the background reviewer; the parked flag settles the
-/// run-log row into the same `awaiting_approval` vocabulary chat and scheduler
-/// turns use, so a worker awaiting a decision reads honestly beside them.
+/// Collected output of one worker turn: the final assistant text plus whether the turn parked
+/// waiting on approval.
 public struct FanOutWorkerOutput: Sendable, Equatable {
     /// Final assistant text the worker turn produced. Empty when the turn
     /// failed or timed out before any output landed.
@@ -64,21 +15,15 @@ public struct FanOutWorkerOutput: Sendable, Equatable {
     /// The empty output: the settled shape for a worker that produced nothing.
     public static let empty = FanOutWorkerOutput(text: "", isParked: false)
 
-    /// Creates one collected output.
-    /// - Parameters:
-    ///   - text: Final assistant text.
-    ///   - isParked: Whether the turn parked awaiting approval.
+    /// Creates one collected output. text: Final assistant text.
     public init(text: String, isParked: Bool) {
         self.text = text
         self.isParked = isParked
     }
 }
 
-/// Narrow orchestrator seam the fan-out engine drives so workers run through
-/// the real orchestrator without the engine (or a test) needing the full LLM
-/// stack. The production witness is the live orchestrator instance the server
-/// context already constructed — the same instance is injected, never
-/// self-built — while a stub keeps the engine testable without the stack.
+/// Narrow orchestrator seam the fan-out engine drives so workers run through the real orchestrator
+/// without the engine (or a test) needing the full LLM stack.
 public protocol OrchestratorFanOutSeam: Sendable {
     /// Runs one worker turn to completion. Throwing marks the worker failed;
     /// the response text itself is owned by the worker's own session, so the
@@ -92,21 +37,15 @@ public protocol OrchestratorFanOutSeam: Sendable {
 }
 
 extension OrchestratorFanOutSeam {
-    /// Default collecting witness falls back to the plain seam: run the turn
-    /// and report no output text. Witness types that predate the merge pass
-    /// keep compiling unchanged, and the merge pass fails open to its honest
-    /// fallback when nothing was collected.
+    /// Default collecting witness falls back to the plain seam: run the turn and report no output
+    /// text.
     public func processCollecting(_ input: UserInput) async throws -> FanOutWorkerOutput {
         try await process(input)
         return .empty
     }
 }
 
-/// Bridges the live orchestrator onto the fan-out seam. The forwarding
-/// witness keeps the engine's seam shape (unlabeled `process`) while the
-/// orchestrator's own labeled turn loop stays untouched; the collecting
-/// witness returns the real response text and parked flag so the merge pass
-/// reviews what workers actually produced.
+/// Bridges the live orchestrator onto the fan-out seam.
 extension Orchestrator: OrchestratorFanOutSeam {
     public func process(_ input: UserInput) async throws {
         _ = try await process(input: input)
@@ -118,39 +57,20 @@ extension Orchestrator: OrchestratorFanOutSeam {
     }
 }
 
-/// Run-audit seam so the engine records its rows through the shared run-log
-/// store without linking the server transport (or its entry types) into the
-/// core module. Implementations never throw, so a store failure degrades to
-/// a missing audit row instead of failing the swarm.
+/// Run-audit seam so the engine records its rows through the shared run-log store without linking
+/// the server transport (or its entry types) into the core module.
 public protocol FanOutRunLogging: Sendable {
-    /// Appends one run-log row and returns its identifier so a later settle
-    /// can update the same row in place.
-    /// - Parameters:
-    ///   - kind: Row kind (`fanout` parent, `fanout_worker` children).
-    ///   - status: Row status (`running` until the settle path flips it).
-    ///   - message: Content-free display message.
-    ///   - sessionID: Session the row belongs to.
-    /// - Returns: The appended row's identifier.
+    /// Appends one run-log row and returns its identifier so a later settle can update the same row
+    /// in place. kind: Row kind (`fanout` parent, `fanout_worker` children).
     @discardableResult
     func appendFanOutRow(kind: String, status: String, message: String, sessionID: UUID) async -> UUID
 
-    /// Updates one run-log row's status in place so live views flip the badge.
-    /// - Parameters:
-    ///   - id: Row identifier returned by ``appendFanOutRow(kind:status:message:sessionID:)``.
-    ///   - status: Terminal row status.
+    /// Updates one run-log row's status in place so live views flip the badge. id:
+    /// Row identifier returned by ``appendFanOutRow(kind:status:message:sessionID:)``.
     func updateFanOutRow(id: UUID, status: String) async
 
-    /// Updates one run-log row's settled outcome in place so a worker's raw
-    /// output and duration stay in the child rows (fully auditable) and the
-    /// parent row renders the merged summary. The status-only variant above
-    /// stays for callers that only flip a badge.
-    /// - Parameters:
-    ///   - id: Row identifier returned by ``appendFanOutRow(kind:status:message:sessionID:)``.
-    ///   - status: Terminal row status.
-    ///   - response: Raw output the settled row keeps, or nil to keep the
-    ///     stored response untouched.
-    ///   - durationMs: Wall-clock duration in milliseconds, or nil to keep
-    ///     the stored duration.
+    /// Updates one run-log row's settled outcome in place so a worker's raw output and duration
+    /// stay in the child rows (fully auditable) and the parent row renders the merged summary.
     func updateFanOutRow(id: UUID, status: String, response: String?, durationMs: Int?) async
 }
 
@@ -164,11 +84,6 @@ extension FanOutRunLogging {
 }
 
 /// Resumes a checked continuation exactly once across the worker race.
-///
-/// The orchestrator call and the timeout both try to resume; the first wins
-/// and every later attempt is dropped, so a worker settles on wall-clock time
-/// without awaiting a turn that never observes cancellation. The abandoned
-/// turn task is the deliberate cost of that bound.
 private final class WorkerResumption: Sendable {
     /// Continuation captured at the start of the race, cleared on first resume.
     private let state: OSAllocatedUnfairLock<CheckedContinuation<WorkerOutcome, Never>?>
@@ -240,10 +155,8 @@ private struct WorkerSettle: Sendable {
     /// Wall-clock duration of the turn in milliseconds.
     let durationMs: Int
 
-    /// Builds the settle payload from a settled outcome.
-    /// - Parameters:
-    ///   - subtaskID: Subtask the worker ran.
-    ///   - outcome: Settled worker outcome.
+    /// Builds the settle payload from a settled outcome. subtaskID: Subtask the
+    /// worker ran.
     init(subtaskID: UUID, outcome: WorkerOutcome) {
         self.subtaskID = subtaskID
         self.succeeded = outcome.succeeded
@@ -274,12 +187,6 @@ private struct ActiveFanOutWorker: Sendable {
 }
 
 /// One in-flight run's cancellation surface.
-///
-/// Registered as soon as the parent audit row exists and removed only when the
-/// swarm and merge pass settle, so the window where a cancel can be lost is
-/// none: a cancel before the workers start marks their subtasks and each late
-/// worker settles cancelled without being awaited, and a cancel after the run
-/// settles finds no entry at all.
 private struct ActiveFanOutRun: Sendable {
     /// Parent audit row that identifies the run to the owner.
     let parentRowID: UUID
@@ -300,12 +207,7 @@ private struct ActiveFanOutRun: Sendable {
     var settledSubtaskIDs: Set<UUID>
 }
 
-/// Resumes a checked continuation exactly once across the background review
-/// race. The provider call and the timeout both try to resume; the first wins
-/// and every later attempt is dropped, so the merge pass returns on
-/// wall-clock time without awaiting a provider stream that never observes
-/// cancellation. Mirrors the worker race's resumption so the two bounded
-/// races read identically.
+/// Resumes a checked continuation exactly once across the background review race.
 private final class MergeReviewResumption: Sendable {
     /// Continuation captured at the start of the race, cleared on first resume.
     private let state: OSAllocatedUnfairLock<CheckedContinuation<String?, Never>?>
@@ -358,10 +260,6 @@ struct ParsedMergeReview: Sendable, Equatable {
 }
 
 /// The merge-review outcome the settle path composes the summary from.
-/// The three-way split is the fail-open contract: a parsed review wins, a
-/// wired reviewer that flaked degrades to the raw concatenation with an
-/// honest note, and an unwired reviewer keeps the pre-existing outcome digest
-/// shape so callers without review wiring see no summary change.
 enum MergeReview: Sendable {
     /// Reviewer output parsed and usable.
     case parsed(ParsedMergeReview)
@@ -389,30 +287,18 @@ public actor FanOutEngine {
     /// Run-audit seam injected from the shared run-log store.
     private let runLogs: any FanOutRunLogging
     /// Fanout policy backing the worker cap, timeout, and tool-subset reads.
-    /// Mutable so a settings save can push fresh values live without
-    /// rebuilding the engine; every write goes through `clamped()` so a
-    /// persisted-but-unvalidated hand-built config still degrades to the
-    /// nearest sane bound instead of oversubscribing the serving model.
     private var config: FanOutConfig
-    /// Background reviewer over the collected worker outputs, injected from
-    /// the same serving instance the Wayfinder uses so review quality tracks the
-    /// active model posture; nil keeps the merge pass on its deterministic
-    /// and fail-open fallbacks instead of spending a review call.
+    /// Background reviewer over the collected worker outputs, injected from the same serving
+    /// instance the Wayfinder uses so review quality tracks the active model posture; nil keeps the
+    /// merge pass on its deterministic and fail-open fallbacks instead of spending a review call.
     private var reviewer: (any LLMProvider)?
 
-    /// In-flight runs keyed by parent audit-row id, the cancellation surface
-    /// the owner drives through ``cancel(rowID:)``. A run registers before its
-    /// worker group starts and deregisters once the group and merge pass
-    /// settle, so a settled run can never accept a late cancel.
+    /// In-flight runs keyed by parent audit-row id, the cancellation surface the owner drives
+    /// through ``cancel(rowID:)``.
     private var activeRuns: [UUID: ActiveFanOutRun] = [:]
 
-    /// Creates a fan-out engine over shared collaborators.
-    /// - Parameters:
-    ///   - orchestrator: Seam running each worker turn; the same instance the
-    ///     calling context serves chat turns through.
-    ///   - runLogs: Shared run-log store recording the audit rows.
-    ///   - config: Fanout policy.
-    ///   - reviewer: Optional background reviewer over collected outputs.
+    /// Creates a fan-out engine over shared collaborators. orchestrator: Seam
+    /// running each worker turn; the same instance the calling context serves chat turns through.
     public init(
         orchestrator: any OrchestratorFanOutSeam,
         runLogs: any FanOutRunLogging,
@@ -437,61 +323,28 @@ public actor FanOutEngine {
         config.fullTools
     }
 
-    /// Current fanout policy backing live workers.
-    /// Exposes the clamped snapshot so settings callers can observe a saved
-    /// patch without re-running a swarm; the engine remains the sole writer
+    /// Current fanout policy backing live workers. Exposes the clamped snapshot so settings callers
+    /// can observe a saved patch without re-running a swarm; the engine remains the sole writer
     /// through `updateConfig`.
     public var currentConfig: FanOutConfig {
         config
     }
 
-    /// Pushes a freshly persisted `[fanout]` policy into the live engine so a
-    /// settings save takes effect without a restart.
-    /// Clamps defensively so a hand-built config degrades to the nearest sane
-    /// bound; the settings route validates before persisting, so a clamped
-    /// live value never masks a 400 on the durable file.
-    /// - Parameter newConfig: Persisted fanout policy from the settings save.
+    /// Pushes a freshly persisted `[fanout]` policy into the live engine so a settings save takes
+    /// effect without a restart.
     public func updateConfig(_ newConfig: FanOutConfig) {
         config = newConfig.clamped()
     }
 
-    /// Derives the read-only tool names from a tool snapshot so the calling
-    /// agent passes one deterministic subset without hand-listing names.
-    /// Only `readOnly` tools travel — trusted tiers can still mutate state,
-    /// so research fan-out must not carry them — and the names sort so the
-    /// subset stays deterministic regardless of registry iteration order.
-    /// - Parameter tools: Registry snapshot (already enabled tools).
-    /// - Returns: Sorted read-only tool names.
+    /// Derives the read-only tool names from a tool snapshot so the calling agent passes one
+    /// deterministic subset without hand-listing names.
     public static func readOnlyToolNames(in tools: [any Tool]) -> [String] {
         tools.filter { $0.permissionLevel == .readOnly }.map(\.name).sorted()
     }
 
-    /// Runs the explicit subtasks as concurrent worker turns.
-    ///
-    /// Over-cap lists are rejected before any worker turn spends a model
-    /// round. Each subtask becomes one orchestrator turn
-    /// on a fresh session; the run audit trail records the parent row
-    /// (content-free joined titles) plus one child row per worker so the
-    /// Runs tab renders the swarm and the audit trail is complete. The parent
-    /// run completes when all subtasks settle and never stays running past
-    /// the last settle, so a timed-out worker cannot hold the caller hostage.
-    /// An unlimited worker (zero timeout) can hold the parent run open until
-    /// it finishes or is cancelled, intentional for slow local models. The
-    /// run is cancellable from the moment its parent row exists through
-    /// ``cancel(rowID:)``, and it deregisters before returning, so a settled
-    /// run ignores a late cancel.
-    /// - Parameters:
-    ///   - subtasks: Explicit subtask list; prompts are the caller's, never
-    ///     decomposed here.
-    ///   - originSessionID: Session that spawned the run.
-    ///   - allowedTools: Explicit tool names workers may call, or nil for the
-    ///     full registry. The fanout.run tool passes the read-only names
-    ///     unless its policy widens to the full registry, so research
-    ///     fan-out cannot mutate.
-    /// - Returns: The settled run with per-subtask statuses and an honest
-    ///   outcome digest.
-    /// - Throws: ``FanOutError`` when the list is empty,
-    ///   or the list exceeds the configured worker cap.
+    /// Runs the explicit subtasks as concurrent worker turns. The parent run completes when all
+    /// subtasks settle and never stays running past the last settle, so a timed-out worker cannot
+    /// hold the caller hostage.
     @discardableResult
     public func runFanOut(
         subtasks: [FanOutSubtask],
@@ -523,10 +376,9 @@ public actor FanOutEngine {
             createdAt: startedAt,
             updatedAt: startedAt
         )
-        // Parent plus child audit rows land before the first turn so the
-        // Runs tab renders the swarm while workers are in flight; the parent
-        // append also registers the run's cancel surface, so a cancel racing
-        // startup is never lost.
+        // Parent plus child audit rows land before the first turn so the Runs tab renders the swarm
+        // while workers are in flight; the parent append also registers the run's cancel surface, so
+        // a cancel racing startup is never lost.
         let swarmRows = await recordSwarmRows(
             subtasks: subtasks,
             originSessionID: originSessionID,
@@ -540,12 +392,7 @@ public actor FanOutEngine {
         // rejects a late cancel.
         defer { activeRuns[parentRowID] = nil }
 
-        // Workers run concurrently under the group so a slow worker never
-        // delays its siblings. Each child races the bounded wall-clock
-        // timeout; settled outcomes are applied on the actor between group
-        // iterations so the run status, the subtask badge, and the audit row
-        // flip as each worker settles rather than only at the end. Outputs
-        // collect per worker so the merge pass reviews real worker text.
+        // Workers run concurrently under the group so a slow worker never delays its siblings.
         let orchestrator = self.orchestrator
         let timeoutSeconds = config.workerTimeoutSeconds
         var notes: [UUID: String] = [:]
@@ -555,10 +402,6 @@ public actor FanOutEngine {
                 let subtaskID = subtasks[index].id
                 let input = workerInputs[index]
                 // The turn is created up front so its handle exists to cancel.
-                // Registration runs before the pre-cancel check, so a cancel
-                // that landed while the worker was still starting is honored:
-                // the subtask is already marked and the task is cancelled now,
-                // settling cancelled without ever being awaited.
                 let worker = Self.makeWorkerTask(input: input, orchestrator: orchestrator)
                 registerWorkerHandle(
                     parentRowID: parentRowID,
@@ -592,10 +435,8 @@ public actor FanOutEngine {
             }
         }
 
-        // The merge pass settles the parent: deterministic overlap detection
-        // first, then one background reviewer call, then the merged summary
-        // and the run-log row flip. The parent never stays running past the
-        // last settle, so a flaky reviewer cannot hold the caller hostage.
+        // The merge pass settles the parent: deterministic overlap detection first, then one
+        // background reviewer call, then the merged summary and the run-log row flip.
         await settleParent(
             run: &run,
             outputs: outputs,
@@ -607,20 +448,6 @@ public actor FanOutEngine {
     }
 
     /// Applies one settled worker's outcome to the in-flight run and audit row.
-    ///
-    /// The owner cancellation check outranks worker success and failure: an
-    /// aborted turn can surface as a rushed success, and an owner stop is
-    /// never a failure. Whole-call cancellation is the second signal: the
-    /// parent task is cancelled and a cooperative worker observed the stop
-    /// as a cancellation, so the swarm reads cancelled rather than failed
-    /// exactly where the old path reported failures.
-    /// - Parameters:
-    ///   - settle: Settle payload from the worker task.
-    ///   - run: In-flight run being updated.
-    ///   - notes: Failure or cancellation notes keyed by subtask identifier.
-    ///   - outputs: Collected worker outputs keyed by subtask identifier.
-    ///   - parentRowID: Run registry key.
-    ///   - childRowID: Child audit row identifier, if one exists for the subtask.
     private func applyWorkerSettle(
         _ settle: WorkerSettle,
         run: inout FanOutRun,
@@ -657,9 +484,8 @@ public actor FanOutEngine {
         }
         outputs[settle.subtaskID] = settle.output
         if let childRowID {
-            // A parked worker persists as awaiting_approval like chat
-            // and scheduler turns, resolving through the same inbox
-            // resume path in its own session; the raw output and
+            // A parked worker persists as awaiting_approval like chat and scheduler turns,
+            // resolving through the same inbox resume path in its own session; the raw output and
             // duration ride the row so the audit trail stays complete.
             let rowStatus = if settle.succeeded {
                 settle.output.isParked ? "awaiting_approval" : "ok"
@@ -678,25 +504,6 @@ public actor FanOutEngine {
     // MARK: - Merge pass
 
     /// Settles the parent run after every subtask settles.
-    ///
-    /// Deterministic overlap detection runs FIRST so exact file-path/URL
-    /// collisions across the collected outputs are flagged conflict without
-    /// spending a model round — duplicate targets never depend on a flaky
-    /// review to surface. One background reviewer call follows over the
-    /// collected outputs; the reviewer judges content quality, never
-    /// permissions, and its output becomes the merged summary. A run with
-    /// every subtask cancelled has nothing left to merge, so the reviewer
-    /// call is skipped and the digest states the owner stop plainly. The
-    /// run-log row settles into the executeJob vocabulary — `ok`,
-    /// `awaiting_approval` when a worker parked, `cancelled` when the owner
-    /// stopped work, `error` when work was lost — with the merged summary as
-    /// its response, exactly like the scheduler's job runs.
-    /// - Parameters:
-    ///   - run: Settled run to complete with the merged summary.
-    ///   - outputs: Collected worker outputs keyed by subtask identifier.
-    ///   - notes: Settle notes keyed by subtask identifier.
-    ///   - parentRowID: Parent audit row to flip in place.
-    ///   - startedAt: Instant the run began, for the honest duration.
     private func settleParent(
         run: inout FanOutRun,
         outputs: [UUID: FanOutWorkerOutput],
@@ -721,11 +528,8 @@ public actor FanOutEngine {
                 review: review
             )
         }
-        // The parent never stays running past the last settle: all-done reads
-        // completed and any failure reads failed so the returned digest stays
-        // honest. An owner stop outranks a failure — cancelled is a deliberate
-        // outcome, error is a lost one — and the run-log row carries the same
-        // executeJob vocabulary so the Runs tab renders one pill across kinds.
+        // The parent never stays running past the last settle: all-done reads completed and any
+        // failure reads failed so the returned digest stays honest.
         let anyCancelled = run.subtasks.contains { $0.status == .cancelled }
         let allDone = run.subtasks.allSatisfy { $0.status == .done }
         if anyCancelled {
@@ -737,11 +541,8 @@ public actor FanOutEngine {
         let anyParked = run.subtasks.contains { subtask in
             subtask.status == .done && (outputs[subtask.id]?.isParked ?? false)
         }
-        // A cancelled subtask outranks a failure and a park: the owner asked
-        // for the stop, so the row must not read as an error or as work that
-        // is merely parked. A failure outranks a park: work that was lost is
-        // the more severe reading, and a parked worker still resolves through
-        // the approvals inbox while an error needs the owner's attention.
+        // A cancelled subtask outranks a failure and a park: the owner asked for the stop, so the
+        // row must not read as an error or as work that is merely parked.
         let rowStatus: String = if anyCancelled {
             Self.cancelledRowStatus
         } else if anyFailed {
@@ -759,35 +560,8 @@ public actor FanOutEngine {
         )
     }
 
-    /// Records the parent plus child audit rows, registers the run's cancel
-    /// surface, and mints the worker inputs.
-    ///
-    /// The parent row stays content-free (joined titles) so subtask prompts
-    /// never leak into the trail, and it travels on the caller's session so
-    /// the swarm links back to the turn that asked for it. The cancel entry
-    /// goes live immediately after the parent row exists — before the child
-    /// rows and the worker group — so a cancel racing startup still lands: a
-    /// parent cancel marks every subtask, and a worker created after that mark
-    /// settles cancelled without running. Each child row maps to its subtask
-    /// as soon as it is appended for the same reason: a child-row cancel
-    /// arriving before the worker task exists still reaches the subtask.
-    /// Each worker owns a fresh session: the UUID is minted here and the
-    /// orchestrator creates the session record when the turn runs, mirroring
-    /// the per-run scheduler isolation — the fresh identifiers are what keep
-    /// concurrent worker histories from interleaving with the caller's session
-    /// or each other on the shared conversation store. Child rows carry each
-    /// worker's own fresh session so live views open the turn that produced
-    /// them. Each worker input also carries its subtask title and the origin
-    /// session as its parent, so the created session is classifiable in
-    /// history and nests under the caller that asked for the swarm.
-    /// - Parameters:
-    ///   - subtasks: Explicit subtask list.
-    ///   - originSessionID: Session that spawned the run.
-    ///   - allowedTools: Tool subset workers may call, or nil for the full
-    ///     registry; travels verbatim so the orchestrator's tool loop filters
-    ///     its registry to the caller's subset before the loop.
-    /// - Returns: Worker inputs with fresh sessions, the parent row id, and
-    ///   child row ids parallel to the subtask order.
+    /// Records the parent plus child audit rows, registers the run's cancel surface, and mints the
+    /// worker inputs.
     private func recordSwarmRows(
         subtasks: [FanOutSubtask],
         originSessionID: UUID,
@@ -799,10 +573,9 @@ public actor FanOutEngine {
             message: Self.parentMessage(for: subtasks),
             sessionID: originSessionID
         )
-        // Registration runs beside the parent row, before the child rows and
-        // the worker group, so a cancel arriving while the run is still
-        // starting cannot fall into a gap: it marks the subtasks and the
-        // late-created workers settle cancelled without running.
+        // Registration runs beside the parent row, before the child rows and the worker group, so a
+        // cancel arriving while the run is still starting cannot fall into a gap: it marks the
+        // subtasks and the late-created workers settle cancelled without running.
         activeRuns[parentRowID] = ActiveFanOutRun(
             parentRowID: parentRowID,
             subtaskIDs: subtasks.map(\.id),
@@ -845,36 +618,19 @@ public actor FanOutEngine {
 
 // MARK: - Composition, worker, and merge-pass helpers
 
-/// Composition, worker, and merge-pass helpers kept in one extension so the
-/// actor body stays within the lint budget while the overlap check, the
-/// reviewer prompt, and the summary composition stay beside the engine they
-/// serve.
+/// Composition, worker, and merge-pass helpers kept in one extension so the actor body stays within
+/// the lint budget while the overlap check, the reviewer prompt, and the summary composition stay
+/// beside the engine they serve.
 extension FanOutEngine {
     // MARK: - Composition and worker helpers
 
-    /// Composes the content-free parent-row message: joined subtask titles so
-    /// the Runs tab renders the swarm shape. The store truncates overlong
-    /// rows anyway, so a wide subtask list degrades to a bounded row instead
-    /// of failing the audit append.
-    /// - Parameter subtasks: Explicit subtask list.
-    /// - Returns: Titles joined for the parent row.
+    /// Composes the content-free parent-row message: joined subtask titles so the Runs tab renders
+    /// the swarm shape.
     static func parentMessage(for subtasks: [FanOutSubtask]) -> String {
         subtasks.map(\.title).joined(separator: "; ")
     }
 
     /// Composes the honest outcome digest for the parent run.
-    ///
-    /// Worker prompt text never travels here — each worker's own session
-    /// already carries it — so the digest names only counts and the reason
-    /// each failure settled, letting the caller render an accurate summary
-    /// without leaking subtask content into the run record. A cancelled
-    /// subtask never reads as completed, so the all-done line is reserved for
-    /// runs where nothing was stopped; the cancellation note carries the
-    /// titles and reasons separately.
-    /// - Parameters:
-    ///   - subtasks: Settled subtasks.
-    ///   - notes: Settle notes keyed by subtask identifier.
-    /// - Returns: The outcome digest line.
     static func outcomeSummary(subtasks: [FanOutSubtask], notes: [UUID: String]) -> String {
         let done = subtasks.filter { $0.status == .done }.count
         let failures = subtasks.filter { $0.status == .failed }
@@ -894,22 +650,12 @@ extension FanOutEngine {
     }
 
     /// Composes the summary for a run whose every subtask was cancelled.
-    ///
-    /// Nothing survived to merge, so the reviewer call is skipped entirely and
-    /// the digest states the owner stop plainly instead of spending a model
-    /// round to summarize an empty result.
-    /// - Parameter subtasks: Settled subtasks (all cancelled).
-    /// - Returns: The cancelled-run summary line.
     static func allCancelledSummary(for subtasks: [FanOutSubtask]) -> String {
         "Cancelled by owner: all \(subtasks.count) subtasks stopped before completion."
     }
 
-    /// Composes the cancellation note, or nil when no subtask was stopped.
-    /// Reasons travel so an owner stop keeps its cause beside the title.
-    /// - Parameters:
-    ///   - subtasks: Settled subtasks.
-    ///   - notes: Settle notes keyed by subtask identifier.
-    /// - Returns: The cancellation note, or nil when none apply.
+    /// Composes the cancellation note, or nil when no subtask was stopped. Reasons travel so an
+    /// owner stop keeps its cause beside the title.
     static func cancellationNote(subtasks: [FanOutSubtask], notes: [UUID: String]) -> String? {
         let cancelled = subtasks.filter { $0.status == .cancelled }
         guard !cancelled.isEmpty else { return nil }
@@ -920,14 +666,6 @@ extension FanOutEngine {
     }
 
     /// Normalizes one worker failure into an honest note.
-    /// Cancellation reads as its own reason; every other failure keeps its
-    /// underlying reason so the note never reads as success and never hides
-    /// the cause from the run digest. A typed error without a localized
-    /// description falls back to its structural description — the default
-    /// localized description alone renders as a generic operation failure
-    /// that drops the thrown reason.
-    /// - Parameter error: The error the worker turn threw.
-    /// - Returns: The retained note.
     static func failureNote(for error: Error) -> String {
         if error is CancellationError {
             return "cancelled"
@@ -945,30 +683,8 @@ extension FanOutEngine {
         return error.localizedDescription
     }
 
-    /// Runs one already-created worker turn to its settle, bounded by the
-    /// wall-clock timeout when positive.
-    ///
-    /// The turn handle is created and registered by the caller so an owner
-    /// cancel can reach exactly one worker before this race starts; both an
-    /// owner cancel and whole-call cancellation stop the turn through that
-    /// same handle. A positive budget races the handle against the timeout
-    /// for one continuation: the first side to settle wins and the loser is
-    /// cancelled (or abandoned if it never observes cancellation), so a
-    /// worker settles within its budget without holding the parent run
-    /// hostage. A zero timeout means no race at all — the worker awaits under
-    /// the cancellation handler, so an unlimited worker can hold the parent
-    /// run open until it finishes or is cancelled, intentional for slow local
-    /// models and bounded by cancellation. A throwing turn reads as a failed
-    /// worker carrying the error's own reason, except that a cancellation is
-    /// flagged so the settle path can keep an owner stop out of the failure
-    /// vocabulary. The collecting seam returns the final assistant text and
-    /// parked flag so the merge pass reviews real worker output; a stub
-    /// without the collecting witness still works and reports an empty output.
-    /// - Parameters:
-    ///   - worker: The worker turn handle created by the engine.
-    ///   - timeoutSeconds: Wall-clock budget for the turn, or zero for no timeout.
-    /// - Returns: Settled outcome with the collected output and an honest
-    ///   failure note.
+    /// Runs one already-created worker turn to its settle, bounded by the wall-clock timeout when
+    /// positive.
     private static func runWorker(
         _ worker: Task<FanOutWorkerOutput, Error>,
         timeoutSeconds: Int
@@ -1047,10 +763,9 @@ extension FanOutEngine {
         }
     }
 
-    /// Elapsed wall-clock milliseconds since a start instant, floored at zero
-    /// so a clock skew never reports a negative duration.
+    /// Elapsed wall-clock milliseconds since a start instant, floored at zero so a clock skew never
+    /// reports a negative duration.
     /// - Parameter startedAt: Instant the measured interval began.
-    /// - Returns: Non-negative elapsed milliseconds.
     static func elapsedMs(since startedAt: Date) -> Int {
         max(0, Int(Date().timeIntervalSince(startedAt) * 1000))
     }
@@ -1066,16 +781,6 @@ extension FanOutEngine {
     static let cancelledRowStatus = "cancelled"
 
     /// Creates one worker turn as an unstructured task.
-    ///
-    /// The turn runs unstructured — not as a task-group child — because only
-    /// an owned handle lets the engine cancel exactly one worker; the group
-    /// child still carries the timeout race and structured cancellation.
-    /// Created through a nonisolated helper so the turn runs off the engine's
-    /// actor executor instead of serializing workers behind the swarm actor.
-    /// - Parameters:
-    ///   - input: Worker turn input carrying the fresh session.
-    ///   - orchestrator: Seam running the turn.
-    /// - Returns: The worker turn handle the registry cancels.
     private static func makeWorkerTask(
         input: UserInput,
         orchestrator: any OrchestratorFanOutSeam
@@ -1084,15 +789,6 @@ extension FanOutEngine {
     }
 
     /// Attaches a worker's live handle to its registry slot.
-    ///
-    /// The slot exists as soon as the child audit row lands, so this only
-    /// fills in the cancel closure; a subtask marked cancelled before this
-    /// point is caught by the caller's pre-cancel check right after.
-    /// - Parameters:
-    ///   - parentRowID: Run registry key.
-    ///   - subtaskID: Subtask the handle belongs to.
-    ///   - childRowID: Child row the settle path flips.
-    ///   - cancel: Stops the worker's turn.
     private func registerWorkerHandle(
         parentRowID: UUID,
         subtaskID: UUID,
@@ -1104,38 +800,22 @@ extension FanOutEngine {
         activeRuns[parentRowID] = entry
     }
 
-    /// Maps one appended child audit row to its subtask.
-    ///
-    /// The mapping exists before the worker task does, so a child-row cancel
-    /// that races startup still reaches its subtask and marks it cancelled.
-    /// - Parameters:
-    ///   - parentRowID: Run registry key.
-    ///   - childRowID: Child audit row that just landed.
-    ///   - subtaskID: Subtask the child row belongs to.
+    /// Maps one appended child audit row to its subtask. The mapping exists before the worker task
+    /// does, so a child-row cancel that races startup still reaches its subtask and marks it
+    /// cancelled.
     private func mapChildRow(parentRowID: UUID, childRowID: UUID, subtaskID: UUID) {
         guard var entry = activeRuns[parentRowID] else { return }
         entry.subtaskByChildRow[childRowID] = subtaskID
         activeRuns[parentRowID] = entry
     }
 
-    /// Whether the run has marked this subtask cancelled.
-    /// - Parameters:
-    ///   - parentRowID: Run registry key.
-    ///   - subtaskID: Subtask to inspect.
-    /// - Returns: True when the subtask is marked cancelled.
+    /// Whether the run has marked this subtask cancelled. parentRowID: Run registry
+    /// key.
     private func isSubtaskCancelled(parentRowID: UUID, subtaskID: UUID) -> Bool {
         activeRuns[parentRowID]?.cancelledSubtaskIDs.contains(subtaskID) ?? false
     }
 
     /// Removes a settled worker from the registry.
-    ///
-    /// The handle and its child-row lookup leave together as the settle
-    /// applies, so cancelling an already-settled row answers `.notRunning`
-    /// instead of rewriting a terminal outcome. The subtask id stays in
-    /// `settledSubtaskIDs`, so a parent cancel no longer counts it.
-    /// - Parameters:
-    ///   - parentRowID: Run registry key.
-    ///   - subtaskID: Subtask whose settle applied.
     private func markWorkerSettled(parentRowID: UUID, subtaskID: UUID) {
         guard var entry = activeRuns[parentRowID] else { return }
         entry.settledSubtaskIDs.insert(subtaskID)
@@ -1146,17 +826,6 @@ extension FanOutEngine {
     }
 
     /// Cancels the in-flight swarm or worker that owns an audit row.
-    ///
-    /// The parent row stops the whole swarm: every in-flight worker task is
-    /// cancelled and every still-running subtask is marked cancelled, so each
-    /// settle reads `.cancelled` and the run settles `cancelled` — an owner
-    /// stop outranks a worker failure rather than masquerading as an error. A
-    /// child row stops just that worker and leaves its siblings running. A row
-    /// that no live run or worker owns — unknown, already settled, or a run
-    /// whose workers all settled before the merge pass — answers
-    /// `.notRunning`: a settled run must never accept a late cancel.
-    /// - Parameter rowID: Run-log row identifier (parent or child).
-    /// - Returns: The honest cancel boundary the caller hit.
     public func cancel(rowID: UUID) -> FanOutCancelOutcome {
         if var entry = activeRuns[rowID] {
             let running = entry.subtaskIDs.filter { !entry.settledSubtaskIDs.contains($0) }
@@ -1204,14 +873,6 @@ extension FanOutEngine {
     static let maxReviewOutputChars = 2000
 
     /// Flags exact file-path/URL collisions across collected worker outputs.
-    ///
-    /// Deterministic by contract: the same reference appearing in two
-    /// different subtasks' outputs flags both, with no model round involved,
-    /// so duplicate targets never depend on a flaky review to surface.
-    /// - Parameters:
-    ///   - subtasks: Settled subtasks; only outputs of these travel.
-    ///   - outputs: Collected outputs keyed by subtask identifier.
-    /// - Returns: Identifiers of subtasks whose output collides with another's.
     static func overlapConflictIDs(subtasks: [FanOutSubtask], outputs: [UUID: FanOutWorkerOutput]) -> Set<UUID> {
         var owners: [String: [UUID]] = [:]
         for subtask in subtasks {
@@ -1227,12 +888,8 @@ extension FanOutEngine {
         return conflicted
     }
 
-    /// Extracts file-path and URL references from one worker output for the
-    /// deterministic overlap check. Mirrors the doc-recall file-like token
-    /// shape so the two scanners cannot drift, and adds scheme'd URLs so web
-    /// fetch targets collide the same way file targets do.
-    /// - Parameter text: Raw worker output.
-    /// - Returns: The exact references found.
+    /// Extracts file-path and URL references from one worker output for the deterministic overlap
+    /// check.
     static func pathReferences(in text: String) -> Set<String> {
         // Trailing prose punctuation never reads as part of the reference, so
         // "visit /tmp/report.md." collides with a bare "/tmp/report.md".
@@ -1247,14 +904,6 @@ extension FanOutEngine {
     }
 
     /// Whether a token has a file-path or URL shape worth overlap-flagging.
-    ///
-    /// Mirrors the doc-recall file-like token shape (slash tokens need a
-    /// length with the slash away from the edges; dot tokens need a stem plus
-    /// a short alphabetic extension) with output-specific tightenings: a
-    /// relative slash token must carry a dotted final segment and a bare
-    /// number before the slash never qualifies, so output prose carrying
-    /// ratios ("24/7"), fractions ("1.5/2"), and "and/or" joins never reads
-    /// as a file collision.
     private static func isReferenceToken(_ token: String) -> Bool {
         guard !token.isEmpty else { return false }
         if token.contains("://") {
@@ -1290,19 +939,8 @@ extension FanOutEngine {
         return true
     }
 
-    /// Runs the merge-review pass: at most one background reviewer call.
-    ///
-    /// The reviewer judges content quality only. When no reviewer is wired
-    /// the pass reports `.unwired` (the pre-existing digest stands); when a
-    /// wired reviewer errors or times out it reports `.unavailable` and the
-    /// caller fails open to the raw concatenation, so worker output is never
-    /// lost because review was flaky.
-    /// - Parameters:
-    ///   - subtasks: Settled subtasks.
-    ///   - outputs: Collected outputs keyed by subtask identifier.
-    ///   - conflictedIDs: Deterministic overlap conflicts, quoted in the
-    ///     prompt so the reviewer's verdicts cannot undo them silently.
-    /// - Returns: The merge-review outcome.
+    /// Runs the merge-review pass: at most one background reviewer call. The reviewer judges
+    /// content quality only.
     private func reviewMerge(
         subtasks: [FanOutSubtask],
         outputs: [UUID: FanOutWorkerOutput],
@@ -1320,13 +958,8 @@ extension FanOutEngine {
         return .parsed(parsed)
     }
 
-    /// Builds the single-shot merge-review instruction.
-    ///
-    /// The JSON-object demand and the verdict vocabulary are explicit so even
-    /// a terse local model returns a parseable review; the per-subtask cap
-    /// repeats in words so one verbose worker cannot crowd the call. Only the
-    /// collected outputs travel — the deterministic conflicts are named so
-    /// the reviewer's verdicts cannot silently undo them.
+    /// Builds the single-shot merge-review instruction. Only the collected outputs travel — the
+    /// deterministic conflicts are named so the reviewer's verdicts cannot silently undo them.
     static func reviewPrompt(
         subtasks: [FanOutSubtask],
         outputs: [UUID: FanOutWorkerOutput],
@@ -1365,15 +998,6 @@ extension FanOutEngine {
     }
 
     /// Extracts a bounded review from chatty model output.
-    ///
-    /// Fences are removed before scanning so ```json blocks decode, and the
-    /// outermost braces win so leading prose and trailing sign-offs survive.
-    /// Elements missing a usable title or verdict drop rather than becoming
-    /// empty verdicts; an unparsable object or an empty summary yields nil,
-    /// which the caller turns into the fail-open summary instead of a
-    /// fabricated review.
-    /// - Parameter raw: Raw model text.
-    /// - Returns: The parsed review, or nil when nothing parseable remains.
     static func parseReview(from raw: String) -> ParsedMergeReview? {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
@@ -1412,23 +1036,8 @@ extension FanOutEngine {
         )
     }
 
-    /// Composes the parent run's summary from the merge outcome.
-    ///
-    /// A parsed review wins: the reviewer's merged summary plus verdict lines,
-    /// with the deterministic conflicts overriding the reviewer's verdict for
-    /// a colliding subtask. A wired reviewer that flaked fails open to the raw
-    /// concatenation with an honest note, so worker output is never lost. An
-    /// unwired reviewer keeps the pre-existing outcome digest shape so callers
-    /// without review wiring see no summary change. The deterministic
-    /// conflict note and the cancellation note travel in every posture, so a
-    /// partially cancelled run states the stop even beside a merged review.
-    /// - Parameters:
-    ///   - subtasks: Settled subtasks.
-    ///   - outputs: Collected outputs keyed by subtask identifier.
-    ///   - conflictedIDs: Deterministic overlap conflicts.
-    ///   - notes: Settle notes keyed by subtask identifier.
-    ///   - review: The merge-review outcome.
-    /// - Returns: The summary line set stored on the run and its parent row.
+    /// Composes the parent run's summary from the merge outcome. A wired reviewer that flaked fails
+    /// open to the raw concatenation with an honest note, so worker output is never lost.
     static func mergedSummary(
         subtasks: [FanOutSubtask],
         outputs: [UUID: FanOutWorkerOutput],
@@ -1503,26 +1112,17 @@ extension FanOutEngine {
         }
     }
 
-    /// Composes the deterministic conflict note, or nil when no subtask
-    /// collides. Titles travel so the owner can reconcile the targets without
-    /// re-reading every worker row.
-    /// - Parameters:
-    ///   - subtasks: Settled subtasks.
-    ///   - conflictedIDs: Deterministic overlap conflicts.
-    /// - Returns: The conflict note, or nil when none apply.
+    /// Composes the deterministic conflict note, or nil when no subtask collides. Titles travel so
+    /// the owner can reconcile the targets without re-reading every worker row.
     static func conflictNote(subtasks: [FanOutSubtask], conflictedIDs: Set<UUID>) -> String? {
         let titles = subtasks.filter { conflictedIDs.contains($0.id) }.map(\.title)
         guard !titles.isEmpty else { return nil }
         return "Overlap check flagged \(titles.count) subtask(s) with identical file paths or URLs: \(titles.joined(separator: ", "))."
     }
 
-    /// Composes the failure digest line for the fail-open summary, or nil when
-    /// every subtask settled done. Mirrors the outcome digest's failure part
-    /// so a lost worker keeps its cause even when review never ran.
-    /// - Parameters:
-    ///   - subtasks: Settled subtasks.
-    ///   - notes: Failure notes keyed by subtask identifier.
-    /// - Returns: The failure digest line, or nil when nothing failed.
+    /// Composes the failure digest line for the fail-open summary, or nil when every subtask
+    /// settled done. Mirrors the outcome digest's failure part so a lost worker keeps its cause even
+    /// when review never ran.
     static func failureDigest(subtasks: [FanOutSubtask], notes: [UUID: String]) -> String? {
         let failures = subtasks.filter { $0.status == .failed }
         guard !failures.isEmpty else { return nil }
@@ -1532,16 +1132,8 @@ extension FanOutEngine {
         return "Failed subtasks: \(reasons.joined(separator: ", "))"
     }
 
-    /// Collects one review reply, bounded by the wall-clock timeout when positive.
-    ///
-    /// Exactly one chat call runs. A positive budget races the provider
-    /// against the timeout: the timeout resumes the caller, cancels the
-    /// provider task, and returns nil on its own budget without awaiting the
-    /// losing task, so a provider stream that ignores cooperative
-    /// cancellation cannot stretch the merge pass past the configured worker
-    /// budget. A zero timeout means no race — the review awaits under the
-    /// cancellation handler, mirroring the unlimited worker posture. Every
-    /// failure degrades to nil, which the caller turns into the fail-open summary.
+    /// Collects one review reply, bounded by the wall-clock timeout when positive. Every failure
+    /// degrades to nil, which the caller turns into the fail-open summary.
     private func collectReviewText(prompt: String) async -> String? {
         // Unlimited policy skips the review race too, mirroring the worker
         // posture so a slow local model still gets its single review pass.
@@ -1582,10 +1174,6 @@ extension FanOutEngine {
     }
 
     /// Runs the single review chat call and folds its stream to text.
-    ///
-    /// No tools travel because the review is pure text in, JSON out; a
-    /// mid-stream provider error or a cancellation yields nil so the caller
-    /// fails open instead of parsing a truncated fragment.
     private func collectOnce(prompt: String) async -> String? {
         guard let reviewer else { return nil }
         let messages = [Message(role: .user, content: prompt)]

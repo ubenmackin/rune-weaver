@@ -58,24 +58,14 @@ struct SandboxCleanupLifecycle: LifecycleHandler {
 }
 
 /// Lifecycle hook warming the managed browser Python venv on serve boot.
-/// Best-effort child so first navigates stay warm without ever delaying or
-/// failing boot: the venv, pip, and browser budgets run in the background
-/// while the live stage plus health payload carries state to the dashboard.
-/// Failures stay in the server log so a down network never flips a healthy
-/// boot into a failure.
 final class BrowserWarmupLifecycle: LifecycleHandler {
-    /// Retained warmup flight so shutdown can cancel it instead of leaving an
-    /// ensure running after the server exits, mirroring the menu bar
-    /// quit-cancel. Guarded by a lock because boot and shutdown arrive on
-    /// different executors.
+    /// Retained warmup flight so shutdown can cancel it instead of leaving an ensure running after
+    /// the server exits, mirroring the menu bar quit-cancel.
     private let warmupState: OSAllocatedUnfairLock<Task<Void, Never>?> = OSAllocatedUnfairLock(initialState: nil)
 
     func didBootAsync(_: Application) async throws {
-        // Structured child inheriting task-locals and priority so logging plus
-        // tracing flow from boot; never awaited here so a minutes-budget first
-        // provision cannot hold the bind. The ensurer owns single-flight plus
-        // staged progress, so a concurrent first navigate simply joins this
-        // flight. Retained for shutdown cancel.
+        // Structured child inheriting task-locals and priority so logging plus tracing flow from
+        // boot; never awaited here so a minutes-budget first provision cannot hold the bind.
         warmupState.withLock { current in
             current?.cancel()
             current = Task(priority: .background) {
@@ -93,21 +83,6 @@ final class BrowserWarmupLifecycle: LifecycleHandler {
 }
 
 /// Configures loopback binding plus every engine route.
-///
-/// The resolved owner verifier is the single source of truth for the auth
-/// posture: the bind policy and the gate must agree, so a context that claims
-/// auth without a verifier (or the reverse) fails closed instead of silently
-/// serving an unauthenticated or unenforced surface.
-///
-/// The periodic security probe suite wires here too: it runs at serve boot
-/// with a fail-closed refusal on a critical verifier failure, after every
-/// committed policy write through the policy-write middleware, and on the
-/// nightly cadence through its own lifecycle loop. The per-tool path stays
-/// untouched, so tool latency never carries probe cost.
-/// - Parameters:
-///   - app: Application receiving configuration.
-///   - context: Shared engine collaborators.
-///   - auth: Resolved owner verifier, overriding `context.auth` when supplied.
 public func configureRuneWeaver(_ app: Application, context: ServerContext, auth: ServerAuth? = nil) throws {
     let resolvedAuth = auth ?? context.auth
     guard context.config.authConfigured == (resolvedAuth != nil) else {
@@ -141,21 +116,6 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext, auth
 }
 
 /// Registers every engine route on the application.
-///
-/// When a verifier is installed, the auth middleware wraps the whole router so
-/// every non-public path is gated before it can 404 or leak existence. With no
-/// verifier the surface stays the v1 loopback-no-auth shape exactly, including
-/// the absence of the rotation route.
-///
-/// The Host gate reads the runtime bind policy (`hostname`, `allowedHosts`,
-/// `authConfigured`) from the stored context so the policy that refused or
-/// permitted the bind is the same one gating Host headers; the HTTP server
-/// hostname was already set from that config in `configureRuneWeaver`.
-///
-/// Engine API routes always register before the dashboard bundle so a
-/// `/memory/*` listing never falls through to the single-page client fallback
-/// HTML: known listings answer JSON while unknown memory paths answer JSON
-/// `404`, keeping error copy machine-readable for retry affordances.
 public func registerRuneWeaverRoutes(_ app: Application) {
     app.routes.defaultMaxBodySize = "2mb"
     let serverConfig = app.runeWeaver.config
@@ -200,26 +160,12 @@ public func registerRuneWeaverRoutes(_ app: Application) {
     registerDashboardRoutes(app, bundle: dashboardBundle)
 }
 
-/// Registers the owner token rotation route.
-///
-/// Rotation is itself gated by the auth middleware, so a caller reaching this
-/// handler has already presented the current token. The handler never echoes
-/// the credential into logs or audit entries, only into the one-time response
-/// body the owner must capture.
-/// - Parameters:
-///   - app: Application receiving the route.
-///   - auth: Live owner verifier performing the rotation.
+/// Registers the owner token rotation route. The handler never echoes the credential into logs or
+/// audit entries, only into the one-time response body the owner must capture.
 private func registerAuthRotateRoute(_ app: Application, auth: ServerAuth) {
     app.post(PathComponent.constant(ServerPaths.auth), PathComponent.constant(ServerPaths.rotate)) { req async throws -> Response in
         let token = try await auth.rotate()
-        // Rotation retires the previous credential for every client. Established
-        // sockets upgraded under the old token would otherwise keep receiving run
-        // events and approval prompts and could still send chat/decision frames,
-        // so retire them by generation rather than a blind drain: a registration
-        // racing this sweep is refused by the same watermark, leaving no socket
-        // that can linger passive and keep broadcasting under a dead credential.
-        // The watermark is read after the swap so overlapping rotations only ever
-        // raise it. Clients reconnect with the replacement.
+        // Rotation retires the previous credential for every client.
         let liveGeneration = await auth.currentGeneration()
         await req.application.runeWeaver.hub.retire(liveGeneration: liveGeneration)
         // Encoded through the request's configured encoder for contract parity,
@@ -241,11 +187,6 @@ private struct AuthSessionRequestBody: Content {
 }
 
 /// Registers the owner browser session routes (`POST /auth/session` and `DELETE /auth/session`).
-///
-/// Login exchanges the owner bearer token — read from the JSON body or the
-/// `Authorization` header — for one fresh ephemeral session. A resent session
-/// value is not an owner credential and fails closed here like any wrong
-/// token, so sessions cannot mint their own replacements.
 private func registerAuthSessionRoutes(_ app: Application, auth: ServerAuth) {
     let authGroup = app.grouped(PathComponent.constant(ServerPaths.auth))
 
@@ -268,10 +209,8 @@ private func registerAuthSessionRoutes(_ app: Application, auth: ServerAuth) {
         let headerToken = req.headers.bearerAuthorization?.token.trimmingCharacters(in: .whitespacesAndNewlines)
         let candidate = (bodyToken?.isEmpty == false ? bodyToken : nil) ?? (headerToken?.isEmpty == false ? headerToken : nil) ?? ""
 
-        // Owner-only verification: the request gate accepts sessions by design,
-        // but minting a session requires the owner credential itself, matching
-        // the documented exchange. Every attempt — including a resent or
-        // retried login — re-presents and re-verifies it.
+        // Owner-only verification: the request gate accepts sessions by design, but minting a
+        // session requires the owner credential itself, matching the documented exchange.
         guard await auth.verifyOwnerToken(candidate) else {
             RuneWeaverLog.server.warning("Owner auth session login rejected from \(identity).")
             if let retryAfter = await auth.recordFailure(
@@ -342,12 +281,8 @@ private struct SecurityProbeGateKey: StorageKey {
 }
 
 extension Application {
-    /// Verified system-pulse snapshot actor for the health route.
-    ///
-    /// Installed once at route registration against the serving policy
-    /// store, so serve boot and direct route registration share one pulse
-    /// path. A missing entry degrades to an ephemeral actor over the
-    /// current context instead of failing the probe.
+    /// Verified system-pulse snapshot actor for the health route. A missing entry degrades to an
+    /// ephemeral actor over the current context instead of failing the probe.
     var systemHealthSnapshot: SystemHealthSnapshot {
         get {
             if let pulse = storage[SystemHealthSnapshotKey.self] {
@@ -360,12 +295,8 @@ extension Application {
         }
     }
 
-    /// Shared change gate so the health route and every probe path publish a
-    /// pulse only when the value actually moved.
-    ///
-    /// The health route installs one instance at registration and the probe
-    /// sink adopts it, so a boot or nightly probe that produces an unchanged
-    /// verdict never re-fans a steady-state pulse.
+    /// Shared change gate so the health route and every probe path publish a pulse only when the
+    /// value actually moved.
     var healthPulseLastServed: HealthPulseLastServed {
         get {
             if let gate = storage[HealthPulseLastServedKey.self] {
@@ -379,10 +310,6 @@ extension Application {
     }
 
     /// Recorded probe-report hash gate.
-    ///
-    /// The suite's "changed" signal is the report hash compare: a run whose
-    /// posture matches the last recorded one re-asserts the same verdict, so
-    /// the recorder stays quiet instead of rewriting identical outcomes.
     var securityProbeGate: SecurityProbeGate {
         get {
             if let gate = storage[SecurityProbeGateKey.self] {
@@ -397,11 +324,6 @@ extension Application {
 }
 
 /// Locked last-served pulse value suppressing identical rebroadcasts.
-///
-/// Shared by the health route and every security probe path: each compares
-/// its fresh snapshot against the last served one by deep value equality
-/// and publishes only on change, so steady-state polling plus a repeated
-/// nightly pass never re-fan an identical pulse to live dashboards.
 final class HealthPulseLastServed: Sendable {
     /// Last served snapshot, nil before the first probe.
     private let box: OSAllocatedUnfairLock<HealthSnapshotValue?>
@@ -423,11 +345,9 @@ final class HealthPulseLastServed: Sendable {
     }
 }
 
-/// Public pulse projection pushed over the socket hub on change.
-///
-/// Carries the operational signal only: tips stay on the authenticated REST
-/// path, so the push never discloses digests to a surface the probe itself
-/// would redact. Dashboards refetch the full shape on receipt.
+/// Public pulse projection pushed over the socket hub on change. Carries the operational signal
+/// only: tips stay on the authenticated REST path, so the push never discloses digests to a surface
+/// the probe itself would redact.
 private struct HealthPulseUpdatedFrame: Encodable {
     /// Always `"health_updated"`.
     let type = "health_updated"
@@ -444,12 +364,6 @@ private struct HealthPulseUpdatedFrame: Encodable {
 }
 
 /// Publishes a changed pulse value to live dashboards, best-effort.
-///
-/// Shared with the sovereign ceremony path so both publishers fan out through
-/// one encoding instead of drifting into parallel frame shapes.
-/// - Parameters:
-///   - value: Snapshot that differed from the last served one.
-///   - hub: Socket hub fanning out to dashboards.
 func publishHealthPulse(_ value: HealthSnapshotValue, hub: WSHub) async {
     let frame = HealthPulseUpdatedFrame(
         status: value.status.rawValue,
@@ -466,10 +380,8 @@ func publishHealthPulse(_ value: HealthSnapshotValue, hub: WSHub) async {
 
 // MARK: - Security Probe Wiring
 
-/// Collaborators one security probe run records through.
-///
-/// Held as explicit values rather than the application so a retained
-/// background loop never captures the application itself.
+/// Collaborators one security probe run records through. Held as explicit values rather than the
+/// application so a retained background loop never captures the application itself.
 struct SecurityProbeSink: Sendable {
     /// Tool name the inbox item carries for a fail-closed probe posture.
     static let inboxToolName = "security.probe"
@@ -509,14 +421,8 @@ final class SecurityProbeGate: Sendable {
     }
 }
 
-/// Resolves the probe sink for an application, seeding application storage
-/// on first use so every probe path records into one pulse.
-///
-/// Serve installs the pulse and the last-served gate at route registration;
-/// a direct route registration that never did still converges here instead
-/// of recording into an actor no route serves.
-/// - Parameter app: Application owning the pulse plus the gates.
-/// - Returns: The sink every probe path records through.
+/// Resolves the probe sink for an application, seeding application storage on first use so every
+/// probe path records into one pulse.
 func securityProbeSink(app: Application) -> SecurityProbeSink {
     let pulse: SystemHealthSnapshot
     if let stored = app.storage[SystemHealthSnapshotKey.self] {
@@ -549,22 +455,8 @@ func securityProbeSink(app: Application) -> SecurityProbeSink {
     )
 }
 
-/// Runs the periodic security probe suite, records it into the pulse, and
-/// publishes a moved verdict.
-///
-/// The report-hash gate keeps an unchanged posture quiet — a nightly pass on
-/// a healthy machine re-asserts the same verdict instead of re-broadcasting
-/// a steady-state pulse — while a moved posture records and publishes, so
-/// the dashboard clears red only on a fresh passing snapshot. A fail-closed
-/// posture parks one bounded inbox item so the owner learns about it through
-/// the approvals surface; the item is gated by the same hash compare, so a
-/// persistent failure parks one item instead of one per run. Log lines carry
-/// verifier names and counts only, never outcome detail, following the
-/// content-free logging convention.
-/// - Parameters:
-///   - sink: Pulse, hub, inbox, and gates the run records through.
-///   - reason: Trigger label for the log line.
-/// - Returns: The report the run produced.
+/// Runs the periodic security probe suite, records it into the pulse, and publishes a moved
+/// verdict.
 @discardableResult
 func runSecurityProbes(sink: SecurityProbeSink, reason: String) async -> ProbeReport {
     let report = await SecurityProbeSuite.runAll()
@@ -616,11 +508,6 @@ func runSecurityProbes(sink: SecurityProbeSink, reason: String) async -> ProbeRe
 }
 
 /// Lifecycle hook running the security probe suite at serve boot.
-///
-/// Fail-closed: a critical verifier failure (traversal, symlink escape, or
-/// replay) throws, so the boot aborts instead of serving an engine that
-/// cannot prove containment. Non-critical failures record into the pulse
-/// and surface on the dashboard without blocking the bind.
 final class SecurityProbeBootLifecycle: LifecycleHandler {
     func didBootAsync(_ app: Application) async throws {
         let report = await runSecurityProbes(sink: securityProbeSink(app: app), reason: "boot")
@@ -649,19 +536,13 @@ private struct SecurityProbeBootError: Error, CustomStringConvertible {
 }
 
 /// Lifecycle hook running the security probe suite on the nightly cadence.
-///
-/// Rides its own loop rather than the scheduler worker tick so the cadence
-/// owns one single-flight: a retained task cancelled on shutdown, sleeping
-/// the nightly interval between runs. A passing run whose report hash
-/// matches the boot posture stays quiet; only a moved posture records.
 final class SecurityProbeNightlyLifecycle: LifecycleHandler {
     /// Nightly cadence window between suite runs.
     static let intervalSeconds: TimeInterval = 24 * 60 * 60
 
-    /// Retained loop task so shutdown cancels it instead of leaving a
-    /// sleeping task alive past the server, mirroring the browser warmup
-    /// flight. Guarded by a lock because boot and shutdown arrive on
-    /// different executors.
+    /// Retained loop task so shutdown cancels it instead of leaving a sleeping task alive past the
+    /// server, mirroring the browser warmup flight. Guarded by a lock because boot and shutdown
+    /// arrive on different executors.
     private let loopState: OSAllocatedUnfairLock<Task<Void, Never>?>
 
     init() {
@@ -701,12 +582,6 @@ final class SecurityProbeNightlyLifecycle: LifecycleHandler {
 }
 
 /// Middleware running the security probe suite after a committed policy write.
-///
-/// The two committing paths — `PUT /settings/policy` and the on-demand
-/// `POST /settings/policy/recheck-local/apply` — land live with no restart,
-/// so the suite re-runs once the write committed and records the fresh
-/// posture. Preview and verify paths write nothing, a refused save leaves
-/// the prior posture standing, and neither triggers a run.
 final class SecurityProbePolicyWriteMiddleware: AsyncMiddleware, Sendable {
     /// Creates the middleware.
     init() {}
@@ -742,12 +617,9 @@ final class SecurityProbePolicyWriteMiddleware: AsyncMiddleware, Sendable {
 /// Registers the health probe route.
 /// - Parameter app: Application receiving the route.
 private func registerHealthRoute(_ app: Application) {
-    // Boot the verified pulse once per registration against the serving
-    // policy store, then build the boot snapshot eagerly: serve boot (via
-    // configureRuneWeaver) and direct route registration converge here, and
-    // the first dashboard poll compares against a boot value instead of nil.
-    // The snapshot reads the live store on every probe, so policy writes
-    // surface with no restart plus no watcher.
+    // Boot the verified pulse once per registration against the serving policy store, then build
+    // the boot snapshot eagerly: serve boot (via configureRuneWeaver) and direct route registration
+    // converge here, and the first dashboard poll compares against a boot value instead of nil.
     let pulse = SystemHealthSnapshot(policyStore: app.runeWeaver.policyStore)
     app.systemHealthSnapshot = pulse
     let lastServed = HealthPulseLastServed()
@@ -766,25 +638,17 @@ private func registerHealthRoute(_ app: Application) {
         // for both the dot and the Starting line; nil when idle.
         let searchProgress = await SearXNGEnsurer.shared.currentStartProgress(for: searchURL)
         let liveConfig = req.application.runeWeaver.config
-        // The boot bind is owner-private: only callers that cleared the owner
-        // gate learn it for the restart banner, while any other caller reaching
-        // this handler (the middleware answers unauthenticated probes with the
-        // minimal liveness shape, but the route must not rely on that alone)
-        // sees no hostname, port, or allowlist. The loopback-no-auth posture
-        // installs no verifier, so no request carries the authenticated marker
-        // and the keys stay omitted there as well; the dashboard tolerates
-        // absent keys by keeping its file snapshot, so omission degrades the
-        // banner instead of breaking the probe.
+        // Boot bind is owner-private: only callers clearing the owner gate receive bind details,
+        // while unauthenticated probes see no hostname, port, or allowlist (the route does not
+        // rely on middleware filtering alone).
         let disclosesBind = req.runeWeaverAuthenticated
-        // Search reachability stays on the TopNav dot plus the Settings search
-        // panel via searchReachable plus searchStatus plus searchStage; it is
-        // never recorded into the pulse, so idle search never moves the dot.
-        // Read through application storage so a replaced test actor takes effect.
+        // Search reachability stays on the TopNav dot plus the Settings search panel via
+        // searchReachable plus searchStatus plus searchStage; it is never recorded into the pulse,
+        // so idle search never moves the dot.
         let pulse = req.application.systemHealthSnapshot
-        // The watchdog evaluates on the serving cadence too: the trailing
-        // window reads live state, so a spike engages the brake without a
-        // restart and the pulse fuses the latest posture on every probe.
-        // Gestation countdown rides info notes with no dot effect.
+        // The watchdog evaluates on the serving cadence too: the trailing window reads live state,
+        // so a spike engages the brake without a restart and the pulse fuses the latest posture on
+        // every probe.
         let watchdog = req.application.runeWeaver.watchdog
         _ = await watchdog.evaluate()
         await pulse.recordWatchdogHealth(watchdog.health())
@@ -824,12 +688,9 @@ private func registerHealthRoute(_ app: Application) {
             degradedReasons: pulseValue.degradedReasons.isEmpty ? nil : pulseValue.degradedReasons,
             infoNotes: pulseValue.infoNotes.isEmpty ? nil : pulseValue.infoNotes
         )
-        // Advertise the authoritative turn cap alongside the JSON body so the
-        // dashboard prefers the server value over its fallback constant; a
-        // header keeps the JSON contract stable while still collapsing
-        // admit/reject drift to one server-owned number. Encoding through the
-        // request's configured encoder keeps date and key strategies aligned
-        // with every other Content route instead of freezing JSONEncoder defaults.
+        // Advertise the authoritative turn cap alongside the JSON body so the dashboard prefers the
+        // server value over its fallback constant; a header keeps the JSON contract stable while
+        // still collapsing admit/reject drift to one server-owned number.
         let response = try await health.encodeResponse(for: req)
         response.headers.replaceOrAdd(name: ActiveTurnTracker.turnCapHeaderName, value: "\(ActiveTurnTracker.maxConcurrentTurns)")
         return response
@@ -854,11 +715,9 @@ private func registerMemoryRoutes(_ app: Application) {
     registerMemorySearchRoute(app)
 
     app.get(PathComponent.constant(ServerPaths.memory), PathComponent.constant(ServerPaths.memoryFacts)) { req async throws -> FactsPageResponse in
-        // Query trimming plus limit plus offset parsing stay at the transport
-        // edge so the engine keeps its typed contract: a blank `q` reads the
-        // recent window instead of failing, while malformed paging rejects
-        // before any store read. The engine owns normalization plus clamping
-        // as the backstop, so this block only validates wire shape.
+        // Query trimming plus limit plus offset parsing stay at the transport edge so the engine
+        // keeps its typed contract: a blank `q` reads the recent window instead of failing, while
+        // malformed paging rejects before any store read.
         let rawQuery = req.query[String.self, at: "q"] ?? ""
         let trimmedQuery = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let limit = try parseQueryLimit(req, default: 20, min: 1, max: 100)
@@ -873,10 +732,8 @@ private func registerMemoryRoutes(_ app: Application) {
             offset = 0
         }
         let context = req.application.runeWeaver
-        // Delegate to the engine-owned paged reader so REST never reaches
-        // past the owner into the vector or episode stores directly. Reads
-        // open storage on demand with no cached snapshot, so a just-stored
-        // fact is visible on the next fetch with no restart.
+        // Delegate to the engine-owned paged reader so REST never reaches past the owner into the
+        // vector or episode stores directly.
         let result = await context.memoryEngine.searchFactsPage(query: trimmedQuery, limit: limit, offset: offset)
         let profile = await context.memoryEngine.getUserProfile()
         return FactsPageResponse(
@@ -935,11 +792,6 @@ private func registerMemoryRoutes(_ app: Application) {
 }
 
 /// Registers the memory search route.
-///
-/// Split from `registerMemoryRoutes` so the parent stays within the function
-/// body budget; search registers first so the remaining memory routes keep
-/// the parent's original registration order.
-/// - Parameter app: Application receiving the routes.
 private func registerMemorySearchRoute(_ app: Application) {
     app.get(PathComponent.constant(ServerPaths.memory), PathComponent.constant(ServerPaths.memorySearch)) { req async throws -> MemorySearchResponse in
         guard let query = req.query[String.self, at: "q"],
@@ -995,11 +847,6 @@ private func registerMemorySearchRoute(_ app: Application) {
 }
 
 /// Registers episodic recent listing plus bulk, session, and single-row delete routes.
-///
-/// Split from `registerMemoryRoutes` so the parent stays within the function
-/// body budget; route order preserves the `session` and `recent` literals
-/// winning over `:id`.
-/// - Parameter app: Application receiving the routes.
 private func registerEpisodicDeleteRoutes(_ app: Application) {
     app.get(
         PathComponent.constant(ServerPaths.memory),
@@ -1026,10 +873,8 @@ private func registerEpisodicDeleteRoutes(_ app: Application) {
         } catch {
             throw Abort(.internalServerError, reason: error.localizedDescription)
         }
-        // Ordering is engine-owned: listRecentEpisodes already returns newest
-        // first, so map directly with no re-sort. Reads open SQLite on demand
-        // with no cached snapshot, so a just-stored turn is visible immediately
-        // with no restart and no watcher.
+        // Ordering is engine-owned: listRecentEpisodes already returns newest first, so map
+        // directly with no re-sort.
         let rows = episodes.map { episode in
             EpisodicEpisodeDTO(
                 id: episode.id,
@@ -1046,12 +891,8 @@ private func registerEpisodicDeleteRoutes(_ app: Application) {
         PathComponent.constant(ServerPaths.memory),
         PathComponent.constant(ServerPaths.memoryEpisodes)
     ) { req async throws -> EpisodicClearResponse in
-        // Clearing is episodic-only by engine ownership: both receipt numbers
-        // come from the single atomic engine clear (measured in the same
-        // transaction, remaining as its immediate post-condition), so no second
-        // fetch can interleave a mirrored turn between them, while semantic rows,
-        // profile, index, sessions, runs, goals, ideas, and grants stay out of
-        // the write path entirely.
+        // Clearing is episodic-only: both receipt counts derive from a single atomic transaction,
+        // preventing interleaving fetches while semantic rows, profile, and index remain untouched.
         do {
             let result = try await req.application.runeWeaver.memoryEngine.clearEpisodicWithRemaining()
             return EpisodicClearResponse(deletedCount: result.deleted, episodeCount: result.remaining)
@@ -1100,23 +941,12 @@ private func registerEpisodicDeleteRoutes(_ app: Application) {
 }
 
 /// Registers the managed browser Python lifecycle routes backing browser settings.
-/// Thin HTTP adapters over `PlaywrightPythonEnsurer`: health reports the
-/// effective interpreter plus the live provision stage so the dashboard can
-/// poll one endpoint about 1s for the amber Preparing line, and ensure
-/// collapses onto the single-flight resolving, creating, installing, browsers
-/// cascade. Provisioning policy (managed venv path, pinned Playwright release,
-/// per-stage budgets) stays single-sourced in the ensurer so boot warmup,
-/// first navigate, and these routes cannot drift; the routes only translate
-/// outcomes to HTTP shapes.
-/// - Parameter app: Application receiving the routes.
 func registerBrowserRoutes(_ app: Application) {
     let browser = app.grouped(PathComponent.constant(ServerPaths.browser))
 
     browser.get(PathComponent.constant(ServerPaths.browserHealth)) { _ async -> BrowserPythonHealthResponse in
-        // Side-effect free by design: the probe never provisions, so opening
-        // Settings or polling mid-flight cannot start a second cascade. The
-        // live stage rides along so a provision in flight renders its current
-        // step plus elapsed time, nil when idle.
+        // Side-effect free by design: the probe never provisions, so opening Settings or polling
+        // mid-flight cannot start a second cascade.
         let progress = await PlaywrightPythonEnsurer.shared.currentProgress()
         let probe = await PlaywrightPythonEnsurer.probeReadiness()
         return BrowserPythonHealthResponse(
@@ -1133,11 +963,8 @@ func registerBrowserRoutes(_ app: Application) {
     }
 
     browser.post(PathComponent.constant(ServerPaths.browserEnsure)) { req async -> BrowserPythonEnsureResponse in
-        // Single-sourced through the shared ensurer so boot warmup, first
-        // navigate, and this route collapse onto one in-flight provision
-        // instead of racing venv plus pip installs. The trimmed banner threads
-        // through for the inline slot while capped diagnostics thread through
-        // for logs plus collapsed UI, so each failure renders once.
+        // Single-sourced through the shared ensurer so boot warmup, first navigate, and this route
+        // collapse onto one in-flight provision instead of racing venv plus pip installs.
         let report = await PlaywrightPythonEnsurer.shared.ensureReport()
         if !report.ready {
             let banner = report.message ?? "none"
@@ -1160,10 +987,6 @@ func registerBrowserRoutes(_ app: Application) {
 }
 
 /// Registers the chat WebSocket with live approval prompts.
-///
-/// The upgrade re-checks the auth marker at the route boundary in addition to
-/// the global middleware, so a socket can never be handed out without passing
-/// the owner gate even if the middleware is not installed.
 private func registerWebSocketRoute(_ app: Application) {
     app.webSocket(
         PathComponent.constant(ServerPaths.websocket),
@@ -1176,29 +999,21 @@ private func registerWebSocketRoute(_ app: Application) {
             let connectionID = UUID()
             let box = WSSocketBox(webSocket)
             let connectionTasks = ConnectionChatTasks()
-            // Bind the socket to the token generation it upgraded under so a
-            // later rotation revokes it at the frame boundary as well as through
-            // the hub teardown, closing the window where a buffered frame could
-            // still be answered after the swap.
+            // Bind the socket to the token generation it upgraded under so a later rotation revokes
+            // it at the frame boundary as well as through the hub teardown, closing the window where
+            // a buffered frame could still be answered after the swap.
             let generation = req.runeWeaverTokenGeneration
             let (stream, continuation) = AsyncStream<String>.makeStream()
             // The verified pulse rides in so a brake decision records its
             // watchdog health into the same actor the health route serves.
             let pulse = req.application.systemHealthSnapshot
             let connectionTask = Task { [box, context, connectionID, stream, connectionTasks, generation, auth, continuation, pulse] in
-                // Register bound to the upgrade generation, then re-validate it
-                // immediately: the middleware authenticates and `onUpgrade`
-                // registers on separate hops, so a rotation can land in between.
-                // A registration the hub already knows is retired is refused, and
-                // one that slipped in before the sweep is caught by the auth
-                // re-check. Either path removes the socket and closes it with the
-                // policy violation instead of letting a passive socket linger to
-                // receive broadcasts under a dead credential.
+                // Register bound to the upgrade generation, then re-validate it immediately: the
+                // middleware authenticates and `onUpgrade` registers on separate hops, so a rotation
+                // can land in between.
                 let registered = await context.hub.add(id: connectionID, box: box, generation: generation)
-                // Evaluate the retirement check outside the boolean expression:
-                // its right operand is a non-async autoclosure, so an `await`
-                // cannot appear there. Either a refused registration or a
-                // retired generation must tear the socket down.
+                // Evaluate the retirement check outside the boolean expression: its right operand
+                // is a non-async autoclosure, so an `await` cannot appear there.
                 let retired = await webSocketGenerationIsRetired(auth: auth, generation: generation)
                 if !registered || retired {
                     connectionTasks.cancelAll()
@@ -1230,10 +1045,9 @@ private func registerWebSocketRoute(_ app: Application) {
                     }
                 }
                 let retiredAtEnd = await webSocketGenerationIsRetired(auth: auth, generation: generation)
-                // Every socket close seals the turn registry so orphaned turns
-                // cannot keep writing past the socket lifetime and the
-                // reserve/insert race stays closed; only a retired credential
-                // additionally closes the socket with a policy violation.
+                // Every socket close seals the turn registry so orphaned turns cannot keep writing
+                // past the socket lifetime and the reserve/insert race stays closed; only a retired
+                // credential additionally closes the socket with a policy violation.
                 connectionTasks.cancelAll()
                 await context.hub.remove(id: connectionID)
                 if retiredAtEnd {
@@ -1259,34 +1073,12 @@ private func registerWebSocketRoute(_ app: Application) {
 }
 
 /// Whether a socket's upgrade generation has been retired by a rotation.
-///
-/// A socket that upgraded without a verifier (the loopback no-auth posture)
-/// carries no generation and is never revoked; an authenticated upgrade always
-/// records one, so a live rotation retires every socket that holds it.
-/// - Parameters:
-///   - auth: Installed owner verifier, or nil for the ungated posture.
-///   - generation: Generation captured at upgrade, or nil when unauthenticated.
-/// - Returns: True when the token that authorized the socket is no longer live.
 private func webSocketGenerationIsRetired(auth: ServerAuth?, generation: Int?) async -> Bool {
     guard let auth, let generation else { return false }
     return await !auth.isCurrentGeneration(generation)
 }
 
 /// Registers the static dashboard bundle routes.
-///
-/// The bundle is served without the owner credential because a browser cannot
-/// attach a bearer header to navigation or asset fetches; the bundle renders its
-/// own login gate and every data route stays behind the uniform 401. The auth
-/// middleware forwards these GET paths through to this handler, and both share
-/// the same resolved bundle so the gate's public-path classifier and this
-/// delivery path cannot disagree.
-///
-/// Engine API routes register before this bundle so listings answer JSON; any
-/// `/memory/*` path reaching here is unknown and answers JSON `404` instead of
-/// the single-page HTML fallback, keeping Abort errors machine-readable.
-/// - Parameters:
-///   - app: Application receiving the routes.
-///   - bundle: Resolved bundle to serve, or a fresh resolution when omitted.
 public func registerDashboardRoutes(_ app: Application, bundle: DashboardBundle = .resolve()) {
     app.get { req async throws -> Response in
         try await bundle.response(for: req, requestPath: "")

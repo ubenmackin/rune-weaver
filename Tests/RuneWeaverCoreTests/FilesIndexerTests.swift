@@ -1,12 +1,4 @@
 // Rune Weaver Core Tests — Files indexer walk, skip, guard, and cancellation behavior.
-//
-// Exercises one index run against isolated temporary trees: built-in and
-// configured excludes prune whole directories, AppleDouble sidecars and
-// symlinks are never indexed, an unchanged body is skipped by content hash, a
-// denied path never reaches the index, a cancelled run stops between files and
-// a resume finishes the tree, and the vector policy keeps partial documents
-// keyword-only. The document store is created outside every walked root so the
-// index database is never itself a candidate.
 
 import Foundation
 import os
@@ -237,10 +229,8 @@ private func makeTemporaryDirectory() -> URL {
     return url.resolvingSymlinksInPath().standardizedFileURL
 }
 
-/// Writes UTF-8 contents, creating intermediate directories.
-/// - Parameters:
-///   - contents: Text to write.
-///   - url: Destination file URL.
+/// Writes UTF-8 contents, creating intermediate directories. contents: Text to
+/// write.
 private func writeFile(_ contents: String, at url: URL) {
     try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     try? Data(contents.utf8).write(to: url)
@@ -256,26 +246,8 @@ private func makeStore() -> (store: DocIndexStore, directory: URL) {
     return (DocIndexStore(dbPath: canonical.appendingPathComponent("docindex.db").path), canonical)
 }
 
-/// Builds an indexer over one temporary root with the test stubs.
-/// - Parameters:
-///   - store: Document store to write into.
-///   - root: Directory to walk.
-///   - accessGuard: Path policy stub.
-///   - exclude: User-configured exclude patterns.
-///   - embedder: Optional embeddings backend.
-///   - embeddingsPool: Optional pooled backends for parallel workers.
-///   - workerCountOverride: Files in flight when set; nil resolves from config.
-///   - thermalStateProvider: Thermal state source; nil observes the live state.
-///   - lowPowerModeProvider: Low Power Mode source; nil observes the live state.
-///   - vectorPolicy: Vector policy for the run.
-///   - nightlyBudget: Maximum newly written documents per run; 0 is unlimited.
-///   - iCloudEvicted: Evicted-iCloud policy (`skip` or `download`).
-///   - evictedCheck: Override resolving evicted files, or nil for the live check.
-///   - downloadStarter: Download trigger for the `download` policy, or nil for `FileManager`.
-///   - fileReader: Override reading file bytes, or nil for memory-mapped reads.
-///   - maxVectorChunks: Per-document vector cap.
-///   - progress: Advisory progress sink.
-/// - Returns: A configured indexer.
+/// Builds an indexer over one temporary root with the test stubs. store: Document
+/// store to write into.
 private func makeIndexer(
     store: DocIndexStore,
     root: URL,
@@ -1174,10 +1146,8 @@ struct FilesIndexerTests {
 
         #expect(report.filesIndexed == total)
         #expect(report.errors == 0)
-        // The invariant under test is the worker cap, not an exact overlap:
-        // at least one file was read, and in-flight reads never exceeded the
-        // worker count. Requiring peak == 3 would depend on scheduler
-        // interleaving, so assert the bounded range instead.
+        // The invariant under test is the worker cap, not an exact overlap: at least one file was
+        // read, and in-flight reads never exceeded the worker count.
         #expect(tracker.peak >= 1 && tracker.peak <= 3)
     }
 

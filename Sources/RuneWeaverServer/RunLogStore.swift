@@ -287,10 +287,9 @@ public actor RunLogStore {
         if let dbPath {
             #if canImport(SQLite3)
                 let pruneCap = capacity
-                // Durable run history keeps hash-only screenshots: the
-                // in-memory entry retains full pixels for the live turn while
-                // the written row strips data URLs so episodes.db never holds
-                // recoverable screen pixels.
+                // Durable run history keeps hash-only screenshots: the in-memory entry retains full
+                // pixels for the live turn while the written row strips data URLs so episodes.db
+                // never holds recoverable screen pixels.
                 let persisted = Self.redactedForPersistence(stored)
                 await SQLiteSerialIO.runUncancellable {
                     SQLiteRunLogStore.write(entry: persisted, dbPath: dbPath, pruneCapacity: pruneCap)
@@ -300,14 +299,6 @@ public actor RunLogStore {
     }
 
     /// Updates an existing run entry by identifier.
-    /// The row timestamp names the completion instant for settled runs and the
-    /// start instant while the run is still in flight: callers pass an explicit
-    /// stamp only when they own the completion moment, and a nil stamp keeps
-    /// the stored instant so pre-existing callers behave exactly as before.
-    /// A row already settled to `cancelled` never moves again: a late
-    /// success or failure arriving after a cooperative cancel keeps the
-    /// stored `cancelled` status so the owner's stop is never clobbered to
-    /// `ok` or `error`.
     @discardableResult
     public func update(
         id: UUID,
@@ -352,17 +343,9 @@ public actor RunLogStore {
         return updated
     }
 
-    /// Atomically settles a live run row to `cancelled`.
-    /// Only rows still `running` or `awaiting_approval` accept the
-    /// transition; settled rows return nil so the caller answers 409 instead
-    /// of resurrecting history. The check and the write run in one actor hop,
-    /// so a success settling to `ok` between a route's read and its cancel
-    /// cannot be flipped back to `cancelled`, and the `cancelled`-wins guard
-    /// in `update` covers the opposite order.
-    /// - Parameters:
-    ///   - id: Entry identifier.
-    ///   - durationMs: Wall-clock duration in milliseconds.
-    /// - Returns: Settled entry, or nil when the row is unknown or settled.
+    /// Atomically settles a live run row to `cancelled`. Only rows still `running` or
+    /// `awaiting_approval` accept the transition; settled rows return nil so the caller answers 409
+    /// instead of resurrecting history.
     @discardableResult
     public func cancel(id: UUID, durationMs: Int? = nil) async -> RunLogEntry? {
         guard let index = entries.firstIndex(where: { $0.id == id }) else {
@@ -400,13 +383,6 @@ public actor RunLogStore {
     }
 
     /// Atomically settles all live run rows for a session to `cancelled`.
-    /// Finds any rows currently `running` or `awaiting_approval` for this session,
-    /// marks them as `cancelled`, and persists the changes immediately so that
-    /// observers and reloads never see an orphaned running turn.
-    /// - Parameters:
-    ///   - sessionID: Session identifier.
-    ///   - durationMs: Wall-clock duration in milliseconds.
-    /// - Returns: List of settled entries.
     @discardableResult
     public func cancelRunning(sessionID: UUID, durationMs: Int? = nil) async -> [RunLogEntry] {
         let targets = entries.filter {
@@ -505,14 +481,6 @@ public actor RunLogStore {
     }
 
     /// Lists entries, newest first.
-    ///
-    /// The `kind` filter applies before the limit so sparse kinds (for example
-    /// `index` rows under chat traffic) are not dropped by a newest-N overall
-    /// window: callers asking for the newest `index` rows receive them within
-    /// the 500-row retention (newest-50 index-row window), regardless of how
-    /// many other-kind rows interleave within that window. Rows pruned past
-    /// the 500-row capacity (oldest first, regardless of kind) are no longer
-    /// visible to any lookup.
     public func list(limit: Int = 50, jobID: UUID? = nil, sessionID: UUID? = nil, goalID: UUID? = nil, kind: String? = nil) async -> [RunLogEntry] {
         guard limit > 0 else { return [] }
         let matching = entries.filter { entry in
@@ -575,18 +543,9 @@ public actor RunLogStore {
 }
 
 /// Shared SQLite open helper for the server stores.
-/// Centralizes the open-plus-log fallback so every read/write/clear/delete
-/// degrades to in-memory state with one consistent log line instead of each
-/// call site repeating its own do/catch; callers keep their domain fallback
-/// note so the log still says what was preserved.
 enum SQLiteOpenHelper {
-    /// Opens a handle, logging once when the database is unavailable.
-    /// - Parameters:
-    ///   - dbPath: SQLite file path being opened.
-    ///   - storeName: Owning store for the log prefix.
-    ///   - fallbackNote: What the caller preserves in memory when open fails.
-    ///   - open: Database-specific open plus migrate closure.
-    /// - Returns: Open handle, or nil when unavailable (already logged).
+    /// Opens a handle, logging once when the database is unavailable. dbPath:
+    /// SQLite file path being opened.
     static func openLogged(
         dbPath: String,
         storeName: String,

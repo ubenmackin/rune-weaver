@@ -1,10 +1,5 @@
 // Rune Weaver Core Tests — LLM SSRF-exemption origin derivation.
-//
-// Exercises `LLMOrigins.serverURLs(from:)`, the single owner of the origin list
-// that the API and browser tools exempt from the SSRF loopback deny. The
-// trimming, blank-dropping, de-duplication, and first-seen order contract is
-// shared by the builtin tool registry, the CLI, serve, and the menu-bar app, so
-// a regression here would silently let those entry points diverge.
+
 import Foundation
 @testable import RuneWeaverCore
 import Testing

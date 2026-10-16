@@ -1,8 +1,4 @@
 // Rune Weaver Dashboard — Shared secret-value modal for Keychain writes.
-//
-// Single owner for the store/update secret form so Providers, Media, and
-// Email flows share one password input, one focus path, and one submit path.
-// Secret bytes stay in local state only and clear on open, close, and success.
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, storeSecret } from "../api";

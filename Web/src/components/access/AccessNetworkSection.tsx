@@ -1,18 +1,5 @@
 // Rune Weaver Dashboard — Network egress section of the declarative security
 // policy surface for policy.toml.
-//
-// Purpose: Owns the structured network-plus-credentials policy editor as its own
-// settings surface. The file governs outbound egress boundaries and per-secret
-// credential bindings only; the surface edits that structured shape and never
-// raw TOML, so the file and the live supervisor cannot disagree on quoting.
-// Scope: Loading the verified snapshot, inline fail-closed editing with field
-// errors, and pane-local structured persistence. Keychain writes, network
-// allowlist enforcement, and file serialization stay with their owners.
-// Architectural role: Settings-adjacent surface rendered outside the shared
-// config form, mirroring the indexing policy panel precedent. Writes apply live
-// through the shared store with no restart and no filesystem watcher. The
-// credentials half of the editor renders through the sibling credentials
-// section while this file keeps the single verified draft and the write path.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authHeaders, checkSecretStatus, deleteSecret, listSecretKeys } from "../../api";
@@ -76,10 +63,7 @@ interface PolicyLocalAccessReport {
   neverDialable: string[];
 }
 
-// Preview diff returned by POST /settings/policy/recheck-local. Added names
-// grants the apply would create, removed names grants it would drop,
-// unchanged names grants it would keep, and unresolved names entries that
-// could not be proven. Every list is sorted. Preview never writes.
+// Preview diff returned by POST /settings/policy/recheck-local.
 interface LocalRecheckPreview {
   added: string[];
   removed: string[];
@@ -87,27 +71,17 @@ interface LocalRecheckPreview {
   unresolved: string[];
 }
 
-// Whether a raw key is usable as a binding name. Delegates to the shared
-// validation owner so the pane gate and the list badges agree on the
-// surrogate alphabet; only the shape rule is reported since key names never
-// carry secret bytes.
+// Whether a raw key is usable as a binding name.
 function isValidPolicyKey(rawKey: string): boolean {
   return isValidBindingKey(rawKey ?? "");
 }
 
-// Whether a stored value would break TOML quoting. Single-sourced through the
-// shared containsTOMLBreakingScalar owner mirroring the store alphabet exactly
-// (double quote plus C0 controls plus DEL), so the pane and the modal refuse
-// the same bytes instead of keeping parallel copies that could drift.
+// Whether a stored value would break TOML quoting.
 function hasTomlBreakingChars(entry: string): boolean {
   return containsTOMLBreakingScalar(entry ?? "");
 }
 
-// Splits multiline domain text into canonical entries. Trimming plus
-// lowercasing keeps the editor and the supervisor comparison in agreement,
-// while blank lines drop so an accidental newline never becomes an entry
-// that could authorize an empty host. Split/trim/filter lives in the shared
-// parseTrimmedLines owner so domain, host, and prefix fields cannot drift.
+// Splits multiline domain text into canonical entries.
 export function parseDomainLines(raw: string): string[] {
   return parseTrimmedLines(raw ?? "").map((line) => line.toLowerCase());
 }
@@ -119,18 +93,9 @@ export function formatDomainLines(domains: string[]): string {
   return (domains ?? []).join(newline);
 }
 
-// Whether one domain line could be stored. Only an exact host or a single
-// leading star-dot edge authorizes; every other star shape would never match
-// at runtime yet would read as allowed, so it refuses here before save.
-// Separators, userinfo, fragments, and port suffixes also refuse: a
-// canonicalized URL host never carries them, so such an entry could only
-// persist and then never authorize.
-// Host-shape gate parity:
-// This client-side validator intentionally mirrors the server-side host shape gate in
-// Sources/RuneWeaverServer/ServerSettingsRoutes.swift (`validateHostEntry` / `validateUnbracketedHostShape`).
-// Client validation provides immediate interactive feedback in the UI before network submission,
-// while the server enforces the authoritative security boundary. Test suites in AccessNetworkSection.test.tsx
-// and SettingsRouteTests.swift pin matching acceptance/rejection vectors to prevent drift.
+// Whether one domain line could be stored. Only an exact host or a single leading star-dot edge
+// authorizes; every other star shape would never match at runtime yet would read as allowed, so it
+// refuses here before save.
 export function isValidDomainLine(entry: string): boolean {
   const lowered = (entry ?? "").trim().toLowerCase();
   if (!lowered) return false;
@@ -154,10 +119,9 @@ export function isValidDomainLine(entry: string): boolean {
   // can only be a port suffix (or another shape DNS never serves).
   if ((lowered.match(/:/g) ?? []).length === 1) return false;
   if (lowered.includes("*")) {
-    // Single leading edge only: delegate the star shape to the shared
-    // classifyWildcard owner mirroring the server leading-edge contract, so
-    // the pane, modal, and preview share one shape verdict. Trailing and
-    // malformed shapes refuse here before save.
+    // Single leading edge only: delegate the star shape to the shared classifyWildcard owner
+    // mirroring the server leading-edge contract, so the pane, modal, and preview share one shape
+    // verdict.
     if (classifyWildcard(lowered) !== "leading") return false;
     const bare = lowered.slice(2);
     if (!bare) return false;
@@ -201,13 +165,8 @@ export function findEgressShadowWarnings(allowed: string[], blocked: string[]): 
   return warnings;
 }
 
-// Validates one loaded or edited draft against the fail-closed bounds the
-// engine enforces. Returns human-readable problems; empty means saveable. Blank
-// domain entries, wildcard shape, TOML-breaking scalars, empty host lists,
-// confinement-refused hosts, unknown modes or methods, unrooted prefixes, and
-// surrogate-alphabet violations all refuse here so the common rejections become
-// inline field errors before a write; the storage-boundary invariants remain
-// the final authority over what persists.
+// Validates one loaded or edited draft against the fail-closed bounds the engine enforces. Returns
+// human-readable problems; empty means saveable.
 function validatePolicyDraft(draft: PolicyDraft | null): string[] {
   if (!draft) return [];
   const problems: string[] = [];
@@ -283,17 +242,9 @@ function validatePolicyDraft(draft: PolicyDraft | null): string[] {
   return problems;
 }
 
-// Canonicalizes a policy draft for dirty tracking. Domain lists and binding
-// arrays behave as sets while credential keys behave as a map, so a plain
-// stringify would read the same posture dirty when only ordering moved.
-// Sorting each collection keeps changed meaning content changed. Domains and
-// hosts normalize via trim plus lowercase, methods via trim plus uppercase,
-// and path prefixes via trim before comparison, so semantically-equal drafts
-// (`API.COM` vs `api.com`, ` post ` vs `POST`, ` /v1 ` vs `/v1`) read clean
-// like the supervisor treats them. network.localExemptions is server-owned
-// display-only and is always excluded here so a server-derived grant never
-// reads dirty; the pane tracks the last loaded exemptions in a separate ref
-// for post-save diffing instead.
+// Canonicalizes a policy draft for dirty tracking. Domain lists and binding arrays behave as sets
+// while credential keys behave as a map, so a plain stringify would read the same posture dirty when
+// only ordering moved.
 export function canonicalPolicySnapshot(policy: PolicyDraft | null): string | null {
   if (!policy) return null;
   const normalizeDomain = (entry: string): string => (entry ?? "").trim().toLowerCase();
@@ -321,11 +272,9 @@ export function canonicalPolicySnapshot(policy: PolicyDraft | null): string | nu
   });
 }
 
-// Normalizes a wire policy payload into the pane draft shape. Accepts the
-// snake_case the engine sends while tolerating camelCase from older doubles,
-// so a drifted payload still loads instead of blanking the form.
-// network.localExemptions is display-only: both the camelCase wire spelling
-// and the snake_case tolerant spelling decode here, defaulting to [].
+// Normalizes a wire policy payload into the pane draft shape. Accepts the snake_case the engine
+// sends while tolerating camelCase from older doubles, so a drifted payload still loads instead of
+// blanking the form.
 function normalizePolicyPayload(raw: unknown): PolicyDraft {
   const fallback: PolicyDraft = {
     version: 1,
@@ -436,10 +385,8 @@ function normalizeRecheckPreview(raw: unknown): LocalRecheckPreview {
   };
 }
 
-// Loads the structured policy snapshot. Reads through the shared owner gate so
-// token mode carries the bearer instead of 401ing on a bare fetch. There is no
-// raw TOML on the wire: the dashboard edits the structured shape and the server
-// owns serialization.
+// Loads the structured policy snapshot. Reads through the shared owner gate so token mode carries
+// the bearer instead of 401ing on a bare fetch.
 export async function fetchPolicy(): Promise<PolicyLoadResult> {
   const res = await fetch("/settings/policy", {
     headers: authHeaders(),
@@ -473,11 +420,8 @@ export async function fetchPolicy(): Promise<PolicyLoadResult> {
   };
 }
 
-// Persists the structured policy draft. Sends the DTO only with no legacy raw
-// text field so an old editor learns the new contract instead of persisting
-// unvalidated text. localExemptions is display-only and is never sent: the
-// server derives the stored set via classification (Shared Contract C).
-// Rejects leave the snapshot untouched so a 400 never silently persists.
+// Persists the structured policy draft. Sends the DTO only with no legacy raw text field so an old
+// editor learns the new contract instead of persisting unvalidated text.
 export async function savePolicy(draft: PolicyDraft): Promise<PolicyLoadResult> {
   const res = await fetch("/settings/policy", {
     method: "PUT",
@@ -511,10 +455,7 @@ export async function savePolicy(draft: PolicyDraft): Promise<PolicyLoadResult> 
   };
 }
 
-// Previews the local-access re-check for the current draft. Never writes:
-// the server diffs the proposed grant set against the stored set and reports
-// unresolved entries instead of erroring so the UI can show them before
-// confirming.
+// Previews the local-access re-check for the current draft.
 export async function previewLocalRecheck(draft: PolicyDraft): Promise<LocalRecheckPreview> {
   const res = await fetch("/settings/policy/recheck-local", {
     method: "POST",
@@ -580,14 +521,7 @@ export interface NetworkEgressEditorsProps {
   applying?: boolean;
 }
 
-// Structured network egress editors. The mode select offers exactly the two
-// surviving postures while the domain textareas keep one host per line; blank
-// lines drop on parse so an accidental newline never becomes a stored entry.
-// Invalid shapes surface inline before save, shadow overlaps warn with
-// blocked-wins copy, and persistence stays with the pane save so there is no
-// second network write path to drift from dirty tracking. Local exemptions
-// render display-only: the server owns the grant set and the pane never edits
-// or sends it.
+// Structured network egress editors.
 export function NetworkEgressEditors({
   mode = "allowlist_only",
   allowedDomains = [],
@@ -757,10 +691,7 @@ export function NetworkEgressEditors({
   );
 }
 
-// Declarative network-plus-credentials policy surface for the Settings Policy
-// tab. This component keeps the single verified draft, the shared save, and
-// the sub-tab chrome; the network editors render inline while the credentials
-// half renders through the sibling credentials section.
+// Declarative network-plus-credentials policy surface for the Settings Policy tab.
 export interface AccessNetworkSectionProps {
   activeView?: "network" | "credentials";
 }
@@ -801,12 +732,7 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
   // so a stored value is never removed by an accidental click. The binding
   // itself stays; only the secret slot is deleted.
   const [pendingDeleteSecretKey, setPendingDeleteSecretKey] = useState<string | null>(null);
-  // Last accepted snapshot for dirty tracking. Changed is a canonical deep
-  // compare of the live draft against this snapshot, so an edit that returns
-  // to the loaded shape or only reorders sets reads clean instead of staying
-  // dirty on object identity or array order alone. localExemptions is excluded
-  // from the canonical snapshot (server-owned display-only); the last loaded
-  // grant set is tracked separately below for post-save diffing.
+  // Last accepted snapshot for dirty tracking.
   const lastLoadedRef = useRef<string | null>(null);
   // Last loaded local exemptions for post-save diffing. Updated on every
   // accepted load/save/apply; never part of the dirty comparison.
@@ -918,10 +844,9 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
     lastLoadedRef.current !== null &&
     draftSnapshot !== lastLoadedRef.current;
 
-  // Any edit clears the saved confirmation so a stale success never reads as
-  // covering the current draft. The snapshot comparison above stays the source
-  // for dirty state while this flag owns only the transient banner. Grant
-  // disclosures clear with the banner since they describe the last write.
+  // Any edit clears the saved confirmation so a stale success never reads as covering the current
+  // draft. The snapshot comparison above stays the source for dirty state while this flag owns only
+  // the transient banner.
   function markEdited(updater: (prev: PolicyDraft) => PolicyDraft) {
     setDraft((prev) => {
       if (!prev) return prev;
@@ -979,10 +904,7 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
     setDeleteAlsoSecret(false);
   }
 
-  // Single owner of the combined binding-plus-optional-secret confirm. The
-  // binding always goes through handleDeleteBinding; the checked box then
-  // deletes the Keychain value and re-probes so the badge and Unlinked list
-  // reconcile. Unchecked leaves the secret stored for Unlinked to surface.
+  // Single owner of the combined binding-plus-optional-secret confirm.
   async function handleConfirmDeleteBinding() {
     const key = pendingDeleteKey;
     if (!key) return;
@@ -1001,10 +923,7 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
     void refreshListedKeys();
   }
 
-  // Opens the in-place Keychain entry for one binding key. The raw key is
-  // normalized so a pasted surrogate resolves to the same slot as the bare
-  // account name; isUpdate reads the live presence map so Set and Update copy
-  // stay honest without a second probe.
+  // Opens the in-place Keychain entry for one binding key.
   function openSecretModal(rawKey: string) {
     const normalized = normalizeSecretKey(rawKey ?? "");
     if (!normalized) return;
@@ -1018,10 +937,8 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
     setSecretModal(null);
   }
 
-  // Merges one probed key into the presence map intersected with live keys so
-  // a deleted binding cannot persist as a stale Stored pill. A binding-modal
-  // shortcut for a not-yet-saved key keeps its probe so the modal badge flips
-  // immediately; the next key-set probe reconciles.
+  // Merges one probed key into the presence map intersected with live keys so a deleted binding
+  // cannot persist as a stale Stored pill.
   function mergeSingleKeyStatus(
     probeKey: string,
     status: Record<string, boolean> | null | undefined,
@@ -1205,10 +1122,8 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
     setRecheckOpen(false);
   }
 
-  // Applies the previewed re-check, then refreshes the draft, banner, and
-  // last-loaded tracking from the response. Apply grants stays disabled while
-  // unresolved is non-empty; a 400 keeps the draft and surfaces the server
-  // reason naming unresolved hosts.
+  // Applies the previewed re-check, then refreshes the draft, banner, and last-loaded tracking from
+  // the response.
   async function handleApplyRecheck() {
     if (!draft || !recheckPreview || applying) return;
     if (recheckPreview.unresolved.length > 0) return;
@@ -1252,12 +1167,9 @@ export function AccessNetworkSection({ activeView }: AccessNetworkSectionProps =
   // set changes, not on every network keystroke.
   const credentialKeysSignature = useMemo(() => bindingKeys.join("\n"), [bindingKeys]);
 
-  // Probes Keychain presence for the live binding keys. The effect derives the
-  // keys from the signature instead of reading the draft, so a keystroke that
-  // only reshapes field text never re-probes. Merged status intersects with
-  // the live keys so a deleted binding cannot persist as a stale badge.
-  // Failures stay silent so rows fall back to Missing instead of blocking
-  // the policy render.
+  // Probes Keychain presence for the live binding keys. The effect derives the keys from the
+  // signature instead of reading the draft, so a keystroke that only reshapes field text never
+  // re-probes.
   useEffect(() => {
     const keys = credentialKeysSignature ? credentialKeysSignature.split("\n") : [];
     if (keys.length === 0) {

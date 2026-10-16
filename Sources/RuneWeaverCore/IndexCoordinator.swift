@@ -1,21 +1,4 @@
 // Rune Weaver Core — Coordinator owning nightly and on-demand index runs.
-//
-// One actor sequences the per-source indexers (files, mail, messages, calendars,
-// and reminders) into a single run, exposes the single live
-// source as the `liveTotals` poll snapshot (nil when idle) that the menu and
-// page read via `GET /index/status` `live` on about a 2s in-run poll, reports
-// run lifecycle through an injected seam so the server can broadcast
-// `run_started`/`run_completed` and persist the run to `run_logs`, and records
-// an `indexAsOf` watermark on success. `ToolProgress` liveness frames plus the
-// `run_started`/`run_completed` broadcasts are poll-now wake-up triggers only,
-// never the data carrier. Each source stage commits its own work as it goes,
-// so a cancelled run stops between batches and leaves already-committed
-// documents in place for the next run to resume from.
-//
-// The coordinator is transport-agnostic on purpose: the core target cannot see
-// the server's `WSHub` or `RunLogStore`, so those are reached through the
-// ``IndexRunReporting`` seam and adapted at the application boundary. Progress
-// frames carry only counts and display copy — never file contents or secrets.
 
 import Foundation
 import os
@@ -26,23 +9,12 @@ import os
 // MARK: - Coordinator
 
 /// Actor owning nightly and on-demand local index runs.
-///
-/// One coordinator sequences its enabled source stages in ``IndexSourceKind/runOrder``,
-/// emits liveness frames at the shared 2 Hz cadence, and reports run lifecycle
-/// through ``IndexRunReporting``. A run is cancellable between stages and each
-/// stage commits as it goes, so cancellation never discards committed work and a
-/// later run resumes from the first unfinished item.
 public actor IndexCoordinator {
     /// Minimum spacing between progress frames (2 Hz), shared with `ToolProgress`.
     static let minimumFrameInterval: TimeInterval = Double(ToolProgress.minimumReportIntervalNanoseconds) / 1_000_000_000
-    /// Heartbeat cadence for stalled runs, bypassing the frame floor.
-    ///
-    /// A run that makes no progress still emits a liveness frame on this
-    /// cadence so a slow IMAP fetch or embedding batch never
-    /// looks wedged. Heartbeats reuse the coordinator emit path, so they carry
-    /// the same elapsed, rate, cumulative counts, and phase/stage tokens.
-    /// The nanosecond form below derives from this single value so the two
-    /// can never drift apart.
+    /// Heartbeat cadence for stalled runs, bypassing the frame floor. A run that makes no progress
+    /// still emits a liveness frame on this cadence so a slow IMAP fetch or embedding batch never
+    /// looks wedged.
     public static let heartbeatInterval: TimeInterval = 2.0
     /// Heartbeat cadence in nanoseconds, derived for `Task.sleep`.
     static var heartbeatIntervalNanoseconds: UInt64 {
@@ -76,32 +48,22 @@ public actor IndexCoordinator {
 
     /// Lock-guarded cancellation flag shared with non-isolated stage closures.
     private let cancelFlag = IndexCancellationFlag()
-    /// Stages currently running, for cancellation propagation.
-    ///
-    /// Holds one entry during sequential passes and up to three during the files plus
-    /// mail plus messages overlap so cancellation reaches every in-flight stage. Each stage
-    /// keeps its own budget, thermal, and battery gates, so sharing this list
-    /// never shares effort accounting.
+    /// Stages currently running, for cancellation propagation. Each stage keeps its own budget,
+    /// thermal, and battery gates, so sharing this list never shares effort accounting.
     private var activeStages: [any IndexSourceStage] = []
     /// Completed scanned count observed when the overlap began, anchoring the summed live frame.
     private var overlapBaseScanned = 0
     /// Completed indexed count observed when the overlap began.
     private var overlapBaseIndexed = 0
-    /// Per-stage scanned high-water marks feeding the single cumulative live frame.
-    ///
-    /// Keyed by the stage's index in the overlap batch, not by kind, so two
-    /// stages sharing one kind never overwrite each other's marks.
+    /// Per-stage scanned high-water marks feeding the single cumulative live frame. Keyed by the
+    /// stage's index in the overlap batch, not by kind, so two stages sharing one kind never
+    /// overwrite each other's marks.
     private var overlapScanned: [Int: Int] = [:]
     /// Per-stage indexed high-water marks feeding the single cumulative live frame.
     ///
     /// Keyed by the stage's index in the overlap batch, not by kind.
     private var overlapIndexed: [Int: Int] = [:]
     /// Handle for the run task in flight, so cancellation aborts in-flight awaits.
-    ///
-    /// Stored at run start and cleared alongside `running` so `cancel()` can
-    /// abort awaits (IMAP, embedding batch) via `Task` cancellation
-    /// in addition to the cooperative flag; the awaits then throw at their next
-    /// checkpoint instead of running to stage end.
     private var activeRunTask: Task<IndexRunSummary, Never>?
     /// Whether a run is in flight.
     private var running = false
@@ -134,17 +96,8 @@ public actor IndexCoordinator {
     /// Per-source reports completed in the run in flight, in completion order.
     private var currentSourceReports: [IndexSourceRunReport] = []
 
-    /// Creates an index coordinator.
-    /// - Parameters:
-    ///   - config: Index policy; `enabled` gates every run.
-    ///   - stages: Source stages, sequenced by ``IndexSourceKind/runOrder``.
-    ///   - store: Optional document store for final aggregate stats.
-    ///   - stateStore: Durable watermark and trigger state.
-    ///   - reporter: Run lifecycle reporting seam; defaults to a null reporter.
-    ///   - now: Wall-clock seam.
-    ///   - nightlyHour: Hour the nightly trigger may fire; defaults to 3 AM.
-    ///   - heartbeatInterval: Cadence for stalled-run heartbeats; defaults to 2.0s.
-    ///   - progress: Advisory progress sink; defaults to a no-op.
+    /// Creates an index coordinator. config: Index policy; `enabled` gates every
+    /// run.
     public init(
         config: IndexConfig,
         stages: [any IndexSourceStage],
@@ -172,12 +125,9 @@ public actor IndexCoordinator {
         running
     }
 
-    /// Lightweight snapshot of the run in flight, or nil when idle.
-    ///
-    /// Reads only the cached live counters so menu-bar and dashboard polling
-    /// never touches run state, the document store, or the watermark. Nil once
-    /// the run settles.
-    /// - Returns: The live snapshot, or nil when no run is in flight.
+    /// Lightweight snapshot of the run in flight, or nil when idle. Reads only the cached live
+    /// counters so menu-bar and dashboard polling never touches run state, the document store, or
+    /// the watermark.
     public var liveTotals: IndexLiveTotals? {
         guard running,
               let trigger = liveTrigger,
@@ -206,27 +156,11 @@ public actor IndexCoordinator {
     }
 
     /// Updates the live index policy so saved `[index]` values take effect without a restart.
-    ///
-    /// The next run re-derives selection from the saved snapshot via the
-    /// single kind-to-flag mapping and builds every indexer from that
-    /// snapshot with no rebuilt stages; a run already in flight keeps the
-    /// snapshot it started with.
-    /// - Parameter newConfig: Persisted policy from the settings save.
     public func updateConfig(_ newConfig: IndexConfig) {
         config = newConfig
     }
 
     /// Runs the nightly trigger when it is due.
-    ///
-    /// A disabled coordinator is a no-op, as is a trigger already run on the
-    /// current calendar day or one that arrives before ``nightlyHour``. The
-    /// trigger is `.nightly` when the calendar hour equals ``nightlyHour``.
-    /// Outside the nightly hour, a missed prior nightly run is evaluated
-    /// as a `.catchUp` trigger at most once per launch session. When an index
-    /// run is already in flight, background triggers quietly return nil
-    /// instead of broadcasting skipped run noise.
-    /// - Parameter date: Evaluation instant.
-    /// - Returns: The run summary when a run fired, or nil when nothing happened.
     @discardableResult
     public func fireNightly(now date: Date = Date()) async -> IndexRunSummary? {
         guard config.enabled else { return nil }
@@ -278,17 +212,9 @@ public actor IndexCoordinator {
         }
     }
 
-    /// Starts an index pass in the background without awaiting its completion.
-    ///
-    /// Returns immediately (~5ms) with ``IndexStartOutcome`` so callers never
-    /// hold an idle network connection open across long-running index passes.
-    /// The spawned run task rides the ``IndexStartOutcome/started`` payload so
-    /// an awaiter joins the exact pass it started instead of re-reading
-    /// coordinator state across an actor hop, where a fast settle could clear
-    /// the stored handle first. Progress streams via WebSocket frames, and
-    /// terminal summary is emitted on completion.
-    /// - Parameter trigger: What caused the run.
-    /// - Returns: Immediate start outcome.
+    /// Starts an index pass in the background without awaiting its completion. Returns immediately
+    /// (~5ms) with ``IndexStartOutcome`` so callers never hold an idle network connection open
+    /// across long-running index passes.
     @discardableResult
     public func start(trigger: IndexRunTrigger = .onDemand) async -> IndexStartOutcome {
         guard config.enabled else {
@@ -305,16 +231,9 @@ public actor IndexCoordinator {
         let sessionID = UUID()
         let eventID = UUID()
 
-        // The child holds the coordinator strongly: a started run must settle
-        // (clear `running` and `activeRunTask`, emit the completion broadcast)
-        // even when every caller drops the coordinator first. The only cycle —
-        // the stored handle below reaching back to this closure — breaks when
-        // the actor-isolated `performRun` clears it via `markRunFinished`
-        // before the task returns. Cleanup lives inside `performRun` (same-actor
-        // context, so no cross-isolation hop) rather than in this closure, where
-        // a sync actor-state mutation would rely on closure isolation
-        // inheritance to prove correct. The single `await` below is for the
-        // `async` `performRun` itself, which requires `await` in every context.
+        // The child holds the coordinator strongly: a started run must settle (clear `running` and
+        // `activeRunTask`, emit the completion broadcast) even when every caller drops the
+        // coordinator first.
         let child = Task<IndexRunSummary, Never> {
             await self.performRun(
                 trigger: trigger,
@@ -334,13 +253,6 @@ public actor IndexCoordinator {
     }
 
     /// Runs one index pass over every enabled source.
-    ///
-    /// The run never throws: a failing stage is counted and the pass continues,
-    /// because a background index should make progress on the remaining sources
-    /// rather than abort on one bad gateway. Cancellation stops the pass within
-    /// one batch, leaving committed work for the next run.
-    /// - Parameter trigger: What caused the run.
-    /// - Returns: A summary describing the pass.
     @discardableResult
     public func run(trigger: IndexRunTrigger = .onDemand) async -> IndexRunSummary {
         let outcome = await start(trigger: trigger)
@@ -364,14 +276,6 @@ public actor IndexCoordinator {
     }
 
     /// Requests cancellation of the run in flight.
-    ///
-    /// The flag is set immediately, every active stage is asked to stop at its
-    /// next safe point, and the stored run task is cancelled so in-flight
-    /// awaits throw at their next checkpoint instead of running to stage end.
-    /// Joining happens in the stage loop, so this stays immediate while the
-    /// run settles via broadcast. Work already committed by prior batches
-    /// stays in place. Returns immediately without awaiting the run;
-    /// completion is observed via the `run_completed` broadcast or the status probe.
     public func cancel() async {
         cancelFlag.set()
         for stage in activeStages {
@@ -390,30 +294,17 @@ public actor IndexCoordinator {
 // MARK: - Run Execution
 
 extension IndexCoordinator {
-    /// Executes the stage loop for one run.
-    ///
-    /// Runs in the run task's context so Task cancellation from `cancel()` is
-    /// observed at the next per-batch checkpoint. A failing stage is counted
-    /// and the pass continues; cancellation stops between batches, leaving
-    /// committed work for the next run. A heartbeat task re-emits the current
-    /// cumulative totals on ``heartbeatInterval`` so a stalled stage never
-    /// looks wedged, and the live snapshot stays fresh for polling surfaces.
-    /// - Parameters:
-    ///   - trigger: What caused the run.
-    ///   - sessionID: Per-run session identifier for the log row.
-    ///   - eventID: Stable event identifier for start and completion events.
-    ///   - startedAt: Instant the run began.
-    /// - Returns: A summary describing the pass.
+    /// Executes the stage loop for one run. A failing stage is counted and the pass continues;
+    /// cancellation stops between batches, leaving committed work for the next run.
     private func performRun(
         trigger: IndexRunTrigger,
         sessionID: UUID,
         eventID: UUID,
         startedAt: Date
     ) async -> IndexRunSummary {
-        // Settle single-flight state on every exit path while still on the
-        // actor: `performRun` executes on the coordinator's executor (reached
-        // via `await self.performRun`), so this sync mutation needs no hop and
-        // runs even for fire-and-forget `start` callers that never join the task.
+        // Settle single-flight state on every exit path while still on the actor: `performRun`
+        // executes on the coordinator's executor (reached via `await self.performRun`), so this sync
+        // mutation needs no hop and runs even for fire-and-forget `start` callers that never join.
         defer { markRunFinished() }
         var totals = Totals()
         // One snapshot for the whole run so a save landing mid-run cannot
@@ -433,11 +324,9 @@ extension IndexCoordinator {
         let heartbeat = startHeartbeat(startedAt: startedAt)
         let ranAny = await runEnabledStages(totals: &totals, startedAt: startedAt, policy: runPolicy)
         activeStages = []
-        // Join the heartbeat before the committing frame so a stale wake
-        // between the committing emit and clearLiveState cannot re-emit the
-        // prior phase after it (phase regression/out-of-order frame). No defer
-        // here: the explicit cancel plus join below is the single teardown
-        // path, and a deferred cancel would only fire as a no-op after it.
+        // Join the heartbeat before the committing frame so a stale wake between the committing
+        // emit and clearLiveState cannot re-emit the prior phase after it (phase
+        // regression/out-of-order frame).
         heartbeat.cancel()
         await heartbeat.value
         return await finishRun(
@@ -454,12 +343,6 @@ extension IndexCoordinator {
     }
 
     /// Resets the cached live counters for a fresh run.
-    ///
-    /// Centralized so the run entry and the live snapshot read from one place;
-    /// polling surfaces observe these fields without touching run state.
-    /// - Parameters:
-    ///   - trigger: What caused the run.
-    ///   - startedAt: Instant the run began.
     private func resetLiveState(trigger: IndexRunTrigger, startedAt: Date) {
         liveTrigger = trigger
         liveStartedAt = startedAt
@@ -478,17 +361,8 @@ extension IndexCoordinator {
         overlapIndexed = [:]
     }
 
-    /// Finalizes a run into its summary, watermark, and completion broadcast.
-    ///
-    /// Committing progress, the durable watermark, and the terminal frame all
-    /// derive here so the stage loop stays focused on sequencing alone.
-    /// Per-source gaps synthesize from the same run policy snapshot that
-    /// selected stages, so saved toggles stay honest in the summary.
-    /// - Parameters:
-    ///   - context: Run identity plus per-run policy snapshot fixed at entry.
-    ///   - totals: Accumulated counts across stages.
-    ///   - ranAny: Whether any stage produced work or a counted failure.
-    /// - Returns: A summary describing the pass.
+    /// Finalizes a run into its summary, watermark, and completion broadcast. - ranAny: Whether any
+    /// stage produced work or a counted failure.
     private func finishRun(
         context: FinishRunContext,
         totals: Totals,
@@ -496,12 +370,9 @@ extension IndexCoordinator {
     ) async -> IndexRunSummary {
         let finishedAt = now()
         let cancelled = cancelFlag.isSet || Task.isCancelled
-        // A cancelled run keeps partial progress observed on the live counters:
-        // an in-flight stage cancelled before returning its report has already
-        // contributed scanned/indexed frames via `observeStageProgress`, so fold
-        // the live high-water marks into the terminal totals instead of dropping
-        // them. The persisted `cancelled` row therefore always carries the work
-        // done so far for the last-run strip.
+        // Cancelled runs retain partial progress from live counters: in-flight stages cancelled
+        // before reporting have contributed frames via `observeStageProgress`, so live high-water
+        // marks are folded into terminal totals instead of being dropped.
         var resolved = totals
         if cancelled {
             resolved.scanned = max(resolved.scanned, liveScanned)
@@ -525,16 +396,9 @@ extension IndexCoordinator {
             await emit(phase: .committing, totals: resolved, startedAt: context.startedAt, force: true)
         }
         let recordedAsOf: Date
-        // Terminal aggregates stay searchable for every mutating run because cancelled
-        // passes keep their committed documents; a failed refresh keeps the prior row
-        // rather than failing the run, and the single refresh pass replaces the old
-        // stats warm read so run end performs exactly one aggregate pass. The refresh
-        // runs first so the durable watermark below rides the persisted snapshot's
-        // content watermark (MAX(indexed_at)) rather than the wall-clock finish;
-        // the value comes from the same single pass, so no extra scan is added.
-        // `IndexRunStateStore.recordCompleted` persists whatever instant it is given,
-        // so it tolerates either leg; when there is no store or the refresh fails,
-        // the wall-clock finish stands in.
+        // Terminal aggregates stay searchable for every mutating run because cancelled passes keep
+        // their committed documents; a failed refresh keeps the prior row rather than failing the
+        // run, and the single refresh pass replaces the old stats warm read so run end performs.
         do {
             if let snapshot = try await store?.refreshAggregates(producingRunID: context.sessionID.uuidString) {
                 recordedAsOf = snapshot.indexAsOf
@@ -589,9 +453,6 @@ extension IndexCoordinator {
     }
 
     /// Clears the cached live counters once a run settles.
-    ///
-    /// Polling surfaces read nil as idle, so clearing here unmounts the live
-    /// strip without persisting any post-run summary.
     private func clearLiveState() {
         liveTrigger = nil
         liveStartedAt = nil
@@ -627,33 +488,10 @@ extension IndexCoordinator {
     }
 
     /// Runs every enabled stage, overlapping files plus mail plus messages and sequencing the rest.
-    ///
-    /// CPU-bound files, network-bound mail, and light local messages wait on
-    /// different resources, so the trio runs together in a task group and
-    /// finishes near the slowest peer instead of the serial sum. Vision plus
-    /// any later stage follows sequentially in canonical order to keep
-    /// enrichment deterministic, and peers join in canonical order regardless
-    /// of completion order so watermarks match the serial pass exactly. One
-    /// totals per concurrent peer feeds a single cumulative live frame under
-    /// the generic extracting phase so polling surfaces stay monotonic;
-    /// warnings plus errors stay attributed per source. A failing peer is
-    /// counted and the pass continues, and cancellation joins every active
-    /// peer within one batch with committed work kept for resume. Budgets stay
-    /// per source because each peer builds its own indexer from the shared run
-    /// policy snapshot, and thermal plus battery gates stay inside those
-    /// indexers untouched.
-    /// - Parameters:
-    ///   - totals: Running counts folded across stages.
-    ///   - startedAt: Instant the run began.
-    ///   - policy: Per-run policy snapshot fixed at run entry; every stage
-    ///     builds from this snapshot so a save landing mid-run never splits
-    ///     one run across policies.
-    /// - Returns: Whether any stage produced work or a counted failure.
     private func runEnabledStages(totals: inout Totals, startedAt: Date, policy: IndexConfig) async -> Bool {
-        // Selection re-derives every run from the live `policy` snapshot via
-        // the single kind-to-flag mapping, so a save applied via
-        // `updateConfig` takes effect on the next run with no rebuild; the
-        // in-flight snapshot stays fixed for the whole run.
+        // Selection re-derives every run from the live `policy` snapshot via the single
+        // kind-to-flag mapping, so a save applied via `updateConfig` takes effect on the next run
+        // with no rebuild; the in-flight snapshot stays fixed for the whole run.
         let enabled = orderedStages.filter { $0.kind.isEnabled(in: policy) }
         let overlapStages = enabled.filter { $0.kind == .files || $0.kind == .mail || $0.kind == .messages }
         let remainder = enabled.filter { $0.kind != .files && $0.kind != .mail && $0.kind != .messages }
@@ -712,10 +550,8 @@ extension IndexCoordinator {
             }
             return gathered
         }
-        // Join plus summation in canonical order so watermarks and last-item
-        // match the serial pass exactly regardless of completion order.
-        // Pops exactly the appended slice by count so duplicate kinds cannot
-        // remove each other.
+        // Join plus summation in canonical order so watermarks and last-item match the serial pass
+        // exactly regardless of completion order.
         let expectedOverlapEnd = overlapBaseCount + overlapStages.count
         if activeStages.count >= expectedOverlapEnd {
             activeStages.removeSubrange(overlapBaseCount ..< expectedOverlapEnd)
@@ -752,19 +588,6 @@ extension IndexCoordinator {
     }
 
     /// Executes one source stage and folds its report into the running totals.
-    ///
-    /// Stage frames carry per-stage counts, so progress is offset by the totals
-    /// at stage start to keep the live snapshot cumulative and monotonic. The
-    /// policy arrives threaded from the run entry, never re-read here, so a
-    /// body keeps the snapshot it started with even when a settings save lands
-    /// mid-run, while the next run picks up the saved policy without rebuilt
-    /// stages.
-    /// - Parameters:
-    ///   - stage: Source stage to run.
-    ///   - totals: Running counts to fold the report into.
-    ///   - startedAt: Instant the run began.
-    ///   - policy: Per-run policy snapshot fixed at run entry.
-    /// - Returns: Whether the stage contributed work or a counted failure.
     private func executeStage(
         _ stage: any IndexSourceStage,
         totals: inout Totals,
@@ -794,10 +617,9 @@ extension IndexCoordinator {
             }
         }
         do {
-            // Per-run policy seam: every stage builds from the run-entry
-            // snapshot, never from a config captured at boot or re-read here,
-            // so saved effort, workers, caps, excludes, roots, and windows
-            // apply on the next run.
+            // Per-run policy seam: every stage builds from the run-entry snapshot, never from a
+            // config captured at boot or re-read here, so saved effort, workers, caps, excludes,
+            // roots, and windows apply on the next run.
             let report = try await stage.run(
                 reporter: stageReporter,
                 isCancelled: cancellationProbe,
@@ -835,21 +657,6 @@ extension IndexCoordinator {
     }
 
     /// Executes one overlapped stage against a shared run snapshot.
-    ///
-    /// Owns exactly one stage's totals so peers never share a counter:
-    /// files, mail, and messages budgets stay isolated because each indexer
-    /// enforces its own cap from the same snapshot. Progress funnels through the summed
-    /// observer keyed by the stage's index in the overlap batch, so duplicate
-    /// kinds never overwrite each other's high-water marks. The caller in
-    /// `runEnabledStages` is the only place that merges peers. Active-stage
-    /// registration stays with the caller so a cancel racing stage start
-    /// still reaches every peer.
-    /// - Parameters:
-    ///   - stage: Overlapped source stage to run.
-    ///   - index: Position in the overlap batch, owning the high-water slot.
-    ///   - policy: Shared run snapshot for the overlap batch.
-    ///   - startedAt: Instant the run began.
-    /// - Returns: Whether the stage contributed work plus its per-stage totals.
     private func executeStage(
         _ stage: any IndexSourceStage,
         index: Int,
@@ -890,17 +697,9 @@ extension IndexCoordinator {
         }
     }
 
-    /// Folds one overlapped frame into the single cumulative live snapshot.
-    ///
-    /// Each peer reports its own cumulative counts, so the per-stage
-    /// high-water mark absorbs late or duplicate frames and the sum of peers
-    /// plus the overlap base stays monotonic. Only the summed frame is
-    /// emitted, never the raw peer frame, so polling surfaces observe one
-    /// stream that matches serial watermark math.
-    /// - Parameters:
-    ///   - index: Overlap-batch position owning the high-water slot.
-    ///   - frame: Peer progress frame.
-    ///   - startedAt: Instant the run began.
+    /// Folds one overlapped frame into the single cumulative live snapshot. Only the summed frame
+    /// is emitted, never the raw peer frame, so polling surfaces observe one stream that matches
+    /// serial watermark math.
     private func observeConcurrentProgress(index: Int, frame: ToolProgress, startedAt: Date) async {
         let priorScanned = overlapScanned[index] ?? 0
         let priorIndexed = overlapIndexed[index] ?? 0
@@ -921,13 +720,6 @@ extension IndexCoordinator {
     }
 
     /// Converges one peer's final report into the summed live marks.
-    ///
-    /// Interim frames can lag the committed report, so the final counts join
-    /// the high-water marks here; the caller merges full totals after the
-    /// group joins, keeping watermark order canonical.
-    /// - Parameters:
-    ///   - index: Overlap-batch position owning the high-water slot.
-    ///   - report: Final stage contribution.
     private func finalizeConcurrentProgress(index: Int, report: IndexSourceRunReport) async {
         overlapScanned[index] = max(overlapScanned[index] ?? 0, report.scanned)
         overlapIndexed[index] = max(overlapIndexed[index] ?? 0, report.indexed)
@@ -951,14 +743,6 @@ extension IndexCoordinator {
     }
 
     /// Builds a skipped summary for reporting through `reportSkipped`.
-    ///
-    /// Pure builder only; the caller persists and broadcasts it via the
-    /// reporting seam so every skipped run lands in `run_logs` and the
-    /// kind-filtered latest-run lookup observes it.
-    /// - Parameters:
-    ///   - trigger: What would have caused the run.
-    ///   - reason: Why the run did not execute.
-    /// - Returns: A summary carrying the skip state.
     private func skippedSummary(trigger: IndexRunTrigger, reason: String) -> IndexRunSummary {
         let stamp = now()
         return IndexRunSummary(
@@ -980,17 +764,6 @@ extension IndexCoordinator {
     }
 
     /// Reports a skipped run through the reporting seam so it lands in `run_logs`.
-    ///
-    /// Skipped runs never touch stage state, but they still persist one
-    /// `run_logs` row (a start event plus a terminal `skipped` completion
-    /// sharing one event id) and broadcast the matching frames, so the
-    /// kind-filtered latest-run lookup observes every run and the status strip
-    /// agrees with the run notice on the skip reason carried by `detailLine`'s
-    /// `Skipped:` line.
-    /// - Parameters:
-    ///   - trigger: What would have caused the run.
-    ///   - reason: Why the run did not execute.
-    /// - Returns: A summary carrying the skip state.
     private func reportSkipped(trigger: IndexRunTrigger, reason: String) async -> IndexRunSummary {
         // Skipped runs mutate no data, so aggregates stay untouched.
         let summary = skippedSummary(trigger: trigger, reason: reason)
@@ -1021,10 +794,6 @@ extension IndexCoordinator {
 
 extension IndexCoordinator {
     /// Builds the live totals snapshot from the cached counters.
-    ///
-    /// Single owner for the snapshot shape so the concurrent observer and
-    /// the heartbeat cannot drift apart.
-    /// - Returns: Totals carrying the current live counters.
     private func liveSnapshot() -> Totals {
         var snapshot = Totals()
         snapshot.scanned = liveScanned
@@ -1038,11 +807,6 @@ extension IndexCoordinator {
     }
 
     /// Starts the stalled-run heartbeat re-emitting current totals.
-    ///
-    /// A slow fetch or embedding batch still proves liveness on this cadence
-    /// by reusing the coordinator emit path with identical tokens and counts.
-    /// - Parameter startedAt: Instant the run began.
-    /// - Returns: The heartbeat task, cancelled when the run settles.
     private func startHeartbeat(startedAt: Date) -> Task<Void, Never> {
         let intervalNanoseconds = instanceHeartbeatIntervalNanoseconds
         return Task<Void, Never> {
@@ -1061,26 +825,14 @@ extension IndexCoordinator {
     }
 
     /// Emits one heartbeat frame, bypassing the cadence floor.
-    ///
-    /// Reuses the coordinator emit path so the heartbeat carries the same
-    /// elapsed, rate, cumulative counts, current item, and phase/stage tokens
-    /// as any other frame. No-ops when no run is in flight.
-    /// - Parameter startedAt: Instant the run began.
     private func emitHeartbeat(startedAt: Date) async {
         guard running, let phase = livePhase else { return }
         await emit(phase: phase, stage: liveStage, totals: liveSnapshot(), startedAt: startedAt, force: true)
     }
 
-    /// Folds one stage progress frame into the cached live counters.
-    ///
-    /// Stage frames carry per-stage counts, so they are offset by the completed
-    /// totals at stage start to keep the live snapshot cumulative. The cached
-    /// values only move forward so a late or duplicate frame never rewinds the
-    /// snapshot or a heartbeat derived from it.
-    /// - Parameters:
-    ///   - frame: Frame reported by the active stage.
-    ///   - baseScanned: Completed scanned total when the stage started.
-    ///   - baseIndexed: Completed indexed total when the stage started.
+    /// Folds one stage progress frame into the cached live counters. The cached values only move
+    /// forward so a late or duplicate frame never rewinds the snapshot or a heartbeat derived from
+    /// it.
     private func observeStageProgress(_ frame: ToolProgress, baseScanned: Int, baseIndexed: Int) {
         let cumulativeScanned = baseScanned + frame.scanned
         let cumulativeIndexed = baseIndexed + frame.matched
@@ -1095,13 +847,8 @@ extension IndexCoordinator {
         }
     }
 
-    /// Emits a phase frame, honoring the shared 2 Hz cadence unless forced.
-    /// - Parameters:
-    ///   - phase: Phase being reported.
-    ///   - stage: Active source stage, or nil for discovering and committing frames.
-    ///   - totals: Running totals so far.
-    ///   - startedAt: Instant the run began.
-    ///   - force: Whether to bypass the cadence floor.
+    /// Emits a phase frame, honoring the shared 2 Hz cadence unless forced. phase:
+    /// Phase being reported.
     private func emit(phase: IndexPhase, stage: IndexSourceKind? = nil, totals: Totals, startedAt: Date, force: Bool) async {
         let timestamp = now()
         if !force, let lastFrameAt, timestamp.timeIntervalSince(lastFrameAt) < Self.minimumFrameInterval {
@@ -1131,10 +878,8 @@ extension IndexCoordinator {
         ))
     }
 
-    /// Emits the terminal progress frame for a finished run.
-    /// - Parameters:
-    ///   - summary: Completed run summary.
-    ///   - startedAt: Instant the run began.
+    /// Emits the terminal progress frame for a finished run. summary: Completed run
+    /// summary.
     private func emitFinal(summary: IndexRunSummary, startedAt: Date) async {
         let elapsedMs = max(0, Int(summary.finishedAt.timeIntervalSince(startedAt) * 1000))
         await progress(ToolProgress(

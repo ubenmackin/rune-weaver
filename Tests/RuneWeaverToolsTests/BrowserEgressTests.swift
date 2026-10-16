@@ -1,15 +1,4 @@
 // Rune Weaver Tools Tests — Browser egress enforcement through the canonical SSRF guard.
-//
-// Approval-free browsing must not dial loopback, link-local, metadata, or
-// private ranges from prompt-injected content. This suite pins that the
-// interactive tools vet every entry URL through the single-source guard with
-// the configured search, media, and model exemptions before the bridge spawns,
-// and that every bridge-reported redirect and landing URL re-vets the same way
-// so a public start cannot bounce into sensitive ranges. Public-host proofs use
-// public IP literals (no resolver use) so they stay hermetic without touching
-// the process-global DNS stub; hostname DNS vetting pins through the pure
-// resolved-list verdict instead, keeping parallel suites from publishing and
-// clearing canned proof under each other mid-chain.
 
 import Dispatch
 import Foundation
@@ -112,9 +101,6 @@ private enum BrowserEgressSupport {
     }
 
     /// Public literal host proving dialable paths without resolver use.
-    /// A dotted public address settles in the literal stage, so success proofs
-    /// never read the process-global DNS stub and stay immune to parallel
-    /// suites publishing and clearing canned proof mid-chain.
     static let publicLiteralHost = "93.184.216.34"
 
     /// Public literal start URL for entry-plus-redirect proofs.
@@ -152,10 +138,6 @@ private enum BrowserEgressSupport {
     }
 
     /// Builds a verified policy store over a throwaway file path.
-    ///
-    /// `update` commits through the same invariant gate a successful load
-    /// uses, so the supervisor factory sees a verified snapshot without the
-    /// test serializing TOML or touching the operator's real `policy.toml`.
     static func policyStore(_ policy: SecurityPolicy) async -> PolicyStore {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("rw-browser-policy-\(UUID().uuidString).toml")
@@ -165,13 +147,8 @@ private enum BrowserEgressSupport {
     }
 }
 
-/// Runs `body` with the debug DNS resolver bound to `resolver` for this test's
-/// task and its children.
-///
-/// The process-global `ApiSSRFGuard.testDNSResolver` is shared by every suite,
-/// so an ordering assertion binds the task-scoped override instead: only this
-/// test's resolver traffic is observed, and concurrent suites keep their own
-/// canned proof.
+/// Runs `body` with the debug DNS resolver bound to `resolver` for this test's task and its
+/// children.
 private func withTaskScopedDNS(
     _ resolver: @escaping @Sendable (String) -> [String],
     _ body: () async throws -> Void
@@ -182,12 +159,6 @@ private func withTaskScopedDNS(
 }
 
 /// Blocks until `semaphore` signals without parking the cooperative pool.
-///
-/// Swift 6 marks `DispatchSemaphore.wait` unavailable from asynchronous
-/// contexts, so the wait hops to a plain thread and resumes a continuation.
-/// The serialization regression parks one run inside the profile queue with
-/// this before releasing a second caller, so overlap can only come from a
-/// missing serial gate.
 private func waitForSignal(_ semaphore: DispatchSemaphore) async {
     await withCheckedContinuation { continuation in
         DispatchQueue.global().async {
@@ -585,10 +556,9 @@ struct BrowserEgressTests {
 
     @Test
     func `Supervised destinations still vet resolved addresses`() async throws {
-        // A policy-allowed host still needs resolved-address vetting on the
-        // supervised path: the supervisor's SSRF stage judges its own
-        // exemption set, so the canonical guard must re-vet the surviving
-        // destination and refuse a loopback resolution.
+        // A policy-allowed host still needs resolved-address vetting on the supervised path: the
+        // supervisor's SSRF stage judges its own exemption set, so the canonical guard must re-vet
+        // the surviving destination and refuse a loopback resolution.
         let store = await BrowserEgressSupport.policyStore(
             SecurityPolicy(network: NetworkEgressPolicy(mode: .unrestricted))
         )
@@ -726,12 +696,9 @@ struct BrowserEgressTests {
 
     @Test
     func `Concurrent bridge runs serialize on the profile queue`() async throws {
-        // A persistent profile admits one Chromium process at a time, so
-        // overlapping helpers would collide on its SingletonLock and fail a
-        // legitimate call; the serial queue must keep runs from overlapping
-        // even when two callers fire together. The first run parks inside the
-        // queue before the second is even launched, so a queue-less
-        // implementation records a second `-start` before the first `-end`.
+        // A persistent profile admits one Chromium process at a time, so overlapping helpers would
+        // collide on its SingletonLock and fail a legitimate call; the serial queue must keep runs
+        // from overlapping even when two callers fire together.
         let events = OSAllocatedUnfairLock<[String]>(initialState: [])
         let entered = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)

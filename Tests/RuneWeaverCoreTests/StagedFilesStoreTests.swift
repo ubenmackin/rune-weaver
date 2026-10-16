@@ -9,14 +9,6 @@ import Testing
 #endif
 
 /// Performs a blocking semaphore wait off the cooperative pool.
-///
-/// Swift 6 marks `DispatchSemaphore.wait` unavailable from asynchronous
-/// contexts, so tests that must rendezvous with the store's synchronous
-/// dispatch lane hop to a plain thread for the wait and resume a continuation.
-/// - Parameters:
-///   - semaphore: Semaphore to wait on.
-///   - timeout: Optional deadline; nil waits indefinitely.
-/// - Returns: True when the wait completed, false when the deadline expired.
 private func waitForSemaphore(_ semaphore: DispatchSemaphore, timeout: DispatchTime? = nil) async -> Bool {
     await withCheckedContinuation { continuation in
         DispatchQueue.global().async {
@@ -529,10 +521,8 @@ struct StagedFilesStoreTests {
         let decision = Task {
             try await store.resolveLiveReviewAtomically(path: file.path) { _ in
                 decisionEntered.signal()
-                // Hold the serialized lane so the concurrent start must wait
-                // for the whole read → mutation → terminal write sequence.
-                // This closure is synchronous, so the blocking wait is legal
-                // here even though the test itself is async.
+                // Hold the serialized lane so the concurrent start must wait for the whole read →
+                // mutation → terminal write sequence.
                 releaseDecision.wait()
                 return .accepted
             }

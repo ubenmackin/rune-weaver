@@ -1,9 +1,5 @@
 // Rune Weaver Tools Tests — Exhaustive JSON schema validation across every builtin.
 
-// Every builtin must survive strict backends, so this suite pins the full
-// registry (email plus messages plus memory plus files plus web and browser) to strict
-// objects and proves one corrupt schema degrades instead of failing turns.
-
 import Foundation
 @testable import RuneWeaverCore
 @testable import RuneWeaverLLM
@@ -25,10 +21,9 @@ private struct BrokenSchemaTool: Tool, Sendable {
 
 @Suite("Tool Schemas")
 struct ToolSchemaTests {
-    /// Single-sources the production registry so prompt and wire agree on the
-    /// same nineteen tools; isolated memory keeps the suite hermetic and the
-    /// injected policy store keeps the mandatory `api.request` supervisor off
-    /// the operator's real `policy.toml`.
+    /// Single-sources the production registry so prompt and wire agree on the same nineteen tools;
+    /// isolated memory keeps the suite hermetic and the injected policy store keeps the mandatory
+    /// `api.request` supervisor off the operator's real `policy.toml`.
     private func makeFullBuiltinTools(engine: MemoryEngine, policyStore: PolicyStore) async throws -> [any Tool] {
         let networkTools = try await BuiltinToolPlugins.makeTools(policyStore: policyStore)
         return EmailTools.makeTools(emailConfig: ToolsTestSupport.testEmailConfig())

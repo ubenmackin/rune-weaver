@@ -1,17 +1,4 @@
 // Rune Weaver Dashboard — Goal drawer for the chat surface.
-//
-// Purpose: surfaces the goal linked to the active chat session as a right-side
-// panel over the conversation: header (title, status, progress), the plan
-// checklist with manual done/skip moves, the ten most recent audit events, and
-// the three most recent linked runs, closed by a footer that can pause/resume,
-// fire one advancement, or jump to the full Goals surface.
-// Scope: rendering plus its own notice/error copy for one goal id. The detail
-// read, the mutations, and the `goal_updated` refresh live in the shared goal
-// controller so this drawer and the Goals panel cannot drift; wire shapes and
-// durable pursuit stay with the client API module and the engine.
-// Architectural role: mounted by ChatView when the header goal chip opens. It
-// renders every model-authored step note and audit message exclusively through
-// the sanitized MarkdownText path — this file holds no raw HTML injection.
 
 import { useEffect, useState, type RefObject } from "react";
 import {

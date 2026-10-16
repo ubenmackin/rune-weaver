@@ -1,12 +1,4 @@
 // Rune Weaver Dashboard — Memory browser with tabbed recall, facts, and episodic views.
-// Purpose: lets the owner search mixed recall, browse paged facts, and review
-// recent episodic turns with scoped deletes from one surface.
-// Scope: three inner tabs inside the Memory view plus the Index Status pane;
-// listing reads stay windowed, deletes confirm behind modals, and tallies stay
-// fresh without a restart. Policy editing stays in Settings.
-// Architectural role: thin dashboard client over the engine memory routes; the
-// engine owns listing scope and validation while this view owns trimming,
-// blank-disable, timing display, and per-tab isolated state.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -38,10 +30,9 @@ export interface MemoryBrowserProps {
   view?: MemoryTab;
 }
 
-// Resolves the starting tab from the dashboard deep link. Menu-bar entries
-// navigate with a memory fragment carrying an inner suffix, so a fresh load
-// with that suffix opens selected on the named pane. Unknown or bare memory
-// links open on Search so the first paint never strands on an empty choice.
+// Resolves the starting tab from the dashboard deep link. Menu-bar entries navigate with a memory
+// fragment carrying an inner suffix, so a fresh load with that suffix opens selected on the named
+// pane.
 export function getInitialMemoryTab(): MemoryTab {
   if (typeof window === "undefined") return "search";
   const hash = window.location.hash.toLowerCase();
@@ -168,10 +159,9 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     }
   }, []);
 
-  // Tab labels settle from the facts route alone so counts stay fresh
-  // without pulling any listing rows. Runs once on mount; tab entry never
-  // fetches and row data appears only through explicit Search, Show Recent,
-  // or More.
+  // Tab labels settle from the facts route alone so counts stay fresh without pulling any listing
+  // rows. Runs once on mount; tab entry never fetches and row data appears only through explicit
+  // Search, Show Recent, or More.
   useEffect(() => {
     void refreshCounts();
   }, [refreshCounts]);
@@ -268,10 +258,8 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
   const [newFact, setNewFact] = useState("");
   const [factsLoadedOnce, setFactsLoadedOnce] = useState(false);
 
-  // Failures preserve the last settled window beside the error (preserve-
-  // plus-error): a failed read never blanks rows the owner already audited.
-  // The finder pane follows the same contract so neither pane lingers
-  // inconsistently.
+  // Failures preserve the last settled window beside the error (preserve- plus-error): a failed
+  // read never blanks rows the owner already audited.
   async function fetchFactsWindow(nextQuery: string, nextOffset: number, append: boolean) {
     // Captures the attempted query before the fetch so Retry re-runs the
     // failed attempt instead of falling back to recent/"". The recent
@@ -389,10 +377,8 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     setPendingDeleteFact(null);
   }
 
-  // Episodes finder owns its contents query, windowed hits, busy, and error
-  // apart from recall and facts. Contents searches filter mixed recall to
-  // episodic rows while recency previews read the bounded listing, so the pane
-  // never pulls an unbounded list to find or to count.
+  // Episodes finder owns its contents query, windowed hits, busy, and error apart from recall and
+  // facts.
   type FinderItem = MemoryResult | EpisodicEpisode;
   const [finderQuery, setFinderQuery] = useState("");
   const [finderBusy, setFinderBusy] = useState(false);
@@ -460,10 +446,8 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     return (item as EpisodicEpisode).timestamp ?? null;
   }
 
-  // Finds episodic turns by contents: pulls a bounded mixed window then keeps
-  // only episodic rows, so semantic and profile hits never enter the finder.
-  // Failures preserve the last settled window beside the error, matching the
-  // facts pane preserve-plus-error contract.
+  // Finds episodic turns by contents: pulls a bounded mixed window then keeps only episodic rows,
+  // so semantic and profile hits never enter the finder.
   async function runFinderContentsSearch() {
     const trimmed = finderQuery.trim();
     if (!trimmed) return;
@@ -512,10 +496,9 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     }
   }
 
-  // Previews one session from the trimmed session input at call time, so
-  // padding never addresses a blank session. Failures preserve the last
-  // settled window beside the error, matching the facts preserve-plus-error
-  // contract.
+  // Previews one session from the trimmed session input at call time, so padding never addresses a
+  // blank session. Failures preserve the last settled window beside the error, matching the facts
+  // preserve-plus-error contract.
   async function runPreviewSessionFinder() {
     const trimmed = sessionInput.trim();
     if (!trimmed) return;
@@ -564,11 +547,9 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     setFinderLoadedOnce(true);
   }
 
-  // Single-path finder owns its preview plus destructive state beside the
-  // fact-delete pair: per-row deletes target one row by id while the finder
-  // danger row targets the shown set or the whole store behind the same
-  // centered Modal pattern. No tab entry fetch runs here; rows appear only
-  // through explicit Search, Show Recent, Preview, or More.
+  // Single-path finder owns its preview plus destructive state beside the fact-delete pair: per-row
+  // deletes target one row by id while the finder danger row targets the shown set or the whole
+  // store behind the same centered Modal pattern.
   const [pendingSearchEpisodic, setPendingSearchEpisodic] = useState<MemoryResult | null>(
     null,
   );
@@ -646,10 +627,9 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     setPendingEpisodeRow(null);
   }
 
-  // Removes exactly the shown finder set behind one confirm: deletes
-  // sequentially through the single-delete route and stops on the first
-  // failure so a rejected id never masks behind later successes, then reloads
-  // tallies plus the active finder source.
+  // Removes exactly the shown finder set behind one confirm: deletes sequentially through the
+  // single-delete route and stops on the first failure so a rejected id never masks behind later
+  // successes, then reloads tallies plus the active finder source.
   async function confirmDeleteAllShown() {
     if (finderResults.length === 0) return;
     const ids = finderResults
@@ -692,11 +672,8 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     setPendingDeleteAllShown(false);
   }
 
-  // Re-runs the recorded finder source after a fetch failure so the Retry
-  // control recovers without the owner retyping. Sources are captured before
-  // each fetch, so Retry re-runs the failed attempt; it falls back to the
-  // recent window only when no attempt ever ran, matching the post-delete
-  // re-read. Failures preserve the last settled window beside the error.
+  // Re-runs the recorded finder source after a fetch failure so the Retry control recovers without
+  // the owner retyping.
   async function retryFinder() {
     if (finderBusy) return;
     setFinderBusy(true);
@@ -712,10 +689,8 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     }
   }
 
-  // Confirms the whole-store episodic clear behind the same centered Modal as
-  // fact delete. On success the pane reloads the active finder source and
-  // tallies so cleared rows never linger. Clearing applies immediately with
-  // no restart because every read opens the store on demand.
+  // Confirms the whole-store episodic clear behind the same centered Modal as fact delete. On
+  // success the pane reloads the active finder source and tallies so cleared rows never linger.
   async function confirmClearAllEpisodes() {
     setFinderBusy(true);
     setFinderError(null);
@@ -746,10 +721,9 @@ export default function MemoryBrowser({ view }: MemoryBrowserProps = {}) {
     setPendingClearAll(false);
   }
 
-  // Preview alone is blank-disabled by the session input; both danger controls
-  // ignore the session input and gate on busy plus stored rows instead: Delete
-  // All Shown on a busy or empty/unaddressable window, Clear All on busy or
-  // zero stored turns with an honest title.
+  // Preview alone is blank-disabled by the session input; both danger controls ignore the session
+  // input and gate on busy plus stored rows instead: Delete All Shown on a busy or
+  // empty/unaddressable window, Clear All on busy or zero stored turns with an honest title.
   const resolvedEpisodeCount = episodeCount ?? 0;
   const hasEpisodes = resolvedEpisodeCount > 0;
   const trimmedSessionInput = sessionInput.trim();

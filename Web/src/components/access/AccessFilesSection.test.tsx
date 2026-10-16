@@ -1,18 +1,4 @@
 // Rune Weaver Dashboard — Component tests for the access Files write-posture section.
-//
-// Purpose: Pins the relocated write-posture editor: the closed
-// model/staged/live mode selector, the write-path rules table with its locked
-// deny rows, the one changed-only payload that carries both the mode and the
-// rules through PUT /settings, the bounds enforced before the wire, and the
-// live-apply signal that never promises a restart.
-// Scope: The [files] write snapshot load, inline validation copy, posture
-// consequence copy, and the server 400 path. Posture precedence, glob
-// matching, and path canonicalization stay with `WritePathPolicy`; only owner
-// configuration is edited here.
-// Architectural role: Guards the single dashboard surface whose writes steer
-// `files.write`, so a rule edit cannot persist unvalidated text, soften a deny
-// row out of existence, claim a write that never landed, or read as needing a
-// restart.
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -47,11 +33,8 @@ describe("AccessFilesSection", () => {
     clearAuthToken();
   });
 
-  // Routes the settings GET plus the files PUT so each case overrides only the
-  // response it exercises. PUT bodies ride out through the returned array so
-  // assertions read what actually shipped, and the response echoes the merged
-  // request the way the engine partial merge does. The `files*` keys ride flat
-  // on the settings response exactly as `SettingsResponse` declares them.
+  // Routes the settings GET plus the files PUT so each case overrides only the response it
+  // exercises.
   function stubSettings(
     files: Record<string, unknown>,
     onPut?: (body: Record<string, unknown>) => Response

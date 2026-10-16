@@ -51,9 +51,6 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
     }
 
     /// The interactive categories registered with the notification center.
-    /// Internal so the notification-surface test can pin that only the
-    /// scheduler category survives and that no approval category with
-    /// action buttons exists.
     func notificationCategories() -> Set<UNNotificationCategory> {
         let openDashboardAction = UNNotificationAction(
             identifier: NotificationActions.openDashboard,
@@ -75,12 +72,6 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
     }
 
     /// Posts an informational notification for a pending approval request.
-    ///
-    /// The payload names only the tool and its severity: the request
-    /// description and its arguments stay off the notification surface, and the
-    /// notification carries no category and no actions, so no decision can
-    /// originate here. The tap deep-links to the dashboard inbox through the
-    /// existing open path.
     public func postApprovalAttention(_ request: PermissionRequest) async {
         let content = approvalAttentionContent(request)
 
@@ -112,10 +103,7 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
         return content
     }
 
-    /// Body copy for an approval-attention notification. Names only the
-    /// evaluated severity and points at the one place a decision can be made;
-    /// an engine-filed request that has not been enriched yet reports unknown
-    /// rather than inventing a severity.
+    /// Body copy for an approval-attention notification.
     private static func attentionBody(severity: ImpactSeverity?) -> String {
         let label = severity?.rawValue ?? "unknown"
         return "Severity: \(label). Decide in the dashboard Inbox."

@@ -1,5 +1,4 @@
 // Rune Weaver Dashboard — Guided creation wizard for recurring time-based and event-based scheduler jobs.
-// Supports Scheduled (Cron) and multi-source Event Watchers (Email, Messages, Calendar) with custom rules.
 
 import { useState } from "react";
 import {

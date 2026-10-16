@@ -110,12 +110,8 @@ private func twoAccountTestConfig() -> EmailConfig {
 private let personalTestUsername = "you@yourdomain.com"
 private let workTestUsername = "worker@work.example.com"
 
-/// Installs passwords for both accounts in `twoAccountTestConfig()` for the
-/// duration of `body` and restores any pre-existing values afterwards. The
-/// work variable is set directly inside the shared credential gate because
-/// that gate is single-flight: nesting a second scoped credential helper
-/// inside it would deadlock, so the save/restore idiom from
-/// `withTestCredential` is mirrored here instead.
+/// Installs passwords for both accounts in `twoAccountTestConfig()` for the duration of `body` and
+/// restores any pre-existing values afterwards.
 private func withTwoAccountPasswords(_ body: @Sendable () async throws -> Void) async rethrows {
     try await ToolsTestSupport.withTestCredential(envVar: "EMAIL_PERSONAL_PASSWORD", value: "test-secret") {
         let saved: String? = "EMAIL_WORK_PASSWORD".withCString { keyPtr in
@@ -149,19 +145,8 @@ private func cannedHit(id: String, day: Int, hour: Int = 9, mailbox: String = "I
     )
 }
 
-/// Gateway that records every searched username and serves canned per-username
-/// hits keyed by `ResolvedEmailCredentials.username`, so multi-account fan-out
-/// is pinned without a network.
-///
-/// Usernames are unique per configured account, which makes the recording the
-/// only observable proof that every account was actually dialed for
-/// omitted/blank/star selectors. Served hits deliberately carry no account
-/// label: the tool layer owns routing labels, and these tests must catch it if
-/// labeling ever leaks into (or away from) the gateway boundary.
-///
-/// Concurrency: accounts are searched inside a task group, so the recording
-/// lives behind the same unfair-lock box the shared test support uses; every
-/// other field is immutable, which keeps the gateway safely `Sendable`.
+/// Gateway that records every searched username and serves canned per-username hits keyed by
+/// `ResolvedEmailCredentials.username`, so multi-account fan-out is pinned without a network.
 private final class RecordingAccountGateway: EmailIMAPGateway, Sendable {
     /// Canned newest-first pool served per username (nil pool means no hits).
     let hitsByUsername: [String: [EmailSearchHit]]
@@ -171,10 +156,9 @@ private final class RecordingAccountGateway: EmailIMAPGateway, Sendable {
     /// Per-username mailbox listing override; every account reports `["INBOX"]`
     /// unless overridden, mirroring a minimal real server.
     let mailboxesByUsername: [String: [String]]
-    /// Username whose searches are interrupted by a synchronous
-    /// `CancellationError`, simulating a cancellation landing mid-dial. The
-    /// throw is synchronous so the abort is deterministic regardless of
-    /// task-group scheduling.
+    /// Username whose searches are interrupted by a synchronous `CancellationError`, simulating a
+    /// cancellation landing mid-dial. The throw is synchronous so the abort is deterministic
+    /// regardless of task-group scheduling.
     let cancellingUsername: String?
 
     /// Box guarding the username recording across the concurrent account fan-out.
@@ -203,10 +187,8 @@ private final class RecordingAccountGateway: EmailIMAPGateway, Sendable {
         EmailMailboxListing(mailboxes: mailboxesByUsername[credentials.username] ?? ["INBOX"], delimiter: "/")
     }
 
-    /// Records the dialed username, then serves that account's canned pool
-    /// capped to `limit`, or throws the configured gateway failure. The
-    /// cancelling username's search throws `CancellationError` after the dial
-    /// is recorded so cancellation tests still prove the account was reached.
+    /// Records the dialed username, then serves that account's canned pool capped to `limit`, or
+    /// throws the configured gateway failure.
     func search(credentials: ResolvedEmailCredentials, mailbox _: String, query _: String, limit: Int) async throws -> [EmailSearchHit] {
         recorded.withLock { $0.append(credentials.username) }
         if credentials.username == cancellingUsername {
@@ -2332,10 +2314,9 @@ struct EmailToolsTests {
 
     @Test
     func `Shared prelude prefers IPv4 with fallback over stub socket`() throws {
-        // Hermetic ordering proof: a stub getaddrinfo returning IPv6 first
-        // must dial IPv4 first, a refused IPv4 must fall through to IPv6,
-        // IPv6-only hosts must connect unchanged, and mixed lists must keep
-        // relative order inside each family.
+        // Hermetic ordering proof: a stub getaddrinfo returning IPv6 first must dial IPv4 first, a
+        // refused IPv4 must fall through to IPv6, IPv6-only hosts must connect unchanged, and mixed
+        // lists must keep relative order inside each family.
         let probe = #"""
         AF4 = socket.AF_INET
         AF6 = socket.AF_INET6
@@ -2594,13 +2575,9 @@ struct EmailToolsTests {
 
     @Test
     func `Multi-account search aborts the whole call when a gateway child is cancelled`() async throws {
-        // The fan-out is fail-soft for ordinary gateway failures but fail-closed
-        // for cancellation: one cancelled child must abort the entire call rather
-        // than let a healthy sibling's hits degrade the result into a partial
-        // envelope. The gateway throws the cancellation synchronously during the
-        // personal account's search while work holds hits that would otherwise
-        // produce a successful partial, so whichever child finishes first, the
-        // only possible outcome is the aborted call.
+        // The fan-out is fail-soft for ordinary gateway failures but fail-closed for cancellation:
+        // one cancelled child must abort the entire call rather than let a healthy sibling's hits
+        // degrade the result into a partial envelope.
         let gateway = RecordingAccountGateway(
             hitsByUsername: [workTestUsername: [cannedHit(id: "w1", day: 3)]],
             cancellingUsername: personalTestUsername
@@ -2730,10 +2707,9 @@ struct EmailToolsTests {
         // Count always derives from the messages, never from the wire value.
         #expect(envelope.count == envelope.messages.count)
         #expect(envelope.messages[0].account == "")
-        // Real tool output carries the multi-account keys even for one account:
-        // the search tool always passes `accounts:[name]` and `failedAccounts:[]`,
-        // so a decoded legacy envelope re-encoded like current tool output gains
-        // them rather than keeping the pre-multi-account byte shape.
+        // Real tool output carries the multi-account keys even for one account: the search tool
+        // always passes `accounts:[name]` and `failedAccounts:[]`, so a decoded legacy envelope
+        // re-encoded like current tool output gains them rather than keeping the pre-multi-account.
         let encoded = try EmailBridgeParsing.encodeSearchEnvelope(
             account: "personal",
             query: "hi",

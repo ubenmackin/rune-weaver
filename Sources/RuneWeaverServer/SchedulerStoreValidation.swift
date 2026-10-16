@@ -5,11 +5,8 @@ import RuneWeaverCore
 
 // MARK: - Validation Helpers
 
-/// Field and trigger validation split from the actor body.
-///
-/// These operate on values only, so keeping them here leaves the isolated
-/// job state and mutation paths scannable in one place. Members stay on
-/// `SchedulerStore` itself, so no caller changes.
+/// Field and trigger validation split from the actor body. These operate on values only, so keeping
+/// them here leaves the isolated job state and mutation paths scannable in one place.
 extension SchedulerStore {
     /// Validates required job fields plus trigger shape.
     static func validated(
@@ -53,11 +50,9 @@ extension SchedulerStore {
                 throw SchedulerStoreError.invalidField("poll_limit requires poll_account")
             }
         }
-        // Fail-closed bounds live here as well as in the shared config
-        // validation so the REST path rejects without depending on whether a
-        // watcher tick carries a poll account: messages and calendar watchers
-        // reuse the interval without an account, and the calendar window has
-        // no poll shape to carry its range.
+        // Fail-closed bounds live here as well as in the shared config validation so the REST path
+        // rejects without depending on whether a watcher tick carries a poll account: messages and
+        // calendar watchers reuse the interval without an account, and the calendar window has no.
         if let interval = pollIntervalSeconds {
             let minInterval = EmailPollRule.minPollIntervalSeconds
             let maxInterval = EmailPollRule.maxPollIntervalSeconds
@@ -127,10 +122,6 @@ extension SchedulerStore {
     }
 
     /// Validates the per-job tool budget carried on the REST path.
-    ///
-    /// The dashboard clamps these fields client-side, but direct REST callers
-    /// bypass it, so the store rejects out-of-range budgets here before they
-    /// persist or reach the worker. Nil inherits the section default.
     static func validateToolBudget(maxToolIterations: Int?, onToolLimit: String?) throws {
         if let maxToolIterations, !(1 ... 100).contains(maxToolIterations) {
             throw SchedulerStoreError.invalidField("max_tool_iterations must be between 1 and 100 (got \(maxToolIterations))")
@@ -158,10 +149,6 @@ extension SchedulerStore {
 // MARK: - Seeding Helpers
 
 /// Config-seed construction split from the actor body.
-///
-/// Builds the in-memory registry from configuration without touching disk
-/// or isolated state, so the bootstrap path stays scannable in one place.
-/// Members stay on `SchedulerStore` itself, so no caller changes.
 extension SchedulerStore {
     /// Seeds in-memory state from configuration.
     static func seedInMemory(from config: SchedulerConfig) -> [UUID: SchedulerJob] {

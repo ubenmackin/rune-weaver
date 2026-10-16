@@ -1,6 +1,4 @@
 // Rune Weaver Dashboard — Inline and dashboard question picker card.
-// Renders single-select candidate options with a write-in "Other" field
-// and Cancel / Submit actions for `question.ask` tools.
 
 import { useState } from "react";
 import type { ReactNode } from "react";

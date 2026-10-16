@@ -1,14 +1,4 @@
 // Rune Weaver Tools — Execution-time email credential resolution.
-//
-// Email passwords never travel as model-visible tool arguments. Every email
-// tool schema carries only an account nickname plus mailbox, query, or message
-// fields; the password resolves server-side at execution time through
-// `EmailCredentialResolver` (environment first, Keychain second) into a
-// `ResolvedEmailCredentials` value. The IMAP and SMTP subprocess gateways take
-// that resolved value as a typed call parameter, never as decoded tool input,
-// so a model-authored call cannot inject, override, or exfiltrate a credential.
-// The invariant is structural: no email argument struct declares a password
-// field, and the bridges never read credentials from `ToolInput`.
 
 import Foundation
 import RuneWeaverCore

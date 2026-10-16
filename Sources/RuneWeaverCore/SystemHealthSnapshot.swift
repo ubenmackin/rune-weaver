@@ -1,14 +1,4 @@
 // Rune Weaver Core — Verified system-pulse health snapshot.
-//
-// Purpose: fuse subsystem probe completions, the live declarative policy
-// posture, and sovereign ledger ceremonies into one closed green/yellow/red
-// verdict with bounded disclosure-ready reasons behind `GET /health`.
-// Scope: the pulse actor with its probe merge, sovereign latch, watchdog
-// fusion, and live policy read. Probe execution and ceremony scheduling stay
-// with the server.
-// Architectural role: the system of record behind the health contract —
-// recording only, never repairing, with red clearing on a fresh passing
-// snapshot alone.
 
 import CryptoKit
 import Foundation
@@ -16,12 +6,6 @@ import Foundation
 // MARK: - Pulse Status
 
 /// Closed health verdict for the verified system pulse.
-///
-/// Green means every recorded verifier passes, yellow means degraded with
-/// reasons behind a disclosure, and red means fail-closed and parked until
-/// a fresh passing verification. Absence of a recorded failure is not a
-/// failure: verifiers constrain the pulse only once they report, so the
-/// served path records its probes before every snapshot.
 public enum HealthPulseStatus: String, Sendable, Codable, Equatable {
     /// Every recorded verifier passes.
     case green
@@ -32,10 +16,6 @@ public enum HealthPulseStatus: String, Sendable, Codable, Equatable {
 }
 
 /// Collapsed verdict over the recorded subsystem probes.
-///
-/// Nil when no probe has reported yet; otherwise pass means every recorded
-/// probe passed, degraded means a non-critical probe failed, and fail means
-/// a fail-closed probe failed.
 public enum HealthProbeVerdict: String, Sendable, Codable, Equatable {
     /// Every recorded probe passed.
     case pass
@@ -47,13 +27,8 @@ public enum HealthProbeVerdict: String, Sendable, Codable, Equatable {
 
 // MARK: - Probe Outcomes
 
-/// One subsystem probe completion recorded into the pulse.
-///
-/// A probe names a verifier the serving path actually ran (for example the
-/// suite or traversal check). Search reachability is intentionally excluded;
-/// it rides TopNav, never the pulse. A failed probe with
-/// `failClosed` set forces the pulse red; any other failure degrades it to
-/// yellow with the detail behind the disclosure.
+/// One subsystem probe completion recorded into the pulse. Search reachability is intentionally
+/// excluded; it rides TopNav, never the pulse.
 public struct HealthProbeOutcome: Sendable, Equatable, Codable {
     /// Stable verifier name (for example `"suite"`).
     public let name: String
@@ -64,12 +39,8 @@ public struct HealthProbeOutcome: Sendable, Equatable, Codable {
     /// Bounded failure detail for the disclosure, nil when passing or silent.
     public let detail: String?
 
-    /// Creates a probe outcome, normalizing the name and detail.
-    /// - Parameters:
-    ///   - name: Stable verifier name.
-    ///   - passed: Whether the probe passed.
-    ///   - failClosed: Whether a failure here fails closed.
-    ///   - detail: Failure detail, blank degrading to nil.
+    /// Creates a probe outcome, normalizing the name and detail. name: Stable
+    /// verifier name.
     public init(name: String, passed: Bool, failClosed: Bool = false, detail: String? = nil) {
         self.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         self.passed = passed
@@ -81,12 +52,6 @@ public struct HealthProbeOutcome: Sendable, Equatable, Codable {
 // MARK: - Sovereign Ceremony
 
 /// Enclave-signed checkpoint vote attesting a ledger head.
-///
-/// Carries the tip the enclave attests plus the signature and the signing
-/// key identity. Validation here is structural only — present, agreeing
-/// with the recorded head, and non-blank — because cryptographic
-/// verification belongs to the enclave verifier producing the vote. This
-/// recorder only judges whether the presented triple agrees.
 public struct SovereignCheckpointVote: Sendable, Equatable, Codable {
     /// Ledger head the vote attests.
     public let tip: String
@@ -95,11 +60,8 @@ public struct SovereignCheckpointVote: Sendable, Equatable, Codable {
     /// Enclave signing key identity.
     public let signer: String
 
-    /// Creates a checkpoint vote, trimming each field.
-    /// - Parameters:
-    ///   - tip: Ledger head the vote attests.
-    ///   - signature: Enclave signature bytes, hex encoded.
-    ///   - signer: Enclave signing key identity.
+    /// Creates a checkpoint vote, trimming each field. tip: Ledger head the vote
+    /// attests.
     public init(tip: String, signature: String, signer: String) {
         self.tip = tip.trimmingCharacters(in: .whitespacesAndNewlines)
         self.signature = signature.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -108,8 +70,6 @@ public struct SovereignCheckpointVote: Sendable, Equatable, Codable {
 
     /// Whether this vote attests the given normalized ledger head.
     /// - Parameter tip: Normalized head to check against.
-    /// - Returns: True when the vote names that head with a non-blank
-    ///   signature and signer.
     public func attests(tip: String) -> Bool {
         guard HealthSnapshotValue.normalizedTip(self.tip) == tip else { return false }
         return !signature.isEmpty && !signer.isEmpty
@@ -117,13 +77,6 @@ public struct SovereignCheckpointVote: Sendable, Equatable, Codable {
 }
 
 /// One recorded sovereign verification ceremony.
-///
-/// Compares the primary ledger head against the sovereign copy head plus
-/// the enclave-signed checkpoint vote. `matched` is nil when the ceremony
-/// carried no comparable material — missing material is indeterminate, not
-/// a failed check — and non-nil once both heads were present to compare.
-/// `decision` preserves the ceremony's tiebreak naming which side the vote
-/// attested, so a parked mismatch keeps its adjudication for the revert path.
 public struct SovereignCeremony: Sendable, Equatable, Codable {
     /// Observed primary ledger head, nil when none was presented.
     public let primaryTip: String?
@@ -138,14 +91,7 @@ public struct SovereignCeremony: Sendable, Equatable, Codable {
     /// When the ceremony was recorded.
     public let recordedAt: Date
 
-    /// Creates a ceremony record.
-    /// - Parameters:
-    ///   - primaryTip: Observed primary ledger head.
-    ///   - sovereignTip: Attested sovereign copy head.
-    ///   - vote: Checkpoint vote presented with the ceremony.
-    ///   - matched: Parity outcome.
-    ///   - decision: How the signed vote resolved a disagreement.
-    ///   - recordedAt: When the ceremony was recorded.
+    /// Creates a ceremony record. primaryTip: Observed primary ledger head.
     public init(
         primaryTip: String?,
         sovereignTip: String?,
@@ -166,11 +112,6 @@ public struct SovereignCeremony: Sendable, Equatable, Codable {
 // MARK: - Snapshot Value
 
 /// Verified system-pulse value served behind `GET /health`.
-///
-/// Bundles the closed status with the evidence behind it: the observed
-/// ledger head and when it was last explicitly verified, the live policy
-/// hash and whether the policy verifies, the collapsed probe verdict, and
-/// the bounded reasons backing a non-green status.
 public struct HealthSnapshotValue: Sendable, Equatable, Codable {
     /// Maximum accepted tip/hash length: 64 hex chars for a SHA-256 digest
     /// with headroom to 128 for longer digests. Longer input is rejected,
@@ -203,16 +144,7 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
     /// Bounded info notes that never move the dot.
     public let infoNotes: [String]
 
-    /// Creates a snapshot value.
-    /// - Parameters:
-    ///   - status: Closed pulse status.
-    ///   - ledgerTip: Observed primary ledger head digest.
-    ///   - ledgerVerifiedAt: Last explicit ledger verification instant.
-    ///   - policyHash: SHA-256 of the canonical verified policy TOML.
-    ///   - policyVerified: Whether the live policy verifies.
-    ///   - probeVerdict: Collapsed probe verdict.
-    ///   - degradedReasons: Backing reasons for a non-green status.
-    ///   - infoNotes: Info notes that never move the dot.
+    /// Creates a snapshot value. status: Closed pulse status.
     public init(
         status: HealthPulseStatus,
         ledgerTip: String? = nil,
@@ -270,11 +202,9 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
         try container.encode(infoNotes, forKey: .infoNotes)
     }
 
-    /// Normalizes a tip or hash digest: trims, lowercases, and accepts hex
-    /// of up to `maxTipLength`. Blank, non-hex, or over-long input is
-    /// rejected to nil instead of stored, so empty text never becomes a tip.
-    /// - Parameter value: Raw digest candidate.
-    /// - Returns: Normalized digest, or nil when rejected.
+    /// Normalizes a tip or hash digest: trims, lowercases, and accepts hex of up to `maxTipLength`.
+    /// Blank, non-hex, or over-long input is rejected to nil instead of stored, so empty text never
+    /// becomes a tip.
     public static func normalizedTip(_ value: String?) -> String? {
         let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !trimmed.isEmpty, trimmed.count <= maxTipLength else { return nil }
@@ -282,20 +212,17 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
         return trimmed
     }
 
-    /// Normalizes one reason fragment: trims and caps at `maxReasonLength`.
-    /// Blank degrades to nil so empty text never becomes a reason.
-    /// - Parameter value: Raw reason fragment.
-    /// - Returns: Bounded reason, or nil when blank.
+    /// Normalizes one reason fragment: trims and caps at `maxReasonLength`. Blank degrades to nil
+    /// so empty text never becomes a reason.
     public static func normalizedDetail(_ value: String?) -> String? {
         let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         return String(trimmed.prefix(maxReasonLength))
     }
 
-    /// Normalizes a reason list: drops blanks, caps each entry, keeps the
-    /// first `maxDegradedReasons` so the disclosure stays bounded.
+    /// Normalizes a reason list: drops blanks, caps each entry, keeps the first
+    /// `maxDegradedReasons` so the disclosure stays bounded.
     /// - Parameter values: Raw reasons.
-    /// - Returns: Bounded reasons, empty when none survive.
     public static func normalizedReasons(_ values: [String]?) -> [String] {
         guard let values else { return [] }
         var normalized: [String] = []
@@ -326,10 +253,8 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
         return normalized
     }
 
-    /// Normalizes a collapsed probe verdict against its closed vocabulary.
-    /// Drifted values degrade to nil instead of failing the probe.
-    /// - Parameter value: Raw verdict candidate.
-    /// - Returns: Known verdict, or nil when blank or unknown.
+    /// Normalizes a collapsed probe verdict against its closed vocabulary. Drifted values degrade
+    /// to nil instead of failing the probe.
     public static func normalizedProbeVerdict(_ value: String?) -> HealthProbeVerdict? {
         let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return HealthProbeVerdict(rawValue: trimmed)
@@ -339,14 +264,6 @@ public struct HealthSnapshotValue: Sendable, Equatable, Codable {
 // MARK: - Snapshot Actor
 
 /// Actor-backed verified system-pulse snapshot.
-///
-/// Holds probe completions, the last sovereign ceremony, and the explicit
-/// verification stamp, and fuses them with the live policy posture into one
-/// closed verdict per `snapshot()`. Probe outcomes merge by name so
-/// concurrent verifiers never clobber each other, while each verifier
-/// refreshes its own entries — a recovered probe clears its failure on the
-/// next passing cycle, but a parked sovereign mismatch clears only on a
-/// freshly recorded passing ceremony, never on a probe result.
 public actor SystemHealthSnapshot {
     /// Reason served while a sovereign mismatch parks the pulse red. Names
     /// the gate and the remedy without tip material, since reasons travel on
@@ -394,20 +311,8 @@ public actor SystemHealthSnapshot {
         self.policyStore = policyStore
     }
 
-    /// Records one sovereign verification ceremony.
-    ///
-    /// A ceremony presenting both heads compares them, additionally
-    /// requiring a presented vote to attest the recorded head; disagreement
-    /// latches the pulse red, agreement records the baseline and clears a
-    /// parked mismatch. A ceremony missing either head is indeterminate and
-    /// leaves the park untouched — missing material is not a failed check.
-    /// The observed primary head sticks even on an indeterminate ceremony,
-    /// while blank tips never clear it.
-    /// - Parameters:
-    ///   - primaryTip: Observed primary ledger head.
-    ///   - sovereignTip: Attested sovereign copy head.
-    ///   - checkpointVote: Enclave-signed vote presented with the ceremony.
-    ///   - decision: Tiebreak decision to preserve, nil when unadjudicated.
+    /// Records one sovereign verification ceremony. A ceremony missing either head is indeterminate
+    /// and leaves the park untouched — missing material is not a failed check.
     public func recordSovereign(
         primaryTip: String?,
         sovereignTip: String?,
@@ -446,20 +351,9 @@ public actor SystemHealthSnapshot {
         parkedMismatch = !matched
     }
 
-    /// Records one sovereign verification verdict.
-    ///
-    /// A passing verdict — `verified` or the explicit `empty` — records
-    /// agreement and clears a parked mismatch; a `mismatch` verdict parks the
-    /// pulse red until a fresh passing verdict arrives, even when the verdict
-    /// carries no sovereign material to compare. A mismatch verdict
-    /// always presents differing heads, because a chain hash covers every
-    /// preceding entry, so a diverging copy or vote drifts its terminal tip;
-    /// that head difference is exactly what parks the pulse. The verification
-    /// instant stamps only on a passing verdict: advancing it on a mismatch
-    /// would read as corroboration for history the ceremony just refused.
-    /// The verdict's tiebreak decision is preserved on the recorded ceremony
-    /// so an approved revert targets the attested side.
-    /// - Parameter verdict: Ceremony verdict to record.
+    /// Records one sovereign verification verdict. The verification instant stamps only on a
+    /// passing verdict: advancing it on a mismatch would read as corroboration for history the
+    /// ceremony just refused.
     public func recordSovereign(_ verdict: SovereignVerdict) {
         switch verdict.outcome {
         case .verified, .empty:
@@ -471,10 +365,8 @@ public actor SystemHealthSnapshot {
             )
             markVerifiedNow()
         case .mismatch:
-            // Present the differing heads so the park latches, and never
-            // stamp the verification instant for refused history. A mismatch
-            // without material still latches: no comparable heads is itself
-            // a fail-closed refusal, not an indeterminate ceremony.
+            // Present the differing heads so the park latches, and never stamp the verification
+            // instant for refused history.
             let sovereign = verdict.sovereignTip ?? verdict.checkpointTip
             guard sovereign != nil else {
                 parkedMismatch = true
@@ -490,23 +382,12 @@ public actor SystemHealthSnapshot {
     }
 
     /// Records an unverifiable sovereign ceremony as a parked mismatch.
-    ///
-    /// A throwing ceremony — unreadable, forged, or stale checkpoint or copy —
-    /// concludes nothing, so keeping the prior pulse would read a possibly
-    /// green posture over refused material. Latching here keeps the fail-closed
-    /// contract: stale past the bound fails and a mismatch parks red.
     public func recordSovereignFailure() {
         parkedMismatch = true
     }
 
-    /// Records the live watchdog health into the pulse.
-    ///
-    /// Red parks fail-closed with the brake reason; green records quiet.
-    /// Gestation never moves the dot: a gestating green carries its countdown
-    /// through `recordWatchdogGestation(_:)` into info notes instead. Called on
-    /// the serving cadence — every health probe and every periodic verifier
-    /// run — so the pulse always fuses the latest brake posture.
-    /// - Parameter health: Current watchdog health.
+    /// Records the live watchdog health into the pulse. Red parks fail-closed with the brake
+    /// reason; green records quiet.
     public func recordWatchdogHealth(_ health: WatchdogHealth) {
         watchdogHealth = health
     }
@@ -523,11 +404,6 @@ public actor SystemHealthSnapshot {
     }
 
     /// Records subsystem probe completions, merging by verifier name.
-    ///
-    /// Blank names are rejected. Replacing per name (instead of wholesale)
-    /// keeps one verifier's cycle from clobbering another's, while a
-    /// verifier's own newer outcome always supersedes its older one.
-    /// - Parameter outcomes: Completed probe outcomes.
     public func recordProbes(_ outcomes: [HealthProbeOutcome]) {
         for outcome in outcomes {
             guard !outcome.name.isEmpty else { continue }
@@ -536,17 +412,6 @@ public actor SystemHealthSnapshot {
     }
 
     /// Records one periodic security probe report into the pulse.
-    ///
-    /// The suite runs on the periodic cadence — serve boot, policy writes,
-    /// the nightly tick, and on-demand re-check applies — never per tool
-    /// call, so each of its outcomes merges by verifier name exactly like
-    /// the health route's own probe: a recovered verifier clears its
-    /// failure on the next passing cycle, and the dashboard clears a red
-    /// pulse only on that fresh passing snapshot, never on a timer. An
-    /// empty report is rejected fail-closed: a report carrying no verifiers
-    /// certifies nothing, so it records one fail-closed suite entry instead
-    /// of letting a blank report pass as healthy.
-    /// - Parameter report: Completed periodic probe report.
     public func recordProbes(_ report: ProbeReport) {
         guard !report.probes.isEmpty else {
             probes["suite"] = HealthProbeOutcome(
@@ -561,23 +426,11 @@ public actor SystemHealthSnapshot {
     }
 
     /// Stamps an explicit ledger verification at this instant.
-    ///
-    /// Called when an explicit verification flow completes — never on a
-    /// timer or a plain probe — so `ledgerVerifiedAt` proves a verification
-    /// happened instead of merely echoing the last poll.
     public func markVerifiedNow() {
         verifiedAt = Date()
     }
 
     /// Builds the current verified snapshot value.
-    ///
-    /// Reads the live policy posture through the shared store, so policy
-    /// writes surface here with no restart plus no watcher. Red wins over
-    /// yellow: a parked mismatch, an engaged brake, live policy violations,
-    /// or a failed fail-closed probe each fail closed, while any other probe
-    /// failure merely degrades. Gestation plus idle search never move the dot:
-    /// gestation countdown rides info notes while the status stays green.
-    /// - Returns: The verified snapshot value.
     public func snapshot() async -> HealthSnapshotValue {
         var reasons: [String] = []
         var notes: [String] = []

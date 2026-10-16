@@ -117,12 +117,6 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
     }
 
     /// Validates the optional fire time and returns the minute-aligned instant to store.
-    ///
-    /// Bounds and alignment are shared with `messages.send` and the scheduler
-    /// store through ``ScheduledSendTimeValidation``, so a requested schedule can
-    /// never disagree with the validation its deterministic replay runs.
-    /// - Parameter now: Reference instant the bounds are measured from.
-    /// - Returns: The validated fire time, or nil when the send is immediate.
     public func validateScheduleAt(now: Date = Date()) throws -> Date? {
         guard let scheduleAt else { return nil }
         return try ScheduledSendTimeValidation.validateScheduleAt(scheduleAt, now: now)
@@ -444,13 +438,8 @@ public enum EmailSendValidation: Sendable {
     }
 }
 
-/// Fail-closed validation for delayed-send fire times, shared by `email.send`,
-/// `messages.send`, and the scheduler's scheduled-send store.
-///
-/// One implementation owns the wire bounds so a requested schedule and the
-/// deterministic replay that later fires it can never disagree: the tool
-/// validates at admission, the store validates at booking, and the fire worker
-/// sends exactly the bytes the validated fire time approved.
+/// Fail-closed validation for delayed-send fire times, shared by `email.send`, `messages.send`, and
+/// the scheduler's scheduled-send store.
 public enum ScheduledSendTimeValidation: Sendable {
     /// Earliest lead time a fire time may carry, so a booked send is never
     /// effectively immediate and the owner always has time to cancel.
@@ -458,17 +447,9 @@ public enum ScheduledSendTimeValidation: Sendable {
     /// Latest horizon a fire time may carry, bounding how far out a send parks.
     public static let maximumHorizonSeconds: TimeInterval = 365 * 24 * 60 * 60
 
-    /// Validates one requested fire time and returns the minute-aligned instant to store.
-    ///
-    /// The scheduling surface picks a date plus a time, so fire times carry
-    /// minute granularity and sub-minute precision is truncated: the stored
-    /// instant is exactly what the owner previewed. Bounds fail closed — a past
-    /// or near-term date would fire before review, and a far-future date would
+    /// Validates one requested fire time and returns the minute-aligned instant to store. Bounds
+    /// fail closed — a past or near-term date would fire before review, and a far-future date would
     /// park a send past the horizon.
-    /// - Parameters:
-    ///   - scheduleAt: Requested fire time.
-    ///   - now: Reference instant the bounds are measured from.
-    /// - Returns: The validated fire time aligned to the minute.
     public static func validateScheduleAt(_ scheduleAt: Date, now: Date = Date()) throws -> Date {
         guard scheduleAt.timeIntervalSince(now) >= minimumLeadSeconds else {
             throw EmailIMAPError.validationFailed("Invalid scheduleAt: the fire time must be at least 5 minutes in the future")
@@ -483,16 +464,6 @@ public enum ScheduledSendTimeValidation: Sendable {
     }
 
     /// Decodes a fire time from wire JSON, accepting an epoch-seconds number or an ISO-8601 string.
-    ///
-    /// The two shapes cover both callers of the wire contract: engines mint
-    /// epoch numbers while the scheduling surface sends the ISO-8601 string its
-    /// timezone picker composes. A blank string reads as omitted so a cleared
-    /// field decodes as no schedule; any other non-date shape throws rather
-    /// than decoding as a silently dropped fire time.
-    /// - Parameters:
-    ///   - container: Keyed container holding the arguments.
-    ///   - key: Key carrying the fire time.
-    /// - Returns: Decoded fire time, or nil when absent, null, or blank.
     public static func decodeScheduleAt<K: CodingKey>(
         from container: KeyedDecodingContainer<K>,
         forKey key: K
@@ -539,9 +510,6 @@ public struct EmailSendTool: Tool, Sendable {
             + "attachments must be workspace-guarded absolute paths, and replyToId threads a reply. "
             + "Returns the sender, recipients, subject, body size, and Sent status."
     /// Function-calling contract for the send envelope plus threading and attachments.
-    /// Schema advertises only canonical keys; decoder tolerance for retired
-    /// spellings stays out of the schema as intentional compatibility so strict
-    /// validators and the decoder agree on what is advertised.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
@@ -1034,20 +1002,15 @@ extension EmailSendTool {
         return successEnvelope(envelope, callID: callID)
     }
 
-    /// Books a validated scheduled send, or previews the booking under dry-run.
-    ///
-    /// Booking stores the exact approved bytes without touching the network, so
-    /// no credential resolution runs here; the fire worker replays the stored
-    /// bytes through this same tool with re-validation. Booking and validation
-    /// errors stay caller-visible as failures, never silent.
+    /// Books a validated scheduled send, or previews the booking under dry-run. Booking and
+    /// validation errors stay caller-visible as failures, never silent.
     private func bookedSendOutput(target: EmailSendTarget, fireAt: Date, callID: String, context: ToolContext) async -> ToolOutput {
         guard let booking else {
             return .failure(Self.bookingUnavailableNote, callID: callID)
         }
-        // The store carries one recipient string plus text/HTML bodies only,
-        // so shapes the replay cannot reproduce fail closed here rather than
-        // booking a success that fires different bytes: attachments, CC/BCC,
-        // multi-to, and reply threading each refuse with their own reason.
+        // The store carries one recipient string plus text/HTML bodies only, so shapes the replay
+        // cannot reproduce fail closed here rather than booking a success that fires different
+        // bytes: attachments, CC/BCC, multi-to, and reply threading each refuse with their own.
         guard target.attachmentPaths.isEmpty else {
             return .failure(
                 "Scheduled sends do not support attachments: remove 'attachmentPaths' or send immediately without scheduleAt.",

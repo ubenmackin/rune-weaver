@@ -1,10 +1,4 @@
 // Rune Weaver Core — Text decoding and normalization for document extraction.
-//
-// Holds the shared text layer for `DocumentTextExtractor`: byte decoding with
-// encoding fallbacks, whitespace normalization, HTML stripping, Office XML
-// paragraph flattening, and worksheet row flattening over the shared string
-// table. Format dispatch and chunking stay in `DocumentTextExtractor.swift`
-// while entity decoding lives beside it.
 
 import Foundation
 
@@ -26,13 +20,8 @@ extension DocumentTextExtractor {
         return String(data: data, encoding: .isoLatin1)
     }
 
-    /// Folds line endings and trims blank or space-padded lines.
-    ///
-    /// Tabs are preserved because spreadsheet cells are flattened with tab
-    /// separators; only runs of spaces collapse. Consecutive blank lines collapse
-    /// to one and leading/trailing blanks drop so chunk packing sees real text.
-    /// - Parameter raw: Decoded or tag-stripped text.
-    /// - Returns: Normalized text, or nil when nothing but whitespace remains.
+    /// Folds line endings and trims blank or space-padded lines. Tabs are preserved because
+    /// spreadsheet cells are flattened with tab separators; only runs of spaces collapse.
     static func normalizedExtractedText(_ raw: String) -> String? {
         let lines = NormalizedText.splitLines(raw)
         var output: [String] = []
@@ -120,9 +109,7 @@ extension DocumentTextExtractor {
 
     /// Flattens worksheet rows into tab-separated lines with resolved shared strings.
     /// - Parameters:
-    ///   - xml: One `xl/worksheets/sheetN.xml` document.
-    ///   - sharedStrings: Shared string table in index order.
-    /// - Returns: Row-aware text, or nil when no rows carry values.
+    /// - xml: One `xl/worksheets/sheetN.xml` document.
     static func textFromWorksheetXML(_ xml: String, sharedStrings: [String]) -> String? {
         let rows = allMatches("<row[^>]*>(.*?)</row>", in: xml)
         guard !rows.isEmpty else { return nil }

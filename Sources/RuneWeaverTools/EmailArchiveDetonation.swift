@@ -1,13 +1,4 @@
 // Rune Weaver Tools — Ephemeral zero-mount container detonation for email archives.
-//
-// Purpose: own archive inspection in forced zero-mount ephemeral runs, keeping
-// untrusted archive bytes off the host and off every shared mount.
-// Scope: the detonation lifecycle (shared-ledger admission, zero-volume spawn,
-// stdin exec, manifest parse, immediate removal plus best-effort reap), the
-// guest scripts, and the result shape.
-// Architectural role: single owner for archive detonation beside the other
-// Tools sandbox helpers; spawning rides the shared container builder and the
-// shared ephemeral ledger owns admission.
 
 import Foundation
 import RuneWeaverCore
@@ -40,13 +31,6 @@ public protocol EmailArchiveDetonator: Sendable {
 }
 
 /// Ephemeral zero-mount detonator backed by the shared container builder.
-///
-/// Every run admits through the shared ephemeral ledger before spawning, then
-/// creates a zero-volume container with the pinned image, a read-only rootfs
-/// over a tmpfs `tmp`, no DNS, and the configured memory cap. Archive bytes
-/// enter by stdin and only the manifest plus one extracted entry cross back.
-/// Detonation containers share the strict name prefix, so the shared strict
-/// sweep reclaims crash orphans the immediate removal missed.
 public struct LiveEmailArchiveDetonator: EmailArchiveDetonator, Sendable {
     /// Pinned OCI image for detonation guests; never config-driven.
     public static let detonationImage = "alpine:3.22"
@@ -172,10 +156,6 @@ public struct LiveEmailArchiveDetonator: EmailArchiveDetonator, Sendable {
     private static let detonationWorkdir = "/tmp"
 
     /// Guest exec arguments piping stdin into the pinned image's shell.
-    ///
-    /// The pinned alpine image ships no bash, so the exec runs busybox `sh`;
-    /// `-i` keeps stdin open for the payload cat, and the trailing argv entry
-    /// binds as `$1` for the extract script.
     static func detonationExecArguments(name: String, script: String, entry: String? = nil) -> [String] {
         var args = ["exec", "-i", name, "/bin/sh", "-c", script]
         if let entry {

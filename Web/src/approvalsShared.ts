@@ -1,15 +1,4 @@
 // Rune Weaver Dashboard — Shared decision-surface approvals vocabulary.
-//
-// Purpose: single web module for the duration options plus target derivation
-// every decision surface renders, so the chat inline banner, the dashboard
-// quick-action card, and the inbox card offer identical tiers and name
-// identical targets instead of drifting per call site.
-// Scope: the egress duration tiers, the per-request duration picker, the
-// request-target derivation with its legacy argument fallback, and the
-// shared truncation bound. Scope editing stays in the inbox; standing-rule
-// scope editing lives in Settings → Access.
-// Architectural role: consumed by all three decision surfaces and their tests;
-// the engine derivation stays authoritative and this module only previews it.
 
 import {
   trustDurationOptions,
@@ -77,10 +66,9 @@ function trimmedArg(record: Record<string, unknown>, key: string): string | null
   return trimmed ? trimmed : null;
 }
 
-// Best-effort preview of the request's own target. The stored displayTarget
-// wins when present; older payloads predating the field fall back to the
-// egress host first, then the bash command, then the legacy key scan.
-// Unreadable arguments degrade to null rather than a misleading preview.
+// Best-effort preview of the request's own target. The stored displayTarget wins when present;
+// older payloads predating the field fall back to the egress host first, then the bash command, then
+// the legacy key scan.
 export function deriveRequestTarget(
   request: PermissionRequest,
 ): string | null {

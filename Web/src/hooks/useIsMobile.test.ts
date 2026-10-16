@@ -1,11 +1,4 @@
-// Shared mobile breakpoint hook matrix for the dashboard shell.
-//
-// Covers the single breakpoint truth shared by the history drawer, the top
-// navigation, and the bottom tab bar: the hook reports handheld widths via a
-// max-width query so styles and components agree on which viewports count as
-// mobile. Cases pin the 640px ceiling, the 640 versus 641 boundary, handheld
-// and desktop viewports, fail-closed behavior without a viewport, live sync,
-// listener cleanup, and the legacy listener path.
+// Rune Weaver Dashboard — Shared mobile breakpoint hook matrix for the dashboard shell.
 
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

@@ -1,8 +1,4 @@
 // Rune Weaver Core Tests — Credential binding target-bound verification.
-//
-// Pins the contract that `rwsecret:<key>` surrogates are bound to authorized
-// destinations via policy.toml. A binding mismatch fails closed before the
-// Keychain is ever accessed.
 
 import Foundation
 @testable import RuneWeaverCore

@@ -1242,12 +1242,9 @@ struct ToolStateStoreTests {
 
 @Suite("Access Rules Routes")
 struct AccessRulesRouteTests {
-    /// Finds the rule a descriptor's trust currently lives under, so tests
-    /// address rows by the target the owner approved rather than by identity.
-    /// - Parameters:
-    ///   - descriptor: Action the rule was minted for.
-    ///   - gate: Gate whose live rules are searched.
-    /// - Returns: The exact-target allow rule, or nil when none is live.
+    /// Finds the rule a descriptor's trust currently lives under, so tests address rows by the
+    /// target the owner approved rather than by identity. descriptor: Action the
+    /// rule was minted for.
     private func rule(for descriptor: ActionDescriptor, gate: PermissionGate) async -> AccessRule? {
         await gate.activeRules().first { rule in
             rule.toolName == descriptor.toolName && rule.scope == .exactTarget(descriptor.target)
@@ -1272,10 +1269,9 @@ struct AccessRulesRouteTests {
         return .noContent
     }
 
-    /// Mirrors the POST /approvals/rules/:id/widen handler mapping so the
-    /// tri-state contract stays pinned: a promoted rule is 204, an unknown or
-    /// expired id is 404, and a live rule whose tool has no tool-wide scope is
-    /// the honest conflict rather than "Unknown rule".
+    /// Mirrors the POST /approvals/rules/:id/widen handler mapping so the tri-state contract stays
+    /// pinned: a promoted rule is 204, an unknown or expired id is 404, and a live rule whose tool
+    /// has no tool-wide scope is the honest conflict rather than "Unknown rule".
     private func widenRuleStatus(id: UUID, gate: PermissionGate) async throws -> HTTPStatus {
         switch await gate.widenGrant(id: id) {
         case .widened:
@@ -1287,10 +1283,9 @@ struct AccessRulesRouteTests {
         }
     }
 
-    /// Mirrors the PATCH /approvals/rules/:id handler mapping so the
-    /// tri-state contract stays pinned: a re-armed rule is 204, an unknown or
-    /// expired id is 404, and a live rule carrying a non-durable tier is the
-    /// honest 400 rather than "Unknown rule".
+    /// Mirrors the PATCH /approvals/rules/:id handler mapping so the tri-state contract stays
+    /// pinned: a re-armed rule is 204, an unknown or expired id is 404, and a live rule carrying a
+    /// non-durable tier is the honest 400 rather than "Unknown rule".
     private func rearmRuleStatus(id: UUID, duration: TrustDuration, gate: PermissionGate) async throws -> HTTPStatus {
         switch await gate.rearmGrant(id: id, duration: duration) {
         case .rearmed:
@@ -2005,10 +2000,9 @@ struct AuthenticatedSurfaceTests {
             let (bundle, directory) = try makeSurfaceBundle()
             defer { try? FileManager.default.removeItem(at: directory) }
             let middleware = ServerAuthMiddleware(auth: makeSurfaceAuth(), dashboardBundle: bundle)
-            // A browser attaches no bearer to a top-level navigation or a
-            // subresource fetch, so the entry point and every real static bundle
-            // file must forward unauthenticated; otherwise the UI can never boot
-            // to render its own owner-token gate.
+            // A browser attaches no bearer to a top-level navigation or a subresource fetch, so the
+            // entry point and every real static bundle file must forward unauthenticated; otherwise
+            // the UI can never boot to render its own owner-token gate.
             let navigationAndAssets = [
                 "/",
                 "/index.html",
@@ -2030,10 +2024,9 @@ struct AuthenticatedSurfaceTests {
                 #expect(response.headers.first(name: "X-Probe-Authenticated") == "false")
             }
 
-            // A public-looking extension alone must not bypass the gate: a
-            // registered data route such as `/plugins/<id>` takes a free-form
-            // identifier, so these paths are data requests even while a bundle
-            // is being served and must answer the uniform 401.
+            // A public-looking extension alone must not bypass the gate: a registered data route
+            // such as `/plugins/<id>` takes a free-form identifier, so these paths are data requests
+            // even while a bundle is being served and must answer the uniform 401.
             for path in ["/plugins/index.html", "/plugins/report.json", "/plugins/theme.js", "/data.json"] {
                 let crafted = try await middleware.respond(
                     to: surfaceRequest(app: app, path: path),
@@ -2084,14 +2077,8 @@ private actor DetachmentRecordingSocket: WSConnectionSocket {
     func close(code _: WebSocketErrorCode) async throws {}
 }
 
-/// Provider holding the turn open with a pause so the test can seal
-/// the socket while inference is still in flight.
-///
-/// The pause lives inside the stream producer as an async sleep so the
-/// orchestrator suspends instead of blocking its cooperative-pool thread;
-/// a synchronous sleep here would pin that thread while every WebSocket
-/// suite runs in parallel and starve the continuations the turn needs to
-/// settle.
+/// Provider holding the turn open with a pause so the test can seal the socket while inference is
+/// still in flight.
 private struct DetachmentDelayedProvider: LLMProvider, Sendable {
     /// Canned model metadata.
     let modelInfo = ModelInfo(name: "detachment-delayed", provider: "stub", contextLength: 2048)
@@ -2128,13 +2115,8 @@ private struct DetachmentDelayedProvider: LLMProvider, Sendable {
     }
 }
 
-/// Provider delaying only turns carrying a marker so one session can hold a slow
-/// turn while its replacement answers immediately.
-///
-/// The slow pause lives inside the stream producer as an async sleep so the
-/// orchestrator suspends instead of blocking its cooperative-pool thread;
-/// a synchronous sleep would pin that thread while the replacement turn
-/// waits behind the same actor and starve the settlement the test polls for.
+/// Provider delaying only turns carrying a marker so one session can hold a slow turn while its
+/// replacement answers immediately.
 private struct DetachmentBranchingProvider: LLMProvider, Sendable {
     /// Canned model metadata.
     let modelInfo = ModelInfo(name: "detachment-branching", provider: "stub", contextLength: 2048)

@@ -1,13 +1,5 @@
 // Rune Weaver Tests — Owner bearer auth: bind policy, token lifecycle, and the
 // middleware trust boundary.
-//
-// Rune Weaver is single-owner by design, so these tests pin the fail-closed
-// contract that protects a non-loopback bind: a LAN address never serves unless
-// a verifier resolved, every rejected request answers identically without
-// echoing the credential, throttling only ever touches a non-loopback peer, and
-// rotation stays reachable only through the gate it replaces. Requests are
-// driven in-process through the middleware and a local responder so no socket is
-// bound and no real token store is touched beyond an isolated temp directory.
 
 import Foundation
 import NIOCore
@@ -279,10 +271,6 @@ struct ServerAuthTokenLifecycleTests {
     @Test
     func `Verify and capture never stamps a retired token with the new generation`() async throws {
         // The token comparison and the generation read must share one actor hop.
-        // If they were separate, a rotation landing between them would return the
-        // new generation for a request authenticated with the retired token, and
-        // a socket stamped with it would pass the hub watermark and the per-frame
-        // check instead of being refused.
         let (auth, directory, _) = try makeAuth(token: "first-token")
         defer { try? FileManager.default.removeItem(at: directory) }
 
@@ -297,10 +285,7 @@ struct ServerAuthTokenLifecycleTests {
         #expect(await auth.verifyAndCaptureGeneration("stale-token") == nil)
         #expect(await auth.verifyAndCaptureGeneration("") == nil)
 
-        // Stress the verify-to-capture window: rotate while captures are in
-        // flight. A retired token may only ever report the generation it verified
-        // under, never the one the rotation advances to; an empty result is a
-        // post-rotation rejection, which is also correct.
+        // Stress the verify-to-capture window: rotate while captures are in flight.
         let rotation = Task { try await auth.rotate() }
         var observed: Set<Int> = []
         for _ in 0 ..< 200 {
@@ -311,10 +296,8 @@ struct ServerAuthTokenLifecycleTests {
         let minted = try await rotation.value
         #expect(observed.isSubset(of: [captured.generation]))
 
-        // Once the rotation lands, the captured generation is retired, the
-        // replacement captures the advanced generation, and the hub refuses a
-        // socket stamped with the retired value. That refusal is what keeps an
-        // upgrade authenticated by the retired token from being registered.
+        // Once the rotation lands, the captured generation is retired, the replacement captures the
+        // advanced generation, and the hub refuses a socket stamped with the retired value.
         #expect(await auth.isCurrentGeneration(captured.generation) == false)
         let advanced = try #require(await auth.verifyAndCaptureGeneration(minted))
         #expect(advanced.generation == captured.generation + 1)
@@ -333,10 +316,8 @@ struct ServerAuthTokenLifecycleTests {
 
     @Test
     func `Failed Keychain write refuses rotation instead of reverting on restart`() async throws {
-        // Resolution consults the Keychain before the file, so a rotation that
-        // only wrote the file could resurrect a stale Keychain value after a
-        // restart and reject the replacement. An empty Keychain namespace makes
-        // the write fail deterministically.
+        // Resolution consults the Keychain before the file, so a rotation that only wrote the file
+        // could resurrect a stale Keychain value after a restart and reject the replacement.
         let (directory, fileURL) = try makeTokenFile(contents: "first-token")
         defer { try? FileManager.default.removeItem(at: directory) }
         // Keep the default env override out of the picture so the Keychain is
@@ -365,10 +346,8 @@ struct ServerAuthTokenLifecycleTests {
 
     @Test
     func `Rotation is refused while an environment override is live`() async throws {
-        // A live environment override wins resolution on the next boot, so a
-        // rotation it cannot replace would report success and then silently
-        // revert. Refuse it up front and name the variable instead of minting a
-        // credential that cannot hold.
+        // A live environment override wins resolution on the next boot, so a rotation it cannot
+        // replace would report success and then silently revert.
         let (directory, fileURL) = try makeTokenFile(contents: "first-token")
         defer { try? FileManager.default.removeItem(at: directory) }
         let envName = "RUNEWEAVER_AUTH_TEST_\(UUID().uuidString.replacingOccurrences(of: "-", with: "_"))"
@@ -782,12 +761,8 @@ struct ServerAuthRotateRouteTests {
 
     @Test
     func `Retired generation stops frames and closes the socket with policy violation`() async throws {
-        // A socket registers bound to the generation it upgraded under, and the
-        // frame loop re-checks that generation before handling every frame. A
-        // rotation retires it, so the next frame must be refused and the revoked
-        // connection dropped as .policyViolation rather than a clean drain.
-        // Driving the real rotation route exercises the production retirement
-        // path end to end instead of hand-rolling the close.
+        // A socket registers bound to the generation it upgraded under, and the frame loop
+        // re-checks that generation before handling every frame.
         let (auth, directory, _) = try makeAuth(token: "first-token")
         defer { try? FileManager.default.removeItem(at: directory) }
         let hub = WSHub()
@@ -982,10 +957,9 @@ struct ServerAuthPublicSurfaceTests {
 
     @Test
     func `Extension-only and parameterized data paths stay gated`() throws {
-        // The classifier must never forward a path on its extension alone: a
-        // registered route such as `/plugins/<id>` takes a free-form identifier,
-        // so `/plugins/index.html` and `/plugins/report.json` are data requests,
-        // not bundle bytes, and neither is present in the bundle.
+        // Classifiers must not forward paths on extension alone: parameterized routes like
+        // `/plugins/<id>` receive data requests (e.g. `/plugins/index.html`), not bundle assets,
+        // and neither is present in the bundle.
         let (bundle, directory) = try makeBundle(files: ["index.html"])
         defer { try? FileManager.default.removeItem(at: directory) }
         let gatedPaths = [
@@ -1078,10 +1052,9 @@ struct ServerAuthCLILifecycleTests {
         #expect(first == again)
         #expect(first != other)
         #expect(first.count == 16)
-        // Hoist the key-path predicate out of `#expect`: the macro's rethrows
-        // argument checker cannot see that `allSatisfy(\.isHexDigit)` is
-        // non-throwing, and the key-path form keeps SwiftFormat's `preferKeyPath`
-        // rule satisfied.
+        // Hoist the key-path predicate out of `#expect`: the macro's rethrows argument checker
+        // cannot see that `allSatisfy(\.isHexDigit)` is non-throwing, and the key-path form keeps
+        // SwiftFormat's `preferKeyPath` rule satisfied.
         let allHexDigits = first.allSatisfy(\.isHexDigit)
         #expect(allHexDigits)
         #expect(first.contains("alpha") == false)
@@ -1241,11 +1214,9 @@ struct ServerAuthSessionAndSecurityHeadersTests {
 
     @Test
     func `Session values cannot mint replacements through the login route`() async throws {
-        // Minting requires the owner credential itself: a resent session
-        // verifies at the request gate by design but must fail closed at
-        // login like any wrong token, so sessions cannot mint their own
-        // replacements. The owner-only verifier mirrors that boundary
-        // directly: sessions fail, the live owner passes, and empty fails.
+        // Minting requires the owner credential itself: a resent session verifies at the request
+        // gate by design but must fail closed at login like any wrong token, so sessions cannot mint
+        // their own replacements.
         let (auth, directory, _) = try makeAuth(token: "owner-token")
         defer { try? FileManager.default.removeItem(at: directory) }
         let sessionID = try await auth.createSession()
@@ -1417,13 +1388,8 @@ private final class TestClock: Sendable {
     }
 }
 
-/// Builds a verifier over an in-memory token store, an injected clock, and no
-/// session store, so these cases exercise only the middleware's cookie-renewal
-/// decision and never touch disk.
-/// - Parameters:
-///   - clock: Deterministic clock injected into the verifier.
-///   - token: Live owner token to initialize the verifier with.
-/// - Returns: The verifier under test.
+/// Builds a verifier over an in-memory token store, an injected clock, and no session store, so
+/// these cases exercise only the middleware's cookie-renewal decision and never touch disk.
 private func makeRenewalAuth(clock: TestClock, token: String = "owner-token") -> ServerAuth {
     let store = ServerAuthTokenStore(
         authConfig: AuthConfig(tokenEnv: "RUNEWEAVER_AUTH_TEST_UNSET_\(UUID().uuidString)", tokenFile: nil),
@@ -1682,11 +1648,9 @@ struct HostValidationMatrixTests {
     @Test
     func `All-interfaces with auth rejects rebinding shapes without echoing the token`() async throws {
         try await withTestApp { app in
-            // Public names, public IPs, and widening shapes must stay outside
-            // the LAN opening: only the private family plus the explicit list
-            // rides the all-interfaces bind, so a rebinding host cannot use it.
-            // Hand-built widening entries are dropped by the gate itself, so a
-            // context assembled past config validation still fails closed.
+            // Public names, public IPs, and widening shapes must stay outside the LAN opening: only
+            // the private family plus the explicit list rides the all-interfaces bind, so a
+            // rebinding host cannot use it.
             let middleware = HostValidationMiddleware(
                 hostname: "0.0.0.0",
                 allowedHosts: ["my-mac.tail123.ts.net", "*.example.com", "192.168.1.0/24", "*", "http://evil.com"],
@@ -1764,10 +1728,9 @@ struct HostValidationMatrixTests {
     @Test
     func `Literal LAN IP bind joins the allowed set without opening the subnet`() async throws {
         try await withTestApp { app in
-            // Binding the literal LAN address is the narrow workaround: the
-            // address itself joins the allowlist, but no sibling on the subnet
-            // is implied the way the authenticated all-interfaces bind implies
-            // the whole private family.
+            // Binding the literal LAN address is the narrow workaround: the address itself joins
+            // the allowlist, but no sibling on the subnet is implied the way the authenticated
+            // all-interfaces bind implies the whole private family.
             let middleware = HostValidationMiddleware(
                 hostname: "192.168.1.20",
                 allowedHosts: [],
@@ -1792,10 +1755,7 @@ struct HostValidationMatrixTests {
 
 @Suite("Host Parity Contract")
 struct HostParityContractTests {
-    /// One pinned vector shared with the dashboard mirror. The same JSON
-    /// literal lives in the web suite so a bracket, case, port, or
-    /// trailing-dot drift on either side fails its own suite instead of
-    /// silently forking the restart compare, the Host gate, or validation.
+    /// One pinned vector shared with the dashboard mirror.
     private struct HostParityVector: Decodable {
         let input: String
         let canonical: String
@@ -1804,15 +1764,8 @@ struct HostParityContractTests {
         let allowedHostValid: Bool
     }
 
-    /// Pinned outputs for the restart canonicalizer, the Host normalizer,
-    /// and the exact-host validator. Bracketed IPv6 strips only in the
-    /// canonical form, casing folds in both string forms, `:port` survives
-    /// the canonical form but strips in the normalized form only for an
-    /// empty or colon-plus-numeric-port suffix after `]` (trailing junk like
-    /// `[::1]evil` survives verbatim and fails validation), unbracketed
-    /// `host:port` strips only for an empty or numeric port (`evil.com:evil`
-    /// and `[::1]:evil` survive verbatim and fail validation), and a trailing
-    /// dot survives both string forms while failing validation.
+    /// Pinned outputs for the restart canonicalizer, the Host normalizer, and the exact-host
+    /// validator.
     private static let fixtureJSON = """
     [
       {"input":"example.com","canonical":"example.com","normalized":"example.com","hostnameValid":true,"allowedHostValid":true},
@@ -1837,10 +1790,8 @@ struct HostParityContractTests {
     ]
     """
 
-    /// Decodes the pinned vectors so a malformed fixture fails loudly
-    /// instead of passing vacuously on an empty matrix.
-    /// - Returns: Pinned vectors in fixture order.
-    /// - Throws: Decoding error when the fixture drifts from the contract shape.
+    /// Decodes the pinned vectors so a malformed fixture fails loudly instead of passing vacuously
+    /// on an empty matrix. - Returns: Pinned vectors in fixture order.
     private static func fixture() throws -> [HostParityVector] {
         try JSONDecoder().decode([HostParityVector].self, from: Data(fixtureJSON.utf8))
     }
@@ -1853,16 +1804,13 @@ struct HostParityContractTests {
             // The restart compare strips brackets only around a colon-bearing
             // literal so `[::1]` and `::1` agree while `[example.com]` stays distinct.
             #expect(canonicalRestartHost(vector.input) == vector.canonical, "canonicalRestartHost('\(vector.input)')")
-            // The Host gate strips a `:port` only for an empty or numeric
-            // suffix in both bracketed and unbracketed forms, so the saved
-            // allowlist and the request header compare alike without
-            // truncating trailing junk like `evil.com:evil` or `[::1]:evil`
-            // to an allowlisted literal.
+            // The Host gate strips `:port` only for empty or numeric suffixes in bracketed and
+            // unbracketed forms, comparing allowlists and headers without truncating trailing junk
+            // like `evil.com:evil` or `[::1]:evil` to an allowlisted literal.
             #expect(ServerEndpointConfig.normalizeHost(vector.input) == vector.normalized, "normalizeHost('\(vector.input)')")
-            // Hostname validation rejects a `:port` suffix the allowlist
-            // strips, while both reject schemes, wildcards, unbalanced or
-            // non-IPv6 brackets, non-numeric port tails, and a trailing dot
-            // fail-closed.
+            // Hostname validation rejects a `:port` suffix the allowlist strips, while both reject
+            // schemes, wildcards, unbalanced or non-IPv6 brackets, non-numeric port tails, and a
+            // trailing dot fail-closed.
             let hostnameOK = (try? RuneWeaverConfig.validateServerHostname(vector.input)) != nil
             #expect(hostnameOK == vector.hostnameValid, "validateServerHostname('\(vector.input)')")
             let allowedOK = (try? RuneWeaverConfig.validateAllowedHosts([vector.input])) != nil

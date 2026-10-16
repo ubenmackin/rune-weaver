@@ -1,7 +1,4 @@
 // Rune Weaver Server — SchedulerStore-backed scheduled-send booking for the send tools.
-//
-// Bridges the tools' booking seam onto the scheduler store so an approved
-// scheduled send lands as an immutable row the fire worker replays exactly once.
 
 import Foundation
 import RuneWeaverCore
@@ -17,12 +14,9 @@ public struct SchedulerStoreBookingAdapter: ScheduledSendBooking, Sendable {
         self.store = store
     }
 
-    /// Books one approved draft as an immutable scheduled-send row.
-    ///
-    /// Store validation and capacity errors propagate to the tool caller, so an
-    /// unavailable booking is always visible, never a silent success.
-    /// - Parameter draft: Exact approved bytes, recipient, and fire time.
-    /// - Returns: Receipt carrying the stored identifier and fire time.
+    /// Books one approved draft as an immutable scheduled-send row. Store validation and capacity
+    /// errors propagate to the tool caller, so an unavailable booking is always visible, never a
+    /// silent success.
     public func book(_ draft: ScheduledSendDraft) async throws -> BookedScheduledSend {
         let channel: ScheduledSend.Channel = draft.channel == .email ? .email : .messages
         let row = try await store.scheduleSend(NewScheduledSend(

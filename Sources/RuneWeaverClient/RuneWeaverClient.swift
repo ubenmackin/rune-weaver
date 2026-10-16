@@ -1,8 +1,4 @@
 // Rune Weaver Client — WebSocket transport to the Rune Weaver engine service.
-//
-// Speaks the engine's streaming chat protocol over `/ws`. When an owner token is
-// configured the client presents it as a bearer header on the upgrade handshake,
-// while the loopback no-auth posture connects credential-free.
 
 import Foundation
 import RuneWeaverCore
@@ -55,19 +51,11 @@ public actor RuneWeaverClient {
     /// Live socket, present only while connecting or connected.
     private var socketTask: URLSessionWebSocketTask?
 
-    /// Owner bearer token presented on the WebSocket handshake, or nil for the
-    /// no-auth loopback posture.
-    ///
-    /// Held in memory only and never logged. The handshake carries it as an
-    /// `Authorization` header rather than a `?token=` query ticket so the
-    /// credential cannot leak into a URL, referrer, or access log.
+    /// Owner bearer token presented on the WebSocket handshake, or nil for the no-auth loopback
+    /// posture. Held in memory only and never logged.
     private let ownerToken: String?
 
-    /// Creates a client for the given engine URL.
-    /// - Parameters:
-    ///   - baseURL: Engine base URL.
-    ///   - token: Owner bearer token for a token-gated engine. Omit for the
-    ///     loopback no-auth posture, which connects with no credential.
+    /// Creates a client for the given engine URL. baseURL: Engine base URL.
     public init(baseURL: URL, token: String? = nil) {
         self.baseURL = baseURL
         self.ownerToken = token
@@ -152,18 +140,8 @@ public actor RuneWeaverClient {
 
     // MARK: - Handshake
 
-    /// Builds the `/ws` upgrade request, presenting the owner token as a bearer
-    /// header when one is configured.
-    ///
-    /// The header path is preferred over the server's upgrade-only `?token=`
-    /// query fallback so the credential never rides in a URL, and the no-token
-    /// posture stays byte-for-byte the v1 unauthenticated handshake. Exposed to
-    /// the test target so request construction can be asserted without a live
-    /// network handshake.
-    /// - Parameters:
-    ///   - socketURL: Derived `ws`/`wss` endpoint.
-    ///   - token: Owner bearer token, or nil.
-    /// - Returns: Request carrying the optional bearer header.
+    /// Builds the `/ws` upgrade request, presenting the owner token as a bearer header when one is
+    /// configured.
     static func handshakeRequest(for socketURL: URL, token: String?) -> URLRequest {
         var request = URLRequest(url: socketURL)
         if let token, !token.isEmpty {
@@ -360,10 +338,9 @@ public actor RuneWeaverClient {
             // Broadcast prompt arriving mid-turn; skip and keep streaming.
             return .continued
         case "tool_progress":
-            // Indeterminate progress is advisory and has no place in the content
-            // stream this client exposes, but it is still decoded so a malformed
-            // payload is validated locally and dropped rather than surfacing. An
-            // unknown future frame keeps taking the default branch below.
+            // Indeterminate progress is advisory and has no place in the content stream this client
+            // exposes, but it is still decoded so a malformed payload is validated locally and
+            // dropped rather than surfacing.
             do {
                 _ = try JSONDecoder().decode(ClientToolProgressFrame.self, from: replyData)
             } catch {
@@ -371,10 +348,8 @@ public actor RuneWeaverClient {
             }
             return .continued
         case "tool_cancel_miss":
-            // A per-tool cancel miss is non-terminal by contract: it reports that
-            // a detached call stopped nothing, while the turn keeps streaming.
-            // Decoding and discarding (instead of throwing like an `error` frame)
-            // keeps library turns alive through a cancel that did not land.
+            // A per-tool cancel miss is non-terminal by contract: it reports that a detached call
+            // stopped nothing, while the turn keeps streaming.
             do {
                 _ = try JSONDecoder().decode(ClientToolCancelMissFrame.self, from: replyData)
             } catch {

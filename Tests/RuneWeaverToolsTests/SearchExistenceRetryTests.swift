@@ -1,14 +1,4 @@
 // Rune Weaver Tools Tests — Existence-aware retry with remove fallback.
-//
-// Purpose: pins the list-or-inspect existence check, the present-then-start
-// versus absent-then-run branches, the `rm`-first remove before every fresh
-// `run`, and the residual race wedge that still revives via `start` so script
-// and engine never diverge on ordering.
-// Scope: pure `SearXNGEnsurer` helpers only; no processes are spawned and no
-// network is touched.
-// Architectural role: guards the existence-aware start contract shared by the
-// engine cascade, the CLI watcher, the dashboard watch, and the escape-hatch
-// script.
 
 import Foundation
 @testable import RuneWeaverTools
@@ -45,10 +35,8 @@ struct SearchExistenceRetryTests {
 
     @Test
     func `Inspect exit decides presence while missing wording stays explicit`() {
-        // Exit 0 is the only present proof; any other exit reads as absent so
-        // the caller still attempts a fresh run that surfaces detail. The
-        // missing hint stays explicit so a daemon outage never poses as a
-        // clean absent that would skip the start attempt without diagnostics.
+        // Exit 0 is the only present proof; any other exit reads as absent so the caller still
+        // attempts a fresh run that surfaces detail.
         #expect(SearXNGEnsurer.inspectShowsEntryPresent(exitCode: 0) == true)
         #expect(SearXNGEnsurer.inspectShowsEntryPresent(exitCode: 1) == false)
         #expect(SearXNGEnsurer.inspectShowsEntryPresent(exitCode: 2) == false)
@@ -62,10 +50,9 @@ struct SearchExistenceRetryTests {
 
     @Test
     func `Settle window stays brief beside the start budget`() {
-        // A present entry earns one short settle poll to prove itself before
-        // paying `rm` plus pull plus `run`; the window must stay positive yet
-        // shorter than the start spawn so the cached-image cascade stays
-        // responsive instead of doubling the start phase.
+        // A present entry earns one short settle poll to prove itself before paying `rm` plus pull
+        // plus `run`; the window must stay positive yet shorter than the start spawn so the
+        // cached-image cascade stays responsive instead of doubling the start phase.
         #expect(SearXNGEnsurer.containerStartSettleSeconds > 0)
         #expect(SearXNGEnsurer.containerStartSettleSeconds < SearXNGEnsurer.containerStartTimeoutSeconds)
         #expect(SearXNGEnsurer.containerStartSettleSeconds <= SearXNGEnsurer.readinessWatchTimeoutSeconds)
@@ -73,10 +60,9 @@ struct SearchExistenceRetryTests {
 
     @Test
     func `Wedged entry refusing start still reaches a fresh run then revives`() {
-        // A wedged half-create reads as present, refuses the start, is cleared
-        // with `rm`-first, then recreates via a fresh `run` with the settings
-        // mount and the cached image; a residual race conflict on that `run`
-        // still revives via `start` before failing.
+        // A wedged half-create reads as present, refuses the start, is cleared with `rm`-first,
+        // then recreates via a fresh `run` with the settings mount and the cached image; a residual
+        // race conflict on that `run` still revives via `start` before failing.
         let name = SearXNGEnsurer.containerName
         // Present branch: the listing names the wedged entry, so the caller
         // earns the `start` attempt instead of skipping straight to `run`.
@@ -112,11 +98,9 @@ struct SearchExistenceRetryTests {
 
     @Test
     func `Fresh run after rm-first is conflict-impossible except races`() {
-        // `rm`-first before every fresh `run` makes the name conflict
-        // impossible in the single-flight path; only a cross-process race
-        // recreating the name between `rm` and `run` can still wedge, and that
-        // residual still revives via `start`. A clean `run` therefore carries
-        // no conflict text and never trips the wedge detector.
+        // `rm`-first before every fresh `run` makes the name conflict impossible in the
+        // single-flight path; only a cross-process race recreating the name between `rm` and `run`
+        // can still wedge, and that residual still revives via `start`.
         let runArgs = SearXNGEnsurer.containerRunArguments(settingsPath: "/tmp/settings.yml", hostPort: 8888)
         // The run verb never spells the remove verb, proving remove precedes
         // run instead of hiding inside it.

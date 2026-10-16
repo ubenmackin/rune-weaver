@@ -1,10 +1,4 @@
 // Rune Weaver Core Tests — Formal policy invariant verifier.
-//
-// Pins the two safety invariants proven by PolicyInvariantVerifier over the
-// network-plus-credentials scope:
-//   1. Credential Confinement — no credential targets forbidden hosts, and a
-//      leading `*.` wildcard's base is checked like an exact host.
-//   2. Rule Shadow Prevention — no allowed domain conflicts with blocked domain.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -51,10 +45,9 @@ struct PolicyInvariantVerifierTests {
 
     @Test
     func `Credential targeting CGNAT and reserved ranges fails`() {
-        // Alibaba's metadata service answers in shared address space
-        // (`100.64.0.0/10`), so CGNAT must fail like the other reserved
-        // blocks; otherwise this storage-boundary invariant and the runtime
-        // SSRF table could reach different verdicts for the same host.
+        // Alibaba's metadata service answers in shared address space (`100.64.0.0/10`), so CGNAT
+        // must fail like the other reserved blocks; otherwise this storage-boundary invariant and
+        // the runtime SSRF table could reach different verdicts for the same host.
         let sensitiveHosts = [
             "100.100.100.200",
             "100.64.0.1",
@@ -209,10 +202,9 @@ struct PolicyInvariantVerifierTests {
 
     @Test
     func `Credential targeting IPv4-embedded translation spellings fails`() {
-        // NAT64, 6to4, and IPv4-compatible spellings of a sensitive address
-        // must be refused exactly like their dotted twins, or a credential
-        // could be bound to the metadata endpoint through an alternate
-        // spelling that the range table never decoded.
+        // NAT64, 6to4, and IPv4-compatible spellings of a sensitive address must be refused exactly
+        // like their dotted twins, or a credential could be bound to the metadata endpoint through
+        // an alternate spelling that the range table never decoded.
         let sensitiveHosts = [
             "64:ff9b::a9fe:a9fe", // NAT64 well-known prefix → 169.254.169.254
             "64:ff9b::a00:1", // NAT64 → 10.0.0.1

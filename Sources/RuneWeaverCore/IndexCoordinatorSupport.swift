@@ -1,8 +1,4 @@
 // Rune Weaver Core — Index coordinator run totals and reporting helpers.
-//
-// Owns the cumulative totals, overlap join bookkeeping, summary formatting, and
-// cancellation flag so the sequencing actor stays focused on run control and
-// each source file stays within the length gate.
 
 import Foundation
 import os
@@ -57,11 +53,6 @@ extension IndexCoordinator {
         }
 
         /// Folds counted fields shared by reports and accumulated totals.
-        ///
-        /// Keeps warning attribution intact by appending in canonical order, so
-        /// a files warning never masks a mail warning and the watermark math
-        /// matches the serial pass exactly.
-        /// - Parameter other: Counted contribution to fold in.
         private mutating func merge(_ other: Totals) {
             scanned += other.scanned
             indexed += other.indexed
@@ -79,10 +70,6 @@ extension IndexCoordinator {
     }
 
     /// One overlapped peer's outcome for the task-group join.
-    ///
-    /// Carries the peer's overlap-batch index so the join folds peers in
-    /// canonical order no matter which finishes first, keeping watermarks
-    /// identical to serial even when two stages share one kind.
     struct OverlapStageOutcome: Sendable {
         /// Overlap-batch position owning the high-water slot.
         let index: Int
@@ -93,9 +80,6 @@ extension IndexCoordinator {
     }
 
     /// Bundled run identity plus policy for finalizing a pass.
-    ///
-    /// Keeps the finish path at three parameters so the lint gate stays
-    /// quiet while the run entry snapshot flows through untouched.
     struct FinishRunContext: Sendable {
         /// What caused the run.
         let trigger: IndexRunTrigger
@@ -114,11 +98,6 @@ extension IndexCoordinator {
 
 extension IndexCoordinator {
     /// Single-line summary for the run event message.
-    ///
-    /// Carries retired and truncated counts inline so the durable message alone
-    /// lights the dashboard badges even when the detail response is pruned.
-    /// - Parameter summary: Completed run summary.
-    /// - Returns: A display-safe one-liner.
     static func summaryLine(_ summary: IndexRunSummary) -> String {
         "Index run \(summary.status.rawValue): \(summary.documentsIndexed) indexed, "
             + "\(summary.vectorChunks) vectors, \(summary.keywordChunks) keyword-only, "
@@ -127,14 +106,6 @@ extension IndexCoordinator {
     }
 
     /// Detailed outcome text for the completion event response.
-    ///
-    /// Repeats retired and truncated as `Retired:`/`Truncated:` detail lines so
-    /// the status probe parses them like the trigger and skip lines without
-    /// depending on summary wording. Per-source outcomes ride `Source:` lines
-    /// after the aggregate legs so the aggregate first-match still lands on
-    /// the summary line.
-    /// - Parameter summary: Completed run summary.
-    /// - Returns: A multi-line, content-free summary.
     static func detailLine(_ summary: IndexRunSummary) -> String {
         var lines = [summaryLine(summary)]
         lines.append("Trigger: \(summary.trigger.rawValue)")
@@ -165,18 +136,6 @@ extension IndexCoordinator {
     }
 
     /// Orders collected reports canonically, filling gaps from the live policy.
-    ///
-    /// Missing kinds on a settled run synthesize from the run policy snapshot:
-    /// kinds the snapshot disables synthesize as disabled, while kinds the
-    /// snapshot enables but that contributed no report synthesize as
-    /// enabled-but-unrun rather than vanishing or mislabeling as disabled; a
-    /// cancelled run leaves unreached sources absent instead of mislabeling
-    /// them.
-    /// - Parameters:
-    ///   - reports: Completed stage contributions in completion order.
-    ///   - cancelled: Whether the run stopped early.
-    ///   - policy: Per-run policy snapshot fixed at run entry.
-    /// - Returns: Reports in canonical run order with policy-derived gaps filled.
     static func orderedSourceReports(_ reports: [IndexSourceRunReport], cancelled: Bool, policy: IndexConfig) -> [IndexSourceRunReport] {
         var ordered = reports.sorted { lhs, rhs in
             let left = IndexSourceKind.runOrder.firstIndex(of: lhs.kind) ?? Int.max
@@ -208,22 +167,12 @@ extension IndexCoordinator {
     }
 
     /// Orders collected reports canonically, filling disabled gaps.
-    ///
-    /// Compatibility wrapper preserving the two-argument call shape; new runs
-    /// consult the live policy via the three-argument overload so an
-    /// enabled-but-unrun source is never mislabeled disabled.
-    /// - Parameters:
-    ///   - reports: Completed stage contributions in completion order.
-    ///   - cancelled: Whether the run stopped early.
-    /// - Returns: Reports in canonical run order with disabled gaps filled.
     static func orderedSourceReports(_ reports: [IndexSourceRunReport], cancelled: Bool) -> [IndexSourceRunReport] {
         orderedSourceReports(reports, cancelled: cancelled, policy: IndexConfig(enabled: false))
     }
 
-    /// Enabled-but-unrun reason for a kind the live policy selects yet that
-    /// contributed no report.
+    /// Enabled-but-unrun reason for a kind the live policy selects yet that contributed no report.
     /// - Parameter kind: Source that did not run despite being enabled.
-    /// - Returns: Reason distinguishing enabled-but-unrun from disabled.
     static func unavailableReason(for kind: IndexSourceKind) -> String {
         switch kind {
         case .files:

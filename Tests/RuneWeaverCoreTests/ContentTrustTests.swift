@@ -1,11 +1,4 @@
 // Rune Weaver Core Tests — Untrusted-content labeling for the LLM context pipeline.
-//
-// Pins the harness-level data-only boundary around network-derived tool output:
-// declaration-driven trust levels, forge-resistant delimiters, byte-identical
-// trusted pass-through, the static composer rule, and the debugging off-switch.
-// Covers the labeler, the tool-loop composition point, the composer prefix, and
-// the additive security config round-trip so external bytes can never read as
-// trusted instructions.
 
 import Foundation
 @testable import RuneWeaverCore

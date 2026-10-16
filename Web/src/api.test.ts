@@ -1842,10 +1842,7 @@ describe("owner bearer auth client", () => {
 });
 
 describe("host parity contract", () => {
-  // Pinned cross-language vectors shared with the engine suite. The same JSON
-  // literal lives in the Swift host-parity suite so a bracket, case, port, or
-  // trailing-dot drift on either side fails its own suite instead of silently
-  // forking the restart compare, the Host gate, or validation.
+  // Pinned cross-language vectors shared with the engine suite.
   type HostParityVector = {
     input: string;
     canonical: string;
@@ -1854,12 +1851,9 @@ describe("host parity contract", () => {
     allowedHostValid: boolean;
   };
 
-  // Bracketed IPv6 strips only in the canonical form, casing folds in both
-  // string forms, `:port` survives the canonical form but strips in the
-  // normalized form only for an empty or colon-plus-numeric-port suffix
-  // after `]` (trailing junk like `[::1]evil` survives verbatim and fails
-  // validation), and a trailing dot survives both string forms while
-  // failing validation.
+  // Bracketed IPv6 strips only in canonical form, casing folds in both forms, and `:port` strips
+  // in normalized form only for empty or numeric-port suffixes after `]` (trailing junk like
+  // `[::1]evil` survives verbatim and fails validation; trailing dots fail validation in both forms).
   const fixtureJSON = `[
     {"input":"example.com","canonical":"example.com","normalized":"example.com","hostnameValid":true,"allowedHostValid":true},
     {"input":"  Example.COM  ","canonical":"example.com","normalized":"example.com","hostnameValid":true,"allowedHostValid":true},
@@ -1887,9 +1881,8 @@ describe("host parity contract", () => {
       // The restart compare strips brackets only around a colon-bearing
       // literal so `[::1]` and `::1` agree while `[example.com]` stays distinct.
       expect(canonicalRestartHost(vector.input)).toBe(vector.canonical);
-      // The Host gate keeps bracketed IPv6 intact while stripping a
-      // `:port` only for an empty or colon-plus-numeric-port suffix
-      // after `]`, so the saved allowlist and the request header
+      // The Host gate keeps bracketed IPv6 intact while stripping a `:port` only for an empty or
+      // colon-plus-numeric-port suffix after `]`, so the saved allowlist and the request header
       // compare alike without truncating trailing junk to allowlisted.
       expect(normalizeServerAllowedHost(vector.input)).toBe(
         vector.normalized,

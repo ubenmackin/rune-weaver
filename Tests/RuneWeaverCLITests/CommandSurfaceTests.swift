@@ -1,12 +1,4 @@
 // Rune Weaver CLI Tests — Command-surface and policy-verify contract.
-//
-// The CLI is an ops handle for the service: exactly `serve`, `status`, `auth`,
-// and `policy verify` stay routable, and the interactive chat loop plus the
-// goals, memory, scheduler, config, workspace, and plugin editing surfaces live
-// on the service instead. These tests pin the router and help source — a
-// resurrected subcommand fails here — plus `policy verify`'s exit contract: a
-// sound file and an absent file both verify, while an unparseable or
-// invariant-violating file exits nonzero.
 
 import ArgumentParser
 import Foundation

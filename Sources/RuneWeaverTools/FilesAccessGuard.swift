@@ -1,22 +1,4 @@
 // Rune Weaver Tools — Shared sensitive-path guard for file tools.
-//
-// Single source of truth for the `[files]` read path (`deny_patterns`,
-// `allow_roots`, `require_approval_on_deny`); write posture lives with
-// `WritePathPolicy` in the core, which owns the engine deny list both paths
-// union in. Every file-tool read evaluates here first: deny hits escalate to
-// the approvals inbox (or fail closed when configured), outside-root paths
-// refuse with the configured roots named, and only inside-root, non-denied
-// paths read without escalation.
-//
-// Every check runs on a canonical view (standardised plus symlink-resolved) so
-// a symlinked parent or `..` segment cannot hide the true location. Matching
-// is case-insensitive across three candidate views — filename, home-relative
-// path plus its suffixes (so `.ssh/*` guards nested depths), and absolute path
-// — with a trailing-`/*` also guarding its bare directory, and `~` shapes
-// resolving against the effective home rather than the process home. A
-// reserved `.rune_`/`.rune_backup_` review sibling also contributes its
-// derived live file's candidate views, so a staging or rollback name cannot
-// reach bytes the live path refuses.
 
 import Foundation
 import RuneWeaverCore
@@ -58,16 +40,9 @@ public enum FilesAccessGuard: Sendable {
         }
     }
 
-    /// Resolves virtual cloud shortcuts (e.g. "iCloud", "iCloud Drive", "Dropbox", "OneDrive", "Google Drive", "GoogleDrive")
-    /// to their actual canonical directory path on the local filesystem.
-    ///
-    /// If the path matches or begins with a recognized cloud shortcut, the prefix is replaced with
-    /// the first matching cloud root found on disk. If no matching directory exists or the path is
-    /// not a recognized shortcut, the original path is returned unmodified.
-    /// - Parameters:
-    ///   - rawPath: User- or agent-supplied path string.
-    ///   - homeDirectoryURL: Home directory override (for testing).
-    /// - Returns: Resolved filesystem path string, or original path if no shortcut matched.
+    /// Resolves virtual cloud shortcuts (e.g. "iCloud", "iCloud Drive", "Dropbox", "OneDrive",
+    /// "Google Drive", "GoogleDrive") to their actual canonical directory path on the local
+    /// filesystem.
     public static func resolveCloudShortcut(_ rawPath: String, homeDirectoryURL: URL? = nil) -> String {
         let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return rawPath }
@@ -166,11 +141,6 @@ public enum FilesAccessGuard: Sendable {
     }
 
     /// Expands and absolutises a raw path without applying policy.
-    /// Resolution is point-in-time: the nearest existing ancestor is resolved
-    /// once and missing trailing components are re-appended without a second
-    /// validation, so a symlink swapped between this check and the later open
-    /// could redirect the final target. Callers that read file bytes open via
-    /// `openNoFollowAndValidate` instead of trusting this view across the gap.
     public static func resolvedURL(for path: String) -> URL {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         let expanded = (trimmed as NSString).expandingTildeInPath
@@ -197,16 +167,8 @@ public enum FilesAccessGuard: Sendable {
         return resolved
     }
 
-    /// Opens a guarded path for reading without following a trailing symlink,
-    /// then re-validates the opened handle against policy before returning it.
-    /// Point-in-time evaluation alone leaves a symlink-swap gap between the
-    /// check and the open, so the open refuses symlinked finals and the live
-    /// handle path is checked again while its inode is pinned.
-    /// - Parameters:
-    ///   - path: Raw caller path (tilde and relative forms accepted).
-    ///   - homeDirectoryURL: Test home override, if any.
-    ///   - filesConfig: `[files]` policy to enforce on both checks.
-    /// - Returns: Open handle plus the validated handle path.
+    /// Opens a guarded path for reading without following a trailing symlink, then re-validates the
+    /// opened handle against policy before returning it.
     public static func openNoFollowAndValidate(
         path: String,
         homeDirectoryURL: URL? = nil,
@@ -309,21 +271,16 @@ public enum FilesAccessGuard: Sendable {
 
     /// Returns the deny-pattern reason for a canonical URL, if any.
     private static func denyReason(for canonical: URL, home: URL, filesConfig: FilesConfig) -> String? {
-        // Candidate views, lowercased once: the filename catches bare shapes
-        // (`*.pem`), the relative path and its suffixes catch directory shapes
-        // at any depth (`.ssh/*`), and the absolute path catches rooted
-        // absolute patterns. A reserved review sibling also contributes the
-        // candidates of the live file it derives from, so a `.rune_`/
-        // `.rune_backup_` name cannot reach bytes its live path refuses.
+        // Candidate views, lowercased once: the filename catches bare shapes (`*.pem`), the
+        // relative path and its suffixes catch directory shapes at any depth (`.ssh/*`), and the
+        // absolute path catches rooted absolute patterns.
         var candidates = denyCandidateViews(for: canonical, home: home)
         if let liveName = liveSiblingName(for: canonical.lastPathComponent) {
             let liveURL = canonical.deletingLastPathComponent().appendingPathComponent(liveName)
             candidates.formUnion(denyCandidateViews(for: liveURL, home: home))
         }
-        // Engine-owned protected patterns are unioned ahead of the configured
-        // list so no operator list can silently drop them (configured patterns
-        // stay fully additive). The list itself lives with `WritePathPolicy`,
-        // the single owner both the read guard and the write policy union in.
+        // Engine-owned protected patterns are unioned ahead of the configured list so no operator
+        // list can silently drop them (configured patterns stay fully additive).
         for rawPattern in WritePathPolicy.alwaysDenyPatterns + filesConfig.denyPatterns {
             let trimmed = rawPattern.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
@@ -416,13 +373,9 @@ public enum FilesAccessGuard: Sendable {
 
 /// Cloud shortcut mount discovery kept out of the guard's primary body.
 extension FilesAccessGuard {
-    /// Reports whether a lowercased `Library/CloudStorage` entry names a provider mount.
-    /// A bare prefix would steer shortcuts into attacker-named siblings
-    /// (`dropboxevil`), so only an exact name or a delimited suffix counts.
-    /// - Parameters:
-    ///   - lowercasedName: Directory entry already lowercased by the caller.
-    ///   - base: Lowercased provider base (for example `dropbox`).
-    /// - Returns: True for an exact or dash/space/slash-suffixed mount name.
+    /// Reports whether a lowercased `Library/CloudStorage` entry names a provider mount. A bare
+    /// prefix would steer shortcuts into attacker-named siblings (`dropboxevil`), so only an exact
+    /// name or a delimited suffix counts.
     fileprivate static func matchesCloudMount(_ lowercasedName: String, base: String) -> Bool {
         lowercasedName == base
             || lowercasedName.hasPrefix(base + "-")
@@ -431,11 +384,7 @@ extension FilesAccessGuard {
     }
 
     /// Lists live `Library/CloudStorage` mounts whose names satisfy a predicate.
-    /// - Parameters:
-    ///   - home: Canonical home boundary.
-    ///   - fileManager: Filesystem accessor.
-    ///   - matching: Lowercased-name predicate selecting one provider's mounts.
-    /// - Returns: Sorted live mount URLs.
+    /// home: Canonical home boundary.
     fileprivate static func cloudStorageDirs(
         home: URL,
         fileManager: FileManager,
@@ -522,13 +471,9 @@ extension FilesAccessGuard {
 
 /// Deny-matching candidate derivation kept out of the guard's primary body.
 extension FilesAccessGuard {
-    /// Candidate views a canonical URL contributes to deny matching: the
-    /// filename, the home-relative path plus its trailing suffixes, and the
-    /// absolute path — all lowercased for the case-insensitive macOS view.
-    /// - Parameters:
-    ///   - canonical: Canonical URL to view.
-    ///   - home: Canonical home boundary.
-    /// - Returns: Lowercased candidate views.
+    /// Candidate views a canonical URL contributes to deny matching: the filename, the
+    /// home-relative path plus its trailing suffixes, and the absolute path — all lowercased for the
+    /// case-insensitive macOS view.
     fileprivate static func denyCandidateViews(for canonical: URL, home: URL) -> Set<String> {
         var candidates: Set<String> = [canonical.lastPathComponent.lowercased(), canonical.path.lowercased()]
         guard isInside(canonical.path, root: home.path), canonical.path != home.path else {
@@ -552,14 +497,8 @@ extension FilesAccessGuard {
         return candidates
     }
 
-    /// Live filename a reserved review sibling derives from, or nil when the
-    /// filename is not a `.rune_`/`.rune_backup_` artifact.
-    ///
-    /// Prefix matching folds case because the default APFS volume does: a
-    /// differently-cased spelling names the same artifact on disk. The
-    /// rollback prefix is tested first because it contains the staging prefix.
-    /// - Parameter filename: Final path component to test.
-    /// - Returns: The live filename, or nil when the name is not a sibling.
+    /// Live filename a reserved review sibling derives from, or nil when the filename is not a
+    /// `.rune_`/`.rune_backup_` artifact.
     fileprivate static func liveSiblingName(for filename: String) -> String? {
         let lowered = filename.lowercased()
         let prefix: String

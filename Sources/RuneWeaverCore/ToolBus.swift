@@ -13,11 +13,9 @@ public struct ToolResult: Sendable, Codable, Equatable {
     public let isError: Bool
     /// Category of tool error, if failed.
     public let errorKind: ToolErrorKind?
-    /// Process exit status recorded by the producing tool, if it spawned a process.
-    ///
-    /// Typed metadata carried end-to-end (wire, SQLite, dashboard) so exit badges
-    /// never depend on parsing untrusted `content`. Nil for non-process tools and
-    /// for history written before the field existed.
+    /// Process exit status recorded by the producing tool, if it spawned a process. Typed metadata
+    /// carried end-to-end (wire, SQLite, dashboard) so exit badges never depend on parsing untrusted
+    /// `content`.
     public let exitCode: Int32?
 
     /// Creates a tool result.
@@ -53,18 +51,13 @@ public struct ToolResult: Sendable, Codable, Equatable {
         self.exitCode = output.exitCode
         if output.isError {
             if let kind = output.errorKind {
-                // An explicit kind is authoritative: a tool that can tell a
-                // configuration or runtime failure from a bad-argument failure
-                // must say so, and the bus never second-guesses it. Without this
-                // precedence a runtime message that merely reads "Invalid ..."
-                // would be masked as invalid_syntax.
+                // An explicit kind is authoritative: a tool that can tell a configuration or
+                // runtime failure from a bad-argument failure must say so, and the bus never
+                // second-guesses it.
                 self.errorKind = kind
             } else if output.content.lowercased().hasPrefix("invalid ") {
-                // Legacy best-effort sniff for tools that predate explicit kinds
-                // and phrase argument validation as "Invalid <tool> arguments: ...".
-                // It cannot separate a genuine argument failure from an environment
-                // failure that happens to share the wording, so tools with runtime
-                // or configuration failure modes must set `errorKind` themselves.
+                // Legacy best-effort sniff for tools that predate explicit kinds and phrase
+                // argument validation as "Invalid <tool> arguments: ...".
                 self.errorKind = .invalidSyntax
             } else {
                 self.errorKind = .executionError
@@ -81,9 +74,6 @@ public struct ToolResult: Sendable, Codable, Equatable {
     }
 
     /// Converts this result to a `tool`-role ``Message`` for LLM history.
-    /// Carries the error category and exit code alongside the failure flag so a
-    /// reloaded history preserves the badge taxonomy instead of collapsing to a
-    /// generic error.
     public func asMessage() -> Message {
         Message(
             role: .tool,
@@ -100,14 +90,6 @@ public struct ToolResult: Sendable, Codable, Equatable {
 public typealias ToolApprovalHandler = @Sendable (any Tool, ToolInput, ToolContext) async -> Bool
 
 /// One in-flight tool call's per-call cancellation slot.
-///
-/// The bus registers a slot for every running call so a user can stop exactly
-/// one tool while its owning turn keeps running. The awaiting execution races
-/// the tool task against this slot: whichever settles first wins, and a cancel
-/// that wins hands the turn an injected failure instead of blocking, so a tool
-/// that never observes cooperative cancellation still yields promptly and the
-/// model can re-scope. Reference-typed and lock-protected because the tool task
-/// settles off the bus actor while a cancel can arrive on it.
 private final class ToolCallCancellation: Sendable {
     /// Mutable race state guarded by ``state``.
     private struct State: Sendable {
@@ -129,10 +111,7 @@ private final class ToolCallCancellation: Sendable {
     private let toolName: String
     private let state = OSAllocatedUnfairLock(initialState: State())
 
-    /// Creates a slot for one call.
-    /// - Parameters:
-    ///   - callID: Correlation identifier of the call.
-    ///   - toolName: Tool being called.
+    /// Creates a slot for one call. callID: Correlation identifier of the call.
     init(callID: String, toolName: String) {
         self.callID = callID
         self.toolName = toolName
@@ -199,8 +178,6 @@ private final class ToolCallCancellation: Sendable {
 
     /// Cancels this call and wakes the turn with the injected failure.
     /// - Parameter reason: Optional user reason, already normalized by the caller.
-    /// - Returns: True when this cancel won the race; false when the call had
-    ///   already finished or been cancelled, so a retry never double-reports.
     @discardableResult
     func cancel(reason: String?) -> Bool {
         let decision = state.withLock { lockState -> (won: Bool, waiter: CheckedContinuation<ToolResult, Never>?) in
@@ -230,11 +207,6 @@ private final class ToolCallCancellation: Sendable {
 }
 
 /// Identity of one in-flight tool call.
-///
-/// A model mints `callID`s per turn, not globally, so two sessions can legitimately
-/// pick the same identifier. Pairing it with the owning session keeps their
-/// cancellation slots distinct: keyed on the identifier alone, the second call
-/// overwrites the first's slot and the earlier call becomes uncancellable.
 private struct ToolCallKey: Hashable {
     /// Session that owns the call.
     let sessionID: UUID
@@ -255,31 +227,16 @@ public actor ToolBus {
     /// Graduated-trust gate consulted before the approval handler.
     private let permissionGate: PermissionGate?
     /// Trusted-tool anomaly watchdog counting executions and denials.
-    ///
-    /// Wired by the serving process so every production tool call contributes
-    /// its outcome category; nil keeps direct-core and test buses silent.
-    /// Executions report only for `trusted`-level tools, while denials and
-    /// egress-supervisor refusals report regardless of level so gated writes
-    /// and supervised reads still feed the denial and firewall rules.
-    /// Dry-run previews never count.
     private var watchdog: BehaviorWatchdog?
     /// In-flight tool call slots indexed by owning session and correlation identifier.
-    /// A per-call cancel stops exactly one entry here while its owning turn keeps
-    /// running, making this registry the single place that maps a wire `callID`
-    /// onto a running execution. The session is part of the key because a `callID`
-    /// is only unique within its session; keying on the identifier alone would let
-    /// two sessions' colliding calls overwrite one another's slots. Entries are
-    /// removed as soon as the call settles, so a late cancel for a reused
-    /// identifier can never abort an unrelated call.
     private var activeCalls: [ToolCallKey: ToolCallCancellation] = [:]
 
     /// Tracker guarding against duplicate retries of timed-out or unconfirmed mutating actions.
     public let uncertainTracker: UncertainActionTracker
 
-    /// Creates a bus.
-    /// Labeling posture lives with the turn owner (`Orchestrator` and the
-    /// surfaces driving it), never here: the bus carries no `SecurityConfig`
-    /// copy so the two can never diverge silently.
+    /// Creates a bus. Labeling posture lives with the turn owner (`Orchestrator` and the surfaces
+    /// driving it), never here: the bus carries no `SecurityConfig` copy so the two can never
+    /// diverge silently.
     public init(
         approvalHandler: ToolApprovalHandler? = nil,
         permissionGate: PermissionGate? = nil,
@@ -303,11 +260,6 @@ public actor ToolBus {
     }
 
     /// Records one trusted-tool observation as a count, never content.
-    ///
-    /// Executions count only for `trusted` tools so reads and gated writes
-    /// never enter the rate baseline, while denials and egress-supervisor
-    /// refusals count regardless of level so the denial and firewall rules
-    /// observe gated writes and supervised reads too.
     private func recordWatchdog(tool: any Tool, sessionID: UUID, outcome: WatchdogOutcome) async {
         if outcome == .executed {
             guard tool.permissionLevel == .trusted else { return }
@@ -316,25 +268,11 @@ public actor ToolBus {
     }
 
     /// Records one egress-supervisor refusal as a firewall-blocked count.
-    ///
-    /// The supervisor lives inside the tools, so refusals surface here as
-    /// error content rather than a typed verdict; tools that already know
-    /// the refusal can file it directly through this seam instead.
-    /// - Parameters:
-    ///   - toolName: Tool whose request the supervisor refused.
-    ///   - sessionID: Session the refusal belongs to.
     public func recordFirewallBlocked(toolName: String, sessionID: UUID) async {
         await watchdog?.ingest(toolName: toolName, sessionID: sessionID, outcome: .firewallBlocked)
     }
 
     /// Whether error content describes an egress-supervisor refusal.
-    ///
-    /// Matches the supervisor's closed refusal vocabulary — policy
-    /// violations, SSRF denials, and the supervisor attribution the tools
-    /// log — so a refusal is counted as firewall-blocked rather than a
-    /// plain execution.
-    /// - Parameter content: Tool error content to inspect.
-    /// - Returns: True when the content names a supervisor refusal.
     private static func isFirewallBlockedContent(_ content: String) -> Bool {
         let lower = content.lowercased()
         return lower.contains("egress supervisor")
@@ -343,13 +281,6 @@ public actor ToolBus {
     }
 
     /// Sets or clears the approval hook with a handler that ignores invocation context.
-    ///
-    /// This lives under its own name because two same-named overloads both accepting
-    /// optionals made a bare `setApprovalHandler(nil)` ambiguous, so callers could not
-    /// clear the context-aware hook without an explicit cast. Handlers registered here
-    /// bridge into the context-aware hook and discard the context they never receive;
-    /// `nil` clears the hook exactly as the context-aware setter does.
-    /// - Parameter handler: New handler ignoring ToolContext.
     public func setLegacyApprovalHandler(_ handler: (@Sendable (any Tool, ToolInput) async -> Bool)?) {
         if let handler {
             approvalHandler = { tool, call, _ in await handler(tool, call) }
@@ -365,15 +296,6 @@ public actor ToolBus {
     }
 
     /// Registers an alias name pointing to a primary registered tool name.
-    /// Generic alias mechanism with zero legacy registrations: no boot path
-    /// registers `remember_fact`/`recall_memories` or any other legacy alias,
-    /// and reintroducing one requires explicit review because canonical memory
-    /// names are the sole wire identity. Resolution stays shared across
-    /// `execute`, `tool(named:)`, `isToolEnabled`, `enableTool`, and
-    /// `disableTool` so an alias never diverges from its target's enablement.
-    /// - Parameters:
-    ///   - aliasName: Alias name that callers might invoke (e.g. legacy tool names).
-    ///   - targetToolName: Primary registered tool name.
     public func registerAlias(from aliasName: String, to targetToolName: String) {
         aliases[aliasName] = targetToolName
     }
@@ -406,9 +328,6 @@ public actor ToolBus {
     }
 
     /// Removes the tool with the given name. Missing names are a no-op.
-    /// Alias entries pointing at or from the removed name are dropped as well
-    /// so a stale legacy alias can never resolve past an unregister.
-    /// - Parameter name: Name of the tool to remove.
     public func unregister(toolNamed name: String) {
         tools.removeValue(forKey: name)
         enabledStates.removeValue(forKey: name)
@@ -548,10 +467,9 @@ public actor ToolBus {
                         errorKind: .executionError
                     ))
                 case .requiresApproval:
-                    // Defense in depth: pre-admission partitioning normally parks these before
-                    // execution, but an egress evaluator (or a future gate change) can return
-                    // this verdict for read-only and trusted levels too, so honor it through
-                    // the same handler path as gated writes instead of executing unsupervised.
+                    // Pre-admission partitioning parks approval-required tools, but egress or gate
+                    // changes can return this for read-only/trusted levels too; honors it through the
+                    // same handler path as gated writes instead of executing unsupervised.
                     if let denial = await resolveApproval(tool: tool, call: call, context: context) {
                         return .denied(denial)
                     }
@@ -565,13 +483,8 @@ public actor ToolBus {
             if let gate = permissionGate {
                 switch await gate.checkPermission(toolCall: call, tool: tool, sessionID: context.sessionID) {
                 case .allowed:
-                    // Attribute this run to the covering rule so later review
-                    // can see which trust is actually exercised. Persistence
-                    // stays best-effort inside the gate, so a store failure
-                    // never blocks the already-authorized tool call. Dry-run
-                    // previews never execute, so they leave counters alone.
-                    // The covering rule is the authorization, so propagate it
-                    // into the tool context for non-dry-run calls.
+                    // Attribute this run to the covering rule so later review can see which trust
+                    // is actually exercised.
                     if !context.dryRun {
                         let descriptor = ActionDescriptor.descriptor(for: call, tool: tool)
                         await gate.recordUse(scope: PermissionGate.scope(for: descriptor), toolName: descriptor.toolName)
@@ -599,19 +512,8 @@ public actor ToolBus {
         return .authorized(approved: approved)
     }
 
-    /// Runs one admitted tool call under its per-call cancellation slot.
-    ///
-    /// Split from ``execute`` so admission (lookup, enablement, argument and
-    /// permission checks) stays separate from execution. The tool runs in its own
-    /// task so a per-call cancel can stop exactly this execution without aborting
-    /// its turn, and the slot races that task's outcome against a cancel so the
-    /// awaiting loop resumes even when the tool is slow to observe cooperative
-    /// cancellation.
-    /// - Parameters:
-    ///   - tool: Registered tool to run.
-    ///   - call: Admitted invocation.
-    ///   - context: Progress-attributed execution context.
-    /// - Returns: The tool outcome, or the injected failure when a cancel wins.
+    /// Runs one admitted tool call under its per-call cancellation slot. - Returns: The tool
+    /// outcome, or the injected failure when a cancel wins.
     private func runRegisteredTool(tool: any Tool, call: ToolInput, context: ToolContext) async -> ToolResult {
         let slot = ToolCallCancellation(callID: call.callID, toolName: call.toolName)
         let key = ToolCallKey(sessionID: context.conversationID, callID: call.callID)
@@ -676,18 +578,6 @@ public actor ToolBus {
     }
 
     /// Cancels one in-flight tool call without ending its owning turn.
-    ///
-    /// The owning turn keeps running and receives the aborted call as an injected
-    /// failure result, so the model can re-scope and continue instead of the whole
-    /// request failing. The session is a required part of the lookup, not an
-    /// optional filter: a `callID` is only unique within its session, so an
-    /// owner-less lookup could only guess between colliding calls and might abort
-    /// another session's work.
-    /// - Parameters:
-    ///   - callID: Correlation identifier of the running call.
-    ///   - sessionID: Session that owns the call; the lookup is scoped to it.
-    ///   - reason: Optional user reason, trimmed and capped before it reaches the model.
-    /// - Returns: True when a running call was cancelled.
     public func cancelToolCall(callID: String, sessionID: UUID, reason: String? = nil) -> Bool {
         let trimmedID = callID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedID.isEmpty else { return false }
@@ -698,56 +588,30 @@ public actor ToolBus {
     }
 
     /// Binds the base context's progress sink to one call's identity.
-    ///
-    /// Tools emit progress without carrying their own call identifier, and the bus
-    /// is the only layer that authoritatively knows it, so the identity is stamped
-    /// here instead of trusted from each emitter. The base sink is invoked
-    /// unchanged, so the caller's routing (session tagging, framing, throttling)
-    /// still owns the report; an unwired base context stays silent through its
-    /// no-op sink.
-    /// - Parameters:
-    ///   - call: Invocation whose identity stamps each report.
-    ///   - base: Caller-supplied context whose sink receives the report.
-    /// - Returns: A context that forwards progress attributed to `call`.
     private func progressContext(for call: ToolInput, base: ToolContext) -> ToolContext {
         ToolContext(conversationID: base.conversationID, dryRun: base.dryRun, approved: base.approved) { report in
             await base.progress(report.attributed(callID: call.callID, toolName: call.toolName))
         }
     }
 
-    /// Propagates handler authorization into the tool context.
-    ///
-    /// Handler approval for a non-dry-run call is the authorization, so the
-    /// tool runs with the approved flag. Centralizes the post-`resolveApproval`
-    /// propagation so the read-only, gated, and no-gate branches cannot drift.
-    /// - Parameters:
-    ///   - context: Invocation context carrying the dry-run flag.
-    ///   - approved: Flag flipped when the handler authorized the call.
+    /// Propagates handler authorization into the tool context. Centralizes the
+    /// post-`resolveApproval` propagation so the read-only, gated, and no-gate branches cannot
+    /// drift.
     private func approveIfAuthorized(context: ToolContext, approved: inout Bool) {
         if !context.dryRun, approvalHandler != nil {
             approved = true
         }
     }
 
-    /// Resolves gated approval through the attached handler.
-    ///
-    /// Pre-admission validation runs first for tools that declare it, so an
-    /// invalid target is answered with the tool's actionable refusal instead of
-    /// reaching the prompt. Dry-run previews never file: they fall through to
-    /// the tool's preview envelope instead of parking and waiting on the inbox.
+    /// Resolves gated approval through the attached handler. Dry-run previews never file: they fall
+    /// through to the tool's preview envelope instead of parking and waiting on the inbox.
     private func resolveApproval(tool: any Tool, call: ToolInput, context: ToolContext) async -> ToolResult? {
         if context.dryRun {
             return nil
         }
-        // Pre-admission validation is the admission seam for target-shaped
-        // tools: the orchestrator consults it before parking, while a direct bus
-        // execution (the CLI REPL, the live-approval backstop) reaches the
-        // prompt without that partition, so the same verdict is consulted here.
-        // A refusal is answered as an immediate failure, so an invalid target
-        // never prompts the owner and no approval row is filed. Tools without
-        // the seam keep their existing approval path byte-identically, and the
-        // dry-run early return above still lets previews compose their own
-        // result.
+        // Pre-admission validation is the admission seam for target-shaped tools: the orchestrator
+        // consults it before parking, while a direct bus execution (the CLI REPL, the live-approval
+        // backstop) reaches the prompt without that partition, so the same verdict is consulted.
         if let validator = tool as? any ToolAdmissionValidating,
            case let .refuse(reason) = await validator.admissionVerdict(for: call)
         {

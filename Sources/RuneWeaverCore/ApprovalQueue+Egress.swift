@@ -1,13 +1,4 @@
 // Rune Weaver Core — Approval queue egress-host extraction.
-//
-// Purpose: hold the link-detector plus per-tool egress-host derivation so
-// triage badges stay single-sourced while the queue actor keeps its queueing,
-// enrichment, and waiter lifecycle. Scope: pure static scanning only (link
-// URLs, URL-alias hosts, command-text hosts, schemeless fallback); queue
-// state and decisions stay with the actor. Architectural role: focused helper
-// backing `ApprovalQueue` keeping the actor body within the type-length
-// budget; bash and desktop screening route through here so the detector shape
-// cannot drift between call sites.
 
 import Foundation
 
@@ -15,13 +6,6 @@ import Foundation
 
 extension ApprovalQueue {
     /// Extracts every explicit HTTP/HTTPS URL present in free text.
-    ///
-    /// Single owner of link-detector scanning for egress triage: bash and
-    /// desktop screening route through here so the detector shape cannot
-    /// drift between call sites. Schemeless hosts are out of scope here;
-    /// `extractEgressHost` layers those per tool below.
-    /// - Parameter text: Command or typed text to scan.
-    /// - Returns: Absolute HTTP/HTTPS URL strings in match order.
     public static func extractLinkURLs(from text: String) -> [String] {
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
             return []
@@ -37,34 +21,13 @@ extension ApprovalQueue {
         }
     }
 
-    /// Builds and enqueues a request for a tool call.
-    /// Extracts any target egress host from the tool arguments if applicable.
-    ///
-    /// Per-tool scoping keeps unrelated keys from over-extracting: URL-bearing
-    /// tools read only their URL aliases, `bash.exec` reads its command
-    /// (including schemeless `curl example.com` spellings the link detector
-    /// misses), and `desktop.action` reads typed `actions[].text`. Unknown
-    /// tools fall back to the broad pass so a new egress-bearing tool still
-    /// surfaces a host for triage instead of parking without a badge.
-    ///
-    /// Single-host triage limit: this returns the first host only while
-    /// enforcement screens every host in the batch, so a multi-host batch
-    /// badges its first host and cannot approve the whole batch on one badge;
-    /// unifying multi-host badging remains a tracked follow-up.
+    /// Builds and enqueues a request for a tool call. Extracts any target egress host from the tool
+    /// arguments if applicable.
     public static func extractEgressHost(toolName: String, argumentsJSON: String) -> String? {
         extractAllEgressHosts(toolName: toolName, argumentsJSON: argumentsJSON).first
     }
 
     /// Extracts every egress host in a tool call, in first-seen order.
-    ///
-    /// Single owner with `extractEgressHost` for detector shape: badge callers
-    /// take the first element while enforcement callers screen each element
-    /// with per-host dedupe, so triage and screening cannot drift on which
-    /// hosts a command names.
-    /// - Parameters:
-    ///   - toolName: Tool name selecting the scoped extraction.
-    ///   - argumentsJSON: Raw tool arguments document.
-    /// - Returns: Hosts in first-seen order, without duplicates.
     public static func extractAllEgressHosts(toolName: String, argumentsJSON: String) -> [String] {
         guard let data = argumentsJSON.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -147,12 +110,6 @@ extension ApprovalQueue {
     }
 
     /// Extracts every egress host from command or typed text, in first-seen order.
-    ///
-    /// Links first (detector order), then every schemeless bare host the
-    /// detector misses, so `curl example.com && curl evil.com` surfaces both
-    /// instead of screening only the first.
-    /// - Parameter text: Command or typed text to scan.
-    /// - Returns: Hosts in first-seen order, without duplicates.
     private static func allHostsFromCommandText(_ text: String) -> [String] {
         var hosts: [String] = []
         var seen = Set<String>()
@@ -172,15 +129,9 @@ extension ApprovalQueue {
         return hosts
     }
 
-    /// Finds every bare dotted host or IPv4 literal in shell text.
-    ///
-    /// Loops all regex matches (not just the first) so a multi-host command
-    /// cannot screen only its first schemeless host while the second executes
-    /// unscreened. Conservative by design: dotted names require a two-letter
-    /// alphabetic tail (or a quad address), so prose like `version 2.0` never
-    /// badges while `curl example.com` and `ping 10.0.0.1` still surface.
-    /// - Parameter text: Command or typed text to scan.
-    /// - Returns: Bare hosts in match order, without duplicates.
+    /// Finds every bare dotted host or IPv4 literal in shell text. Loops all regex matches (not
+    /// just the first) so a multi-host command cannot screen only its first schemeless host while
+    /// the second executes unscreened.
     public static func extractAllSchemelessHosts(in text: String) -> [String] {
         let pattern = #"\b(?:((?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,})|(\d{1,3}(?:\.\d{1,3}){3}))(?::\d+)?(?:/[^\s]*)?"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }

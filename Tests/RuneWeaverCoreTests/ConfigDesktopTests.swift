@@ -1,4 +1,5 @@
 // Rune Weaver Core Tests — Config Desktop tests.
+
 import Foundation
 @testable import RuneWeaverCore
 import Testing
@@ -54,10 +55,8 @@ struct ConfigDesktopTests {
 
     @Test
     func `Retired allow toggles and legacy master key are silently ignored`() throws {
-        // Older files carried `screen_capture_enabled`, `control_enabled`,
-        // and a master `enabled` key. The single-gate contract ignores them
-        // so upgrades load without migration and enablement stays with the
-        // tool-state toggle.
+        // Older files carried `screen_capture_enabled`, `control_enabled`, and a master `enabled`
+        // key.
         let text = """
         [llm]
         default_provider = "mlx"

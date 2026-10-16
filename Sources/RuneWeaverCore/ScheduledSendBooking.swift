@@ -1,8 +1,4 @@
 // Rune Weaver Core — Scheduled-send booking seam for delayed email and Messages sends.
-//
-// Lets the send tools book a fire time at the approval moment without depending
-// on the scheduler store: the serving process injects a store-backed booking,
-// while direct-core contexts leave it unwired and fail closed with guidance.
 
 import Foundation
 

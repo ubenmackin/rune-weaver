@@ -1,12 +1,4 @@
 // Rune Weaver Core — Index coordinator shared models and stage seam.
-//
-// Holds the run phases, source kinds, per-source and per-run reports, live
-// snapshot, reporting seam, and closure-backed stage so the coordinator actor
-// stays focused on sequencing and the file budgets stay within the lint gate.
-// Selection re-derives every run from the live policy snapshot via the single
-// kind-to-flag mapping, so saved toggles apply on the next run with no
-// rebuild; per-run values flow through the snapshot the coordinator hands
-// each body.
 
 import Foundation
 
@@ -25,10 +17,6 @@ public enum IndexPhase: String, Sendable, Equatable, CaseIterable {
 }
 
 /// Indexable corpora the coordinator sequences, in canonical run order.
-///
-/// Declared separately from ``IndexSource`` (the persisted corpus origin) so
-/// stage ordering can evolve independently of the storage spelling; the two
-/// currently share the same five kinds.
 public enum IndexSourceKind: String, Sendable, Hashable, CaseIterable {
     /// Local filesystem documents.
     case files
@@ -47,12 +35,6 @@ public enum IndexSourceKind: String, Sendable, Hashable, CaseIterable {
 
 extension IndexSourceKind {
     /// Whether the kind is selected for a run under the live policy snapshot.
-    ///
-    /// Single kind-to-flag mapping owning selection, so a save applied via
-    /// `updateConfig` takes effect on the next run with no rebuilt stages; the
-    /// in-flight snapshot stays fixed for the whole run.
-    /// - Parameter policy: Per-run policy snapshot fixed at run entry.
-    /// - Returns: True when the global switch plus the kind's toggle enable it.
     public func isEnabled(in policy: IndexConfig) -> Bool {
         guard policy.enabled else { return false }
         switch self {
@@ -125,21 +107,7 @@ public struct IndexSourceRunReport: Sendable, Equatable {
     /// Last relative item processed, for the display `current` field.
     public var lastItem: String?
 
-    /// Creates a source run report.
-    /// - Parameters:
-    ///   - kind: Source the counts belong to.
-    ///   - scanned: Items examined.
-    ///   - indexed: Documents written.
-    ///   - vectorChunks: Chunks written with an embedding.
-    ///   - keywordChunks: Chunks written without an embedding.
-    ///   - skipped: Items deliberately skipped.
-    ///   - errors: Items that could not be processed.
-    ///   - retired: Documents retired by the stage.
-    ///   - truncated: Documents where the vector cap left tail chunks keyword-only.
-    ///   - didRun: Whether the stage ran.
-    ///   - skippedReason: Why a stage did not run.
-    ///   - warnings: Non-fatal problems.
-    ///   - lastItem: Last relative item processed.
+    /// Creates a source run report. kind: Source the counts belong to.
     public init(
         kind: IndexSourceKind,
         scanned: Int = 0,
@@ -209,25 +177,7 @@ public struct IndexRunSummary: Sendable, Equatable {
     /// did-run plus reason even when the aggregate counts hide a skip.
     public let sources: [IndexSourceRunReport]
 
-    /// Creates a run summary.
-    /// - Parameters:
-    ///   - sessionID: Per-run session identifier.
-    ///   - trigger: What caused the run.
-    ///   - status: Final run state.
-    ///   - documentsIndexed: Documents written.
-    ///   - vectorChunks: Chunks written with an embedding.
-    ///   - keywordChunks: Chunks written without an embedding.
-    ///   - scanned: Items examined.
-    ///   - skipped: Items deliberately skipped.
-    ///   - errors: Items that could not be processed.
-    ///   - retired: Documents retired across every source.
-    ///   - truncated: Documents where the vector cap left tail chunks keyword-only.
-    ///   - warnings: Non-fatal problems.
-    ///   - startedAt: Instant the run began.
-    ///   - finishedAt: Instant the run finished.
-    ///   - indexAsOf: Recorded watermark on success.
-    ///   - skippedReason: Why the run did not execute.
-    ///   - sources: Per-source outcomes in canonical run order.
+    /// Creates a run summary. sessionID: Per-run session identifier.
     public init(
         sessionID: UUID,
         trigger: IndexRunTrigger,
@@ -268,10 +218,6 @@ public struct IndexRunSummary: Sendable, Equatable {
 }
 
 /// Lightweight snapshot of an in-flight index run for polling surfaces.
-///
-/// Returned by ``IndexCoordinator/liveTotals``; nil when no run is in flight.
-/// Carries cumulative counts plus the active phase and stage tokens so a
-/// menu-bar or dashboard poll can render liveness without touching run state.
 public struct IndexLiveTotals: Sendable, Equatable {
     /// What caused the run.
     public let trigger: IndexRunTrigger
@@ -296,19 +242,7 @@ public struct IndexLiveTotals: Sendable, Equatable {
     /// Instant the run began.
     public let startedAt: Date
 
-    /// Creates a live snapshot.
-    /// - Parameters:
-    ///   - trigger: What caused the run.
-    ///   - phase: Active phase.
-    ///   - stage: Active source stage, or nil.
-    ///   - scanned: Items examined.
-    ///   - indexed: Documents written.
-    ///   - skipped: Items deliberately skipped.
-    ///   - errors: Items that could not be processed.
-    ///   - rate: Documents per second.
-    ///   - elapsedMs: Milliseconds elapsed since the run began.
-    ///   - current: Last relative item reported.
-    ///   - startedAt: Instant the run began.
+    /// Creates a live snapshot. trigger: What caused the run.
     public init(
         trigger: IndexRunTrigger,
         phase: IndexPhase,
@@ -337,10 +271,6 @@ public struct IndexLiveTotals: Sendable, Equatable {
 }
 
 /// One run lifecycle event delivered to the reporting seam.
-///
-/// Carries the per-run session identifier and stable event identifier so an
-/// adapter can append a `run_logs` row on start and update the same row on
-/// completion, then broadcast the matching `run_started`/`run_completed` frame.
 public struct IndexRunEvent: Sendable, Equatable {
     /// Stable event identifier, reused for the start and completion events.
     public let id: UUID
@@ -359,16 +289,7 @@ public struct IndexRunEvent: Sendable, Equatable {
     /// Execution duration in milliseconds, when this is a completion event.
     public let durationMs: Int?
 
-    /// Creates a run event.
-    /// - Parameters:
-    ///   - id: Stable event identifier.
-    ///   - sessionID: Per-run session identifier.
-    ///   - trigger: What caused the run.
-    ///   - status: Event state.
-    ///   - message: Human-readable summary.
-    ///   - timestamp: Instant the event was produced.
-    ///   - response: Detailed outcome text.
-    ///   - durationMs: Execution duration in milliseconds.
+    /// Creates a run event. id: Stable event identifier.
     public init(
         id: UUID,
         sessionID: UUID,
@@ -391,9 +312,6 @@ public struct IndexRunEvent: Sendable, Equatable {
 }
 
 /// Seam the coordinator reports run lifecycle through.
-///
-/// The server adapts this to `RunLogStore` plus `WSHub`; a test or a
-/// transport-free caller can leave every method as a no-op.
 public protocol IndexRunReporting: Sendable {
     /// Reports that a run started.
     /// - Parameter event: The start event, carrying the per-run session id.
@@ -422,15 +340,9 @@ public struct NullIndexRunReporter: IndexRunReporting {
 
 // MARK: - Stage seam
 
-/// One sequenced source stage the coordinator runs.
-///
-/// Implementations wrap a concrete indexer and translate its report into an
-/// ``IndexSourceRunReport``. The coordinator passes its progress sink, a
-/// cooperative cancellation probe, and the per-run policy snapshot so a stage
-/// can report liveness and stop between batches without the core target
-/// reaching into the server. The run-start snapshot is the single source for
-/// live stage selection (via the kind-to-flag mapping) plus effort, workers,
-/// caps, excludes, roots, and windows.
+/// One sequenced source stage the coordinator runs. The run-start snapshot is the single source for
+/// live stage selection (via the kind-to-flag mapping) plus effort, workers, caps, excludes, roots,
+/// and windows.
 public protocol IndexSourceStage: Sendable {
     /// Source this stage indexes.
     var kind: IndexSourceKind { get }
@@ -440,13 +352,8 @@ public protocol IndexSourceStage: Sendable {
     /// re-derives from the run policy snapshot instead.
     var isEnabled: Bool { get }
 
-    /// Runs the stage against one per-run policy snapshot.
-    /// - Parameters:
-    ///   - reporter: Sink for liveness frames.
-    ///   - isCancelled: Probe that reports whether the run was cancelled.
-    ///   - policy: Live index policy snapshot for this run; the only source
-    ///     for effort, workers, caps, excludes, roots, and windows.
-    /// - Returns: The stage's contribution to the run.
+    /// Runs the stage against one per-run policy snapshot. reporter: Sink for
+    /// liveness frames.
     func run(
         reporter: @escaping ToolProgressReporter,
         isCancelled: @escaping @Sendable () -> Bool,
@@ -462,14 +369,8 @@ extension IndexSourceStage {
     public func cancel() async {}
 }
 
-/// Closure-backed source stage, used to adapt the concrete indexers and to
-/// drive the coordinator against deterministic stubs in tests.
-///
-/// The body receives the coordinator's per-run policy snapshot as its leading
-/// argument so selection plus every value it builds from (effort, workers,
-/// caps, excludes, roots, windows) tracks the saved policy on the next run
-/// without a restart. An in-flight body keeps the snapshot it was invoked
-/// with, ignoring saves that land mid-run.
+/// Closure-backed source stage, used to adapt the concrete indexers and to drive the coordinator
+/// against deterministic stubs in tests.
 public struct IndexClosureStage: IndexSourceStage {
     /// Source this stage indexes.
     public let kind: IndexSourceKind
@@ -481,13 +382,7 @@ public struct IndexClosureStage: IndexSourceStage {
     /// Hook invoked when the coordinator cancels a run.
     private let onCancel: @Sendable () async -> Void
 
-    /// Creates a closure-backed stage.
-    /// - Parameters:
-    ///   - kind: Source this stage indexes.
-    ///   - isEnabled: Boot-time enablement retained for compatibility; live
-    ///     selection re-derives from the run policy snapshot instead.
-    ///   - onCancel: Cancellation hook; defaults to a no-op.
-    ///   - body: Work performed by the stage against the per-run policy.
+    /// Creates a closure-backed stage. kind: Source this stage indexes.
     public init(
         kind: IndexSourceKind,
         isEnabled: Bool = true,
@@ -500,12 +395,8 @@ public struct IndexClosureStage: IndexSourceStage {
         self.body = body
     }
 
-    /// Runs the closure-backed body against one per-run policy snapshot.
-    /// - Parameters:
-    ///   - reporter: Sink for liveness frames.
-    ///   - isCancelled: Cooperative cancellation probe.
-    ///   - policy: Live index policy snapshot for this run.
-    /// - Returns: The stage's contribution to the run.
+    /// Runs the closure-backed body against one per-run policy snapshot. reporter:
+    /// Sink for liveness frames.
     public func run(
         reporter: @escaping ToolProgressReporter,
         isCancelled: @escaping @Sendable () -> Bool,

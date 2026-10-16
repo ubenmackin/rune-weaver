@@ -57,12 +57,7 @@ public struct ToolContext: Sendable, Equatable {
     /// No-op reporter used when a caller does not wire a streaming sink.
     public static let noProgress: ToolProgressReporter = { _ in }
 
-    /// Creates an execution context.
-    /// - Parameters:
-    ///   - conversationID: Owning session identifier.
-    ///   - dryRun: Whether the tool must avoid mutating external state.
-    ///   - approved: Whether a prior approval decision authorizes execution.
-    ///   - progress: Optional progress sink; defaults to a no-op.
+    /// Creates an execution context. conversationID: Owning session identifier.
     public init(
         conversationID: UUID,
         dryRun: Bool = false,
@@ -75,10 +70,9 @@ public struct ToolContext: Sendable, Equatable {
         self.progress = progress
     }
 
-    /// Equality compares only the value fields: the reporter is a closure with no
-    /// stable identity, so folding it in would make two contexts describing the
-    /// same turn compare unequal and break callers that compare for change.
-    /// - Returns: True when both contexts describe the same execution.
+    /// Equality compares only the value fields: the reporter is a closure with no stable identity,
+    /// so folding it in would make two contexts describing the same turn compare unequal and break
+    /// callers that compare for change.
     public static func == (lhs: ToolContext, rhs: ToolContext) -> Bool {
         lhs.conversationID == rhs.conversationID && lhs.dryRun == rhs.dryRun && lhs.approved == rhs.approved
     }
@@ -87,13 +81,9 @@ public struct ToolContext: Sendable, Equatable {
 // MARK: - Tool call placeholder
 
 extension ToolInput {
-    /// Generous cap for arguments embedded in a persisted placeholder line.
-    /// Bounds `sessions`/`messages` persistence and every subsequent wire
-    /// serialization when tool payloads grow large (e.g. email bodies), while
-    /// staying far above the legacy 160-char bound so ordinary calls persist
-    /// intact. Over-limit lines truncate with an ellipsis and degrade to `{}`
-    /// on the wire via `sanitizedToolCallArgumentsJSON`, keeping strict
-    /// backends from 400ing instead of sending a non-object fragment.
+    /// Generous cap for arguments embedded in a persisted placeholder line. Bounds
+    /// persistence and wire serialization when tool payloads grow large (e.g. email bodies),
+    /// while staying far above the legacy bound so ordinary calls persist intact.
     public static let placeholderArgumentsLimit = 4000
 
     /// Builds the assistant placeholder stored when a turn contains only tool calls.
@@ -119,18 +109,6 @@ extension ToolInput {
     }
 
     /// Parses one persisted assistant placeholder line into a structured input.
-    ///
-    /// Wire grammar (authoritative; the dashboard `parsePlaceholderLine` in
-    /// `Web/src/api.ts` mirrors these steps exactly so history coverage and
-    /// plumbing stripping agree): outer whitespace trims, the last `[` wins,
-    /// the char before it must be space/tab, the bracketed identifier trims
-    /// and holds no space/tab/bracket, and the head splits into tool plus
-    /// optional arguments with empty arguments normalizing to `{}`. Shared
-    /// vectors pinning both sides: `Calling a {"limit":1} [c1]` and
-    /// `Calling a [c2]` parse, double-space/tab heads parse, slash/bracket
-    /// arguments keep the last bracket (`arg [inner] [c3]` → `c3`), and
-    /// inside-bracket spaces trim (`[  c4  ]` → `c4`); prose mentions,
-    /// spaced identifiers, and missing pre-bracket spaces reject.
     public static func parsePlaceholderLine(_ line: String) -> ToolInput? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("Calling ") else { return nil }

@@ -1,28 +1,10 @@
 // Rune Weaver Server — Goal pursuit REST surface plus live push fan-out.
-//
-// Purpose: exposes steady goal tracking over HTTP for dashboards and headless
-// clients: listing with status filtering, creation with background planning,
-// detail with bounded audit history, edits with pause and resume, tombstone
-// versus hard deletion, manual advancement bypassing cadence, step-level moves,
-// and per-status counts for badges.
-// Scope: route registration, request validation, and `goal_updated` broadcasts
-// only; durable rows stay with `GoalStore`, planning and due bookkeeping stay
-// with `GoalEngine`, and turn execution stays with the scheduler worker so the
-// service and CLI loops cannot drift.
-// Architectural role: thin Vapor adapter over the core pursuit engine, mirroring
-// the run and scheduler route idioms (strict UUID checks, clamped limits, honest
-// status codes) while keeping every mutation observable on the shared hub.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
 /// Registers every goal route on the application.
-///
-/// Global middleware already guards data paths, so no route installs its own
-/// auth; the summary literal registers before the `:id` parameter so the exact
-/// path wins without relying on registration order.
-/// - Parameter app: Application receiving the routes.
 func registerGoalRoutes(_ app: Application) {
     let goals = app.grouped(PathComponent.constant(ServerPaths.goals))
     registerGoalListRoute(on: goals)
@@ -35,11 +17,8 @@ func registerGoalRoutes(_ app: Application) {
     registerGoalStepRoute(on: goals)
 }
 
-/// Lists goals with optional status filtering for dashboards.
-///
-/// Steps stay per-row because plans are bounded by config; fan-out lives here
-/// so the thin dispatcher stays free of closure detail.
-/// - Parameter goals: Route group receiving the list route.
+/// Lists goals with optional status filtering for dashboards. Steps stay per-row because plans are
+/// bounded by config; fan-out lives here so the thin dispatcher stays free of closure detail.
 private func registerGoalListRoute(on goals: RoutesBuilder) {
     goals.get { req async throws -> GoalsListResponse in
         let filter = try parseGoalStatusFilter(req.query[String.self, at: "status"])
@@ -66,11 +45,9 @@ private func registerGoalListRoute(on goals: RoutesBuilder) {
     }
 }
 
-/// Creates a goal with background planning for dashboards and headless clients.
-///
-/// Planning lands shortly after creation on a tracked background task; the
-/// detached hop lives here so the dispatcher never carries turn logic.
-/// - Parameter goals: Route group receiving the create route.
+/// Creates a goal with background planning for dashboards and headless clients. Planning lands
+/// shortly after creation on a tracked background task; the detached hop lives here so the
+/// dispatcher never carries turn logic.
 private func registerGoalCreateRoute(on goals: RoutesBuilder) {
     goals.post { req async throws -> GoalDetailResponse in
         let body = try req.content.decode(GoalCreateRequest.self)
@@ -135,11 +112,6 @@ private func registerGoalCreateRoute(on goals: RoutesBuilder) {
 }
 
 /// Counts goals per status for dashboard badges.
-///
-/// The summary literal registers before the `:id` parameter so the exact path
-/// wins without relying on registration order; call order in the dispatcher
-/// preserves that.
-/// - Parameter goals: Route group receiving the summary route.
 private func registerGoalSummaryRoute(on goals: RoutesBuilder) {
     goals.get(PathComponent.constant(ServerPaths.goalSummary)) { req async throws -> GoalsSummaryResponse in
         let all = try await req.application.runeWeaver.goals.list(status: nil)
@@ -177,11 +149,9 @@ private func registerGoalSummaryRoute(on goals: RoutesBuilder) {
     }
 }
 
-/// Fetches one goal with its plan and bounded audit history.
-///
-/// A present limit must sit inside the advertised range instead of silently
-/// clamping; the tail bound lives here so the dispatcher stays declarative.
-/// - Parameter goals: Route group receiving the detail route.
+/// Fetches one goal with its plan and bounded audit history. A present limit must sit inside the
+/// advertised range instead of silently clamping; the tail bound lives here so the dispatcher stays
+/// declarative.
 private func registerGoalDetailRoute(on goals: RoutesBuilder) {
     goals.get(PathComponent.parameter("id")) { req async throws -> GoalDetailResponse in
         guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
@@ -215,11 +185,9 @@ private func registerGoalDetailRoute(on goals: RoutesBuilder) {
     }
 }
 
-/// Edits a goal's fields and lifecycle state with all-or-nothing validation.
-///
-/// Every present field validates before any column writes so a bad patch never
-/// half-applies title before failing on interval.
-/// - Parameter goals: Route group receiving the patch route.
+/// Edits a goal's fields and lifecycle state with all-or-nothing validation. Every present field
+/// validates before any column writes so a bad patch never half-applies title before failing on
+/// interval.
 private func registerGoalPatchRoute(on goals: RoutesBuilder) {
     goals.patch(PathComponent.parameter("id")) { req async throws -> GoalDetailResponse in
         guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
@@ -326,10 +294,6 @@ private func registerGoalPatchRoute(on goals: RoutesBuilder) {
 }
 
 /// Tombstones or hard-deletes a goal.
-///
-/// Purge accepts both native booleans and string spellings so dashboard
-/// toggles and hand-built curls agree without a second parameter.
-/// - Parameter goals: Route group receiving the delete route.
 private func registerGoalDeleteRoute(on goals: RoutesBuilder) {
     goals.delete(PathComponent.parameter("id")) { req async throws -> HTTPStatus in
         guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
@@ -368,11 +332,6 @@ private func registerGoalDeleteRoute(on goals: RoutesBuilder) {
 }
 
 /// Manually advances a goal through the shared scheduler worker.
-///
-/// The worker owns the single-flight lock, session, run row, and proactive
-/// gating so manual fires ride the exact background path instead of a
-/// route-local reimplementation that could drift.
-/// - Parameter goals: Route group receiving the advance route.
 private func registerGoalAdvanceRoute(on goals: RoutesBuilder) {
     goals.post(PathComponent.parameter("id"), PathComponent.constant(ServerPaths.goalAdvance)) { req async throws -> GoalAdvanceResponse in
         guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
@@ -421,12 +380,9 @@ private func registerGoalAdvanceRoute(on goals: RoutesBuilder) {
     }
 }
 
-/// Moves one plan step and pushes the refreshed row.
-///
-/// A blank note preserves history instead of wiping prior text with
-/// whitespace; manual moves are progress boundaries so the refreshed row
+/// Moves one plan step and pushes the refreshed row. A blank note preserves history instead of
+/// wiping prior text with whitespace; manual moves are progress boundaries so the refreshed row
 /// broadcasts for live dashboards.
-/// - Parameter goals: Route group receiving the step route.
 private func registerGoalStepRoute(on goals: RoutesBuilder) {
     goals.patch(
         PathComponent.parameter("id"),
@@ -480,12 +436,9 @@ private func registerGoalStepRoute(on goals: RoutesBuilder) {
     }
 }
 
-/// Maps advancement turn failures to HTTP codes without leaking engine detail.
-///
-/// Empty input is a caller 400, loop overflow is unprocessable, and LLM
-/// transport stays a gateway failure so dashboards keep the honest code.
-/// - Parameter error: Orchestrator failure from the advancement turn.
-/// - Returns: Abort with the mapped status.
+/// Maps advancement turn failures to HTTP codes without leaking engine detail. Empty input is a
+/// caller 400, loop overflow is unprocessable, and LLM transport stays a gateway failure so
+/// dashboards keep the honest code.
 private func mapOrchestratorAdvanceError(_ error: OrchestratorError) -> Abort {
     switch error {
     case .emptyInput:
@@ -497,12 +450,8 @@ private func mapOrchestratorAdvanceError(_ error: OrchestratorError) -> Abort {
     }
 }
 
-/// Validates a goal title once for create and patch.
-///
-/// Thin REST wrapper over the shared validator so the route and CLI share one
-/// trimmed-empty rule while keeping the `Abort` idiom locally.
-/// - Parameter raw: Raw title.
-/// - Returns: Trimmed title.
+/// Validates a goal title once for create and patch. Thin REST wrapper over the shared validator so
+/// the route and CLI share one trimmed-empty rule while keeping the `Abort` idiom locally.
 func validatedGoalTitle(_ raw: String) throws -> String {
     do {
         return try GoalValidation.validatedTitle(raw)
@@ -511,12 +460,9 @@ func validatedGoalTitle(_ raw: String) throws -> String {
     }
 }
 
-/// Validates a goal statement once for create and patch.
-///
-/// Thin REST wrapper over the shared validator so the route and CLI share one
-/// trimmed-empty rule while keeping the `Abort` idiom locally.
-/// - Parameter raw: Raw statement.
-/// - Returns: Trimmed statement.
+/// Validates a goal statement once for create and patch. Thin REST wrapper over the shared
+/// validator so the route and CLI share one trimmed-empty rule while keeping the `Abort` idiom
+/// locally.
 func validatedGoalStatement(_ raw: String) throws -> String {
     do {
         return try GoalValidation.validatedStatement(raw)
@@ -525,13 +471,9 @@ func validatedGoalStatement(_ raw: String) throws -> String {
     }
 }
 
-/// Validates an optional cadence hint against the configured pursuit bounds.
-///
-/// Thin REST wrapper over the config-owned validator so the route and CLI
-/// share one range while keeping their own error idioms. Nil passes through
-/// so creation falls back to the configured interval.
-/// - Parameter raw: Raw interval, or nil when omitted.
-/// - Returns: Validated interval, or nil.
+/// Validates an optional cadence hint against the configured pursuit bounds. Thin REST wrapper over
+/// the config-owned validator so the route and CLI share one range while keeping their own error
+/// idioms.
 func validatedGoalCadence(_ raw: Int?) throws -> Int? {
     do {
         return try GoalsConfig.validateCadence(raw)
@@ -548,12 +490,8 @@ func validatedGoalCadence(_ raw: Int?) throws -> Int? {
     }
 }
 
-/// Maps REST trigger inputs onto engine draft specs, rejecting blank kinds.
-///
-/// A trigger without an event kind can never match, so it fails the request
-/// instead of being armed as dead weight. Nil input arms nothing.
-/// - Parameter inputs: Trigger inputs from a create or patch body, if any.
-/// - Returns: Draft specs for the engine.
+/// Maps REST trigger inputs onto engine draft specs, rejecting blank kinds. A trigger without an
+/// event kind can never match, so it fails the request instead of being armed as dead weight.
 private func goalTriggerDrafts(_ inputs: [GoalTriggerInput]?) throws -> [GoalTriggerDraft] {
     guard let inputs else { return [] }
     var drafts: [GoalTriggerDraft] = []
@@ -569,18 +507,6 @@ private func goalTriggerDrafts(_ inputs: [GoalTriggerInput]?) throws -> [GoalTri
 }
 
 /// Replaces a goal's armed triggers through one atomic store transaction.
-///
-/// Present patches are a full replacement: the existing set is cleared and the
-/// new set inserted in a single `BEGIN IMMEDIATE` transaction, so a failure or
-/// crash can never leave the goal with zero or partial triggers while the
-/// request errors. Inputs are capped at the configured per-goal budget (never
-/// above the absolute bound) and each cooldown is pulled up to the minimum so a
-/// hand-built curl cannot arm a tight re-fire loop.
-/// - Parameters:
-///   - inputs: Replacement trigger inputs.
-///   - goalID: Goal whose triggers are being replaced.
-///   - store: Durable goal persistence.
-///   - budget: Configured per-goal trigger budget, clamped to the valid range.
 private func replaceGoalTriggers(
     _ inputs: [GoalTriggerInput],
     goalID: UUID,
@@ -609,11 +535,6 @@ private func replaceGoalTriggers(
 }
 
 /// Parses an optional status filter for list routes.
-///
-/// Thin REST wrapper over the shared validator so list filters and CLI flags
-/// agree. Blank and absent both mean unfiltered.
-/// - Parameter raw: Raw status value.
-/// - Returns: Parsed filter, or nil.
 func parseGoalStatusFilter(_ raw: String?) throws -> GoalStatus? {
     do {
         return try GoalValidation.parseGoalStatusFilter(raw)
@@ -629,13 +550,8 @@ func parseGoalStatusFilter(_ raw: String?) throws -> GoalStatus? {
     }
 }
 
-/// Parses a required goal lifecycle state.
-///
-/// Thin REST wrapper over the shared validator: only the exact `rawValue`
-/// plus the `needsInput` camelCase alias for the parked state. Case variants
-/// such as `ACTIVE` fail instead of silently listing.
-/// - Parameter raw: Raw status value.
-/// - Returns: Parsed state.
+/// Parses a required goal lifecycle state. Thin REST wrapper over the shared validator: only the
+/// exact `rawValue` plus the `needsInput` camelCase alias for the parked state.
 func parseGoalStatus(_ raw: String) throws -> GoalStatus {
     do {
         return try GoalValidation.parseGoalStatus(raw)
@@ -652,12 +568,6 @@ func parseGoalStatus(_ raw: String) throws -> GoalStatus {
 }
 
 /// Parses a required step state.
-///
-/// Thin REST wrapper over the shared validator: only the exact `rawValue`
-/// plus the `inProgress` camelCase alias for the underway state, mirroring
-/// the goal parser's strictness so the two cases cannot drift.
-/// - Parameter raw: Raw status value.
-/// - Returns: Parsed state.
 func parseStepStatus(_ raw: String) throws -> StepStatus {
     do {
         return try GoalValidation.parseStepStatus(raw)
@@ -673,12 +583,8 @@ func parseStepStatus(_ raw: String) throws -> StepStatus {
     }
 }
 
-/// Maps store failures to HTTP codes: unknown rows become 404 while transport
-/// failures stay 500 instead of leaking driver detail.
-/// - Parameters:
-///   - error: Store failure.
-///   - raw: Raw identifier for the not-found message.
-/// - Returns: Abort with the mapped status.
+/// Maps store failures to HTTP codes: unknown rows become 404 while transport failures stay 500
+/// instead of leaking driver detail. error: Store failure.
 func mapGoalStoreError(_ error: GoalStoreError, raw: String) -> Abort {
     switch error {
     case let .notFound(detail):

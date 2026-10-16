@@ -1,19 +1,10 @@
 // Rune Weaver Core — JSON-backed store for incremental mail indexing checkpoints.
-//
-// Purpose: Persists per-mailbox UID watermarks, backfill floors, validity tokens,
-// and seen content hashes to a JSON sidecar file so the indexer can resume
-// incrementally without altering the document index schema.
-// Scope: Checkpoint file IO and in-memory caching only; IMAP enumeration and
-// document extraction live in `MailIndexer`.
 
 import Foundation
 
 // MARK: - Checkpoint store
 
 /// JSON-backed store for per-mailbox UID watermarks, backfill floors, and seen content hashes.
-///
-/// The checkpoint is small and read on demand, so a JSON sidecar keeps the
-/// incremental cursor independent of the document store schema.
 public actor MailIndexCheckpointStore {
     /// Default checkpoint path, kept beside the other durable memory stores.
     public static let defaultPath = "~/.runeweaver/memory/mail-index-checkpoint.json"
@@ -35,22 +26,11 @@ public actor MailIndexCheckpointStore {
     }
 
     /// Composes the mailbox key used for watermarks.
-    ///
-    /// Delegates to the shared `mailboxKey` so padded spellings share one
-    /// watermark with the pooled session instead of forking pool vs checkpoint.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    /// - Returns: A stable opaque key.
     public static func key(account: String, mailbox: String) -> String {
         mailboxKey(account: account, mailbox: mailbox)
     }
 
-    /// Highest indexed UID for one mailbox.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    /// - Returns: The watermark, or zero when none has been recorded.
+    /// Highest indexed UID for one mailbox. account: Account nickname.
     public func watermark(account: String, mailbox: String) -> Int {
         loadIfNeeded()
         return checkpoint.watermarks[Self.key(account: account, mailbox: mailbox)] ?? 0
@@ -64,32 +44,21 @@ public actor MailIndexCheckpointStore {
         return checkpoint.contentHashes.contains(hash)
     }
 
-    /// Last observed validity token for one mailbox.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    /// - Returns: Stored token, or nil when never observed.
+    /// Last observed validity token for one mailbox. account: Account nickname.
     public func uidValidity(account: String, mailbox: String) -> Int? {
         loadIfNeeded()
         return checkpoint.uidValidities[Self.key(account: account, mailbox: mailbox)]
     }
 
-    /// Lowest indexed UID reached during backfill for one mailbox.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    /// - Returns: The backfill floor UID, or nil when backfill is completed or not started.
+    /// Lowest indexed UID reached during backfill for one mailbox. account: Account
+    /// nickname.
     public func backfillFloor(account: String, mailbox: String) -> Int? {
         loadIfNeeded()
         return checkpoint.backfillFloors[Self.key(account: account, mailbox: mailbox)]
     }
 
-    /// Records the backfill floor for one mailbox, persisting immediately.
-    /// Setting floor <= 1 or nil removes the floor, marking backfill complete.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    ///   - floor: Lowest UID reached during backfill.
+    /// Records the backfill floor for one mailbox, persisting immediately. Setting floor <= 1 or
+    /// nil removes the floor, marking backfill complete.
     public func recordBackfillFloor(account: String, mailbox: String, floor: Int?) throws {
         loadIfNeeded()
         let mailboxKey = Self.key(account: account, mailbox: mailbox)
@@ -101,16 +70,8 @@ public actor MailIndexCheckpointStore {
         try persist()
     }
 
-    /// Reconciles the stored validity token, resetting the watermark on mismatch.
-    ///
-    /// A changed token means the server reassigned UIDs, so the mailbox
-    /// restarts from zero while retained hashes dedupe refetches instead of
-    /// duplicating. A first observation only records without resetting.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    ///   - uidValidity: Current server token, or nil when unknown.
-    /// - Returns: True when the watermark was reset.
+    /// Reconciles the stored validity token, resetting the watermark on mismatch. A first
+    /// observation only records without resetting.
     @discardableResult
     public func synchronizeValidity(account: String, mailbox: String, uidValidity: Int?) throws -> Bool {
         loadIfNeeded()
@@ -129,12 +90,8 @@ public actor MailIndexCheckpointStore {
         return false
     }
 
-    /// Records progress for one mailbox, persisting immediately.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Mailbox name.
-    ///   - watermark: Highest indexed UID, which may only advance.
-    ///   - contentHash: Content hash to remember, when one was computed.
+    /// Records progress for one mailbox, persisting immediately. account: Account
+    /// nickname.
     public func record(account: String, mailbox: String, watermark: Int, contentHash: String?) throws {
         loadIfNeeded()
         let mailboxKey = Self.key(account: account, mailbox: mailbox)
@@ -157,13 +114,9 @@ public actor MailIndexCheckpointStore {
         return checkpoint
     }
 
-    /// Drops the watermark, validity token, and backfill floor for one mailbox.
-    ///
-    /// Called after a denied mailbox retires so re-allowing it backfills from
-    /// zero instead of resuming past mail it never indexed while denied.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - mailbox: Denied mailbox name.
+    /// Drops the watermark, validity token, and backfill floor for one mailbox. Called after a
+    /// denied mailbox retires so re-allowing it backfills from zero instead of resuming past mail it
+    /// never indexed while denied.
     public func dropMailbox(account: String, mailbox: String) throws {
         loadIfNeeded()
         let key = Self.key(account: account, mailbox: mailbox)
@@ -183,11 +136,6 @@ public actor MailIndexCheckpointStore {
     }
 
     /// Forgets content hashes for retired mail so a re-allowed mailbox re-indexes.
-    ///
-    /// Hashes are global dedupe keys, so only the retired rows' hashes leave:
-    /// every other mailbox keeps its dedupe memory while the denied bodies
-    /// become indexable again.
-    /// - Parameter hashes: Content hashes of the retired documents.
     public func removeContentHashes(_ hashes: Set<String>) throws {
         loadIfNeeded()
         guard !hashes.isEmpty else { return }

@@ -1,8 +1,4 @@
 // Rune Weaver Tools Tests — Calendar gateway persistence tests.
-//
-// Purpose: verify calendar gateway search, create, update, and delete against a hermetic EventKit seam.
-// Scope: in-memory mock store only; no live EventKit access.
-// Architectural role: guards gateway persistence behavior while tool tests own the ToolBus surface.
 
 import Foundation
 import os

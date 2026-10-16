@@ -2,12 +2,8 @@
 
 import Foundation
 
-/// Recall plan inferred from one user query without model calls.
-///
-/// `since` is inclusive and `until` is exclusive; date-only days resolve at
-/// local midnight via `TemporalFilter.parse`. Either side may be nil for
-/// unbounded. `skipDocIndex` mirrors `LiveSearchGuidance` freshness so live
-/// tools cover state the nightly index may not hold yet.
+/// Recall plan inferred from one user query without model calls. `since` is inclusive and `until`
+/// is exclusive; date-only days resolve at local midnight via `TemporalFilter.parse`.
 public struct RecallPlan: Sendable, Equatable {
     /// Inclusive lower bound, or nil for unbounded below.
     public let since: Date?
@@ -16,10 +12,6 @@ public struct RecallPlan: Sendable, Equatable {
     /// True when freshness terms imply live tools over the document index.
     public let skipDocIndex: Bool
     /// Per-tier result budget from the caller's clamped `RecallBudgets`.
-    ///
-    /// Single source for automatic recall fan-out: `MemoryEngine` consumes
-    /// this instead of reading budgets directly so a custom-budget default
-    /// plan cannot diverge from its budgets.
     public let perTier: Int
     /// Lowercased trimmed query with mailbox alias folding only.
     public let expandedQuery: String
@@ -34,26 +26,11 @@ public struct RecallPlan: Sendable, Equatable {
     }
 }
 
-/// Deterministic query-to-plan inference for automatic recall.
-///
-/// No LLM call: lowercased trimming plus mailbox alias folding only. Day
-/// bounds come from `TemporalFilter.parse`; the calendar is used solely to
-/// derive `YYYY-MM-DD` strings for yesterday, today, single-date, month,
-/// future-relative, and offset day, week, and month windows. The bare future
-/// window anchors at now.
-/// Exactly one temporal behavior wins by precedence: yesterday, then
-/// single `YYYY-MM-DD`, then past-relative, then future-relative, then offset
-/// arithmetic, then bare future, then month name, then tonight plus today-like
-/// freshness, else unbounded. Blank queries yield an unbounded plan.
+/// Deterministic query-to-plan inference for automatic recall. No LLM call: lowercased trimming
+/// plus mailbox alias folding only.
 public enum MemoryQueryRouter: Sendable {
-    /// Infers a recall plan for one query at one instant.
-    /// - Parameters:
-    ///   - query: Raw user query text.
-    ///   - currentDate: Instant anchoring relative days and month years.
-    ///   - budgets: Recall budgets bounding per-tier fan-out; clamped so a
-    ///     hand-built out-of-range value degrades to the documented `1...50`
-    ///     contract instead of widening recall.
-    /// - Returns: Recall plan with parsed bounds and expanded query.
+    /// Infers a recall plan for one query at one instant. query: Raw user query
+    /// text.
     public static func plan(for query: String, currentDate: Date, budgets: RecallBudgets = RecallBudgets()) -> RecallPlan {
         let perTier = budgets.clamped().perTierLimit
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -125,9 +102,6 @@ public enum MemoryQueryRouter: Sendable {
     }
 
     /// Last-weekday window for the first `last <weekday>` pair.
-    ///
-    /// A same-weekday `last` reaches seven days back so the window stays
-    /// strictly in the past.
     private static func pastWeekdayRange(currentDate: Date, lowered: String) -> TemporalRange? {
         let tokens = lowered.split { !$0.isLetter }.map { String($0) }
         var target: Int?
@@ -190,10 +164,8 @@ public enum MemoryQueryRouter: Sendable {
         return dayWindow(since: todayStart, until: tomorrowStart, calendar: calendar)
     }
 
-    /// Next-occurrence weekday window for the first non-`last` weekday name.
-    ///
-    /// Today counts when it is that weekday, so a same-day name stays in-day
-    /// instead of leaping a week forward.
+    /// Next-occurrence weekday window for the first non-`last` weekday name. Today counts when it
+    /// is that weekday, so a same-day name stays in-day instead of leaping a week forward.
     private static func weekdayRange(currentDate: Date, lowered: String) -> TemporalRange? {
         let tokens = lowered.split { !$0.isLetter }.map { String($0) }
         var target: Int?
@@ -248,10 +220,8 @@ public enum MemoryQueryRouter: Sendable {
         }
     }
 
-    /// Coming-weekend window `[Saturday-midnight, Monday-midnight)`.
-    ///
-    /// A same-day Saturday stays in-day; Sunday reaches forward six days so
-    /// the window never reaches backward.
+    /// Coming-weekend window `[Saturday-midnight, Monday-midnight)`. A same-day Saturday stays
+    /// in-day; Sunday reaches forward six days so the window never reaches backward.
     private static func weekendRange(currentDate: Date, lowered: String) -> TemporalRange? {
         guard LiveSearchGuidance.containsWord("weekend", in: lowered) else { return nil }
         let calendar = gregorianCalendar()
@@ -264,10 +234,6 @@ public enum MemoryQueryRouter: Sendable {
     }
 
     /// Bare future window `[now, now+60-days)` for `next`, `following`, or `upcoming`.
-    ///
-    /// Specific `next` phrases win earlier; only a bare marker with no day,
-    /// week, or weekend window reaches here, so the bound anchors at now
-    /// instead of local midnight.
     private static func bareFutureRange(currentDate: Date, lowered: String) -> TemporalRange? {
         let isBare = LiveSearchGuidance.containsWord("next", in: lowered)
             || LiveSearchGuidance.containsWord("upcoming", in: lowered)
@@ -279,13 +245,6 @@ public enum MemoryQueryRouter: Sendable {
     }
 
     /// Month window `[first-of-month, first-of-next-month)` for the first month name.
-    ///
-    /// A bare month name resolves to the most recent occurrence: when the
-    /// same-year window would start after `currentDate` (for example asking
-    /// for `december` in January), the window rolls back one year so mail
-    /// recall looks backward. Calendars now satisfy explicit future windows
-    /// through the future-relative builders; the rollback stays conservative
-    /// for mail.
     private static func monthRange(currentDate: Date, lowered: String) -> TemporalRange? {
         guard let month = firstMonth(in: lowered) else { return nil }
         let calendar = gregorianCalendar()
@@ -304,12 +263,6 @@ public enum MemoryQueryRouter: Sendable {
     }
 
     /// Today window `[today-midnight, tomorrow-midnight)` for today-like freshness.
-    ///
-    /// Whole-word matching keeps `todays` and `todayish` from opening a
-    /// day window while `may` inside `maybe` already stays quiet; the
-    /// `this morning` phrase matches across its space and hyphen spellings
-    /// via adjacent tokens for the same boundary reason. Boundaries are owned
-    /// by `LiveSearchGuidance`; the router delegates one-way.
     private static func todayRange(currentDate: Date, lowered: String) -> TemporalRange? {
         let isTodayLike = LiveSearchGuidance.containsWord("today", in: lowered) || LiveSearchGuidance.containsThisMorning(in: lowered)
         guard isTodayLike else { return nil }

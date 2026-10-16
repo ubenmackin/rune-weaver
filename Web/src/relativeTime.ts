@@ -1,12 +1,5 @@
 // Rune Weaver Dashboard — Shared relative-time ladders for elapsed and countdown labels.
-// Chat footers and approval grant cards previously carried their own copies of
-// the seconds/minutes/hours/days ladder, so a granularity tweak in one place
-// left the other reading differently. Centralizing both tenses here keeps every
-// "ago" and "in" label on the same granularity by construction.
 
-// Past-tense elapsed label sharing one granularity ladder across the dashboard.
-// Sub-second and future-skewed deltas collapse to "just now" so fresh events
-// never render as "0s ago" and clock skew never surfaces as a negative countdown.
 export function formatRelativeAgo(diffMs: number): string {
   if (!Number.isFinite(diffMs) || diffMs < 1000) return "just now";
   const diffSec = Math.floor(diffMs / 1000);
@@ -19,10 +12,8 @@ export function formatRelativeAgo(diffMs: number): string {
   return `${diffDays}d ago`;
 }
 
-// Future-tense countdown label on the same granularity ladder so remaining time
-// reads with identical steps as elapsed time. Sub-second deltas floor to
-// "in 1s" so imminent expiries never render "in 0s"; callers keep owning
-// expired/empty sentinels just like the past-tense branch above.
+// Future-tense countdown label on the same granularity ladder so remaining time reads with
+// identical steps as elapsed time.
 export function formatRelativeIn(diffMs: number): string {
   if (!Number.isFinite(diffMs) || diffMs < 1000) return "in 1s";
   const diffSec = Math.floor(diffMs / 1000);

@@ -1,12 +1,4 @@
 // Rune Weaver Tools — Goal pursuit tools for the shared ToolBus (`goal.create`, `goal.status`, `goal.progress`).
-//
-// Purpose: exposes long-horizon goals to the model as three tools: approval-gated creation with session
-// linkage, read-only status showing plans plus dues plus recent events, and approval-gated ledger progress
-// that records step outcomes without performing real-world actions.
-// Scope: argument decoding, default-goal resolution, and engine/store dispatch only; persistence lives
-// in GoalStore and planning in GoalEngine. Architectural role: the agent's cross-session memory of
-// commitments — creation links the chat so the dashboard can badge it, status recalls promises, and
-// progress mutates only the local ledger while real actions still ride their own permission-gated tools.
 
 import Foundation
 import RuneWeaverCore
@@ -72,10 +64,6 @@ public struct GoalCreateArgs: Sendable, Equatable, Decodable {
 }
 
 /// One event wake-up supplied to `goal.create`.
-///
-/// The kind is required so a trigger can never be armed against an unspecified
-/// event; the pattern and cooldown stay optional so the common "wake me when
-/// this event kind happens" case needs only one field.
 public struct GoalTriggerArgs: Sendable, Equatable, Decodable {
     /// Event kind to watch (a goal audit kind or a bridge event kind).
     public let eventKind: String
@@ -373,10 +361,9 @@ public struct GoalStatusStep: Sendable, Equatable, Codable {
     }
 }
 
-/// One armed event wake-up within a `goal.status` detail.
-///
-/// Carries the debounce stamp so the model can tell an armed-but-never-fired
-/// trigger apart from one that has already pulled its goal forward.
+/// One armed event wake-up within a `goal.status` detail. Carries the debounce stamp so the model
+/// can tell an armed-but-never-fired trigger apart from one that has already pulled its goal
+/// forward.
 public struct GoalStatusTrigger: Sendable, Equatable, Codable {
     /// Event kind the trigger watches.
     public let eventKind: String
@@ -530,22 +517,14 @@ public enum GoalToolEncoding {
 // MARK: - Shared helpers
 
 /// Honest fail-closed copy returned when goal pursuit is off.
-///
-/// Kept in one place so create, status, and progress refuse identically instead of
-/// each inventing its own disabled wording; it mirrors the engine's disabled error
-/// so tool and direct-engine callers hear the same guidance.
 private enum GoalDisabledMessage {
     /// Disabled copy naming the `[goals]` opt-in.
     static let text = "Goal pursuit is disabled. Enable [goals] to create goals."
 }
 
-/// Maps caller-supplied progress text onto a ledger state.
-///
-/// Accepts the wire `in_progress` spelling plus the camel and dashed variants the model
-/// sometimes emits, case-insensitively, so `inProgress` lands instead of failing. Pending
-/// never maps: the ledger only records forward movement, and replanning stays with status.
-/// - Parameter raw: Caller status text.
-/// - Returns: Ledger state, or nil when the text names nothing actionable.
+/// Maps caller-supplied progress text onto a ledger state. Accepts the wire `in_progress` spelling
+/// plus the camel and dashed variants the model sometimes emits, case-insensitively, so `inProgress`
+/// lands instead of failing.
 private func goalLedgerStatus(from raw: String) -> StepStatus? {
     let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     switch normalized {
@@ -814,14 +793,6 @@ public struct GoalProgressTool: Tool, Sendable {
             + #""required":["stepOrdinal","status"],"additionalProperties":false}"#
     )
     /// Step moves mutate durable pursuit state, so every call parks for approval.
-    ///
-    /// This deliberately differs from the `memories.store` bargain (trusted per the owner
-    /// memory-write ruling): a remembered fact appends one semantic note, while
-    /// `goal.progress` moves step lifecycle state and can park the whole goal into
-    /// `needs_input` via the engine, changing what the scheduler advances next. That is a
-    /// state transition on shared pursuit — not note-taking — so the Security Model
-    /// read-by-default/write-with-permission boundary requires approval here. Graduated
-    /// trust still applies, so steady use approves once per target instead of every turn.
     public let permissionLevel = PermissionLevel.requiresApproval
 
     /// Durable step persistence.
@@ -889,10 +860,8 @@ public struct GoalProgressTool: Tool, Sendable {
             if context.dryRun {
                 return .success("Dry run: would mark step \(stepOrdinal) ('\(step.title)') as \(ledgerStatus.rawValue).", callID: input.callID)
             }
-            // The originating session tags the ledger row so later turns can tell
-            // which chat moved the step. The field stays session-tagged by design:
-            // server goal runs keep distinct run-log and session IDs, and the tool
-            // context carries only the conversation identifier to stamp.
+            // The originating session tags the ledger row so later turns can tell which chat moved
+            // the step.
             try await store.setStepStatus(
                 goalID: goalID,
                 stepID: step.id,
@@ -941,11 +910,6 @@ public struct GoalProgressTool: Tool, Sendable {
     }
 
     /// Resolves the explicit goal or the session-linked and single-goal defaults.
-    ///
-    /// Explicit identifiers win untouched. Otherwise the session link resolves first so the
-    /// creating chat keeps addressing its own goal without naming it; a lone non-terminal
-    /// goal is the only safe guess, and anything else returns guidance listing the choice
-    /// instead of moving a step on the wrong commitment.
     private func resolveGoalID(explicit: String?, context: ToolContext) async throws -> UUID {
         if let explicit {
             guard let uuid = UUID(uuidString: explicit) else {
@@ -1012,19 +976,6 @@ public enum GoalTools {
     public static let toolNames = ["goal.create", "goal.status", "goal.progress"]
 
     /// Builds the goal tools for a shared engine and store.
-    ///
-    /// The tools always build so they stay visible when wired; enablement lives in
-    /// `goalsConfig` (disabled fails closed inside each tool) while `ToolBus` enablement
-    /// stays on, so a disabled install reports the honest `[goals]` copy instead of a
-    /// generic bus-disabled line. Session linkage and linked-goal defaults ride the
-    /// optional conversations manager; nil keeps creation unlinked and progress on the
-    /// single-active fallback so store-only callers still work.
-    /// - Parameters:
-    ///   - engine: Goal lifecycle owner (creation plus blocked parking).
-    ///   - store: Durable goal, step, and event persistence.
-    ///   - conversations: Sessions owner for chip linkage and linked-goal defaults.
-    ///   - goalsConfig: Pursuit policy; `enabled == false` fails every call closed.
-    /// - Returns: Tools in registration order.
     public static func makeTools(
         engine: GoalEngine,
         store: GoalStore,

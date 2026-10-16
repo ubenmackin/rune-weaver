@@ -1,13 +1,4 @@
 // Rune Weaver Core — Trusted-tool anomaly watchdog with a parked-session brake.
-//
-// Purpose: observe trusted-tool activity and approval outcomes as counts only
-// and park every running turn with one inbox card when a rate, denial,
-// off-hours, or firewall rule fires, resuming only on explicit owner action.
-// Scope: outcome ingestion, the four trailing-window rules, the parked brake
-// with its persisted count-only baselines, and the pulse health projection.
-// Approval gating, egress supervision, and pulse fusion stay with their owners.
-// Architectural role: the counting brake behind the brake contract — it never
-// holds arguments, prompts, or model output and never auto-remediates.
 
 import Foundation
 
@@ -23,10 +14,8 @@ public enum WatchdogRule: String, Sendable, Codable, CaseIterable {
     case firewallSpike = "firewall_spike"
 }
 
-/// Outcome category for one ingested trusted-tool observation.
-///
-/// Only the category is recorded — never which command ran, what arguments it
-/// carried, or any model or prompt text.
+/// Outcome category for one ingested trusted-tool observation. Only the category is recorded —
+/// never which command ran, what arguments it carried, or any model or prompt text.
 public enum WatchdogOutcome: String, Sendable, Codable {
     /// The tool call executed.
     case executed
@@ -49,12 +38,7 @@ public struct BrakeReason: Sendable, Codable, Equatable {
     /// per-hour denial threshold for the denial rule.
     public let baseline: Int
 
-    /// Creates a brake reason.
-    /// - Parameters:
-    ///   - rule: Rule that fired.
-    ///   - observed: Observed count inside the trailing evaluation window.
-    ///   - baseline: Reference count the observation is compared against.
-    ///   - toolName: Attributed tool, when the fired rule is per-tool.
+    /// Creates a brake reason. rule: Rule that fired.
     public init(rule: WatchdogRule, observed: Int, baseline: Int, toolName: String? = nil) {
         self.rule = rule
         self.observed = observed
@@ -84,12 +68,8 @@ public struct BrakeDecision: Sendable, Equatable {
         return BrakeReason(rule: rule, observed: observed, baseline: baseline, toolName: toolName)
     }
 
-    /// Creates a decision; defaults describe a quiet pass.
-    /// - Parameters:
-    ///   - rule: Rule that fired, or nil when quiet.
-    ///   - observed: Observed count inside the trailing evaluation window.
-    ///   - baseline: Reference count for the evaluation.
-    ///   - toolName: Attributed tool, when the fired rule is per-tool.
+    /// Creates a decision; defaults describe a quiet pass. rule: Rule that fired,
+    /// or nil when quiet.
     public init(rule: WatchdogRule? = nil, observed: Int = 0, baseline: Int = 0, toolName: String? = nil) {
         self.rule = rule
         self.observed = observed
@@ -98,10 +78,8 @@ public struct BrakeDecision: Sendable, Equatable {
     }
 }
 
-/// Watchdog health, shared with the dashboard pulse.
-///
-/// Red is fail-closed: it clears only on an explicit owner Resume against a
-/// fresh passing snapshot, never on a timer.
+/// Watchdog health, shared with the dashboard pulse. Red is fail-closed: it clears only on an
+/// explicit owner Resume against a fresh passing snapshot, never on a timer.
 public enum WatchdogHealth: String, Sendable, Codable {
     /// Quiet including gestation; the countdown rides info notes, never the dot.
     case green
@@ -120,11 +98,7 @@ public struct BehaviorSessionBaseline: Sendable, Codable, Equatable {
     /// Events observed since the last persist; bounded and reset on persist.
     public var pending: Int
 
-    /// Creates a session baseline entry.
-    /// - Parameters:
-    ///   - id: Session identifier.
-    ///   - hourlyAverage: Learned hourly event average for the session.
-    ///   - pending: Events observed since the last persist.
+    /// Creates a session baseline entry. id: Session identifier.
     public init(id: String, hourlyAverage: Int, pending: Int) {
         self.id = id
         self.hourlyAverage = max(hourlyAverage, 0)
@@ -158,12 +132,6 @@ public struct BehaviorSessionBaseline: Sendable, Codable, Equatable {
 }
 
 /// Persisted baselines document (counts only).
-///
-/// Decoding is deliberately lenient — missing fields default, unknown future
-/// versions reject, and both key spellings plus either timestamp shape decode —
-/// so an operator-hand-written or older file can never stop the engine from
-/// booting. The document never carries a tool argument, prompt body, or model
-/// output, only counts.
 public struct BehaviorBaselines: Sendable, Codable, Equatable {
     /// Current persisted-schema version.
     public static let currentVersion = 1
@@ -177,12 +145,7 @@ public struct BehaviorBaselines: Sendable, Codable, Equatable {
     /// Per-session contributions, bounded to the watchdog's session cap.
     public var sessions: [BehaviorSessionBaseline]
 
-    /// Creates a baselines document.
-    /// - Parameters:
-    ///   - version: Persisted-schema version.
-    ///   - learnedAt: Instant the baseline was last learned or folded.
-    ///   - hourlyAverage: Effective hourly event average.
-    ///   - sessions: Per-session contributions.
+    /// Creates a baselines document. version: Persisted-schema version.
     public init(
         version: Int = BehaviorBaselines.currentVersion,
         learnedAt: Date? = nil,
@@ -239,10 +202,8 @@ public struct BehaviorBaselines: Sendable, Codable, Equatable {
     }
 }
 
-/// Seam the brake drives to park every running turn.
-///
-/// The server's active-turn tracker is the production owner; Core names the
-/// seam so the watchdog never depends on a server-layer type.
+/// Seam the brake drives to park every running turn. The server's active-turn tracker is the
+/// production owner; Core names the seam so the watchdog never depends on a server-layer type.
 public protocol TurnParking: Sendable {
     /// Session identifiers of every running turn.
     func runningSessionIDs() async -> [UUID]
@@ -305,12 +266,6 @@ private struct BrakeCardPayload: Encodable {
 }
 
 /// Trusted-tool anomaly watchdog.
-///
-/// The actor owns every piece of watchdog state: live per-session counters, the
-/// trailing window of minute buckets, the learned baseline, and the brake flag.
-/// Baselines load at construction from the persisted JSON sidecar so serve boots
-/// resume armed instead of restarting the 14-day gestation, and every
-/// evaluation reads live state, so a brake engages without a restart.
 public actor BehaviorWatchdog {
     /// Quiet-learning gestation; the watchdog stays silent until it elapses.
     public static let gestationSeconds: TimeInterval = 14 * 24 * 60 * 60
@@ -374,13 +329,8 @@ public actor BehaviorWatchdog {
     /// Event total as of the last persist, for the changed comparison.
     private var persistedTotal = 0
 
-    /// Creates a watchdog, loading persisted baselines at boot.
-    /// - Parameters:
-    ///   - approvalQueue: Inbox the brake card files into.
-    ///   - steeringQueue: Steering the brake clears for every parked session.
-    ///   - turnParking: Tracker the brake parks every running turn through.
-    ///   - baselinesPath: JSON sidecar path; `~` expands on read and write.
-    ///   - now: Clock seam, injectable for deterministic evaluation.
+    /// Creates a watchdog, loading persisted baselines at boot. approvalQueue:
+    /// Inbox the brake card files into.
     public init(
         approvalQueue: ApprovalQueue,
         steeringQueue: SteeringQueue,
@@ -403,14 +353,6 @@ public actor BehaviorWatchdog {
     }
 
     /// Records one trusted-tool observation as a count.
-    ///
-    /// Only the tool name, session, and outcome category are retained — never
-    /// arguments, prompt bodies, or model output — so neither the live state
-    /// nor the persisted baselines can ever hold content.
-    /// - Parameters:
-    ///   - toolName: Tool that produced the observation.
-    ///   - sessionID: Session the observation belongs to.
-    ///   - outcome: Outcome category; defaults to a plain execution.
     public func ingest(toolName: String, sessionID: UUID, outcome: WatchdogOutcome = .executed) {
         let now = self.now()
         foldCompletedHours(now: now)
@@ -439,15 +381,8 @@ public actor BehaviorWatchdog {
         }
     }
 
-    /// Evaluates every rule against the live trailing window and the learned
-    /// baseline, braking automatically when a rule fires.
-    ///
-    /// Silent during gestation: with no armed baseline there is nothing to
-    /// compare against, so no rule fires and no card files. When a rule fires
-    /// the returned decision still carries the numbers, and the brake it
-    /// engages is idempotent, so a repeated evaluation inside the same anomaly
-    /// keeps the original card instead of flooding the inbox.
-    /// - Returns: The decision, carrying the observed-versus-baseline numbers.
+    /// Evaluates every rule against the live trailing window and the learned baseline, braking
+    /// automatically when a rule fires.
     public func evaluate() async -> BrakeDecision {
         let now = self.now()
         foldCompletedHours(now: now)
@@ -463,14 +398,6 @@ public actor BehaviorWatchdog {
     }
 
     /// Parks every running turn, clears their steering, and files the inbox card.
-    ///
-    /// Idempotent while the brake is engaged: a repeated brake inside the same
-    /// anomaly returns the original card and re-parks nothing. The watchdog
-    /// never auto-remediates and never approves — a denial (keep paused) leaves
-    /// every turn parked exactly as the owner left it, and clearing the brake
-    /// is an explicit owner Resume.
-    /// - Parameter reason: Fired rule with the observed-versus-baseline numbers.
-    /// - Returns: The filed card, or the card already filed while engaged.
     @discardableResult
     public func brake(reason: BrakeReason) async -> PermissionRequest? {
         if braking {
@@ -495,11 +422,7 @@ public actor BehaviorWatchdog {
         return card
     }
 
-    /// Clears the brake after an explicit owner Resume.
-    ///
-    /// The trailing counters reset with it, so the resumed hour starts a fresh
-    /// snapshot and the just-observed spike cannot immediately re-fire. The
-    /// brake never clears on a timer.
+    /// Clears the brake after an explicit owner Resume. The brake never clears on a timer.
     public func resume() {
         guard braking else { return }
         braking = false
@@ -508,14 +431,8 @@ public actor BehaviorWatchdog {
         toolMinutes.removeAll()
     }
 
-    /// Live health for the dashboard pulse.
-    ///
-    /// Green while quiet including gestation, red only while the brake is
-    /// engaged with an inbox card pending. Gestation never moves the dot;
-    /// the remaining countdown rides `gestationRemainingDays()` into the
-    /// pulse info disclosure instead. Red clears on Resume against a fresh
-    /// passing snapshot, never on a timer.
-    /// - Returns: Current watchdog health.
+    /// Live health for the dashboard pulse. Green while quiet including gestation, red only while
+    /// the brake is engaged with an inbox card pending.
     public func health() -> WatchdogHealth {
         if braking {
             return .red
@@ -581,11 +498,6 @@ public actor BehaviorWatchdog {
     }
 
     /// Whether live counts diverged from the last persisted baseline.
-    ///
-    /// Compares the live event total and the computed hourly average against
-    /// what was last persisted, so a dashboard can disclose pending learning
-    /// without recomputing it.
-    /// - Returns: True when counts moved past the persisted baseline.
     public func baselineChanged() -> Bool {
         if liveTotal() != persistedTotal {
             return true
@@ -594,10 +506,6 @@ public actor BehaviorWatchdog {
     }
 
     /// Persists the baselines sidecar atomically.
-    ///
-    /// Writes counts only — the document never carries a tool argument, prompt
-    /// body, or model output — and folds every session's pending events into
-    /// the persisted baseline so ``baselineChanged()`` reports false afterwards.
     public func persistBaselines() throws {
         let observedKeys = Array(sessions.keys)
         for key in observedKeys {
@@ -674,16 +582,9 @@ extension BehaviorWatchdog {
         return nil
     }
 
-    /// Whether detection is armed.
-    ///
-    /// A persisted baseline learned past the gestation window arms immediately,
-    /// so a serve boot that loads mature counts resumes armed instead of
-    /// restarting the quiet window. A document carrying counts without a
-    /// learning timestamp arms too: there is no recorded window to wait out, and
-    /// staying silent forever on seeded counts would read as a deliberate
-    /// disarm. A document that recorded a still-gestating window keeps waiting
-    /// out that window, and a fresh install with no document at all arms only
-    /// once live observations span the whole gestation.
+    /// Whether detection is armed. A document that recorded a still-gestating window keeps waiting
+    /// out that window, and a fresh install with no document at all arms only once live observations
+    /// span the whole gestation.
     private func isArmed(now: Date) -> Bool {
         if let learnedAt = baselines.learnedAt {
             return now.timeIntervalSince(learnedAt) >= BehaviorWatchdog.gestationSeconds
@@ -695,12 +596,9 @@ extension BehaviorWatchdog {
         return now.timeIntervalSince(firstSeen) >= BehaviorWatchdog.gestationSeconds
     }
 
-    /// Folds completed hours into the baseline and advances the fold mark.
-    ///
-    /// The in-progress hour never folds, so a burst still in flight cannot
-    /// raise the baseline it is being measured against. Hours with no retained
-    /// bucket — idle spans, or a clock jump — fold zero events, which limits
-    /// their influence instead of freezing a stale average forever.
+    /// Folds completed hours into the baseline and advances the fold mark. The in-progress hour
+    /// never folds, so a burst still in flight cannot raise the baseline it is being measured
+    /// against.
     private func foldCompletedHours(now: Date) {
         let currentHour = BehaviorWatchdog.hourIndex(now)
         guard let last = lastFoldedHour else {
@@ -793,11 +691,6 @@ extension BehaviorWatchdog {
     }
 
     /// Seeds the baseline fold from a loaded document.
-    ///
-    /// The imported span is capped so a baseline learned months ago stops
-    /// dominating the live average; a document without a learned instant
-    /// contributes exactly one hour of history, preserving its average until
-    /// live folds take over.
     fileprivate static func importedHistory(average: Int, learnedAt: Date?, now: Date) -> (events: Int, hours: Int) {
         guard average > 0 else { return (0, 0) }
         let spanHours: Double = if let learnedAt {

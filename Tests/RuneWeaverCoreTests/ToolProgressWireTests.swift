@@ -1,16 +1,4 @@
 // Rune Weaver Tests — Untrusted tool-progress wire decode and field sanitizers.
-//
-// Progress frames cross a trust boundary: the engine encodes them, but a peer
-// can hand-craft one, so `WSToolProgressFrame.init(from:)` and the
-// `ToolProgress` sanitizers must treat every field as untrusted. These tests pin
-// that contract directly. A partial, negative, or fractional counter fails to
-// decode, so the caller's `try?` drops the whole frame instead of rendering
-// mis-attributed or zeroed progress, and a blank `callID` or `toolName` drops
-// the frame at the same point the dashboard guard rejects blank identity. An
-// absolute, home, or traversing `current` degrades to nil rather than disclosing
-// a filesystem location, and blank or non-string `current` or `warning` copy
-// collapses to absent without costing the frame. The emission happy path lives
-// in `ToolProgressEmissionTests`; this suite covers the input side.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -31,27 +19,20 @@ private func baseProgressFields() -> [String: Any] {
     ]
 }
 
-/// Encodes an arbitrary progress payload so individual fields can be omitted,
-/// fractionalized, or made unsafe without hand-building JSON braces.
-/// - Parameter fields: Field values keyed by wire name.
-/// - Returns: UTF-8 JSON data.
-/// - Throws: Serialization error when a value cannot be represented.
+/// Encodes an arbitrary progress payload so individual fields can be omitted, fractionalized, or
+/// made unsafe without hand-building JSON braces. - Parameter fields: Field values keyed by wire
+/// name.
 private func progressPayload(_ fields: [String: Any]) throws -> Data {
     try JSONSerialization.data(withJSONObject: fields)
 }
 
-/// Decodes one generated payload, surfacing the decoder's error.
-/// - Parameter data: UTF-8 JSON data.
-/// - Returns: The decoded frame.
-/// - Throws: The decoder's error when the payload is not a complete frame.
+/// Decodes one generated payload, surfacing the decoder's error. - Parameter data: UTF-8 JSON data.
 private func decodeProgressFrame(_ data: Data) throws -> WSToolProgressFrame {
     try JSONDecoder().decode(WSToolProgressFrame.self, from: data)
 }
 
-/// Decodes one generated payload the way a live consumer does: any failure drops
-/// the frame rather than surfacing an error.
-/// - Parameter fields: Field values keyed by wire name.
-/// - Returns: The decoded frame, or nil when the payload is rejected.
+/// Decodes one generated payload the way a live consumer does: any failure drops the frame rather
+/// than surfacing an error. - Parameter fields: Field values keyed by wire name.
 private func decodedProgress(_ fields: [String: Any]) -> WSToolProgressFrame? {
     guard let data = try? progressPayload(fields) else { return nil }
     return try? decodeProgressFrame(data)

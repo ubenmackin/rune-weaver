@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — Unit tests for the shared navigation contract.
-//
-// Pins the desktop group composition, the membership-based active rule, and the
-// fail-closed badge roll-up directly against navigationConfig rather than only
-// through a TopNav render, so the contract the top nav and the mobile bottom
-// bar both consume cannot drift underneath them.
 
 import { describe, expect, it } from "vitest";
 import {

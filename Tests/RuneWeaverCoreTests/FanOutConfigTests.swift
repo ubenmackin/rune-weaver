@@ -1,12 +1,4 @@
 // Rune Weaver Core Tests — Single-gate fan-out policy and unlimited timeout.
-//
-// Covers the `[fanout]` tuning section after availability moved to tool
-// registration alone: stock defaults, TOML decode plus canonical render
-// round-trip, tolerance of the retired `enabled` key, clamped bounds for
-// hand-built configs, load-time validation of the timeout range, the
-// zero-timeout worker path that awaits without a timeout race, and live
-// policy swaps through the engine's config update. Tests run against stub
-// orchestrator and run-log seams so no real model round or store is spent.
 
 import Foundation
 import os

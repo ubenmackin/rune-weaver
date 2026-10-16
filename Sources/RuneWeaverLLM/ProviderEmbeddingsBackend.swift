@@ -68,14 +68,6 @@ public enum EmbeddingsBackendFactory: Sendable {
     }
 
     /// Builds a per-slot backend factory for the files indexing pool.
-    ///
-    /// Each invocation mints one distinct backend from the same memory backend
-    /// name so parallel embedding never serializes on the shared recall
-    /// embedder; the shared instance stays out of the pool.
-    /// - Parameters:
-    ///   - memoryEmbeddingBackend: Configured `embedding_backend` selector.
-    ///   - providers: Providers in priority order backing each minted backend.
-    /// - Returns: Sendable factory minting one backend per files worker.
     public static func makePoolFactory(
         memoryEmbeddingBackend: String,
         providers: [any LLMProvider]

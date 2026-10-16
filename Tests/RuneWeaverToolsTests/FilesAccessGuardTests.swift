@@ -1,15 +1,4 @@
 // Rune Weaver Tools Tests — Shared file access guard credential deny coverage.
-//
-// Exercises the `[files]` deny boundary that both the file tools and the
-// background files indexer enforce: newly added credential and shell-history
-// patterns refuse representative paths through the shared guard, an ordinary
-// Markdown document still passes, a denied credential refuses a `files.read`
-// without leaking bytes, and an index walk over the same policy skips the
-// credential without handing its bytes to the extractor. The engine-owned
-// always-deny patterns (the memory tree, browser profiles, the egress policy
-// control file, the owner bearer token, and the per-install SearXNG settings,
-// plus their review siblings) keep holding when a config replaces the editable
-// deny list, so operator drift can never expose protected state.
 
 import Foundation
 import os
@@ -47,10 +36,6 @@ private enum GuardTestSupport {
 }
 
 /// Extractor that records every file name it is asked to extract.
-///
-/// The indexer consults the access guard before opening a candidate, so a
-/// denied credential must never reach this seam; the recorded names prove the
-/// skip happened before any read rather than after a failed parse.
 private final class GuardRecordingExtractor: DocumentTextExtracting, Sendable {
     /// Guarded file names in extraction order.
     private let seen = OSAllocatedUnfairLock<[String]>(initialState: [])
@@ -253,10 +238,9 @@ struct FilesAccessGuardTests {
     func `Always-deny patterns survive a config that replaces the deny list`() throws {
         let (base, home) = try GuardTestSupport.makeBaseAndHome()
         defer { GuardTestSupport.cleanup(base) }
-        // A `[files] deny_patterns` list replaces the editable defaults, so an
-        // emptied list must still refuse the engine's own private state:
-        // browser-profile cookies/session tokens and memory vectors can never
-        // become readable through configuration drift.
+        // A `[files] deny_patterns` list replaces the editable defaults, so an emptied list must
+        // still refuse the engine's own private state: browser-profile cookies/session tokens and
+        // memory vectors can never become readable through configuration drift.
         let emptied = FilesConfig(denyPatterns: [], allowRoots: [home.path])
         let protectedPaths = [
             ".runeweaver/browser_profiles/default/Cookies",
@@ -308,14 +292,9 @@ struct FilesAccessGuardTests {
     func `Memory tree stays denied when the operator list is emptied`() throws {
         let (base, home) = try GuardTestSupport.makeBaseAndHome()
         defer { GuardTestSupport.cleanup(base) }
-        // The memory tree holds the episodic sessions and approval rows, the
-        // trust-grant ledger, and the plaintext profile JSON beside the vector
-        // store, so an emptied operator list must still refuse all of it:
-        // `files.read` can otherwise return profile facts without approval and
-        // `files.write` can target the control-plane database. The reserved
-        // review namespace inherits the same protection through the live-path
-        // derivation, so a `.rune_` staging or `.rune_backup_` rollback name
-        // cannot reach bytes the live path refuses.
+        // The memory tree holds the episodic sessions and approval rows, the trust-grant ledger,
+        // and the plaintext profile JSON beside the vector store, so an emptied operator list must
+        // still refuse all of it: `files.read` can otherwise return profile facts without approval.
         let emptied = FilesConfig(denyPatterns: [], allowRoots: [home.path])
         let protectedPaths = [
             ".runeweaver/memory/episodes.db",
@@ -357,11 +336,9 @@ struct FilesAccessGuardTests {
     func `Policy control file and its review siblings deny with an empty deny list`() throws {
         let (base, home) = try GuardTestSupport.makeBaseAndHome()
         defer { GuardTestSupport.cleanup(base) }
-        // The egress policy file is the credential and network control plane,
-        // so an emptied operator list must still refuse it; its reserved
-        // staging and rollback siblings name the same live file, so a direct
-        // write to those names must refuse too or the protection could be
-        // bypassed through the review namespace.
+        // The egress policy file is the credential and network control plane, so an emptied
+        // operator list must still refuse it; its reserved staging and rollback siblings name the
+        // same live file, so a direct write to those names must refuse too or the protection could.
         let emptied = FilesConfig(denyPatterns: [], allowRoots: [home.path])
         let protectedPaths = [
             ".runeweaver/policy.toml",
@@ -384,12 +361,9 @@ struct FilesAccessGuardTests {
     func `Engine secret files and their review siblings deny with an empty deny list`() throws {
         let (base, home) = try GuardTestSupport.makeBaseAndHome()
         defer { GuardTestSupport.cleanup(base) }
-        // The owner bearer token and the SearXNG settings minted beside the
-        // engine's state are live credentials the engine writes for itself, so
-        // an emptied operator list must still refuse them. The reserved
-        // staging and rollback siblings name the same live token file, so a
-        // direct read of those names must refuse too or the protection could
-        // be bypassed through the review namespace.
+        // The owner bearer token and the SearXNG settings minted beside the engine's state are live
+        // credentials the engine writes for itself, so an emptied operator list must still refuse
+        // them.
         let emptied = FilesConfig(denyPatterns: [], allowRoots: [home.path])
         let protectedPaths = [
             ".runeweaver/auth_token",
@@ -411,10 +385,9 @@ struct FilesAccessGuardTests {
 
     @Test
     func `Always-deny patterns stay pinned inside the shipped defaults`() {
-        // The union and the editable defaults are separate surfaces; keeping
-        // the engine-owned set a subset of the defaults means a config copied
-        // from the shipped example (and its web mirror) can never drift below
-        // the guard's floor without a test failing here.
+        // The union and the editable defaults are separate surfaces; keeping the engine-owned set a
+        // subset of the defaults means a config copied from the shipped example (and its web mirror)
+        // can never drift below the guard's floor without a test failing here.
         #expect(WritePathPolicy.alwaysDenyPatterns.isEmpty == false)
         for pattern in WritePathPolicy.alwaysDenyPatterns {
             #expect(

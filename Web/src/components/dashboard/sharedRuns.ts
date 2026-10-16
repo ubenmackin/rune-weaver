@@ -1,27 +1,9 @@
 // Rune Weaver Dashboard — Shared Recent Runs Fetcher.
-//
-// Purpose: collapse the Dashboard's duplicate `GET /runs` polling into a single
-// network request shared by the Working Right Now stream, the Recent Reports
-// cards, and the greeting identity cluster, so a cold Dashboard mount issues
-// one fetch instead of three.
-//
-// Scope: read-only recent-run payloads fetched through the existing `listRuns`
-// API helper plus the one shared run-title fallback. Filtering stays in each
-// widget (active versus terminal runs), and this module never interprets run
-// status itself beyond the title fallback's ownership order.
-//
-// Architectural role: single-flight cache sitting between the run-log REST
-// endpoint and the dashboard widgets. The widgets keep their own filtered state
-// while this module owns fetch timing, so polling cadence and WebSocket-driven
-// refetches agree on one payload instead of drifting per call site.
 
 import { listRuns, type RunLogEntry } from "../../api";
 
-// Single run-title fallback shared by the Working Right Now stream, the
-// Recent Reports cards, and the dashboard greeting caption: message first
-// (trimmed), then goal/job ownership, then a short id. One trim policy lives
-// here so the caption, the stream, and the reports never disagree on
-// leading/trailing whitespace.
+// Single run-title fallback shared by the Working Right Now stream, the Recent Reports cards, and
+// the dashboard greeting caption: message first (trimmed), then goal/job ownership, then a short id.
 export function getSharedRunTitle(run: RunLogEntry): string {
   if (run.message && run.message.trim()) return run.message.trim();
   if (run.goalId) return `Goal Execution: ${run.goalId}`;
@@ -29,45 +11,26 @@ export function getSharedRunTitle(run: RunLogEntry): string {
   return `Interactive Task ${run.id.slice(0, 8)}`;
 }
 
-// Freshness window for the shared payload. Five seconds keeps concurrent mounts
-// and WebSocket-driven refetches on one response while staying short enough
-// that a newly settled run appears on the next poll tick rather than sticking
-// to a stale snapshot.
+// Freshness window for the shared payload.
 const SHARED_RUNS_TTL_MS = 5000;
 
-// Single cached payload plus the limit it was fetched with and the wall-clock
-// time it completed. The cache key is the one max limit: a smaller caller slices
-// from a larger payload, while a larger caller refetches when the cached limit
-// cannot satisfy it.
+// Single cached payload plus the limit it was fetched with and the wall-clock time it completed.
 let cachedRuns: RunLogEntry[] | null = null;
 let cachedLimit = 0;
 let cachedAtMs = 0;
 
-// One in-flight fetch shared by concurrent callers. The accompanying limit
-// tracks the largest request seen while the fetch is pending so synchronously
-// co-mounted widgets agree on one `GET /runs` sized for the hungriest caller.
-// The dispatched pair records the limit the request was actually built with
-// plus whether the network has started: a caller arriving after dispatch that
-// wants more rows than the dispatched limit can no longer widen the request,
-// so it awaits the flight and refetches once instead of slicing short.
+// One in-flight fetch shared by concurrent callers.
 let inFlight: Promise<RunLogEntry[]> | null = null;
 let inFlightLimit = 0;
 let inFlightDispatched = false;
 let inFlightEffectiveLimit = 0;
 
-// One queued fresh fetch scheduled when a caller asks for `forceRefresh` while
-// a flight is already in the network (`inFlightDispatched === true`). The
-// in-flight request was dispatched before the event that prompted the forced
-// refresh, so its response cannot be trusted to contain post-event data.
-// Callers requesting forceRefresh join this queued flight instead of absorbing
-// the pre-event response.
+// One queued fresh fetch scheduled when a caller asks for `forceRefresh` while a flight is already
+// in the network (`inFlightDispatched === true`).
 let nextFlight: Promise<RunLogEntry[]> | null = null;
 let nextFlightLimit = 0;
 
-// Resets the cached payload and any pending flight. Test-only: inert in
-// production builds so prod callers can never wipe the shared payload; Vitest
-// runs with MODE=test, where the reset stays live between cases so one case's
-// payload cannot leak into the next through the module-level cache.
+// Resets the cached payload and any pending flight.
 export function clearSharedRecentRunsForTesting(): void {
   if (import.meta.env.MODE !== "test") return;
   cachedRuns = null;
@@ -81,12 +44,7 @@ export function clearSharedRecentRunsForTesting(): void {
   nextFlightLimit = 0;
 }
 
-// Returns the most recent runs, sliced to the caller's limit. Concurrent calls
-// collapse onto one `listRuns` sized with the larger limit; fresh-cache calls
-// return a slice with zero network; failures never populate the cache and
-// propagate to every awaiting caller. Callers reacting to a `run_started` or
-// `run_completed` frame pass `forceRefresh` to bypass the freshness window so
-// a newly settled run appears now instead of at the next poll tick.
+// Returns the most recent runs, sliced to the caller's limit.
 export function getSharedRecentRuns(
   limit: number,
   options?: { forceRefresh?: boolean },
@@ -97,10 +55,8 @@ export function getSharedRecentRuns(
   const forceRefresh = options?.forceRefresh === true;
   const now = Date.now();
 
-  // Fresh cache with a sufficient limit serves immediately unless a forced
-  // refresh was requested or a forced refresh flight is already queued. An
-  // insufficient limit falls through to a refetch: slicing a smaller payload
-  // would silently short a caller that asked for more rows than were ever fetched.
+  // Fresh cache with a sufficient limit serves immediately unless a forced refresh was requested or
+  // a forced refresh flight is already queued.
   if (
     !forceRefresh &&
     nextFlight === null &&
@@ -161,10 +117,7 @@ export function getSharedRecentRuns(
     return inFlight.then((runs) => runs.slice(0, requested));
   }
 
-  // Cold or stale path: open the single flight. The fetch defers its network
-  // start by one microtask so a second widget mounting in the same commit can
-  // widen the limit before the URL is built; without that yield the first
-  // mount's limit would win and the hungrier sibling would under-fetch.
+  // Cold or stale path: open the single flight.
   inFlightLimit = requested;
   inFlightDispatched = false;
   inFlightEffectiveLimit = 0;

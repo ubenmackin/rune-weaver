@@ -1,13 +1,4 @@
 // Rune Weaver Tools — Shared HTTP redirect follower for web and API hops.
-//
-// Manual redirect chains stay single-source here so `web.fetch` and `api.request`
-// cannot diverge on hop budget, relative-Location resolution, or redirect
-// surfacing. Both transports disable automatic following and resolve every hop
-// against the current URL, then re-validate the next hop before dialing; a safe
-// start can never launder an unsafe redirect target through the session
-// follower. `api.request` dials the SSRF gate's pinned addresses through
-// `PinnedDialTransport`, so it no longer uses the URLSession no-follow session
-// below; `web.fetch` (whose stack keeps its own SSRF/redirect guard) does.
 
 import Foundation
 
@@ -17,10 +8,6 @@ public enum HTTPRedirectFollower: Sendable {
     public static let maxRedirects = 5
 
     /// Resolves a redirect `Location` against the current URL.
-    /// Fails closed on absolute non-web targets (`javascript:`, `data:`,
-    /// `file:`, and friends): the shared policy never hands callers a URL
-    /// they must re-validate, so an unsafe hop cannot launder through the
-    /// session follower. Relative targets inherit the current http(s) scheme.
     public static func resolveRedirect(current: URL, location: String) -> URL? {
         let trimmed = location.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -44,11 +31,6 @@ public enum HTTPRedirectFollower: Sendable {
 }
 
 /// Single-source JSON encoding for tool output envelopes.
-///
-/// Every tool envelope (`web.search`, `web.fetch`, `browser.navigate`/`browser.act`,
-/// `api.request`) encodes through this helper with sorted, pretty-printed keys so
-/// the four surfaces cannot drift on formatting; per-tool encoder copies are
-/// intentionally absent.
 public enum ToolEnvelopeEncoding: Sendable {
     /// Encodes one envelope as the tool output document.
     /// - Parameter envelope: Encodable envelope value.
@@ -61,12 +43,9 @@ public enum ToolEnvelopeEncoding: Sendable {
     }
 }
 
-/// Session delegate that surfaces redirects instead of following them.
-///
-/// No-follow policy for the `web.fetch` live transport and the SearXNG
-/// readiness probe, which need the 3xx surfaced rather than followed.
-/// `api.request` uses the pinned dialer instead, since a URLSession dial
-/// re-resolves the hostname and cannot preserve the SSRF gate's address pin.
+/// Session delegate that surfaces redirects instead of following them. `api.request` uses the
+/// pinned dialer instead, since a URLSession dial re-resolves the hostname and cannot preserve the
+/// SSRF gate's address pin.
 final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
     func urlSession(
         _: URLSession,

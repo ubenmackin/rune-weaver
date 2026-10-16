@@ -38,10 +38,9 @@ struct SeatbeltProfileBuilderTests {
 
     @Test
     func `Denies browser profile reads inside the sandbox`() {
-        // The persistent browser profile lives under the home directory, which
-        // the sandbox otherwise reopens as an allowed read root, so the
-        // generated profile must deny the whole profile tree both as an
-        // explicit subpath and as a filename-level regex.
+        // The persistent browser profile lives under the home directory, which the sandbox
+        // otherwise reopens as an allowed read root, so the generated profile must deny the whole
+        // profile tree both as an explicit subpath and as a filename-level regex.
         let builder = SeatbeltProfileBuilder(
             allowedReadPaths: ["/Users/test/workspace"],
             allowedWritePaths: ["/Users/test/workspace"]
@@ -55,10 +54,9 @@ struct SeatbeltProfileBuilderTests {
 
     @Test
     func `Denies engine token and SearXNG secrets inside the sandbox`() {
-        // The owner bearer token and the per-install SearXNG settings live
-        // under the home directory, which the sandbox otherwise reopens as an
-        // allowed read root, so the generated profile must deny both as
-        // explicit subpaths plus filename-level regexes.
+        // The owner bearer token and the per-install SearXNG settings live under the home
+        // directory, which the sandbox otherwise reopens as an allowed read root, so the generated
+        // profile must deny both as explicit subpaths plus filename-level regexes.
         let builder = SeatbeltProfileBuilder(
             allowedReadPaths: ["/Users/test/workspace"],
             allowedWritePaths: ["/Users/test/workspace"]

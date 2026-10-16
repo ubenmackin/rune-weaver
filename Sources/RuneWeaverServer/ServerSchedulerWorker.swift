@@ -1,11 +1,4 @@
 // Rune Weaver Server — In-process background scheduler worker.
-//
-// Fires cron and poll jobs plus steady goal advancements inside the service
-// process. Jobs drive on cron windows while goals drive on `next_due_at`;
-// both share the per-process single-flight spirit so overlapping fires skip
-// instead of stacking. Downtime carries no catch-up: a firing missed while
-// down simply becomes due and advances once on the next tick, then re-dueues
-// on its regular interval rather than replaying every missed slot.
 
 import Foundation
 import Logging
@@ -14,10 +7,6 @@ import RuneWeaverCore
 // swiftformat:disable docComments
 
 // Whether a finished scheduler turn should advance the cursor.
-///
-/// Only clean completions advance the watermark; parked, budget-limited,
-/// failed, and cancelled turns keep the prior value so the next run rescans
-/// the same window instead of skipping work.
 extension OrchestratorResponse {
     var shouldAdvanceSchedulerCursor: Bool {
         !isParked && !isBudgetExceeded
@@ -64,10 +53,6 @@ public actor ServerSchedulerWorker {
     let goalRunLock: SchedulerRunLock
     let activeTurns: ActiveTurnTracker?
     /// Interruption gate for background notifications and dashboard frames.
-    ///
-    /// Filters macOS notifications and `proactive_message` frames only; run
-    /// history, run broadcasts, and the approvals inbox always record so the
-    /// audit trail never loses a turn the gate suppresses.
     let outcomeGate: OutcomeGate
     private let schedulerConfig: SchedulerConfig
     let goalsConfig: GoalsConfig
@@ -236,20 +221,17 @@ public actor ServerSchedulerWorker {
         do {
             try await fireDueScheduledSends(now: now)
         } catch is CancellationError {
-            // Cancellation stops further scheduled sends this tick and is
-            // preserved for the outer loop; the claimed row stays `sending`
-            // until its replay settles or a later boot reconciles it, so
-            // nothing double-sends.
+            // Cancellation stops further scheduled sends this tick and is preserved for the outer
+            // loop; the claimed row stays `sending` until its replay settles or a later boot
+            // reconciles it, so nothing double-sends.
             await logger?("Scheduled send fire cancelled.")
         } catch {
             await logger?("Scheduled send fire failed: \(error.localizedDescription)")
         }
 
-        // The nightly-or-catch-up index trigger rides the same tick: the
-        // coordinator selects `.nightly` at the nightly hour and `.catchUp`
-        // for a later same-day launch, while a disabled or already-run
-        // coordinator returns immediately, so this is a no-op for the default
-        // configuration.
+        // The nightly-or-catch-up index trigger rides the same tick: the coordinator selects
+        // `.nightly` at the nightly hour and `.catchUp` for a later same-day launch, while a
+        // disabled or already-run coordinator returns immediately, so this is a no-op for the default configuration.
         if let goalStore, let goalEngine {
             // Disabled installs never spend advancement turns even when stale
             // rows linger from an earlier enabled period.
@@ -306,11 +288,6 @@ public actor ServerSchedulerWorker {
     }
 
     /// Refreshes proactive ideas at most once per cadence window.
-    ///
-    /// Rides the tick that already owns nightly maintenance so no separate
-    /// timer is needed. The interval high-water mark makes the cadence
-    /// independent of tick frequency, and `generate()` self-guards on the
-    /// `[ideas]` enabled flag so a disabled install spends nothing.
     private func refreshIdeasIfDue(now: Date) async {
         guard let ideasEngine else { return }
         guard now.timeIntervalSince(lastIdeasRefresh) >= Self.ideasRefreshInterval else { return }
@@ -325,20 +302,10 @@ public actor ServerSchedulerWorker {
     }
 
     /// Broadcasts one freshly proposed idea on the existing proactive frame.
-    ///
-    /// Reuses `WSProactiveMessageFrame` rather than adding a transport: the
-    /// kind names the idea family and the title plus a one-line body headline
-    /// carry the card. The linked goal rides along so the dashboard can
-    /// deep-link without a second lookup. The frame passes through the same
-    /// interruption gate as every other proactive push, so `off`,
-    /// `milestones`, and `guarded` installs stay silent (the guarded judge
-    /// only weighs scheduler successes) while `all` surfaces it as before.
-    /// - Parameter idea: Newly persisted suggestion to surface.
     func broadcastIdeaProposed(_ idea: Idea) async {
-        // The frame decoder rejects blank card text, and a directly-seeded row
-        // can carry a whitespace-only body, so trim before choosing the
-        // fallback; a blank title falls back too rather than emitting a frame
-        // the dashboard would drop.
+        // The frame decoder rejects blank card text, and a directly-seeded row can carry a
+        // whitespace-only body, so trim before choosing the fallback; a blank title falls back too
+        // rather than emitting a frame the dashboard would drop.
         let body = idea.body.trimmingCharacters(in: .whitespacesAndNewlines)
         let title = idea.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallbackTitle = title.isEmpty ? "New suggestion" : title
@@ -644,19 +611,11 @@ extension ServerSchedulerWorker {
     }
 
     /// Verbatim timestamp shape injected alongside the cursor.
-    ///
-    /// `SchedulerRunBookkeeping` owns the shape because the migration's
-    /// persisted audit record prints the same instants from the store side;
-    /// this is the worker-facing name for that single formatter.
     static func schedulerCursorTimestampString(from date: Date) -> String {
         SchedulerRunBookkeeping.schedulerCursorTimestampString(from: date)
     }
 
     /// Builds the effective run prompt, always carrying the cursor rule.
-    ///
-    /// Cursorless first runs get the rule plus the default-lookback sentence
-    /// with the owning job's configured window verbatim and without a
-    /// timestamp, so the agent never re-improvises bookkeeping.
     static func schedulerRunPrompt(for job: SchedulerJob) -> String {
         guard let cursor = job.lastSuccessfulRunEndedAt else {
             return job.prompt + "\n\n\(schedulerCursorlessLookbackLine)\n\(schedulerCursorlessWindowDetail(for: job))\n\(schedulerCursorRuleLine)"
@@ -674,10 +633,6 @@ extension ServerSchedulerWorker {
     }
 
     /// Migrates legacy email-report markers into job cursors at boot.
-    ///
-    /// Production routes the boot-tail sweep through this wrapper so the
-    /// caller can log and persist the audit record instead of discarding the
-    /// cursor jump; the sweep itself is one-shot behind a durable latch.
     @discardableResult
     func migrateEmailReportMarkers(memoryEngine: MemoryEngine) async -> SchedulerMarkerMigrationReport {
         await scheduler.migrateEmailReportMarkers(memoryEngine: memoryEngine)
@@ -704,14 +659,6 @@ private enum ProactiveJudgeError: Error, Sendable {
 
 extension ServerSchedulerWorker {
     /// Broadcasts one surfaced interruption frame for dashboard badges.
-    ///
-    /// Called only when the gate surfaces so suppressed modes stay silent;
-    /// the run row broadcast already happened unconditionally, so this frame
-    /// carries the interruption alone and never duplicates audit history. The
-    /// shared `WSProactiveMessageFrame` shape carries kind, title, and
-    /// headline plus session and goal links so the dashboard can raise a Web
-    /// Notification or badge and deep-link without a second lookup, even with
-    /// no macOS notifier.
     func broadcastProactive(kind: ProactiveEventKind, title: String, headline: String, sessionID: UUID? = nil, goalID: UUID? = nil) async {
         // The hub owns the single encoding for this wire shape, so build the
         // frame and reuse it instead of duplicating the encode here.
@@ -720,12 +667,6 @@ extension ServerSchedulerWorker {
     }
 
     /// Classifies a finished goal turn into its proactive kind.
-    ///
-    /// Parked turns map to the parked kind without touching the store; fresh
-    /// terminal states (achieved, needs input) win next, then any blocked
-    /// step, with routine step completion as the fallback. Best-effort: store
-    /// failures degrade to the routine kind rather than failing the turn, and
-    /// the gate still surfaces errors and parked turns from their own paths.
     func resolveGoalEventKind(goal: Goal, store: GoalStore, outcome: GoalAdvancementTurn) async -> ProactiveEventKind {
         if outcome.isParked {
             return .runParked
@@ -756,14 +697,6 @@ extension ServerSchedulerWorker {
     }
 
     /// Builds the single-exchange judge prompt for a routine scheduler success.
-    ///
-    /// Sets a high interruption bar (worth the owner's attention right now?)
-    /// and demands JSON only so the parser can fail closed to a throw, which
-    /// the gate then fails open to surfacing. The title is clamped to the
-    /// headline budget so an unbounded goal title cannot bloat the judge
-    /// exchange; the preview already carries the shared 160-character bound.
-    /// - Parameter event: Routine outcome awaiting a verdict.
-    /// - Returns: User prompt for the judge model.
     static func proactiveJudgePrompt(for event: ProactiveEvent) -> String {
         let title = ProactiveEvent.clampHeadline(event.title)
         return """
@@ -777,13 +710,6 @@ extension ServerSchedulerWorker {
     }
 
     /// Parses one judge reply into a verdict, throwing on any drift.
-    ///
-    /// Strips fenced code wrappers before decoding so a helpful model that
-    /// wraps its JSON still parses; anything else (empty, non-JSON, missing
-    /// keys) throws so the gate fails open instead of silently swallowing the
-    /// outcome.
-    /// - Parameter text: Raw judge reply text.
-    /// - Returns: Decoded verdict.
     static func parseProactiveJudgeResponse(_ text: String) throws -> SurfacingVerdict {
         struct Payload: Decodable {
             let surface: Bool
@@ -828,13 +754,9 @@ extension ServerSchedulerWorker {
         return working.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Builds a judge closure around one LLM provider.
-    ///
-    /// Runs one short text-in/JSON-out exchange with no tools; provider errors
-    /// and unparseable replies throw so the gate fails open to surfacing. The
-    /// gate itself enforces the judge timeout, so this closure never sleeps.
-    /// - Parameter llm: Provider serving the single judge exchange.
-    /// - Returns: Judge closure for a guarded gate.
+    /// Builds a judge closure around one LLM provider. Runs one short text-in/JSON-out exchange
+    /// with no tools; provider errors and unparseable replies throw so the gate fails open to
+    /// surfacing.
     static func makeProactiveJudge(llm: any LLMProvider) -> ProactiveJudge {
         let captured = llm
         return { @Sendable event in

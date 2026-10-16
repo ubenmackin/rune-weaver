@@ -1,28 +1,11 @@
 // Rune Weaver Core — Engine-derived display target for permission requests.
-//
-// Purpose: single owner of the display target naming what "this target"
-// covers for a permission request, so the chat banner, the inbox card, and
-// the dashboard quick actions all present the same host, recipient, command,
-// or path instead of re-deriving one per call site.
-// Scope: the pure derivation over tool name plus arguments JSON — egress
-// host precedence with blank hosts treated as absent, send-tool recipients
-// (string or array, comma-joined), bash commands, files paths, and the
-// common target-ish key fallback. Scope matching, decision recording, and
-// approval policy stay with their owners.
-// Architectural role: a stateless derivation beside the approval queue;
-// `PermissionRequest.displayTarget` renders it and the decision log stores
-// the same rendering when a decision resolves.
 
 import Foundation
 
 /// Single owner of target display derivation for permission requests.
 public enum PermissionRequestTarget: Sendable {
-    /// Derives the display target naming what "this target" covers.
-    /// - Parameters:
-    ///   - toolName: Name of the tool requesting approval.
-    ///   - argumentsJSON: Raw JSON arguments for the call.
-    ///   - egressHost: Target host for unlisted network egress, when present.
-    /// - Returns: Display target, or nil when none is derivable.
+    /// Derives the display target naming what "this target" covers. toolName: Name
+    /// of the tool requesting approval.
     public static func derive(toolName: String, argumentsJSON: String, egressHost: String?) -> String? {
         if let host = egressHost?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty {
             return host

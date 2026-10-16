@@ -4,13 +4,8 @@ import Foundation
 
 /// Namespace owning tier resolution plus scoped mount and profile helpers.
 public enum BashSandboxRouter: Sendable {
-    /// Toolchain resolution reads for `xcode-select` under the host tier.
-    ///
-    /// Every root carries both spellings — symlinked (`/var/...`) and
-    /// canonical (`/private/var/...`): the kernel evaluates opens on the
-    /// canonical path while callers spell the symlinked one, so a
-    /// single-spelling entry can deny a read the profile intends to allow.
-    /// Future path additions must carry both spellings of the same root.
+    /// Toolchain resolution reads for `xcode-select` under the host tier. Future path additions
+    /// must carry both spellings of the same root.
     static let hostToolchainReadPaths = [
         "/var/select",
         "/private/var/select",
@@ -19,16 +14,6 @@ public enum BashSandboxRouter: Sendable {
     ]
 
     /// Resolves the execution tier for one command.
-    ///
-    /// Chained commands never reach the host tier: any chaining operator,
-    /// substitution, or subshell fails closed to the configured sandbox mode
-    /// before allow patterns are consulted, so a wildcard match over the full
-    /// command string cannot carry an attacker suffix into `hostSeatbelt`.
-    /// Unchained commands keep the existing opt-out; ordering carries no
-    /// meaning because the outcome stays binary. Matching reuses
-    /// `BashSecurity.matches` so allow entries accept the same fnmatch
-    /// wildcards and bare-prefix spellings owners already use for permission
-    /// rules, keeping tier opt-out consistent with policy.
     public static func resolveTier(command: String, config: BashConfig) -> BashSandboxMode {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         if BashSecurity.detectChaining(in: trimmed) {
@@ -41,10 +26,6 @@ public enum BashSandboxRouter: Sendable {
     }
 
     /// Effective execution tier shared by approval stamping and the bash tool.
-    ///
-    /// Applies the host fallback the executor enforces for staged copies,
-    /// hermetic scratch roots, and system-temp paths so the stamped summary
-    /// cannot advertise an isolated tier while execution runs on the host.
     public static func effectiveTier(
         command: String,
         config: BashConfig,
@@ -56,12 +37,6 @@ public enum BashSandboxRouter: Sendable {
     }
 
     /// Applies the executor host fallback to a resolved base tier.
-    ///
-    /// Single fallback owner so stamping and execution cannot drift: staged
-    /// copies and hermetic roots force host unconditionally, while temp paths
-    /// force host only when the base tier is isolated. Staged-copy and temp
-    /// matches run on expanded path tokens, never raw substrings, so an echo
-    /// of a name stays isolated while an executed staged path still maps host.
     public static func applyHostFallback(
         baseTier: BashSandboxMode,
         command: String,
@@ -81,22 +56,12 @@ public enum BashSandboxRouter: Sendable {
     }
 
     /// Whether the executed argv references a staged agent-tool copy.
-    ///
-    /// Matches the staged filename only as a path token carrying a separator,
-    /// so `echo runeweaver-tool-x` stays isolated while the quoted staged
-    /// execution `'.../runeweaver-tool-UUID.sh'` still maps host. The first
-    /// shell word owns the verdict because it is the executed path; later
-    /// words are data for that execution, not a second execution needing host.
     static func commandReferencesStagedCopyPath(_ command: String) -> Bool {
         guard let first = firstShellWord(command) else { return false }
         return first.contains("runeweaver-tool-") && first.contains("/")
     }
 
     /// First shell word with surrounding quotes stripped.
-    ///
-    /// Skips leading whitespace; a leading single or double quote parses to its
-    /// mate so the quoted staged path counts as one word. Unbalanced quotes
-    /// fall back to the whitespace-delimited token.
     static func firstShellWord(_ command: String) -> String? {
         var index = command.startIndex
         while index < command.endIndex, command[index].isWhitespace {
@@ -130,11 +95,6 @@ public enum BashSandboxRouter: Sendable {
     }
 
     /// Unquoted shell words for temp-path fallback.
-    ///
-    /// Tracks single plus double quote state so a quoted `"/tmp/foo"` echo
-    /// stays data while an unquoted `/tmp/foo` path still maps host. Words
-    /// split on whitespace plus shell operators outside quotes; quoted words
-    /// are excluded because they are string data, not executed paths.
     static func unquotedShellWords(_ command: String) -> [String] {
         var words: [String] = []
         var current = ""
@@ -179,10 +139,6 @@ public enum BashSandboxRouter: Sendable {
     }
 
     /// Whether an unquoted path token sits under system temp.
-    ///
-    /// Matches temp as a prefix on unquoted path tokens, never as a raw
-    /// substring, so `echo "/tmp/foo"` stays isolated while `cat /tmp/foo`
-    /// still maps host for the executed path.
     static func commandReferencesSystemTempPath(_ command: String) -> Bool {
         for word in unquotedShellWords(command) {
             let expanded = (word as NSString).expandingTildeInPath
@@ -203,10 +159,6 @@ public enum BashSandboxRouter: Sendable {
     }
 
     /// Whether an isolated tier cannot honor this turn without hiding host temp.
-    ///
-    /// Cwd inside system temp forces host because no isolated mount covers it;
-    /// command temp references force host only as unquoted path-token prefixes,
-    /// never raw substrings, so an echo of a temp name stays isolated.
     static func requiresHostForSystemTemp(command: String, rawCwd: String?, workspaceRoot: URL?) -> Bool {
         if let workspaceRoot {
             let trimmedCwd = (rawCwd ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -268,11 +220,6 @@ public enum BashSandboxRouter: Sendable {
     }
 
     /// Host paths mounted for one tier.
-    ///
-    /// Single mount contract backing Seatbelt scoping: the strict tier scopes
-    /// to workspace `tmp`, the machine tier scopes to the workspace root, and
-    /// the host tier has no container mount (empty) because host runs on the
-    /// Mac with Seatbelt scoped to the working directory instead.
     public static func mountedHostPaths(for tier: BashSandboxMode, workspaceRoot: URL) -> [String] {
         let root = workspaceRoot.standardizedFileURL.path
         let tmp = workspaceTmpURL(for: workspaceRoot).standardizedFileURL.path
@@ -287,11 +234,6 @@ public enum BashSandboxRouter: Sendable {
     }
 
     /// Seatbelt profile scoped to one tier.
-    ///
-    /// Isolated tiers derive their allowed roots from `mountedHostPaths` so
-    /// routing, mounts, and Seatbelt confinement agree on one contract; the
-    /// host tier has no container mount and scopes Seatbelt to the working
-    /// directory instead.
     public static func seatbeltProfile(
         for tier: BashSandboxMode,
         workspaceRoot: URL,
@@ -327,10 +269,9 @@ public enum BashSandboxRouter: Sendable {
                 allowedEgressHosts: declaredHosts
             )
             let profile = builder.buildProfile()
-            // DVTKeychain frameworks match the lowercase filename deny despite the capital K, so drop that single
-            // regex on host; real stores stay denied via the Keychains subpath deny. Exact line equality keeps
-            // the exemption to that one deny so a rename or addition fails visibly instead of widening silently,
-            // and no subpath allow line can match.
+            // DVTKeychain frameworks match the lowercase filename deny despite the capital K, so
+            // drop that single regex on host; real stores stay denied via the Keychains subpath
+            // deny.
             let keychainFilenameDenyLine = ##"    (regex #"/[^/]*keychain[^/]*"#)"##
             return profile
                 .components(separatedBy: "\n")
@@ -340,12 +281,6 @@ public enum BashSandboxRouter: Sendable {
     }
 
     /// Filtered environment for one tier with no HOME and no agent forwarding outside host.
-    ///
-    /// Isolated tiers allowlist a minimal key set without `HOME`; the host
-    /// tier additionally keeps `HOME`. No tier forwards ssh-agent: the agent
-    /// socket keys never survive filtering because `container run` only
-    /// forwards when explicitly passed `--ssh`, which isolated and detonation
-    /// paths never pass.
     public static func scopedEnvironment(for tier: BashSandboxMode, workingDir: URL) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let allowedKeys: [String] = switch tier {
@@ -363,21 +298,6 @@ public enum BashSandboxRouter: Sendable {
     }
 
     /// Whether a schemeless host is embedded in a file path within one command.
-    ///
-    /// Staged agent copies (`/tmp/.../runeweaver-tool-UUID.sh`) plus other
-    /// workspace file paths surface as dotted names whose trailing file
-    /// extension reads as a TLD (`.sh`); a real dial (`curl example.com`)
-    /// follows whitespace, never a path separator, so path-embedded matches
-    /// stay local file artifacts, not egress dials. Callers skip these before
-    /// screening so local runs stay host-free while true dials still screen.
-    /// Every occurrence must sit behind a path separator to count as
-    /// embedded: a command mixing a real dial with a later path echo
-    /// (`curl evil.com; echo /evil.com`) still screens because the dial
-    /// occurrence is not path-embedded.
-    /// - Parameters:
-    ///   - host: Bare host candidate from schemeless extraction.
-    ///   - command: Raw shell command carrying the candidate.
-    /// - Returns: True when every occurrence sits behind a path separator.
     public static func isPathEmbeddedHost(_ host: String, in command: String) -> Bool {
         guard !host.isEmpty, !command.isEmpty else { return false }
         let lowerCommand = command.lowercased()
@@ -402,19 +322,6 @@ public enum BashSandboxRouter: Sendable {
     }
 
     /// Whether one run needs egress screening for its tier.
-    ///
-    /// Isolated tiers screen every network-capable command even without an
-    /// explicit network request, so a missing supervisor denies fail-closed
-    /// instead of running unscreened; the host tier screens only when network
-    /// egress is explicitly allowed. Screening itself stays declared-hosts
-    /// first with the supervisor as the second opinion, so undeclared dials
-    /// deny even when policy would allow them. Centralized here so the tool
-    /// plus future callers agree on the tier gate without duplicating the branch.
-    /// - Parameters:
-    ///   - effectiveAllowNetwork: Whether this turn allows Seatbelt network.
-    ///   - tier: Resolved sandbox tier for the command.
-    ///   - isNetworkCapable: Whether the command names a network tool or host.
-    /// - Returns: True when explicit-URL screening must run.
     public static func shouldScreenNetwork(
         effectiveAllowNetwork: Bool,
         tier: BashSandboxMode,

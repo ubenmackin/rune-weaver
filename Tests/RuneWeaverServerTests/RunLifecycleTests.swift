@@ -455,10 +455,6 @@ struct RunApprovalLifecycleTests {
 }
 
 /// Recording socket capturing broadcast and direct frames without a live handshake.
-///
-/// Two instances model a reloaded tab plus its original: broadcast delivery must
-/// reach both while requester-scoped replies reach only the requester, so each
-/// socket keeps its own frame list for the delivery assertions below.
 private actor BroadcastRecordingSocket: WSConnectionSocket {
     /// Frames delivered to this connection.
     private(set) var sent: [String] = []
@@ -472,10 +468,9 @@ private actor BroadcastRecordingSocket: WSConnectionSocket {
     func close(code _: WebSocketErrorCode) async throws {}
 }
 
-/// Immediate provider serving one finished text chunk.
-///
-/// A single delta plus the terminal done frame is enough to prove detached
-/// delivery: the second socket must see both without re-sending the turn.
+/// Immediate provider serving one finished text chunk. A single delta plus the terminal done frame
+/// is enough to prove detached delivery: the second socket must see both without re-sending the
+/// turn.
 private struct BroadcastImmediateProvider: LLMProvider, Sendable {
     /// Stable test model metadata.
     let modelInfo = ModelInfo(name: "broadcast-immediate", provider: "test", contextLength: 2048)
@@ -503,11 +498,6 @@ private struct BroadcastImmediateProvider: LLMProvider, Sendable {
 }
 
 /// Delayed provider holding the turn open so cancellation can land mid-flight.
-///
-/// The pause lives inside the stream producer as an async sleep so the
-/// orchestrator suspends instead of blocking its cooperative-pool thread;
-/// a synchronous sleep would pin that thread while every broadcast suite
-/// runs in parallel and starve the continuations the turn needs to settle.
 private struct BroadcastDelayedProvider: LLMProvider, Sendable {
     /// Stable test model metadata.
     let modelInfo = ModelInfo(name: "broadcast-delayed", provider: "test", contextLength: 2048)
@@ -539,10 +529,9 @@ private struct BroadcastDelayedProvider: LLMProvider, Sendable {
     }
 }
 
-/// Failing provider reporting a mid-stream LLM error.
-///
-/// The error chunk routes the turn onto the failed path, proving the terminal
-/// error frame broadcasts session-tagged instead of answering one socket.
+/// Failing provider reporting a mid-stream LLM error. The error chunk routes the turn onto the
+/// failed path, proving the terminal error frame broadcasts session-tagged instead of answering one
+/// socket.
 private struct BroadcastFailingProvider: LLMProvider, Sendable {
     /// Stable test model metadata.
     let modelInfo = ModelInfo(name: "broadcast-failing", provider: "test", contextLength: 2048)
@@ -570,12 +559,6 @@ private struct BroadcastFailingProvider: LLMProvider, Sendable {
 }
 
 /// Builds an isolated server context for broadcast delivery tests.
-///
-/// Each test owns its tracker, run store, and hub so the three-slot cap and the
-/// frame lists never leak across cases; the temporary directory keeps SQLite off
-/// the real engine data directory.
-/// - Parameter provider: LLM backend driving the turn under test.
-/// - Returns: Isolated context plus its temporary directory for cleanup.
 private func makeBroadcastContext(provider: any LLMProvider) throws -> (ServerContext, URL) {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent("runeweaver-broadcast-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -609,12 +592,9 @@ private func makeBroadcastContext(provider: any LLMProvider) throws -> (ServerCo
     return (context, base)
 }
 
-/// Polls until a condition holds or a short budget expires.
-///
-/// Turns spawn detached, so the test must wait for the run row plus the fan-out
-/// to land instead of asserting immediately after the spawn returns.
-/// - Parameter condition: Async predicate to poll.
-/// - Returns: True when the predicate held in budget.
+/// Polls until a condition holds or a short budget expires. Turns spawn detached, so the test must
+/// wait for the run row plus the fan-out to land instead of asserting immediately after the spawn
+/// returns.
 private func broadcastWaitUntil(_ condition: @Sendable @escaping () async -> Bool) async -> Bool {
     let deadline = Date().addingTimeInterval(8)
     while Date() < deadline {
@@ -627,11 +607,6 @@ private func broadcastWaitUntil(_ condition: @Sendable @escaping () async -> Boo
 }
 
 /// Reads the frame discriminator without failing on unrelated shapes.
-///
-/// Run broadcasts carry a different payload than turn frames, so the delivery
-/// assertions filter by this type instead of counting every frame on the socket.
-/// - Parameter raw: Raw frame text.
-/// - Returns: The `type` value, or nil when the payload is not JSON.
 private func broadcastFrameType(_ raw: String) -> String? {
     guard let data = raw.data(using: .utf8),
           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -642,12 +617,6 @@ private func broadcastFrameType(_ raw: String) -> String? {
 }
 
 /// Reads the owning session from a frame, when present.
-///
-/// Every broadcast turn frame carries its session so multiplexed views filter
-/// before touching state; requester-scoped replies carry it too, so the direct
-/// assertions below can prove the reply belonged to the requesting session.
-/// - Parameter raw: Raw frame text.
-/// - Returns: The session identifier, or nil when absent or malformed.
 private func broadcastFrameSessionID(_ raw: String) -> UUID? {
     guard let data = raw.data(using: .utf8),
           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

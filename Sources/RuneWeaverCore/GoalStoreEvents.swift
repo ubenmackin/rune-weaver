@@ -1,8 +1,4 @@
 // Rune Weaver Core — Goal audit events for the SQLite goal store.
-//
-// Holds the append-only audit trail: row decoding, event inserts, bounded
-// most-recent reads, and lifecycle-kind mapping. Step rows and goal rows
-// live beside it under the same namespace.
 
 import Foundation
 
@@ -14,10 +10,6 @@ import Foundation
     /// Audit-trail persistence and retrieval for the goal store.
     extension SQLiteGoalStore {
         /// Maps a goal lifecycle state to its audit counterpart.
-        ///
-        /// Abandonment has no dedicated lifecycle kind, so it lands as a note
-        /// carrying the transition message rather than inventing a new case
-        /// that older readers could not decode.
         static func eventKind(for status: GoalStatus) -> GoalEventKind {
             switch status {
             case .active: .resumed

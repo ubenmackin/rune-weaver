@@ -63,10 +63,9 @@ extension RuneWeaverConfig {
     }
 
     private func validateServerSection() throws {
-        // Decode and the settings PUT trim before storing, so the stored form
-        // never carries padding; the hostname check validates the trimmed
-        // form under the same exact-host rules as `allowed_hosts` and the
-        // Host gate so file-load and PUT agree before persisting.
+        // Decode and the settings PUT trim before storing, so the stored form never carries
+        // padding; the hostname check validates the trimmed form under the same exact-host rules as
+        // `allowed_hosts` and the Host gate so file-load and PUT agree before persisting.
         try Self.validateServerHostname(server.hostname)
         // Mirrors `ServerConfig.validPortRange` without linking the server
         // transport into the config layer, so a bad port fails at load.
@@ -78,19 +77,8 @@ extension RuneWeaverConfig {
         try Self.validateAllowedHosts(server.allowedHosts)
     }
 
-    /// Validates `server.hostname` as an exact host matching `allowed_hosts`
-    /// and Host-gate semantics.
-    ///
-    /// The Host gate matches the bind hostname after lowercasing (plus
-    /// bracket-canonicalized IPv6), so validation rejects shapes that could
-    /// never match exactly or would widen the gate: schemes, wildcards, CIDR
-    /// ranges or paths, userinfo, query or fragment, interior whitespace,
-    /// and control characters. A `:port` suffix on a non-IPv6 literal is
-    /// rejected because the port lives in `server.port`: persisting
-    /// `example.com:8082` as the hostname would never match the normalized
-    /// Host yet read as configured (spurious 403) or fail at bind time.
-    /// - Parameter hostname: Raw configured hostname.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` on any widening shape.
+    /// Validates `server.hostname` as an exact host matching `allowed_hosts` and Host-gate
+    /// semantics.
     public static func validateServerHostname(_ hostname: String) throws {
         let field = "server.hostname"
         let trimmed = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -106,12 +94,9 @@ extension RuneWeaverConfig {
         // Single-sourced through `validateExactHost` so hostname and allowlist
         // agree on every widening shape; length and port checks stay local.
         try Self.validateExactHost(trimmed: trimmed, original: hostname, field: field)
-        // Fail closed on `host:port` spellings for non-IPv6 literals: the
-        // port belongs in `server.port`, and the Host gate compares the
-        // port-stripped form, so persisting the suffix would never match yet
-        // read as configured. Unbracketed IPv6 literals carry multiple
-        // colons and keep them; a single colon (or a bracketed `:port`
-        // after `]`) is a port suffix, not an address.
+        // Fail closed on `host:port` spellings for non-IPv6 literals: the port belongs in
+        // `server.port`, and the Host gate compares the port-stripped form, so persisting the suffix
+        // would never match yet read as configured.
         if Self.isHostWithPortSuffix(trimmed) {
             throw ConfigError.validationError(
                 field: field,
@@ -126,15 +111,9 @@ extension RuneWeaverConfig {
         }
     }
 
-    /// Whether a trimmed hostname carries a `:port` suffix.
-    ///
-    /// Bracketed literals (`[::1]`) keep their brackets; a colon after the
-    /// closing `]` counts as a port only for a numeric port, mirroring the
-    /// normalization strip rule. Unbracketed values with more than one colon
-    /// are IPv6 literals and keep their colons, while a single colon marks
-    /// `host:port` only for an empty or numeric suffix.
-    /// - Parameter trimmed: Whitespace-trimmed hostname.
-    /// - Returns: True when the value carries a port suffix.
+    /// Whether a trimmed hostname carries a `:port` suffix. Bracketed literals (`[::1]`) keep their
+    /// brackets; a colon after the closing `]` counts as a port only for a numeric port, mirroring
+    /// the normalization strip rule.
     private static func isHostWithPortSuffix(_ trimmed: String) -> Bool {
         if trimmed.hasPrefix("[") {
             guard let closingBracketIndex = trimmed.firstIndex(of: "]") else {
@@ -161,20 +140,6 @@ extension RuneWeaverConfig {
     }
 
     /// Validates one exact host against the shared Host-gate semantics.
-    ///
-    /// Single-sources the widening-shape guards shared by
-    /// `validateServerHostname` and `validateAllowedHosts` (scheme, bare `*`,
-    /// wildcards, CIDR/paths, userinfo, query/fragment, whitespace, controls)
-    /// plus the unbalanced-bracket, bracketed non-IPv6, empty-bracket, and
-    /// trailing-dot fail-closed checks so file-load, the settings PUT, and
-    /// the Host gate agree. Length, empty, port-suffix, and normalized-empty
-    /// checks stay with the callers because the hostname rejects `:port`
-    /// while the allowlist strips it.
-    /// - Parameters:
-    ///   - trimmed: Whitespace-trimmed host value.
-    ///   - original: Raw value echoed in diagnostics.
-    ///   - field: Dotted field name for diagnostics.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` on any widening shape.
     private static func validateExactHost(trimmed: String, original: String, field: String) throws {
         let lowered = trimmed.lowercased()
         if lowered.contains("://") {
@@ -223,12 +188,9 @@ extension RuneWeaverConfig {
         }
         try validateBracketedHost(trimmed: trimmed, original: original, field: field)
 
-        // Fail closed on unbracketed `host:suffix` with a non-numeric suffix:
-        // normalization strips only an empty or numeric port, so
-        // `evil.com:evil` would otherwise persist verbatim garbage that never
-        // matches yet reads as configured. Empty or numeric suffixes pass
-        // through for the hostname port-suffix rejection and the allowlist
-        // strip respectively; IPv6 literals keep their colons above.
+        // Fail closed on unbracketed `host:suffix` with a non-numeric suffix: normalization strips
+        // only an empty or numeric port, so `evil.com:evil` would otherwise persist verbatim garbage
+        // that never matches yet reads as configured.
         if !trimmed.hasPrefix("[") {
             if trimmed.filter({ $0 == ":" }).count == 1,
                let colonIndex = trimmed.firstIndex(of: ":")
@@ -248,10 +210,8 @@ extension RuneWeaverConfig {
                 }
             }
         }
-        // Fail closed on a trailing FQDN dot: the gate compares exact
-        // normalized hosts, so `example.com.` would never match `example.com`
-        // yet read as allowed. Loopback classification strips the dot first,
-        // while every other host must drop it before configuring.
+        // Fail closed on a trailing FQDN dot: the gate compares exact normalized hosts, so
+        // `example.com.` would never match `example.com` yet read as allowed.
         if trimmed.hasSuffix(".") {
             throw ConfigError.validationError(
                 field: field, message: "must not end with '.' (got '\(original)'); list the host without the trailing dot instead"
@@ -303,13 +263,6 @@ extension RuneWeaverConfig {
     }
 
     /// Validates explicit `server.allowed_hosts` entries as exact hostnames only.
-    ///
-    /// The Host gate matches entries after lowercasing plus port stripping, so
-    /// validation rejects shapes that could never match exactly or would widen
-    /// the gate: schemes, wildcards, CIDR ranges, and a bare `*`. Bounds keep
-    /// the allowlist auditable and within the DNS name limit.
-    /// - Parameter hosts: Raw configured entries.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` on any widening shape.
     public static func validateAllowedHosts(_ hosts: [String]) throws {
         let field = "server.allowed_hosts"
         if hosts.count > ServerEndpointConfig.maxAllowedHosts {
@@ -332,11 +285,9 @@ extension RuneWeaverConfig {
             // Single-sourced through `validateExactHost` so allowlist and hostname
             // agree on every widening shape; bounds stay local.
             try Self.validateExactHost(trimmed: trimmed, original: entry, field: field)
-            // Fail closed on entries that normalize to empty (e.g. `:8082`):
-            // the Host gate compares the lowercased, port-stripped form, so a
-            // port-only entry would never match yet read as configured. The
-            // settings PUT already rejects this shape after normalization, so
-            // rejecting here keeps file-load and PUT in agreement.
+            // Fail closed on entries that normalize to empty (e.g. `:8082`): the Host gate compares
+            // the lowercased, port-stripped form, so a port-only entry would never match yet read as
+            // configured.
             if Self.normalizedAllowedHostForValidation(trimmed).isEmpty {
                 throw ConfigError.validationError(field: field, message: "must not contain empty strings")
             }
@@ -344,12 +295,6 @@ extension RuneWeaverConfig {
     }
 
     /// Normalizes one `allowed_hosts` entry to the compared Host form for validation.
-    ///
-    /// Single-sourced through `ServerEndpointConfig.normalizeHost` so file-load
-    /// validation and the settings PUT reject the same normalized-empty shapes
-    /// fail-closed without linking the server transport into the config layer.
-    /// - Parameter entry: Raw configured entry.
-    /// - Returns: Lowercased, port-stripped host.
     private static func normalizedAllowedHostForValidation(_ entry: String) -> String {
         ServerEndpointConfig.normalizeHost(entry)
     }
@@ -464,13 +409,9 @@ extension RuneWeaverConfig {
                 message: "must be one of \(allowedBackends.joined(separator: ", ")) (got '\(memory.embeddingBackend)')"
             )
         }
-        // Recall budgets deliberately fail open, unlike the fail-closed
-        // neighboring bounds: file-load already clamped in `decodeMemory` and
-        // the settings PUT clamps on merge, so an out-of-range `recall_*`
-        // reaches here at the nearest bound and never throws — a stray digit
-        // degrades recall fan-out instead of refusing to boot or save. Live
-        // engine paths clamp again at use via `RecallBudgets.clamped()` for
-        // hand-built configs. No range throw here by design.
+        // Recall budgets deliberately fail open, unlike the fail-closed neighboring bounds:
+        // file-load already clamped in `decodeMemory` and the settings PUT clamps on merge, so an
+        // out-of-range `recall_*` reaches here at the nearest bound and never throws — a stray digit.
     }
 
     private func validateVoiceSection() throws {
@@ -492,13 +433,6 @@ extension RuneWeaverConfig {
     }
 
     /// Validates the `[containers]` section.
-    ///
-    /// Bounds keep container work bounded: a sub-256MB guest cannot fit
-    /// toolchains and an 8GB-plus guest crowds the host, an unbounded
-    /// concurrency cap oversubscribes the machine, and a sub-five-minute TTL
-    /// churns containers faster than one model round while a multi-day TTL
-    /// reads as storage. All three fail closed at load; the runtime paths
-    /// share the same range constants so they cannot drift.
     private func validateContainersSection() throws {
         if containers.memoryMB < ContainersConfig.minMemoryMB || containers.memoryMB > ContainersConfig.maxMemoryMB {
             throw ConfigError.validationError(
@@ -570,10 +504,8 @@ extension RuneWeaverConfig {
                 message: "must be one of \(IndexConfig.allowedEfforts.joined(separator: ", ")) (got '\(index.effort)')"
             )
         }
-        // Custom carries an explicit count while presets derive it, so a
-        // preset with a stray count and a custom without one both fail here.
-        // The custom count validates against a static ceiling so the same
-        // file loads on any machine; resolution clamps to the live cores.
+        // Custom carries an explicit count while presets derive it, so a preset with a stray count
+        // and a custom without one both fail here.
         if index.effort == "custom" {
             if index.workers < 1 || index.workers > IndexConfig.maxAllowedWorkers {
                 throw ConfigError.validationError(
@@ -603,11 +535,8 @@ extension RuneWeaverConfig {
     }
 
     private func validateBrowserSection() throws {
-        // Fail closed on a blank or relative SearXNG URL so search never
-        // fans out to an unintended host; range checks mirror the mail
-        // search caps so context budgets stay predictable. Only http/https
-        // pass here so `ftp:`/`file:`-adjacent values fail at config load
-        // instead of later in `searchRequest` via `WebURLSafety`.
+        // Fail closed on a blank or relative SearXNG URL so search never fans out to an unintended
+        // host; range checks mirror the mail search caps so context budgets stay predictable.
         try Self.validateHTTPURLField(browser.searxngURL, field: "browser.searxng_url")
         if browser.searchTimeoutSeconds < 1 || browser.searchTimeoutSeconds > 120 {
             throw ConfigError.validationError(
@@ -648,19 +577,6 @@ extension RuneWeaverConfig {
     }
 
     /// Parses a raw `files.write_mode` string into the closed posture set.
-    ///
-    /// The single source of truth for `files.write_mode` acceptance: the TOML
-    /// decoder and the settings route both delegate here, so trim/lowercase
-    /// normalization and the rejection field/message cannot drift between
-    /// file-load and runtime updates. An unknown value throws instead of
-    /// falling back to the model posture, because a typo would otherwise read
-    /// as "agent chooses" and silently unforce the owner's posture.
-    /// - Parameters:
-    ///   - raw: Raw value from TOML or the settings payload.
-    ///   - field: Dotted field name carried by the thrown error.
-    /// - Returns: The matching write mode after trim and lowercase normalization.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` when the value
-    ///   is not one of `model`, `staged`, or `live`.
     public static func validateFilesWriteMode(_ raw: String, field: String = "files.write_mode") throws -> FilesWriteMode {
         let lowered = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard let mode = FilesWriteMode(rawValue: lowered) else {
@@ -672,20 +588,9 @@ extension RuneWeaverConfig {
         return mode
     }
 
-    /// Parses a raw `files.write_paths` posture into the closed set.
-    ///
-    /// The single source of truth for per-path posture acceptance, mirroring
-    /// ``validateFilesWriteMode(_:field:)``: the TOML decoder delegates here,
-    /// so trim/lowercase normalization and the rejection field/message cannot
-    /// drift between the policy file and any future settings surface. An
-    /// unknown posture throws instead of falling back to a safer value,
-    /// because a typo would otherwise read as a posture the owner never chose.
-    /// - Parameters:
-    ///   - raw: Raw value from the entry's `posture` key.
-    ///   - field: Dotted field name carried by the thrown error.
-    /// - Returns: The matching posture after trim and lowercase normalization.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` when the value
-    ///   is not one of `live`, `stage`, `ask`, or `deny`.
+    /// Parses a raw `files.write_paths` posture into the closed set. An unknown posture throws
+    /// instead of falling back to a safer value, because a typo would otherwise read as a posture
+    /// the owner never chose.
     public static func validateFilesWritePathPosture(
         _ raw: String,
         field: String = "files.write_paths.posture"
@@ -700,12 +605,8 @@ extension RuneWeaverConfig {
         return posture
     }
 
-    /// Validates the Trash-class mailbox denylist as non-blank globs.
-    ///
-    /// Empty opts every mailbox back in, so only blank entries fail: a blank
-    /// would otherwise read as configured yet match nothing.
-    /// - Parameter patterns: Raw denylist entries.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` on any blank entry.
+    /// Validates the Trash-class mailbox denylist as non-blank globs. Empty opts every mailbox back
+    /// in, so only blank entries fail: a blank would otherwise read as configured yet match nothing.
     public static func validateMailboxDeny(_ patterns: [String]) throws {
         let field = "index.mailbox_deny"
         for pattern in patterns where pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -888,20 +789,9 @@ extension RuneWeaverConfig {
     }
 
     /// Validates the `[security]` section.
-    ///
-    /// Both flags are plain booleans with no range to bound, so there is
-    /// nothing to reject: the method exists so the section joins the same
-    /// validate-every-section contract as all prior sections.
     private func validateSecuritySection() throws {}
 
     /// Validates the `[goals]` section.
-    ///
-    /// Bounds keep steady pursuit steady: a sub-five-minute cadence would
-    /// busy-loop the scheduler, a multi-week cadence reads as abandoned, and
-    /// unbounded active goals or plan lengths would crowd execution context.
-    /// The planning timeout is fail-closed to `0...86400` with zero meaning
-    /// unlimited; the engine clamps it again at use so an unvalidated path
-    /// never waits beyond the shared upper bound.
     private func validateGoalsSection() throws {
         if goals.stepIntervalMinutes < GoalsConfig.minStepIntervalMinutes
             || goals.stepIntervalMinutes > GoalsConfig.maxStepIntervalMinutes
@@ -962,11 +852,6 @@ extension RuneWeaverConfig {
     }
 
     /// Validates the `[proactive]` section.
-    ///
-    /// The judge budget bounds one guarded model round trip so a stray digit
-    /// fails at load instead of holding the scheduler tick; the mode itself
-    /// is already closed by its enum, with the TOML decoder rejecting unknown
-    /// strings at the same dotted field.
     private func validateProactiveSection() throws {
         if proactive.judgeTimeoutSeconds < ProactiveConfig.minJudgeTimeoutSeconds
             || proactive.judgeTimeoutSeconds > ProactiveConfig.maxJudgeTimeoutSeconds
@@ -981,12 +866,6 @@ extension RuneWeaverConfig {
     }
 
     /// Validates the `[ideas]` section.
-    ///
-    /// Bounds keep proactive suggestions cheap: an unbounded per-cycle cap
-    /// would flood the ideas list, and a non-positive or overlong review
-    /// budget would either never call the model or hold the trigger that asked
-    /// too long. The engine clamps again at use so an unvalidated hand-built
-    /// config never waits forever.
     private func validateIdeasSection() throws {
         if ideas.maxPerCycle < IdeasConfig.minMaxPerCycle || ideas.maxPerCycle > IdeasConfig.maxMaxPerCycle {
             throw ConfigError.validationError(
@@ -1002,16 +881,8 @@ extension RuneWeaverConfig {
         }
     }
 
-    /// Validates the `[fanout]` section.
-    ///
-    /// The worker cap bounds simultaneous model rounds so a wide subtask list
-    /// cannot oversubscribe the serving model. The timeout accepts zero for
-    /// unlimited (no wall-clock bound, intentional for slow local models and
-    /// ended by cancellation) and otherwise stays within
-    /// `1...maxWorkerTimeoutSeconds` so a stray digit fails at load instead of
-    /// holding a run open beyond any plausible model round. The engine clamps
-    /// again at init so an unvalidated hand-built config degrades to the
-    /// nearest sane bound instead of refusing to run.
+    /// Validates the `[fanout]` section. The worker cap bounds simultaneous model rounds so a wide
+    /// subtask list cannot oversubscribe the serving model.
     private func validateFanoutSection() throws {
         if fanOut.maxWorkers < FanOutConfig.minMaxWorkers || fanOut.maxWorkers > FanOutConfig.maxMaxWorkers {
             throw ConfigError.validationError(
@@ -1031,13 +902,9 @@ extension RuneWeaverConfig {
         }
     }
 
-    /// Validates the `[workspace]` section.
-    ///
-    /// Quotas bound shell scratch so a stray download cannot fill the disk and
-    /// a quota walk cannot dominate a turn; the temp TTL bounds `tmp/` growth
-    /// without manual cleanup. The store clamps again at use so an unvalidated
-    /// hand-built config degrades to the nearest sane bound instead of
-    /// refusing to run.
+    /// Validates the `[workspace]` section. Quotas bound shell scratch so a stray download cannot
+    /// fill the disk and a quota walk cannot dominate a turn; the temp TTL bounds `tmp/` growth
+    /// without manual cleanup.
     private func validateWorkspaceSection() throws {
         try WorkspaceConfig.validateQuotaMB(workspace.quotaMB)
         try WorkspaceConfig.validateQuotaFiles(workspace.quotaFiles)
@@ -1045,17 +912,6 @@ extension RuneWeaverConfig {
     }
 
     /// Validates the `[persona]` section through the shared normalizers.
-    ///
-    /// Decode and merge paths already repaired at their own boundaries, so this
-    /// enforces the same bounds fail-closed for hand-built configs: a blank
-    /// assistant name and overlong style guidance that would have fallen back
-    /// or truncated on load instead throw here, because the non-mutating check
-    /// cannot repair the stored value and passing would leave a broken identity
-    /// line. Bounds that cannot be repaired on any path throw with the dotted
-    /// field via the shared normalizers. Tone and avatar are closed enums, so
-    /// nothing beyond their decode-time rejection can drift here. The composer
-    /// additionally clamps at render so a prompt never splices even when
-    /// validation is bypassed.
     private func validatePersonaSection() throws {
         if persona.assistantName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ConfigError.validationError(
@@ -1076,11 +932,6 @@ extension RuneWeaverConfig {
 }
 
 /// Bounds enforcement for goal pursuit when the config bypasses load-time validation.
-///
-/// Load-time validation above fails closed; this clamps instead so live
-/// engine paths constructed from hand-built configs degrade to the nearest
-/// sane bound rather than refusing to run. Both share the same range
-/// constants so the two postures cannot drift.
 public extension GoalsConfig {
     /// Returns a copy clamped into the validated ranges.
     /// - Returns: Config with interval, caps, and timeout pulled inside bounds.
@@ -1099,17 +950,8 @@ public extension GoalsConfig {
 }
 
 /// Bounds enforcement for recall budgets at every fail-open clamp site.
-///
-/// File-load clamps in `decodeMemory`, the settings PUT clamps on merge, and
-/// this covers hand-built configs plus live engine paths, so a stray digit
-/// degrades to the nearest bound rather than refusing to boot, save, or run.
-/// All sites share the same range constants on `RecallBudgets` so the
-/// fail-open posture cannot drift.
 public extension RecallBudgets {
     /// Returns a copy clamped into the documented ranges.
-    /// - Returns: Budgets with limits pulled inside `1...50`, threshold and
-    ///   weight inside `0...1`, `maxChars` inside `500...32000`,
-    ///   `perHitChars` inside `100...8000`, and multiplier inside `1...8`.
     func clamped() -> RecallBudgets {
         RecallBudgets(
             perTierLimit: min(max(perTierLimit, Self.limitBounds.lowerBound), Self.limitBounds.upperBound),
@@ -1124,11 +966,6 @@ public extension RecallBudgets {
 }
 
 /// Bounds enforcement for idea suggestions when the config bypasses load-time validation.
-///
-/// Load-time validation above fails closed; this clamps instead so live
-/// engine paths constructed from hand-built configs degrade to the nearest
-/// sane bound rather than refusing to run. Both share the same range
-/// constants so the two postures cannot drift.
 public extension IdeasConfig {
     /// Returns a copy clamped into the validated ranges.
     /// - Returns: Config with the per-cycle cap and review timeout pulled inside bounds.
@@ -1145,13 +982,9 @@ public extension IdeasConfig {
 /// PUT, and TOML decoding so the three paths cannot drift on fields or
 /// messages.
 public extension BashRule {
-    /// Validates one rule's pattern, rejecting blank values.
-    ///
-    /// The matcher trims surrounding whitespace before comparing, so a
-    /// whitespace-only pattern never matches and fails closed here instead
-    /// of persisting a dead rule.
-    /// - Parameter index: Position in `BashConfig.rules` for diagnostics.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` when the pattern is blank.
+    /// Validates one rule's pattern, rejecting blank values. The matcher trims surrounding
+    /// whitespace before comparing, so a whitespace-only pattern never matches and fails closed here
+    /// instead of persisting a dead rule.
     func validate(index: Int) throws {
         if pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ConfigError.validationError(
@@ -1195,12 +1028,9 @@ public extension BashConfig {
         8192
     }
 
-    /// Validates the stored bash policy, throwing a descriptive error on failure.
-    ///
-    /// Covers the rule list, the wall-clock timeout, and the resource bounds
-    /// together so file-load and any full-snapshot check share one contract.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` when the rule
-    ///   list is empty, a rule pattern is blank, or any bound is out of range.
+    /// Validates the stored bash policy, throwing a descriptive error on failure. Covers the rule
+    /// list, the wall-clock timeout, and the resource bounds together so file-load and any
+    /// full-snapshot check share one contract.
     func validate() throws {
         try Self.validateRules(rules)
         try Self.validateTimeoutSeconds(timeoutSeconds)
@@ -1210,12 +1040,6 @@ public extension BashConfig {
     }
 
     /// Returns a copy clamped into the validated ranges.
-    ///
-    /// The shell clamps at use so a hand-built config degrades to the nearest
-    /// sane bound instead of refusing to run; load-time validation fails
-    /// closed, and both postures share the same range constants so they cannot
-    /// drift.
-    /// - Returns: Config with the timeout and resource bounds pulled inside bounds.
     func clamped() -> BashConfig {
         BashConfig(
             enabled: enabled,
@@ -1231,13 +1055,6 @@ public extension BashConfig {
     }
 
     /// Validates an ordered rule list, requiring at least one non-blank pattern.
-    ///
-    /// A present list replaces the built-in default in stored order, so an
-    /// empty list fails closed instead of persisting a policy that reloads
-    /// as the default star rule.
-    /// - Parameter rules: Ordered permission rules evaluated last-match-wins.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` when the list
-    ///   is empty or a pattern is blank.
     static func validateRules(_ rules: [BashRule]) throws {
         if rules.isEmpty {
             throw ConfigError.validationError(
@@ -1250,12 +1067,8 @@ public extension BashConfig {
         }
     }
 
-    /// Validates the default execution timeout in seconds.
-    ///
-    /// Bounds keep a zero hang or an unbounded run from persisting through
-    /// any write path.
-    /// - Parameter timeoutSeconds: Default execution timeout in seconds.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` when outside 1-3600.
+    /// Validates the default execution timeout in seconds. Bounds keep a zero hang or an unbounded
+    /// run from persisting through any write path.
     static func validateTimeoutSeconds(_ timeoutSeconds: Int) throws {
         if timeoutSeconds < minTimeoutSeconds || timeoutSeconds > maxTimeoutSeconds {
             throw ConfigError.validationError(
@@ -1265,12 +1078,8 @@ public extension BashConfig {
         }
     }
 
-    /// Validates the CPU time budget in seconds.
-    ///
-    /// Bounds keep a zero budget (which would kill every command instantly)
-    /// or an unbounded budget from persisting through any write path.
-    /// - Parameter cpuSeconds: CPU time budget in seconds.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` when outside 1-3600.
+    /// Validates the CPU time budget in seconds. Bounds keep a zero budget (which would kill every
+    /// command instantly) or an unbounded budget from persisting through any write path.
     static func validateCPUSeconds(_ cpuSeconds: Int) throws {
         if cpuSeconds < minCPUSeconds || cpuSeconds > maxCPUSeconds {
             throw ConfigError.validationError(
@@ -1280,12 +1089,8 @@ public extension BashConfig {
         }
     }
 
-    /// Validates the address-space budget in megabytes.
-    ///
-    /// Bounds keep a trivially small budget (which would fail every spawn)
-    /// or a host-scale budget from persisting through any write path.
-    /// - Parameter memoryMB: Address-space budget in megabytes.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` when outside 64-8192.
+    /// Validates the address-space budget in megabytes. Bounds keep a trivially small budget (which
+    /// would fail every spawn) or a host-scale budget from persisting through any write path.
     static func validateMemoryMB(_ memoryMB: Int) throws {
         if memoryMB < minMemoryMB || memoryMB > maxMemoryMB {
             throw ConfigError.validationError(
@@ -1295,11 +1100,9 @@ public extension BashConfig {
         }
     }
 
-    /// Validates the `hostSeatbelt` allowlist, failing closed on over-limit or malformed entries.
-    ///
-    /// - Parameter patterns: Fnmatch/prefix allow patterns gating `hostSeatbelt` via `BashSecurity.matches`.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` when over `maxHostAllowPatterns`
-    ///   or any entry is blank, overlong, or carries control or TOML-breaking bytes.
+    /// Validates the `hostSeatbelt` allowlist, failing closed on over-limit or malformed entries. -
+    /// Parameter patterns: Fnmatch/prefix allow patterns gating `hostSeatbelt` via
+    /// `BashSecurity.matches`.
     static func validateHostAllowPatterns(_ patterns: [String]) throws {
         if patterns.count > maxHostAllowPatterns {
             throw ConfigError.validationError(
@@ -1313,12 +1116,6 @@ public extension BashConfig {
     }
 
     /// Validates one `hostAllowPatterns` entry.
-    ///
-    /// - Parameters:
-    ///   - pattern: Raw allow pattern.
-    ///   - index: Position in `hostAllowPatterns` for diagnostics.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` on blank, overlong,
-    ///   or control/TOML-breaking content.
     static func validateHostAllowPattern(_ pattern: String, index: Int) throws {
         let field = "bash.host_allow_patterns"
         let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)

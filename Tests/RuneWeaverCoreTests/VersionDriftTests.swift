@@ -1,8 +1,4 @@
 // Rune Weaver Core Tests — Engine version single-source drift guard.
-//
-// Pins the repo-root VERSION file, the stamped Swift constant, and the
-// dashboard package manifest together so releases cannot ship mismatched
-// User-Agent strings, health versions, or CLI versions.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -33,9 +29,6 @@ struct VersionDriftTests {
     }
 
     /// Reads the canonical release from the repo-root VERSION file.
-    ///
-    /// - Returns: Normalized X.Y.Z string with surrounding whitespace and a
-    ///   leading `v` removed, matching how packaging scripts read the file.
     private static func repoVersion() throws -> String {
         let root = try repoRoot()
         let url = root.appendingPathComponent("VERSION")
@@ -47,10 +40,8 @@ struct VersionDriftTests {
         return normalized
     }
 
-    /// Reads the dashboard release from the web package manifest.
-    ///
-    /// - Returns: Version string from `Web/package.json`, kept in sync by
-    ///   the version stamping step rather than hand edits.
+    /// Reads the dashboard release from the web package manifest. - Returns: Version string from
+    /// `Web/package.json`, kept in sync by the version stamping step rather than hand edits.
     private static func packageVersion() throws -> String {
         let root = try repoRoot()
         let url = root.appendingPathComponent("Web/package.json")
@@ -68,9 +59,6 @@ struct VersionDriftTests {
     }
 
     /// Walks ancestors of this file until a VERSION marker appears.
-    ///
-    /// - Returns: Repository root, found independently of the test runner's
-    ///   working directory so Xcode, `swift test`, and CI all resolve alike.
     private static func repoRoot() throws -> URL {
         var dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         for _ in 0 ..< 10 {

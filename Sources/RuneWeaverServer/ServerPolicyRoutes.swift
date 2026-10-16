@@ -1,8 +1,4 @@
 // Rune Weaver Server — Security Policy routes and structured validation gates.
-//
-// Mounts GET /settings/policy, PUT /settings/policy, POST /settings/policy/verify,
-// and POST /settings/policy/recheck-local (preview and apply). Enforces input
-// validation, SSRF classification, and optimistic concurrency.
 
 import Foundation
 import RuneWeaverCore
@@ -238,26 +234,11 @@ private func handleRecheckApply(req: Request) async throws -> PolicyResponse {
     }
 }
 
-/// HTTP methods a credential binding may name.
-///
-/// Empty stays Any, so the list only narrows when present. Uppercased before
-/// comparison so a lowercase editor spelling still authorizes the same verb
-/// instead of failing closed on casing alone.
+/// HTTP methods a credential binding may name. Empty stays Any, so the list only narrows when
+/// present.
 private let allowedPolicyMethods: Set<String> = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 
 /// Validates a structured policy candidate from the REST contract.
-///
-/// Trims surrounding whitespace, drops blank method and prefix entries that
-/// can only mean Any, rejects blank domain entries and empty host lists that
-/// could only match nothing, enforces the schema version floor, the two-mode
-/// allowlist, the surrogate key alphabet, the method allowlist, and the
-/// leading-slash prefix shape, refuses TOML-breaking scalars that would not
-/// survive a save/load cycle, then runs the two formal invariants. Any
-/// failure throws a 400 naming the gate and field so the editor can repair
-/// the exact entry.
-/// - Parameter dto: Structured candidate from PUT or verify.
-/// - Returns: Normalized core policy ready to serialize and persist.
-/// - Throws: `Abort(.badRequest)` naming the gate and field.
 func validateStructuredPolicyInput(_ dto: SecurityPolicyDTO) throws -> SecurityPolicy {
     guard dto.version >= 1 else {
         throw Abort(
@@ -297,13 +278,6 @@ func validateStructuredPolicyInput(_ dto: SecurityPolicyDTO) throws -> SecurityP
 }
 
 /// Reads the verified store snapshot for re-check endpoints.
-///
-/// Mirrors the PUT atomicity gate so a corrupt file never seeds grants: an
-/// unverified store keeps the invariant Abort behavior instead of
-/// classifying against a fallback.
-/// - Parameter store: Shared policy store serving the routes.
-/// - Returns: Verified policy snapshot.
-/// - Throws: `Abort(.badRequest)` naming the invariant gate.
 private func verifiedPolicySnapshotForRecheck(store: PolicyStore) async throws -> SecurityPolicy {
     do {
         return try await store.snapshot()
@@ -313,16 +287,6 @@ private func verifiedPolicySnapshotForRecheck(store: PolicyStore) async throws -
 }
 
 /// One re-check classification pass shared by preview and apply.
-///
-/// Re-classifies every exact/literal entry in the candidate allowlist
-/// server-side while wildcard/pattern entries keep their stored grant status
-/// (Shared Contract C). `.localNetwork` proposes a grant, `.publicDestination`
-/// proposes nothing, `.neverDialable` persists name-only with no grant, and
-/// `.unresolved` is collected for the caller to report or abort on.
-/// - Parameters:
-///   - candidateAllowed: Canonical candidate allowlist entries.
-///   - storedExemptions: Canonical stored exemption grants.
-/// - Returns: Proposed grants plus the never-dialable and unresolved reports.
 private func classifyRecheckLocalExemptions(candidateAllowed: Set<String>, storedExemptions: Set<String>) async -> RecheckClassification {
     var proposed: Set<String> = []
     var neverDialable: [String] = []
@@ -354,11 +318,7 @@ private func classifyRecheckLocalExemptions(candidateAllowed: Set<String>, store
     return RecheckClassification(proposed: proposed, neverDialable: neverDialable, unresolved: unresolved)
 }
 
-/// Resolves the validated egress posture.
-///
-/// Only the two surviving spellings persist. The retired `deny_by_default`
-/// name maps to the fail-closed posture so older editors keep their intent
-/// without persisting ambiguity.
+/// Resolves the validated egress posture. Only the two surviving spellings persist.
 private func validatedPolicyMode(_ rawValue: String) throws -> EgressMode {
     let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmed == "deny_by_default" {
@@ -510,12 +470,6 @@ private func validateUnbracketedHostShape(_ lowered: String, trimmed: String, co
 }
 
 /// Validates one host entry at the network and binding ingress gates.
-///
-/// Host-shape gate parity:
-/// This server-side gate enforces authoritative host validation. A matching client-side
-/// implementation exists in Web/src/components/access/AccessNetworkSection.tsx (`isValidDomainLine`) to give
-/// instant interactive UI feedback without network round-trips. Test suites in SettingsRouteTests.swift
-/// and AccessNetworkSection.test.tsx maintain identical test vectors to prevent semantic drift.
 private func validateHostEntry(_ raw: String, field: String, gate: String) throws -> String {
     let context = HostValidationContext(field: field, gate: gate)
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -525,10 +479,8 @@ private func validateHostEntry(_ raw: String, field: String, gate: String) throw
     guard !PolicyStore.containsTOMLBreakingScalar(trimmed) else {
         throw context.tomlBreakingAbort(trimmed: trimmed)
     }
-    // Bracketed literals wrap an IPv6 address only: one outer pair with a
-    // colon-bearing inner and no port suffix. The inner strips for the
-    // confinement check downstream, so sensitive bracketed targets still
-    // refuse through the shared verifier rather than this shape gate.
+    // Bracketed literals wrap an IPv6 address only: one outer pair with a colon-bearing inner and
+    // no port suffix.
     if context.isBinding, trimmed.contains("[") || trimmed.contains("]") {
         try validateBracketedIPv6Host(trimmed, context: context)
         return trimmed

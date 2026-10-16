@@ -1,14 +1,4 @@
 // Rune Weaver Dashboard — Add/Edit modal for one target-bound credential binding.
-//
-// Purpose: Groups one secret key with its hosts, methods, and path prefixes in a single
-// container so the pairing stays explicit: the secret is sent only when host, method, and
-// effective path all match. Empty methods or prefixes mean Any while empty hosts means
-// the binding can never send, and every prefix applies to every host in the same binding.
-// Scope: Pure form state plus inline confinement errors and a live probe preview; TOML
-// persistence, Keychain writes, and network allowlist updates stay with the owning pane
-// through callbacks.
-// Architectural role: Visual editor over the declarative credential-binding contract that
-// mirrors the egress supervisor without duplicating its enforcement.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { previewBindingDecision } from "../policyBindingPreview";
@@ -93,12 +83,9 @@ export interface PolicyBindingModalProps {
   triggerRef?: { current: HTMLElement | null } | null;
 }
 
-// Single owner for textarea list parsing lives in policyHostNormalize: blank
-// lines drop so an accidental newline never becomes a stored entry, while
-// trimming keeps the editor and the supervisor comparison in agreement. Both
-// hosts and prefixes share this rule so the two fields cannot drift apart;
-// empty stays Any for prefixes and unusable for hosts, with line numbers
-// stable for inline errors.
+// Single owner for textarea list parsing lives in policyHostNormalize: blank lines drop so an
+// accidental newline never becomes a stored entry, while trimming keeps the editor and the
+// supervisor comparison in agreement.
 
 // Hosts entry point over the shared list rule, so host splitting never diverges from prefix splitting.
 export function parseHostsText(text: string): string[] {
@@ -110,16 +97,11 @@ export function parsePrefixesText(text: string): string[] {
   return parseTrimmedLines(text);
 }
 
-// IPv4 confinement numeric value plus sensitive-range verdict live in the
-// shared policyHostNormalize owner (decimal/octal/hex 1-4-part parsing plus
-// the full engine sensitive table); the modal imports them instead of keeping
-// parallel copies. The server remains authoritative on confinement.
+// IPv4 confinement numeric value plus sensitive-range verdict live in the shared
+// policyHostNormalize owner (decimal/octal/hex 1-4-part parsing plus the full engine sensitive
+// table); the modal imports them instead of keeping parallel copies.
 
-// Validates one host line against the confinement the supervisor enforces. Only
-// a single leading `*.` edge is meaningful; every other star shape, scheme,
-// port, or sensitive literal fails closed with the entry echoed for repair.
-// Brackets are an IPv6 literal delimiter rather than glob syntax, so the
-// bracket branch below mirrors the server's bracket-stripping canonicalizer.
+// Validates one host line against the confinement the supervisor enforces.
 export function validateBindingHostEntry(entry: string): string | null {
   const trimmed = (entry ?? "").trim();
   if (!trimmed) return "must not be blank";
@@ -156,11 +138,9 @@ export function validateBindingHostEntry(entry: string): string | null {
     return `must not contain bare "*" (would allow every host)`;
   }
   if (trimmed.includes("*")) {
-    // Wildcard shape shares one owner mirroring the server leading-edge
-    // contract: only a single leading `*.` edge with a named suffix
-    // authorizes, so trailing, doubled, embedded, glob, and port-qualified
-    // shapes all refuse here before confinement. The pane and the preview
-    // share this same classifier instead of keeping parallel copies.
+    // Wildcard shape shares one owner mirroring the server leading-edge contract: only a single
+    // leading `*.` edge with a named suffix authorizes, so trailing, doubled, embedded, glob, and
+    // port-qualified shapes all refuse here before confinement.
     const classification = classifyWildcard(lowered);
     if (classification === "invalidSuffix") {
       return `wildcard must name a base domain after "*." (got '${entry}')`;
@@ -349,11 +329,8 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
     props.onAddToAllowedDomains ??
     props.onFixNetworkCoverage;
   const handleStoreInKeychain = props.onStoreInKeychain ?? props.onStoreSecret;
-  // Stable close wiring: the latest close handler plus focus target ride in
-  // refs so requestClose keeps an empty dependency identity even when the
-  // parent passes an inline onClose. Escape and click-outside effects then
-  // subscribe once instead of per render. Ref updates live in effects so the
-  // render stays pure.
+  // Stable close wiring: the latest close handler plus focus target ride in refs so requestClose
+  // keeps an empty dependency identity even when the parent passes an inline onClose.
   const closeHandlerRef = useRef(props.onClose ?? props.onRequestClose);
   const focusTargetRef = useRef(
     props.returnFocusRef ?? props.invokingRowRef ?? props.triggerRef ?? null,
@@ -417,12 +394,9 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
     }
   }, [step]);
 
-  // Memoized close so the Escape and click-outside effects always observe
-  // the latest close handler and focus target without a stale closure.
-  // Return focus to the invoking row so keyboard users never lose place.
-  // The row stays mounted outside the portal, so a synchronous focus keeps
-  // the tab order deterministic across Escape and click-outside. Refs keep
-  // this callback stable across renders, so the effects below subscribe once.
+  // Memoized close so the Escape and click-outside effects always observe the latest close handler
+  // and focus target without a stale closure. Return focus to the invoking row so keyboard users
+  // never lose place.
   const requestClose = useCallback(() => {
     closeHandlerRef.current?.();
     try {
@@ -433,10 +407,6 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
   }, []);
 
   // Escape closes and returns focus, matching the grouped navigation dropdowns.
-  // When a Keychain store dialog is stacked above (the pane opens the store
-  // without closing this modal), Escape belongs to the topmost dialog, so this
-  // handler yields instead of dismissing the binding underneath. Stacking
-  // arrives as an explicit isStoreOpen prop from the owning pane.
   const isStoreOpen = props.isStoreOpen ?? false;
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -452,11 +422,8 @@ export function PolicyBindingModal(props: PolicyBindingModalProps) {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [requestClose, isStoreOpen]);
 
-  // Click-outside closes through the same containment probe as the dropdowns:
-  // a mousedown outside the dialog container dismisses while clicks inside are
-  // ignored, with no hover-open path. Clicks landing inside another stacked
-  // dialog (the Keychain store portaled above this modal) are ignored so the
-  // binding stays mounted while the store is edited.
+  // Click-outside closes through the same containment probe as the dropdowns: a mousedown outside
+  // the dialog container dismisses while clicks inside are ignored, with no hover-open path.
   useEffect(() => {
     function handleMouseDown(event: MouseEvent) {
       const target = event.target;

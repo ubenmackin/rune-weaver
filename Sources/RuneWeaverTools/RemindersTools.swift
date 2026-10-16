@@ -1,8 +1,4 @@
 // Rune Weaver Tools — Reminders search, create, update, and delete tools.
-//
-// Purpose: user-facing ToolBus surface for reminders with fail-closed validation.
-// Scope: tool naming, schemas, permission levels, and gateway delegation only; no EventKit calls.
-// Architectural role: owns the reminders tool contract while ProductionRemindersGateway owns persistence.
 
 import Foundation
 import RuneWeaverCore

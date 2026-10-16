@@ -194,9 +194,6 @@ public actor LLMRouter {
     }
 
     /// Drains one text-streaming provider, preserving error propagation.
-    /// Threads the chat identifier so backends with per-turn session handling
-    /// pin the turn; backends without sticky state fall back to the
-    /// session-agnostic path via the base default, so only sticky backends pin.
     private static func drainStandardProvider(
         _ provider: any LLMProvider,
         messages: [Message],

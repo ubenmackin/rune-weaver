@@ -195,31 +195,14 @@ public actor MemoryEngine {
     /// Semantic fact/vector store.
     private let vectorStore: VectorStore
     /// Durable document index for hybrid keyword/vector recall, when configured.
-    ///
-    /// Internal so the document-recall extension in a companion file shares the
-    /// same single store path without duplicating configuration.
     let docIndexStore: DocIndexStore?
     /// In-memory profile snapshot, mirrored to disk best-effort.
-    ///
-    /// Internal so recall merging in a companion file reads the live profile
-    /// without exposing mutation outside the engine.
     var profile: UserProfile
     /// JSON file backing the profile, if configured.
     private let profilePath: String?
     /// Semantic answer cache for repeated pure Q&A turns.
-    ///
-    /// The engine owns the instance so the turn path delegates through one
-    /// memory-owned seam instead of a second cache implementation, and every
-    /// durable memory write clears it through
-    /// ``SemanticAnswerCache/invalidateOnMemoryWrite()``. The routine episodic
-    /// turn mirror deliberately does not invalidate: mirrors land on every
-    /// turn, so treating them as writes would keep a repeated question from
-    /// ever hitting.
     public let answerCache: SemanticAnswerCache
     /// Maximum results fetched per tier before merging.
-    ///
-    /// Internal so recall extensions share one per-tier cap with the episodic
-    /// and semantic paths instead of drifting into separate limits.
     static let maxPerTierResults = 1000
     /// Maximum characters accepted for a single stored content.
     public static let maxContentLength = 10000
@@ -252,12 +235,8 @@ public actor MemoryEngine {
         }
     }
 
-    /// Creates an engine from filesystem paths.
-    /// - Parameters:
-    ///   - episodesDBPath: SQLite path for episodic memory.
-    ///   - vectorDBPath: Directory for the semantic vector store.
-    ///   - docIndexDBPath: SQLite path for the document index; omit for keyword-and-vector recall only.
-    ///   - profilePath: JSON profile path; defaults beside the episodes database.
+    /// Creates an engine from filesystem paths. episodesDBPath: SQLite path for
+    /// episodic memory.
     public init(
         episodesDBPath: String,
         vectorDBPath: String,
@@ -379,19 +358,6 @@ public actor MemoryEngine {
     }
 
     /// Lists recent episodic turns across all sessions or one session, newest first.
-    ///
-    /// Read-only listing over the episodic tables only: without a session it
-    /// returns the newest rows across every session, with a session it previews
-    /// that session's newest rows. Rows order newest first with a stable
-    /// tie-break on identifier so repeated reads order identically instead of
-    /// leaving equal timestamps to sort chance. Every read opens SQLite on
-    /// demand with no cached snapshot, so a just-stored turn is visible
-    /// immediately with no restart and no invalidation step. Semantic rows,
-    /// profile, document index, and session ledgers stay untouched on this path.
-    /// - Parameters:
-    ///   - limit: Maximum rows to return; clamped to the per-tier cap.
-    ///   - sessionID: Owning session to preview, or nil for all sessions.
-    /// - Returns: Stored episodes newest first; empty when the store or session has no rows.
     public func listRecentEpisodes(limit: Int = 20, sessionID: UUID? = nil) async throws -> [Episode] {
         guard limit > 0 else { return [] }
         let clamped = min(limit, Self.maxPerTierResults)
@@ -423,16 +389,6 @@ public actor MemoryEngine {
     }
 
     /// Clears every episodic turn across all sessions, returning the removed count.
-    ///
-    /// Scope is episodic only: the count is measured in the same atomic store
-    /// transaction as the delete (via `EpisodeStore.clearReturningCount`) so a
-    /// concurrent `storeEpisodic`/`deleteEpisode`/`deleteSession` cannot interleave
-    /// between the measure and the delete, while semantic facts, the profile file,
-    /// the document index, and session ledgers outside the episodes tables stay
-    /// untouched. Every read opens SQLite on demand with no cached snapshot, so the
-    /// next recall observes the clear immediately with no restart and no
-    /// invalidation step.
-    /// - Returns: Episode count measured in the same transaction before clearing; zero when empty.
     public func clearEpisodic() async throws -> Int {
         try await withEpisodic {
             try await episodeStore.clearReturningCount()
@@ -440,13 +396,6 @@ public actor MemoryEngine {
     }
 
     /// Clears every episodic turn, returning both the removed and remaining counts.
-    ///
-    /// Both numbers come from the single atomic store operation: `deleted` is
-    /// measured in the same `BEGIN IMMEDIATE`/`COMMIT` transaction as the delete,
-    /// and `remaining` is `0` as the immediate post-condition of that successful
-    /// atomic clear, so callers never need a second `episodeCount()` fetch with its
-    /// race window. Scope stays episodic only.
-    /// - Returns: Removed count plus remaining count (`0` after a successful clear).
     public func clearEpisodicWithRemaining() async throws -> (deleted: Int, remaining: Int) {
         try await withEpisodic {
             let deleted = try await episodeStore.clearReturningCount()
@@ -455,12 +404,6 @@ public actor MemoryEngine {
     }
 
     /// Deletes one episodic turn by identifier. Missing rows are a no-op.
-    ///
-    /// The engine takes the already-typed identifier as-is: UUID shape is validated at
-    /// the REST and CLI boundaries, never here, so this path stays a thin owner over the
-    /// persisted store. Ordering with concurrent clears comes from the shared serial
-    /// store queue inside the episode store, so no added lock is needed.
-    /// - Parameter id: Episode identifier to remove.
     public func deleteEpisode(id: UUID) async throws {
         try await withEpisodic {
             try await episodeStore.delete(id: id)
@@ -602,11 +545,9 @@ public actor MemoryEngine {
         }
     }
 
-    /// Records a preference, then persists the profile.
-    ///
-    /// Async because the durable write clears the semantic answer cache: a new
-    /// preference rewrites future answers, so cached pure answers must not
-    /// survive it.
+    /// Records a preference, then persists the profile. Async because the durable write clears the
+    /// semantic answer cache: a new preference rewrites future answers, so cached pure answers must
+    /// not survive it.
     public func setPreference(_ preference: Preference) async {
         if Self.isSingleValuePreferenceKey(preference.key) {
             profile.preferences.removeAll { $0.key == preference.key }
@@ -952,15 +893,6 @@ extension MemoryEngine {
     public static let episodicToolOutcomeLimit = 2000
 
     /// Builds compact episodic content for one tool execution.
-    ///
-    /// Untrusted external bytes stay delimited as data so a later recall cannot
-    /// re-enter as trusted instructions: the `Used <tool>:` prefix is
-    /// engine-authored and stays outside the label while the compact outcome
-    /// carries the single-sourced data-only block. Trusted tools pass through
-    /// with the exact historical shape, and a disabled labeler passes through
-    /// byte-identically for debugging. Unknown provenance fails closed to
-    /// untrusted so a caller that forgets to declare trust cannot silently
-    /// persist attacker bytes as trusted history.
     public static func episodicToolRecord(
         toolName: String,
         content: String,
@@ -993,11 +925,8 @@ extension MemoryEngine {
         return "Used \(trimmedName): \(visibleOutcome)"
     }
 
-    /// Builds compact episodic content from a bus result.
-    ///
-    /// Fail-closed legacy path: provenance is unknown here, so the record
-    /// labels as untrusted rather than trusting by default. Callers with a
-    /// declared `contentTrustLevel` use the overload below.
+    /// Builds compact episodic content from a bus result. Fail-closed legacy path: provenance is
+    /// unknown here, so the record labels as untrusted rather than trusting by default.
     public static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
         episodicToolRecord(
             toolName: toolName,
@@ -1264,32 +1193,14 @@ extension MemoryEngine {
 // MARK: - MemoryEngine Semantic Answer Cache Delegation
 
 extension MemoryEngine {
-    /// Cached answer for one repeated pure question, or nil on a miss.
-    ///
-    /// Pure delegation to the cache owner: keying, similarity, threshold,
-    /// expiry, and every exclusion rule live there, so the engine adds no
-    /// second implementation. An empty or blank query yields nil without a
-    /// failure, matching the recall contract that a cache problem can never
+    /// Cached answer for one repeated pure question, or nil on a miss. An empty or blank query
+    /// yields nil without a failure, matching the recall contract that a cache problem can never
     /// fail a turn.
-    /// - Parameters:
-    ///   - normalizedQuery: Query text in normalized cache-key form.
-    ///   - persona: Assistant persona identity the answer was composed under.
-    ///   - modelID: Serving model identifier.
-    /// - Returns: The cached answer, or nil when nothing matches.
     public func cachedAnswer(for normalizedQuery: String, persona: String, modelID: String) async -> CachedAnswer? {
         await answerCache.lookup(normalizedQuery: normalizedQuery, persona: persona, modelID: modelID)
     }
 
     /// Files one pure Q&A answer so the next identical question hits the cache.
-    ///
-    /// Delegates to the cache owner, which refuses blank queries and answers
-    /// past its character budget instead of truncating, so a later hit always
-    /// replays complete text.
-    /// - Parameters:
-    ///   - text: Final assistant text from a pure turn.
-    ///   - normalizedQuery: Query text in normalized cache-key form.
-    ///   - persona: Assistant persona identity the answer was composed under.
-    ///   - modelID: Serving model identifier.
     public func cacheAnswer(_ text: String, for normalizedQuery: String, persona: String, modelID: String) async {
         await answerCache.storeAnswer(
             normalizedQuery: normalizedQuery,

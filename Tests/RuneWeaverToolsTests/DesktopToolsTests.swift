@@ -1,4 +1,5 @@
 // Rune Weaver Tools Tests — Desktop vision and control tool tests.
+
 import Foundation
 @testable import RuneWeaverCore
 @testable import RuneWeaverTools
@@ -86,10 +87,8 @@ private struct StubDesktopControlBridge: DesktopControlling, Sendable {
     private static let supportedKeyHint =
         "Return/Enter, Escape/Esc, Tab, Space, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp/Down, F1-F12, a-z, 0-9."
 
-    /// Hardware codes mirrored from the live bridge table so the stub gate
-    /// and the hermetic mapping test below read one list; UInt16 keeps the
-    /// suite compiling where CoreGraphics is unavailable. Prefer a live
-    /// test-visible helper if one becomes available.
+    /// Hardware codes mirrored from the live bridge table so the stub gate and the hermetic mapping
+    /// test below read one list; UInt16 keeps the suite compiling where CoreGraphics is unavailable.
     fileprivate static let mirroredKeyCodes: [String: UInt16] = [
         "return": 0x24, "enter": 0x24,
         "escape": 0x35, "esc": 0x35,
@@ -184,10 +183,8 @@ private struct StubDesktopControlBridge: DesktopControlling, Sendable {
         return results
     }
 
-    /// Test-owned mirror of the live shortcut table shape: modified a-z and
-    /// 0-9 plus named keys resolve, while punctuation like "!" has no slot.
-    /// Reads the single mirrored table so the gate cannot fork from the
-    /// hardware codes pinned by the hermetic test below.
+    /// Test-owned mirror of the live shortcut table shape: modified a-z and 0-9 plus named keys
+    /// resolve, while punctuation like "!" has no slot.
     private func isShortcutMappable(_ key: String) -> Bool {
         Self.keyCode(for: key) != nil
     }
@@ -197,9 +194,6 @@ private struct StubDesktopControlBridge: DesktopControlling, Sendable {
 
 @Suite("Desktop Tools", .serialized)
 struct DesktopToolsTests {
-    // The control bridge reads the process-wide emergency-stop latch, so this
-    // suite serializes internally: a stop latched by one test must never leak
-    // into a neighbor expecting a permission denial.
     // MARK: - Registration & Gating (always registered, fail-closed gates)
 
     @Test
@@ -582,11 +576,9 @@ struct DesktopToolsTests {
 
     @Test
     func `Capture bridge silent gate denies every entry point`() async {
-        // Exercises the real fail-closed gate with an injected denial so the
-        // test proves the bridge itself refuses before touching shareable
-        // content, rather than trusting the stub to throw on its behalf.
-        // The denial runs before the platform gate so it holds even where
-        // ScreenCaptureKit is unavailable.
+        // Exercises the real fail-closed gate with an injected denial so the test proves the bridge
+        // itself refuses before touching shareable content, rather than trusting the stub to throw
+        // on its behalf.
         let denied = DesktopCaptureBridge(screenRecordingAccess: { false })
         await #expect(throws: DesktopCaptureError.screenRecordingPermissionDenied) {
             try await denied.captureDisplay(displayIndex: 0, maxDimension: 1280, jpegQuality: 0.75)
@@ -601,10 +593,8 @@ struct DesktopToolsTests {
 
     @Test
     func `Control bridge silent gate denies without dispatch`() async {
-        // Same hermetic pattern as the capture gate: the live bridge with a
-        // denied silent check must refuse before validating the batch or
-        // reaching CGEvent dispatch. Starts from a cleared latch because the
-        // stop flag is shared process state that a neighbor test may latch.
+        // Same hermetic pattern as the capture gate: the live bridge with a denied silent check
+        // must refuse before validating the batch or reaching CGEvent dispatch.
         await DesktopControlMonitor.shared.clearEmergencyStop()
         let denied = DesktopControlBridge(accessibilityAccess: { false })
         await #expect(throws: DesktopControlError.accessibilityPermissionDenied) {
@@ -619,10 +609,8 @@ struct DesktopToolsTests {
 
     @Test
     func `Control bridge prefers emergency stop over permission denial`() async {
-        // Ordering contract: an operator stop latched before the first step
-        // aborts without paying a TCC syscall, so a stopped turn never
-        // reports a permission error instead of the stop. Starts clean and
-        // clears on every exit so the latched stop never leaks into neighbors.
+        // Ordering contract: an operator stop latched before the first step aborts without paying a
+        // TCC syscall, so a stopped turn never reports a permission error instead of the stop.
         await DesktopControlMonitor.shared.clearEmergencyStop()
         let denied = DesktopControlBridge(accessibilityAccess: { false })
         await DesktopControlMonitor.shared.requestEmergencyStop()
@@ -644,18 +632,13 @@ struct DesktopToolsTests {
 
     @Test
     func `Control bridge prefers cancellation over permission denial`() async {
-        // Same ordering contract for task cancellation: a cancelled turn
-        // must surface cancellation rather than masking it behind a
-        // permission error that would invite a pointless Settings trip.
-        // Starts from a cleared latch so a neighbor's stop cannot mask the
-        // cancellation signal under test.
+        // Same ordering contract for task cancellation: a cancelled turn must surface cancellation
+        // rather than masking it behind a permission error that would invite a pointless Settings
+        // trip.
         await DesktopControlMonitor.shared.clearEmergencyStop()
         let denied = DesktopControlBridge(accessibilityAccess: { false })
-        // Gate the batch behind a signal the test opens only after
-        // cancelling, so `executeBatch` always begins with cancellation
-        // latched. Letting a fast start run first instead races the bridge's
-        // opening checkpoint: a denial observed before the cancel lands
-        // would mask the cancellation signal this test exists to protect.
+        // Gate the batch behind a signal the test opens only after cancelling, so `executeBatch`
+        // always begins with cancellation latched.
         let (gate, gateContinuation) = AsyncStream.makeStream(of: Void.self)
         let task = Task {
             for await _ in gate {
@@ -686,10 +669,9 @@ struct DesktopToolsTests {
 
     @Test
     func `Screenshot tool surfaces window-list denial instead of silent empty`() async throws {
-        // Fail-closed list contract: a denied window scan fails the turn
-        // with permission guidance so the model can tell "no permission"
-        // apart from "no windows"; an empty success still means a genuine
-        // scan found nothing.
+        // Fail-closed list contract: a denied window scan fails the turn with permission guidance
+        // so the model can tell "no permission" apart from "no windows"; an empty success still
+        // means a genuine scan found nothing.
         var stub = StubDesktopCaptureBridge()
         stub.failWindowsListWithPermissionDenied = true
         stub.windowsToReturn = [
@@ -713,10 +695,8 @@ struct DesktopToolsTests {
 
     @Test
     func `Cmd Shift H routes through stub shortcut path`() async throws {
-        // Modified letters must reach the shortcut system as hardware codes
-        // (h is 0x04) instead of Unicode text, since Unicode posting with
-        // command flags never triggers the intended chord. The stub proves
-        // routing without posting a real Finder chord.
+        // Modified letters must reach the shortcut system as hardware codes (h is 0x04) instead of
+        // Unicode text, since Unicode posting with command flags never triggers the intended chord.
         await DesktopControlMonitor.shared.clearEmergencyStop()
         let tool = DesktopActionTool(controlBridge: StubDesktopControlBridge())
         let input = ToolInput(
@@ -798,10 +778,8 @@ struct DesktopToolsTests {
 
     @Test
     func `Modified punctuation fails closed as unknown key`() async throws {
-        // Punctuation has no shortcut hardware slot, so a modified mark
-        // must refuse with guidance instead of typing a literal that the
-        // model would mistake for a successful chord. The stub mirrors the
-        // live fail-closed rule, so no CGEvent is posted.
+        // Punctuation has no shortcut hardware slot, so a modified mark must refuse with guidance
+        // instead of typing a literal that the model would mistake for a successful chord.
         await DesktopControlMonitor.shared.clearEmergencyStop()
         let tool = DesktopActionTool(controlBridge: StubDesktopControlBridge())
         let input = ToolInput(
@@ -819,11 +797,9 @@ struct DesktopToolsTests {
 
     @Test
     func `Shortcut hardware codes match documented values`() {
-        // Pins the chord contract without posting: modified input must
-        // resolve to the physical key the shortcut system expects, so the
-        // suite locks representative codes plus full-table coverage and
-        // case folding instead of trusting routing text alone. Performs no
-        // dispatch, so it needs no emergency-stop latch handling.
+        // Pins the chord contract without posting: modified input must resolve to the physical key
+        // the shortcut system expects, so the suite locks representative codes plus full-table
+        // coverage and case folding instead of trusting routing text alone.
         #expect(StubDesktopControlBridge.keyCode(for: "h") == 0x04)
         #expect(StubDesktopControlBridge.keyCode(for: "H") == 0x04)
         #expect(StubDesktopControlBridge.keyCode(for: "n") == 0x2D)
@@ -864,11 +840,9 @@ struct DesktopToolsTests {
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["RUNEWEAVER_LIVE_DESKTOP_SHORTCUTS"] == "1"))
     func `Live shortcut dispatch runs only with explicit opt-in`() async throws {
-        // Live CGEvent dispatch stays behind an explicit opt-in so the unit
-        // suite never posts real Finder chords on macOS CI; set
-        // RUNEWEAVER_LIVE_DESKTOP_SHORTCUTS=1 for a local integration run.
-        // The enabled trait keeps the test absent by default instead of
-        // throwing an XCTest skip, which Swift Testing records as a failure.
+        // Live CGEvent dispatch stays behind an explicit opt-in so the unit suite never posts real
+        // Finder chords on macOS CI; set RUNEWEAVER_LIVE_DESKTOP_SHORTCUTS=1 for a local integration
+        // run.
         await DesktopControlMonitor.shared.clearEmergencyStop()
         let live = DesktopControlBridge(accessibilityAccess: { true })
         do {
@@ -895,11 +869,9 @@ struct DesktopToolsTests {
 
     @Test
     func `Nine-step Finder batch decodes and keeps envelope shape`() async throws {
-        // The reported Finder flow mixes app focus, shortcut chords, typing,
-        // and pointer settles; the batch must decode intact and the tool
-        // envelope must report the full shape so progress stays honest.
-        // Uses the stub where hardware posting is unavailable so the shape
-        // check never depends on real dispatch.
+        // The reported Finder flow mixes app focus, shortcut chords, typing, and pointer settles;
+        // the batch must decode intact and the tool envelope must report the full shape so progress
+        // stays honest.
         await DesktopControlMonitor.shared.clearEmergencyStop()
         let json = """
         {

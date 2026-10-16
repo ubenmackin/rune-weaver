@@ -1,9 +1,4 @@
-// Mobile bottom navigation matrix for handheld viewports.
-//
-// Owns the bottom-bar contract shared with the desktop top nav: four canonical
-// groups (Chat, Approvals, Work, Memory) with touch-sized targets, fail-closed
-// active state, drop-up menus for grouped views, and capped unread badges.
-// Settings stays in the profile menu only.
+// Rune Weaver Dashboard — Mobile bottom navigation matrix for handheld viewports.
 
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

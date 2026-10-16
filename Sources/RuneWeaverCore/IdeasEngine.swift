@@ -1,14 +1,4 @@
 // Rune Weaver Core — Proactive Wayfinder engine that proposes next moves.
-//
-// Reviews recent goal outcomes and a memory-facts summary, then spends exactly
-// one cheap model call to turn them into a small batch of suggestions. The
-// language provider is injected from the same instance that serves chat turns
-// so suggestion quality tracks the active model posture; this engine never
-// mints its own provider. Parsing is deliberately forgiving of chatty
-// wrappers, but a flaky reply or a timeout yields an EMPTY batch instead of a
-// fabricated idea, mirroring the goal decomposer's fallback spirit: bad
-// planning must never invent an action the owner did not ask for. Persistence
-// and dedup live in `IdeasStore`; this engine only assembles candidates.
 
 import Foundation
 import os
@@ -19,10 +9,9 @@ struct ParsedIdea: Sendable, Equatable {
     let kind: IdeaKind
     /// Bounded title, already trimmed to the documented cap.
     let title: String
-    /// Explanation text, possibly empty. For a plan adjustment carrying
-    /// structured steps this holds those steps newline-separated so the
-    /// replacement plan survives the existing body column without a schema
-    /// change.
+    /// Explanation text, possibly empty. For a plan adjustment carrying structured steps this holds
+    /// those steps newline-separated so the replacement plan survives the existing body column
+    /// without a schema change.
     let body: String
     /// Goal a plan adjustment targets, copied by the model from the goal id
     /// quoted beside each recent outcome. Nil for every other kind and for a
@@ -31,11 +20,6 @@ struct ParsedIdea: Sendable, Equatable {
 }
 
 /// Resumes a checked continuation exactly once across the review race.
-///
-/// The provider call and the timeout both try to resume; the first wins and
-/// every later attempt is dropped, so the engine returns on wall-clock time
-/// without awaiting a provider stream that never observes cancellation. The
-/// abandoned provider task is the deliberate cost of that bound.
 private final class ReviewResumption: Sendable {
     /// Continuation captured at the start of the race, cleared on first resume.
     private let state: OSAllocatedUnfairLock<CheckedContinuation<String?, Never>?>
@@ -80,24 +64,12 @@ public actor IdeasEngine {
     /// nearest sane bound instead of refusing to run.
     private let config: IdeasConfig
     /// Goal events read over the same shared database as the idea store.
-    ///
-    /// Derived from the idea store's own path so callers wire one store and
-    /// one provider; the goal tables live in the same `episodes.db` the idea
-    /// table migrates into.
     private let goalStore: GoalStore
     /// Optional provider of a short memory-facts summary appended to the prompt.
-    ///
-    /// Injected as a closure so the engine stays decoupled from the memory
-    /// engine's storage; a caller that has no memory wiring passes nothing and
-    /// the prompt simply omits the section.
     private let memoryFacts: @Sendable () async -> [String]
 
-    /// Creates an ideas engine over shared collaborators.
-    /// - Parameters:
-    ///   - store: Durable idea persistence and dedup.
-    ///   - llm: Injected provider shared with chat turns.
-    ///   - config: Suggestion policy.
-    ///   - memoryFacts: Optional closure supplying a short memory-facts summary.
+    /// Creates an ideas engine over shared collaborators. store: Durable idea
+    /// persistence and dedup.
     public init(
         store: IdeasStore,
         llm: any LLMProvider,
@@ -124,12 +96,6 @@ public actor IdeasEngine {
     }
 
     /// Runs one review cycle and persists any fresh suggestions.
-    ///
-    /// The cycle is best-effort by contract: a disabled install, an unusable
-    /// or timed-out reply, or a duplicate-only batch all return an empty array
-    /// without throwing, so a trigger on a hot path (goal achievement, the
-    /// nightly tick) is never failed by a quiet model.
-    /// - Returns: Newly persisted ideas, empty when nothing usable was produced.
     @discardableResult
     public func generate() async -> [Idea] {
         guard config.enabled else { return [] }
@@ -141,10 +107,8 @@ public actor IdeasEngine {
         guard let raw = await collectReviewText(prompt: prompt),
               let parsed = Self.parseIdeas(from: raw, maxCount: maxPerCycle)
         else { return [] }
-        // Dedup is owned solely by the store's batch append, which skips titles
-        // that duplicate an existing non-dismissed idea. A dismissed suggestion
-        // is the owner's "no" for now but does not permanently blacklist its
-        // title, so it may resurface when the model proposes it again.
+        // Dedup is owned solely by the store's batch append, which skips titles that duplicate an
+        // existing non-dismissed idea.
         let now = Date()
         let ideas = parsed.map { candidate in
             Idea(
@@ -167,14 +131,8 @@ public actor IdeasEngine {
 
     // MARK: - Prompt assembly
 
-    /// Builds the single-shot review instruction.
-    ///
-    /// The JSON-array demand and the kind vocabulary are explicit so even a
-    /// terse local model returns a parseable list; the cap repeats in words and
-    /// digits. Only the bounded outcome tail and the supplied facts travel, so
-    /// long goal histories never crowd the review call. Outcome lines carry
-    /// their source goal ids, and an adjustment copies its target goal's id
-    /// into `goalId`, which is the link the accept route re-plans against.
+    /// Builds the single-shot review instruction. Only the bounded outcome tail and the supplied
+    /// facts travel, so long goal histories never crowd the review call.
     static func reviewPrompt(outcomes: [String], facts: [String], maxPerCycle: Int) -> String {
         var lines: [String] = []
         lines.append("You are the Wayfinder for Rune Weaver, a personal assistant harness.")
@@ -215,21 +173,8 @@ public actor IdeasEngine {
         return lines.joined(separator: "\n")
     }
 
-    /// Extracts bounded suggestions from chatty model output.
-    ///
-    /// Fences are removed before scanning so ```json blocks decode, and the
-    /// outermost brackets win so leading prose and trailing sign-offs survive.
-    /// Elements missing a usable title drop rather than becoming empty
-    /// suggestions; an unknown kind degrades to the generic tip rather than
-    /// discarding otherwise usable text, and over-long titles truncate to the
-    /// documented cap. A plan adjustment keeps the model's `goalId` link so it
-    /// can be accepted against its goal; other kinds never carry one. The cap
-    /// is honored exactly: zero yields an empty batch and negatives clamp to
-    /// zero, so every layer agrees that no cap means no suggestions.
-    /// - Parameters:
-    ///   - raw: Raw model text.
-    ///   - maxCount: Upper bound on returned suggestions.
-    /// - Returns: Parsed suggestions, or nil when nothing parseable remains.
+    /// Extracts bounded suggestions from chatty model output. A plan adjustment keeps the model's
+    /// `goalId` link so it can be accepted against its goal; other kinds never carry one.
     static func parseIdeas(from raw: String, maxCount: Int) -> [ParsedIdea]? {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
@@ -259,13 +204,9 @@ public actor IdeasEngine {
             var body = ((object["body"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let rawKind = (object["kind"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             let kind = rawKind.flatMap(IdeaKind.init(rawValue:)) ?? .tip
-            // A plan adjustment carries its replacement plan as a structured
-            // `steps` array; encode it newline-separated into `body` so the
-            // accept route reads a contract-backed plan instead of re-splitting
-            // free-form prose, and the existing body column needs no migration.
-            // The target goal link travels only on an adjustment: a tip or a
-            // new-goal suggestion has no existing goal to point at, and keeping
-            // the link off them avoids mis-attributing an unrelated suggestion.
+            // A plan adjustment carries its replacement plan as a structured `steps` array; encode
+            // it newline-separated into `body` so the accept route reads a contract-backed plan
+            // instead of re-splitting free-form prose, and the existing body column needs no.
             let goalID = kind == .planAdjustment ? Self.parseGoalID(from: object) : nil
             if kind == .planAdjustment {
                 let steps = Self.normalizedSteps(from: (object["steps"] as? [Any]) ?? [])
@@ -280,12 +221,6 @@ public actor IdeasEngine {
     }
 
     /// Normalizes one model-supplied step list into bounded, non-empty entries.
-    ///
-    /// Blank entries drop, the count is capped so a chatty reply cannot widen a
-    /// plan without bound, and each entry truncates to the documented length so
-    /// one paragraph never becomes a single giant step title.
-    /// - Parameter raw: Raw `steps` array elements.
-    /// - Returns: Cleaned step titles, possibly empty.
     static func normalizedSteps(from raw: [Any]) -> [String] {
         raw.compactMap { $0 as? String }
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -294,14 +229,8 @@ public actor IdeasEngine {
             .map { String($0.prefix(Self.maxAdjustmentStepLength)) }
     }
 
-    /// Extracts an optional goal link from one model-supplied object.
-    ///
-    /// Accepts the canonical `goalId` spelling first, then the legacy variants
-    /// the wire contract tolerates elsewhere, so a model that echoes either
-    /// spelling still links its adjustment. A blank or malformed value degrades
-    /// to nil rather than dropping the suggestion.
-    /// - Parameter object: One parsed JSON object.
-    /// - Returns: The linked goal identifier, or nil.
+    /// Extracts an optional goal link from one model-supplied object. A blank or malformed value
+    /// degrades to nil rather than dropping the suggestion.
     static func parseGoalID(from object: [String: Any]) -> UUID? {
         let raw = (object["goalId"] as? String)
             ?? (object["goalID"] as? String)
@@ -313,15 +242,9 @@ public actor IdeasEngine {
 
     // MARK: - Review internals
 
-    /// Reads recent goal outcomes worth reviewing.
-    ///
-    /// Only terminal completions and blocked steps travel: those are the
-    /// events that reveal what worked and what stalled, which is what a
-    /// suggestion should build on. Each line is tagged with its source goal id
-    /// so the review prompt can hand the model a link to copy into a
-    /// plan-adjustment suggestion; store failures degrade to no outcomes rather
-    /// than failing generation, matching the background-work posture.
-    /// - Returns: Recent outcome lines, newest first.
+    /// Reads recent goal outcomes worth reviewing. Only terminal completions and blocked steps
+    /// travel: those are the events that reveal what worked and what stalled, which is what a
+    /// suggestion should build on.
     private func recentOutcomes() async -> [String] {
         let since = Date().addingTimeInterval(-Self.outcomeLookback)
         let events: [GoalObservedEvent]
@@ -348,13 +271,8 @@ public actor IdeasEngine {
             }
     }
 
-    /// Collects one review reply under a wall-clock timeout.
-    ///
-    /// Exactly one chat call runs. The timeout resumes the caller, cancels the
-    /// provider task, and returns nil on its own budget without awaiting the
-    /// losing task, so a provider stream that ignores cooperative cancellation
-    /// cannot stretch the call past the configured timeout. Every failure
-    /// degrades to nil, which the caller turns into an empty array.
+    /// Collects one review reply under a wall-clock timeout. Every failure degrades to nil, which
+    /// the caller turns into an empty array.
     private func collectReviewText(prompt: String) async -> String? {
         let timeoutSeconds = max(1, config.timeoutSeconds)
         let timeoutNS = UInt64(timeoutSeconds) * 1_000_000_000
@@ -385,10 +303,6 @@ public actor IdeasEngine {
     }
 
     /// Runs the single review chat call and folds its stream to text.
-    ///
-    /// No tools travel because the review is pure text in, JSON out; a
-    /// mid-stream provider error or a cancellation yields nil so the caller
-    /// returns an empty batch instead of parsing a truncated fragment.
     private func collectOnce(prompt: String) async -> String? {
         let messages = [Message(role: .user, content: prompt)]
         let stream = llm.chat(messages: messages, tools: [])

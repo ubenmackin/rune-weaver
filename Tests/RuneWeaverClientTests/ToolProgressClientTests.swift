@@ -1,22 +1,11 @@
 // Rune Weaver Tests — Client-side tool-progress frame handling.
-//
-// The client's streaming loop decodes every `tool_progress` frame through the
-// `ClientToolProgressFrame` alias (single-sourced from the engine's
-// `WSToolProgressFrame`) and then drops it: indeterminate progress is advisory
-// and has no place in the content stream `RuneWeaverClient.send` exposes. The
-// decode is still load-bearing, because the branch uses `try?` so a malformed or
-// drifted payload is validated locally and swallowed rather than surfacing. The
-// private frame dispatcher cannot be driven without a live socket, so these
-// tests pin the alias contract it depends on at that reachable seam.
 
 import Foundation
 @testable import RuneWeaverClient
 import Testing
 
-/// Decodes one raw frame through the same alias the client's `tool_progress`
-/// branch consumes, using `try?` exactly as the branch does.
-/// - Parameter raw: Raw frame text.
-/// - Returns: The decoded frame, or nil when the branch would drop it.
+/// Decodes one raw frame through the same alias the client's `tool_progress` branch consumes, using
+/// `try?` exactly as the branch does. - Parameter raw: Raw frame text.
 private func decodedClientProgress(_ raw: String) -> ClientToolProgressFrame? {
     try? JSONDecoder().decode(ClientToolProgressFrame.self, from: Data(raw.utf8))
 }

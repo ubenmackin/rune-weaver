@@ -1,15 +1,4 @@
 // Rune Weaver Core — Shared sensitive-address parsing and range classification.
-//
-// Purpose: canonicalize resolver-accepted IPv4 spellings, IPv6 literals, and
-// origin forms before any range decision, so obfuscated hosts cannot bypass a
-// security check. Scope: parsing plus loopback, link-local, private-range,
-// shared/CGNAT, special-purpose reserved-block, cloud-metadata host matching,
-// and mapped/translated/embedded IPv4-tail classification only, with no DNS or
-// dial decisions.
-// Architectural role: the engine's single-source classification layer — the
-// SSRF egress guard and the formal policy invariant verifier both enter
-// through these helpers, so credential-confinement and egress verdicts cannot
-// diverge on alternate spellings of the same address.
 
 import Foundation
 
@@ -34,11 +23,6 @@ public struct IPv4Octets: Sendable, Equatable {
 }
 
 /// Resolver-accepted IPv4 and IPv6 parsing shared by security checks.
-///
-/// Handles decimal, hex, octal, and short forms plus IPv4-mapped IPv6 so
-/// obfuscated spellings canonicalize before any range decision. Parsers trim
-/// manually rather than through the display-copy agreement because they need
-/// the empty string plus numeric validation downstream, not nil-for-blank.
 public enum SensitiveAddressParsing: Sendable {
     /// Parses one numeric IPv4 part in decimal, octal, or hex.
     public static func parseNumericPart(_ part: String) -> UInt32? {
@@ -106,17 +90,9 @@ public enum SensitiveAddressParsing: Sendable {
         return groups
     }
 
-    /// Parses IPv6 text into eight hextets, accepting the mixed dotted-tail form.
-    ///
-    /// `ipv6Hextets` deliberately rejects dots because callers need a
-    /// pure-hextet verdict; this variant expands a dotted tail into the two
-    /// hextets it denotes, so prefix classification (link-local, unique-local,
-    /// and the IPv4-embedding prefixes) can run against the literal's own
-    /// prefix instead of the dotted tail that normalization collapses to. The
-    /// prefix must parse with two placeholder hextets appended, mirroring the
-    /// dotted-literal proof the normalizer performs.
-    /// - Parameter host: Raw or canonical host text.
-    /// - Returns: Eight hextets, or nil when the text is not an IPv6 literal.
+    /// Parses IPv6 text into eight hextets, accepting the mixed dotted-tail form. The prefix must
+    /// parse with two placeholder hextets appended, mirroring the dotted-literal proof the
+    /// normalizer performs.
     static func ipv6HextetsExpandingDottedTail(_ host: String) -> [UInt16]? {
         let lowered = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard lowered.contains(":") else { return nil }
@@ -143,12 +119,6 @@ public enum SensitiveAddressParsing: Sendable {
     }
 
     /// Resolves the IPv4 octets hidden inside an IPv6 literal.
-    ///
-    /// Dotted tails prove only with a proven IPv6 prefix: a bare
-    /// `host:port` spelling (for example `api.example.com:443`) must not
-    /// collapse onto its numeric port and read as an address literal, so the
-    /// prefix is verified with the same two-hextet proof the dotted-literal
-    /// check uses before the tail is accepted.
     static func octetsFromMappedIPv6(_ lowered: String) -> IPv4Octets? {
         if lowered.contains(".") {
             guard let lastColon = lowered.lastIndex(of: ":") else { return nil }
@@ -178,10 +148,6 @@ public enum SensitiveAddressParsing: Sendable {
     }
 
     /// Whether a cleaned host is a dotted IPv4-embedded IPv6 literal with a proven prefix.
-    /// A valid tail alone cannot prove a literal: collapsing an unverified prefix onto an
-    /// allowlisted tail would let garbage pass as the tail's origin without ever dialing it,
-    /// so the prefix must parse with the tail occupying two hextets. Unproven forms stay DNS
-    /// names and fail closed instead of passing as public literals.
     public static func isValidDottedIPv6Literal(_ cleaned: String) -> Bool {
         guard cleaned.contains(":"), cleaned.contains(".") else { return false }
         guard let lastColon = cleaned.lastIndex(of: ":") else { return false }
@@ -254,12 +220,6 @@ public enum SensitiveAddressParsing: Sendable {
 }
 
 /// Host normalization and origin comparison shared by security checks.
-///
-/// Canonicalizes bracketed IPv6, zone IDs, and trailing dots plus the
-/// scheme-default port so allowlist exemptions compare `host:port` exactly.
-/// Normalizers trim manually rather than through the display-copy agreement
-/// because they must keep empty strings for downstream parsing plus bracket
-/// and zone folding, not nil-for-blank.
 public enum SensitiveAddressNormalization: Sendable {
     /// Trims a raw host to its comparable base form.
     public static func cleanedHostBase(_ host: String) -> String {
@@ -319,14 +279,6 @@ public enum SensitiveAddressNormalization: Sendable {
 }
 
 /// Sensitive-range classification shared by security checks.
-///
-/// Covers cloud-metadata hostnames and literals, loopback, link-local, private
-/// RFC 1918, the shared address space (`100.64.0.0/10`, where cloud metadata
-/// literals such as Alibaba's `100.100.100.200` answer), special-purpose
-/// reserved IPv4 blocks, `0.0.0.0/8`, IPv6 unique-local addresses, and the
-/// IPv4-embedding translation prefixes (mapped, translated, NAT64, 6to4, and
-/// IPv4-compatible) so fetch, API, and policy-vault checks share one range
-/// table.
 public enum SensitiveAddressRanges: Sendable {
     /// Whether a host is in `169.254.0.0/16` (link-local, never allowlisted).
     public static func isLinkLocalIPv4(_ host: String) -> Bool {
@@ -335,9 +287,6 @@ public enum SensitiveAddressRanges: Sendable {
     }
 
     /// Whether a host is IPv6 link-local (`fe80::/10`, never allowlisted).
-    /// Mixed dotted-tail spellings parse through the shared expansion so
-    /// `fe80::93.184.216.34` refuses like its `fe80::5db8:d822` twin instead
-    /// of reading as the public tail once the prefix is dropped.
     public static func isLinkLocalIPv6(_ host: String) -> Bool {
         let cleaned = SensitiveAddressNormalization.cleanedHostBase(host)
         guard cleaned.contains(":") else { return false }
@@ -352,9 +301,6 @@ public enum SensitiveAddressRanges: Sendable {
     }
 
     /// Whether a host is IPv6 loopback or unspecified.
-    /// Mixed dotted-tail spellings expand to the hextets they denote, so
-    /// `::0.0.0.1` classifies like its `::1` twin instead of reading as a
-    /// plain dotted IPv4 after the prefix is dropped.
     public static func isLoopbackIPv6(_ host: String) -> Bool {
         let cleaned = SensitiveAddressNormalization.cleanedHostBase(host)
         guard cleaned.contains(":") else { return false }
@@ -387,16 +333,12 @@ public enum SensitiveAddressRanges: Sendable {
     }
 
     /// Whether a 32-bit IPv4 value is in `169.254.0.0/16` (link-local).
-    /// Value-level owner of the mask so host checks, resolved-address
-    /// vetting, and the server LAN carve-out compose one boundary instead of
-    /// re-deriving it from octets.
     public static func isLinkLocalIPv4Value(_ value: UInt32) -> Bool {
         (value & 0xFFFF_0000) == 0xA9FE_0000
     }
 
-    /// Whether a 32-bit IPv4 value is in private RFC 1918 space
-    /// (`10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`).
-    /// Value-level owner of the three private masks so no caller drifts on a
+    /// Whether a 32-bit IPv4 value is in private RFC 1918 space (`10.0.0.0/8`, `172.16.0.0/12`, or
+    /// `192.168.0.0/16`). Value-level owner of the three private masks so no caller drifts on a
     /// boundary.
     public static func isPrivateIPv4Value(_ value: UInt32) -> Bool {
         if (value & 0xFF00_0000) == 0x0A00_0000 {
@@ -411,17 +353,9 @@ public enum SensitiveAddressRanges: Sendable {
         return false
     }
 
-    /// Whether a 32-bit IPv4 value dials a sensitive range: loopback,
-    /// `0.0.0.0/8`, link-local, private RFC 1918, shared address space
-    /// (`100.64.0.0/10`, where Alibaba's metadata service answers at
-    /// `100.100.100.200`), or a special-purpose reserved block that is never
-    /// globally reachable (IETF protocol assignments, TEST-NET-1/2/3,
-    /// benchmarking, deprecated 6to4 relay anycast, multicast, and the
-    /// reserved `240.0.0.0/4` block including limited broadcast).
-    /// Single-sourced so the API guard, the fetch guard, and the policy
-    /// invariant verifier cannot diverge on obfuscated spellings, and so a
-    /// cloud-metadata literal outside `169.254.0.0/16` cannot classify as
-    /// public. Public unicast addresses stay unaffected.
+    /// Whether a 32-bit IPv4 value dials a sensitive range: loopback, `0.0.0.0/8`, link-local,
+    /// private RFC 1918, shared address space (`100.64.0.0/10`, where Alibaba's metadata service
+    /// answers at `100.100.100.200`), or a special-purpose reserved block that is never globally.
     public static func isSensitiveIPv4Value(_ value: UInt32) -> Bool {
         // 127.0.0.0/8: loopback.
         if (value & 0xFF00_0000) == 0x7F00_0000 {
@@ -485,17 +419,8 @@ public enum SensitiveAddressRanges: Sendable {
             | (UInt32(octets.thirdOctet) << 8) | UInt32(octets.fourthOctet)
     }
 
-    /// The IPv4 address embedded in eight hextets by a translation prefix.
-    ///
-    /// Covers the fixed-offset IPv4-embedding prefixes the range table
-    /// decodes — IPv4-mapped `::ffff:0:0/96`, IPv4-translated
-    /// `::ffff:0:0:0/96`, NAT64 well-known `64:ff9b::/96` (RFC 6052) and
-    /// local-use `64:ff9b:1::/48` (RFC 8215), 6to4 `2002::/16`, and
-    /// IPv4-compatible `::/96`. Any other prefix returns nil so a native
-    /// public IPv6 literal is never misread as an embedded address.
-    /// - Parameter groups: Eight parsed hextets.
-    /// - Returns: The embedded 32-bit IPv4 value, or nil when the prefix
-    ///   embeds none.
+    /// The IPv4 address embedded in eight hextets by a translation prefix. Any other prefix returns
+    /// nil so a native public IPv6 literal is never misread as an embedded address.
     static func embeddedIPv4Value(in groups: [UInt16]) -> UInt32? {
         guard groups.count == 8 else { return nil }
         let tailValue = (UInt32(groups[6]) << 16) | UInt32(groups[7])
@@ -511,10 +436,8 @@ public enum SensitiveAddressRanges: Sendable {
         if groups[0] == 0x0064, groups[1] == 0xFF9B, groups[2] == 0, groups[3] == 0, groups[4] == 0, groups[5] == 0 {
             return tailValue
         }
-        // 64:ff9b:1::/48 — local-use NAT64 prefix (RFC 8215): the embedded
-        // IPv4 splits around the reserved u octet. The u bits are ignored
-        // rather than required zero, so a malformed embedding cannot smuggle
-        // the carried address past classification.
+        // 64:ff9b:1::/48 — local-use NAT64 prefix (RFC 8215): the embedded IPv4 splits around the
+        // reserved u octet.
         if groups[0] == 0x0064, groups[1] == 0xFF9B, groups[2] == 0x0001 {
             return (UInt32(groups[3]) << 16) | (UInt32(groups[4] & 0x00FF) << 8) | UInt32(groups[5] >> 8)
         }
@@ -529,16 +452,8 @@ public enum SensitiveAddressRanges: Sendable {
         return nil
     }
 
-    /// Dotted-quad text of the IPv4 address an IPv6 literal embeds by a
-    /// translation prefix, or nil when the literal embeds none.
-    ///
-    /// Single-sourced decode for the runtime SSRF guard, the fetch guard, and
-    /// the policy verifier: a decoded link-local or metadata literal is
-    /// refused even for an allowlisted name, so a NAT64, 6to4, or
-    /// IPv4-compatible spelling cannot smuggle a never-dialable target past
-    /// the exemption checks.
-    /// - Parameter host: Raw or canonical host text.
-    /// - Returns: Dotted-quad embedded address, or nil when none is embedded.
+    /// Dotted-quad text of the IPv4 address an IPv6 literal embeds by a translation prefix, or nil
+    /// when the literal embeds none.
     public static func embeddedIPv4Literal(_ host: String) -> String? {
         let cleaned = SensitiveAddressNormalization.cleanedHostBase(host)
         guard cleaned.contains(":") else { return nil }
@@ -552,23 +467,8 @@ public enum SensitiveAddressRanges: Sendable {
         return "\(first).\(second).\(third).\(fourth)"
     }
 
-    /// Whether a canonical host is a sensitive IPv6 literal (loopback,
-    /// link-local `fe80::/10`, unique-local `fc00::/7`, or an IPv4-embedding
-    /// prefix whose decoded address is sensitive).
-    ///
-    /// The literal parses through the shared hextet reader, including mixed
-    /// dotted-tail spellings, so prefix checks run against the literal's own
-    /// prefix: `fe80::93.184.216.34` classifies like its `fe80::5db8:d822`
-    /// twin instead of collapsing to the public tail. IPv4-embedding prefixes
-    /// decode to the address they carry — IPv4-mapped, IPv4-translated, NAT64
-    /// well-known and local-use, 6to4, and IPv4-compatible — and classify
-    /// like the decoded address's dotted twin, so a translation spelling
-    /// cannot masquerade as a plain public literal. Unique-local requires an
-    /// IPv6 literal (a colon) plus the `fc00::/7` hextet mask, so DNS names
-    /// like `fc.example.com` never false-positive.
-    /// - Parameter canonical: Cleaned host text (raw literal also accepted).
-    /// - Returns: True when the literal's own prefix or embedded address is
-    ///   sensitive.
+    /// Whether a canonical host is a sensitive IPv6 literal (loopback, link-local `fe80::/10`,
+    /// unique-local `fc00::/7`, or an IPv4-embedding prefix whose decoded address is sensitive).
     public static func isSensitiveIPv6Host(_ canonical: String) -> Bool {
         let cleaned = SensitiveAddressNormalization.cleanedHostBase(canonical)
         guard cleaned.contains(":"),
@@ -588,11 +488,9 @@ public enum SensitiveAddressRanges: Sendable {
         if (groups[0] & 0xFE00) == 0xFC00 {
             return true
         }
-        // Embedding prefixes decode numerically so zero-padded spellings
-        // collapse to one verdict instead of relying on string suffixes; any
-        // sensitive embedded address (loopback, private, shared/reserved,
-        // link-local, or 0/8) refuses like its dotted twin, while a public
-        // embedded address stays public.
+        // Embedding prefixes decode numerically so zero-padded spellings collapse to one verdict
+        // instead of relying on string suffixes; any sensitive embedded address (loopback, private,
+        // shared/reserved, link-local, or 0/8) refuses like its dotted twin, while a public embedded.
         if let embedded = embeddedIPv4Value(in: groups) {
             return isSensitiveIPv4Value(embedded)
         }
@@ -600,19 +498,6 @@ public enum SensitiveAddressRanges: Sendable {
     }
 
     /// Whether a raw host is a sensitive address literal without DNS.
-    ///
-    /// Covers loopback, unspecified, link-local `169.254.0.0/16` and
-    /// `fe80::/10`, private RFC 1918, shared address space `100.64.0.0/10`
-    /// (where Alibaba's metadata service answers), special-purpose reserved
-    /// IPv4 blocks, `0.0.0.0/8`, unique-local `fc00::/7`, IPv4-mapped
-    /// sensitive tails, and NAT64 (well-known and local-use), 6to4, and
-    /// IPv4-compatible embedded spellings across decimal, hex, octal, short,
-    /// and IPv6 forms.
-    /// Only parsed literals and `localhost` classify true, so a public DNS
-    /// name that merely starts with digits — or a `host:port` entry the
-    /// binding comparison could never match — never false-positives.
-    /// - Parameter host: Raw host from configuration, optionally bracketed.
-    /// - Returns: True when the host is a sensitive literal target.
     public static func isSensitiveHostLiteral(_ host: String) -> Bool {
         let cleaned = SensitiveAddressNormalization.cleanedHostBase(host)
         guard !cleaned.isEmpty else { return false }
@@ -620,10 +505,8 @@ public enum SensitiveAddressRanges: Sendable {
             return true
         }
         if cleaned.contains(":") {
-            // Dotted-colon forms collapse only on a proven prefix: an unverified
-            // prefix must not be decoded as a dotted tail, or `host:port` text
-            // would masquerade as an address literal. Hextet-only forms must
-            // parse as a full IPv6 literal before normalization.
+            // Dotted-colon forms collapse only on a proven prefix: an unverified prefix must not be
+            // decoded as a dotted tail, or `host:port` text would masquerade as an address literal.
             if cleaned.contains(".") {
                 guard SensitiveAddressParsing.isValidDottedIPv6Literal(cleaned) else { return false }
             } else {
@@ -652,10 +535,8 @@ public enum SensitiveAddressRanges: Sendable {
 // MARK: - Cloud Metadata Hosts
 
 extension SensitiveAddressRanges {
-    /// Well-known cloud metadata hostnames plus metadata address literals,
-    /// refused even over public DNS and even when an allowlisted name resolves
-    /// to them. Single-sourced here so the runtime SSRF guard and the policy
-    /// invariant verifier cannot drift on what counts as a metadata target.
+    /// Well-known cloud metadata hostnames plus metadata address literals, refused even over public
+    /// DNS and even when an allowlisted name resolves to them.
     public static let blockedMetadataHosts: Set<String> = [
         "metadata.google.internal",
         "metadata.google",
@@ -670,13 +551,6 @@ extension SensitiveAddressRanges {
     ]
 
     /// Whether a host is a well-known metadata hostname or metadata literal.
-    /// Intent: exact plus dot-suffix match against the blocked set keeps
-    /// subdomains like `sub.metadata.google.internal` refused while
-    /// `foo-metadata.google-bar.example.com` passes; substring matching
-    /// would overblock the latter, and an address literal such as
-    /// `100.100.100.200` matches exactly so it is refused before any allowlist
-    /// exemption. Invariant: comparison uses the cleaned lowercased base form,
-    /// and empty hosts never match.
     public static func isMetadataHost(_ host: String) -> Bool {
         let lowered = SensitiveAddressNormalization.cleanedHostBase(host)
         guard !lowered.isEmpty else { return false }

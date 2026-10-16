@@ -1,13 +1,4 @@
 // Rune Weaver Server Tests — Goals REST surface plus live push shapes.
-//
-// Purpose: pins the goal HTTP contract and its WebSocket fan-out without a live
-// network: request validation, disabled pursuit, per-status counts, frame
-// round-trips, and goal-scoped run filtering end to end through the registered
-// routes.
-// Scope: route status codes, DTO shapes, and hub encodings only; durable
-// planning and advancement timing stay with the engine and worker suites.
-// Architectural role: guards the thin adapter so future route edits cannot
-// silently widen validation or drift the live push from the list shape.
 
 import Foundation
 import NIOWebSocket
@@ -59,16 +50,6 @@ private actor GoalRouteRecordingSocket: WSConnectionSocket {
 }
 
 /// Builds a configured application sharing an isolated goal store.
-///
-/// The context carries an explicit goal engine so enabled and disabled postures
-/// are both observable through the same route surface; the temporary database
-/// keeps rows off the real engine data directory.
-/// - Parameters:
-///   - enabled: Whether pursuit runs for this app.
-///   - answer: Canned model text for planning turns.
-///   - maxTriggersPerGoal: Optional per-goal trigger budget override.
-///   - body: Test body receiving the app plus its context.
-/// - Returns: Whatever `body` returns.
 private func withGoalApp<T>(
     enabled: Bool = true,
     answer: String = #"[{"title": "First step"}, {"title": "Second step"}]"#,
@@ -131,13 +112,8 @@ private func withGoalApp<T>(
     }
 }
 
-/// Sends one request through the full registered surface.
-/// - Parameters:
-///   - app: Configured application.
-///   - method: HTTP method.
-///   - path: Path plus optional query string.
-///   - body: Optional encodable body.
-/// - Returns: Route response.
+/// Sends one request through the full registered surface. app: Configured
+/// application.
 private func goalRequest(app: Application, method: HTTPMethod, path: String, body: (some Content)?) async throws -> Response {
     let request = Request(
         application: app,

@@ -339,10 +339,8 @@ struct ToolBusTests {
     func `Alias resolves identically across bus paths and unregister drops stale aliases`() async {
         let bus = ToolBus()
         await bus.register(tool: ReadOnlyStubTool())
-        // Generic alias plumbing: the alias is only a second name for the
-        // target, so every lookup and mutation must land on the same entry.
-        // Otherwise an alias could execute while reporting disabled, or stay
-        // enabled while its target is off.
+        // Generic alias plumbing: the alias is only a second name for the target, so every lookup
+        // and mutation must land on the same entry.
         await bus.registerAlias(from: "stub.legacy", to: "stub.read")
 
         // Lookup shares resolution: alias and canonical name return the same tool.

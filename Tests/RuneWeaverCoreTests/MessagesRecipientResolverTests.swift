@@ -1,19 +1,4 @@
 // Rune Weaver Core Tests — Recipient resolution composition and determinism.
-//
-// Purpose: pin the resolver pipeline every Messages surface relies on: source
-// scoring (alias 110; contact name quality from the shared matcher table),
-// recency bonuses (+20 within a week, +10 within a month), the deterministic
-// score → recency → service → handle order, handle-key dedupe, limit clamping,
-// history enrichment, the handle passthrough, diacritic folding, and the
-// ambiguity identity rule.
-//
-// Scope: hermetic composition tests only. Every acceptance line of the
-// resolution contract is exercised against lock-backed in-memory stubs; the
-// live address-book and chat-database readers are covered by their own suites,
-// so no test touches Contacts, Messages, or the filesystem.
-//
-// Architectural role: guards the deterministic decision surface the Messages
-// tools consume, so ranking and ambiguity cannot drift silently.
 
 import Foundation
 import os
@@ -44,10 +29,8 @@ final class StubContactSearching: MessagesContactSearching, Sendable {
 
     private let state: OSAllocatedUnfairLock<State>
 
-    /// Creates a stub over canned records and handle-to-name pairs.
-    /// - Parameters:
-    ///   - records: Contact records served by name search.
-    ///   - names: Normalized-handle to display-name pairs served by `displayNames()`.
+    /// Creates a stub over canned records and handle-to-name pairs. records:
+    /// Contact records served by name search.
     init(records: [MessageContactMatch] = [], names: [String: String] = [:]) {
         state = OSAllocatedUnfairLock(initialState: State(records: records, names: names))
     }
@@ -81,10 +64,7 @@ final class StubHistorySourcing: MessagesHistorySourcing, Sendable {
 
     private let state: OSAllocatedUnfairLock<State>
 
-    /// Creates a history stub.
-    /// - Parameters:
-    ///   - stats: Rows returned by a successful read.
-    ///   - fails: When true, the read throws instead of returning rows.
+    /// Creates a history stub. stats: Rows returned by a successful read.
     init(stats: [MessageHandleStats] = [], fails: Bool = false) {
         state = OSAllocatedUnfairLock(initialState: State(stats: stats, fails: fails))
     }

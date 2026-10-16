@@ -1,7 +1,4 @@
 // Rune Weaver Dashboard — Component tests for honest tool status display.
-// Covers the pending-versus-running distinction so completed turns with no
-// recorded output never claim to be executing, plus live per-tool progress,
-// broad-scope warnings, and the per-call cancel reason wiring.
 
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

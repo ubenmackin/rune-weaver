@@ -1,17 +1,4 @@
 // Rune Weaver Core — Permission gate data types and contracts.
-//
-// Purpose: own the shared vocabulary the permission gate and its callers
-// exchange — the trust duration tiers, the action descriptor derived from a
-// live call, the approval prompt and its impact assessment, and the decision
-// verdicts — so every surface files, renders, and decides approvals with the
-// same shapes.
-// Scope: `TrustDuration`, `ActionDescriptor` with its per-tool target
-// derivation, `GrantWidenOutcome`, `GrantRearmOutcome`, `ImpactSeverity`,
-// `ImpactAssessment`, `PermissionRequest`, `PermissionDecision`,
-// `ToolAdmissionVerdict`, and `ToolAdmissionValidating`. Rule storage,
-// evaluation, and scope matching stay with `PermissionGate` and `AccessRule`.
-// Architectural role: the Core contract layer between the gate and the bus,
-// service, and dashboard surfaces that file, render, and decide approvals.
 
 import Foundation
 
@@ -58,12 +45,6 @@ public enum TrustDuration: String, Sendable, Codable, Equatable, CaseIterable {
     }
 
     /// Whether the tier can back a durable rule.
-    ///
-    /// Allowlisting the four durable tiers keeps a future tier from silently
-    /// minting an unexpected lifetime, matching the re-arm gate on live
-    /// grants. Rule creation, rule decoding, re-arm validation, and the rules
-    /// route all consume this one enumeration, so a tier added here becomes
-    /// durable everywhere at once and nowhere else.
     public var isDurable: Bool {
         switch self {
         case .fiveMinutes, .oneHour, .oneDay, .forever: true
@@ -86,19 +67,11 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
     }
 
     /// Maximum argument bytes parsed for approval targets.
-    ///
-    /// Bounds the JSON parse so an oversized arguments blob fails closed to
-    /// an empty target instead of inflating the grant store; mirrors the
-    /// hardened object-shape checks on the bus path.
     static let maxArgumentsJSONBytes = 64 * 1024
 
-    /// Parses tool arguments as a hardened JSON object.
-    ///
-    /// Pins `options: []` and requires the top-level object shape so
-    /// fragments (arrays, strings, numbers) reject, matching the bus execute
-    /// and narration gates. Oversized payloads fail closed before parsing.
-    /// - Parameter argumentsJSON: Raw tool arguments.
-    /// - Returns: Argument object, or nil when oversized, non-UTF8, or not an object.
+    /// Parses tool arguments as a hardened JSON object. Pins `options: []` and requires the
+    /// top-level object shape so fragments (arrays, strings, numbers) reject, matching the bus
+    /// execute and narration gates.
     static func parsedArgumentsObject(from argumentsJSON: String) -> [String: Any]? {
         guard argumentsJSON.utf8.count <= maxArgumentsJSONBytes else { return nil }
         guard let data = argumentsJSON.data(using: .utf8) else { return nil }
@@ -108,29 +81,14 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
         return object
     }
 
-    /// Derives a descriptor from a tool call.
-    /// - Parameters:
-    ///   - toolCall: Raw invocation arguments.
-    ///   - tool: Tool receiving the call.
-    /// - Returns: The action descriptor the gate stores and checks.
+    /// Derives a descriptor from a tool call. toolCall: Raw invocation arguments.
     public static func descriptor(for toolCall: ToolInput, tool: any Tool) -> ActionDescriptor {
         descriptor(for: toolCall, toolName: tool.name)
     }
 
-    /// Derives a descriptor from a raw tool call and a tool name alone.
-    ///
-    /// An approval decision retains only the parked request's tool name, so the
-    /// decide path cannot reach a live `Tool` instance. Branching on the tool
-    /// name here keeps the grant stored on approval identical to the
-    /// descriptor allow-checks and usage accounting derive later; generic
-    /// extraction would store a different target for `browser.act` (action,
-    /// ref, and page URL) and `api.request` (method, URL, and body preview), so
-    /// a durable narrow grant would never cover the identical next call and the
-    /// engine would re-prompt despite the user having trusted that exact action.
-    /// - Parameters:
-    ///   - toolCall: Raw invocation arguments.
-    ///   - toolName: Tool name selecting the specialized target shape.
-    /// - Returns: The action descriptor the gate stores and checks.
+    /// Derives a descriptor from a raw tool call and a tool name alone. An approval decision
+    /// retains only the parked request's tool name, so the decide path cannot reach a live `Tool`
+    /// instance.
     public static func descriptor(for toolCall: ToolInput, toolName: String) -> ActionDescriptor {
         if toolName == "browser.act",
            let combined = browserActTarget(from: toolCall)
@@ -144,38 +102,13 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
         }
         if toolName == "messages.send" {
             // `messages.send` never falls through to the generic target path.
-            // Generic extraction accepts arrays and comma-split strings and
-            // skips a non-string `recipient` for a handle-shaped `to`, so a
-            // malformed call could derive a canonical handle and mint a durable
-            // per-handle grant for a send that can never execute. The strict
-            // derivation yields nil for those shapes, and the empty target it
-            // maps to is a descriptor `isGrantable` already refuses for sends.
             return ActionDescriptor(toolName: toolName, target: messagesRecipientHandle(from: toolCall) ?? "")
         }
         return ActionDescriptor(toolName: toolName, target: ActionDescriptor.target(from: toolCall))
     }
 
-    /// Canonical handle for a `messages.send` recipient, or nil when the call
-    /// carries no usable canonical handle.
-    ///
-    /// A durable send grant must key on the exact handle the owner authorized,
-    /// so the target derives through the shared classification owner instead of
-    /// the generic lowercased-text extraction that would store a display name.
-    /// Handle spellings canonicalize (`+1 (555) 123-4567` and `+15551234567`
-    /// agree on one target), while names and malformed recipients return nil so
-    /// callers can refuse them before any approval or grant is derived.
-    ///
-    /// The scan is strict about a present key: once `recipient` exists it
-    /// decides the target, so a non-string value (`["+15551234567"]`, `123`,
-    /// `true`, `{}`) or a blank/name-shaped string is malformed and returns nil
-    /// rather than falling through to the `to` alias. Only a missing (or null)
-    /// `recipient` lets `to` supply the handle, matching the tool decoder that
-    /// reads a null recipient as absent. Falling through on a present
-    /// non-string is exactly how an array or numeric recipient paired with a
-    /// handle-shaped `to` could mint a durable grant for a send that can never
-    /// execute.
-    /// - Parameter toolCall: Raw `messages.send` invocation.
-    /// - Returns: Canonical handle, or nil when absent or not a handle.
+    /// Canonical handle for a `messages.send` recipient, or nil when the call carries no usable
+    /// canonical handle.
     static func messagesRecipientHandle(from toolCall: ToolInput) -> String? {
         guard let object = parsedArgumentsObject(from: toolCall.argumentsJSON) else { return nil }
         for key in ["recipient", "to"] {
@@ -250,13 +183,6 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
     }
 
     /// Builds the approval target for a constrained API request call.
-    ///
-    /// The target carries the header summary alongside method, URL, and body
-    /// preview so the approver can verify the secret slot: a surrogate
-    /// reference (`rwsecret:<KEY>`) stays visible while a pasted live value
-    /// redacts to the shared placeholder and never reaches the grant store.
-    /// Calls without headers keep the historical `METHOD URL [body:preview]`
-    /// shape so existing narrow grants keep covering.
     private static func apiRequestTarget(from toolCall: ToolInput) -> String? {
         guard let object = parsedArgumentsObject(from: toolCall.argumentsJSON)
         else { return nil }
@@ -283,11 +209,6 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
     }
 
     /// Extracts model-authored headers from API request arguments.
-    ///
-    /// Accepts the `headers`/`header` aliases the tool decoder honors so the
-    /// approval target sees what the transport will validate. Entries with
-    /// blank names or non-string values drop; blank values drop so an empty
-    /// header object reads as absent and keeps the historical target shape.
     private static func apiRequestHeaders(from object: [String: Any]) -> [String: String]? {
         let raw: Any? = object["headers"] ?? object["header"]
         guard let raw else { return nil }
@@ -316,14 +237,6 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
     }
 
     /// Summarizes headers for the approval target with secrets redacted.
-    ///
-    /// Delegates to the shared core header rule so approval targets and the
-    /// tools-layer preview policy agree on surrogate visibility: an
-    /// `Authorization` value carrying a `rwsecret:<KEY>` reference stays
-    /// visible so dry-run previews and approval targets agree, while any other
-    /// `Authorization` value redacts to the shared placeholder and never
-    /// persists a live secret in the grant store. Other headers pass through
-    /// the shared sweep (no resolved values exist at approval time to sweep).
     private static func apiRedactedHeaderSummary(_ headers: [String: String]) -> String {
         var redacted: [String: String] = [:]
         redacted.reserveCapacity(headers.count)
@@ -407,11 +320,6 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
 }
 
 /// Outcome of promoting a persisted grant to its tool-wide scope.
-///
-/// Widening can fail for two reasons callers must keep distinct: the
-/// identifier may name no live grant, or the grant may be live but belong to a
-/// tool with no tool-wide scope. Collapsing both into "not widened" makes a
-/// visible, live grant read as unknown.
 public enum GrantWidenOutcome: Sendable, Equatable {
     /// The grant was found and now covers every target for its tool. An
     /// already tool-wide grant reports success without changing.
@@ -429,12 +337,9 @@ public enum GrantWidenOutcome: Sendable, Equatable {
     public static let messagesSendRefusal = "messages.send grants are per-recipient and cannot be widened"
 }
 
-/// Outcome of changing a persisted grant's duration tier in place.
-///
-/// Re-arming can fail for two reasons callers must keep distinct: the
-/// identifier may name no live grant, or the requested tier may not be a
-/// durable tier. Collapsing both into a single failure makes an expired grant
-/// read as a bad tier, or a one-shot request read as unknown.
+/// Outcome of changing a persisted grant's duration tier in place. Re-arming can fail for two
+/// reasons callers must keep distinct: the identifier may name no live grant, or the requested tier
+/// may not be a durable tier.
 public enum GrantRearmOutcome: Sendable, Equatable {
     /// The grant was found and now carries the new duration with expiry
     /// recomputed from now. Identity and usage counters are unchanged.
@@ -607,12 +512,6 @@ public enum PermissionDecision: Sendable, Equatable {
 }
 
 /// Pre-admission verdict for a tool call carrying a target-shaped argument.
-///
-/// Tools whose arguments encode an externally-addressed target can refuse a
-/// call before the permission gate parks it, so an invalid target never reaches
-/// the approvals inbox and a durable trust grant can never be keyed on it.
-/// Execution still re-validates and fails closed; this verdict only decides
-/// whether the call may enter the approval pipeline.
 public enum ToolAdmissionVerdict: Sendable, Equatable {
     /// The call may proceed to permission evaluation and approval filing.
     case proceed
@@ -620,13 +519,9 @@ public enum ToolAdmissionVerdict: Sendable, Equatable {
     case refuse(reason: String)
 }
 
-/// Optional pre-admission validation seam for target-shaped tool calls.
-///
-/// The orchestrator consults the verdict before `PermissionGate.checkPermission`
-/// and before `ApprovalQueue.fileRequest`. A refusal is answered to the model as
-/// an immediate failure result, so an invalid target is actionable before the
-/// owner is asked to approve anything. Tools that do not conform keep their
-/// existing admission path byte-identically.
+/// Optional pre-admission validation seam for target-shaped tool calls. A refusal is answered to
+/// the model as an immediate failure result, so an invalid target is actionable before the owner is
+/// asked to approve anything.
 public protocol ToolAdmissionValidating: Sendable {
     /// Validates one call before permission evaluation and approval filing.
     /// - Parameter input: Raw invocation about to be admitted.

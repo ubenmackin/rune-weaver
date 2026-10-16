@@ -1,17 +1,4 @@
 // Rune Weaver Tools Tests — Dial-time pinning for api.request egress.
-//
-// Purpose: pins the SSRF contract's dial-time half — an allowed vetting
-// returns the numeric addresses it proved, the tool carries that pin through
-// every redirect hop, and the transport dials the pin instead of resolving the
-// hostname again, so a rebinding name cannot reach a destination the gate
-// refused.
-// Scope: supervisor/tool pin plumbing with hermetic scripted transports,
-// resolver-call counting that proves the dial never re-resolves, live
-// transport fail-closed behavior without a pin, and the pure HTTP/1.1
-// request/response helpers the pinned dialer relies on.
-// Architectural role: the regression suite for the check-then-dial race,
-// asserting the vetted address is what reaches the transport on the initial
-// URL and on every redirect hop.
 
 import Foundation
 import os
@@ -77,10 +64,6 @@ private struct PinnedScriptedResponse: Sendable {
 }
 
 /// Stub transport that records each dial's pin and answers from a script.
-///
-/// The unpinned entry throws so a tool that regressed to dialing by name (or
-/// that failed to dispatch the pinned requirement through the existential)
-/// fails loudly instead of succeeding silently.
 private struct PinnedScriptedTransport: ApiRequestTransport, Sendable {
     /// Shared dial log.
     let recorder: PinnedDialRecorder
@@ -130,9 +113,6 @@ private func makePinnedPolicyStore(_ policy: SecurityPolicy) async -> PolicyStor
 }
 
 /// Runs `body` with the debug DNS resolver bound to this test's task.
-///
-/// The process-global holder is shared by parallel suites, so counting
-/// resolver traffic requires a task-scoped binding.
 private func withPinnedDNS(
     _ resolver: @escaping @Sendable (String) -> [String],
     _ body: () async throws -> Void

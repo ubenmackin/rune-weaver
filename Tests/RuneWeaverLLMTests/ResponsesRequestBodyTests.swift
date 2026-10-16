@@ -1,4 +1,5 @@
 // Rune Weaver LLM Tests — Responses request body generation and formatting.
+
 import Foundation
 @testable import RuneWeaverCore
 @testable import RuneWeaverLLM
@@ -248,10 +249,9 @@ struct ResponsesRequestBodyTests {
 
     @Test
     func `Chat wire scrubs parked placeholder without tool_calls`() throws {
-        // A parked/approval-gated turn persists an assistant note but no tool result
-        // until the approval resumes; promoting it to tool_calls would reach the wire
-        // as an unmatched call and be rejected. The plumbing line must be scrubbed
-        // entirely rather than re-emitted as raw `Calling …` request content.
+        // A parked/approval-gated turn persists an assistant note but no tool result until the
+        // approval resumes; promoting it to tool_calls would reach the wire as an unmatched call and
+        // be rejected.
         let callID = "call_parked_1"
         let args = #"{"action":"send"}"#
         let placeholder = ToolInput.placeholderContent(for: [

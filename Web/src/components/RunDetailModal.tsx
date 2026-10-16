@@ -1,5 +1,4 @@
 // Rune Weaver Dashboard — Detailed modal viewer for inspectable run logs.
-// Shows prompt, executed tool actions, full assistant response, and performance metrics.
 
 import {
   formatRunDuration,
@@ -24,10 +23,8 @@ interface RunDetailModalProps {
 }
 
 export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
-  // Hooks run before the null-run short-circuit so the modal obeys the rules
-  // of hooks when a parent mounts it with a run that can flip to null. Batched
-  // hydration reads one review-status request for every write card the run
-  // carries, resolved before the cards themselves mount.
+  // Hooks run before the null-run short-circuit so the modal obeys the rules of hooks when a parent
+  // mounts it with a run that can flip to null.
   const toolActions = run?.toolActions ?? [];
   const writeReviewOwners = collectWriteReviewOwners(toolActions);
   const writeHydrationTargets = collectWriteHydrationTargets(toolActions);
@@ -42,10 +39,9 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
   // it would fall through to the error copy and read as if execution broke.
   const isCancelled = run.status === "cancelled";
   const isFanOutParent = run.kind === "fanout";
-  // Fan-out rows read their own family so a worker's detail never opens
-  // mislabeled as a chat turn, and a parent's merged summary is the response
-  // surface — it renders through the sanitized Markdown renderer only, never
-  // a raw box, so worker content cannot inject markup.
+  // Fan-out rows read their own family so a worker's detail never opens mislabeled as a chat turn,
+  // and a parent's merged summary is the response surface — it renders through the sanitized
+  // Markdown renderer only, never a raw box, so worker content cannot inject markup.
   const kindLabel =
     run.kind === "scheduler"
       ? "Scheduled Run"

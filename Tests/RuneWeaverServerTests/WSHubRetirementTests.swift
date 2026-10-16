@@ -1,13 +1,4 @@
 // Rune Weaver Tests — WebSocket hub token-generation retirement.
-//
-// Owner-token rotation must revoke established `/ws` sessions immediately, even
-// when a socket sits passive and never sends another frame. These tests pin the
-// hub half of that contract: retirement advances a monotonically rising live
-// watermark, closes the sockets bound to a superseded generation, refuses a
-// registration that races the sweep, and never fans a broadcast out to a socket
-// the hub already knows holds a dead generation. A recording fake stands in for
-// the live socket so close codes and delivered frames are directly observable
-// without a network handshake.
 
 import Foundation
 import NIOWebSocket
@@ -251,10 +242,9 @@ struct WSHubRetirementTests {
 
     @Test
     func `Trailing-dot Host-Origin parity fails closed locally`() async throws {
-        // Defense in depth at the origin layer: trailing-dot hosts are rejected
-        // here even when Host==Origin matches, instead of relying solely on
-        // upstream `HostValidationMiddleware` or riding parity under a stripped
-        // spelling.
+        // Defense in depth at the origin layer: trailing-dot hosts are rejected here even when
+        // Host==Origin matches, instead of relying solely on upstream `HostValidationMiddleware` or
+        // riding parity under a stripped spelling.
         let app = try await Application.make(.testing)
         do {
             var trailingHeaders = HTTPHeaders()
@@ -284,13 +274,9 @@ struct WSHubRetirementTests {
 
     @Test
     func `Attacker Host-Origin parity relies on upstream Host gate`() async throws {
-        // Pins the middleware ordering assumption: parity alone passes any
-        // Host==Origin pair (including `rebind.attacker.com`), so end-to-end
-        // safety for that pair rests on `HostValidationMiddleware` rejecting the
-        // attacker Host upstream (`registerRuneWeaverRoutes` installs the Host
-        // gate before the `/ws` route). An allowlisted proxy Host passes both
-        // layers while the attacker Host passes only the origin layer in
-        // isolation and fails the combined stack.
+        // Pins the middleware ordering assumption: parity alone passes any Host==Origin pair
+        // (including `rebind.attacker.com`), so end-to-end safety for that pair rests on
+        // `HostValidationMiddleware` rejecting the attacker Host upstream.
         let app = try await Application.make(.testing)
         do {
             var attackerHeaders = HTTPHeaders()

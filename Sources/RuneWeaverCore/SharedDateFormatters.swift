@@ -1,26 +1,8 @@
 // Rune Weaver Core — Shared date formatting helpers.
-//
-// Purpose: back run titles, email dates, and mail index dates with one
-// formatting call site.
-// Scope: locale-stable run titles plus POSIX, ISO-8601, and epoch parsing.
-// Architectural role: shared utility beside the other Core helpers; helpers
-// build a fresh formatter per call because `DateFormatter` and
-// `ISO8601DateFormatter` are reference types with shared mutable state that
-// is not safe to share across concurrency domains; per-call instances keep
-// every helper concurrency-safe with no shared mutable state.
 
 import Foundation
 
 /// Shared date formatting helpers backing run titles, email dates, and mail index dates.
-///
-/// Intent: run-title, email, and mail-index paths share one call site so the
-/// POSIX locale and time-zone choices stay single-source and titles plus
-/// parsed dates stay stable across callers.
-///
-/// Invariant: no stored formatter instances live here. Each helper configures
-/// a local formatter with the same locale, style, and options the callers
-/// expect, so formatted output and accepted inputs stay stable without
-/// shared state.
 public enum SharedDateFormatters: Sendable {
     /// Formats a run-title timestamp with a locale-stable formatter.
     /// - Parameter date: Timestamp to format.
@@ -35,12 +17,8 @@ public enum SharedDateFormatters: Sendable {
         return formatter.string(from: date)
     }
 
-    /// Parses a string with a POSIX formatter for one format.
-    /// - Parameters:
-    ///   - string: Candidate date string.
-    ///   - format: Date format to try.
-    ///   - timeZone: Time zone for the attempt (nil keeps the system zone).
-    /// - Returns: Parsed date, or nil when the format does not match.
+    /// Parses a string with a POSIX formatter for one format. string: Candidate
+    /// date string.
     public static func posixDate(from string: String, format: String, timeZone: TimeZone? = nil) -> Date? {
         // Local instance keeps locale single-source while allowing per-attempt
         // format and time-zone mutations without touching shared state.

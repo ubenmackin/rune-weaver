@@ -1,18 +1,4 @@
 // Rune Weaver Dashboard — Executive Control Center & Mission Overview.
-//
-// Transforms RuneWeaver from a passive chat bot into an autonomous executive
-// assistant. Shows the operator:
-// 1. What needs your action (approvals, blocked goals)?
-// 2. What we should focus on today (proactive ideas radar)?
-// 3. What is working right now (live task trees & tools in flight)?
-// 4. Goals momentum & step progress with 1-click advance?
-// 5. Upcoming schedule cadence and recent executive report cards?
-//
-// The greeting row also owns the sole identity surface (settings picker editor excluded):
-// the Wisp renders at 112px beside the assistant name and a one-line state
-// caption, right-aligned on the welcome headline. Profile and chat surfaces
-// show text identity only, so this cluster is where colorway, resolved state,
-// and caption meet.
 
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
@@ -94,33 +80,19 @@ function truncateWorkingTitle(title: string): string {
   return `${trimmed.slice(0, WORKING_TITLE_LIMIT).trimEnd()}…`;
 }
 
-// Run-title fallback lives once in `dashboard/sharedRuns` (`getSharedRunTitle`)
-// with a single trim policy, so the caption and the Working Right Now stream
-// never disagree on what the agent is doing — including leading/trailing
-// whitespace.
+// Run-title fallback lives once in `dashboard/sharedRuns` (`getSharedRunTitle`) with a single trim
+// policy, so the caption and the Working Right Now stream never disagree on what the agent is doing
+// — including leading/trailing whitespace.
 
-// Greeting-row identity cluster: avatar, assistant name, and one-line state
-// caption. State resolves through the untouched priority helper fed by the
-// REST snapshot the sections below already read (pending approvals, goals
-// needing input, active runs) combined with the shared store liveness
-// ChatView and TopNav publish (working/activity plus the attention mirror) —
-// no new transport, no parallel navigation. Runs ride the shared single-flight
-// fetcher so this mount never issues a second `GET /runs` outside the collapse
-// window, and the snapshot refreshes on the same lifecycle frames the stream
-// and queue already watch. Caption navigation reuses the dashboard's existing
-// onSelectTab, so the attention button routes through the shell's single tab
-// switcher.
+// Greeting-row identity cluster: avatar, assistant name, and one-line state caption.
 function DashboardGreetingIdentity({
   onSelectTab,
 }: {
   onSelectTab: (tab: Tab) => void;
 }) {
-  // Persona name, attention, working, and idle clock come from the shared
-  // store: Settings publishes the persona, ChatView publishes activity and the
-  // working flag, TopNav mirrors attention from the badges it already owns.
-  // REST counts/titles below combine with those store mirrors (OR) so the
-  // resolved state never ignores a publisher. This cluster only reads; it
-  // never invents an identity.
+  // Persona name, attention, working, and idle clock come from the shared store: Settings publishes
+  // the persona, ChatView publishes activity and the working flag, TopNav mirrors attention from the
+  // badges it already owns.
   const {
     persona,
     attention: storeAttention,
@@ -136,12 +108,7 @@ function DashboardGreetingIdentity({
   // reads as "still looking" rather than a confident idle claim.
   const [loaded, setLoaded] = useState(false);
 
-  // Live snapshot of the signals the sections below already fetch. Failures
-  // degrade to empty lists (the same posture as the Needs Action queue) so a
-  // down endpoint yields no caption instead of a stale one; the empty-data
-  // branch below then owns the render. Runs collapse through the shared
-  // single-flight fetcher; lifecycle frames force past its freshness window so
-  // a newly started or settled run appears now instead of at the next tick.
+  // Live snapshot of the signals the sections below already fetch.
   const fetchGreetingSnapshot = useCallback(
     async (forceRefresh = false): Promise<void> => {
       try {
@@ -229,10 +196,9 @@ function DashboardGreetingIdentity({
   const hasAttention = storeAttention || totalAttention > 0;
   const isWorking = storeWorking || activeRuns.length > 0;
 
-  // Shared sleep-wake clock owns the clamp/re-arm in one place, so
-  // idle→sleeping lands without polling and without a second timer copy.
-  // Attention and working short-circuit sleeping, so no timer arms while
-  // either is active.
+  // Shared sleep-wake clock owns the clamp/re-arm in one place, so idle→sleeping lands without
+  // polling and without a second timer copy. Attention and working short-circuit sleeping, so no
+  // timer arms while either is active.
   const nowMs = useSleepWakeNow(hasAttention, isWorking, lastActivityAtMs);
 
   const resolvedState = resolveAvatarState({
@@ -258,13 +224,9 @@ function DashboardGreetingIdentity({
   const personaName = personaAssistantName(persona) ?? "Rune Weaver Agent";
   const personaColor = personaAvatarColor(persona);
 
-  // One line per resolved state. Attention is a button because it routes;
-  // working names the first active run truncated to the caption budget;
-  // sleeping rests until the next run and idle confirms the queue is clear.
-  // Empty data (nothing fetched, no clock, no history) renders no caption
-  // rather than inventing a mood. Titles reuse the shared run fallback, so
-  // the caption derives from the same signals the stream already names with
-  // no invented ownership.
+  // One line per resolved state. Attention is a button because it routes; working names the first
+  // active run truncated to the caption budget; sleeping rests until the next run and idle confirms
+  // the queue is clear.
   let caption: ReactNode = null;
   if (loaded) {
     if (hasAttention) {
@@ -368,11 +330,9 @@ export default function DashboardView({
   const [inspectedRun, setInspectedRun] = useState<RunLogEntry | null>(null);
   const [goalsRefreshTrigger, setGoalsRefreshTrigger] = useState(0);
   const greeting = getGreeting();
-  // Greeting identity follows the same blank rule as the chat header: a stored
-  // owner name that trims to empty is indistinguishable from an absent persona,
-  // so both surfaces fall back to the stock address instead of greeting an
-  // empty string. Reading the shared store keeps the headline live when
-  // Settings publishes a rename without a reload.
+  // Greeting identity follows the same blank rule as the chat header: a stored owner name that
+  // trims to empty is indistinguishable from an absent persona, so both surfaces fall back to the
+  // stock address instead of greeting an empty string.
   const { persona: greetingPersona } = usePersonaSignals();
   const greetingName = personaUserName(greetingPersona).trim();
   const operatorName = greetingName.length > 0 ? greetingName : "Operator";

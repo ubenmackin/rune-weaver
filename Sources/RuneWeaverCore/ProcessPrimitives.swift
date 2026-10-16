@@ -1,22 +1,10 @@
 // Rune Weaver Core — Shared primitives for bounded subprocess execution.
-//
-// Purpose: single-source capped pipe buffers, drain and budget values, and
-// one-shot continuation gates. Scope: used by the bounded runner and the
-// JSON-RPC subprocess bridge so timeouts, caps, termination, and cancellation
-// stay converged; the live-process box stays single-sourced as
-// `BoundedProcessRunner.ProcessBox` and is shared by both paths. Architectural
-// role: convergence point preventing lock, latch, and snapshot drift across
-// callers; every bounded child enforces the same budgets and settles its
-// continuation exactly once.
 
 import Foundation
 import os
 
-/// Caps bounding pipe drains.
-/// Groups both limits so drain helpers take one value instead of two ints.
-/// Intent: one shared shape keeps the bounded runner and the plugin bridge from
-/// drifting on cap ordering; callers clamp to at least one byte so empty caps
-/// fail closed instead of allowing unbounded growth.
+/// Caps bounding pipe drains. Groups both limits so drain helpers take one value instead of two
+/// ints.
 public struct ProcessDrainLimits: Sendable {
     /// Retained stdout cap in bytes.
     public let stdout: Int
@@ -30,11 +18,8 @@ public struct ProcessDrainLimits: Sendable {
     }
 }
 
-/// Budgets bounding one invocation.
-/// Groups timeout and output cap so termination mapping stays narrow.
-/// Intent: timeout wins over caps in every mapper, so the flag plus the stored
-/// budgets must travel together; the plugin call identity travels separately so
-/// the same budgets serve both generic helpers and JSON-RPC responses.
+/// Budgets bounding one invocation. Groups timeout and output cap so termination mapping stays
+/// narrow.
 public struct ProcessBudgets: Sendable {
     /// Timeout in seconds before the child is terminated.
     public let timeoutSeconds: TimeInterval
@@ -48,11 +33,9 @@ public struct ProcessBudgets: Sendable {
     }
 }
 
-/// Snapshot of retained pipe bytes plus latched cap flags.
-/// Exists so pipe drains return a named value instead of a wide tuple, and so
-/// both the generic runner and the plugin bridge read the same latched state.
-/// Invariant: flags latch on first excess and never clear, so a racy second
-/// append cannot un-trip a cap the mapper already observed.
+/// Snapshot of retained pipe bytes plus latched cap flags. Exists so pipe drains return a named
+/// value instead of a wide tuple, and so both the generic runner and the plugin bridge read the same
+/// latched state.
 public struct CappedPipeSnapshot: Sendable {
     /// Retained stdout bytes up to the cap.
     public var stdout = Data()
@@ -72,13 +55,8 @@ public struct CappedPipeSnapshot: Sendable {
     }
 }
 
-/// Sendable accumulation for concurrent pipe handlers so readability closures
-/// never capture mutable state across executors. Caps latch on first excess so
-/// a malicious child cannot force an unbounded allocation before truncation.
-/// Intent: one shared buffer keeps the bounded runner and the plugin bridge on
-/// the same append, latch, and snapshot ordering. Invariant: every mutation
-/// stays behind the unfair lock, which is held only for short value moves and
-/// never across termination or resume.
+/// Sendable accumulation for concurrent pipe handlers so readability closures never capture mutable
+/// state across executors.
 public final class CappedPipeBuffers: Sendable {
     private struct State: Sendable {
         var stdout = Data()
@@ -149,13 +127,8 @@ public final class CappedPipeBuffers: Sendable {
     }
 }
 
-/// Shared pipe-drain, budget, timeout, and input helpers converging the bounded runner and the plugin bridge.
-/// Single-sources readability attachment, tail draining, timeout-over-cap mapping, timeout spawning, and tolerant
-/// input writes so the two runners cannot drift on caps, budgets, or termination ordering.
-/// Intent: one implementation owns the budgets; per-runner shims only adapt result shapes and log levels.
-/// Invariant: timeout wins over caps in `mapTermination`; the timeout task only terminates and never resumes, keeping
-/// cancellation distinguishable via the flag plus the outer cancellation check; locks are held only for short value
-/// moves and never across termination or resume.
+/// Shared pipe-drain, budget, timeout, and input helpers converging the bounded runner and the
+/// plugin bridge.
 public enum ProcessDrainHelpers: Sendable {
     /// Attaches concurrent readability handlers draining both pipes under caps.
     /// Caps terminate via the shared box without capturing the child directly,
@@ -274,16 +247,8 @@ public enum ProcessDrainHelpers: Sendable {
     }
 }
 
-/// One-shot gate ensuring a throwing continuation resumes exactly once.
-/// Only the first claim wins; late arrivals observe the stored outcome instead
-/// of racing. Supports both eager continuations (published at init) and late
-/// continuations (published via `set` after a racer already won), so DNS-style
-/// timeouts and process termination share the same once semantics.
-/// Intent: single generic replaces the per-caller did-resume plus unfair-lock
-/// copies; timeout and cancellation extensions compose around this gate instead
-/// of copying it. Invariant: the lock is held only for short value moves, never
-/// across a continuation resume or task cancel, so racers cannot deadlock while
-/// settling the verdict.
+/// One-shot gate ensuring a throwing continuation resumes exactly once. Only the first claim wins;
+/// late arrivals observe the stored outcome instead of racing.
 public final class CheckedOnce<Success: Sendable>: Sendable {
     private struct State: Sendable {
         var continuation: CheckedContinuation<Success, Error>?

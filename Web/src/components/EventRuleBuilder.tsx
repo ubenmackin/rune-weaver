@@ -1,19 +1,4 @@
 // Rune Weaver Dashboard — Rule builder for multi-source event watcher scheduler jobs.
-//
-// Purpose: lets owners compose the ordered rule list evaluated for each email,
-// messages, or calendar event: per-source condition forms (sender/subject/body
-// filters, chat scope, calendar fields with match-all), the action editor
-// (agent prompt versus allowlisted zero-token direct tool), and the
-// stop-processing flag, with add, reorder, expand, and remove affordances.
-// Scope: rendering plus local list edits only; filter vocabularies, the
-// direct-tool allowlist and its per-source default, and rule validation and
-// normalization live with the shared client API module, while deterministic
-// matching and execution stay with the engine, so this editor never invents
-// conditions or actions the server cannot round-trip.
-// Architectural role: embedded editor inside the schedule wizard's watcher
-// step, feeding canonical rules upward through controlled props. The parent
-// owns persistence and fail-closed save gating; this component only shapes
-// user input into engine-compatible rule objects.
 
 import { useState } from "react";
 import {

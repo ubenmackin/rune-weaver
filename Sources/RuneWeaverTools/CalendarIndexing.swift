@@ -1,8 +1,4 @@
 // Rune Weaver Tools — Calendar indexer plus stage builder.
-//
-// Purpose: single owner of calendar indexing from live EventKit rows into the document index.
-// Scope: occurrence expansion with per-series cap, hash-gated upserts, state-tracked pruning.
-// Architectural role: owns calendar indexing while CalendarGateway owns persistence.
 
 import CryptoKit
 import Foundation
@@ -448,9 +444,6 @@ extension CalendarIndexer {
     }
 
     /// Reads persisted known identifiers, defaulting to empty when absent.
-    ///
-    /// A corrupt file warns once and rebuilds from the live fetch; pruning is
-    /// skipped for that pass rather than deleting against an empty set.
     private func readKnownIDs() -> (Set<String>, String?) {
         guard FileManager.default.fileExists(atPath: stateURL.path) else {
             return ([], nil)

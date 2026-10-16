@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — Shared navigation contract for top tabs and mobile bottom bar.
-//
-// Single source of truth for dashboard navigation: owns the grouped
-// navigation structure, the mobile breakpoint, and badge formatting plus
-// roll-up so the desktop top nav and the mobile bottom nav render identical
-// labels and counts without drifting.
 
 import type { ComponentType } from "react";
 import {
@@ -103,12 +98,8 @@ export const NAV_GROUPS: NavGroupEntry[] = [
   },
 ];
 
-// Normalizes any badge input to a non-negative integer with no upper bound.
-// Non-finite, negative, and fractional values fail closed to zero (hidden)
-// rather than rendering a misleading count. Display caps at 99+ through the
-// shared formatter while accessible labels keep the honest unclamped count
-// so a large backlog never announces a clamped value. Single owner for badge
-// normalization so desktop and mobile cannot drift.
+// Normalizes any badge input to a non-negative integer with no upper bound. Non-finite, negative,
+// and fractional values fail closed to zero (hidden) rather than rendering a misleading count.
 export function normalizeBadgeCount(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return 0;
   const floored = Math.floor(value);
@@ -116,10 +107,9 @@ export function normalizeBadgeCount(value: unknown): number {
   return floored;
 }
 
-// Formats a raw unread count for badge display. Zero (and any non-positive or
-// non-finite input) returns an empty string so callers can hide the badge;
-// 1-99 render verbatim and larger counts cap at 99+. Callers keep the raw
-// count for the accessible `{n} unread` label while rendering this string.
+// Formats a raw unread count for badge display. Zero (and any non-positive or non-finite input)
+// returns an empty string so callers can hide the badge; 1-99 render verbatim and larger counts cap
+// at 99+.
 export function formatBadgeCount(count: number): string {
   // Display-only cap over the shared normalization so flooring and
   // fail-closed edges stay single-sourced instead of duplicated per caller.
@@ -129,11 +119,8 @@ export function formatBadgeCount(count: number): string {
   return "99+";
 }
 
-// Reports whether a desktop group should read as active for the selected tab.
-// Membership, not equality, is the rule: a group lights up when any of its
-// children is selected. This is the tab-state analogue of a parent-route map,
-// which the app does not need because it has no router. Unknown group ids fail
-// closed to inactive so a stale caller never highlights the wrong entry.
+// Reports whether a desktop group should read as active for the selected tab. Membership, not
+// equality, is the rule: a group lights up when any of its children is selected.
 export function isGroupActive(groupId: NavGroupId, currentTab: string): boolean {
   const entry = NAV_GROUPS.find((group) => group.id === groupId);
   if (!entry) return false;
@@ -143,11 +130,9 @@ export function isGroupActive(groupId: NavGroupId, currentTab: string): boolean 
   return entry.id === currentTab;
 }
 
-// Sums the normalized unread counts across a group's children so one trigger
-// badge communicates total pending work without the owner opening the menu.
-// Leaf entries report their own badge (approvals stays top-level). Every child
-// count routes through the shared normalizer so negative, fractional, and
-// non-finite inputs collapse to zero instead of skewing the roll-up.
+// Sums the normalized unread counts across a group's children so one trigger badge communicates
+// total pending work without the owner opening the menu. Leaf entries report their own badge
+// (approvals stays top-level).
 export function rolledUpBadge(
   groupId: NavGroupId,
   badges: Partial<Record<NavTabId, number>>,

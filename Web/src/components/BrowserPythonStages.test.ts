@@ -1,9 +1,4 @@
-// Managed browser Python provision contract and Settings Web-pane behavior.
-// Pins the dashboard stage copy and pinned Playwright requirement to the
-// engine provision wording so a rename or version bump on either side fails
-// loudly instead of silently relabeling the Preparing line, and exercises the
-// state-aware Browser automation header so Ready, Missing, Unknown, and
-// in-flight each render exactly one action.
+// Rune Weaver Dashboard — Managed browser Python provision contract and Settings Web-pane behavior.
 
 import React from "react";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -44,10 +39,8 @@ const mockSettings = {
   configPath: "/Users/test/.runeweaver/config.toml",
 };
 
-// Builds a fetch stub that serves the browser health/ensure contracts plus the
-// ambient settings/plugins/tools/search routes the Web pane touches. `ensure`
-// defaults to a not-ready result and `ensureGate` lets a test hold the
-// provision open to observe the in-flight header state.
+// Builds a fetch stub that serves the browser health/ensure contracts plus the ambient
+// settings/plugins/tools/search routes the Web pane touches.
 function browserFetchMock(options: {
   health: unknown;
   ensure?: unknown;

@@ -1,13 +1,4 @@
 // Rune Weaver Server — Goal pursuit DTOs for the engine API.
-//
-// Purpose: carries the goal, step, event, and summary wire shapes so list,
-// detail, advancement, and live-push payloads encode identically on both ends
-// of the wire.
-// Scope: goal REST and WebSocket contracts only; route registration, auth
-// gating, and persistence stay with the route and store layers.
-// Architectural role: keeps the goal adapters decoupled from the engine core
-// in version-tolerant Codable contracts, so a dashboard built against an
-// older engine still decodes.
 
 import Foundation
 import RuneWeaverCore
@@ -15,33 +6,20 @@ import Vapor
 
 // MARK: - Goals DTOs
 
-/// Finished-versus-planned tally nested under one goal.
-///
-/// Single-sourced from the core live-push tally so REST rows and WebSocket
-/// frames share one field set and one clamping rule instead of drifting
-/// field-for-field. Done counts only `done` steps so blocked work never
-/// inflates progress; an empty plan reads as 0/0.
+/// Finished-versus-planned tally nested under one goal. Single-sourced from the core live-push
+/// tally so REST rows and WebSocket frames share one field set and one clamping rule instead of
+/// drifting field-for-field.
 public typealias GoalProgressDTO = RuneWeaverCore.WSGoalProgress
 
 /// Wire shape of one goal for list, detail, and `goal_updated` pushes.
-///
-/// Single-sourced from the core snapshot so REST rows and live pushes share
-/// one JSON shape: progress rides nested so the row stays self-contained,
-/// dates travel as server instants, and the origin session stays optional
-/// because headless and imported goals may have no owning conversation.
-/// The alias keeps existing `GoalDTO` call sites compiling while the struct
-/// lives once in core.
 public typealias GoalDTO = RuneWeaverCore.WSGoalSnapshot
 
 extension RuneWeaverCore.WSGoalProgress: Content {}
 extension RuneWeaverCore.WSGoalSnapshot: Content {}
 
 extension RuneWeaverCore.WSGoalSnapshot {
-    /// Builds a DTO from a stored goal plus its plan, deriving progress locally
-    /// so list fan-out never issues a second query per row for counts.
-    /// - Parameters:
-    ///   - goal: Stored goal snapshot.
-    ///   - steps: Full plan ordered by ordinal.
+    /// Builds a DTO from a stored goal plus its plan, deriving progress locally so list fan-out
+    /// never issues a second query per row for counts. goal: Stored goal snapshot.
     public init(goal: Goal, steps: [GoalStep], isPlanning: Bool? = nil) {
         let done = steps.filter { $0.status == .done }.count
         self.init(
@@ -60,20 +38,13 @@ extension RuneWeaverCore.WSGoalSnapshot {
     }
 
     /// Live-push snapshot for this DTO.
-    ///
-    /// Identity now that the REST row aliases the core snapshot; kept so
-    /// existing broadcast call sites keep compiling without a second fetch.
-    /// - Returns: This snapshot.
     public func wsSnapshot() -> RuneWeaverCore.WSGoalSnapshot {
         self
     }
 }
 
-/// Wire shape of one ordered step within a goal plan.
-///
-/// Ordinal decides display order; status rides as its raw value so dashboards
-/// never branch on unknown cases. Notes stay optional because most moves carry
-/// no annotation.
+/// Wire shape of one ordered step within a goal plan. Ordinal decides display order; status rides
+/// as its raw value so dashboards never branch on unknown cases.
 public struct GoalStepDTO: Content, Sendable, Equatable {
     /// Stable step identifier.
     public let id: UUID
@@ -147,10 +118,8 @@ public struct GoalStepDTO: Content, Sendable, Equatable {
         case updatedAt
     }
 
-    /// Decodes tolerantly across the goal and run identifier spellings through
-    /// the shared alias helper. Canonical `goalId`/`lastRunId` win
-    /// when several spellings ride together.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes tolerantly across the goal and run identifier spellings through the shared alias
+    /// helper. Canonical `goalId`/`lastRunId` win when several spellings ride together.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(UUID.self, forKey: .id)
@@ -195,9 +164,6 @@ public struct GoalStepDTO: Content, Sendable, Equatable {
 }
 
 /// Wire shape of one append-only audit entry for a goal.
-///
-/// Identifiers ride the SQLite rowid (zero means not-yet-persisted) so the
-/// trail stays ordered without inventing a second sequence.
 public struct GoalEventDTO: Content, Sendable, Equatable {
     /// SQLite rowid.
     public let id: Int64
@@ -234,10 +200,8 @@ public struct GoalEventDTO: Content, Sendable, Equatable {
         case createdAt
     }
 
-    /// Decodes tolerantly across the goal identifier spellings through the
-    /// shared alias helper. Canonical `goalId` wins when several spellings
-    /// ride together.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes tolerantly across the goal identifier spellings through the shared alias helper.
+    /// Canonical `goalId` wins when several spellings ride together.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(Int64.self, forKey: .id)
@@ -284,9 +248,6 @@ public struct GoalsListResponse: Content, Equatable {
 }
 
 /// Wire shape of one armed event wake-up on a goal.
-///
-/// Carries the debounce stamp so the dashboard can show an armed trigger that
-/// has not fired yet; the identifier lets a later edit target one trigger.
 public struct GoalTriggerDTO: Content, Sendable, Equatable {
     /// Stable trigger identifier.
     public let id: UUID
@@ -347,10 +308,9 @@ public struct GoalTriggerDTO: Content, Sendable, Equatable {
         case createdAt
     }
 
-    /// Decodes tolerantly across the goal and trigger identifier spellings,
-    /// routing through the shared alias helper so one payload cannot fork the
-    /// row shape. Canonical camelCase spellings win when several ride together.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes tolerantly across the goal and trigger identifier spellings, routing through the
+    /// shared alias helper so one payload cannot fork the row shape. Canonical camelCase spellings
+    /// win when several ride together.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(UUID.self, forKey: .id)
@@ -386,10 +346,6 @@ public struct GoalTriggerDTO: Content, Sendable, Equatable {
 }
 
 /// One event wake-up supplied when creating or patching a goal over REST.
-///
-/// The kind is required; the pattern and cooldown stay optional so the common
-/// case needs one field. Aliases mirror the dashboard contract so hand-built
-/// curls and typed clients agree.
 public struct GoalTriggerInput: Content, Sendable, Equatable {
     /// Event kind to watch.
     public let eventKind: String
@@ -456,10 +412,9 @@ public struct GoalTriggerInput: Content, Sendable, Equatable {
     }
 }
 
-/// Goal detail response for `GET /goals/:id` and mutating goal routes.
-///
-/// Steps ride whole because plans stay small by config bound; events ride
-/// bounded by the caller's limit so long audit trails never crowd the row.
+/// Goal detail response for `GET /goals/:id` and mutating goal routes. Steps ride whole because
+/// plans stay small by config bound; events ride bounded by the caller's limit so long audit trails
+/// never crowd the row.
 public struct GoalDetailResponse: Content, Equatable {
     /// Goal row.
     public let goal: GoalDTO
@@ -510,11 +465,6 @@ public struct GoalCreateRequest: Content, Equatable {
 }
 
 /// Goal edit request for `PATCH /goals/:id`.
-///
-/// Every field is optional so one call can rename, restate, retime, or flip
-/// lifecycle state; absent keys leave their columns untouched. A blank title or
-/// statement is rejected rather than stored, so partial edits cannot wipe a
-/// field with whitespace.
 public struct GoalPatchRequest: Content, Equatable {
     /// New lifecycle state raw value, when changing state.
     public let status: String?
@@ -545,10 +495,6 @@ public struct GoalPatchRequest: Content, Equatable {
 }
 
 /// Manual step move for `PATCH /goals/:id/steps/:stepId`.
-///
-/// Status rides required because a move without a destination is a no-op that
-/// would still log a note; the note stays optional so terse moves need no
-/// annotation.
 public struct GoalStepPatchRequest: Content, Equatable {
     /// Destination step state raw value.
     public let status: String
@@ -563,9 +509,6 @@ public struct GoalStepPatchRequest: Content, Equatable {
 }
 
 /// Goal counts for `GET /goals/summary`.
-///
-/// Explicit per-status tallies keep the dashboard badge free of key-string
-/// branching. The parked badge reads `needsInput` directly.
 public struct GoalsSummaryResponse: Content, Equatable {
     /// Total goals across every state.
     public let total: Int
@@ -631,10 +574,6 @@ public struct GoalsSummaryResponse: Content, Equatable {
 }
 
 /// Manual-advance receipt for `POST /goals/:id/advance`.
-///
-/// Carries both durable identifiers so the dashboard can link the fresh run row
-/// and its session without a second lookup: the run row supplies the audit
-/// trail while the session supplies the conversation.
 public struct GoalAdvanceResponse: Content, Equatable {
     /// Run-log row for the advancement turn.
     public let runID: UUID

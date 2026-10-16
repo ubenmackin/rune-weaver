@@ -24,10 +24,7 @@ public struct ActiveChatInfo: Identifiable, Sendable, Equatable {
 @Observable
 @MainActor
 public final class AppModel {
-    /// Single-line menu title for the embedded service. Holds only the
-    /// display title (at most 40 characters), never the full error text, so
-    /// the narrow menu stays readable while diagnostics live in the log plus
-    /// the one-line detail below.
+    /// Single-line menu title for the embedded service.
     public var serverStatus: String = "Starting…"
     /// Whether the latest boot attempt failed. The sole selector for the
     /// Failed menu affordance, so views never branch on title text and a
@@ -49,10 +46,6 @@ public final class AppModel {
     public var nextScheduleText: String = "No jobs scheduled"
     public var lastRunSummaryText: String = "None yet"
     /// Whether a desktop action batch is currently executing.
-    ///
-    /// The sole selector for the Desktop Control menu section: armed-but-idle
-    /// tool toggles stay out of the menu, so the section appears only while a
-    /// batch runs and Emergency Stop is reachable exactly when it can act.
     public var isDesktopActive: Bool = false
     /// Whether desktop automation is currently paused waiting for operator resume.
     public var hasPausedDesktopAutomation: Bool {
@@ -65,10 +58,9 @@ public final class AppModel {
     /// the shared refresh tick, so the menu label and Indexing section track
     /// runs without a second cadence.
     public var isIndexing: Bool = false
-    /// Whether a cancel request is in flight for the run in flight. Claimed
-    /// synchronously in `cancelIndexRun` so double-clicks collapse to one
-    /// cancel, and cleared on the refresh tick once the run settles. Drives
-    /// the disabled Cancelling state of the menu cancel button.
+    /// Whether a cancel request is in flight for the run in flight. Claimed synchronously in
+    /// `cancelIndexRun` so double-clicks collapse to one cancel, and cleared on the refresh tick
+    /// once the run settles.
     public var isCancellingIndex: Bool = false
     /// Display label for what caused the run in flight (for example Manual Run).
     public var indexTriggerText: String = "Index Run"
@@ -96,11 +88,9 @@ public final class AppModel {
     /// can isolate first-run state in a fresh defaults suite without touching
     /// the owner's real flag.
     private let permissionsOnboardingStore: PermissionsOnboardingStore
-    /// Freshly minted owner token shown exactly once. Held in memory only and
-    /// cleared on acknowledgement; never logged and never written outside the
-    /// Keychain/file persistence owned by the auth store. The setter stays
-    /// private so acknowledgement is the sole external mutation path and the
-    /// secret cannot be overwritten from outside the model.
+    /// Freshly minted owner token shown exactly once. Held in memory only and cleared on
+    /// acknowledgement; never logged and never written outside the Keychain/file persistence owned
+    /// by the auth store.
     public private(set) var generatedOnceToken: String?
     /// Non-secret SHA-256 prefix identifying the stored owner token, so
     /// Settings can prove which credential is active without rendering it.
@@ -152,11 +142,9 @@ public final class AppModel {
         searchEnsurer: any SearXNGEnsuring = SearXNGEnsurer.shared,
         onTerminate: @escaping @MainActor @Sendable () -> Void = { NSApplication.shared.terminate(nil) }
     ) {
-        // Construction stays side-effect free: the notification center is
-        // configured when boot starts, so building the model (including in
-        // refresh-path tests) never touches UNUserNotificationCenter.
-        // The completion flag snapshots the durable store so first-run
-        // guidance survives relaunches through UserDefaults, not memory.
+        // Construction stays side-effect free: the notification center is configured when boot
+        // starts, so building the model (including in refresh-path tests) never touches
+        // UNUserNotificationCenter.
         self.permissionsOnboardingStore = permissionsOnboardingStore
         self.hasCompletedPermissionsOnboarding = permissionsOnboardingStore.isCompleted
         self.searchEnsurer = searchEnsurer
@@ -207,10 +195,7 @@ public final class AppModel {
         serverStatusDetail = nil
     }
 
-    /// Marks boot as running, clearing any stale failure. The title names
-    /// the bound endpoint for healthy boots and appends the local-only cue
-    /// when no owner token was resolved, so a loopback boot is never
-    /// mistaken for a fully provisioned one.
+    /// Marks boot as running, clearing any stale failure.
     public func setServerRunning(host: String, port: Int, authConfigured: Bool) {
         // Trim here as well as at the bind site so a padded value set
         // directly still renders the classified address.
@@ -222,10 +207,8 @@ public final class AppModel {
         serverStatusDetail = nil
     }
 
-    /// Marks boot as failed with a one-line summary, keeping the menu title
-    /// fixed and short while the detail carries the actionable hint. The
-    /// full error stays in the log; only the truncated tail reaches the UI
-    /// and no secret ever flows through this path.
+    /// Marks boot as failed with a one-line summary, keeping the menu title fixed and short while
+    /// the detail carries the actionable hint.
     public func setServerFailed(detail: String) {
         serverStatus = "Server failed"
         isServerFailed = true
@@ -259,13 +242,8 @@ extension AppModel {
         return "…" + String(oneLine.suffix(serverStatusDetailLimit - 1))
     }
 
-    /// Preconditions a snapshot of the published bind values against the
-    /// resolved owner-auth posture.
-    ///
-    /// The policy itself lives in `ServerConfig.requireBindable`: loopback always
-    /// serves, a non-loopback endpoint serves only once an owner token resolved,
-    /// and an unauthenticated LAN bind is refused rather than silently
-    /// downgraded to an open surface.
+    /// Preconditions a snapshot of the published bind values against the resolved owner-auth
+    /// posture.
     private func validatedBootBind(host: String, port: Int, authConfigured: Bool, allowedHosts: [String] = []) -> ServerConfig? {
         // Trim before validation so a padded file value classifies as the
         // loopback it names and the refusal message echoes the same address
@@ -330,13 +308,6 @@ extension AppModel {
     }
 
     /// Warms the local search engine after the menu bar server is already live.
-    /// Best-effort by design: failures stay in the server log so a down engine
-    /// never flips a healthy boot into a failure, while the health endpoint's
-    /// live stage plus reachability carries state to the dashboard dot and
-    /// message. Hops off the main actor via a nonisolated factory (a plain
-    /// Task here is non-isolated and does not inherit MainActor isolation,
-    /// so isolation must be explicit), with the
-    /// handle retained so quit can cancel the flight.
     private func startSearchWarmup(browserConfig: BrowserConfig) {
         searchWarmupTask?.cancel()
         let captured = browserConfig
@@ -361,9 +332,6 @@ extension AppModel {
     }
 
     /// Creates the warmup flight off MainActor isolation.
-    /// Nonisolated so the minutes-budget ensure never blocks the menu bar while
-    /// still inheriting task-locals and priority (unlike a detached task);
-    /// the caller retains the handle for quit cancel.
     private nonisolated static func makeSearchWarmupTask(
         browserConfig: BrowserConfig,
         ensurer: any SearXNGEnsuring
@@ -379,10 +347,8 @@ extension AppModel {
         ensurer: any SearXNGEnsuring
     ) async {
         let searxngURL = browserConfig.searxngURL
-        // Structured group ties the stage ticker to the ensure flight so parent
-        // cancel or scope exit always reaps the watcher; no unstructured
-        // watcher can leak past settle. Ticks only when stage or elapsed moves,
-        // matching the serve boot lines for long pulls.
+        // Structured group ties the stage ticker to the ensure flight so parent cancel or scope
+        // exit always reaps the watcher; no unstructured watcher can leak past settle.
         await withDiscardingTaskGroup { group in
             group.addTask {
                 var lastStage: SearXNGEnsurer.StartStage?
@@ -457,21 +423,17 @@ extension AppModel {
             do {
                 config = try RuneWeaverConfig.loadDefault()
             } catch let error as ConfigError {
-                // Refuse to boot from defaults when a stored file exists but
-                // fails validation, so corrupt settings are never mistaken
-                // for intentional defaults. The full parse detail stays in
-                // the log; the menu carries only the actionable hint.
+                // Refuse to boot from defaults when a stored file exists but fails validation, so
+                // corrupt settings are never mistaken for intentional defaults.
                 RuneWeaverLog.app.error("Invalid config: \(String(describing: error))")
                 setServerFailed(detail: "Invalid config — check ~/.runeweaver/config.toml")
                 self.hasStartedBoot = false
                 return
             }
 
-            // `[server]` supplies the bind defaults while the published fields
-            // stay the override channel: a field left at its built-in default
-            // adopts the configured value, and an explicit change wins. Snapshot
-            // both once so an edit mid-boot cannot produce a half-old address;
-            // the policy is applied after auth resolves.
+            // `[server]` supplies the bind defaults while the published fields stay the override
+            // channel: a field left at its built-in default adopts the configured value, and an
+            // explicit change wins.
             let rawBindHost = hostname == ServerEndpointConfig.defaultHostname ? config.server.hostname : hostname
             // Trim surrounding whitespace so a padded file value still boots
             // as the loopback it classifies as, and never reaches the bind
@@ -479,11 +441,8 @@ extension AppModel {
             let bindHost = rawBindHost.trimmingCharacters(in: .whitespacesAndNewlines)
             let bindPort = port == ServerEndpointConfig.defaultPort ? config.server.port : port
 
-            // Resolve the owner token before the bind check so the bind policy
-            // and the request gate share one posture, matching `serve`. A
-            // declared but unreadable token (for example a loose-permissioned
-            // file) fails boot here instead of surfacing at the gate; the
-            // resolved value is never logged or rendered.
+            // Resolve the owner token before the bind check so the bind policy and the request gate
+            // share one posture, matching `serve`.
             let auth: ServerAuth?
             do {
                 auth = try await ServerAuth.resolve(authConfig: config.auth)
@@ -497,11 +456,9 @@ extension AppModel {
                 return
             }
 
-            // A missing token is a first-run posture, not a boot failure:
-            // loopback stays usable for local work while the menu surfaces an
-            // actionable onboarding state instead of failing silently. The
-            // fingerprint is derived and the raw value dropped immediately so
-            // only the non-secret prefix ever reaches published state.
+            // A missing token is a first-run posture, not a boot failure: loopback stays usable for
+            // local work while the menu surfaces an actionable onboarding state instead of failing
+            // silently.
             if auth == nil {
                 self.needsOwnerToken = true
                 self.ownerTokenFingerprint = nil
@@ -651,13 +608,6 @@ extension AppModel {
     }
 
     /// Refreshes the menu-bar indexing snapshot from the live index pair.
-    ///
-    /// Prefers the coordinator live totals while a run is in flight and falls
-    /// back to the store committed document count for indexed only when the run
-    /// started but no live frame has landed yet. Scanned counts examined items
-    /// including skipped and errored ones, so it stays zero (unknown) rather
-    /// than misreporting committed documents. Idle clears the flag so the
-    /// section hides.
     private func refreshIndexState(context: ServerContext) async {
         // Snapshot the pair atomically so the coordinator and store always
         // belong to one generation, never a half-swapped mix.
@@ -678,11 +628,8 @@ extension AppModel {
             let running = await coordinator.isRunning
             self.isIndexing = running
             if running {
-                // No live frame yet (the run just started); show the committed
-                // document count as indexed so the row never reads zero for a
-                // live run. Scanned counts examined items including skipped and
-                // errored ones, so it stays zero (unknown) instead of
-                // misreporting committed documents as scanned.
+                // No live frame yet (the run just started); show the committed document count as
+                // indexed so the row never reads zero for a live run.
                 if let store = liveIndex.store {
                     do {
                         let stats = try await store.stats()
@@ -716,10 +663,9 @@ extension AppModel {
         }
     }
 
-    /// Maps an index run trigger to the menu display copy, matching the
-    /// dashboard wording for run notices and history rows.
+    /// Maps an index run trigger to the menu display copy, matching the dashboard wording for run
+    /// notices and history rows.
     /// - Parameter trigger: What caused the run.
-    /// - Returns: Plain-language label for the menu row.
     static func indexTriggerLabel(for trigger: IndexRunTrigger) -> String {
         switch trigger {
         case .nightly:
@@ -754,11 +700,9 @@ extension AppModel {
     /// parent segments, short enough to avoid widening the menu.
     private static let indexCurrentMenuLimit = 48
 
-    /// Truncates a relative index path to menu width, keeping the trailing
-    /// portion so the filename stays visible (the suffix is significant for
-    /// paths, while a leading prefix would hide it behind parent directories).
-    /// - Parameter current: Last relative item reported by the run.
-    /// - Returns: Truncated row text, or nil when there is nothing to show.
+    /// Truncates a relative index path to menu width, keeping the trailing portion so the filename
+    /// stays visible (the suffix is significant for paths, while a leading prefix would hide it
+    /// behind parent directories).
     static func truncatedIndexCurrent(_ current: String?) -> String? {
         guard let current, !current.isEmpty else { return nil }
         if current.count <= indexCurrentMenuLimit {
@@ -773,18 +717,15 @@ extension AppModel {
 extension AppModel {
     /// Whether the web dashboard and web settings can be opened from the menu.
     public var isDashboardAvailable: Bool {
-        // A refused bind leaves no live endpoint while the published fields
-        // still fall back to loopback defaults, so availability must require
-        // a successful bind instead of a constructible URL alone; otherwise
-        // the menu would offer a dashboard that has no server behind it.
+        // A refused bind leaves no live endpoint while the published fields still fall back to
+        // loopback defaults, so availability must require a successful bind instead of a
+        // constructible URL alone; otherwise the menu would offer a dashboard that has no server.
         guard isRunning, boundEndpoint != nil else { return false }
         return dashboardURL() != nil
     }
 
-    /// Builds a dashboard URL from the effective bind values so host text can never inject a
-    /// scheme or path, and so a concurrent edit cannot produce a half-old address.
-    /// When bound to an all-interfaces wildcard (0.0.0.0, ::, [::], *), resolves to 127.0.0.1
-    /// so local navigation reaches the service via loopback.
+    /// Builds a dashboard URL from the effective bind values so host text can never inject a scheme
+    /// or path, and so a concurrent edit cannot produce a half-old address.
     public func dashboardURL(fragment: String? = nil, queryItems: [URLQueryItem]? = nil) -> URL? {
         // Follow the endpoint actually bound at boot (which may come from
         // `[server]`), falling back to the published fields before boot.
@@ -837,10 +778,8 @@ extension AppModel {
         dashboardURL(fragment: "approvals")
     }
 
-    /// Opens the dashboard on the Approvals inbox tab, the one surface where any
-    /// request kind can be decided. Honors the live-bind availability check so
-    /// a menu row never opens a browser at a server that is not running, the
-    /// same guard the menu applies to its other dashboard destinations.
+    /// Opens the dashboard on the Approvals inbox tab, the one surface where any request kind can
+    /// be decided.
     public func openInbox() {
         guard isDashboardAvailable else { return }
         if let url = inboxURL() {
@@ -848,22 +787,16 @@ extension AppModel {
         }
     }
 
-    /// Opens the dashboard on the Memory section's Index Status inner tab,
-    /// where the run controls live beside Search and Memory. The fragment
-    /// carries the indexing subpath the dashboard routes on, so the inner tab
-    /// opens selected instead of the default Search and Memory view.
+    /// Opens the dashboard on the Memory section's Index Status inner tab, where the run controls
+    /// live beside Search and Memory.
     public func openIndexStatus() {
         if let url = dashboardURL(fragment: "memory/indexing") {
             NSWorkspace.shared.open(url)
         }
     }
 
-    /// Requests cancellation of the run in flight through the coordinator
-    /// cancel path, keeping committed batches so the next run resumes from
-    /// there. Claims the cancelling flag synchronously so double-clicks
-    /// collapse to one cancel; the flag clears on the refresh tick once the
-    /// run settles. Returns immediately; the refresh tick hides the section
-    /// once the run settles.
+    /// Requests cancellation of the run in flight through the coordinator cancel path, keeping
+    /// committed batches so the next run resumes from there.
     public func cancelIndexRun() {
         guard !isCancellingIndex else { return }
         guard let context = serverContext else {
@@ -967,10 +900,8 @@ extension AppModel {
 // MARK: - Owner Token Onboarding & Settings Access
 
 extension AppModel {
-    /// Mints the first owner token for a fresh install through the shared
-    /// auth store, so the menu bar never reimplements randomness or storage.
-    /// The running service keeps its boot-time posture until the
-    /// acknowledgement restart, which is why the needs flag stays set here.
+    /// Mints the first owner token for a fresh install through the shared auth store, so the menu
+    /// bar never reimplements randomness or storage.
     public func generateOwnerToken() {
         guard !isGeneratingOwnerToken else { return }
         // Set synchronously before the Task hops so a double-tap cannot pass
@@ -983,11 +914,8 @@ extension AppModel {
         }
     }
 
-    /// Replaces the stored owner token through the same store the first mint
-    /// uses, keeping Terminal optional for rotation. The live service still
-    /// enforces the previous credential until the acknowledgement restart
-    /// adopts the replacement, so a lost copy can be recovered by rotating
-    /// again before acknowledging.
+    /// Replaces the stored owner token through the same store the first mint uses, keeping Terminal
+    /// optional for rotation.
     public func rotateOwnerToken() {
         guard !isGeneratingOwnerToken else { return }
         // Same synchronous single-flight as generation: claim the flag on the
@@ -999,10 +927,8 @@ extension AppModel {
         }
     }
 
-    /// Re-reads the stored credential without minting, so Settings can prove
-    /// which token is active by fingerprint prefix alone. The raw value is
-    /// dropped immediately after hashing; only the prefix and source label
-    /// ever reach published state.
+    /// Re-reads the stored credential without minting, so Settings can prove which token is active
+    /// by fingerprint prefix alone.
     public func refreshOwnerTokenStatus() {
         Task { [weak self] in
             guard let self else { return }
@@ -1037,19 +963,15 @@ extension AppModel {
         }
     }
 
-    /// Clears the once-shown secret from memory and restarts the embedded
-    /// service so the gate adopts the stored credential. Clearing first
-    /// guarantees the secret cannot linger in published state past the owner's
-    /// confirmation, even if the restart itself fails.
+    /// Clears the once-shown secret from memory and restarts the embedded service so the gate
+    /// adopts the stored credential.
     public func acknowledgeGeneratedToken() {
         generatedOnceToken = nil
         restartServerToAdoptToken()
     }
 
-    /// Restarts the embedded service without terminating the menu bar, so a
-    /// newly minted token takes effect without relaunching the app. The
-    /// shutdown mirrors quit (polling, warmup, gate, hub, app) but returns to
-    /// boot instead of terminating.
+    /// Restarts the embedded service without terminating the menu bar, so a newly minted token
+    /// takes effect without relaunching the app.
     public func restartServerToAdoptToken() {
         guard !isRestarting else { return }
         // Claim synchronously on the MainActor before the Task hops so a
@@ -1061,11 +983,8 @@ extension AppModel {
         }
     }
 
-    /// Mints via the single-owner rotation path so CSPRNG bytes plus
-    /// Keychain/0600 persistence stay single-sourced with the terminal flow.
-    /// An empty seed is honest for first generation because the throwaway
-    /// verifier is never served; rotation seeds from the stored value so a
-    /// storage failure leaves the working credential untouched.
+    /// Mints via the single-owner rotation path so CSPRNG bytes plus Keychain/0600 persistence stay
+    /// single-sourced with the terminal flow.
     private func mintOwnerToken(replacing: Bool) async {
         // The single-flight flag was already claimed synchronously by
         // generateOwnerToken/rotateOwnerToken before the Task hop, so a
@@ -1122,11 +1041,8 @@ extension AppModel {
         }
     }
 
-    /// Shuts down the live service and boots again from disk, letting a newly
-    /// stored token flow through the same resolve-plus-bind path as launch.
-    /// Live state is dropped before reboot so a failed restart never resumes
-    /// a half-wired context, and the boot flag is held across the hop so a
-    /// concurrent menu appearance cannot bind the port twice.
+    /// Shuts down the live service and boots again from disk, letting a newly stored token flow
+    /// through the same resolve-plus-bind path as launch.
     private func restartServer() async {
         // The isRestarting flag was claimed synchronously by
         // restartServerToAdoptToken; clearing here releases the single-flight
@@ -1181,9 +1097,6 @@ private actor ServerRunnerActor {
 }
 
 /// Minimal fallback provider when no LLM provider is enabled in config.
-///
-/// Internal so boot helpers in a companion file share the same unconfigured
-/// path without duplicating the placeholder turn.
 struct FallbackDummyProvider: LLMProvider {
     var modelInfo: ModelInfo {
         ModelInfo(name: "unconfigured", provider: "none", contextLength: 4096, supportsTools: false, supportsEmbeddings: false)

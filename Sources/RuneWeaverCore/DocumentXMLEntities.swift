@@ -1,19 +1,10 @@
 // Rune Weaver Core — Spreadsheet cells and entity decoding for extraction.
-//
-// Holds the worksheet and entity layer for `DocumentTextExtractor`: cell value
-// resolution over the shared string table, cell and regex match helpers,
-// named plus numeric XML entity decoding, and the segment plus word-wrap
-// helpers behind overlapping chunking. Text normalization lives beside it
-// while ZIP reading stays in its own file.
 
 import Foundation
 
 extension DocumentTextExtractor {
-    /// Resolves one worksheet cell to its display value.
-    /// - Parameters:
-    ///   - cell: Cell attributes plus inner XML.
-    ///   - sharedStrings: Shared string table in index order.
-    /// - Returns: Cell value, empty when the cell carries none.
+    /// Resolves one worksheet cell to its display value. cell: Cell attributes plus
+    /// inner XML.
     static func worksheetCellValue(_ cell: (attributes: String, inner: String), sharedStrings: [String]) -> String {
         if let type = attributeValue("t", in: cell.attributes) {
             switch type {
@@ -57,21 +48,14 @@ extension DocumentTextExtractor {
         }
     }
 
-    /// Reads one quoted attribute value from an XML start tag body.
-    /// - Parameters:
-    ///   - name: Attribute name.
-    ///   - attributes: Attribute body without the tag name.
-    /// - Returns: Attribute value, or nil when absent.
+    /// Reads one quoted attribute value from an XML start tag body. name: Attribute
+    /// name.
     static func attributeValue(_ name: String, in attributes: String) -> String? {
         firstMatch("\\b\(name)=\"([^\"]*)\"", in: attributes)
     }
 
-    /// Returns the first capture group of a regex match.
-    /// - Parameters:
-    ///   - pattern: Regular expression with at least one capture group.
-    ///   - text: Text to search.
-    ///   - group: Capture group index (defaults to the first group).
-    /// - Returns: Captured substring, or nil when the pattern does not match.
+    /// Returns the first capture group of a regex match. pattern: Regular
+    /// expression with at least one capture group.
     static func firstMatch(_ pattern: String, in text: String, group: Int = 1) -> String? {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else {
             return nil
@@ -86,12 +70,8 @@ extension DocumentTextExtractor {
         return source.substring(with: match.range(at: group))
     }
 
-    /// Returns every capture group match of a regex.
-    /// - Parameters:
-    ///   - pattern: Regular expression with at least one capture group.
-    ///   - text: Text to search.
-    ///   - group: Capture group index (defaults to the first group).
-    /// - Returns: Captured substrings in match order.
+    /// Returns every capture group match of a regex. pattern: Regular expression
+    /// with at least one capture group.
     static func allMatches(_ pattern: String, in text: String, group: Int = 1) -> [String] {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else {
             return []
@@ -106,11 +86,6 @@ extension DocumentTextExtractor {
     }
 
     /// Decodes the XML entities that appear in document and HTML text.
-    ///
-    /// `&amp;` decodes last so a double-escaped sequence such as `&amp;lt;` ends
-    /// as the literal `&lt;` instead of collapsing all the way to `<`.
-    /// - Parameter text: Text containing entities.
-    /// - Returns: Text with named and numeric entities decoded.
     static func decodeXMLEntities(_ text: String) -> String {
         var result = text
         for (entity, replacement) in namedXMLEntities {
@@ -159,10 +134,7 @@ extension DocumentTextExtractor {
     }
 
     /// Splits normalized text into segments no longer than the character budget.
-    /// - Parameters:
-    ///   - text: Normalized extracted text.
-    ///   - characterBudget: Maximum characters per segment.
-    /// - Returns: Non-empty segments in reading order.
+    /// text: Normalized extracted text.
     static func chunkSegments(from text: String, characterBudget: Int) -> [String] {
         var segments: [String] = []
         for line in NormalizedText.splitLines(text) where !line.isEmpty {
@@ -175,11 +147,8 @@ extension DocumentTextExtractor {
         return segments
     }
 
-    /// Word-wraps an over-long line, hard-splitting a single oversized word.
-    /// - Parameters:
-    ///   - line: Line longer than the character budget.
-    ///   - characterBudget: Maximum characters per piece.
-    /// - Returns: Wrapped pieces in order.
+    /// Word-wraps an over-long line, hard-splitting a single oversized word. line:
+    /// Line longer than the character budget.
     static func splitLongLine(_ line: String, characterBudget: Int) -> [String] {
         var pieces: [String] = []
         var current = ""
@@ -209,11 +178,8 @@ extension DocumentTextExtractor {
         return pieces
     }
 
-    /// Hard-splits a word that exceeds the character budget.
-    /// - Parameters:
-    ///   - word: Word longer than the budget.
-    ///   - characterBudget: Maximum characters per piece.
-    /// - Returns: Fixed-width pieces in order.
+    /// Hard-splits a word that exceeds the character budget. word: Word longer than
+    /// the budget.
     static func hardSplit(_ word: String, characterBudget: Int) -> [String] {
         var pieces: [String] = []
         var start = word.startIndex

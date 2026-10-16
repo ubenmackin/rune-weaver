@@ -1,15 +1,4 @@
 // Rune Weaver Tools — Autonomous fan-out tool for the shared ToolBus (`fanout.run`).
-//
-// Purpose: lets the calling agent spawn bounded parallel worker turns through
-// the fan-out engine as one approval-gated call, so multi-step research runs
-// concurrently instead of serially inside one turn. Scope: argument decoding,
-// read-only subset derivation, and engine dispatch only; concurrency, run
-// rows, and the merge pass live in FanOutEngine. Architectural role: the
-// agent's lever for parallel autonomous work — the call itself parks for
-// approval because it spends model rounds, workers get the read-only tool
-// subset unless the fanout tool settings widen them to the full registry,
-// and real-world actions still ride their own permission-gated tools so a
-// worker swarm cannot mutate state by surprise.
 
 import Foundation
 import RuneWeaverCore
@@ -32,9 +21,8 @@ public struct FanOutRunArgs: Sendable, Equatable, Decodable {
         case subtasks
     }
 
-    /// Decodes run args, defaulting an absent list to empty so a caller that
-    /// sent no subtasks still decodes and reads the honest rejection instead
-    /// of a decode failure.
+    /// Decodes run args, defaulting an absent list to empty so a caller that sent no subtasks still
+    /// decodes and reads the honest rejection instead of a decode failure.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -49,10 +37,7 @@ public struct FanOutSubtaskArgs: Sendable, Equatable, Decodable {
     /// Full prompt the worker turn runs.
     public let prompt: String
 
-    /// Creates one subtask argument pair.
-    /// - Parameters:
-    ///   - title: Display title for the run rows.
-    ///   - prompt: Full prompt the worker turn runs.
+    /// Creates one subtask argument pair. title: Display title for the run rows.
     public init(title: String, prompt: String) {
         self.title = title
         self.prompt = prompt
@@ -91,10 +76,7 @@ public struct FanOutSubtaskWire: Sendable, Equatable, Codable {
     /// Lifecycle state after the run settled.
     public let status: String
 
-    /// Creates one subtask status wire.
-    /// - Parameters:
-    ///   - title: Subtask title.
-    ///   - status: Lifecycle state raw value.
+    /// Creates one subtask status wire. title: Subtask title.
     public init(title: String, status: String) {
         self.title = title
         self.status = status
@@ -102,11 +84,6 @@ public struct FanOutSubtaskWire: Sendable, Equatable, Codable {
 }
 
 /// Envelope wrapping `fanout.run` output.
-///
-/// The merged summary rides the envelope so the calling agent renders one
-/// honest digest in its own turn without re-reading the run rows; the origin
-/// session link is claimed only when the conversation manager knows the
-/// session, so unknown sessions never conjure ghost links.
 public struct FanOutRunEnvelope: Sendable, Equatable, Codable {
     /// Created run identifier.
     public let runID: String
@@ -120,13 +97,7 @@ public struct FanOutRunEnvelope: Sendable, Equatable, Codable {
     /// was known to the conversation manager.
     public let sessionID: String?
 
-    /// Creates a run envelope.
-    /// - Parameters:
-    ///   - runID: Created run identifier.
-    ///   - status: Parent lifecycle state.
-    ///   - summary: Merged summary, or nil while unwritten.
-    ///   - subtasks: Per-subtask statuses.
-    ///   - sessionID: Linked origin session, when known.
+    /// Creates a run envelope. runID: Created run identifier.
     public init(
         runID: String,
         status: String,
@@ -163,12 +134,6 @@ public struct FanOutTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and scheduler prompts.
     public let name = "fanout.run"
     /// When the LLM should use this tool.
-    ///
-    /// The description teaches the model the worker bargain up front so it
-    /// plans subtasks knowing what its workers can and cannot do: the
-    /// read-only subset unless the fanout tool settings widen it to the full
-    /// registry, and real-world actions still ride their own permission-gated
-    /// tools.
     public let description =
         "Spawns parallel worker subagents that run their own subtask prompts concurrently and returns one merged summary. "
             + "Use when independent research or investigation steps can run at the same time. "
@@ -194,18 +159,12 @@ public struct FanOutTool: Tool, Sendable {
     /// Sessions owner verifying the origin link; nil keeps the tool usable
     /// without a manager (the envelope then never claims a session link).
     private let conversations: ConversationManager?
-    /// Read-only tool names the workers get unless the fanout tool settings
-    /// widen workers to the full registry, derived once at registration from
-    /// the built registry snapshot so the subset stays deterministic; names for tools
-    /// disabled on the bus simply filter to nothing in the orchestrator's
+    /// Read-only tool names workers get unless settings widen them to the full registry;
+    /// names for tools disabled on the bus filter to nothing in the orchestrator's
     /// enabled-only snapshot, so they are harmless to carry.
     private let allowedToolNames: [String]
 
-    /// Creates a fan-out tool.
-    /// - Parameters:
-    ///   - engine: Fan-out engine running the swarm.
-    ///   - conversations: Sessions owner for the origin-link verification.
-    ///   - allowedToolNames: Read-only tool names workers may call.
+    /// Creates a fan-out tool. engine: Fan-out engine running the swarm.
     public init(engine: FanOutEngine, conversations: ConversationManager? = nil, allowedToolNames: [String] = []) {
         self.engine = engine
         self.conversations = conversations
@@ -249,10 +208,7 @@ public struct FanOutTool: Tool, Sendable {
                 originSessionID: context.conversationID,
                 allowedTools: allowedTools
             )
-            // The origin session links the swarm's parent row back to the turn
-            // that asked for it. The link is claimed in the output only when
-            // the conversation manager knows the session, mirroring the goal
-            // creation pattern — unknown sessions never conjure ghost links.
+            // The origin session links the swarm's parent row back to the turn that asked for it.
             var linkedSessionID: String?
             if let conversations, await conversations.session(id: context.conversationID) != nil {
                 linkedSessionID = context.conversationID.uuidString
@@ -275,11 +231,8 @@ public struct FanOutTool: Tool, Sendable {
         }
     }
 
-    /// Maps one typed engine rejection onto honest tool copy.
-    /// The typed cases are the caller's only error surface, so each reads as
-    /// its own guidance instead of a generic engine failure.
-    /// - Parameter error: The error the engine threw.
-    /// - Returns: The honest failure copy.
+    /// Maps one typed engine rejection onto honest tool copy. The typed cases are the caller's only
+    /// error surface, so each reads as its own guidance instead of a generic engine failure.
     static func failureMessage(for error: FanOutError) -> String {
         switch error {
         case let .maxWorkersReached(limit):
@@ -298,19 +251,6 @@ public enum FanOutTools {
     public static let toolNames = ["fanout.run"]
 
     /// Builds the fan-out tool for a shared engine.
-    ///
-    /// The tool builds whenever an engine arrives; enablement lives solely in
-    /// the tool-state toggle — the tool ships disabled (see
-    /// `BuiltinToolPlugins.shipsDisabledToolNames`) and an operator enable is
-    /// the only gate before it runs, keeping `GET /tools` stable instead of
-    /// shape-shifting with config. Session-link verification rides the optional
-    /// conversations manager; nil keeps the envelope's session link off so
-    /// engine-only callers still work.
-    /// - Parameters:
-    ///   - engine: Fan-out engine running the swarm.
-    ///   - conversations: Sessions owner for the origin-link verification.
-    ///   - allowedToolNames: Read-only tool names workers may call.
-    /// - Returns: Tools in registration order.
     public static func makeTools(
         engine: FanOutEngine,
         conversations: ConversationManager? = nil,

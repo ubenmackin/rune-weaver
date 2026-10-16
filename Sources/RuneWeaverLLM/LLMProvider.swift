@@ -189,11 +189,9 @@ extension LLMProvider {
     /// - Parameter tools: Registered tools the model may call.
     /// - Returns: Definitions in provider wire shape, preserving caller order.
     public func toolDefinitions(for tools: [any Tool]) -> [ToolDefinition] {
-        // Ordering stays unsorted here on purpose: the request-body builders own
-        // the single canonical name sort at the wire boundary, where the prompt
-        // and both endpoints already converge for prefix-stable caching. Sorting
-        // here as well would duplicate that guarantee and mask callers that
-        // bypass this helper straight to the builders.
+        // Ordering stays unsorted here on purpose: the request-body builders own the single
+        // canonical name sort at the wire boundary, where the prompt and both endpoints already
+        // converge for prefix-stable caching.
         tools.map { ToolDefinition($0) }
     }
 }
@@ -737,14 +735,8 @@ struct OpenAIResponsesToolCallAccumulator: Sendable {
 
 /// Best-effort sticky slot hint for llama.cpp prompt-cache reuse.
 public enum LlamaCppSlot: Sendable {
-    /// Derives a best-effort slot for one chat session.
-    /// Nil when no session is set so the server auto-assigns. The hash spreads
-    /// sessions (FNV-1a over UTF-8) but cannot isolate them: hash collisions and
-    /// pigeonhole overlap share a slot and evict each other's KV prefix, so treat
-    /// pinning as a cache hint rather than isolation. The pool size stays an
-    /// explicit caller argument with no fallback because any hardcoded count
-    /// risks an out-of-range id on servers started with a smaller `--parallel`;
-    /// pass the configured provider pool so small servers keep auto-assignment.
+    /// Derives a best-effort slot for one chat session. Nil when no session is set so the server
+    /// auto-assigns.
     public static func slotID(forSessionID sessionID: String?, slotCount: Int) -> Int? {
         guard let sessionID else { return nil }
         // Trim once and hash the trimmed form so padded and bare identifiers

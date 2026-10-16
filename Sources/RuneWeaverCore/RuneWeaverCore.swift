@@ -1,7 +1,4 @@
 // Rune Weaver Core — Core module entry point.
-//
-// Single-sources the engine version so User-Agent strings and API versions
-// cannot drift across tools, providers, and the service surface.
 
 /// Canonical engine version shared by User-Agent strings and API versions.
 public enum RuneWeaverVersion: Sendable {

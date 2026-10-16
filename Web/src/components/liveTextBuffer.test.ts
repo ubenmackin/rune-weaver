@@ -1,8 +1,4 @@
 // Rune Weaver Dashboard — Live grapheme buffer matrix for streaming Markdown.
-//
-// Covers split emoji across deltas, ZWJ family holds, Segmenter-absent
-// fallback with zero loss, empty text rendering null, and done convergence
-// so the live bubble and the terminal bubble agree through MarkdownText.
 
 import React from "react";
 import { render } from "@testing-library/react";

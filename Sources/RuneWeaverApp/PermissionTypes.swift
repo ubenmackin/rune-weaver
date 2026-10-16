@@ -1,19 +1,4 @@
 // Rune Weaver App — Permission vocabulary for the onboarding window.
-//
-// Defines the ordered permission kinds, live statuses, row actions, and
-// System Settings panes behind the first-run Permissions window. The ordering
-// of PermissionKind is the presentation order, so inserting a new capability
-// means appending in the place it should appear rather than sorting elsewhere.
-// This file owns the user-facing copy and the pure status/action mappings;
-// live TCC queries live in PermissionProbes so tests can exercise every
-// mapping without ever prompting for real consent.
-//
-// Scope: app-layer presentation plus pure mappings only. No TCC calls, no
-// UserDefaults, no window logic — those belong to the probes and the
-// onboarding store.
-// Architectural role: single vocabulary shared by the probes, the store gate,
-// and the Permissions window, keeping status interpretation identical in
-// production reads and in tests.
 
 import Contacts
 import EventKit
@@ -22,10 +7,6 @@ import RuneWeaverCore
 import Speech
 
 /// Ordered capabilities surfaced in the Permissions window.
-///
-/// Declaration order is the UI order: Messages History first because search
-/// and send confirmation depend on it, Send Messages last because it is only
-/// meaningful once history is readable.
 public enum PermissionKind: String, CaseIterable, Sendable {
     case fullDiskAccess
     case contacts
@@ -38,12 +19,6 @@ public enum PermissionKind: String, CaseIterable, Sendable {
 }
 
 /// Live readability state for one capability.
-///
-/// Separate from the raw platform values so the window reasons about one
-/// closed set: granted means usable now, denied means the owner refused,
-/// notDetermined means no prompt has been answered yet, deferred means the
-/// system will ask on first use, and unavailable means the capability cannot
-/// be granted on this install.
 public enum PermissionStatus: Sendable, Equatable {
     case granted
     case denied
@@ -53,10 +28,6 @@ public enum PermissionStatus: Sendable, Equatable {
 }
 
 /// Row affordance derived from a live status.
-///
-/// The window never invents per-row behavior inline; every row maps its
-/// status through PermissionActionsMapping so the affordance stays
-/// consistent when a status flips after a request.
 public enum PermissionAction: Sendable, Equatable {
     case none
     case enable
@@ -64,9 +35,6 @@ public enum PermissionAction: Sendable, Equatable {
 }
 
 /// System Settings privacy pane backing each capability.
-///
-/// The URL opens the exact privacy section so the owner lands one click from
-/// the toggle instead of the top-level pane.
 public enum PermissionPane: String, Sendable {
     case allFiles
     case contacts
@@ -78,10 +46,6 @@ public enum PermissionPane: String, Sendable {
     case automation
 
     /// Deep link into System Settings for this pane.
-    ///
-    /// Each string names the privacy section directly; a nil result would
-    /// mean the link shape changed, in which case the row falls back to
-    /// opening nothing rather than a wrong section.
     public var url: URL? {
         switch self {
         case .allFiles:
@@ -128,10 +92,6 @@ extension PermissionKind {
     }
 
     /// Why the capability matters, shown beneath the row title.
-    ///
-    /// Full Disk Access names the missing-prompt trap explicitly because the
-    /// system never asks; the owner must add the app by hand, so the copy
-    /// has to say so instead of implying a button will prompt.
     public var rationale: String {
         switch self {
         case .fullDiskAccess:
@@ -218,17 +178,8 @@ extension PermissionStatus {
 }
 
 /// Pure translation from platform states into PermissionStatus.
-///
-/// Kept free of side effects so both the live probes and the test suite share
-/// one interpretation: a TCC denial always reads denied, an untouched prompt
-/// always reads notDetermined, and anything unrecognized fails closed
-/// rather than guessing granted.
 enum PermissionStatusMapping {
     /// Interprets the Contacts authorization state.
-    ///
-    /// Limited access still withholds arbitrary lookups the send path needs,
-    /// so it reads denied rather than granted; an unknown future case reads
-    /// denied so the window never claims access it has not verified.
     static func contacts(_ status: CNAuthorizationStatus) -> PermissionStatus {
         switch status {
         case .authorized:
@@ -258,11 +209,6 @@ enum PermissionStatusMapping {
     }
 
     /// Interprets any EventKit authorization state.
-    ///
-    /// Calendars and reminders share one authorization shape: only full access
-    /// unlocks the search the event and task paths need, so write-only still
-    /// reads denied rather than granted; an unknown future case reads
-    /// denied so the window never claims access it has not verified.
     static func eventKit(_ status: EKAuthorizationStatus) -> PermissionStatus {
         switch status {
         case .fullAccess:
@@ -278,51 +224,26 @@ enum PermissionStatusMapping {
     }
 
     /// Interprets the Calendars authorization state.
-    ///
-    /// Thin alias over the shared EventKit reading so the call site names the
-    /// capability while the interpretation stays in one place.
     static func calendars(_ status: EKAuthorizationStatus) -> PermissionStatus {
         eventKit(status)
     }
 
     /// Interprets the Reminders authorization state.
-    ///
-    /// Thin alias over the shared EventKit reading so the call site names the
-    /// capability while the interpretation stays in one place.
     static func reminders(_ status: EKAuthorizationStatus) -> PermissionStatus {
         eventKit(status)
     }
 
     /// Interprets the Accessibility trust flag.
-    ///
-    /// Platform limitation: the silent trust query reports only a Bool with
-    /// no denied-versus-unasked distinction, so false maps to notDetermined
-    /// and keeps the Enable affordance (fail-open). Routing an untouched
-    /// install straight to Settings would strand first-run owners who never
-    /// saw a dialog, while the prompting Enable variant stays the repair
-    /// path: it re-invokes the system prompt when still answerable and the
-    /// owner can still reach the pane by hand when the system suppresses it.
     static func accessibility(trusted: Bool) -> PermissionStatus {
         trusted ? .granted : .notDetermined
     }
 
     /// Interprets the Screen Recording preflight flag.
-    ///
-    /// Platform limitation: the preflight reports only a Bool with no
-    /// denied-versus-unasked distinction, so false maps to notDetermined
-    /// and keeps the Enable affordance (fail-open). Same bargain as
-    /// Accessibility: first-run owners keep the prompting path instead of a
-    /// premature Settings detour, and the prompting variant stays the repair
-    /// path when the grant is still answerable.
     static func screenRecording(hasAccess: Bool) -> PermissionStatus {
         hasAccess ? .granted : .notDetermined
     }
 
     /// Interprets a Full Disk Access snapshot attempt.
-    ///
-    /// Success proves readability; an explicit permission denial proves the
-    /// grant is missing; any other failure (missing database, unreadable
-    /// snapshot) is environmental, so it reads unavailable rather than denied.
     static func fullDiskAccess(result: Result<Void, Error>) -> PermissionStatus {
         switch result {
         case .success:
@@ -338,10 +259,6 @@ enum PermissionStatusMapping {
     }
 
     /// Interprets the Automation consent query for Messages.
-    ///
-    /// The target-not-running shape reads deferred because the system will
-    /// ask on first send; anything outside the four documented outcomes reads
-    /// unavailable so an OS change fails closed instead of claiming granted.
     static func automation(_ status: OSStatus) -> PermissionStatus {
         switch status {
         case noErr:
@@ -359,10 +276,6 @@ enum PermissionStatusMapping {
 }
 
 /// Pure translation from a live status into its row affordance.
-///
-/// Granted and deferred rows need no action (deferred resolves on first
-/// send); an unanswered prompt offers Enable; an explicit denial or an
-/// environmental failure points at Settings where the owner can repair it.
 enum PermissionActionsMapping {
     static func action(for status: PermissionStatus) -> PermissionAction {
         switch status {

@@ -31,12 +31,8 @@ public enum UnifiedDiffEngine: Sendable {
         public let deletions: Int
     }
 
-    /// Computes the unified diff between `oldText` and `newText`.
-    /// - Parameters:
-    ///   - oldText: Original text (or nil/empty if new file).
-    ///   - newText: New text.
-    ///   - filepath: Relative or display path of the file.
-    ///   - contextRadius: Number of context lines before/after each change block (default 3).
+    /// Computes the unified diff between `oldText` and `newText`. oldText: Original
+    /// text (or nil/empty if new file).
     public static func computeDiff(
         oldText: String?,
         newText: String,
@@ -242,10 +238,6 @@ public struct FilesWriteArgs: Sendable, Equatable, Decodable {
     public let content: String
     public let mode: String
     /// Whether the call explicitly supplied `mode`.
-    ///
-    /// Forced postures distinguish a real contradiction from an omitted mode
-    /// that merely defaults to staged: only an explicit request that lost to
-    /// the owner setting earns the override sentence in the envelope.
     public let modeExplicit: Bool
 
     public static let defaultMode = "staged"
@@ -310,15 +302,6 @@ public struct FilesWriteEnvelope: Sendable, Equatable, Codable {
 }
 
 /// Naming rules for the review artifacts that sit beside a live file.
-///
-/// Every write derives a `.rune_<name>` staging sibling and a
-/// `.rune_backup_<name>` rollback sibling in the target's own directory. Those
-/// names belong to the review lifecycle, which is why the review routes refuse
-/// pairs that step into either namespace; the tool enforces the same
-/// reservation before any disk access so a model-chosen target can never read,
-/// write over, or delete another file's review state. This type is the single
-/// owner of both markers and their matching rules, shared by the tool and the
-/// review routes so the namespaces cannot drift apart.
 public enum ReviewArtifacts {
     /// Canonical staging marker beside each live file.
     public static let stagingPrefix = ".rune_"
@@ -338,33 +321,12 @@ public enum ReviewArtifacts {
     }
 
     /// Reports whether a filename belongs to the rollback-copy namespace.
-    ///
-    /// Prefix matching folds case because the default APFS volume does: a
-    /// differently-cased spelling names the same artifact on disk. The review
-    /// routes share this predicate so a staging entry that lands in the
-    /// rollback family is refused before any move or removal can consume
-    /// another review's copy.
-    /// - Parameter filename: Final path component to test.
-    /// - Returns: True when the name begins with `.rune_backup_`, ignoring case.
     public static func isRollbackArtifactFilename(_ filename: String) -> Bool {
         filename.lowercased().hasPrefix(backupPrefix)
     }
 
-    /// Refuses a target filename whose own name or derived sibling collides
-    /// with a reserved review artifact.
-    ///
-    /// Two shapes collide. A `.rune_`-prefixed target IS another file's
-    /// staging or rollback artifact, so writing it would mutate that review
-    /// directly and a live write would supersede its staging row through the
-    /// staging-path lookup. A `backup_`-prefixed target derives the staging
-    /// sibling `.rune_<name>`, which is exactly another file's rollback copy,
-    /// so a staged write (or the live supersede cleanup) would clobber or
-    /// delete it.
-    ///
-    /// Prefix matching folds case because the default APFS volume does: a
-    /// differently-cased spelling names the same artifact on disk.
-    /// - Parameter filename: Final path component of the resolved target.
-    /// - Returns: A refusal sentence, or nil when the target is safe to serve.
+    /// Refuses a target filename whose own name or derived sibling collides with a reserved review
+    /// artifact.
     static func reservationRefusal(forFilename filename: String) -> String? {
         let lowered = filename.lowercased()
         if lowered.hasPrefix(stagingPrefix) {
@@ -435,11 +397,7 @@ public struct FilesWriteTool: Tool, Sendable {
     private let homeDirectoryURL: URL?
     private let filesConfig: FilesConfig
     private let stagedFilesStore: StagedFilesStore
-    /// Propagation seam for a live write that supersedes a pending staged
-    /// review. The supersede resolves inside this tool rather than a route, so
-    /// the serving process hands in a hook that fans the terminal row out to
-    /// connected dashboards; direct-core writers (CLI, menu-bar app) and tests
-    /// pass nil and stay silent.
+    /// Propagation seam for a live write that supersedes a pending staged review.
     private let supersededReviewNotifier: (@Sendable (String) async -> Void)?
 
     public init(
@@ -508,20 +466,6 @@ public struct FilesWriteTool: Tool, Sendable {
     }
 
     /// Runs the write-path posture gate ahead of mode resolution.
-    ///
-    /// `WritePathPolicy.classify` is the single owner of write posture, so
-    /// this gate only interprets its decision: a deny posture refuses the
-    /// call naming the policy reason with no file content, an ask posture
-    /// waits on a recorded decide and fails closed without one, and a stage
-    /// or live posture forces the mode the call actually uses. Only the
-    /// model posture, whose schema promises staged or live, fails closed on
-    /// an unknown mode: a forced posture accepts and ignores any stale value.
-    /// - Parameters:
-    ///   - rawPath: Trimmed caller-supplied live path.
-    ///   - args: Decoded call arguments carrying the requested mode.
-    ///   - approved: True when a recorded decide authorizes an ask posture.
-    ///   - callID: Tool call identifier echoed on refusals.
-    /// - Returns: The posture to execute in, or the caller-facing refusal.
     private func resolvePosture(
         rawPath: String,
         args: FilesWriteArgs,
@@ -579,16 +523,8 @@ public struct FilesWriteTool: Tool, Sendable {
         ))
     }
 
-    /// Resolves the posture the call must actually use, layering the
-    /// write-path decision over the configured mode and the per-call request.
-    ///
-    /// The policy decision outranks both: a stage or live posture forces the
-    /// call into it, and a contradicting `write_mode` or explicit request is
-    /// not rejected — the forced posture wins and the envelope names the
-    /// override so the outcome stays honest. An approved ask decides nothing
-    /// about the mode, so it resolves exactly as the configured mode plus
-    /// request always did. An omitted mode is not a contradiction — it
-    /// defaults to staged — so it never earns the override sentence.
+    /// Resolves the posture the call must actually use, layering the write-path decision over the
+    /// configured mode and the per-call request.
     private static func resolveEffectiveMode(
         posture: FilesWritePathPosture,
         requestedMode: String,
@@ -625,14 +561,8 @@ public struct FilesWriteTool: Tool, Sendable {
         }
     }
 
-    /// Resolves the posture the configured `write_mode` plus the per-call
-    /// request decide, before any write-path rule is layered on.
-    ///
-    /// Owner settings outrank the model's per-call request. A contradicting
-    /// explicit request is not rejected: the forced posture wins and the
-    /// envelope names the override so the outcome stays honest. An omitted
-    /// mode is not a contradiction — it defaults to staged — so it never
-    /// earns the override sentence.
+    /// Resolves the posture the configured `write_mode` plus the per-call request decide, before
+    /// any write-path rule is layered on.
     private static func resolveEffectiveMode(
         requestedMode: String,
         modeExplicit: Bool,
@@ -715,21 +645,16 @@ public struct FilesWriteTool: Tool, Sendable {
             return output
         }
 
-        // Both postures act on the staging sibling: a live write removes it
-        // during supersede cleanup (and `removeItem` deletes directories
-        // recursively), while a staged write replaces it with
-        // `Data.write(.atomic)`. A non-regular entry there refuses before any
-        // disk mutation so a planted directory is never an unadvertised
-        // deletion or a late, opaque write failure, and the preview carries
-        // the same refusal as disk writes.
+        // Both postures act on the staging sibling: a live write removes it during supersede
+        // cleanup (and `removeItem` deletes directories recursively), while a staged write replaces
+        // it with `Data.write(.atomic)`.
         if let refusal = Self.stagingSiblingRefusal(target: target, isStaged: effectiveMode.isStaged) {
             return .failure(refusal, callID: input.callID)
         }
 
-        // Live writes fail closed on an unreadable ledger before any disk
-        // mutation; previews degrade to promising nothing, and the disk path
-        // re-resolves the authoritative posture inside the store's atomic
-        // review start.
+        // Live writes fail closed on an unreadable ledger before any disk mutation; previews
+        // degrade to promising nothing, and the disk path re-resolves the authoritative posture
+        // inside the store's atomic review start.
         guard let liveReviewLookup = await resolveLiveReviewLookup(
             effectiveMode: effectiveMode,
             livePath: target.liveURL.path,
@@ -828,19 +753,6 @@ extension FilesWriteTool {
     // MARK: - Target vetting
 
     /// Vets every path a write call derives before any disk access.
-    ///
-    /// The live path, its parent directory, and the rollback sibling (live
-    /// posture only) each pass the shared access guard, and reserved
-    /// review-artifact namespaces are refused before anything is created or
-    /// written through. The diff is computed here from the live bytes and the
-    /// call's content so previews and disk writes describe the same change.
-    /// - Parameters:
-    ///   - rawPath: Trimmed caller-supplied live path.
-    ///   - content: Full text the write would apply.
-    ///   - effectiveMode: Posture the call actually uses.
-    ///   - callID: Tool call identifier echoed on refusals.
-    /// - Returns: The vetted target plus its diff, or the caller-facing
-    ///   refusal exactly as the guard produced it.
     private func resolveWriteTarget(
         rawPath: String,
         content: String,
@@ -861,11 +773,8 @@ extension FilesWriteTool {
         let parentDir = liveURL.deletingLastPathComponent()
         let filename = liveURL.lastPathComponent
 
-        // The review-artifact namespaces are owned by the staging/rollback
-        // lifecycle, and those siblings share the target directory with other
-        // user files. A target in either reserved namespace is refused before
-        // any disk access, mirroring the route-level pair refusals, so one
-        // write can never clobber or delete another file's review artifacts.
+        // The review-artifact namespaces are owned by the staging/rollback lifecycle, and those
+        // siblings share the target directory with other user files.
         if let refusal = ReviewArtifacts.reservationRefusal(forFilename: filename) {
             return .refused(.failure(refusal, callID: callID))
         }
@@ -890,14 +799,9 @@ extension FilesWriteTool {
             ))
         }
 
-        // A live write snapshots to the derived rollback sibling and a
-        // decision consumes it, so the sibling is vetted exactly as the review
-        // routes vet it: a denied backup path refuses before any disk mutation
-        // even when the live path itself passed the guard. Staged writes never
-        // touch the rollback namespace, so only the live posture evaluates it.
-        // The guard is an allow/deny gate only: operations stay on the derived
-        // sibling so a link planted at the reserved name remains visible to
-        // the no-follow probes below instead of being resolved away.
+        // A live write snapshots to the derived rollback sibling and a decision consumes it, so the
+        // sibling is vetted exactly as the review routes vet it: a denied backup path refuses before
+        // any disk mutation even when the live path itself passed the guard.
         if !effectiveMode.isStaged {
             let backupDecision = FilesAccessGuard.evaluate(
                 path: backupURL.path,
@@ -939,12 +843,6 @@ extension FilesWriteTool {
     }
 
     /// Decides how this live write relates to the review-owned rollback copy.
-    ///
-    /// A pending row owns its copy: later writes in the same series must not
-    /// re-clone the live file, or the copy would drift to version N-1 and the
-    /// pre-series original would become unrecoverable. Only an absent or
-    /// terminal review starts a fresh series, and a fresh series over an
-    /// existing file snapshots before its first overwrite.
     private static func rollbackPlacement(target: WriteTarget, lookup: LiveReviewLookup) -> RollbackPlacement {
         switch lookup {
         case let .record(review) where review.resolution == nil:
@@ -972,20 +870,9 @@ extension FilesWriteTool {
         }
     }
 
-    /// Resolves the pre-write review-ledger posture for a write call.
-    ///
-    /// Live disk writes fail closed on an unreadable ledger before any disk
-    /// mutation, because they would otherwise overwrite a file with no
-    /// reliable way back. The authoritative rollback posture is resolved again
-    /// inside the store's atomic review start, which reads the ledger, takes
-    /// the snapshot, and records the row in one serialized critical section.
-    /// Previews read the ledger best-effort because they only describe what
-    /// would happen, and an unreadable ledger makes them promise nothing.
-    /// - Parameters:
-    ///   - effectiveMode: Posture the call actually uses.
-    ///   - livePath: Canonical live path whose review row is read.
-    ///   - dryRun: True for previews, which degrade instead of refusing.
-    /// - Returns: The lookup, or nil when a live disk write must refuse.
+    /// Resolves the pre-write review-ledger posture for a write call. Live disk writes fail closed
+    /// on an unreadable ledger before any disk mutation, because they would otherwise overwrite a
+    /// file with no reliable way back.
     private func resolveLiveReviewLookup(
         effectiveMode: EffectiveWriteMode,
         livePath: String,
@@ -1013,21 +900,8 @@ extension FilesWriteTool {
         return " Backup would save to \(target.backupFilename)."
     }
 
-    /// Refusal sentence when a live write finds a rollback entry that the
-    /// ledger cannot attribute to a settled series, or nil when the entry is
-    /// absent or accounted for.
-    ///
-    /// Such an entry may be a peer's just-captured original that has not
-    /// reached the ledger yet, so it must never be replaced on a guess. The
-    /// presence probe does not follow a final symlink: a link planted at the
-    /// derived backup path is an existing entry too, so a dangling link cannot
-    /// hide from the refusal and be written through later. The preview path
-    /// shares this check so an approval card never promises a write that disk
-    /// would reject.
-    /// - Parameters:
-    ///   - backupURL: Derived rollback-copy path beside the live file.
-    ///   - previousSeriesSettled: True when the ledger holds a terminal row
-    ///     for the path, proving any copy there belongs to a settled series.
+    /// Refusal sentence when a live write finds a rollback entry that the ledger cannot attribute
+    /// to a settled series, or nil when the entry is absent or accounted for.
     private static func unexplainedBackupRefusal(backupURL: URL, previousSeriesSettled: Bool) -> String? {
         guard !previousSeriesSettled,
               LiveFileBackup.entryExists(at: backupURL)
@@ -1038,35 +912,15 @@ extension FilesWriteTool {
             + " refusing to overwrite it. Resolve or remove it before writing live again."
     }
 
-    /// Refusal sentence when a fresh snapshot would find the rollback
-    /// destination occupied by a regular file, or nil when the entry is absent
-    /// or not a regular file.
-    ///
-    /// `LiveFileBackup.snapshot` creates exclusively and never deletes, so a
-    /// copy left beside a settled series blocks a fresh series instead of
-    /// being replaced: the entry may equally be a peer process's just-captured
-    /// original whose review row has not reached the shared ledger yet. A
-    /// pending review joins without snapshotting, so its copy never reaches
-    /// this check. Non-regular entries stay on the snapshot's own no-follow
-    /// probe so their refusal names the offending node type.
-    /// - Parameter backupURL: Derived rollback-copy path beside the live file.
+    /// Refusal sentence when a fresh snapshot would find the rollback destination occupied by a
+    /// regular file, or nil when the entry is absent or not a regular file.
     private static func leftoverBackupRefusal(backupURL: URL) -> String? {
         guard LiveFileBackup.isRegularFileNoFollow(backupURL) else { return nil }
         return "A rollback copy already exists at \(backupURL.lastPathComponent);"
             + " refusing to overwrite it. Remove it before writing live again."
     }
 
-    /// Refusal sentence when a fresh snapshot would fail, or nil when the
-    /// snapshot would succeed.
-    ///
-    /// The snapshot's no-follow source guard refuses a live path that is not a
-    /// regular file, its exclusive create refuses every entry kind at the
-    /// destination, and a terminal ledger row does not explain a leftover. A
-    /// regular destination entry keeps the write path's established leftover
-    /// sentence, while a non-regular source or destination surfaces the
-    /// snapshot's own refusal, so a preview and a disk write refuse exactly
-    /// the same snapshots.
-    /// - Parameter target: Vetted write target carrying both URLs.
+    /// Refusal sentence when a fresh snapshot would fail, or nil when the snapshot would succeed.
     private static func freshSnapshotRefusal(target: WriteTarget) -> String? {
         if let refusal = leftoverBackupRefusal(backupURL: target.backupURL) {
             return refusal
@@ -1077,19 +931,8 @@ extension FilesWriteTool {
         return LiveFileBackup.snapshotDestinationRefusal(liveURL: target.liveURL, backupURL: target.backupURL)
     }
 
-    /// Refusal sentence when a write's staging sibling is a non-regular entry,
-    /// or nil when the sibling is absent or a regular file.
-    ///
-    /// A live write removes the sibling with `removeItem`, which deletes
-    /// directories recursively, and a staged write replaces it with
-    /// `Data.write(.atomic)`, which cannot land on a directory; a planted
-    /// non-regular entry must never be recursed into or fail a write late.
-    /// Refusing before the snapshot, overwrite, or supersede cleanup leaves
-    /// disk untouched, and the preview path shares this check so an approval
-    /// card never promises a write that disk would reject.
-    /// - Parameters:
-    ///   - target: Vetted write target carrying the staging sibling URL.
-    ///   - isStaged: True for the staged posture, whose refusal names it.
+    /// Refusal sentence when a write's staging sibling is a non-regular entry, or nil when the
+    /// sibling is absent or a regular file.
     private static func stagingSiblingRefusal(target: WriteTarget, isStaged: Bool) -> String? {
         let stagingURL = target.stagingURL
         guard FileManager.default.fileExists(atPath: stagingURL.path),
@@ -1121,11 +964,9 @@ extension FilesWriteTool {
         // Computed up front so each if-expression branch stays a single
         // expression; the staged branch simply ignores the live placement.
         let placement = Self.rollbackPlacement(target: target, lookup: liveReviewLookup)
-        // A fresh series over an existing live file must snapshot, and the
-        // snapshot refuses both a non-regular live source and any entry
-        // already at its destination: the preview carries the same refusals
-        // instead of promising a write that disk would reject. A joined
-        // pending review may keep its copy, so only fresh starts are checked.
+        // A fresh series over an existing live file must snapshot, and the snapshot refuses both a
+        // non-regular live source and any entry already at its destination: the preview carries the
+        // same refusals instead of promising a write that disk would reject.
         if !effectiveMode.isStaged, placement.startsWithExistingFile,
            let refusal = Self.freshSnapshotRefusal(target: target)
         {
@@ -1190,10 +1031,9 @@ extension FilesWriteTool {
         )
     }
 
-    /// Writes the staged sibling and records its pending review.
-    ///
-    /// Staging never snapshots: the live file stays untouched, so a rollback
-    /// snapshot failure must not be able to block a safe staged edit.
+    /// Writes the staged sibling and records its pending review. Staging never snapshots: the live
+    /// file stays untouched, so a rollback snapshot failure must not be able to block a safe staged
+    /// edit.
     private func performStagedWrite(
         target: WriteTarget,
         args: FilesWriteArgs,
@@ -1228,16 +1068,6 @@ extension FilesWriteTool {
     }
 
     /// Applies the live write around the review-owned rollback copy.
-    ///
-    /// The store's atomic start owns the first-wins decision: the ledger read,
-    /// the snapshot, the review row, and the live byte write happen in one
-    /// serialized critical section, so a concurrent fresh-series write can
-    /// never remove or re-clone over the copy this series captured, and a
-    /// decision that consumes the rollback copy can never interleave with a
-    /// joined write. Either the decision sees the write's series as pending
-    /// and reverts over it, or it finishes first and the write starts a fresh
-    /// series over the restored bytes; the ledger can never settle terminal
-    /// while the live file holds a later write.
     private func performLiveWrite(
         target: WriteTarget,
         args: FilesWriteArgs,
@@ -1251,10 +1081,9 @@ extension FilesWriteTool {
         let start = await stagedFilesStore.startLiveReview(
             path: liveURL.path,
             applyingWrite: {
-                // Writing inside the store's critical section is what keeps
-                // the ledger and the filesystem from diverging: a decision
-                // cannot consume the joined rollback copy between the start's
-                // return and this write.
+                // Writing inside the store's critical section is what keeps the ledger and the
+                // filesystem from diverging: a decision cannot consume the joined rollback copy
+                // between the start's return and this write.
                 try Data(content.utf8).write(to: liveURL, options: .atomic)
             },
             snapshot: { previousSeriesSettled in
@@ -1267,28 +1096,21 @@ extension FilesWriteTool {
                 guard FileManager.default.fileExists(atPath: liveURL.path) else {
                     return .noCopy
                 }
-                // A fresh snapshot creates exclusively and never deletes at the
-                // destination, so a regular copy already there — a settled
-                // series' leftover or a peer's in-flight capture — refuses before
-                // the clone is attempted.
+                // A fresh snapshot creates exclusively and never deletes at the destination, so a
+                // regular copy already there — a settled series' leftover or a peer's in-flight
+                // capture — refuses before the clone is attempted.
                 if let refusal = Self.leftoverBackupRefusal(backupURL: backupURL) {
                     return .refused(reason: refusal)
                 }
-                // The snapshot's no-follow source guard refuses a live path that
-                // is not a regular file; surfacing the shared refusal sentence
-                // here keeps the disk error identical to the preview instead of
-                // reporting the clone's wrapped description.
+                // The snapshot's no-follow source guard refuses a live path that is not a regular
+                // file; surfacing the shared refusal sentence here keeps the disk error identical to
+                // the preview instead of reporting the clone's wrapped description.
                 if let refusal = LiveFileBackup.snapshotSourceRefusal(liveURL: liveURL, backupURL: backupURL) {
                     return .refused(reason: refusal)
                 }
-                // The snapshot's exclusive create also refuses every
-                // non-regular entry at the destination, which the leftover
-                // check above deliberately leaves to the snapshot's own
-                // no-follow probe; mirroring that predicate here keeps the disk
-                // sentence identical to the preview's bare destination refusal
-                // instead of reporting the clone's wrapped description. A
-                // regular destination entry was already refused above, so this
-                // pre-check never reaches that established leftover sentence.
+                // The snapshot's exclusive create also refuses every non-regular entry at the
+                // destination, which the leftover check above deliberately leaves to the snapshot's
+                // own no-follow probe; mirroring that predicate here keeps the disk sentence.
                 if let refusal = LiveFileBackup.snapshotDestinationRefusal(liveURL: liveURL, backupURL: backupURL) {
                     return .refused(reason: refusal)
                 }
@@ -1324,18 +1146,14 @@ extension FilesWriteTool {
         }
 
         // A live write supersedes any previously staged edit for this path.
-        // The row keeps a durable superseded resolution so a reloaded card
-        // cannot resurrect Accept/Discard; the lingering .rune_<name> sibling
-        // is removed below.
         let supersededStagedRow = await stagedFilesStore.resolveStaged(
             pathOrStagingPath: target.liveURL.path,
             resolution: .superseded
         )
         if FileManager.default.fileExists(atPath: target.stagingURL.path) {
-            // `removeItem` deletes directories recursively, so only a regular
-            // file may be removed; the pre-write check already refused a
-            // non-regular entry, and this guard keeps a race from slipping a
-            // directory past that check.
+            // `removeItem` deletes directories recursively, so only a regular file may be removed;
+            // the pre-write check already refused a non-regular entry, and this guard keeps a race
+            // from slipping a directory past that check.
             if LiveFileBackup.isRegularFile(target.stagingURL) {
                 do {
                     try FileManager.default.removeItem(at: target.stagingURL)
@@ -1357,12 +1175,9 @@ extension FilesWriteTool {
         }
 
         if supersededStagedRow {
-            // The staged row left the pending inbox without a route call, so
-            // an already-mounted dashboard card would otherwise keep offering
-            // Accept/Discard on a sibling this write deleted. Hand the
-            // supersede to the serving process's broadcaster so live viewers
-            // settle the card; delivery is best-effort and never fails the
-            // write that already landed.
+            // The staged row left the pending inbox without a route call, so an already-mounted
+            // dashboard card would otherwise keep offering Accept/Discard on a sibling this write
+            // deleted.
             await supersededReviewNotifier?(target.liveURL.path)
         }
 

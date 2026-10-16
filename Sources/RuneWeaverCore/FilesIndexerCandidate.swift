@@ -1,10 +1,4 @@
 // Rune Weaver Core — Parallel files candidate processing for the document index.
-//
-// Hosts the per-file worker path shared by parallel runs: grouped inputs,
-// staged helpers, and the commit sequence mirror the sequential walk so
-// parallel and sequential runs agree on counts for identical trees. Staging
-// lives here so the walk file stays within lint budgets while the store,
-// policy, and budget seams remain injected and behavior stays unchanged.
 
 import Foundation
 
@@ -49,10 +43,6 @@ extension FilesIndexer {
     }
 
     /// Actor-isolated nightly budget counter shared by parallel workers.
-    ///
-    /// Workers claim one slot just before committing a document and release it
-    /// when the commit fails, so concurrent finishers can never write past the
-    /// configured budget even though they extract concurrently.
     actor FileIndexBudget {
         /// Newly written documents still permitted this run.
         private var remaining: Int
@@ -85,10 +75,6 @@ extension FilesIndexer {
     }
 
     /// Identity of one parallel candidate file.
-    ///
-    /// Carries only the per-file values that vary within a run, so the worker
-    /// entry point groups the shared dependencies separately instead of
-    /// threading sixteen positional arguments through every helper.
     struct CandidateIdentity: Sendable {
         /// Canonical file URL the guard allowed.
         let fileURL: URL
@@ -99,10 +85,6 @@ extension FilesIndexer {
     }
 
     /// Shared services consulted while processing one candidate.
-    ///
-    /// Groups the store, extraction, embedding, and policy seams so parallel
-    /// workers share one value instead of repeating six dependencies on every
-    /// helper signature.
     struct CandidateServices: Sendable {
         /// Document index the run writes into.
         let store: DocIndexStore
@@ -118,10 +100,9 @@ extension FilesIndexer {
         let vectorPolicy: FilesVectorPolicy
     }
 
-    /// Per-run policy and test seams for one candidate.
-    ///
-    /// Keeps walk caps, home boundary, and injectable I/O overrides together
-    /// so helpers that only need policy never observe the store or budget.
+    /// Per-run policy and test seams for one candidate. Keeps walk caps, home boundary, and
+    /// injectable I/O overrides together so helpers that only need policy never observe the store or
+    /// budget.
     struct CandidatePolicy: Sendable {
         /// Walk size cap, evicted policy, and vector cap.
         let config: IndexConfig
@@ -135,10 +116,8 @@ extension FilesIndexer {
         let fileReader: (@Sendable (URL) throws -> Data)?
     }
 
-    /// Mutable run coordination shared by all workers.
-    ///
-    /// Pairs the atomic nightly budget with the lock-guarded cancellation
-    /// mirror so commit helpers observe both without extra parameters.
+    /// Mutable run coordination shared by all workers. Pairs the atomic nightly budget with the
+    /// lock-guarded cancellation mirror so commit helpers observe both without extra parameters.
     struct CandidateRunState: Sendable {
         /// Actor-isolated nightly budget shared by all workers.
         let budget: FileIndexBudget
@@ -147,9 +126,6 @@ extension FilesIndexer {
     }
 
     /// Canonical identity derived once per candidate.
-    ///
-    /// Resolved up front so later stages reuse one stable external identifier
-    /// instead of re-canonicalizing the URL on every branch.
     struct ResolvedCandidate: Sendable {
         /// Canonical file URL with symlinks resolved.
         let canonicalURL: URL
@@ -164,9 +140,6 @@ extension FilesIndexer {
     }
 
     /// Extracted body plus the values needed to commit it.
-    ///
-    /// Bundles the read bytes, hash, and extraction so the commit stage takes
-    /// one payload instead of repeating five positional arguments.
     struct CandidatePayload: Sendable {
         /// Source modification time, when known.
         let modificationDate: Date?
@@ -229,20 +202,8 @@ extension FilesIndexer {
 // MARK: - Candidate worker
 
 extension FilesIndexer {
-    /// Processes one candidate file on a parallel worker, mirroring `indexFile` plus `persistExtraction`.
-    ///
-    /// Every branch matches the sequential path — fast-path skips, evicted
-    /// handling, hashing, extraction gating, embedding with cancel checks, and
-    /// actor-serialized store commits — so parallel and sequential runs agree
-    /// on counts for identical trees. The nightly budget is claimed atomically
-    /// just before the commit and released when the commit fails or cancels,
-    /// so concurrent finishers can never overshoot it.
-    /// - Parameters:
-    ///   - identity: Per-file URLs plus the opaque stamp for the run in flight.
-    ///   - services: Store, extractor, embeddings, guard, and vector policy.
-    ///   - policy: Walk caps, home boundary, and injectable I/O overrides.
-    ///   - state: Shared budget plus the lock-guarded cancellation mirror.
-    /// - Returns: The outcome for the run to fold into its counters.
+    /// Processes one candidate file on a parallel worker, mirroring `indexFile` plus
+    /// `persistExtraction`.
     static func processCandidate(
         identity: CandidateIdentity,
         services: CandidateServices,
@@ -293,17 +254,6 @@ extension FilesIndexer {
     }
 
     /// Evaluates pre-read metadata and policies for a candidate.
-    ///
-    /// Probes cancellation, unreadable resource values, symlinks, aliases, AppleDouble
-    /// sidecars, iCloud eviction, max file size, access guard policy, and the
-    /// stored fingerprint fast path.
-    /// - Parameters:
-    ///   - identity: Per-file URLs plus the run stamp.
-    ///   - services: Store, extractor, embeddings, and access guard.
-    ///   - policy: Walk caps, home boundary, and injectable I/O overrides.
-    ///   - state: Shared budget plus the cancellation mirror.
-    ///   - resolved: Canonical identity for the candidate.
-    /// - Returns: A preflight bundle ready for reading, or an outcome when processing finishes early.
     static func preflightCandidate(
         identity: CandidateIdentity,
         services: CandidateServices,
@@ -362,15 +312,8 @@ extension FilesIndexer {
         ))
     }
 
-    /// Reads, hashes, extracts, and vectorizes candidate bytes into a committable payload.
-    /// - Parameters:
-    ///   - identity: Per-file URLs plus the run stamp.
-    ///   - services: Store, extractor, embeddings, and access guard.
-    ///   - policy: Walk caps, home boundary, and injectable I/O overrides.
-    ///   - state: Shared budget plus the cancellation mirror.
-    ///   - resolved: Canonical identity for the candidate.
-    ///   - preflight: Resource values and guard-resolved read path.
-    /// - Returns: Extracted candidate payload ready for commit, or an early outcome.
+    /// Reads, hashes, extracts, and vectorizes candidate bytes into a committable payload. -
+    /// Parameters: - identity: Per-file URLs plus the run stamp.
     static func prepareCandidatePayload(
         identity: CandidateIdentity,
         services: CandidateServices,
@@ -468,14 +411,6 @@ extension FilesIndexer {
     }
 
     /// Derives one stable identity for a candidate before any I/O.
-    ///
-    /// Canonicalization matches the sequential walk so stored keys agree
-    /// across effort presets even when the enumerator returns different
-    /// spellings of the same path.
-    /// - Parameters:
-    ///   - identity: Per-file URLs plus the run stamp.
-    ///   - policy: Walk caps carrying `max_file_mb`.
-    /// - Returns: Canonical URL, store key, display path, and byte cap.
     static func resolveCandidate(identity: CandidateIdentity, policy: CandidatePolicy) -> ResolvedCandidate {
         let canonicalURL = identity.fileURL.resolvingSymlinksInPath().standardizedFileURL
         let canonicalPath = canonicalURL.path
@@ -498,13 +433,8 @@ extension FilesIndexer {
         FileOutcome(kind: .skipped, relative: relative)
     }
 
-    /// Builds a content-free error outcome for one candidate.
-    ///
-    /// Only the reason travels into the warning; file bytes never do.
-    /// - Parameters:
-    ///   - relative: Root-relative display path.
-    ///   - reason: Short failure reason, never file content.
-    /// - Returns: An error outcome carrying the warning line.
+    /// Builds a content-free error outcome for one candidate. Only the reason travels into the
+    /// warning; file bytes never do.
     static func failedOutcome(relative: String, reason: String) -> FileOutcome {
         FileOutcome(
             kind: .error(warning: FilesIndexer.skipWarningText(relative: relative, reason: reason)),
@@ -512,14 +442,8 @@ extension FilesIndexer {
         )
     }
 
-    /// Folds a stamp result into a worker outcome.
-    ///
-    /// A failed stamp forces the reconcile to stay skipped; a cancelled stamp
-    /// still counts the file but propagates cancellation to the run.
-    /// - Parameters:
-    ///   - stamp: Whether the `last_seen_run` write landed.
-    ///   - outcome: Worker outcome to annotate.
-    /// - Returns: The annotated outcome.
+    /// Folds a stamp result into a worker outcome. A failed stamp forces the reconcile to stay
+    /// skipped; a cancelled stamp still counts the file but propagates cancellation to the run.
     static func stamped(_ stamp: StampResult, onto outcome: FileOutcome) -> FileOutcome {
         var resolved = outcome
         switch stamp {
@@ -537,15 +461,9 @@ extension FilesIndexer {
 // MARK: - Candidate stages
 
 extension FilesIndexer {
-    /// Reports whether a candidate has no local bytes to read.
-    ///
-    /// An injected override wins in tests; the live ubiquity check runs
-    /// otherwise so an undetermined download state never hides a readable file.
-    /// - Parameters:
-    ///   - policy: Override resolving evicted iCloud files, or nil for live.
-    ///   - canonicalURL: Canonical file URL.
-    ///   - values: Pre-fetched resource values.
-    /// - Returns: True when the file is evicted.
+    /// Reports whether a candidate has no local bytes to read. An injected override wins in tests;
+    /// the live ubiquity check runs otherwise so an undetermined download state never hides a
+    /// readable file.
     static func isEvictedCandidate(
         policy: CandidatePolicy,
         canonicalURL: URL,
@@ -557,17 +475,8 @@ extension FilesIndexer {
         return Self.isLiveEvicted(at: canonicalURL, values: values)
     }
 
-    /// Handles an evicted file under the configured iCloud policy.
-    ///
-    /// The file is always skipped this run; under `download` its bytes are
-    /// requested for a later run. Stamping keeps a previously indexed row
-    /// alive so eviction alone never retires it.
-    /// - Parameters:
-    ///   - identity: Per-file URLs plus the run stamp.
-    ///   - services: Document index the run writes into.
-    ///   - policy: Evicted policy plus the download trigger.
-    ///   - resolved: Canonical identity for the candidate.
-    /// - Returns: A skipped outcome with the stamp folded in.
+    /// Handles an evicted file under the configured iCloud policy. Stamping keeps a previously
+    /// indexed row alive so eviction alone never retires it.
     static func handleEvictedCandidate(
         identity: CandidateIdentity,
         services: CandidateServices,
@@ -589,16 +498,9 @@ extension FilesIndexer {
         return stamped(stamp, onto: skippedOutcome(relative: resolved.relative))
     }
 
-    /// Probes the pre-read fingerprint for an unchanged file.
-    ///
-    /// A matching size plus an mtime within tolerance and a non-failed prior
-    /// extraction means the body is current without reading any bytes.
-    /// - Parameters:
-    ///   - identity: Per-file URLs plus the run stamp.
-    ///   - services: Document index holding the stored fingerprint.
-    ///   - resolved: Canonical identity for the candidate.
-    ///   - values: Pre-fetched resource values with size and mtime.
-    /// - Returns: An outcome when the file resolves here, or nil to keep reading.
+    /// Probes the pre-read fingerprint for an unchanged file. A matching size plus an mtime within
+    /// tolerance and a non-failed prior extraction means the body is current without reading any
+    /// bytes.
     static func checkFingerprintUnchanged(
         identity: CandidateIdentity,
         services: CandidateServices,
@@ -644,10 +546,7 @@ extension FilesIndexer {
     }
 
     /// Reads one candidate's bytes through the injected override or a mapped read.
-    /// - Parameters:
-    ///   - policy: Override reading file bytes, or nil for memory-mapped reads.
-    ///   - resolvedPath: Canonical path the guard allowed.
-    /// - Returns: File bytes.
+    /// policy: Override reading file bytes, or nil for memory-mapped reads.
     static func readCandidateBytes(policy: CandidatePolicy, resolvedPath: String) throws -> Data {
         if let fileReader = policy.fileReader {
             return try fileReader(URL(fileURLWithPath: resolvedPath))
@@ -655,13 +554,8 @@ extension FilesIndexer {
         return try Data(contentsOf: URL(fileURLWithPath: resolvedPath), options: [.mappedIfSafe])
     }
 
-    /// Gates re-indexing on the stored content hash.
-    /// - Parameters:
-    ///   - identity: Per-file URLs plus the run stamp.
-    ///   - services: Document index holding the stored hash.
-    ///   - resolved: Canonical identity for the candidate.
-    ///   - hash: Fresh content hash for the bytes just read.
-    /// - Returns: An outcome when the file resolves here, or nil to keep extracting.
+    /// Gates re-indexing on the stored content hash. identity: Per-file URLs plus
+    /// the run stamp.
     static func checkContentCurrent(
         identity: CandidateIdentity,
         services: CandidateServices,
@@ -702,16 +596,8 @@ extension FilesIndexer {
         return nil
     }
 
-    /// Applies extraction gating for one candidate.
-    ///
-    /// Unsupported files are skipped without a stamp because they were never
-    /// committable; failed extractions stamp first so a prior row survives.
-    /// - Parameters:
-    ///   - identity: Per-file URLs plus the run stamp.
-    ///   - services: Store and extractor for the candidate.
-    ///   - resolved: Canonical identity for the candidate.
-    ///   - extraction: Extracted document body.
-    /// - Returns: An outcome when extraction is terminal, or nil to keep embedding.
+    /// Applies extraction gating for one candidate. Unsupported files are skipped without a stamp
+    /// because they were never committable; failed extractions stamp first so a prior row survives.
     static func checkExtractionTerminal(
         identity: CandidateIdentity,
         services: CandidateServices,
@@ -733,21 +619,9 @@ extension FilesIndexer {
         }
     }
 
-    /// Embeds one candidate's chunks inside the vector policy.
-    ///
-    /// A policy miss or missing backend stays keyword-only; embedding
-    /// failures degrade the same way through the shared helper instead of
-    /// failing the file. OCR-empty images bypass the status gate (keeping the
-    /// byte bound) so the visual path is still attempted from its interim
-    /// outcome. Cancellation is never degraded: it escapes as an
-    /// error so the worker returns `.cancelled` before claiming budget or
-    /// committing a keyword-only row.
-    /// - Parameters:
-    ///   - services: Embedding backends plus the vector policy.
-    ///   - policy: Index policy carrying the per-document vector cap.
-    ///   - extraction: Extracted document body.
-    ///   - byteCount: Bytes considered for the document.
-    /// - Returns: Vectors plus whether the visual path produced them.
+    /// Embeds one candidate's chunks inside the vector policy. A policy miss or missing backend
+    /// stays keyword-only; embedding failures degrade the same way through the shared helper instead
+    /// of failing the file.
     static func resolveCandidateVectors(
         services: CandidateServices,
         policy: CandidatePolicy,
@@ -784,23 +658,9 @@ extension FilesIndexer {
         )
     }
 
-    /// Commits one extracted candidate under the atomic nightly budget.
-    ///
-    /// The budget is claimed just before the write so concurrent finishers can
-    /// never overshoot it, and released when the commit fails or cancels.
-    /// The document row, its chunk rows (and their FTS entries via triggers),
-    /// and the `last_seen_run` stamp land in one transaction, so a crash
-    /// between writes can never strand a half-indexed document. A failed
-    /// write still attempts a standalone stamp so a live row never retires
-    /// for a transient failure.
-    /// - Parameters:
-    ///   - identity: Per-file URLs plus the run stamp.
-    ///   - services: Document index the run writes into.
-    ///   - policy: Index policy carrying the vector cap.
-    ///   - state: Shared budget plus the cancellation mirror.
-    ///   - resolved: Canonical identity for the candidate.
-    ///   - payload: Bytes, hash, extraction, and vectors to write.
-    /// - Returns: The indexed, over-budget, cancelled, or error outcome.
+    /// Commits one extracted candidate under the atomic nightly budget. The budget is claimed just
+    /// before the write so concurrent finishers can never overshoot it, and released when the commit
+    /// fails or cancels.
     static func commitCandidateDocument(
         identity: CandidateIdentity,
         services: CandidateServices,
@@ -879,12 +739,8 @@ extension FilesIndexer {
         return outcome
     }
 
-    /// Stamps one visited file as seen by the current run without touching indexer state.
-    /// - Parameters:
-    ///   - store: Document index the run writes into.
-    ///   - canonicalPath: Stable external identifier.
-    ///   - runID: Opaque stamp for the run in flight.
-    /// - Returns: Whether the stamp landed, failed, or observed cancellation.
+    /// Stamps one visited file as seen by the current run without touching indexer state. -
+    /// Parameters: - store: Document index the run writes into.
     static func stampCandidate(store: DocIndexStore, canonicalPath: String, runID: String) async -> StampResult {
         do {
             try await store.markSeen(source: .files, externalID: canonicalPath, runID: runID)
@@ -897,20 +753,6 @@ extension FilesIndexer {
     }
 
     /// Embeds a document's chunks for a parallel worker, degrading to keyword-only on any failure.
-    ///
-    /// A pooled backend is preferred when one is configured so concurrent
-    /// workers never serialize on a single backend actor; a shared backend
-    /// stays correct but may serialize actor-backed implementations. A width
-    /// or count mismatch is treated as a backend failure so a partial vector
-    /// list never pairs the wrong vector with a chunk. Cancellation escapes
-    /// instead of degrading so the worker stops before claiming budget: the
-    /// caller converts it to a `.cancelled` outcome without committing.
-    /// - Parameters:
-    ///   - extraction: Extracted document body.
-    ///   - config: Index policy carrying the per-document vector cap.
-    ///   - embedder: Shared backend, or nil when only the pool is configured.
-    ///   - embeddingsPool: Pooled backends, or nil to share `embedder`.
-    /// - Returns: One vector per embedded chunk, or nil when the document stays keyword-only.
     static func embedCandidate(
         extraction: DocumentExtraction,
         fileURL: URL,
@@ -931,17 +773,6 @@ extension FilesIndexer {
     }
 
     /// Embeds a document's chunks while reporting whether the visual path produced them.
-    ///
-    /// Shares the same visual-first then text-fallback sequence as
-    /// `embedCandidate` so the commit can promote an interim image row to
-    /// `.extracted` only after a visual vector lands; text-only vectors keep
-    /// the interim outcome.
-    /// - Parameters:
-    ///   - extraction: Extracted document body.
-    ///   - config: Index policy carrying the per-document vector cap.
-    ///   - embedder: Shared backend, or nil when only the pool is configured.
-    ///   - embeddingsPool: Pooled backends, or nil to share `embedder`.
-    /// - Returns: Vectors plus whether the visual multimodal path produced them.
     static func embedCandidateWithVisual(
         extraction: DocumentExtraction,
         fileURL: URL,

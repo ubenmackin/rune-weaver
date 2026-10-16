@@ -1,16 +1,4 @@
 // Rune Weaver Dashboard — Component tests for the access Bash & Shell section.
-//
-// Purpose: Pins the relocated shell-policy editor: the ordered
-// `pattern = action` rules textarea with its last-match-wins ordering copy,
-// every resource and confinement knob, the changed-only `bash` patch through
-// PUT /settings, and the live-apply signal that never promises a restart.
-// Scope: The [bash] snapshot load, inline validation copy, save payload
-// parity, and the server 400 path. Rule-engine evaluation and the engine-side
-// clamp math stay with their owner suites; only owner configuration is edited
-// here.
-// Architectural role: Guards the single dashboard surface whose writes steer
-// sandboxed shell execution, so a rule edit cannot persist unvalidated text,
-// claim a write that never landed, or read as needing a restart.
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -39,10 +27,8 @@ describe("AccessBashSection", () => {
     clearAuthToken();
   });
 
-  // Routes the settings GET plus the bash PATCH so each case overrides only
-  // the response it exercises. PUT bodies ride out through the returned
-  // arrays so assertions read what actually shipped, and the response echoes
-  // the merged request the way the engine partial merge does.
+  // Routes the settings GET plus the bash PATCH so each case overrides only the response it
+  // exercises.
   function stubSettings(
     bash: Record<string, unknown>,
     onPut?: (body: Record<string, unknown>) => Response
@@ -176,10 +162,8 @@ describe("AccessBashSection", () => {
     expect(rulesTextarea.value.endsWith("\n")).toBe(true);
     expect(screen.getByText(/2 rules/i)).toBeDefined();
 
-    // Blank lines and surrounding whitespace collapse on save with order
-    // preserved top-to-bottom; the wire shape is an ordered rule array.
-    // Malformed lines reject first with their editor line number and never
-    // reach the network, so the ordered save below runs from a clean form.
+    // Blank lines and surrounding whitespace collapse on save with order preserved top-to-bottom;
+    // the wire shape is an ordered rule array.
     const editedTextarea = screen.getByLabelText(
       /Rules, one per line/i
     ) as HTMLTextAreaElement;

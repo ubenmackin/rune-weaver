@@ -1,43 +1,15 @@
 // Rune Weaver Server — Health probe response contract for `GET /health`.
-//
-// Purpose: carries the canonical health probe shape — engine identity,
-// search posture, live boot bind, and the verified-pulse evidence — so the
-// route, the dashboard, and version-tolerant decoders share one closed
-// contract.
-// Scope: the `HealthResponse` body plus its wire normalization only; route
-// registration, auth gating, and snapshot computation stay with the route
-// and core layers.
-// Architectural role: keeps the `/health` wire shape decoupled from the
-// engine core in a version-tolerant Codable contract, so a dashboard built
-// against an older engine still decodes.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
-/// Health probe response for `GET /health`.
-/// Carries the live Start stage when a SearXNG ensure flight is running so the
-/// dashboard profile menu can poll one endpoint for both the dot and the
-/// Starting line. Older engines omit the stage keys, which decode to nil.
-/// The optional bind keys carry the live boot socket (not the file): the
-/// dashboard compares the pending file from `GET /settings` against this boot
-/// snapshot for its restart banner instead of comparing file against file.
-/// The bind keys are owner-private: the route omits them unless the caller
-/// cleared the owner gate (or no gate is installed on the loopback-no-auth
-/// posture), so an unauthenticated probe never learns the boot bind. Absent
-/// keys decode to nil and the dashboard keeps its file snapshot.
-/// The verified-pulse keys carry the closed green/yellow/red status plus the
-/// ledger and policy evidence behind it. Tips are owner-private like the bind
-/// keys: the route omits `ledgerTip` and `policyHash` unless the caller
-/// cleared the owner gate, while the status, verdict, and reasons stay on
-/// every projection so degraded dashboards still disclose. Absent pulse keys
-/// decode to nil for payloads from engines that predate the verified pulse.
+/// Health probe response for `GET /health`. Carries the live Start stage when a SearXNG ensure
+/// flight is running so the dashboard profile menu can poll one endpoint for both the dot and the
+/// Starting line.
 public struct HealthResponse: Content, Equatable {
-    /// Closed verified-pulse status (`"green"`, `"yellow"`, or `"red"`).
-    /// The route always serves the computed pulse status. Construction and
-    /// decoding normalize through the closed vocabulary: legacy `"ok"` reads
-    /// as `"green"`, while a missing or drifted value degrades to `"yellow"`
-    /// so an unanswered or unknown probe never reads healthy.
+    /// Closed verified-pulse status (`"green"`, `"yellow"`, or `"red"`). The route always serves
+    /// the computed pulse status.
     public let status: String
     /// Engine display name.
     public let engine: String
@@ -170,10 +142,8 @@ public struct HealthResponse: Content, Equatable {
         case ledgerTip, ledgerVerifiedAt, policyHash, policyVerified, probeVerdict, degradedReasons, infoNotes
     }
 
-    /// Decodes tolerantly so payloads from engines that predate staged Start
-    /// progress still parse with a nil stage instead of failing the probe.
-    /// The boot-bind keys are optional for the same reason: absent means the
-    /// dashboard keeps its snapshot fallback instead of failing the probe.
+    /// Decodes tolerantly so payloads from engines that predate staged Start progress still parse
+    /// with a nil stage instead of failing the probe.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         status = try Self.normalizedStatus(container.decodeIfPresent(String.self, forKey: .status))
@@ -225,13 +195,6 @@ public struct HealthResponse: Content, Equatable {
     }
 
     /// Normalizes a pulse status against its closed vocabulary.
-    ///
-    /// Legacy `"ok"` payloads read as `"green"` so a pre-pulse engine never
-    /// flips a healthy dashboard to degraded, while a missing or drifted
-    /// value degrades to `"yellow"` so an unanswered probe never reads
-    /// healthy and never parks fail-closed without evidence.
-    /// - Parameter value: Raw status candidate, or nil when absent.
-    /// - Returns: Known status, `"yellow"` when blank or unknown.
     private static func normalizedStatus(_ value: String?) -> String {
         let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch trimmed {
@@ -247,19 +210,6 @@ public struct HealthResponse: Content, Equatable {
     }
 
     /// Normalizes boot allowed-hosts through shared validation plus boot dedupe.
-    ///
-    /// Single-sourced through `RuneWeaverConfig.validateAllowedHosts` and
-    /// `ServerEndpointConfig.dedupeNormalizedBootHosts` in Core so the health
-    /// snapshot and the settings file compare under identical semantics;
-    /// widening shapes drop nil matching the Host gate instead of allowlisting
-    /// a carved fragment, and IPv6 counterparts ride along. The raw count
-    /// bound was enforced at write time, so the boot entry point skips the
-    /// raw-count prefix: the deduped form can legitimately exceed
-    /// `maxAllowedHosts` because each IPv6 literal stores both its bracketed
-    /// and bare spellings, so 11 IPv6 entries advertise as 22 matching the
-    /// file, the PUT, and the gate instead of being cut back to 20.
-    /// - Parameter hosts: Raw boot allowlist, or nil when unknown.
-    /// - Returns: Normalized, deduped allowlist, or nil when unknown.
     private static func normalizedAllowedHosts(_ hosts: [String]?) -> [String]? {
         guard let hosts else { return nil }
         // Route through shared validation matching the Host gate so a widening
@@ -270,11 +220,6 @@ public struct HealthResponse: Content, Equatable {
     }
 
     /// Encodes the stage keys only when a Start is in flight.
-    /// The boot-bind keys encode only when known so older dashboards that
-    /// ignore unknown keys keep parsing, and newer dashboards fall back to
-    /// their snapshot when the keys are absent. The pulse keys encode only
-    /// when present for the same reason: absent keys keep pre-pulse
-    /// dashboards parsing while newer ones disclose from them.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(status, forKey: .status)

@@ -219,10 +219,9 @@ private func chatEditedRead(prompt: String) -> String? {
     #endif
 }
 
-/// Edited single-line reads for interactive operator prompts.
-///
-/// Kept beside the other shared terminal helpers so a blocking read never
-/// parks the cooperative pool, and every prompt path serializes on one queue.
+/// Edited single-line reads for interactive operator prompts. Kept beside the other shared terminal
+/// helpers so a blocking read never parks the cooperative pool, and every prompt path serializes on
+/// one queue.
 enum ChatLineEditing {
     /// Reads one line without blocking the cooperative pool.
     static func readLine(prompt: String) async -> String? {
@@ -235,15 +234,7 @@ enum CLIShared {
     /// Cached engines keyed by episodes, vector, and document index paths.
     private static let engines = CLILockedValue<[String: MemoryEngine]>([:])
 
-    /// Returns the shared engine for the given memory config,
-    /// creating and caching it on first use.
-    ///
-    /// The optional document index path points recall at the configured
-    /// `[index]` database; nil keeps the keyword-and-vector engine.
-    /// - Parameters:
-    ///   - config: Memory paths from `config.toml`.
-    ///   - docIndexDBPath: SQLite path for the document index, or nil for recall without it.
-    /// - Returns: The cached engine for these paths.
+    /// Returns the shared engine for the given memory config, creating and caching it on first use.
     static func memoryEngine(for config: MemoryConfig, docIndexDBPath: String? = nil) -> MemoryEngine {
         let key = "\(config.episodesDBPath)\0\(config.vectorDBPath)\0\(docIndexDBPath ?? "")"
         return engines.withLock { cached in
@@ -265,25 +256,11 @@ enum CLIShared {
     }
 
     /// Configured LLM `server_url` values exempted from the SSRF loopback deny.
-    /// Thin passthrough to the canonical `LLMOrigins` helper in `RuneWeaverCore`
-    /// so the CLI resolves the same trimmed, de-duplicated origin list as the
-    /// app and serve paths instead of deriving a second copy.
-    /// - Parameter llmConfig: `[llm]` section carrying provider endpoints.
-    /// - Returns: Non-empty trimmed server URLs.
     static func llmServerURLs(from llmConfig: LLMConfig?) -> [String] {
         LLMOrigins.serverURLs(from: llmConfig)
     }
 
     /// Ensures the agent scratch workspace exists and clears expired `tmp/`.
-    ///
-    /// Every bash-invoking CLI command calls this before building its tool
-    /// bus so a fresh boot creates the 0700 root and a stale `tmp/` never
-    /// accumulates across runs. Failures stay best-effort with a dim note
-    /// because the per-turn quota gate still fails closed when the directory
-    /// is missing.
-    /// - Parameters:
-    ///   - config: Quotas and retention from `[workspace]`.
-    ///   - store: Injected store for tests; nil derives from `config`.
     static func ensureWorkspace(config: WorkspaceConfig = WorkspaceConfig(), store: WorkspaceStore? = nil) async {
         let resolved = store ?? WorkspaceStore(config: config)
         do {
@@ -295,23 +272,6 @@ enum CLIShared {
     }
 
     /// Built-in plugin tools registered into every CLI `ToolBus`.
-    ///
-    /// Goal tools join only when both the engine and store arrive (nil keeps them
-    /// unregistered); a disabled `[goals]` section still registers through the same
-    /// path and fails closed inside each tool so the surface stays inspectable.
-    /// Fan-out tools follow the ships-disabled invariant: the tool joins only when
-    /// the fan-out engine arrives (nil keeps it unregistered), and it registers
-    /// disabled behind the tool-state toggle with no config gate overriding it.
-    ///
-    /// The build fails closed: when the security policy cannot be verified the
-    /// reason prints and the command exits nonzero rather than registering a
-    /// supervisor-less `api.request`.
-    /// - Parameter policyStore: Shared security policy store; nil builds and
-    ///   loads the factory default.
-    /// - Parameter recipientAliasStore: Durable alias store the send tool
-    ///   learns from after a resolved-name send; nil keeps alias learning off.
-    /// - Returns: Tools in registration order.
-    /// - Throws: `ExitCode(1)` after printing the policy rejection reason.
     static func pluginTools(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -376,34 +336,6 @@ enum CLIShared {
     }
 
     /// Builds a `ToolBus` pre-populated from the shared plugin source.
-    ///
-    /// Capabilities in `BuiltinToolPlugins.shipsDisabledToolNames` register
-    /// disabled like every other boot path, then the persisted tool-state rows
-    /// re-apply (the same restore the service runs), so the CLI sees exactly the
-    /// tool set the dashboard governs instead of a permissive side door. The
-    /// tool-state toggle is the sole authority.
-    /// Goal tools follow the shared registration path: callers pass a store built
-    /// from `config.memory.episodes_db_path` plus its engine (and the live
-    /// conversations manager for chip linkage); nil keeps them unregistered while
-    /// a disabled `[goals]` section still registers and fails closed inside each
-    /// tool. When only the policy plus an LLM arrive, the store and engine build
-    /// here from the episodes path so the CLI needs no second wiring step.
-    /// Agent script tools follow the same one-registry posture: an explicit pin
-    /// store wins, otherwise one builds over the resolved episodes path with the
-    /// effective workspace so dashboard and CLI pins never drift. Fan-out tools follow the same ships-disabled posture: the optional engine
-    /// passes through so a caller that wired one sees the fanout.run tool
-    /// registered disabled, while nil keeps it unregistered (the CLI builds no
-    /// engine here because the orchestrator and run-log store arrive after the
-    /// bus).
-    /// - Parameter policyStore: Shared security policy store; nil builds and
-    ///   loads the factory default. Callers that also boot a service pass
-    ///   their instance so one store backs both.
-    /// - Parameter recipientAliasStore: Durable alias store the send tool
-    ///   learns from; nil auto-builds one from the resolved episodes path so
-    ///   a resolved-name send teaches later resolutions without a second
-    ///   wiring step.
-    /// - Throws: `ExitCode(1)` after printing when the security policy cannot
-    ///   be verified.
     static func makeToolBus(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -449,10 +381,9 @@ enum CLIShared {
         if effectiveEngine == nil, let goalsConfig, let goalLLM, let store = effectiveStore {
             effectiveEngine = GoalEngine(store: store, llm: goalLLM, config: goalsConfig)
         }
-        // The learned-alias store needs no engine, so it auto-builds from the
-        // same resolved path whenever the caller supplied none: a CLI turn
-        // records confirmed name sends without a second wiring step, and
-        // construction is path-only, so callers that never send pay no I/O.
+        // The learned-alias store needs no engine, so it auto-builds from the same resolved path
+        // whenever the caller supplied none: a CLI turn records confirmed name sends without a
+        // second wiring step, and construction is path-only, so callers that never send pay no I/O.
         let effectiveAliasStore = recipientAliasStore ?? RecipientAliasStore(dbPath: rawPath)
         let effectiveWorkspace = workspaceStore ?? WorkspaceStore(config: workspaceConfig)
         let shipsDisabled = BuiltinToolPlugins.shipsDisabledToolNames

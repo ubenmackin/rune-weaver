@@ -1,7 +1,4 @@
 // Rune Weaver Dashboard — Unit and integration tests for DashboardView and dashboard components.
-// Covers the greeting-row identity cluster (the app's sole avatar image at
-// 112px with assistant name and per-state caption), the prompt bar, the radar
-// and workstream widgets, and the full dashboard mount.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -757,10 +754,9 @@ describe("RecentReports", () => {
         expect(screen.getByText("Indexed workspace files")).toBeInTheDocument();
       });
     } finally {
-      // The override must not leak into later cases: jsdom ships no own
-      // visibilityState descriptor (the accessor lives on the prototype), so
-      // an unremoved override would pin every visibility-gated refetch open
-      // for the rest of the file.
+      // The override must not leak into later cases: jsdom ships no own visibilityState descriptor
+      // (the accessor lives on the prototype), so an unremoved override would pin every
+      // visibility-gated refetch open for the rest of the file.
       if (visibilityDescriptor) {
         Object.defineProperty(document, "visibilityState", visibilityDescriptor);
       } else {

@@ -24,9 +24,6 @@ public enum BashNetworkGuard: Sendable {
     }
 
     /// Extracts any explicit HTTP/HTTPS URLs present in the command string.
-    ///
-    /// Delegates to the approval queue's shared link scanner so bash
-    /// screening and inbox triage cannot drift on detector shape.
     public static func extractURLs(from command: String) -> [String] {
         ApprovalQueue.extractLinkURLs(from: command)
     }

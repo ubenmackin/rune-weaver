@@ -1,12 +1,4 @@
 // Rune Weaver Core Tests — PermissionRequestTarget derivation matrix and displayTarget codable contract.
-//
-// Pins the single display-target derivation every decision surface shares:
-// egress-host precedence with blank hosts treated as absent, send-tool
-// recipients (string plus array forms, nil when no recipient), bash commands,
-// files paths, and the common target-ish key fallback with malformed and
-// non-object JSON yielding nil. The PermissionRequest tests pin the derived
-// field populating displayTarget, its Codable round trip, and a legacy
-// payload without the field decoding to nil.
 
 import Foundation
 @testable import RuneWeaverCore

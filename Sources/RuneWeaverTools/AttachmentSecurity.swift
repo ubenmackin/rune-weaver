@@ -147,9 +147,6 @@ public enum AttachmentSecurity: Sendable {
     }
 
     /// Whether filename or MIME type alone marks the payload as an archive.
-    /// Single source of truth for the filename/MIME archive table; magic-byte
-    /// inspection layers on top inside `detectedArchive`, and lifecycle helpers
-    /// delegate here so the tables cannot drift.
     public static func isArchiveFilenameOrMime(contentType: String, filename: String) -> Bool {
         archiveFilenameOrMimeReason(contentType: contentType, filename: filename) != nil
     }

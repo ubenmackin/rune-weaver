@@ -1,23 +1,4 @@
 // Rune Weaver Dashboard — Needs Action Queue.
-//
-// Surfaces all items blocked on human decision:
-// 1. Tool and egress approvals (consequential actions: delete, push, spend, email).
-// 2. The behavior brake card the trusted-tool watchdog files into the same inbox.
-// 3. Goals paused in 'needs_input' status waiting on operator direction.
-// 4. Booked scheduled sends awaiting their fire time (monitoring only: Cancel
-//    plus a Manage shortcut, no approval semantics of any kind).
-//
-// Every quick decision on this surface is duration-only: the Allow chevron
-// lists the shared duration tiers for the request and the decision carries
-// no scope, so the engine resolves the request's own target. One-shot
-// (coerced-tool) requests — continuation, desktop resume — carry no standing
-// deny either, because their durable tier coerces to thisTime and mints no
-// rule; the decision tags surface "dashboard" for the audit trail. Scope
-// editing lives in the Approvals Inbox, which every approval card links to,
-// and there is no batch or bulk control anywhere — each card is decided on
-// its own. Scheduled sends sit outside the attention count entirely: they
-// never move the badge, the subtitle, or the greeting caption, and the
-// all-clear card requires approvals, goals, and sends to all be empty.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -70,13 +51,9 @@ interface NeedsActionQueueProps {
 // instead of the generic approve or deny pair.
 const BRAKE_TOOL_NAME = "behavior.brake";
 
-// One-shot (coerced-tool) requests, mirroring the engine's oneShotToolNames in
-// ApprovalQueue: any durable tier on them coerces to thisTime and mints no
-// rule, so a standing deny on one is a dead vote. The chat banner gates them
-// behind dedicated Continue/Stop and Resume/Cancel branches with no standing
-// deny at all; the dashboard card matches by hiding the Deny-always chevron
-// for these tools. question.ask and behavior.brake never reach the generic
-// card (own branches above) but stay in the set for contract parity.
+// One-shot (coerced-tool) requests, mirroring the engine's oneShotToolNames in ApprovalQueue: any
+// durable tier on them coerces to thisTime and mints no rule, so a standing deny on one is a dead
+// vote.
 const ONE_SHOT_TOOL_NAMES: ReadonlySet<string> = new Set([
   "engine.continue",
   "question.ask",
@@ -101,10 +78,7 @@ function requestSeverity(req: PermissionRequest): ImpactSeverity {
   return req.assessment?.severity ?? "moderate";
 }
 
-// Severity descending, then filing time descending. The wire carries no filing
-// timestamp, so payload position is the only filing signal available: a later
-// position in the payload reads as the more recent filing, so equal severities
-// break newest-first.
+// Severity descending, then filing time descending.
 function orderBySeverityThenFiling(approvals: PermissionRequest[]): PermissionRequest[] {
   return approvals
     .map((req, index) => ({ req, index }))
@@ -123,10 +97,7 @@ function orderSendsByFireTime(sends: ScheduledSend[]): ScheduledSend[] {
   );
 }
 
-// Full duration and scope options live in the Approvals Inbox, so every
-// approval card routes there. The hash anchor resolves through the shell's
-// existing hashchange router, which keeps the link working without threading a
-// navigation callback through every card variant.
+// Full duration and scope options live in the Approvals Inbox, so every approval card routes there.
 function OpenInboxLink({ req }: { req: PermissionRequest }) {
   return (
     <a
@@ -153,15 +124,8 @@ interface DashboardApprovalCardProps {
   onDecide: (req: PermissionRequest, approved: boolean, duration: TrustDuration) => void;
 }
 
-// Generic approval card with duration-only Allow / Deny split buttons sharing
-// the chat banner's split-allow class structure, so menu styling stays shared.
-// The Allow chevron lists exactly the shared tiers for the request and sends
-// no scope. The Deny chevron offers only the standing deny, and only for
-// ordinary tools: a one-shot (coerced-tool) request resolves a single parked
-// batch, so its standing-deny control is hidden exactly like the chat
-// banner's dedicated one-shot branches. Open, dismissal, focus, and keyboard
-// semantics come from the shared useSplitMenu machine both decision surfaces
-// consume.
+// Generic approval card with duration-only Allow / Deny split buttons sharing the chat banner's
+// split-allow class structure, so menu styling stays shared.
 function DashboardApprovalCard({
   req,
   severity,
@@ -174,10 +138,9 @@ function DashboardApprovalCard({
   onOpenSession,
   onDecide,
 }: DashboardApprovalCardProps) {
-  // A one-shot request can only deny once: its durable tier coerces to
-  // thisTime inside the shared decision contract and mints no rule, so the
-  // standing-deny control stays off the card entirely, matching the chat
-  // banner's dedicated one-shot branches.
+  // A one-shot request can only deny once: its durable tier coerces to thisTime inside the shared
+  // decision contract and mints no rule, so the standing-deny control stays off the card entirely,
+  // matching the chat banner's dedicated one-shot branches.
   const isOneShot = ONE_SHOT_TOOL_NAMES.has(req.toolName);
   const allowOptions = durationOptionsFor(req);
   const derivedTarget = deriveRequestTarget(req);

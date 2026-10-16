@@ -1,10 +1,4 @@
 // Rune Weaver Tests — Local index route contracts, auth gating, and settings DTOs.
-//
-// The `/index` surface is owner-gated and drives the injected coordinator and
-// document store rather than binding a socket or touching a real index, so
-// these tests pin the anonymous `401`, the control-route outcomes, the status
-// shape, and the `PUT /settings` index merge that must preserve every omitted
-// field while the full snapshot round-trips through the same merge path.
 
 import Foundation
 import os
@@ -15,10 +9,8 @@ import Vapor
 
 // MARK: - Fixtures
 
-/// Builds an isolated `0600` token file so auth resolution never touches a real
-/// credential.
-/// - Parameter contents: Token text to persist.
-/// - Returns: The containing directory and the token file URL.
+/// Builds an isolated `0600` token file so auth resolution never touches a real credential. -
+/// Parameter contents: Token text to persist.
 private func makeIndexTokenFile(contents: String) throws -> (directory: URL, fileURL: URL) {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("runeweaver-index-auth-\(UUID().uuidString)")
@@ -61,10 +53,8 @@ private func withIndexTestApp<T>(_ body: (Application) async throws -> T) async 
     }
 }
 
-/// Builds a unique scratch path for a reset sidecar so route tests never clear
-/// the operator's real mail checkpoint or Messages watermark files.
-/// - Parameter name: Leaf file name.
-/// - Returns: An isolated path under the system temporary directory.
+/// Builds a unique scratch path for a reset sidecar so route tests never clear the operator's real
+/// mail checkpoint or Messages watermark files. - Parameter name: Leaf file name.
 private func makeResetScratchPath(_ name: String) -> String {
     FileManager.default.temporaryDirectory
         .appendingPathComponent("runeweaver-index-reset-\(UUID().uuidString)", isDirectory: true)
@@ -72,17 +62,8 @@ private func makeResetScratchPath(_ name: String) -> String {
         .path
 }
 
-/// Builds a context around the ephemeral fallback collaborators so a test can
-/// vary only the index collaborators and verifier without booting the engine.
-/// Reset sidecar targets default to scratch paths so a route test can never
-/// delete the operator's live state.
-/// - Parameters:
-///   - auth: Owner verifier, or nil for the ungated posture.
-///   - coordinator: Index coordinator to expose, or nil.
-///   - store: Document store to expose, or nil.
-///   - messagesStatePath: Persisted Messages watermark the reset route clears.
-///   - mailCheckpointPath: Persisted mail checkpoint the reset route clears.
-/// - Returns: A context wired for the `/index` routes.
+/// Builds a context around the ephemeral fallback collaborators so a test can vary only the index
+/// collaborators and verifier without booting the engine.
 private func makeIndexTestContext(
     auth: ServerAuth? = nil,
     coordinator: IndexCoordinator? = nil,
@@ -108,13 +89,8 @@ private func makeIndexTestContext(
     )
 }
 
-/// Sends an in-process request through the registered route table.
-/// - Parameters:
-///   - app: Configured application.
-///   - method: HTTP verb.
-///   - path: Request path.
-///   - token: Optional bearer credential.
-/// - Returns: The response, without binding a socket.
+/// Sends an in-process request through the registered route table. app: Configured
+/// application.
 private func indexRequest(
     app: Application,
     method: HTTPMethod,
@@ -135,13 +111,8 @@ private func indexRequest(
     return try await app.responder.respond(to: request).get()
 }
 
-/// Sends a prune request with an optional JSON body through the route table.
-/// An absent body exercises the missing-cutoff path, which must fail closed
-/// instead of clearing the store.
-/// - Parameters:
-///   - app: Configured application.
-///   - body: Prune request to encode, or nil for no body.
-/// - Returns: The response, without binding a socket.
+/// Sends a prune request with an optional JSON body through the route table. An absent body
+/// exercises the missing-cutoff path, which must fail closed instead of clearing the store.
 private func indexPruneRequest(app: Application, body: IndexPruneRequest?) async throws -> Response {
     let request = Request(
         application: app,
@@ -155,14 +126,9 @@ private func indexPruneRequest(app: Application, body: IndexPruneRequest?) async
     return try await app.responder.respond(to: request).get()
 }
 
-/// Sends a prune request with a raw JSON dictionary body, so tests can pin the
-/// missing-cutoff (`{}`) versus malformed-cutoff (`{"before":"not-a-date"}`)
-/// 400 variants without constructing an `IndexPruneRequest` the required-cutoff
-/// initializer no longer permits.
-/// - Parameters:
-///   - app: Configured application.
-///   - body: Raw JSON object to encode as the request body.
-/// - Returns: The response, without binding a socket.
+/// Sends a prune request with a raw JSON dictionary body, so tests can pin the missing-cutoff
+/// (`{}`) versus malformed-cutoff (`{"before":"not-a-date"}`) 400 variants without constructing an
+/// `IndexPruneRequest` the required-cutoff initializer no longer permits.
 private func indexPruneDictRequest(app: Application, body: [String: String]) async throws -> Response {
     let request = Request(
         application: app,
@@ -961,10 +927,9 @@ struct IndexLiveConstructionTests {
 
 // MARK: - Live snapshot and kind-filtered latest run
 
-/// Covers the additive live strip plus the durable latest-run lookup: live is
-/// present while a run is in flight and null when idle, the newest index row
-/// survives heavy chat interleaving, and a cancelled pass still leaves a strip
-/// entry carrying its partial counts.
+/// Covers the additive live strip plus the durable latest-run lookup: live is present while a run
+/// is in flight and null when idle, the newest index row survives heavy chat interleaving, and a
+/// cancelled pass still leaves a strip entry carrying its partial counts.
 @Suite("Index Status Live and Latest Run")
 struct IndexStatusLiveLatestTests {
     /// Waits until the coordinator reports a run in flight.
@@ -1388,10 +1353,9 @@ struct FilesEmbeddingPoolTests {
 
 // MARK: - Boot reporter wiring
 
-/// Covers the boot-owned run reporter: `ServerIndexBoot` threads the live run
-/// store plus hub into the coordinator, so a manual run appends one running
-/// row on start and updates that same row on completion, and the status probe
-/// renders the newest index row while a fresh store reports no runs yet.
+/// Covers the boot-owned run reporter: `ServerIndexBoot` threads the live run store plus hub into
+/// the coordinator, so a manual run appends one running row on start and updates that same row on
+/// completion, and the status probe renders the newest index row while a fresh store reports no runs.
 @Suite("Index Boot Reporter Wiring")
 struct IndexBootReporterWiringTests {
     @Test
@@ -1485,17 +1449,13 @@ struct IndexBootReporterWiringTests {
 
 // MARK: - Last errors with warnings
 
-/// Covers the failure list surfacing per-file warnings beneath run-level
-/// errors: errors stay newest-first at the head while every `Warning:`
-/// detail line from the newest run follows in run order, so a finished pass
-/// with many skipped files renders every line and a clean pass renders none.
+/// Covers the failure list surfacing per-file warnings beneath run-level errors: errors stay
+/// newest-first at the head while every `Warning:` detail line from the newest run follows in run
+/// order, so a finished pass with many skipped files renders every line and a clean pass renders.
 @Suite("Index Status Last Errors")
 struct IndexStatusLastErrorsTests {
-    /// Builds a completion response carrying the given warning lines.
-    /// - Parameters:
-    ///   - message: Summary line the strip also parses.
-    ///   - warnings: Warning lines in run order, oldest first.
-    /// - Returns: Detail text matching the coordinator's detail contract.
+    /// Builds a completion response carrying the given warning lines. message:
+    /// Summary line the strip also parses.
     private func warningResponse(message: String, warnings: [String]) -> String {
         ([message, "Trigger: onDemand"] + warnings).joined(separator: "\n")
     }
@@ -1631,10 +1591,9 @@ struct IndexStatusLastErrorsTests {
 
 // MARK: - Completion timestamps
 
-/// Covers completion-timestamp ownership for index run rows: the store keeps
-/// the stored instant when no stamp is supplied so long-standing callers read
-/// exactly as before, while an explicit stamp replaces it so a finished run
-/// can name its end instead of its start.
+/// Covers completion-timestamp ownership for index run rows: the store keeps the stored instant
+/// when no stamp is supplied so long-standing callers read exactly as before, while an explicit
+/// stamp replaces it so a finished run can name its end instead of its start.
 @Suite("Run Log Completion Timestamps")
 struct RunLogCompletionTimestampTests {
     @Test
@@ -1687,10 +1646,9 @@ struct RunLogCompletionTimestampTests {
     }
 }
 
-/// Covers the reporter stamping the completion instant onto the start row: the
-/// start event opens the row at the start time and the completion event moves
-/// that same row to the end time, so the status strip reads finished seconds
-/// ago even for a long run while live rows still name their start.
+/// Covers reporter stamping completion instant onto start row: the start event opens the row,
+/// and completion moves it to end time, so status reads finished seconds ago while live rows
+/// still name their start.
 @Suite("Index Reporter Completion Timestamps")
 struct IndexReporterCompletionTimestampTests {
     @Test

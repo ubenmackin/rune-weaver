@@ -1,11 +1,4 @@
 // Rune Weaver Tools Tests — Fan-out tool ships-disabled registration and single-gate execution.
-//
-// Covers the fanout.run boot posture shared by every registration site: fresh
-// installs list the tool disabled with the tool-state toggle as the sole
-// authority, enabling through the toggle makes it visible in the enabled-only
-// snapshot and runnable with no second gate, and workers keep the read-only
-// subset unless the fanout tool settings widen them. Tests run against a stub
-// orchestrator seam and a capturing run logger, never the live stack.
 
 import Foundation
 import os

@@ -1,11 +1,4 @@
 // Rune Weaver Dashboard — Tests for the ephemeral session-trust chip.
-//
-// Purpose: pin the render matrix (task, session, and egress trust kinds plus
-// the empty and no-session silences), the scoped revoke contract (the clear
-// posts exactly the clicked trust and the refetch confirms it), and the
-// refresh triggers (poll cadence plus approval and rule-change frames).
-// Scope: the chip component only; the durable standing-rules surface lives in
-// Settings → Access and is intentionally absent here.
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

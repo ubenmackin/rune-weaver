@@ -1,24 +1,11 @@
 // Rune Weaver Server — Bash settings DTOs for the settings API.
-//
-// Purpose: carries the partial bash patch for `PUT /settings` so dashboard
-// edits preserve untouched fields while shell policy applies without a restart.
-// Scope: REST patch bodies only; the settings request type owns merge policy
-// while validation and persistence stay with the config layer.
-// Architectural role: keeps bash Codable contracts version-tolerant and
-// decoupled from the broader settings surface.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
-/// Partial bash patch for `PUT /settings`.
-///
-/// Every field stays optional so a request carrying only one key leaves the
-/// stored shell policy untouched instead of resetting it. Rules stay ordered
-/// top-to-bottom last-match-wins, matching the stored `BashConfig` order. Put the catch-all first and specifics after.
-/// Covers the same field set as the full `BashConfig` snapshot, so a caller
-/// holding a complete policy can build the patch through `init(bash:)` and
-/// reuse the merge path without hand-mapping fields.
+/// Partial bash patch for `PUT /settings`. Every field stays optional so a request carrying only
+/// one key leaves the stored shell policy untouched instead of resetting it.
 public struct BashSettingsUpdate: Content, Equatable {
     /// Whether the bash tool is enabled. Nil preserves the stored value.
     public var enabled: Bool?
@@ -40,16 +27,6 @@ public struct BashSettingsUpdate: Content, Equatable {
     public var hostAllowPatterns: [String]?
 
     /// Creates a partial bash patch.
-    /// - Parameters:
-    ///   - enabled: Whether the bash tool is enabled.
-    ///   - defaultAction: Default action when no rule matches.
-    ///   - rules: Ordered permission rules.
-    ///   - timeoutSeconds: Default execution timeout in seconds.
-    ///   - cpuSeconds: CPU time budget in seconds.
-    ///   - memoryMb: Address-space budget in megabytes.
-    ///   - allowNetwork: Whether network access is permitted.
-    ///   - sandboxMode: Sandbox execution tier.
-    ///   - hostAllowPatterns: Fnmatch/prefix allow patterns gating `hostSeatbelt` execution.
     public init(
         enabled: Bool? = nil,
         defaultAction: String? = nil,
@@ -101,17 +78,9 @@ public struct BashSettingsUpdate: Content, Equatable {
             && hostAllowPatterns == nil
     }
 
-    /// Merges this patch onto the stored policy, preserving every field the
-    /// request omits. A nil field is a no-op, so a dashboard edit to one knob
-    /// never resets the rest of the `[bash]` section.
-    /// - Parameter bash: Stored bash policy to mutate in place.
-    /// - Throws: `ConfigError.validationError` when the rule list is empty,
-    ///   a rule pattern is blank, the default action is unknown, the sandbox
-    ///   mode is unknown, the host allowlist is over-limit or malformed, or the
-    ///   timeout, CPU, or memory bound falls outside its documented range.
-    ///   Range checks reuse the `BashConfig` validators the TOML load path
-    ///   enforces, so the PUT and file-load paths refuse the same values with
-    ///   the same dotted field.
+    /// Merges this patch onto the stored policy, preserving every field the request omits. A nil
+    /// field is a no-op, so a dashboard edit to one knob never resets the rest of the `[bash]`
+    /// section.
     public func apply(to bash: inout BashConfig) throws {
         // Every present field validates before anything mutates, so a
         // multi-field patch with one bad value leaves the stored policy
@@ -198,14 +167,9 @@ extension UpdateSettingsRequest {
 // MARK: - Bash Settings Merge
 
 extension UpdateSettingsRequest {
-    /// Merges a partial bash patch onto the stored policy, preserving every
-    /// field the request omits. A nil patch is a no-op, so a dashboard edit
-    /// elsewhere never resets the `[bash]` section. Validation stays
-    /// single-sourced in `BashSettingsUpdate.apply(to:)` so the PUT and
-    /// direct-merge paths agree with a clear 400 instead of persisting bad values.
-    ///
-    /// Internal so the shared settings `apply(to:)` keeps one merge path while
-    /// the bash-specific logic lives beside its DTOs.
+    /// Merges a partial bash patch onto the stored policy, preserving every field the request
+    /// omits. A nil patch is a no-op, so a dashboard edit elsewhere never resets the `[bash]`
+    /// section.
     func applyBash(to bash: inout BashConfig) throws {
         guard let update = self.bash else { return }
         try update.apply(to: &bash)

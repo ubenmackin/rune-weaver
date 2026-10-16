@@ -4,19 +4,6 @@ import Foundation
 import RuneWeaverCore
 
 /// Cadence gate shared by the `files.grep` and `files.glob` progress emitters.
-///
-/// Progress is advisory and the transport trusts emitters to throttle, so the
-/// two file walkers share one gate instead of each picking its own cadence. Two
-/// independent triggers can open the gate. The spacing floor is time-based: any
-/// new work once the wire-contract window closes reports, so a walk is never
-/// silent for longer than the documented ~2 Hz and a short scan is not held
-/// hostage to a count it will never reach. The file interval is work-based: a
-/// full interval of new visits reports on its own, bounding how much work can
-/// pass between frames on a fast walk even before the clock opens the floor.
-/// Either trigger is sufficient on its own, so every walk — short, slow, or
-/// fast — keeps reporting on time instead of looking hung. Time is read from an
-/// injected monotonic instant so tests advance it deterministically instead of
-/// sleeping.
 struct FilesProgressThrottle {
     /// Work trigger: visits since the last report that open the gate on their own.
     static let fileInterval = 250
@@ -29,25 +16,13 @@ struct FilesProgressThrottle {
     private var lastReportedInstant: ContinuousClock.Instant?
 
     /// Seeds the gate so the first file cannot report ahead of either threshold.
-    /// - Parameters:
-    ///   - scanned: Visit count at the start of the walk (normally zero).
-    ///   - now: Monotonic instant the walk began.
+    /// scanned: Visit count at the start of the walk (normally zero).
     mutating func begin(scanned: Int, now: ContinuousClock.Instant) {
         lastReportedScanned = scanned
         lastReportedInstant = now
     }
 
     /// Reports whether the walk should emit progress for the visit just completed.
-    ///
-    /// Either trigger is sufficient. The spacing floor needs at least one new
-    /// visit, which keeps a repeated check at the same count from re-emitting
-    /// while still letting a short or slow walk report on time. The file
-    /// interval stands alone so a fast walk cannot run past a full interval of
-    /// work without a frame even when the clock has not opened the floor yet.
-    /// - Parameters:
-    ///   - scanned: Files visited including the current one.
-    ///   - now: Monotonic instant for the current visit.
-    /// - Returns: True when the spacing floor elapsed with new work, or the file interval was crossed.
     func shouldReport(scanned: Int, now: ContinuousClock.Instant) -> Bool {
         guard let lastScanned = lastReportedScanned, let lastInstant = lastReportedInstant else {
             return true
@@ -59,9 +34,7 @@ struct FilesProgressThrottle {
     }
 
     /// Records an emitted report so the next thresholds are measured from it.
-    /// - Parameters:
-    ///   - scanned: Visit count reported.
-    ///   - now: Monotonic instant of the report.
+    /// scanned: Visit count reported.
     mutating func markReported(scanned: Int, now: ContinuousClock.Instant) {
         lastReportedScanned = scanned
         lastReportedInstant = now
@@ -79,25 +52,11 @@ struct FilesProgressThrottle {
 }
 
 /// Scope copy for `files.glob` progress and prompt guidance.
-///
-/// Single-sources the broad-scan warning so the tool's progress message and the
-/// dashboard's scope line render the same sentence. The warning rides its own
-/// progress field and the message stays a plain `Find … in …` line: no consumer
-/// has to split a separator, so a pattern that itself contains the delimiter can
-/// never be misread as a warning. The warning is heuristic by design — an
-/// omitted `baseDir` widens the walk to the whole home directory even when the
-/// pattern itself matches one level, which is the common cause of a slow,
-/// over-broad scan.
 public enum FilesGlobScopeWarning: Sendable {
     /// Warning copy describing a home-wide scan.
     public static let entireHomeCopy = "entire home folder"
 
     /// Reports whether a pattern is broad enough to call out on its own.
-    /// Matches the `*` and `*.ext` shapes a caller types when they mean
-    /// "find this file name anywhere": a bare star or a single-level extension
-    /// glob with no path, class, or further wildcard.
-    /// - Parameter pattern: Trimmed glob pattern.
-    /// - Returns: True for `*`, `**`, and `*.ext`-shaped patterns.
     public static func isBroad(_ pattern: String) -> Bool {
         if pattern == "*" || pattern == "**" {
             return true
@@ -110,27 +69,15 @@ public enum FilesGlobScopeWarning: Sendable {
         return !suffix.contains { $0 == "*" || $0 == "?" || $0 == "[" || $0 == "]" }
     }
 
-    /// Warning copy for a scan, or nil when the scan is already narrow.
-    /// - Parameters:
-    ///   - pattern: Trimmed glob pattern.
-    ///   - baseDirOmitted: Whether the caller let `baseDir` default to home.
-    /// - Returns: The warning copy when a broad pattern searches all of home.
+    /// Warning copy for a scan, or nil when the scan is already narrow. pattern:
+    /// Trimmed glob pattern.
     public static func warningCopy(pattern: String, baseDirOmitted: Bool) -> String? {
         guard baseDirOmitted, isBroad(pattern) else { return nil }
         return entireHomeCopy
     }
 
-    /// Builds the display line carried by progress frames.
-    /// - Parameters:
-    ///   - pattern: Trimmed glob pattern.
-    ///   - scope: Display scope (typically `~` or a home-relative directory), or
-    ///     nil when no safe scope can be named; the line then omits the scope
-    ///     clause rather than rendering a degenerate one.
-    /// - Returns: `Find <pattern> in <scope>`, or `Find <pattern>` when `scope`
-    ///   is nil. The broad-scan warning from
-    ///   ``FilesGlobScopeWarning/warningCopy(pattern:baseDirOmitted:)`` travels
-    ///   as its own progress field rather than a suffix here, so the scope line
-    ///   is never split on a delimiter the pattern itself could contain.
+    /// Builds the display line carried by progress frames. pattern: Trimmed glob
+    /// pattern.
     public static func findMessage(pattern: String, scope: String?) -> String {
         guard let scope else {
             return "Find \(pattern)"
@@ -139,26 +86,15 @@ public enum FilesGlobScopeWarning: Sendable {
     }
 }
 
-/// Reduces a raw final path component to a safe progress tail.
-/// A root (`/`) or blank component names no file, so it degrades to nil and the
-/// frame omits its tail rather than rendering an absolute or empty value.
-/// - Parameter component: Candidate final path component.
-/// - Returns: The component, or nil when it names a root or is blank.
+/// Reduces a raw final path component to a safe progress tail. A root (`/`) or blank component
+/// names no file, so it degrades to nil and the frame omits its tail rather than rendering an
+/// absolute or empty value.
 private func filesDisplayTail(_ component: String) -> String? {
     guard !component.isEmpty, component != "/" else { return nil }
     return component
 }
 
-/// Renders a resolved path as dashboard-safe scope copy, or nil when no safe
-/// scope can be named.
-/// Home collapses to `~`, descendants stay home-relative, and anything outside
-/// the boundary drops to its last component so an absolute machine path never
-/// reaches a progress frame. A root or blank last component (`/`, `""`) names no
-/// file, so it degrades to nil and the message omits the scope clause instead.
-/// - Parameters:
-///   - resolvedPath: Canonical path from the access guard.
-///   - homeDirectoryURL: Home boundary override, or nil for the real home.
-/// - Returns: `~`, `~/relative`, a bare path component, or nil when none is safe.
+/// Renders a resolved path as dashboard-safe scope copy, or nil when no safe scope can be named.
 func filesScopeDisplay(resolvedPath: String, homeDirectoryURL: URL?) -> String? {
     let home = FilesAccessGuard.resolvedHomeURL(overriding: homeDirectoryURL).path
     if resolvedPath == home {
@@ -172,14 +108,6 @@ func filesScopeDisplay(resolvedPath: String, homeDirectoryURL: URL?) -> String? 
 }
 
 /// Expresses a candidate file relative to the search root for progress display.
-/// A single-file root has no parent to strip, and a resolved candidate outside
-/// the root (for example a symlink target) falls back to its own name so an
-/// absolute machine path never reaches a frame. A root or blank fallback name
-/// degrades to nil, so a degenerate tail is omitted rather than rendered.
-/// - Parameters:
-///   - fileURL: Candidate file the walker is visiting.
-///   - root: Search root the candidate was enumerated under.
-/// - Returns: A root-relative path, the final path component, or nil when none is safe.
 func filesRelativeDisplayPath(for fileURL: URL, root: URL) -> String? {
     let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
     if fileURL.path.hasPrefix(rootPrefix) {
@@ -242,11 +170,8 @@ public struct FilesReadTool: Tool, Sendable {
         case let .failure(failure):
             return failure.output
         }
-        // Guard before disk: denied paths never reach the filesystem, so no
-        // existence oracle or byte leak can ride the failure message. Byte
-        // reads then open through the no-follow helper so the descriptor pins
-        // the inode while its live path is re-validated, closing a symlink
-        // swap between the first check and the read.
+        // Guard before disk: denied paths never reach the filesystem, so no existence oracle or
+        // byte leak can ride the failure message.
         let decision = FilesAccessGuard.evaluate(path: args.trimmedPath, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
         guard decision.allowed else {
             return FilesReadHelpers.deniedOutput(
@@ -465,9 +390,6 @@ public struct FilesGlobEnvelope: Sendable, Equatable, Codable {
 }
 
 /// Shared glob matching for `files.grep` include filters and `files.glob`.
-///
-/// Thin tools-layer facade over `SharedGlobMatching` so the file tools and the
-/// indexer excludes resolve patterns through one canonical matcher.
 public enum FilesGlobMatching: Sendable {
     /// Reports whether a glob tries to climb with a `..` segment.
     /// - Parameter pattern: Glob pattern.
@@ -476,23 +398,14 @@ public enum FilesGlobMatching: Sendable {
         SharedGlobMatching.containsDotDot(pattern)
     }
 
-    /// Reports whether a relative path matches a glob.
-    /// - Parameters:
-    ///   - pattern: Glob pattern.
-    ///   - relativePath: Path to match against.
-    /// - Returns: True when the whole path matches.
+    /// Reports whether a relative path matches a glob. pattern: Glob pattern.
     public static func matches(pattern: String, relativePath: String) -> Bool {
         SharedGlobMatching.matches(pattern: pattern, relativePath: relativePath)
     }
 
-    /// Reports whether a path matches a glob pattern, following the Git and
-    /// VS Code convention: patterns without a slash match against the filename
-    /// component at any depth; slash-bearing patterns match against the root-relative path.
-    /// - Parameters:
-    ///   - pattern: Glob pattern.
-    ///   - relativePath: Path relative to the walk root.
-    ///   - filename: Final path component.
-    /// - Returns: True when the filename or the relative path matches.
+    /// Reports whether a path matches a glob pattern, following the Git and VS Code convention:
+    /// patterns without a slash match against the filename component at any depth; slash-bearing
+    /// patterns match against the root-relative path.
     public static func matchesPath(pattern: String, relativePath: String, filename: String) -> Bool {
         SharedGlobMatching.matchesPath(pattern: pattern, relativePath: relativePath, filename: filename)
     }
@@ -558,12 +471,9 @@ public struct FilesGrepTool: Tool, Sendable {
         self.nowProvider = { ContinuousClock().now }
     }
 
-    /// Creates a grep tool with an injectable monotonic clock so progress
-    /// cadence can be exercised without sleeping.
-    /// - Parameters:
-    ///   - homeDirectoryURL: Home boundary override, or nil for the real home.
-    ///   - filesConfig: `[files]` policy enforced through the shared guard.
-    ///   - nowProvider: Monotonic instant source for the throttle.
+    /// Creates a grep tool with an injectable monotonic clock so progress cadence can be exercised
+    /// without sleeping. homeDirectoryURL: Home boundary override, or nil for the
+    /// real home.
     init(
         homeDirectoryURL: URL? = nil,
         filesConfig: FilesConfig = FilesConfig(),
@@ -652,14 +562,8 @@ public struct FilesGrepTool: Tool, Sendable {
         }
     }
 
-    /// Walks the root's candidates in one counted pass, matching `expression` and
-    /// emitting advisory progress frames on the shared cadence. Returns the matches
-    /// plus whether the result cap cut them short; cancellation propagates to the
-    /// owning turn.
-    ///
-    /// Matching during the walk (rather than after a pre-built candidate array)
-    /// keeps a home-wide search visible while it enumerates instead of silent until
-    /// the walk returns.
+    /// Walks the root's candidates in one counted pass, matching `expression` and emitting advisory
+    /// progress frames on the shared cadence.
     private func scanMatches(
         root: URL,
         isDirectory: Bool,
@@ -691,10 +595,9 @@ public struct FilesGrepTool: Tool, Sendable {
             } ?? true
             if includesFile, let lines = searchableLines(at: fileURL) {
                 for (index, line) in lines.enumerated() {
-                    // Cooperative cancel inside the line loop so a costly pattern over a
-                    // large file aborts with the turn instead of hanging it; the per-file
-                    // check above alone would let one file monopolize the turn. Checked
-                    // periodically to keep the fast path cheap while staying responsive.
+                    // Cooperative cancel inside the line loop so a costly pattern over a large file
+                    // aborts with the turn instead of hanging it; the per-file check above alone
+                    // would let one file monopolize the turn.
                     if index & 15 == 0 {
                         try Task.checkCancellation()
                     }
@@ -704,9 +607,8 @@ public struct FilesGrepTool: Tool, Sendable {
                     }
                     totalMatched += 1
                     // An unsorted walk finds files in arbitrary order, so keep only the
-                    // lexicographically first `maxResults` hits; that reproduces the
-                    // sorted prefix the old sorted-candidate scan returned without
-                    // holding every hit from a noisy pattern.
+                    // lexicographically first `maxResults` hits; that reproduces the sorted prefix
+                    // the old sorted-candidate scan returned without holding every hit from a noisy.
                     Self.insertBounded(
                         FilesGrepMatch(path: fileURL.path, line: index + 1, preview: Self.preview(line)),
                         into: &matches,
@@ -715,10 +617,6 @@ public struct FilesGrepTool: Tool, Sendable {
                 }
             }
             // Emitted after the file so `matched` counts the visit just completed.
-            // The running `totalMatched` is reported rather than `matches.count`:
-            // the bounded array stops growing once `maxResults` is reached, so the
-            // retained count would freeze and understate the true progress of a
-            // noisy pattern. `current` is the root-relative path the guard allowed.
             let now = nowProvider()
             if throttle.shouldReport(scanned: scanned, now: now) {
                 throttle.markReported(scanned: scanned, now: now)
@@ -779,14 +677,7 @@ public struct FilesGrepTool: Tool, Sendable {
         return (matches, totalMatched > args.maxResults)
     }
 
-    /// Inserts a hit, keeping `matches` ordered by path then line and capped at
-    /// `limit`. An unsorted walk discovers files in arbitrary order, so the bound
-    /// must evict the lexicographically largest hit rather than the newest; a
-    /// binary insertion point keeps the array ordered without a final sort.
-    /// - Parameters:
-    ///   - match: Hit to place.
-    ///   - matches: Ordered accumulator, updated in place.
-    ///   - limit: Maximum hits to retain.
+    /// Inserts a hit, keeping `matches` ordered by path then line and capped at `limit`.
     private static func insertBounded(_ match: FilesGrepMatch, into matches: inout [FilesGrepMatch], limit: Int) {
         var low = 0
         var high = matches.count
@@ -820,9 +711,6 @@ public struct FilesGrepTool: Tool, Sendable {
     }
 
     /// Reads a file's searchable lines, or nil when the file is skipped.
-    /// Bytes come from the pinned no-follow descriptor with its live path
-    /// re-validated, so a symlink swapped after pruning cannot redirect the
-    /// read; denied, symlinked, or oversized files skip without leaking bytes.
     private func searchableLines(at url: URL) -> [String]? {
         let pinned: (handle: FileHandle, resolvedPath: String)
         do {
@@ -946,12 +834,9 @@ public struct FilesGlobTool: Tool, Sendable {
         self.nowProvider = { ContinuousClock().now }
     }
 
-    /// Creates a glob tool with an injectable monotonic clock so progress
-    /// cadence can be exercised without sleeping.
-    /// - Parameters:
-    ///   - homeDirectoryURL: Home boundary override, or nil for the real home.
-    ///   - filesConfig: `[files]` policy enforced through the shared guard.
-    ///   - nowProvider: Monotonic instant source for the throttle.
+    /// Creates a glob tool with an injectable monotonic clock so progress cadence can be exercised
+    /// without sleeping. homeDirectoryURL: Home boundary override, or nil for the
+    /// real home.
     init(
         homeDirectoryURL: URL? = nil,
         filesConfig: FilesConfig = FilesConfig(),
@@ -1040,14 +925,8 @@ public struct FilesGlobTool: Tool, Sendable {
         }
     }
 
-    /// Walks `baseURL` in one counted pass, matching `rawPattern` and emitting
-    /// advisory progress frames on the shared cadence. Returns the matched absolute
-    /// paths in discovery order; cancellation propagates to the owning turn.
-    ///
-    /// Matching during the walk (rather than after a pre-built candidate list)
-    /// keeps a home-wide scan visible while it enumerates instead of silent until
-    /// the walk returns, which would read as a hang on the slow phase the user is
-    /// actually waiting on.
+    /// Walks `baseURL` in one counted pass, matching `rawPattern` and emitting advisory progress
+    /// frames on the shared cadence.
     private func collectGlobMatches(
         baseURL: URL,
         rawPattern: String,
@@ -1218,10 +1097,6 @@ public enum FilesTools {
     public static let toolNames = ["files.read", "files.grep", "files.glob", "files.list", "files.write"]
 
     /// Builds the file tools.
-    /// - Parameter supersededReviewNotifier: Optional propagation hook the
-    ///   serving process hands to `files.write` so a live write that
-    ///   supersedes a staged review reaches connected dashboards; nil in
-    ///   direct-core paths.
     public static func makeTools(
         homeDirectoryURL: URL? = nil,
         filesConfig: FilesConfig = FilesConfig(),

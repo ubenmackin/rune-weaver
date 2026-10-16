@@ -1,44 +1,11 @@
 // Rune Weaver Core — Declarative security policy types for policy.toml.
-//
-// Decouples security boundaries (network egress rules plus per-secret
-// credential bindings) from application code into a versionable, auditable
-// schema stored at `~/.runeweaver/policy.toml`. The file owns network plus
-// credentials only: legacy filesystem and tool tables are ignored on load and
-// never serialized back, so one store stays authoritative for egress and
-// secret routing and a resaved file sheds retired sections.
-//
-// The two owned invariants are credential confinement plus rule-shadow
-// prevention: bindings refuse forbidden, loopback, link-local, and private
-// targets except through a single leading `*.` edge whose base is checked
-// like an exact host, and a blocked domain always refuses even when an allow
-// entry would otherwise cover it. `EgressMode` lists exactly `allowlist_only`
-// plus `unrestricted`; a legacy `deny_by_default` string maps to
-// `allowlist_only` at the parse boundary, preserving its fail-closed intent.
-//
-// Every type is `Sendable` and `Equatable` to match the repo-wide concurrency
-// standard. The dashboard edits the structured shape while the server owns
-// serialization with a reparse round-trip proof, so the bytes on disk always
-// reload to the verified object and quoting edges cannot split file from
-// supervisor. Writes apply live through the shared `PolicyStore` with no
-// restart plus no watcher.
-//
-// The file also carries `EffectiveRequestPath`, the shared resolver that turns
-// a raw request destination into the route path a credential binding
-// authorizes, so every enforcement point compares what an origin server
-// actually routes. One binding pairs one key with hosts plus methods plus
-// path prefixes: empty hosts authorizes nothing while empty methods or
-// prefixes authorize any value.
 
 import Foundation
 
 // MARK: - Root Policy
 
-/// Root security policy mirroring `~/.runeweaver/policy.toml`.
-///
-/// The policy file is separate from `config.toml` so security boundaries
-/// are independently versionable and auditable. A missing or malformed
-/// policy file resolves to `SecurityPolicy.safeDefault` — the immutable
-/// factory posture that denies by default.
+/// Root security policy mirroring `~/.runeweaver/policy.toml`. The policy file is separate from
+/// `config.toml` so security boundaries are independently versionable and auditable.
 public struct SecurityPolicy: Sendable, Equatable {
     /// Schema version for forward compatibility. Current: 1.
     public var version: Int
@@ -65,14 +32,9 @@ public struct SecurityPolicy: Sendable, Equatable {
     /// and no secret routable.
     public static let safeDefault = SecurityPolicy()
 
-    /// Returns a copy of the policy with an additional allowed domain.
-    ///
-    /// Trims surrounding whitespace and stores the canonical comparison form
-    /// so `"  Evil.COM  "` lands exactly as the matcher evaluates it. Blank
-    /// input is a no-op returning the policy unchanged: callers that must
-    /// fail closed on empty (triage handlers) validate before calling.
-    /// `localExemptions` rides through untouched, so a domain append never
-    /// widens or narrows an exemption grant.
+    /// Returns a copy of the policy with an additional allowed domain. Blank input is a no-op
+    /// returning the policy unchanged: callers that must fail closed on empty (triage handlers)
+    /// validate before calling.
     public func appendingAllowedDomain(_ domain: String) -> SecurityPolicy {
         guard let canonical = Self.canonicalDomainEntry(domain) else { return self }
         var updated = self
@@ -87,12 +49,8 @@ public struct SecurityPolicy: Sendable, Equatable {
         return updated
     }
 
-    /// Returns a copy of the policy with an additional blocked domain.
-    ///
-    /// Trims surrounding whitespace and stores the canonical comparison form;
-    /// blank input is a no-op returning the policy unchanged.
-    /// `localExemptions` rides through untouched, so a domain append never
-    /// widens or narrows an exemption grant.
+    /// Returns a copy of the policy with an additional blocked domain. `localExemptions` rides
+    /// through untouched, so a domain append never widens or narrows an exemption grant.
     public func appendingBlockedDomain(_ domain: String) -> SecurityPolicy {
         guard let canonical = Self.canonicalDomainEntry(domain) else { return self }
         var updated = self
@@ -107,13 +65,8 @@ public struct SecurityPolicy: Sendable, Equatable {
         return updated
     }
 
-    /// Canonicalizes one caller-supplied domain for storage.
-    ///
-    /// Single-sourced through `NetworkEgressPolicy.canonicalEntry` so stored
-    /// values compare equal to what `hostStatus(for:)` evaluates: the `*.`
-    /// edge passes through with a normalized base while every other entry
-    /// normalizes whole. Nil for blank input so appenders no-op instead of
-    /// persisting an entry that could only match an empty host.
+    /// Canonicalizes one caller-supplied domain for storage. Nil for blank input so appenders no-op
+    /// instead of persisting an entry that could only match an empty host.
     private static func canonicalDomainEntry(_ domain: String) -> String? {
         let canonical = NetworkEgressPolicy.canonicalEntry(domain)
         guard !canonical.isEmpty, canonical != "*." else { return nil }
@@ -124,10 +77,6 @@ public struct SecurityPolicy: Sendable, Equatable {
 // MARK: - Network Egress
 
 /// Outbound network mode for the egress supervisor.
-///
-/// Exactly two postures exist. A stored `deny_by_default` string from an
-/// older file no longer constructs a distinct mode and falls back to
-/// `allowlistOnly` at the parse boundary, preserving its fail-closed intent.
 public enum EgressMode: String, Sendable, Equatable, CaseIterable {
     /// Only destinations in `allowedDomains` may be dialed.
     case allowlistOnly = "allowlist_only"
@@ -135,11 +84,8 @@ public enum EgressMode: String, Sendable, Equatable, CaseIterable {
     case unrestricted
 }
 
-/// `[network]` — outbound network egress boundaries.
-///
-/// Controls which external hosts the agent may contact. The SSRF guard
-/// (`ApiSSRFGuard`) still blocks metadata, link-local, and RFC 1918 ranges
-/// regardless of domain allowlist settings.
+/// `[network]` — outbound network egress boundaries. The SSRF guard (`ApiSSRFGuard`) still blocks
+/// metadata, link-local, and RFC 1918 ranges regardless of domain allowlist settings.
 public struct NetworkEgressPolicy: Sendable, Equatable {
     /// Outbound network posture.
     public var mode: EgressMode
@@ -149,10 +95,9 @@ public struct NetworkEgressPolicy: Sendable, Equatable {
     /// Domains explicitly blocked regardless of mode. Evaluated before
     /// the allowlist so a blocked domain is never reachable.
     public var blockedDomains: Set<String>
-    /// Owner-declared local-network exemptions from `[network].local_exemptions`.
-    /// Entries are shape-checked plus classified before storage; comparison
-    /// always canonicalizes through `canonicalEntry(_:)`. Empty by default, so
-    /// a policy that declared no grant exempts nothing.
+    /// Owner-declared local-network exemptions from `[network].local_exemptions`. Entries are
+    /// shape-checked plus classified before storage; comparison always canonicalizes through
+    /// `canonicalEntry(_:)`.
     public var localExemptions: Set<String>
 
     /// Creates a network egress policy.
@@ -182,13 +127,6 @@ public struct NetworkEgressPolicy: Sendable, Equatable {
     }
 
     /// Evaluates the granular status of a host.
-    ///
-    /// Evaluation order:
-    /// 1. Blocked domains always refuse.
-    /// 2. Unrestricted mode allows all non-blocked hosts.
-    /// 3. Allowlist modes check exact match and wildcard suffix match.
-    /// - Parameter host: Raw host component to evaluate.
-    /// - Returns: `HostStatus` indicating allowed, explicitly blocked, or unlisted.
     public func hostStatus(for host: String) -> HostStatus {
         let canonicalHost = SensitiveAddressNormalization.normalizedHost(host)
 
@@ -231,10 +169,6 @@ public struct NetworkEgressPolicy: Sendable, Equatable {
     }
 
     /// Whether a given host is permitted under this policy.
-    ///
-    /// Delegates to `hostStatus(for:)`.
-    /// - Parameter host: Raw host component (name or address literal) to evaluate.
-    /// - Returns: `nil` when allowed, or a human-readable refusal reason.
     public func denyReason(for host: String) -> String? {
         switch hostStatus(for: host) {
         case .allowed:
@@ -244,15 +178,9 @@ public struct NetworkEgressPolicy: Sendable, Equatable {
         }
     }
 
-    /// Canonicalizes one declared domain entry for comparison.
-    ///
-    /// Single owner for domain canonicalization: appenders reuse this instead
-    /// of keeping a second copy, so storage and matching cannot drift on the
-    /// `*.` edge. Only the suffix of a `*.` entry names a host, so the
-    /// wildcard edge passes through untouched; every other entry reuses the
-    /// same normalizer the SSRF guard trusts. A malformed entry that
-    /// normalizes to nothing can only equal an empty host, so it fails closed
-    /// instead of matching broadly.
+    /// Canonicalizes one declared domain entry for comparison. Single owner for domain
+    /// canonicalization: appenders reuse this instead of keeping a second copy, so storage and
+    /// matching cannot drift on the `*.` edge.
     public static func canonicalEntry(_ entry: String) -> String {
         let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("*.") else {
@@ -265,18 +193,6 @@ public struct NetworkEgressPolicy: Sendable, Equatable {
 // MARK: - Effective Request Path
 
 /// Resolves the route path a request actually reaches, for binding comparison.
-///
-/// Foundation's decoded `URL.path` still carries `..` segments (and erases
-/// `%2f`/`%2e` spellings), so a request to `https://host/v1/%2e%2e/admin`
-/// reads as starting with `/v1/` while RFC 3986 routing sends it to `/admin`,
-/// and the live Keychain value would ride a path the binding never authorized.
-/// This resolver percent-decodes the raw path, applies RFC 3986 §5.2.4
-/// `remove_dot_segments`, and refuses spellings whose routed destination
-/// differs across proxy decoders: encoded path separators (`%2f`, `%5c`, raw
-/// backslash) and encoded dot segments (`%2e`, `%2e%2e`, `.%2e`, and nested
-/// encodings). One resolver serves every enforcement point — the egress
-/// supervisor re-enters it for the initial URL and every redirect hop, because
-/// each hop's binding decision flows through `CredentialBinding.denyReason`.
 public enum EffectiveRequestPath: Sendable {
     /// Outcome of resolving one request destination.
     public enum Resolution: Sendable, Equatable {
@@ -287,32 +203,14 @@ public enum EffectiveRequestPath: Sendable {
     }
 
     /// Percent-decoding layers peeled before an over-encoded path is refused.
-    ///
-    /// One layer covers plain escaping and two cover double-encoded traversal
-    /// (`%252e%252e`); deeper nesting refuses instead of being guessed at, so a
-    /// multiply-wrapped separator never reaches the prefix comparison.
     private static let maximumDecodeLayers = 4
 
     /// Resolves a URL destination from its raw, still-encoded components.
-    ///
-    /// The raw accessors are deliberate: the decoded `URL.path` has already
-    /// erased the escapes this resolver must refuse, and the raw forms are what
-    /// the wire request carries.
-    /// - Parameter url: Request URL under evaluation.
-    /// - Returns: The effective path, or a refusal reason.
     public static func resolve(for url: URL) -> Resolution {
         resolve(host: url.host(percentEncoded: true) ?? "", rawPath: url.path(percentEncoded: true))
     }
 
     /// Resolves a raw host plus raw path pair.
-    ///
-    /// A host that spells a separator or dot as an escape is refused before
-    /// wildcard suffix matching: resolvers disagree on those bytes, so the
-    /// binding fails closed instead of authorizing an ambiguous authority.
-    /// - Parameters:
-    ///   - host: Raw authority component, escapes intact.
-    ///   - rawPath: Raw path as it appears in the request target.
-    /// - Returns: The effective path, or a refusal reason.
     public static func resolve(host: String, rawPath: String) -> Resolution {
         if let hostReason = encodedHostReason(host) {
             return .rejected("host '\(host)' \(hostReason)")
@@ -321,12 +219,6 @@ public enum EffectiveRequestPath: Sendable {
     }
 
     /// Resolves one raw path to the effective route path.
-    ///
-    /// Every decoding layer is checked before it is peeled, so a traversal
-    /// wrapped in deeper percent-encoding is refused rather than smuggled
-    /// through as an opaque literal segment.
-    /// - Parameter rawPath: Raw path as it appears in the request target.
-    /// - Returns: The effective path, or a refusal reason.
     public static func resolve(rawPath: String) -> Resolution {
         var current = rawPath.isEmpty ? "/" : rawPath
         var layers = 0
@@ -353,10 +245,6 @@ public enum EffectiveRequestPath: Sendable {
     }
 
     /// RFC 3986 §5.2.4 `remove_dot_segments` over an already-decoded path.
-    ///
-    /// Literal `.`/`..` segments are safe to normalize because every RFC 3986
-    /// origin server removes them the same way; encoded spellings never reach
-    /// this step because `resolve` refuses them first.
     static func removeDotSegments(_ path: String) -> String {
         var input = path
         var output = ""
@@ -430,12 +318,8 @@ public enum EffectiveRequestPath: Sendable {
 
 // MARK: - Credential Binding
 
-/// Binds a secret surrogate (`rwsecret:<key>`) to authorized destinations.
-///
-/// When the agent requests `rwsecret:GITHUB_PAT`, the egress supervisor
-/// checks that the target URL's host, HTTP method, and path prefix all
-/// match this binding before the Keychain is ever accessed. A mismatch
-/// fails closed — the secret is never loaded into memory.
+/// Binds a secret surrogate (`rwsecret:<key>`) to authorized destinations. A mismatch fails closed
+/// — the secret is never loaded into memory.
 public struct CredentialBinding: Sendable, Equatable {
     /// Hosts this credential may be sent to (e.g. `["api.github.com"]`).
     /// A single leading `*.` entry (`*.example.com`) also authorizes the
@@ -458,35 +342,11 @@ public struct CredentialBinding: Sendable, Equatable {
     }
 
     /// Whether a request to the given destination is authorized for this credential.
-    ///
-    /// Host authorization accepts exact destinations plus a single leading
-    /// `*.` edge covering the base domain and any subdomain depth. The
-    /// request host and each configured entry canonicalize through the shared
-    /// host normalizer so casing, trailing dots, and alternate numeric
-    /// spellings agree; malformed star shapes never authorize, so a typo
-    /// fails closed instead of silently widening the binding.
-    ///
-    /// Path authorization compares the effective route path from
-    /// `EffectiveRequestPath` — percent-decoded with RFC 3986 dot segments
-    /// removed — and refuses encoded separators or encoded dot segments, so a
-    /// traversal spelling like `/v1/../admin` can never satisfy a `/v1/`
-    /// prefix. The same resolution runs for every redirect hop because the
-    /// egress supervisor re-enters this method per hop.
-    /// - Parameters:
-    ///   - key: Secret key the binding belongs to (used in refusal wording).
-    ///   - host: Raw target hostname.
-    ///   - method: HTTP method (uppercased).
-    ///   - path: Request path, raw or decoded; resolved before comparison.
-    /// - Returns: `nil` when authorized, or a human-readable refusal reason.
     public func denyReason(key: String, host: String, method: String, path: String) -> String? {
         let canonicalHost = SensitiveAddressNormalization.normalizedHost(host)
         let upperedMethod = method.uppercased()
 
         // Resolve the effective destination before any authorization decision.
-        // A binding must judge the path the origin server routes, not the raw
-        // request text, and an ambiguous escape spelling has to refuse rather
-        // than guess; resolving here also covers direct callers that hold an
-        // already-decoded `URL.path`.
         let effectivePath: String
         switch EffectiveRequestPath.resolve(host: host, rawPath: path) {
         case let .effective(resolved):
@@ -525,12 +385,9 @@ public struct CredentialBinding: Sendable, Equatable {
         return nil
     }
 
-    /// Whether one `allowed_hosts` entry authorizes a canonical destination.
-    ///
-    /// A leading `*.` entry authorizes the base domain plus every subdomain,
-    /// matching the invariant verifier's confinement semantics. Every other
-    /// star shape (bare `*`, trailing `.*`, glob syntax, port qualifiers) is
-    /// meaningless for a host binding and refuses.
+    /// Whether one `allowed_hosts` entry authorizes a canonical destination. A leading `*.` entry
+    /// authorizes the base domain plus every subdomain, matching the invariant verifier's
+    /// confinement semantics.
     private static func authorizes(canonicalHost: String, pattern: String) -> Bool {
         let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
         switch AllowedOriginPattern.classifyWildcard(trimmed.lowercased()) {

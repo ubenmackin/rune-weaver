@@ -1,21 +1,4 @@
 // Rune Weaver Core — Approval decision log persistence for the audit trail.
-//
-// Purpose: own the durable record of every resolved approval decision — tool,
-// scope, allow or deny, duration, surface, and when it was decided — so run
-// history and the approvals inbox can answer what the owner chose without
-// re-asking. The decision path records best-effort; this file owns the copy
-// beside it, including oldest-first eviction past the row cap.
-// Scope: the `ApprovalDecisionRecording` protocol plus an in-memory store and
-// a SQLite (`episodes.db`, table `approval_decisions`) store. Scope comparison
-// is never this file's job — `AccessScope.matches` is the single matcher — so
-// rows store only the canonical single-value rendering of the resolved scope.
-// An unreadable store yields empty reads and drops writes, never throwing
-// into the decision path.
-// Architectural role: storage adapter beside the permission gate, following
-// the shared Core store idiom (serialized SQLite access via `SQLiteSerialIO`)
-// so serve, CLI, and the menu-bar app share one persistence path. Free-form
-// row fields are bounded at the entry boundary so neither store can persist
-// an oversized string.
 
 import Foundation
 #if canImport(SQLite3)
@@ -46,12 +29,6 @@ public struct ApprovalDecisionEntry: Sendable, Codable, Equatable {
     public let decidedAt: Date
 
     /// Creates a decision entry.
-    ///
-    /// Free-form fields are bounded here — the one boundary both stores share —
-    /// so an oversized tool name, scope rendering, duration, session id, or
-    /// display target can never reach either persistence path unbounded. Truncation
-    /// keeps the audit prefix rather than dropping the row: a bounded entry
-    /// still answers who decided what, fail-open, exactly like the log itself.
     public init(
         id: UUID = UUID(),
         toolName: String,
@@ -115,11 +92,8 @@ public enum ApprovalDecisionLog {
     /// Maximum retained decision rows; appends evict oldest past this bound.
     public static let maxRows = 10000
 
-    /// Persisted-string bounds for the audit row, mirroring how the access
-    /// rule store bounds its fields through the scope canonicalizers. Tool
-    /// names, surface tags, and duration tiers are short by construction;
-    /// scope data and display targets mirror the rule store's path-prefix
-    /// cap, and a session id is a UUID string with headroom.
+    /// Persisted-string bounds for the audit row, mirroring how the access rule store bounds its
+    /// fields through the scope canonicalizers.
     public static let maxToolNameChars = 128
     public static let maxScopeKindChars = 32
     public static let maxScopeDataChars = 1024
@@ -129,12 +103,6 @@ public enum ApprovalDecisionLog {
     public static let maxDisplayTargetChars = 1024
 
     /// Bounds one persisted string to `limit` characters.
-    ///
-    /// Truncation preserves the identifying prefix rather than dropping or
-    /// blanking the value: an over-bound audit field still answers what was
-    /// decided without letting an oversized string reach the store. Nil and
-    /// within-bound values pass through untouched so bounded entries compare
-    /// equal to their inputs.
     public static func bounded(_ value: String?, limit: Int) -> String? {
         guard let value, value.count > limit else { return value }
         return String(value.prefix(limit))
@@ -163,11 +131,8 @@ public enum ApprovalDecisionLog {
 public protocol ApprovalDecisionRecording: Sendable {
     /// Records one decision; never throws so the audit trail cannot block decisions.
     func append(_ entry: ApprovalDecisionEntry) async
-    /// Lists decisions newest first, optionally narrowed to one exact tool
-    /// name and/or one polarity. Filters are part of the store contract so
-    /// callers page over the filtered set directly — a SQLite-backed store
-    /// turns them into `WHERE` clauses instead of a post-fetch slice, which
-    /// keeps both the page and the paired count honest for any history size.
+    /// Lists decisions newest first, optionally narrowed to one exact tool name and/or one
+    /// polarity.
     func list(limit: Int, offset: Int, toolName: String?, allowed: Bool?) async throws -> [ApprovalDecisionEntry]
     /// Counts stored decisions under the same optional tool/polarity narrowing.
     func count(toolName: String?, allowed: Bool?) async throws -> Int
@@ -540,10 +505,9 @@ public actor InMemoryApprovalDecisionLog: ApprovalDecisionRecording {
     }
 #endif
 
-/// SQLite-backed decision log persisted in `episodes.db` under `approval_decisions`.
-///
-/// Reads return newest first. An unreadable database yields empty reads and
-/// drops writes with a stores log, never throwing into the decision path.
+/// SQLite-backed decision log persisted in `episodes.db` under `approval_decisions`. An unreadable
+/// database yields empty reads and drops writes with a stores log, never throwing into the decision
+/// path.
 public actor ApprovalDecisionLogStore: ApprovalDecisionRecording {
     /// Filesystem path of the SQLite database (`episodes.db`).
     public let dbPath: String

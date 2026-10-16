@@ -1,7 +1,4 @@
 // Rune Weaver Dashboard — Quick executive prompt & command bar.
-// Sits prominently below the morning greeting, allowing the operator to
-// immediately issue directives, questions, or goal triggers that start
-// a fresh chat session with the prompt dispatched immediately.
 
 import { useState, type FormEvent } from "react";
 import { SparklesIcon } from "../icons";

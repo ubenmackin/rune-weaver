@@ -1,14 +1,4 @@
 // Rune Weaver Tests — PermissionGate rule persistence, lifecycle administration, and the legacy carry-forward.
-//
-// Pins the durable half of the rule model: durable rules save, load, and survive
-// a restart with their tool, scope, action, and usage counters; expired allow
-// rules prune from memory and from storage while deny rules never age out and
-// are removed only by an explicit revoke; widening and re-arming preserve rule
-// identity, creation time, and usage counters while recomputing only the
-// lifetime; usage counters attribute to the covering rule and round-trip; and a
-// legacy `trust_grants` row allows exactly the call it covered before the rule
-// model existed. Ephemeral task and session grants stay in memory, never
-// persist, and die on the lifecycle signal that ends them.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -17,11 +7,9 @@ import Testing
     import SQLite3
 #endif
 
-/// Raw SQLite fixtures for the rule-persistence suites.
-///
-/// The store opens and closes per call exactly as production does, so the
-/// helpers mirror its busy timeout instead of surfacing a transient write lock
-/// as a failed fixture.
+/// Raw SQLite fixtures for the rule-persistence suites. The store opens and closes per call exactly
+/// as production does, so the helpers mirror its busy timeout instead of surfacing a transient write
+/// lock as a failed fixture.
 private enum RulePersistenceTestSupport {
     /// Builds an isolated database path under the temporary directory.
     static func temporaryDBPath() -> String {
@@ -66,10 +54,6 @@ private enum RulePersistenceTestSupport {
     }
 
     /// Backdates one rule's expiry so a row lapses while the gate is live.
-    ///
-    /// Every durable tier outlasts a test, so the fixture advances the stored row
-    /// the way a clock change would and leaves the reaper to prove it sweeps the
-    /// database rather than only filtering on read.
     @discardableResult
     static func backdateExpiry(dbPath: String, id: UUID, expiresAt: Date) -> Bool {
         let sql = "UPDATE access_rules SET expires_at = \(expiresAt.timeIntervalSince1970) WHERE id = '\(id.uuidString)';"

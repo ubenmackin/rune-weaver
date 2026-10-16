@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — Working Right Now Stream.
-//
-// Real-time visibility into active agent tasks and background executions:
-// - Running goal turns and automated schedule jobs
-// - Active tool calls with progress counters and live elapsed duration
-// - Immediate intervention actions: "View Live in Chat" and "Stop"
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -37,10 +32,8 @@ export default function WorkingNowStream({
   const fetchActiveRuns = useCallback(async (forceRefresh = false) => {
     try {
       setError(null);
-      // Shared single-flight fetch: concurrent dashboard widgets collapse onto
-      // one `GET /runs` sized for the hungriest caller, then filter locally.
-      // Lifecycle frames force past the freshness window so a newly started or
-      // settled run appears now instead of at the next poll tick.
+      // Shared single-flight fetch: concurrent dashboard widgets collapse onto one `GET /runs`
+      // sized for the hungriest caller, then filter locally.
       const runs = await getSharedRecentRuns(30, { forceRefresh });
       const running = (runs || []).filter((r) => isActiveRunStatus(r.status));
       setActiveRuns(running);

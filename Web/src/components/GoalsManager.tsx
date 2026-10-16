@@ -1,22 +1,4 @@
 // Rune Weaver Dashboard — Long-horizon goal manager.
-//
-// Purpose: drives steady goal pursuit from the dashboard: listing goals with
-// their progress, creating a goal and its cadence, advancing, pausing,
-// abandoning, or purging, and inspecting one goal's plan checklist, audit
-// events, and linked runs. The agent can also create goals from chat, so this
-// surface mirrors rather than owns the pursuit lifecycle.
-// Scope: rendering plus the create, tombstone, and purge calls this panel
-// owns; detail reads, advance, status flips, and step moves route through the
-// shared goal controller. Cadence bounds, status and event vocabularies, and
-// the wire shapes live with the client API module; durable pursuit stays with
-// the engine, so this component never invents state the server cannot
-// round-trip.
-// Architectural role: one of the dashboard panels multiplexed over the shared
-// WebSocket, refreshing its list on `goal_updated` pushes. The needs-input
-// attention count is owned by the shell's notification hook and passed in, so
-// the panel never counts the same proactive frames a second time. Model-
-// authored event and step notes render exclusively through the sanitized
-// MarkdownText path — this file holds no raw HTML injection.
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
@@ -271,10 +253,7 @@ export default function GoalsManager({
         }
         return;
       }
-      // A freshly proposed idea rides the shared proactive frame. Re-read the
-      // ideas list so a newly announced suggestion appears in the panel without
-      // a manual refresh or remount; the shell's notification hook still owns
-      // the attention badge, so this handler never counts the frame itself.
+      // A freshly proposed idea rides the shared proactive frame.
       if (isIdeaProposedProactive(raw)) {
         void refreshIdeas();
       }

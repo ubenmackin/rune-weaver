@@ -1,11 +1,4 @@
 // Rune Weaver Dashboard — Wire API casing contract test.
-//
-// Purpose: ensures all engine-dashboard wire TypeScript contracts in `api.ts`
-// use camelCase properties exclusively (no snake_case keys or aliases).
-// Scope: tests runtime default configurations and statically analyzes `api.ts`
-// interface and type definitions.
-// Architectural role: guardrail preventing future agents and contributors from
-// reintroducing snake_case wire properties or drift between frontend and backend.
 
 import { describe, expect, it } from "vitest";
 import {

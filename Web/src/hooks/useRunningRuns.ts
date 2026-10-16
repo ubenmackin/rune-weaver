@@ -1,8 +1,4 @@
-// Shared running-run polling for the dashboard chat and sidebar.
-// Single module-level poller over the run log so mounted views share one
-// interval and one in-flight fetch instead of doubling QPS; live WebSocket
-// broadcasts plus parked-flight state stay with callers for immediacy while
-// this hook covers reloads, missed sockets, and cross-tab turns.
+// Rune Weaver Dashboard — Shared running-run polling for the dashboard chat and sidebar.
 
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import {
@@ -28,29 +24,21 @@ export type FrozenRunLogEntry = Omit<Readonly<RunLogEntry>, "toolActions"> & {
 
 type RunsListener = () => void;
 
-// Stable empty snapshot for server rendering so hydration starts detached
-// without allocating a fresh array per call, which would read as a change.
-// Typed readonly so a stray mutation fails compilation instead of corrupting
-// every reader at runtime.
+// Stable empty snapshot for server rendering so hydration starts detached without allocating a
+// fresh array per call, which would read as a change.
 const emptyRunsSnapshot: ReadonlyArray<FrozenRunLogEntry> =
   Object.freeze([]);
 
-// Module-level single flight so two mounted views never double the run-log
-// QPS: the chat view (parked-settle reconcile) and the sidebar (row badges)
-// subscribe to the same tick and the same promise instead of each owning a
-// timer. The cache seeds late subscribers so a remount badges instantly while
-// the next tick revalidates. The snapshot reference only changes on publish
-// or test reset so concurrent readers never tear; the snapshot and every row
-// inside it stay frozen so no caller can mutate shared state in place.
+// Module-level single flight so two mounted views never double the run-log QPS: the chat view
+// (parked-settle reconcile) and the sidebar (row badges) subscribe to the same tick and the same
+// promise instead of each owning a timer.
 let cachedRuns: ReadonlyArray<FrozenRunLogEntry> = emptyRunsSnapshot;
 const listeners = new Set<RunsListener>();
 let sharedTimer: ReturnType<typeof setInterval> | null = null;
 let sharedInFlight: Promise<void> | null = null;
 
-// Copies one run row plus its nested tool actions so a later publish never
-// shares mutable objects with a prior snapshot. Each level freezes on the way
-// out, and the readonly result type rejects in-place edits at compile time
-// instead of throwing from the runtime freeze under concurrent renders.
+// Copies one run row plus its nested tool actions so a later publish never shares mutable objects
+// with a prior snapshot.
 function freezeRunCopy(
   run: RunLogEntry | FrozenRunLogEntry,
 ): FrozenRunLogEntry {
@@ -90,11 +78,7 @@ function fingerprintField(value: unknown): string {
   return text === "" ? "" : text;
 }
 
-// Builds the equality key for one frozen snapshot in incoming order with no
-// sorting. Each row joins its scalar fields with newlines, each action joins
-// its fields with pipes and actions join with pipes inside the row, and rows
-// join with double newlines; timestamps normalize to epoch millis through
-// the shared parser so both wire shapes compare as one value.
+// Builds the equality key for one frozen snapshot in incoming order with no sorting.
 export function runsFingerprint(
   runs: ReadonlyArray<FrozenRunLogEntry>,
 ): string {
@@ -141,10 +125,9 @@ export function runsFingerprint(
 function publishRuns(
   next: ReadonlyArray<RunLogEntry | FrozenRunLogEntry>,
 ): void {
-  // Freeze first so the fingerprint compares the exact rows that would be
-  // published; a matching fingerprint keeps the cached reference with no
-  // notify so identical ticks never re-render idle views, while a mismatch
-  // swaps before notifying to keep snapshot reads tear-free.
+  // Freeze first so the fingerprint compares the exact rows that would be published; a matching
+  // fingerprint keeps the cached reference with no notify so identical ticks never re-render idle
+  // views, while a mismatch swaps before notifying to keep snapshot reads tear-free.
   const frozen = freezeRunsSnapshot(next);
   if (runsFingerprint(frozen) === runsFingerprint(cachedRuns)) {
     return;
@@ -192,10 +175,8 @@ function stopSharedPoller(): void {
   }
 }
 
-// Test-only reset that drops the shared timer, cache, in-flight fetch, and
-// subscribers so suites start from a detached poller without reaching into
-// module privates. Gated to the test bundle so production never tears down
-// the shared interval; outside tests this is a no-op.
+// Test-only reset that drops the shared timer, cache, in-flight fetch, and subscribers so suites
+// start from a detached poller without reaching into module privates.
 export function resetSharedRunsForTesting(): void {
   if (import.meta.env.MODE !== "test") return;
   if (sharedTimer !== null) {
@@ -207,13 +188,7 @@ export function resetSharedRunsForTesting(): void {
   listeners.clear();
 }
 
-// External-store subscription owning the shared poller lifetime. The first
-// subscriber starts the single interval plus an immediate single-flight
-// revalidate; a late subscriber joins the in-flight fetch instead of firing
-// a second request. Removing the last subscriber stops the timer so idle
-// routes never poll behind the scenes. Ref counting here keeps StrictMode
-// double-mount balanced (subscribe/unsubscribe/subscribe) while the shared
-// in-flight promise dedupes the remount fetch.
+// External-store subscription owning the shared poller lifetime.
 function subscribeSharedRuns(listener: RunsListener): () => void {
   listeners.add(listener);
   if (listeners.size === 1) {
@@ -229,10 +204,7 @@ function subscribeSharedRuns(listener: RunsListener): () => void {
   };
 }
 
-// Snapshot accessor for the external store. Returns the cached frozen
-// reference directly so repeated reads compare stable until the next publish
-// swaps it; never copies here because a fresh array per call would read as
-// changed on every render and loop.
+// Snapshot accessor for the external store.
 function getSharedRunsSnapshot(): ReadonlyArray<FrozenRunLogEntry> {
   return cachedRuns;
 }
@@ -244,12 +216,6 @@ function getSharedRunsServerSnapshot(): ReadonlyArray<FrozenRunLogEntry> {
 }
 
 // Shared run-log poller for running-session badges and parked-settle reconcile.
-// Readers subscribe through the external-store hook so concurrent rendering
-// stays tear-free under StrictMode; mounting views share one interval at the
-// centralized cadence while unmounting the last subscriber stops the timer.
-// Live `run_started`/`run_completed` broadcasts stay with callers because the
-// socket is already shared and adds no QPS, while parked flights stay with the
-// chat view that owns their timelines.
 export function useRunningRuns() {
   // Tear-free subscription: React re-reads the cached snapshot after each
   // publish notification instead of each view owning divergent state, so a

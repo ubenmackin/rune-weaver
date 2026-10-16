@@ -1,36 +1,12 @@
 // Rune Weaver Core — Periodic security probe suite for the verified system pulse.
-//
-// Purpose: prove the live security posture with runtime checks instead of
-// trusting configuration alone. The server wires the suite onto the
-// periodic cadence — serve boot, every committed policy write, the nightly
-// tick, and on-demand re-check applies — and never onto the per-tool path,
-// so tool latency never carries probe cost.
-//
-// Scope: the report shape with its stable outcome hash, the bounded runner
-// (12 probes, 30 seconds total, 5 seconds per probe), and the seven verifier
-// families — workspace traversal containment, symlink escape, approval
-// replay, credential redaction, sovereign ledger integrity, sandbox
-// zero-socket posture, and vault round-trip. Recording into the pulse
-// belongs to the health snapshot owner; scheduling belongs to the server.
-// Architectural role: a Core subsystem exercising the fail-closed paths of
-// `WorkspaceContainment`, `ApprovalQueue`, `SecretsManager`, the redaction
-// sweep, `SovereignLedger`, and `SeatbeltProfileBuilder` exactly the way
-// production does, so a regression in any of them latches the pulse red
-// instead of surfacing only at the moment it is exploited.
 
 import CryptoKit
 import Foundation
 
 // MARK: - Report
 
-/// One completed periodic security probe report.
-///
-/// Carries the bounded outcome set plus a stable hash over the outcomes
-/// alone. Timestamps are deliberately excluded from the hash: two runs
-/// exercising the same posture must compare equal, so "changed" names a
-/// posture change and never a clock change. Traversal, symlink, and replay
-/// failures are fail-closed and block serve boot; every other failure
-/// degrades with its detail behind the dashboard disclosure.
+/// One completed periodic security probe report. Carries the bounded outcome set plus a stable hash
+/// over the outcomes alone.
 public struct ProbeReport: Sendable, Equatable, Codable {
     /// Maximum probes one report carries; extras are dropped, never widened.
     public static let maxProbes = 12
@@ -59,13 +35,6 @@ public struct ProbeReport: Sendable, Equatable, Codable {
     }
 
     /// Creates a report, normalizing the outcome set.
-    ///
-    /// Sorts by verifier name and caps at `maxProbes` so a drifting suite
-    /// cannot widen the served disclosure.
-    /// - Parameters:
-    ///   - probes: Completed probe outcomes.
-    ///   - startedAt: When the run started.
-    ///   - finishedAt: When the run finished.
     public init(probes: [HealthProbeOutcome], startedAt: Date, finishedAt: Date) {
         self.probes = Array(
             probes.sorted { $0.name < $1.name }.prefix(Self.maxProbes)
@@ -89,13 +58,8 @@ public struct ProbeReport: Sendable, Equatable, Codable {
 
 // MARK: - Suite
 
-/// Periodic security probe suite.
-///
-/// Runs the fixed verifier set under the suite bounds and returns one
-/// report. Every verifier is self-contained — a scratch tree, an in-memory
-/// vault, a throwaway approval queue — so a run never touches operator
-/// state, and every failure converts into a bounded outcome instead of a
-/// throw: a suite that cannot run at all must read as failed, never silent.
+/// Periodic security probe suite. Runs the fixed verifier set under the suite bounds and returns
+/// one report.
 public enum SecurityProbeSuite {
     /// Runs every verifier under the suite bounds.
     /// - Returns: The completed report, never empty by construction.
@@ -107,10 +71,9 @@ public enum SecurityProbeSuite {
             let outcome = await runBounded(verifier, deadline: deadline)
             outcomes.append(outcome)
         }
-        // A run always emits one outcome per verifier, so an empty set is
-        // unreachable by construction. The synthetic entry keeps a
-        // hypothetical empty set failing closed: absence of evidence is not
-        // evidence of safety.
+        // A run always emits one outcome per verifier, so an empty set is unreachable by
+        // construction. The synthetic entry keeps a hypothetical empty set failing closed: absence
+        // of evidence is not evidence of safety.
         if outcomes.isEmpty {
             outcomes = [
                 HealthProbeOutcome(
@@ -135,15 +98,9 @@ public enum SecurityProbeSuite {
         (ProbeName.vaultRoundTrip, false)
     ]
 
-    /// Runs one verifier against the remaining suite budget.
-    ///
-    /// The per-verifier budget never exceeds the remaining suite budget, so
-    /// a hung verifier consumes at most its own slice and never the whole
-    /// run. A budget expiry records a timeout outcome rather than throwing.
-    /// - Parameters:
-    ///   - verifier: Verifier name plus fail-closed flag.
-    ///   - deadline: Instant the whole suite budget expires.
-    /// - Returns: The verifier's outcome, or a timeout outcome.
+    /// Runs one verifier against the remaining suite budget. The per-verifier budget never exceeds
+    /// the remaining suite budget, so a hung verifier consumes at most its own slice and never the
+    /// whole run.
     private static func runBounded(_ verifier: (name: String, failClosed: Bool), deadline: Date) async -> HealthProbeOutcome {
         let remaining = deadline.timeIntervalSinceNow
         guard remaining > 0 else {
@@ -215,10 +172,6 @@ public enum SecurityProbeSuite {
 // MARK: - Verifier Identities
 
 /// Stable verifier names recorded into the pulse.
-///
-/// Names persist into the served disclosure, so they rename only with a
-/// matching change on the dashboard surface; the seeded `search` verifier
-/// from the health route stays separate.
 private enum ProbeName {
     static let traversal = "traversal"
     static let symlinkEscape = "symlink-escape"
@@ -242,11 +195,6 @@ private enum ProbeName {
 
 extension SecurityProbeSuite {
     /// Workspace traversal containment.
-    ///
-    /// Plants a scratch root beside an outside sibling, then asserts the
-    /// containment primitive accepts an in-root path while refusing the
-    /// outside absolute spelling, the dot-dot spelling a caller can embed in
-    /// a relative argument, and the resolved escape.
     private static func probeTraversal() async -> HealthProbeOutcome {
         let name = ProbeName.traversal
         guard let scratch = ProbeScratch.make(prefix: "rune-probe-traversal") else {
@@ -298,12 +246,6 @@ extension SecurityProbeSuite {
     }
 
     /// Symlink escape containment.
-    ///
-    /// Plants a symlink inside the scratch root pointing at the outside
-    /// sibling, then asserts the `lstat` probe sees it, the containment
-    /// primitive refuses the link without following it, and the escape check
-    /// flags the resolved target. A regular in-root file stays usable so the
-    /// refusal is about the link, not a blanket refusal of the root.
     private static func probeSymlinkEscape() async -> HealthProbeOutcome {
         let name = ProbeName.symlinkEscape
         guard let scratch = ProbeScratch.make(prefix: "rune-probe-symlink") else {
@@ -354,12 +296,6 @@ extension SecurityProbeSuite {
     }
 
     /// Approval replay protection.
-    ///
-    /// Parks one approval in a throwaway queue, resolves it, then replays
-    /// the same identifier: a queue that honors the replay would let a
-    /// captured decision response authorize a second write, so the second
-    /// decide must be a no-op and the entry must stop being pending the
-    /// moment the first decision lands.
     private static func probeReplay() async -> HealthProbeOutcome {
         let name = ProbeName.replay
         let queue = ApprovalQueue()
@@ -393,11 +329,6 @@ extension SecurityProbeSuite {
     }
 
     /// Credential redaction at the transport boundary.
-    ///
-    /// Stores a sentinel in an in-memory vault, then asserts the sweep the
-    /// egress boundary relies on removes the resolved value from echoed
-    /// content and from an `Authorization` preview, leaving the shared
-    /// marker behind instead of any secret bytes.
     private static func probeFirewallRedaction() async -> HealthProbeOutcome {
         let name = ProbeName.firewallRedaction
         let vault = SecretsManager(service: "com.runeweaver.probe.\(UUID().uuidString)", inMemory: true)
@@ -434,13 +365,9 @@ extension SecurityProbeSuite {
         }
     }
 
-    /// Sovereign ledger integrity.
-    ///
-    /// Runs a full ceremony over a throwaway ledger and store — chain
-    /// recomputation, sovereign copy write, and signed checkpoint — under a
-    /// probe signer that never touches operator key material. A clean
-    /// ceremony must verify; a copy tampered afterward must not, because a
-    /// ceremony that accepts a broken chain would read as agreement forever.
+    /// Sovereign ledger integrity. Runs a full ceremony over a throwaway ledger and store — chain
+    /// recomputation, sovereign copy write, and signed checkpoint — under a probe signer that never
+    /// touches operator key material.
     private static func probeLedgerIntegrity() async -> HealthProbeOutcome {
         let name = ProbeName.ledgerIntegrity
         guard let scratch = ProbeScratch.make(prefix: "rune-probe-ledger") else {
@@ -484,12 +411,6 @@ extension SecurityProbeSuite {
     }
 
     /// Sandbox zero-socket posture.
-    ///
-    /// Asserts the sandbox firewall spellings move together with the
-    /// `allowNetwork` knob: a denied profile carries the socket deny with no
-    /// allow, and a permitted profile carries the allow with no deny. A
-    /// profile that grants network while the knob says denied would let a
-    /// sandboxed guest dial out, so the assert is one-directional by design.
     private static func probeZeroSocket() async -> HealthProbeOutcome {
         let name = ProbeName.zeroSocket
         let denied = SeatbeltProfileBuilder(allowNetwork: false).buildProfile()
@@ -513,11 +434,6 @@ extension SecurityProbeSuite {
     }
 
     /// Vault round-trip.
-    ///
-    /// Stores a sentinel in an in-memory vault, reads it back, issues the
-    /// surrogate a model-visible argument would carry, resolves that
-    /// surrogate, then deletes and confirms the credential is gone: a delete
-    /// that leaves the slot readable would strand a stale secret live.
     private static func probeVaultRoundTrip() async -> HealthProbeOutcome {
         let name = ProbeName.vaultRoundTrip
         let vault = SecretsManager(service: "com.runeweaver.probe.\(UUID().uuidString)", inMemory: true)
@@ -555,12 +471,6 @@ extension SecurityProbeSuite {
     }
 
     /// Appends one unchainable line to a sovereign copy.
-    ///
-    /// The line declares a sequence position the chain cannot produce, so a
-    /// strict read refuses the whole copy — the tamper must surface as a
-    /// refusal or a mismatch verdict, never as a verification.
-    /// - Parameter path: Sovereign copy path to tamper.
-    /// - Throws: A filesystem error when the append fails.
     private static func appendTamperLine(to path: String) throws {
         let ids = #"00000000-0000-0000-0000-000000000000"#
         let episode = #"{"id":"\#(ids)","session_id":"\#(ids)","role":"user","timestamp":"0.0","content":"tamper","metadata":{}}"#
@@ -575,11 +485,8 @@ extension SecurityProbeSuite {
 
 // MARK: - Probe Support
 
-/// Scratch tree pair for one verifier run.
-///
-/// A root beside an outside sibling, so containment checks have a real
-/// destination to refuse. Owner-only modes keep the probe bytes private
-/// while it runs, and removal clears both halves.
+/// Scratch tree pair for one verifier run. Owner-only modes keep the probe bytes private while it
+/// runs, and removal clears both halves.
 private struct ProbeScratch: Sendable {
     /// Probe root the containment checks defend.
     let root: URL
@@ -618,10 +525,6 @@ private struct ProbeScratch: Sendable {
 }
 
 /// In-memory enclave signer for the ledger verifier.
-///
-/// The production signer mints an owner-only key under `~/.runeweaver`; a
-/// probe must never touch operator key material, so the ceremony runs under
-/// a throwaway HMAC key that lives and dies with the probe.
 private struct ProbeSigner: SovereignSigner {
     /// Stable signer identity recorded on probe votes.
     let identity = "runeweaver-probe-enclave-hmac-sha256"

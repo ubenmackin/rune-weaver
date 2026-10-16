@@ -1,18 +1,4 @@
 // Rune Weaver Dashboard — Shared goal detail state and mutation helpers.
-//
-// Purpose: one home for the goal detail read plus its mutations so the goals
-// manager and the chat goal drawer cannot drift apart. The best-effort detail
-// fetch, the single-flight 409 contention copy, the pause/resume transition,
-// and the done/pending step move all live here instead of being reimplemented
-// per surface.
-// Scope: goal REST calls and their local lifecycle for one goal id at a time.
-// Wire shapes and status vocabularies stay with the client API module; durable
-// pursuit stays with the engine, so this hook never invents state the server
-// cannot round-trip and re-reads detail after every successful mutation.
-// Architectural role: consumed by the GoalsManager panel for its expanded row
-// and by the chat GoalDrawer. Both subscribe to `goal_updated` pushes through
-// the shared socket and reload only when the frame names their goal; callers
-// keep their own list rows, notices, and per-row locks.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -116,10 +102,8 @@ export interface GoalDetailController {
   setStepStatus: (step: GoalStep, nextStatus: string) => Promise<boolean>;
 }
 
-// Owns goal detail plus its mutations for one id at a time. A null id leaves
-// the controller idle (no read, no push handling) so a collapsed panel keeps
-// no stale row state. `onError` and `onNotice` must be stable (state setters
-// or memoized callbacks) because they participate in the reload identity.
+// Owns goal detail plus its mutations for one id at a time. A null id leaves the controller idle
+// (no read, no push handling) so a collapsed panel keeps no stale row state.
 export function useGoalDetail(
   goalId: string | null,
   options: UseGoalDetailOptions,

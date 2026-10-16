@@ -1,10 +1,4 @@
 // Rune Weaver Server — WebSocket socket plumbing and broadcast hub.
-//
-// Owns the per-connection socket box, the serialized per-connection send
-// queue with its per-send timeout, and the hub fanning approval prompts,
-// run events, and stream frames out to live sockets. Kept apart from the
-// route surface so each file stays focused on one layer: this file moves
-// bytes, while the service file owns routes and request handling.
 
 import Foundation
 import NIOWebSocket
@@ -13,10 +7,6 @@ import RuneWeaverCore
 import Vapor
 
 /// Socket surface the hub needs to move bytes and drop a connection.
-///
-/// Tracking connections behind this seam keeps the hub independent of the
-/// concrete Vapor socket, so revocation (a rotation closing retired sockets)
-/// stays observable in tests without a live network handshake.
 public protocol WSConnectionSocket: Sendable {
     /// Sends one text frame.
     func send(_ text: String) async throws
@@ -80,31 +70,15 @@ public actor WSHub {
     private var sockets: [UUID: RegisteredConnection] = [:]
     /// Per-connection send queues preserving frame order per socket.
     private var queues: [UUID: WSSendQueue] = [:]
-    /// Lowest token generation still allowed to send or receive.
-    ///
-    /// Rotation raises this watermark in the same hop that sweeps the hub, so a
-    /// socket whose generation is already known to be retired is neither fanned
-    /// out to nor allowed to register late. It only ever advances, so a second
+    /// Lowest token generation still allowed to send or receive. It only ever advances, so a second
     /// rotation racing the first cannot lower it back onto a retired credential.
     private var minimumLiveGeneration: Int?
 
     /// Creates an empty hub.
     public init() {}
 
-    /// Registers an already-boxed socket without crossing the actor
-    /// boundary with a non-`Sendable` value.
-    ///
-    /// A registration that lands after its own generation was retired is
-    /// refused rather than stored: the rotation already swept the hub, so
-    /// accepting it would let a socket holding the retired credential linger
-    /// and keep receiving broadcasts. The caller must close a refused socket.
-    /// - Parameters:
-    ///   - id: Connection identifier.
-    ///   - box: Socket surface used to move bytes and drop the connection.
-    ///   - generation: Generation captured at upgrade, or nil for the ungated
-    ///     loopback posture that rotation never retires.
-    /// - Returns: True when the socket is registered, false when its generation
-    ///   is already retired.
+    /// Registers an already-boxed socket without crossing the actor boundary with a non-`Sendable`
+    /// value. The caller must close a refused socket.
     @discardableResult
     public func add(id: UUID, box: any WSConnectionSocket, generation: Int? = nil) -> Bool {
         guard !isRetired(generation) else { return false }
@@ -143,18 +117,6 @@ public actor WSHub {
     }
 
     /// Retires every socket bound to a superseded token generation.
-    ///
-    /// Called once the replacement token is live, so a socket that upgraded
-    /// under the retired credential is dropped here even when it would
-    /// otherwise sit passive and never trip the per-frame generation check.
-    /// Raising the watermark and draining in the same actor hop keeps the
-    /// revocation atomic against registration and fan-out: a socket can be
-    /// refused, closed, or filtered, but never both registered and delivered to
-    /// under a generation the hub already knows is retired. The watermark is
-    /// anchored to the generation current *after* the swap and only ever
-    /// advances, so overlapping rotations cannot lower it onto a retired
-    /// credential.
-    /// - Parameter liveGeneration: Generation that is current after the rotation.
     public func retire(liveGeneration: Int) async {
         minimumLiveGeneration = max(minimumLiveGeneration ?? 0, liveGeneration)
         for box in drainRetired() {
@@ -182,12 +144,6 @@ public actor WSHub {
     }
 
     /// Whether a socket generation sits below the live watermark.
-    ///
-    /// Before the first rotation no watermark exists, so every registration is
-    /// live; afterwards a nil generation is the ungated posture, which a hub
-    /// that just retired a token can no longer trust either.
-    /// - Parameter generation: Generation to test, or nil when unauthenticated.
-    /// - Returns: True when the generation is known to be superseded.
     private func isRetired(_ generation: Int?) -> Bool {
         guard let minimumLiveGeneration else { return false }
         guard let generation else { return true }
@@ -226,10 +182,7 @@ public actor WSHub {
             let type: String
             let run: RunLogEntry
         }
-        // Only a live `running` turn keeps the session badge lit. A parked
-        // `awaiting_approval` turn lands as completed so live and polled views
-        // agree; the approvals badge carries the wait instead of double-badging
-        // one blocked turn, matching the dashboard active-status filter.
+        // Only a live `running` turn keeps the session badge lit.
         let eventType = run.status == "running" ? "run_started" : "run_completed"
         let text: String
         do {
@@ -265,12 +218,6 @@ public actor WSHub {
     }
 
     /// Broadcasts one goal snapshot to every connected socket.
-    ///
-    /// The DTO converts to the core snapshot so the REST list and the live push
-    /// share one JSON shape: dashboards patch the row in place instead of
-    /// refetching after every create, plan-ready, progress, status flip, or
-    /// advancement turn.
-    /// - Parameter dto: Current goal row with its progress tally.
     public func broadcastGoal(_ dto: GoalDTO) async {
         let text: String
         do {
@@ -285,11 +232,8 @@ public actor WSHub {
         await fanOut(text)
     }
 
-    /// Broadcasts one proactive nudge to every connected socket.
-    ///
-    /// Best-effort like every other push: encoding failures log and drop instead
-    /// of failing the turn that volunteered the card.
-    /// - Parameter frame: Card carrying kind, title, and headline.
+    /// Broadcasts one proactive nudge to every connected socket. Best-effort like every other push:
+    /// encoding failures log and drop instead of failing the turn that volunteered the card.
     public func broadcastProactiveMessage(_ frame: WSProactiveMessageFrame) async {
         let text: String
         do {
@@ -304,13 +248,6 @@ public actor WSHub {
     }
 
     /// Broadcasts one file-review action frame to every connected socket.
-    ///
-    /// Shared by the staged/live resolution routes and the live-write
-    /// supersede hook so every `file_*` frame — `file_accepted`,
-    /// `file_discarded`, `file_superseded`, `live_resolved` — encodes through
-    /// one path.
-    /// - Parameter event: Frame carrying the event type, live path, and
-    ///   optional terminal review state.
     public func broadcastFileAction(_ event: WSFileActionEvent) async {
         let text: String
         do {
@@ -343,9 +280,6 @@ public actor WSHub {
     }
 
     /// Broadcasts an arbitrary text frame to every connected socket.
-    ///
-    /// Terminal `done` frames ride this generic path carrying the content-free
-    /// recall summary, so no per-type filtering may drop the diagnostics block.
     public func broadcast(text: String) async {
         await fanOut(text)
     }
@@ -397,11 +331,8 @@ public actor WSHub {
     }
 }
 
-/// Exactly-once gate for one best-effort send.
-/// Holds the non-throwing continuation so the send, the timeout, and
-/// cancellation race on one shared verdict without a throwing bridge.
-/// Invariant: only the first racer resumes; late arrivals are ignored, and a
-/// resume racing registration still settles instead of hanging.
+/// Exactly-once gate for one best-effort send. Holds the non-throwing continuation so the send, the
+/// timeout, and cancellation race on one shared verdict without a throwing bridge.
 private final class WSSendGate: Sendable {
     /// Locked verdict carrying the waiter plus the settled outcome.
     private struct State: Sendable {
@@ -444,10 +375,6 @@ private final class WSSendGate: Sendable {
 }
 
 /// Sends one WebSocket text frame with a per-send timeout, best-effort.
-/// The send, the timeout, and cancellation race on one shared verdict so a slow
-/// socket arriving after a timeout cannot resume twice; the winner drops its loser
-/// so burst sends never stack lingering sleeps. Late arrivals observe the stored
-/// outcome instead of racing. Returns true if sent successfully, false if timed out or failed.
 private func wsSendWithTimeout(
     _ text: String,
     to box: any WSConnectionSocket,

@@ -1,16 +1,4 @@
 // Rune Weaver Core — SQLite-backed durable store for proactive Wayfinder ideas.
-//
-// Persists the suggestions the ideas engine proposes in the shared
-// `episodes.db` file beside sessions, episodes, goals, trust grants, and run
-// logs. The table is created additively (`CREATE TABLE IF NOT EXISTS`) so
-// opening a database that already carries conversations never disturbs
-// existing rows. Blocking SQLite work runs off the actor executor through the
-// shared serial store queue, mirroring the goal and episode stores, and a
-// batch append commits in one transaction so a partial write never leaves a
-// half-generated suggestion set behind. The `IdeasStoring` protocol is a
-// substitution seam for tests and future surfaces; the ideas engine currently
-// binds this concrete actor because it also reads goal events over the store's
-// shared database path, which the protocol deliberately does not expose.
 
 import Foundation
 
@@ -31,34 +19,20 @@ public enum IdeasStoreError: Error, Sendable, Equatable {
 }
 
 /// Protocol seam for idea persistence, so callers can substitute fakes.
-///
-/// The actor below is the production implementation. The protocol exists as a
-/// substitution seam for tests and future surfaces; the ideas engine binds the
-/// concrete actor because it derives a paired `GoalStore` from the same
-/// database path, which is intentionally outside this protocol's behavior.
 public protocol IdeasStoring: Sendable {
-    /// Persists a batch of ideas, skipping blank titles and titles that
-    /// duplicate a non-dismissed existing idea (case-insensitive).
+    /// Persists a batch of ideas, skipping blank titles and titles that duplicate a non-dismissed
+    /// existing idea (case-insensitive).
     /// - Parameter ideas: Candidate ideas to persist.
-    /// - Returns: The subset that was actually inserted.
     func append(ideas: [Idea]) async throws -> [Idea]
     /// Lists ideas newest first, optionally filtered by status and bounded by `limit`.
     /// A nil limit reads all matching rows; callers listing for display must
     /// pass a bound so the SQL carries the LIMIT instead of slicing in memory.
     func list(status: IdeaStatus?, limit: Int?) async throws -> [Idea]
     /// Reads one idea by identifier, or nil when absent.
-    ///
-    /// The single-row read exists so decision routes resolve an idea without
-    /// scanning the whole history; listing stays the display path.
     func idea(id: UUID) async throws -> Idea?
     /// Moves one idea to a new lifecycle state and returns the updated row.
     func setStatus(id: UUID, status: IdeaStatus) async throws -> Idea
     /// Atomically transitions one idea from `from` to `to`, returning the row.
-    ///
-    /// The guarded update is the single-writer claim behind acceptance: a
-    /// replay that finds the row already past `from` throws
-    /// ``IdeasStoreError/conflict(_:)`` instead of reapplying the effect, so a
-    /// retried accept can never double-apply its change.
     func claim(id: UUID, from: IdeaStatus, to: IdeaStatus) async throws -> Idea
     /// Returns the lowercased titles of every dismissed idea.
     func dismissedTitles() async throws -> [String]
@@ -168,12 +142,6 @@ public actor IdeasStore: IdeasStoring {
     /// Blocking SQLite implementation behind ``IdeasStore``.
     enum SQLiteIdeasStore {
         /// Opens (creating parent directories) and migrates the database.
-        ///
-        /// Tables are additive only: existing session, message, episode,
-        /// goal, trust-grant, scheduler, and run-log tables are never altered
-        /// or dropped, so a shared `episodes.db` keeps its history intact.
-        /// - Parameter dbPath: SQLite file path. `~` is expanded.
-        /// - Returns: Open database handle. Caller must close it.
         static func open(dbPath: String) throws -> OpaquePointer? {
             // Shared busy_timeout/WAL policy lives in `SQLiteHelpers.openHandle`.
             let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: IdeasStoreError.storeUnavailable)
@@ -212,11 +180,8 @@ public actor IdeasStore: IdeasStoring {
             SQLiteHelpers.columnText(statement, index: index)
         }
 
-        /// Reads the idea at the statement's current row.
-        /// - Parameters:
-        ///   - statement: Prepared statement positioned on a row.
-        ///   - offset: Zero-based index of the `id` column, so joins can shift the block.
-        /// - Returns: Decoded idea, or nil when required columns are missing.
+        /// Reads the idea at the statement's current row. statement: Prepared
+        /// statement positioned on a row.
         static func readIdea(_ statement: OpaquePointer?, offset: Int32 = 0) -> Idea? {
             guard let idText = columnText(statement, index: offset),
                   let id = UUID(uuidString: idText),
@@ -268,12 +233,6 @@ public actor IdeasStore: IdeasStoring {
         }
 
         /// Reads the lowercased titles of every idea that is not dismissed.
-        ///
-        /// Dismissal is the owner's "no" and does not block a future
-        /// suggestion with the same title; only outstanding and accepted
-        /// suggestions suppress a duplicate. Titles are whitespace-trimmed and
-        /// lowercased in Swift rather than SQLite's ASCII-only `lower()` so the
-        /// dedup stays case-insensitive for non-Latin scripts too.
         static func nonDismissedTitles(handle: OpaquePointer?) throws -> Set<String> {
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, "SELECT title FROM ideas WHERE status <> ?;", -1, &statement, nil) == SQLITE_OK else {
@@ -296,13 +255,6 @@ public actor IdeasStore: IdeasStoring {
         }
 
         /// Persists a batch of ideas and a dedup pass in one transaction.
-        ///
-        /// The non-dismissed title set is read once, then extended as rows are
-        /// inserted so two candidates inside one batch cannot both land. An
-        /// empty result is the honest answer when every candidate duplicates
-        /// an outstanding suggestion. Blank titles skip fail-closed so a
-        /// whitespace-only row never persists only to be dropped by the engine
-        /// and dashboard filters, which would leave counts and lists drifting.
         static func append(ideas: [Idea], dbPath: String) throws -> [Idea] {
             guard !ideas.isEmpty else { return [] }
             let handle = try open(dbPath: dbPath)
@@ -380,16 +332,6 @@ public actor IdeasStore: IdeasStoring {
         }
 
         /// Atomically transitions one idea from `from` to `to`.
-        ///
-        /// The status predicate rides the `UPDATE`, so exactly one racing
-        /// caller observes a changed row; a loser reads the row back to tell a
-        /// missing identifier apart from a status that already moved.
-        /// - Parameters:
-        ///   - id: Idea to transition.
-        ///   - from: Required current status.
-        ///   - to: Status to set.
-        ///   - dbPath: Shared SQLite file path.
-        /// - Returns: The updated row.
         static func claim(id: UUID, from: IdeaStatus, to: IdeaStatus, dbPath: String) throws -> Idea {
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }

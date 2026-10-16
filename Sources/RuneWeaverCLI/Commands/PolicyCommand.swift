@@ -1,11 +1,4 @@
 // Rune Weaver CLI — Declarative security policy verification surface.
-//
-// The CLI's only policy responsibility is verification: it proves that the
-// owner's `~/.runeweaver/policy.toml` satisfies the two formal invariants plus
-// the local-exemption safety check before the engine ever boots against it.
-// Policy authoring lives in Settings → Access (Network/Credentials), so no
-// CLI path seeds, edits, or rewrites the file; every runtime read flows
-// through the shared `PolicyStore` this command verifies against.
 
 import ArgumentParser
 import Foundation
@@ -70,10 +63,9 @@ struct PolicyVerifyCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        // Only the three owned invariants decide the verdict: legacy filesystem
-        // and tool tables parse for compatibility but never fail verification,
-        // so an old file with those sections still verifies when its network
-        // and credential bindings are sound.
+        // Only the three owned invariants decide the verdict: legacy filesystem and tool tables
+        // parse for compatibility but never fail verification, so an old file with those sections
+        // still verifies when its network and credential bindings are sound.
         let violations = PolicyInvariantVerifier.verify(parsed)
         if violations.isEmpty {
             print(TerminalStyle.success("✓ PASSED: All 3 formal security invariants verified successfully."))

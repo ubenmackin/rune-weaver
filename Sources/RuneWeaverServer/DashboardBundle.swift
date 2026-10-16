@@ -257,9 +257,6 @@ public struct DashboardBundle: Sendable, Equatable {
     }
 
     /// Builds the HTTP response for one dashboard request path (synchronous test-only fallback).
-    /// Production routes must use `response(for:req:requestPath:)` above so bundle bytes stream
-    /// without blocking the event loop; this entry point exists only for unit tests that have no
-    /// `Request` and must never be wired into routes.
     public func response(for requestPath: String, fileManager: FileManager = .default) -> Response {
         switch route(for: requestPath, fileManager: fileManager) {
         case .stubIndex:
@@ -303,10 +300,6 @@ public struct DashboardBundle: Sendable, Equatable {
     }
 
     /// Classifies one request path into a routing decision.
-    /// - Parameters:
-    ///   - requestPath: Raw request path.
-    ///   - fileManager: Filesystem accessor.
-    /// - Returns: Routing decision covering stub and bundle states.
     private func route(for requestPath: String, fileManager: FileManager = .default) -> DashboardRoute {
         guard bundleAvailable(using: fileManager) else {
             return Self.isStubIndexPath(requestPath) ? .stubIndex : .stubMissing

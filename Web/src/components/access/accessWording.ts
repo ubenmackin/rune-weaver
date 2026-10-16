@@ -1,29 +1,10 @@
 // Rune Weaver Dashboard — Shared plain-English wording for access rules and
 // decision scopes.
-//
-// Purpose: Owns the human-readable rendering of one access or decision scope
-// and the grouped-by-tool summary of what a session is still allowed to do.
-// The Rules section describes the six-kind scope vocabulary (tool-wide, exact
-// target, recipient set, domain, path prefix, glob) with this one reader, so
-// the scope lines, the grouped header, and the tier labels cannot drift apart
-// across a list view and a modal.
-// Scope: Turning a scope DTO into a one-line reading, deriving the "Right now
-// the agent can …" sentence from the active allow rules grouped by tool, and
-// labeling a durable tier. Whether a rule matches a call, how a rule is stored,
-// and the deny-outranks decision order stay with their engine owners, so this
-// helper never re-implements scope comparison or a matching verdict.
-// Architectural role: presentational helper beside the relative-time and
-// warnings ladders, imported by the access Rules section so a wording fix lands
-// in exactly one place.
 
 import type { AccessRule, AccessScopeDTO, TrustDuration } from "../../api";
 import { parseRuleExpiry, trustDurationOptions } from "../../api";
 
-// One-line reading of a scope that names what trust reaches. Covers all six
-// wire kinds (tool, exactTarget, recipientSet, domain, pathPrefix, glob) plus
-// the legacy `toolWide` spelling of tool-wide; a malformed, absent, or
-// unrecognized scope names no target and reads as an unknown scope rather than
-// widening to tool-wide or rendering blank.
+// One-line reading of a scope that names what trust reaches.
 export function describeAccessScope(scope: AccessScopeDTO | undefined): string {
   if (!scope || typeof scope !== "object") return "unknown scope";
   const kind = (scope as { kind?: unknown }).kind;
@@ -95,12 +76,7 @@ function isSendTool(tool: string): boolean {
   return tool === "email.send" || tool === "messages.send";
 }
 
-// Reads the combined coverage one tool's active allow rules reach. A tool-wide
-// rule covers everything and reads as the bare action phrase ("run shell
-// commands"), since the tool-wide breadth is already implied by the verb and
-// the row's own scope line carries "any target". Otherwise the distinct
-// recipients (send tools) or targets (everything else) are counted so
-// overlapping rules for one tool never inflate the total.
+// Reads the combined coverage one tool's active allow rules reach.
 function coverageClause(tool: string, scopes: AccessScopeDTO[]): string {
   if (
     scopes.some(
@@ -173,22 +149,14 @@ function joinClauses(clauses: string[]): string {
   return `${clauses.slice(0, -1).join(", ")}, and ${clauses[clauses.length - 1]}`;
 }
 
-// Whether a rule is still in force: a null expiry is the forever tier and a
-// future expiry is still active, while a past expiry lapses. Deny rules carry
-// a null expiry forever by contract, so they read active here too, matching
-// the gate that always honors a deny.
+// Whether a rule is still in force: a null expiry is the forever tier and a future expiry is still
+// active, while a past expiry lapses.
 export function isRuleActive(rule: AccessRule, nowMs: number = Date.now()): boolean {
   const expiresAt = parseRuleExpiry(rule.expiresAt);
   return expiresAt === null || expiresAt.getTime() > nowMs;
 }
 
 // Derives the plain-English header from the active allow rules grouped by tool.
-// Only allow rules enter the sentence and only while active, because the
-// sentence describes what the agent can do on its own; a deny rule removes
-// capability and an expired rule no longer applies, so neither belongs here.
-// The effect is read from either wire spelling the engine emits and never
-// defaults one, so a payload carrying neither names no auto-approved trust and
-// stays out of the sentence instead of widening it.
 export function accessRulesHeaderSentence(
   rules: AccessRule[],
   nowMs: number = Date.now(),

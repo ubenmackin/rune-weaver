@@ -1,8 +1,4 @@
 // Rune Weaver Core — GoalStore SQLite-unavailable fallback stubs.
-//
-// Extracted from GoalStore.swift to keep file length within lint bounds.
-// When the SQLite3 module is not available these stubs throw a clear error
-// so the rest of the goal layer compiles without conditional imports.
 
 import Foundation
 

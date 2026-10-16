@@ -1,16 +1,4 @@
 // Rune Weaver Tools — Models and DTOs for Sonarr and Radarr media automation.
-//
-// Purpose: decodes `media.arr` arguments across the canonical service, action,
-// query, id, qualityProfile, and rootFolder keys with compatibility-only aliases for model drift.
-// Scope: argument shapes only; transport, gating, and execution live with the
-// client and tool layers. Architectural role: the single argument contract
-// shared by the read and write tools so both validate identically. Decoder
-// tolerance is intentionally kept out of the strict schema: schemas advertise
-// canonical keys only with `type:object` plus explicit `required` plus
-// `additionalProperties:false`, while `init(from:)` accepts legacy aliases
-// (`app`/`target`, `command`, `title`/`term`, `tvdbId`/`tmdbId`, snake-case
-// `quality_profile`/`root_folder`) so older model output still decodes without
-// widening the wire contract.
 
 import Foundation
 
@@ -65,15 +53,7 @@ public struct MediaArrArgs: Sendable, Equatable, Decodable {
         self.rootFolder = rootFolder
     }
 
-    // Canonical-to-alias key map for compatibility-only decoding.
-    // Canonical wire keys are `service`, `action`, `query`, `id`,
-    // `qualityProfile`, and `rootFolder`; every other case here is a legacy
-    // alias (`app`/`target` for service, `command` for action, `title`/`term`
-    // for query, `tvdbId`/`tmdbId` for id, snake-case `quality_profile`/
-    // `root_folder` alongside camelCase) kept so older model output still
-    // decodes. Aliases never appear in either tool schema, so a strict
-    // `additionalProperties:false` validator accepts exactly the canonical
-    // shape while the decoder stays forgiving.
+    /// Canonical-to-alias key map for compatibility-only decoding.
     private enum CodingKeys: String, CodingKey {
         case service
         case app
@@ -129,10 +109,9 @@ public struct MediaArrArgs: Sendable, Equatable, Decodable {
             ?? container.decodeIfPresent(String.self, forKey: .title)
             ?? container.decodeIfPresent(String.self, forKey: .term)
 
-        // External IDs stay service-scoped so a cross-service alias cannot
-        // silently reinterpret: Sonarr reads TVDB IDs while Radarr reads TMDB
-        // IDs, and the mismatched alias fails with guidance instead of
-        // masquerading as the other service's identifier.
+        // External IDs stay service-scoped so a cross-service alias cannot silently reinterpret:
+        // Sonarr reads TVDB IDs while Radarr reads TMDB IDs, and the mismatched alias fails with
+        // guidance instead of masquerading as the other service's identifier.
         let genericId = try container.decodeIfPresent(Int.self, forKey: .id)
         let tvdbId = try container.decodeIfPresent(Int.self, forKey: .tvdbId)
         let tmdbId = try container.decodeIfPresent(Int.self, forKey: .tmdbId)
@@ -157,10 +136,9 @@ public struct MediaArrArgs: Sendable, Equatable, Decodable {
             self.id = genericId ?? tmdbId
         }
 
-        // Compatibility-only profile and folder spellings kept out of the strict
-        // schema: the wire advertises camelCase `qualityProfile`/`rootFolder`
-        // while the decoder also accepts snake-case `quality_profile`/
-        // `root_folder` for drifted callers.
+        // Compatibility-only profile and folder spellings kept out of the strict schema: the wire
+        // advertises camelCase `qualityProfile`/`rootFolder` while the decoder also accepts
+        // snake-case `quality_profile`/ `root_folder` for drifted callers.
         self.qualityProfile = try container.decodeIfPresent(String.self, forKey: .qualityProfile)
             ?? container.decodeIfPresent(String.self, forKey: .qualityProfileName)
 

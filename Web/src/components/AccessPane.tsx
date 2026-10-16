@@ -1,21 +1,4 @@
 // Rune Weaver Dashboard — Access settings pane shell.
-//
-// Purpose: Hosts the owner "what the agent is allowed to do" surface as a
-// full-width underline tab bar over the standing-rules, shell, network,
-// credentials, and files editors. Rules is the landing section, and each
-// section mounts only when selected so the pane never renders five surfaces at
-// once. The bar keeps its selection across a section's own save so an owner
-// mid-edit is not bounced back to Rules by a refetch.
-// Scope: Section navigation plus lazily mounting the selected section, and
-// translating an access deep link into a preselected, highlighted rule. The
-// hash itself is read by accessNav's readAccessDeepLink, so this shell follows
-// that reader's verdict and never re-parses the query spelling. Each mounted
-// section owns its own data and its own save, so the shell navigates and
-// highlights only and never second-guesses a section's state.
-// Architectural role: the container the approvals inbox links to via
-// `#settings?access=rules` and via a per-rule deep link; it mirrors the memory
-// browser's hash-driven selection instead of introducing a router, and its
-// underline tab bar folds into the grouped settings navigation.
 
 import { useCallback, useEffect, useState } from "react";
 import { AccessBashSection } from "./access/AccessBashSection";
@@ -93,11 +76,9 @@ export default function AccessPane({ initialSection = "rules" }: AccessPaneProps
     };
   }, []);
 
-  // Lazily renders exactly the selected section. Rules receives the highlight;
-  // the policy surface below owns both network and credentials behind its own
-  // sub-tabs, so the Network and Credentials rail entries both mount it.
-  // `section` is narrowed by the fail-closed guard on entry, so the trailing
-  // fallback is defensive only and still lands on Rules rather than blanking.
+  // Lazily renders exactly the selected section. Rules receives the highlight; the policy surface
+  // below owns both network and credentials behind its own sub-tabs, so the Network and Credentials
+  // rail entries both mount it.
   const renderSection = useCallback(() => {
     switch (section) {
       case "rules":

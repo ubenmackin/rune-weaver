@@ -1,15 +1,4 @@
 // Rune Weaver Core — Semantic answer cache for repeated pure Q&A turns.
-//
-// Purpose: replay an answer the model alone already produced for a repeated
-// pure question, so identical Q&A returns instantly with no second provider
-// round trip while tool turns, approvals, sends, and background runs never
-// store and therefore never hit.
-// Scope: the in-memory keyed entries with similarity scoring plus the single
-// full-clear invalidation primitive that memory writes, goal changes, and
-// policy changes share. Recall planning and turn orchestration stay with
-// their owners.
-// Architectural role: the narrow cache behind the cache contract — state
-// starts empty at every boot and a stale answer never outlives its write.
 
 import Foundation
 
@@ -28,10 +17,6 @@ public struct CachedAnswer: Sendable, Equatable {
 }
 
 /// In-memory cache of pure assistant answers keyed by query, persona, and model.
-///
-/// An actor so concurrent turns serialize their lookups and stores. The only
-/// model dependency is the injected embeddings producer; a nil backend keeps
-/// the keyword-overlap similarity path working on vector-disabled deployments.
 public actor SemanticAnswerCache {
     /// Minimum similarity a near-duplicate question must reach to hit.
     public static let similarityThreshold = 0.92
@@ -77,35 +62,15 @@ public actor SemanticAnswerCache {
     }
 
     /// Normalizes query text into the shared cache key form.
-    ///
-    /// Lowercases and collapses every whitespace run to a single space so
-    /// casing and padding differences share one key; the shared line-ending
-    /// fold keeps multi-line copy normalized like every other text boundary
-    /// in Core.
-    /// - Parameter text: Raw query text.
-    /// - Returns: Normalized query, empty when nothing usable remains.
     public static func normalizedQuery(_ text: String) -> String {
         let folded = NormalizedText.splitLines(text).joined(separator: " ")
         let collapsed = folded.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         return collapsed.lowercased()
     }
 
-    /// Whether a turn is excluded from the cache entirely.
-    ///
-    /// Tool turns, approvals, and sends change the world or park for an owner
-    /// decision, and voice prompts arrive through the transcription path, so
-    /// none of their answers are pure enough to replay. Background turns are
-    /// excluded through the orchestrator's single background-source owner:
-    /// their key carries no session or source, so a stored background answer
-    /// would replay into chat. Excluding them at the
-    /// turn boundary is what makes "never store" imply "never hit": an
-    /// excluded turn files nothing, so no later lookup can match its text.
-    /// - Parameters:
-    ///   - source: Turn origin label, nil when untagged.
-    ///   - executedToolCalls: Tool calls the turn executed; zero for a pure Q&A turn.
-    ///   - isParked: Whether the turn parked waiting on approval; parked turns
-    ///     executed nothing yet still decided world-changing work, including sends.
-    /// - Returns: True when the turn must neither store nor hit.
+    /// Whether a turn is excluded from the cache entirely. Excluding them at the turn boundary is
+    /// what makes "never store" imply "never hit": an excluded turn files nothing, so no later
+    /// lookup can match its text.
     public static func isExcludedTurn(source: String?, executedToolCalls: Int, isParked: Bool = false) -> Bool {
         if isParked {
             return true
@@ -120,18 +85,6 @@ public actor SemanticAnswerCache {
     }
 
     /// Looks up one cached answer for a normalized question.
-    ///
-    /// An exact key hit answers instantly; otherwise the query scores against
-    /// same-persona, same-model entries — cosine when both sides carry
-    /// same-width vectors, keyword overlap otherwise — and the best score at
-    /// or above ``similarityThreshold`` wins. Entries past ``timeToLive`` drop
-    /// and read as a miss, and an empty query yields nil without touching the
-    /// store.
-    /// - Parameters:
-    ///   - normalizedQuery: Query text in normalized key form.
-    ///   - persona: Assistant persona identity the answer was composed under.
-    ///   - modelID: Serving model identifier.
-    /// - Returns: The cached answer, or nil on a miss.
     public func lookup(normalizedQuery: String, persona: String, modelID: String) async -> CachedAnswer? {
         let query = Self.normalizedQuery(normalizedQuery)
         guard !query.isEmpty else { return nil }
@@ -154,19 +107,9 @@ public actor SemanticAnswerCache {
         return best
     }
 
-    /// Files one pure answer for a normalized question.
-    ///
-    /// A blank query or an answer past ``maxAnswerChars`` is refused rather
-    /// than truncated, so a hit always replays complete text. Re-storing a key
-    /// replaces the entry in place, and growth past ``maxEntries`` evicts the
-    /// oldest entries first. The query embeds best-effort: an unavailable or
-    /// cancelled embedding degrades the entry to keyword similarity instead of
+    /// Files one pure answer for a normalized question. The query embeds best-effort: an
+    /// unavailable or cancelled embedding degrades the entry to keyword similarity instead of
     /// dropping an answer the turn already produced.
-    /// - Parameters:
-    ///   - normalizedQuery: Query text in normalized key form.
-    ///   - persona: Assistant persona identity the answer was composed under.
-    ///   - modelID: Serving model identifier.
-    ///   - answer: Answer to retain.
     public func storeAnswer(normalizedQuery: String, persona: String, modelID: String, answer: CachedAnswer) async {
         let query = Self.normalizedQuery(normalizedQuery)
         guard !query.isEmpty else { return }
@@ -182,22 +125,11 @@ public actor SemanticAnswerCache {
     }
 
     /// Clears every entry because a durable memory write can change answers.
-    ///
-    /// One full clear is the single invalidation primitive: memory writes,
-    /// goal changes, and policy changes all route here, so no partial
-    /// invalidation path can replay pre-write text. Applies live with no
-    /// restart and surfaces no banner.
     public func invalidateOnMemoryWrite() async {
         entries.removeAll()
     }
 
     /// Scores one entry against the query, or nil when there is no match basis.
-    ///
-    /// Cosine wins whenever both sides carry same-width vectors; a negative
-    /// cosine is a direction mismatch rather than a weak match, so it floors
-    /// at zero. Keyword overlap covers vector-disabled stores and width
-    /// mismatches left by a backend swap: overlap over the union of salient
-    /// tokens, so a rephrase that only drops filler still scores 1.0.
     private static func score(queryTokens: Set<String>, queryEmbedding: [Float], entry: Entry) -> Double? {
         if !queryEmbedding.isEmpty, !entry.embedding.isEmpty, queryEmbedding.count == entry.embedding.count {
             let cosine = cosineSimilarity(queryEmbedding, entry.embedding)
@@ -234,10 +166,6 @@ public actor SemanticAnswerCache {
     }
 
     /// Embeds text best-effort, degrading to no vector on any failure.
-    ///
-    /// Both entry points are non-throwing by contract, so a failure —
-    /// including cancellation — leaves the entry on the keyword path instead
-    /// of losing an answer the turn already produced.
     private func embedText(_ text: String) async -> [Float] {
         guard let embedder else { return [] }
         do {

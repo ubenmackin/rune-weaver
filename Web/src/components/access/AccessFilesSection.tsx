@@ -1,19 +1,4 @@
 // Rune Weaver Dashboard — File write-posture section of the owner configuration surface.
-//
-// Purpose: Owns `[files] write_mode` plus the ordered `[files]
-// write_path_rules` table as one settings surface.
-// `WritePathPolicy.classify(path:filesConfig:)` stays the single evaluator of
-// every posture resolved from what is saved here, so no precedence, glob, or
-// path-canonicalization logic lives in this file — it records owner intent only.
-// Scope: Loading the [files] write snapshot, inline fail-closed editing with
-// the rule-count and path-length bounds enforced before the wire, and
-// persisting one changed-only patch through PUT /settings. Allow roots, deny
-// patterns, and approval-on-deny stay with the Files & Access editor; tool
-// enablement stays with the tool toggle.
-// Architectural role: settings-adjacent surface rendered outside the shared
-// config form, mirroring the bash and policy panel precedents. Write posture
-// applies live through the engine with no restart and no filesystem watcher, so
-// the saved banner never promises a restart.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -33,10 +18,7 @@ import {
 import { AlertTriangleIcon, CloseIcon, PlusIcon, RefreshIcon, TrashIcon } from "../icons";
 import Modal from "../Modal";
 
-// Closed write-mode vocabulary for files.write ([files] write_mode). The engine
-// stays the validator of record: it rejects anything outside this set, so the
-// editor only ever surfaces these three postures and a drifted loaded value
-// normalizes back to the model posture.
+// Closed write-mode vocabulary for files.write ([files] write_mode).
 type FilesWriteMode = "model" | "staged" | "live";
 
 const FILES_WRITE_MODES: readonly FilesWriteMode[] = ["model", "staged", "live"];
@@ -66,10 +48,9 @@ interface FilesWriteModeOption {
   description: string;
 }
 
-// Option copy explains the enforcement each posture applies, pinned to the
-// engine contract: `model` keeps per-call mode selection with an omitted mode
-// defaulting to staged review, `staged` forces every write through Staged
-// Changes, and `live` writes immediately leaving a `.rune_backup_` rollback copy.
+// Option copy explains the enforcement each posture applies, pinned to the engine contract: `model`
+// keeps per-call mode selection with an omitted mode defaulting to staged review, `staged` forces
+// every write through Staged Changes, and `live` writes immediately leaving a `.rune_backup_`.
 const FILES_WRITE_MODE_OPTIONS: readonly FilesWriteModeOption[] = [
   {
     value: "model",
@@ -184,10 +165,7 @@ export function validateFilesBoundaryFields(
 
 
 
-// Normalizes a loaded or raw write-mode value into the closed editor
-// vocabulary. Older engines omit the key and a hand-edited config can carry
-// casing, so the editor falls back to the model posture rather than rendering
-// an unknown selection.
+// Normalizes a loaded or raw write-mode value into the closed editor vocabulary.
 function normalizeFilesWriteMode(value: unknown): FilesWriteMode {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
   return (FILES_WRITE_MODES as readonly string[]).includes(normalized)
@@ -205,11 +183,8 @@ function normalizeFilesWritePosture(value: unknown): FilesWritePosture {
     : "ask";
 }
 
-// Copies the loaded rule list into rows, tolerating both wire spellings of the
-// posture and dropping entries with no usable path. An absent list keeps the
-// documented defaults (an older engine, or a section the owner never wrote),
-// while an explicit empty list stays empty because an owner who cleared every
-// rule opted out of per-path postures.
+// Copies the loaded rule list into rows, tolerating both wire spellings of the posture and dropping
+// entries with no usable path.
 function normalizeWritePathRules(raw: unknown): WritePathRule[] {
   if (!Array.isArray(raw)) {
     return DEFAULT_FILES_WRITE_PATH_RULES.map((rule) => ({ ...rule }));
@@ -263,10 +238,7 @@ export function writePostureConsequence(posture: string): string {
   );
 }
 
-// Whether a rule path can ever match a write target. `WritePathPolicy` refuses a
-// bare relative rule path because a boundary without a root could only match
-// whatever directory the process stood in, so the form fails closed with the
-// same shape instead of surfacing a server 400.
+// Whether a rule path can ever match a write target.
 function isUsableRulePath(path: string): boolean {
   return path === "~" || path.startsWith("~/") || path.startsWith("/");
 }
@@ -371,10 +343,8 @@ export function AccessFilesSection() {
     filesAllowRootsText !== loadedRef.current.allowRootsText ||
     filesRequireApprovalOnDeny !== loadedRef.current.requireApprovalOnDeny;
 
-  // Copies one loaded snapshot into both editors at once, then reseeds the
-  // loaded ref and the dirty comparison from that same snapshot. Deriving both
-  // from one freshly built draft keeps the next changed-only patch honest
-  // instead of comparing against state that has not re-rendered yet.
+  // Copies one loaded snapshot into both editors at once, then reseeds the loaded ref and the dirty
+  // comparison from that same snapshot.
   const applyLoadedConfig = useCallback((settings: SettingsResponse | null | undefined) => {
     if (!settings) return;
     const nextMode = normalizeFilesWriteMode(settings.filesWriteMode);
@@ -468,11 +438,8 @@ export function AccessFilesSection() {
     markEdited();
   }
 
-  // Saves the changed-only [files] patch through PUT /settings. Only the edited
-  // keys travel, and the mode plus the rule list ride one payload. Client
-  // validation reports inline without closing while a server 400 lands in the
-  // error path without discarding the draft. Posture applies live, so success
-  // shows the saved banner with no restart banner.
+  // Saves the changed-only [files] patch through PUT /settings. Only the edited keys travel, and
+  // the mode plus the rule list ride one payload.
   const handleSave = async (): Promise<void> => {
     const boundaryError = validateFilesBoundaryFields(filesDenyText, filesAllowRootsText);
     if (boundaryError) {

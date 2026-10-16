@@ -1,3 +1,5 @@
+// Rune Weaver Dashboard — Unit tests for client-side chat preferences.
+
 import { describe, expect, it, beforeEach } from "vitest";
 import {
   CHAT_SETTINGS_STORAGE_KEY,

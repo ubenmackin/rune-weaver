@@ -1,23 +1,11 @@
 // Rune Weaver Server — Desktop settings DTOs for the settings API.
-//
-// Purpose: carries the partial desktop patch for `PUT /settings` so dashboard
-// edits preserve untouched fields while capture knobs apply without a restart.
-// Scope: REST patch bodies only; the settings request type owns merge policy
-// while validation and persistence stay with the config layer.
-// Architectural role: keeps desktop Codable contracts version-tolerant and
-// decoupled from the broader settings surface.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
-/// Partial desktop patch for `PUT /settings`.
-///
-/// Every field stays optional so a request carrying only one key leaves the
-/// stored capture knobs and blocklist untouched instead of resetting them.
-/// Covers the same field set as the full `DesktopConfig` snapshot, so a
-/// caller holding a complete policy can build the patch through `init(_:)`
-/// and reuse the merge path without hand-mapping fields.
+/// Partial desktop patch for `PUT /settings`. Every field stays optional so a request carrying only
+/// one key leaves the stored capture knobs and blocklist untouched instead of resetting them.
 public struct DesktopSettingsUpdate: Content, Equatable {
     /// Longest edge of the downscaled screenshot in pixels.
     public var maxImageDimension: Int?
@@ -58,14 +46,9 @@ extension UpdateSettingsRequest {
 // MARK: - Desktop Settings Merge
 
 extension UpdateSettingsRequest {
-    /// Merges a partial desktop patch onto the stored policy, preserving every
-    /// field the request omits. A nil patch is a no-op, so a dashboard edit to
-    /// one knob never resets the rest of the `[desktop]` section. Values land
-    /// verbatim because range checks stay single-sourced in
-    /// `RuneWeaverConfig.validate`, which runs before the merged config persists.
-    ///
-    /// Internal so the shared settings `apply(to:)` keeps one merge path while
-    /// the desktop-specific logic lives beside its DTOs.
+    /// Merges a partial desktop patch onto the stored policy, preserving every field the request
+    /// omits. A nil patch is a no-op, so a dashboard edit to one knob never resets the rest of the
+    /// `[desktop]` section.
     func applyDesktop(to desktop: inout DesktopConfig) {
         guard let update = self.desktop else { return }
         if let maxImageDimension = update.maxImageDimension {

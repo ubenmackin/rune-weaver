@@ -4,25 +4,11 @@ import Foundation
 import RuneWeaverCore
 
 /// Ensures a usable Python virtual environment with Playwright and Chromium installed.
-/// Managed at `~/.runeweaver/python` so server instances never collide with Homebrew
-/// system pythons or externally-managed-environment restrictions.
-/// `RUNEWEAVER_PYTHON_BIN` or gateway-level overrides skip provisioning entirely;
-/// pipx install is left alone because it never satisfies the import.
-/// Offline pip or browser downloads fail closed with the venv path plus a
-/// manual fallback instead of the old generic pip hint. Concurrent callers
-/// collapse onto one in-flight provision following the resolving, creating,
-/// installing, browsers cascade, publishing a live stage plus Start time so
-/// health polls render one line plus elapsed instead of hanging silently.
-/// Seatbelt and Apple Container boundaries stay untouched: provisioning only
-/// touches the managed venv directory and spawns local python processes.
 public actor PlaywrightPythonEnsurer {
     /// Shared process-wide ensurer backing first navigate and serve warmup.
     public static let shared = PlaywrightPythonEnsurer()
 
     /// User-visible provision stage while one flight runs.
-    /// Coarser than pip output: one flight moves resolving, creating,
-    /// installing, browsers so health polls and single-flight joiners watch
-    /// one step plus elapsed instead of one static label.
     public enum Stage: String, Sendable, CaseIterable, Codable {
         case resolving
         case creating
@@ -30,9 +16,6 @@ public actor PlaywrightPythonEnsurer {
         case browsers
 
         /// Short operator-facing copy naming the in-flight step.
-        /// This wording is a cross-boundary contract: the dashboard mirrors it
-        /// for the Preparing line, so renames must land on both sides together
-        /// and stay pinned by the stage-copy contract tests.
         public var userCopy: String {
             Self.userCopies[self] ?? "Preparing"
         }
@@ -69,11 +52,9 @@ public actor PlaywrightPythonEnsurer {
         }
     }
 
-    /// Non-throwing provision outcome for health routes sharing the flight.
-    /// `started` is true only when this caller owned a flight that actually
-    /// provisioned; joiners collapsing onto an existing flight never claim a
-    /// start. Failures carry a trimmed banner in `message` plus chained
-    /// detail in `diagnostics` so inline slots and collapsed UI each render once.
+    /// Non-throwing provision outcome for health routes sharing the flight. `started` is true only
+    /// when this caller owned a flight that actually provisioned; joiners collapsing onto an
+    /// existing flight never claim a start.
     public struct Report: Sendable, Equatable {
         public let ready: Bool
         public let started: Bool
@@ -119,12 +100,8 @@ public actor PlaywrightPythonEnsurer {
     public static let systemProbeTimeoutSeconds: TimeInterval = 10
     /// Cap for pip and browser stderr tails kept in diagnostics.
     public static let maxDiagnosticsChars = 2000
-    /// Pinned Playwright pip release installed into the managed venv.
-    /// Pinned exact so fresh provisions converge instead of floating across
-    /// breaking helper APIs. To bump: verify the helper in
-    /// `BrowserPlaywrightScript` against the new release, update this
-    /// constant, and keep the manual fallback copy below installing the same
-    /// requirement.
+    /// Pinned Playwright pip release installed into the managed venv. Pinned exact so fresh
+    /// provisions converge instead of floating across breaking helper APIs.
     public static let pinnedPlaywrightVersion = "1.49.1"
     /// Pinned pip requirement derived from the version above.
     /// Single-sourced so provisioning and the manual fallback copy install
@@ -177,13 +154,6 @@ public actor PlaywrightPythonEnsurer {
     }
 
     /// Manual fallback naming the managed interpreter.
-    /// Names the venv python explicitly because `pipx` and `brew
-    /// install playwright-cli` never satisfy `import playwright` for the
-    /// server python; the Linux `install-deps` note stays advisory because it
-    /// typically needs sudo outside the harness. Installs the pinned
-    /// requirement so manual recovery converges with managed provisioning.
-    /// - Parameter pythonPath: Interpreter to name, defaulting to the managed one.
-    /// - Returns: Copy-paste recovery commands.
     public static func manualFallbackHint(pythonPath: String? = nil) -> String {
         let python = NormalizedText.value(pythonPath, fallback: managedPythonURL().path)
         let effective = python.isEmpty ? managedPythonURL().path : python
@@ -192,14 +162,6 @@ public actor PlaywrightPythonEnsurer {
     }
 
     /// Actionable missing-dependency message naming the venv path.
-    /// Replaces the old generic pip hint so offline or half-provisioned
-    /// states point at the managed entry plus the manual fallback instead of
-    /// a system-wide `python3 -m pip` that Homebrew now refuses.
-    /// - Parameters:
-    ///   - stage: Provision step that failed, if known.
-    ///   - detail: Underlying cause (pip tail, launch text, or import text).
-    ///   - pythonPath: Interpreter that failed, defaulting to the managed one.
-    /// - Returns: `playwrightMissing` copy carrying venv plus fallback.
     public static func missingMessage(stage: Stage?, detail: String, pythonPath: String? = nil) -> String {
         let venvPath = managedVenvDisplayPath
         let effective = NormalizedText.value(pythonPath, fallback: managedPythonURL().path)
@@ -218,11 +180,6 @@ public actor PlaywrightPythonEnsurer {
     }
 
     /// Fast-path resolution preferring override, then managed, then PATH.
-    /// Returns nil for the PATH fallback so the bridge keeps its
-    /// `/usr/bin/env python3` spelling instead of a resolved absolute path
-    /// that could drift across Homebrew updates.
-    /// - Parameter explicit: Gateway-level explicit path, if any.
-    /// - Returns: Effective python path, or nil to use PATH `python3`.
     public static func fastEffectivePythonBin(explicit: String?) -> String? {
         if let trimmed = NormalizedText.value(explicit) {
             return trimmed
@@ -237,11 +194,6 @@ public actor PlaywrightPythonEnsurer {
     }
 
     /// Resolves the interpreter for dry-run previews without provisioning.
-    /// Dry runs validate without mutating, so they never pay the venv, pip,
-    /// or browser budgets and never publish staged progress; the caller keeps
-    /// the `/usr/bin/env python3` spelling when nothing is already present.
-    /// - Parameter explicit: Gateway-level explicit path, if any.
-    /// - Returns: Effective python path, or nil to use PATH `python3`.
     public static func resolveDryRunPythonBin(explicit: String?) -> String? {
         fastEffectivePythonBin(explicit: explicit)
     }
@@ -253,13 +205,6 @@ public actor PlaywrightPythonEnsurer {
     }
 
     /// Lightweight readiness probe for health routes.
-    /// Resolves the effective interpreter through the fast path without
-    /// provisioning, then checks only `import playwright`, so dashboard
-    /// health polls stay cheap and side-effect free while a provision flight
-    /// publishes its stage separately through `currentProgress`. Opening
-    /// Settings must never kick off the venv, pip, or browser budgets.
-    /// - Parameter explicitPythonBin: Gateway-level explicit path, if any.
-    /// - Returns: Readiness plus the effective interpreter path probed.
     public static func probeReadiness(explicitPythonBin: String? = nil) async -> (ready: Bool, pythonPath: String) {
         if Task.isCancelled {
             return (false, managedPythonURL().path)
@@ -299,24 +244,14 @@ public actor PlaywrightPythonEnsurer {
     }
 
     /// Ensures a usable interpreter, provisioning the managed venv on demand.
-    /// Explicit and `RUNEWEAVER_PYTHON_BIN` paths return immediately without
-    /// provisioning so operator overrides never pay the pip budget; otherwise
-    /// a present managed interpreter that already imports playwright returns
-    /// immediately, and only a missing entry or a failed import collapses onto
-    /// one provisioning flight. Serve boot calls this best-effort via
-    /// `warmup()` while first navigate awaits it inline.
-    /// - Parameter explicitPythonBin: Gateway-level explicit path, if any.
-    /// - Returns: Effective interpreter path to spawn.
     public func ensure(explicitPythonBin: String? = nil) async throws -> String {
         let outcome = try await ensureWithOwnership(explicitPythonBin: explicitPythonBin)
         return outcome.path
     }
 
-    /// Ensures like `ensure` while reporting whether this caller provisioned.
-    /// Shared by the throwing path and the health report so both agree on the
-    /// single-flight outcome without duplicating the fast-path checks.
-    /// - Parameter explicitPythonBin: Gateway-level explicit path, if any.
-    /// - Returns: Effective path plus whether this caller owned the provision.
+    /// Ensures like `ensure` while reporting whether this caller provisioned. Shared by the
+    /// throwing path and the health report so both agree on the single-flight outcome without
+    /// duplicating the fast-path checks.
     private func ensureWithOwnership(explicitPythonBin: String? = nil) async throws -> (path: String, didProvision: Bool) {
         try Task.checkCancellation()
         if let trimmedExplicit = NormalizedText.value(explicitPythonBin) {
@@ -325,10 +260,8 @@ public actor PlaywrightPythonEnsurer {
         if let override = Self.envOverridePythonBin() {
             return (override, false)
         }
-        // Fast path keeps warm navigates to one import probe instead of a
-        // full provision; the probe itself stays short so a down interpreter
-        // fails fast into the single flight below. Every hit re-probes so a
-        // deleted venv or a broken upgrade never returns a stale warm path.
+        // Fast path keeps warm navigates to one import probe instead of a full provision; the probe
+        // itself stays short so a down interpreter fails fast into the single flight below.
         if Self.isManagedPythonPresent() {
             let managedPath = Self.managedPythonURL().path
             if await Self.canImportPlaywright(pythonPath: managedPath) {
@@ -369,11 +302,9 @@ public actor PlaywrightPythonEnsurer {
         }
     }
 
-    /// Non-throwing ensure for health routes sharing the single-flight path.
-    /// Joiners collapsing onto an existing flight never claim a start, and a
-    /// cancelled turn reports not-ready without claiming.
-    /// - Parameter explicitPythonBin: Gateway-level explicit path, if any.
-    /// - Returns: Readiness plus whether this caller provisioned plus banner.
+    /// Non-throwing ensure for health routes sharing the single-flight path. Joiners collapsing
+    /// onto an existing flight never claim a start, and a cancelled turn reports not-ready without
+    /// claiming.
     public func ensureReport(explicitPythonBin: String? = nil) async -> Report {
         if Task.isCancelled {
             return Report(
@@ -432,10 +363,7 @@ public actor PlaywrightPythonEnsurer {
         }
     }
 
-    /// Best-effort warmup for serve boot: provisions in the background without
-    /// ever failing boot. Failures stay in the server log so a down network
-    /// never flips a healthy boot into a failure, while the live stage plus
-    /// health payload carries state to the dashboard.
+    /// Best-effort warmup for serve boot: provisions in the background without ever failing boot.
     public func warmup() async {
         if Task.isCancelled {
             return
@@ -495,14 +423,6 @@ public actor PlaywrightPythonEnsurer {
 /// Encapsulates the ordered subprocess commands needed to provision and probe the managed venv.
 extension PlaywrightPythonEnsurer {
     /// Runs one managed provision through the ordered cascade.
-    /// Follows resolving, creating, installing, browsers: each step records
-    /// its own failure detail while the thrown banner holds only the
-    /// actionable cause plus the venv path and manual fallback. An existing
-    /// managed entry is reused; only a missing directory runs `venv`, and a
-    /// present directory missing `bin/python` fails closed without deleting
-    /// anything so a user-owned non-venv directory is never clobbered.
-    /// - Parameter onStage: Live stage reporter, nil keeps it silent.
-    /// - Returns: Managed interpreter path.
     private static func provisionImpl(onStage: StageReporter? = nil) async throws -> String {
         try Task.checkCancellation()
         await onStage?(.resolving)
@@ -533,9 +453,6 @@ extension PlaywrightPythonEnsurer {
     }
 
     /// Ensures the managed venv directory exists without clobbering.
-    /// A missing directory runs `python3 -m venv` once; a present directory
-    /// holding `bin/python` reuses it; a present directory missing the
-    /// interpreter fails closed without deleting so user content survives.
     private static func ensureVenvDir() async throws {
         let manager = FileManager.default
         let dirPath = managedVenvDirURL().path
@@ -586,11 +503,9 @@ extension PlaywrightPythonEnsurer {
         }
     }
 
-    /// Installs the Playwright package inside the managed venv.
-    /// Uses the venv interpreter (`-m pip`) so Homebrew's
-    /// externally-managed guard never trips; a system-wide `pip install`
-    /// outside the venv is never attempted. Installs the pinned requirement
-    /// so fresh provisions converge on one tested release.
+    /// Installs the Playwright package inside the managed venv. Uses the venv interpreter (`-m
+    /// pip`) so Homebrew's externally-managed guard never trips; a system-wide `pip install` outside
+    /// the venv is never attempted.
     private static func pipInstallPlaywright() async throws {
         let pythonPath = managedPythonURL().path
         do {
@@ -626,9 +541,6 @@ extension PlaywrightPythonEnsurer {
     }
 
     /// Installs the Chromium browser into the managed venv.
-    /// System dependency installation (`install-deps`) stays a manual note
-    /// because it typically needs sudo outside the harness; macOS bundles the
-    /// needed libraries while Linux hosts may need the extra step.
     private static func installChromium() async throws {
         let pythonPath = managedPythonURL().path
         do {
@@ -707,10 +619,8 @@ extension PlaywrightPythonEnsurer {
         }
     }
 
-    /// Probes whether PATH `python3` can import playwright.
-    /// Covers the fallback where no absolute interpreter resolves, so health
-    /// reports the same spelling the bridge would spawn through env.
-    /// - Returns: True only when `import playwright` exits zero.
+    /// Probes whether PATH `python3` can import playwright. Covers the fallback where no absolute
+    /// interpreter resolves, so health reports the same spelling the bridge would spawn through env.
     private static func canImportPlaywrightViaEnv() async -> Bool {
         if Task.isCancelled {
             return false

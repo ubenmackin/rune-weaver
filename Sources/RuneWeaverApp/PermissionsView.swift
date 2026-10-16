@@ -1,15 +1,4 @@
 // Rune Weaver App — Permissions checklist window content.
-//
-// Purpose: Guides the owner through the macOS grants Rune Weaver needs for
-// messages, contacts, and desktop control, with one honest affordance per row
-// and no surprise prompts outside an explicit Enable press.
-// Scope: Header copy plus one row per PermissionKind in declaration order plus
-// footer actions; status colors, Enable versus Settings routing, and the
-// capture-grant relaunch hint live here. Live reads, prompting, and relaunch
-// mechanics stay in the view model and its seams.
-// Architectural role: The single SwiftUI owner of Permissions presentation,
-// keeping prompting behind user intent while background activation refreshes
-// keep every row truthful when the owner returns from System Settings.
 
 import AppKit
 import SwiftUI
@@ -48,10 +37,9 @@ struct PermissionsView: View {
                     Spacer()
                     VStack(alignment: .trailing, spacing: 8) {
                         if !viewModel.didLoad {
-                            // Pre-first-read rows render loading instead of
-                            // the unavailable fallback, so the initial paint
-                            // never flashes Open System Settings before any
-                            // live read lands.
+                            // Pre-first-read rows render loading instead of the unavailable
+                            // fallback, so the initial paint never flashes Open System Settings
+                            // before any live read lands.
                             ProgressView()
                                 .controlSize(.small)
                         } else {
@@ -59,9 +47,8 @@ struct PermissionsView: View {
                             case .none:
                                 EmptyView()
                             case .enable:
-                                // The literal label stays the generic Enable
-                                // per row; tool guidance phrases it as Enable
-                                // for Contacts when pointing at this button on
+                                // The literal label stays the generic Enable per row; tool guidance
+                                // phrases it as Enable for Contacts when pointing at this button on
                                 // the Contacts row.
                                 Button("Enable") {
                                     Task {
@@ -77,10 +64,9 @@ struct PermissionsView: View {
                                 }
                                 .disabled(viewModel.isRefreshing)
                             }
-                            // Screen capture, desktop control, and history
-                            // grants only apply at launch, so the row offers
-                            // a relaunch while the grant is missing instead
-                            // of leaving the owner to discover it.
+                            // Screen capture, desktop control, and history grants only apply at
+                            // launch, so the row offers a relaunch while the grant is missing
+                            // instead of leaving the owner to discover it.
                             if kind == .fullDiskAccess || kind == .screenRecording || kind == .accessibility, status != .granted {
                                 Button("Relaunch Rune Weaver") {
                                     viewModel.relaunchApp()

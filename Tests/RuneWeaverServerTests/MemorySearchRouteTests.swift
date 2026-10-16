@@ -1,14 +1,4 @@
 // Rune Weaver Server Tests — Memory search route parity with chat auto-recall.
-//
-// Purpose: pins GET /memory/search without a live network: dated, future, and
-// dateless queries each recall through the router window chat turns use, a
-// forced live query hides document-index hits, and the response envelope stays
-// the documented query/count/memories triple.
-// Scope: route status codes, router window wiring, doc-index suppression, and
-// response shape only; router inference, recall calibration, and index building
-// stay with their own suites.
-// Architectural role: guards the thin adapter so future route edits cannot drop
-// the router window, resurrect suppressed index hits, or widen the envelope.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -37,10 +27,6 @@ private final class SearchRouteStubLLM: LLMProvider, Sendable {
 }
 
 /// Isolated harness for one memory-search route test.
-///
-/// Holds the configured application plus the stores behind it so fixtures can
-/// be written at explicit instants exactly the way a live store would hold them,
-/// with every run confined to its own temporary directory.
 private struct SearchRouteHarness {
     /// Configured application carrying the registered routes.
     let app: Application
@@ -53,16 +39,6 @@ private struct SearchRouteHarness {
 }
 
 /// Builds a configured application over an isolated set of stores.
-///
-/// Bindings mirror the serving surface: loopback with no owner verifier, so
-/// requests reach the handlers exactly as they do on a machine with no token
-/// configured. When `docIndex` is set the engine opens the document index the
-/// way `rune-weaver serve` does with indexing enabled, which is the only state
-/// under which doc-index suppression is observable at all.
-/// - Parameters:
-///   - docIndex: True to wire a document index database for this run.
-///   - body: Test body receiving the harness.
-/// - Returns: Whatever `body` returns.
 private func withSearchApp<T>(
     docIndex: Bool = false,
     _ body: (SearchRouteHarness) async throws -> T
@@ -129,11 +105,8 @@ private func withSearchApp<T>(
     }
 }
 
-/// Sends one body-less request through the full registered surface.
-/// - Parameters:
-///   - app: Configured application.
-///   - path: Path plus optional query string.
-/// - Returns: Route response.
+/// Sends one body-less request through the full registered surface. app: Configured
+/// application.
 private func searchRequest(app: Application, path: String) async throws -> Response {
     let request = Request(
         application: app,
@@ -145,15 +118,6 @@ private func searchRequest(app: Application, path: String) async throws -> Respo
 }
 
 /// Stores one episodic turn at an explicit instant.
-///
-/// The route recalls through the engine's episodic store, so the fixture writes
-/// through a store bound to the same database the engine opened; the timestamp
-/// rides on the episode so a dated window can be pinned instead of waiting for
-/// the clock to move.
-/// - Parameters:
-///   - store: Episodic store sharing the engine's database.
-///   - content: Unique turn text.
-///   - timestamp: Instant the turn occurred at.
 private func seedEpisode(
     in store: EpisodeStore,
     content: String,
@@ -164,15 +128,9 @@ private func seedEpisode(
     )
 }
 
-/// Indexes one document carrying a single chunk at an explicit event time.
-///
-/// Keyword-only chunks keep the fixture on the FTS leg, which is the path a
-/// fresh install without an embeddings backend takes.
-/// - Parameters:
-///   - store: Document index store sharing the engine's index database.
-///   - externalID: Source-scoped identifier.
-///   - text: Chunk body.
-///   - mtime: Parent event time, or nil for undated.
+/// Indexes one document carrying a single chunk at an explicit event time. Keyword-only chunks keep
+/// the fixture on the FTS leg, which is the path a fresh install without an embeddings backend
+/// takes.
 private func seedIndexedDoc(
     in store: DocIndexStore,
     externalID: String,
@@ -201,23 +159,13 @@ private func routerCalendar() -> Calendar {
     return calendar
 }
 
-/// Renders an instant as `YYYY-MM-DD` in the device zone.
-/// - Parameters:
-///   - date: Instant to render.
-///   - calendar: Zone-carrying calendar used to pick the day parts.
-/// - Returns: Calendar-day text the router recognizes.
+/// Renders an instant as `YYYY-MM-DD` in the device zone. date: Instant to render.
 private func dayString(from date: Date, calendar: Calendar) -> String {
     let components = calendar.dateComponents([.year, .month, .day], from: date)
     return String(format: "%04d-%02d-%02d", components.year ?? 2000, components.month ?? 1, components.day ?? 1)
 }
 
 /// Percent-encodes one query value for a `q` parameter.
-///
-/// Query delimiters plus `+` are stripped from the allowed set so a space
-/// survives the wire as an encoded byte rather than reaching the parser as a
-/// separator or a space spelling.
-/// - Parameter query: Raw query text.
-/// - Returns: Encoded value for the `q` parameter.
 private func encodedQueryValue(_ query: String) -> String {
     var allowed = CharacterSet.urlQueryAllowed
     allowed.remove(charactersIn: "&=+?#/%")

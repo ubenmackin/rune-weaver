@@ -1,7 +1,4 @@
 // Rune Weaver Server — Active turn tracking and cooperative cancellation.
-//
-// Tracks in-flight interactive chat turn tasks across sessions, bounding
-// concurrency and enabling cooperative cancellation.
 
 import Foundation
 import os
@@ -66,13 +63,6 @@ public actor ActiveTurnTracker {
     private static let pendingCancelTTL: TimeInterval = 2
 
     /// Bounds how many interactive turns may run at once across sessions.
-    /// Local inference degrades past a couple of concurrent evaluations, so a
-    /// fresh session past the cap fails with an honest busy notice instead of
-    /// stacking turns that would all look hung. Kept namespaced here (not as
-    /// a module global) so REST and WebSocket share one cap. This is the
-    /// authoritative single source: every health probe advertises it so the
-    /// dashboard prefers the server value and only falls back to its mirrored
-    /// constant for older engines, keeping admit and reject in agreement.
     public static let maxConcurrentTurns = 3
 
     /// Response header carrying the authoritative turn cap on every health probe.
@@ -94,17 +84,9 @@ public actor ActiveTurnTracker {
         store(sessionID: sessionID, cancel: onCancel)
     }
 
-    /// Atomically acquires a turn slot when capacity allows.
-    /// A replacement turn for the same session always fits (it supersedes the
-    /// prior slot); a fresh session past the cap returns nil instead of
-    /// registering. The check and the store run in one actor hop so concurrent
-    /// fresh sessions cannot both slip past the cap between a separate
-    /// contains/count probe and a later register. The cap stays fixed here so
-    /// no caller can widen it and silently stack slow inference turns.
-    /// - Parameters:
-    ///   - sessionID: Owning session.
-    ///   - onCancel: Cooperative cancel action for the turn.
-    /// - Returns: Registration receipt, or nil when a fresh session is over cap.
+    /// Atomically acquires a turn slot when capacity allows. A replacement turn for the same
+    /// session always fits (it supersedes the prior slot); a fresh session past the cap returns nil
+    /// instead of registering.
     public func tryAcquire(
         sessionID: UUID,
         onCancel: @Sendable @escaping () -> Void
@@ -224,10 +206,9 @@ public actor ActiveTurnTracker {
 
 // MARK: - Behavior Watchdog Brake Parking
 
-/// The tracker is the production owner of behavior-brake parking: the watchdog
-/// reads the running roster through this seam and parks every turn through it,
-/// reusing the identical cooperative cancel contract the REST and WebSocket
-/// cancel paths already run.
+/// The tracker is the production owner of behavior-brake parking: the watchdog reads the running
+/// roster through this seam and parks every turn through it, reusing the identical cooperative
+/// cancel contract the REST and WebSocket cancel paths already run.
 extension ActiveTurnTracker: TurnParking {}
 
 /// Bridges a tracker cancel action to a chat task created just after registration.

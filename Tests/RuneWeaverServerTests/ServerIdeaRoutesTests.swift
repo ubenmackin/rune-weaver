@@ -1,15 +1,4 @@
 // Rune Weaver Server Tests — Proactive idea REST surface and settings merge.
-//
-// Purpose: pins the idea HTTP contract without a live network: request
-// validation, unknown identifiers, the disabled/capped acceptance guards, the
-// plan-adjustment and new-goal effects, the summary tallies, the proactive
-// frame kind, and the `[ideas]` settings merge.
-// Scope: route status codes, DTO shapes, and settings merge only; durable
-// suggestion generation and the nightly cadence stay with the engine and worker
-// suites.
-// Architectural role: guards the thin adapter so future route edits cannot
-// silently widen validation, drift the accept effects, or reset untouched
-// settings fields.
 
 import Foundation
 import NIOWebSocket
@@ -47,14 +36,6 @@ private final class IdeaRouteStubLLM: LLMProvider, Sendable {
 }
 
 /// Builds a configured application sharing an isolated ideas store.
-///
-/// The context carries explicit goal and idea stores so both postures are
-/// observable through the same route surface; the temporary database keeps rows
-/// off the real engine data directory.
-/// - Parameters:
-///   - goalsEnabled: Whether goal pursuit runs for this app.
-///   - body: Test body receiving the app plus its context.
-/// - Returns: Whatever `body` returns.
 private func withIdeaApp<T>(
     goalsEnabled: Bool = true,
     _ body: (Application, ServerContext) async throws -> T
@@ -115,12 +96,8 @@ private func withIdeaApp<T>(
     }
 }
 
-/// Sends one request through the full registered surface.
-/// - Parameters:
-///   - app: Configured application.
-///   - method: HTTP method.
-///   - path: Path plus optional query string.
-/// - Returns: Route response.
+/// Sends one request through the full registered surface. app: Configured
+/// application.
 private func ideaRequest(app: Application, method: HTTPMethod, path: String) async throws -> Response {
     let request = Request(
         application: app,
@@ -432,10 +409,9 @@ struct IdeaAcceptBroadcastTests {
             let idea = try await seedIdea(context, kind: .newGoal, title: "Ship the field guide", body: "Publish it.")
             let response = try await ideaRequest(app: app, method: .POST, path: "/ideas/\(idea.id.uuidString)/accept")
             #expect(response.status == .ok)
-            // The accept path pushes the created row for live dashboards the
-            // same way the create route does, so other sockets learn the row
-            // without refetching; a trailing plan-ready refresh may add a
-            // second frame, so the assertion pins presence, not count.
+            // The accept path pushes the created row for live dashboards the same way the create
+            // route does, so other sockets learn the row without refetching; a trailing plan-ready
+            // refresh may add a second frame, so the assertion pins presence, not count.
             let frames = await socket.sent
             #expect(!frames.isEmpty)
             let decoded = try frames.map { try JSONDecoder().decode(WSGoalUpdatedFrame.self, from: Data($0.utf8)) }

@@ -1,32 +1,10 @@
 // Rune Weaver Server — Settings REST DTOs.
-//
-// Purpose: carries the full settings snapshot for `GET /settings` plus the
-// partial update for `PUT /settings` so dashboard edits preserve every field
-// the request omits while engine, server bind, media, index, desktop, goals,
-// proactive, ideas, fanout, browser, bash, workspace, containers, and files
-// patches merge in one place.
-// Scope: REST bodies and merge policy only; range and shape checks stay with
-// the config validation layer and live-reload decisions stay with the
-// settings routes.
-// Architectural role: keeps the Vapor settings adapters decoupled from the
-// engine core in version-tolerant Codable contracts, so a dashboard built
-// against an older engine still decodes.
-//
-// Live-apply note: `WorkspaceStore` derives limits per call (`usage`,
-// `pruneTmp`, and `checkQuota` all read `config.clamped()`), so a save pushes
-// the merged quotas into the live context store in place and the next usage,
-// prune, and `bash.exec` checks enforce them with no restart. The rebuilt
-// `BashTool` carries a fresh store with the same hermetic overrides, so
-// isolated roots keep enforcing against the same tree.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
 /// Settings snapshot for `GET /settings` and `PUT /settings`.
-/// Carries both `browser*` (canonical `[browser]` keys) and `search*`
-/// dashboard aliases with identical values so either contract reads without
-/// falling back to defaults.
 public struct SettingsResponse: Content, Equatable {
     public let engineName: String
     public let logLevel: String
@@ -52,10 +30,8 @@ public struct SettingsResponse: Content, Equatable {
     /// Maximum characters kept per hit before ellipsis truncation (`[memory] recall_per_hit_chars`).
     public let memoryRecallPerHitChars: Int
     /// Widening factor for the document candidate pool (`[memory] recall_doc_pool_multiplier`):
-    /// `pool = clamped * multiplier` drives the vector leg's read width
-    /// `min(max(pool * 10, 500), maxPerTierResults)` and the keyword leg mirrors it.
-    /// Inert at the default page size — it moves the vector leg only once
-    /// `pool * 10` clears the 500-row floor.
+    /// `pool = clamped * multiplier` drives the vector leg's read width `min(max(pool * 10, 500),
+    /// maxPerTierResults)` and the keyword leg mirrors it.
     public let memoryRecallDocPoolMultiplier: Int
     /// Weight mapping episodic rank scores onto the shared recall scale (`[memory] recall_episodic_weight`).
     public let memoryRecallEpisodicWeight: Double
@@ -101,10 +77,7 @@ public struct SettingsResponse: Content, Equatable {
     public let ideas: IdeasConfig
     /// Parallel worker fan-out policy backing `fanout.run`.
     public let fanout: FanOutConfig
-    /// Owner-facing assistant persona from `[persona]`. The stored snapshot
-    /// rides the settings GET so the dashboard identity surface round-trips
-    /// without a second endpoint; a persona save itself is boot-held and
-    /// advertised through `requiresRestart`.
+    /// Owner-facing assistant persona from `[persona]`.
     public let persona: PersonaConfig
     /// HTTP bind interface from `[server] hostname`. Changing it needs a restart
     /// because the socket and the Host gate are fixed at boot.
@@ -236,15 +209,9 @@ public struct SettingsResponse: Content, Equatable {
         case requiresRestart
     }
 
-    /// Decodes tolerantly so payloads from engines that predate an additive
-    /// settings key still parse: the key falls back to its documented default
-    /// — the `[server]` bind fields to the loopback defaults, `requiresRestart`
-    /// to false, and `logLevel` to the engine's documented `info` — instead of
-    /// failing the settings fetch. The posture is deliberately defensive rather
-    /// than strict: every settings-surface key has a known default, so a missing
-    /// key means an older writer on the wire, not a corrupt payload, and
-    /// refusing the whole GET for one absent key would strand the dashboard on
-    /// a surface it can render correctly from the remaining fields.
+    /// Decodes tolerantly so payloads from engines that predate an additive settings key still
+    /// parse: the key falls back to its documented default — the `[server]` bind fields to the
+    /// loopback defaults, `requiresRestart` to false, and `logLevel` to the engine's documented.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         engineName = try container.decode(String.self, forKey: .engineName)
@@ -648,13 +615,9 @@ public struct UpdateSettingsRequest: Content, Equatable {
     }
 }
 
-/// Partial `[containers]` patch for `PUT /settings`.
-///
-/// Every field stays optional so a request carrying only one key leaves the
-/// rest of the stored admission bounds untouched instead of resetting them.
-/// Covers the same field set as the full `ContainersConfig` snapshot, so a
-/// caller holding a complete policy can build the patch through `init(_:)` and
-/// reuse the merge path without hand-mapping fields.
+/// Partial `[containers]` patch for `PUT /settings`. Every field stays optional so a request
+/// carrying only one key leaves the rest of the stored admission bounds untouched instead of
+/// resetting them.
 public struct ContainersSettingsUpdate: Content, Equatable {
     /// Guest memory cap in MB. Nil preserves the stored value.
     public var memoryMB: Int?
@@ -663,11 +626,7 @@ public struct ContainersSettingsUpdate: Content, Equatable {
     /// Idle TTL in minutes. Nil preserves the stored value.
     public var ttlMinutes: Int?
 
-    /// Creates a partial containers patch.
-    /// - Parameters:
-    ///   - memoryMB: Guest memory cap in MB.
-    ///   - maxConcurrent: Maximum concurrent containers.
-    ///   - ttlMinutes: Idle TTL in minutes.
+    /// Creates a partial containers patch. memoryMB: Guest memory cap in MB.
     public init(
         memoryMB: Int? = nil,
         maxConcurrent: Int? = nil,
@@ -693,10 +652,9 @@ public struct ContainersSettingsUpdate: Content, Equatable {
         case ttlMinutes
     }
 
-    /// Merges this patch onto the stored policy, preserving every field the
-    /// request omits. A nil field is a no-op, so a dashboard edit to one knob
-    /// never resets the rest of the `[containers]` section.
-    /// - Parameter containers: Stored containers policy to mutate in place.
+    /// Merges this patch onto the stored policy, preserving every field the request omits. A nil
+    /// field is a no-op, so a dashboard edit to one knob never resets the rest of the `[containers]`
+    /// section.
     public func apply(to containers: inout ContainersConfig) throws {
         if let memoryMB {
             containers.memoryMB = try Self.validatedBound(memoryMB, field: "containers.memory_mb")
@@ -742,9 +700,6 @@ extension UpdateSettingsRequest {
 }
 
 /// Configuration application methods for `UpdateSettingsRequest`.
-///
-/// Kept in an extension so the request struct body stays within the type
-/// length budget.
 extension UpdateSettingsRequest {
     /// Applies this update onto a loaded config, preserving every field
     /// the request omits.
@@ -817,14 +772,9 @@ extension UpdateSettingsRequest {
         if let memoryEmbeddingModel {
             memory.embeddingModel = memoryEmbeddingModel
         }
-        // Recall budgets merge field-by-field so a dashboard edit to one knob
-        // never resets the rest of the `[memory] recall_*` section, then clamp
-        // into the documented ranges so the persisted file mirrors the live
-        // engine contract even if a caller passes an edge value — fail-open
-        // like file-load (`decodeMemory`), never a save refusal. A save
-        // without recall keys is a no-op and preserves the stored budgets
-        // verbatim. Validation documents this posture; live paths clamp again
-        // at use via `RecallBudgets.clamped()`.
+        // Recall budgets merge field-by-field so a dashboard edit to one knob never resets the rest
+        // of the `[memory] recall_*` section, then clamp into the documented ranges so the persisted
+        // file mirrors the live engine contract even if a caller passes an edge value — fail-open.
         if let memoryRecallPerTierLimit {
             memory.recallBudgets.perTierLimit = memoryRecallPerTierLimit
         }
@@ -875,14 +825,9 @@ extension UpdateSettingsRequest {
         }
     }
 
-    /// Merges a partial containers patch onto the stored policy, preserving every
-    /// field the request omits. A nil patch is a no-op, so a dashboard edit
-    /// elsewhere never resets the `[containers]` section. Validation stays
-    /// single-sourced in `ContainersSettingsUpdate.apply(to:)` so the PUT and
-    /// direct-merge paths agree with a clear 400 instead of persisting bad values.
-    ///
-    /// Internal so the shared settings `apply(to:)` keeps one merge path while
-    /// the containers-specific logic lives beside its DTO.
+    /// Merges a partial containers patch onto the stored policy, preserving every field the request
+    /// omits. A nil patch is a no-op, so a dashboard edit elsewhere never resets the `[containers]`
+    /// section.
     func applyContainers(to containers: inout ContainersConfig) throws {
         guard let update = self.containers else { return }
         try update.apply(to: &containers)
@@ -907,25 +852,14 @@ extension UpdateSettingsRequest {
             files.writeMode = try RuneWeaverConfig.validateFilesWriteMode(filesWriteMode)
         }
         if let filesWritePathRules {
-            // The list and each path stay bounded exactly as the config
-            // document bounds them, so a settings PUT refuses a policy the
-            // TOML load would refuse instead of persisting an unbounded rule
-            // set the write-path classifier would have to fan out over.
+            // The list and each path stay bounded exactly as the config document bounds them, so a
+            // settings PUT refuses a policy the TOML load would refuse instead of persisting an
+            // unbounded rule set the write-path classifier would have to fan out over.
             files.writePathRules = try Self.validatedWritePathRules(filesWritePathRules)
         }
     }
 
-    /// Validates one `write_path_rules` patch against the bounds the config
-    /// document enforces.
-    ///
-    /// Mirrors `FilesWritePathRule.maxRuleCount` and
-    /// `FilesWritePathRule.maxPathLength` so the PUT path and the file-load
-    /// path refuse the same list with the same field and message; paths store
-    /// trimmed so a padded entry never reads as a longer prefix than it names.
-    /// - Parameter rules: Raw rules from the request.
-    /// - Returns: The validated rules in stored spelling.
-    /// - Throws: `ConfigError.validationError` on an over-long list, a blank
-    ///   path, or an over-bound path.
+    /// Validates one `write_path_rules` patch against the bounds the config document enforces.
     private static func validatedWritePathRules(_ rules: [FilesWritePathRule]) throws -> [FilesWritePathRule] {
         guard rules.count <= FilesWritePathRule.maxRuleCount else {
             throw ConfigError.validationError(
@@ -988,17 +922,10 @@ extension UpdateSettingsRequest {
     }
 
     /// Applies the `[server]` bind patch, preserving every key the request omits.
-    /// A nil patch is a no-op, while a present patch writes verbatim after
-    /// fail-closed checks so invalid values never persist or reach the live
-    /// bind. Hostname validation is
-    /// single-sourced through `RuneWeaverConfig.validateServerHostname` so the
-    /// PUT and file-load paths agree with a clear 400 instead of a spurious
-    /// 403 or an obscure bind failure.
     private func applyServer(to server: inout ServerEndpointConfig) throws {
         if let serverHostname {
-            // Validates the exact-host shape (scheme, wildcard, slash,
-            // userinfo, query, fragment, whitespace, controls,
-            // normalized-empty, and `:port` for non-IPv6) before storing so
+            // Validates the exact-host shape (scheme, wildcard, slash, userinfo, query, fragment,
+            // whitespace, controls, normalized-empty, and `:port` for non-IPv6) before storing so
             // `http://evil` and sibling shapes never reach the file.
             try RuneWeaverConfig.validateServerHostname(serverHostname)
             server.hostname = serverHostname.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1013,13 +940,9 @@ extension UpdateSettingsRequest {
             server.port = serverPort
         }
         if let serverAllowedHosts {
-            // Validate the raw entries before port stripping hides a widening
-            // shape: stripping first would carve `http` from `http://evil.com`
-            // and let a scheme slip through as an exact host. This raw check
-            // carries the only count bound (`maxAllowedHosts` on the supplied
-            // entries): the deduped form can legitimately hold more entries
-            // because each IPv6 literal stores both its bracketed and bare
-            // spellings, so 11 IPv6 entries store as 22 without throwing.
+            // Validate the raw entries before port stripping hides a widening shape: stripping
+            // first would carve `http` from `http://evil.com` and let a scheme slip through as an
+            // exact host.
             try RuneWeaverConfig.validateAllowedHosts(serverAllowedHosts)
             // Single-sourced through `dedupeNormalizedHosts` so file-load, the
             // PUT, the health snapshot, and the Host gate store identically.
@@ -1035,9 +958,6 @@ extension UpdateSettingsRequest {
 }
 
 /// Request flags and hostname helpers for `UpdateSettingsRequest`.
-///
-/// Kept in an extension so the request struct body stays within the type
-/// length budget; the route reads these without touching the stored patch.
 extension UpdateSettingsRequest {
     /// Whether this request carries any bind-affecting `[server]` key.
     /// The settings route uses this to mark `requiresRestart` without
@@ -1047,9 +967,6 @@ extension UpdateSettingsRequest {
     }
 
     /// Whether this request carries any `[memory] recall_*` budget key.
-    /// The settings route uses this to push the merged budgets into the live
-    /// orchestrator without a restart; a save without recall keys leaves the
-    /// live engine untouched.
     public var carriesRecallPatch: Bool {
         memoryRecallPerTierLimit != nil || memoryRecallAutoLimit != nil || memoryRecallThreshold != nil
             || memoryRecallMaxChars != nil || memoryRecallPerHitChars != nil
@@ -1064,22 +981,13 @@ extension UpdateSettingsRequest {
             || filesWriteMode != nil || filesWritePathRules != nil
     }
 
-    /// Whether a hostname binds loopback only. Non-loopback binds need a
-    /// resolvable owner token and fail closed otherwise. Single-sourced through
-    /// `ServerConfig.isLoopbackHostname` so a hostname that saves as loopback
-    /// also boots as loopback.
+    /// Whether a hostname binds loopback only. Non-loopback binds need a resolvable owner token and
+    /// fail closed otherwise.
     public static func isLoopbackHostname(_ hostname: String) -> Bool {
         ServerConfig.isLoopbackHostname(hostname)
     }
 
     /// Normalizes one `allowed_hosts` entry to the compared Host form.
-    /// Single-sourced through `ServerEndpointConfig.normalizeHost` in Core so
-    /// the stored allowlist and the request gate trim, lowercase, and strip
-    /// ports identically; a stored entry that matches at save time matches at
-    /// gate time. Callers validate before and after so widening shapes never
-    /// hide behind the strip.
-    /// - Parameter entry: Raw configured entry.
-    /// - Returns: Lowercased, port-stripped host.
     static func normalizedAllowedHost(_ entry: String) -> String {
         ServerEndpointConfig.normalizeHost(entry)
     }

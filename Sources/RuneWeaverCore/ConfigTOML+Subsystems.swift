@@ -1,11 +1,4 @@
 // Rune Weaver Core — Subsystem TOML decoding for config.toml.
-//
-// Purpose: decode subsystem config.toml tables into RuneWeaverConfig with
-// strict typed accessors and additive defaults for absent sections.
-// Scope: desktop, security, goals, bash, proactive, ideas, fanout, workspace,
-// and persona tables; wrong-typed values throw while missing tables keep defaults.
-// Architectural role: subsystem half of the TOML load path beside the core
-// ConfigTOML decoder; range checks stay in validation so decode stays type-only.
 
 import Foundation
 
@@ -14,10 +7,9 @@ import Foundation
 extension RuneWeaverConfig {
     static func decodeDesktop(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let desktop = root.tables["desktop"] else { return }
-        // Single-gate contract: retired `screen_capture_enabled`,
-        // `control_enabled`, and legacy `enabled` keys are silently ignored
-        // when present so old files load without migration; enablement flows
-        // solely through the persisted tool-state toggle.
+        // Single-gate contract: retired `screen_capture_enabled`, `control_enabled`, and legacy
+        // `enabled` keys are silently ignored when present so old files load without migration;
+        // enablement flows solely through the persisted tool-state toggle.
         if let dim = try desktop.strictInt("max_image_dimension", field: "desktop.max_image_dimension") {
             config.desktop.maxImageDimension = dim
         }
@@ -37,10 +29,6 @@ extension RuneWeaverConfig {
     }
 
     /// Decodes the additive `[security]` section, defaulting omitted keys.
-    ///
-    /// Absent sections keep the default-ON policies so existing files load
-    /// untouched; present-but-wrong-typed values throw instead of silently
-    /// defaulting, matching every prior section's strict accessors.
     static func decodeSecurity(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let security = root.tables["security"] else { return }
         if let labeling = try security.strictBool("untrusted_labeling", field: "security.untrusted_labeling") {
@@ -52,11 +40,6 @@ extension RuneWeaverConfig {
     }
 
     /// Decodes the additive `[goals]` section, defaulting omitted keys.
-    ///
-    /// An absent table keeps the opt-in defaults so existing files load
-    /// untouched; present-but-wrong-typed values throw instead of silently
-    /// defaulting, matching the `[index]` decode style, and range checks land
-    /// in validation so decode stays type-only.
     static func decodeGoals(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let goals = root.tables["goals"] else { return }
         if let enabled = try goals.strictBool("enabled", field: "goals.enabled") {
@@ -132,10 +115,8 @@ extension RuneWeaverConfig {
                 guard let pattern = try node.strictString("pattern", field: "bash.rules[\(idx)].pattern") else {
                     throw ConfigError.validationError(field: "bash.rules[\(idx)].pattern", message: "missing required")
                 }
-                // Single-sourced through `BashRule.validate(index:)` so
-                // file-load, the settings PUT, and core validation agree on
-                // the blank-pattern field and message. The placeholder action
-                // is unchecked; only the pattern matters here.
+                // Single-sourced through `BashRule.validate(index:)` so file-load, the settings
+                // PUT, and core validation agree on the blank-pattern field and message.
                 try BashRule(pattern: pattern, action: .ask).validate(index: idx)
                 let actionStr = try node.strictString("action", field: "bash.rules[\(idx)].action") ?? "ask"
                 guard let action = BashPermissionAction(rawValue: actionStr.lowercased()) else {
@@ -143,20 +124,13 @@ extension RuneWeaverConfig {
                 }
                 rules.append(BashRule(pattern: pattern, action: action))
             }
-            // A present rule list replaces the built-in default in stored
-            // order; an absent key preserves the default. An empty list never
-            // persists because validation requires at least one rule, so a
-            // saved file always round-trips the same evaluation order.
+            // A present rule list replaces the built-in default in stored order; an absent key
+            // preserves the default.
             config.bash.rules = rules
         }
     }
 
     /// Decodes the additive `[proactive]` section, defaulting omitted keys.
-    ///
-    /// An absent table keeps the surfacing default so existing files load
-    /// untouched; present-but-wrong-typed values throw instead of silently
-    /// defaulting, matching the `[goals]` decode style, and range checks land
-    /// in validation so decode stays type-only.
     static func decodeProactive(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let proactive = root.tables["proactive"] else { return }
         if let rawMode = try proactive.strictString("mode", field: "proactive.mode") {
@@ -175,11 +149,6 @@ extension RuneWeaverConfig {
     }
 
     /// Decodes the additive `[ideas]` section, defaulting omitted keys.
-    ///
-    /// An absent table keeps the opt-in defaults so existing files load
-    /// untouched; present-but-wrong-typed values throw instead of silently
-    /// defaulting, matching the `[goals]` decode style, and range checks land
-    /// in validation so decode stays type-only.
     static func decodeIdeas(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let ideas = root.tables["ideas"] else { return }
         if let enabled = try ideas.strictBool("enabled", field: "ideas.enabled") {
@@ -194,15 +163,6 @@ extension RuneWeaverConfig {
     }
 
     /// Decodes the additive `[fanout]` section, defaulting omitted keys.
-    ///
-    /// An absent table keeps the single-gate defaults so existing files load
-    /// untouched; present-but-wrong-typed values throw instead of silently
-    /// defaulting, matching the `[ideas]` decode style, and range checks land
-    /// in validation so decode stays type-only. A legacy `enabled` key is
-    /// tolerated and ignored because reads are per-key: availability flows
-    /// through tool registration alone, so the stale knob never gates a run.
-    /// The live engine clamps the worker cap at init so a stray digit
-    /// degrades to the nearest bound instead of oversubscribing the serving model.
     static func decodeFanout(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let fanout = root.tables["fanout"] else { return }
         if let maxWorkers = try fanout.strictInt("max_workers", field: "fanout.max_workers") {
@@ -217,11 +177,6 @@ extension RuneWeaverConfig {
     }
 
     /// Decodes the additive `[workspace]` section, defaulting omitted keys.
-    ///
-    /// An absent table keeps the documented scratch quotas so existing files
-    /// load untouched; present-but-wrong-typed values throw instead of
-    /// silently defaulting, matching the `[fanout]` decode style, and range
-    /// checks land in validation so decode stays type-only.
     static func decodeWorkspace(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let workspace = root.tables["workspace"] else { return }
         if let quotaMB = try workspace.strictInt("quota_mb", field: "workspace.quota_mb") {
@@ -236,14 +191,6 @@ extension RuneWeaverConfig {
     }
 
     /// Decodes the additive `[persona]` section, defaulting omitted keys.
-    ///
-    /// An absent table keeps the stock identity so existing files load with
-    /// today's prompt bytes; keys are read one by one through the shared
-    /// normalize-or-reject contract (matching the `[index]` decode style),
-    /// present-but-wrong-typed values throw via the strict accessors instead
-    /// of silently defaulting, and blank names or overlong style guidance
-    /// degrade to the documented fallbacks with a logged note inside the
-    /// normalizers.
     static func decodePersona(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let persona = root.tables["persona"] else { return }
         // One leading `try` per assignment covers the throwing strict read,

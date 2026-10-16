@@ -1,13 +1,4 @@
 // Rune Weaver Core — Strict ephemeral container runner.
-//
-// Purpose: own isolated per-turn execution in throwaway containers that mount
-// only fresh workspace scratch, keeping sessions from sharing state.
-// Scope: argument builders for create plus exec, the container runtime
-// resolver, runtime capability probing, owner-only scratch leaves, bounded
-// host invocation, the shared ephemeral admission ledger, and the
-// session-keyed turn registry with terminal reap plus park-aware sweep.
-// Architectural role: single owner for strict isolated execution beside the
-// other Core sandbox helpers; callers wrap commands with resource limits.
 
 import Foundation
 import os
@@ -51,21 +42,12 @@ public enum StrictContainerRunner: Sendable {
     public static let maxProcessOutputBytes = 11 * 1024 * 1024
     /// Maximum stderr bytes retained for diagnostics.
     public static let maxProcessErrorBytes = 64 * 1024
-    /// Legacy detonation name shapes kept inside the reclamation scope.
-    ///
-    /// Detonation containers share the strict name prefix today; these
-    /// pre-migration shapes stay matched so historical orphans still count
-    /// against the cap and reclaim. Longer `runeweaver-` names (the SearXNG
-    /// service container, the workspace container) are never derived from
-    /// this list.
+    /// Legacy detonation name shapes kept inside the reclamation scope. Longer `runeweaver-` names
+    /// (the SearXNG service container, the workspace container) are never derived from this list.
     public static let detonationNamePrefixes = ["runeweaver-session-", "runeweaver-attach-"]
 
-    /// Whether a container name counts as an ephemeral RuneWeaver container.
-    ///
-    /// Strict plus detonation containers share the strict name prefix, and
-    /// the legacy detonation shapes stay covered so historical orphans still
-    /// count and reclaim. The machine singleton workspace container and the
-    /// SearXNG service container are never matched.
+    /// Whether a container name counts as an ephemeral RuneWeaver container. The machine singleton
+    /// workspace container and the SearXNG service container are never matched.
     public static func isEphemeralContainerName(_ name: String) -> Bool {
         guard name != workspaceContainerName else { return false }
         if name.hasPrefix(strictNamePrefix) {
@@ -86,13 +68,9 @@ public enum StrictContainerRunner: Sendable {
     /// a minimal PATH must never hide a standard Homebrew install.
     public static let fallbackRuntimeDirectories = ["/opt/homebrew/bin", "/usr/local/bin"]
 
-    /// Ordered directories probed for the container runtime.
-    /// PATH order wins so an operator override shadows the fallback, while the
-    /// appended fallbacks keep a Homebrew install visible when PATH is minimal.
-    /// Duplicates collapse so a PATH that already carries a fallback probes it
-    /// once; blanks are skipped so empty segments never become relative probes.
-    /// - Parameter pathValue: Raw `PATH` value, or nil when unset.
-    /// - Returns: Deduplicated directories, PATH entries first.
+    /// Ordered directories probed for the container runtime. PATH order wins so an operator
+    /// override shadows the fallback, while the appended fallbacks keep a Homebrew install visible
+    /// when PATH is minimal.
     public static func runtimeSearchDirectories(pathValue: String?) -> [String] {
         var ordered: [String] = []
         var seen = Set<String>()
@@ -119,14 +97,8 @@ public enum StrictContainerRunner: Sendable {
         runtimeSearchDirectories(pathValue: ProcessInfo.processInfo.environment["PATH"])
     }
 
-    /// Resolves the absolute path for the container CLI.
-    /// Absolute runtime values probe directly without PATH expansion; bare
-    /// names probe the shared search ordering with no Docker fallback.
-    /// - Parameters:
-    ///   - runtime: Binary name or absolute path.
-    ///   - searchDirectories: Ordered directories to probe for bare names.
-    ///   - isExecutable: Filesystem probe, injectable so tests can stub an install.
-    /// - Returns: Executable URL, or nil when missing.
+    /// Resolves the absolute path for the container CLI. Absolute runtime values probe directly
+    /// without PATH expansion; bare names probe the shared search ordering with no Docker fallback.
     public static func resolveRuntimeURL(
         runtime: String = "container",
         searchDirectories: [String],
@@ -145,14 +117,9 @@ public enum StrictContainerRunner: Sendable {
         return nil
     }
 
-    /// Resolves the runtime against an explicit PATH value for testing.
-    /// Routes the same fallback ordering through a stubbed filesystem probe so
-    /// minimal-PATH coverage stays verifiable without touching the real PATH.
-    /// - Parameters:
-    ///   - runtime: Binary name or absolute path.
-    ///   - pathValue: Raw `PATH` value driving the search ordering.
-    ///   - isExecutable: Filesystem probe, injectable so tests can stub an install.
-    /// - Returns: Executable URL, or nil when missing everywhere searched.
+    /// Resolves the runtime against an explicit PATH value for testing. Routes the same fallback
+    /// ordering through a stubbed filesystem probe so minimal-PATH coverage stays verifiable without
+    /// touching the real PATH.
     public static func resolveRuntimeURL(
         runtime: String = "container",
         pathValue: String?,
@@ -178,10 +145,8 @@ public enum StrictContainerRunner: Sendable {
         )
     }
 
-    /// Verifies stubbed help text carries every required strict flag.
-    /// - Parameters:
-    ///   - createHelp: Combined stdout plus stderr from `create --help`.
-    ///   - execHelp: Combined stdout plus stderr from `exec --help`.
+    /// Verifies stubbed help text carries every required strict flag. createHelp:
+    /// Combined stdout plus stderr from `create --help`.
     public static func probeRuntimeHelp(createHelp: String, execHelp: String) throws {
         let combined = createHelp + "\n" + execHelp
         for flag in ["--volume", "--workdir", "--no-dns", "--read-only", "--tmpfs", "--entrypoint", "--memory"] {
@@ -258,11 +223,8 @@ public enum StrictContainerRunner: Sendable {
         try? FileManager.default.removeItem(at: url)
     }
 
-    /// Runs one host `container` invocation with bounded output.
-    /// - Parameters:
-    ///   - arguments: Arguments after the runtime binary.
-    ///   - timeoutSeconds: Wall-clock budget.
-    /// - Returns: Bounded result.
+    /// Runs one host `container` invocation with bounded output. arguments:
+    /// Arguments after the runtime binary.
     public static func runHostCommand(arguments: [String], timeoutSeconds: TimeInterval) async throws -> BoundedProcessResult {
         guard ProcessInfo.processInfo.environment["RUNEWEAVER_HERMETIC_TESTS"] != "1" else {
             throw ContainerOperationError.operationFailed(
@@ -319,10 +281,7 @@ public enum StrictContainerRunner: Sendable {
         )
     }
 
-    /// Synchronously reaps one test session container plus its scratch.
-    ///
-    /// Synchronous so test `defer` blocks reap even on early return or
-    /// cancellation, where `await` is unavailable. Only live creations are
+    /// Synchronously reaps one test session container plus its scratch. Only live creations are
     /// tracked, so stubbed hermetic runs never spawn here.
     public static func reapTestSessionSync(_ sessionID: UUID, timeoutSeconds: TimeInterval = 10) {
         guard let track = testContainerTracks.withLock({ $0.removeValue(forKey: sessionID) }) else { return }
@@ -389,11 +348,6 @@ public struct LiveContainerHostRuntime: ContainerHostRuntime, Sendable {
 }
 
 /// Stubbed host runtime for hermetic tests, never spawning.
-///
-/// Tracks every `create --name` plus every scratch leaf noted by the registry,
-/// so teardown can assert creation and reap scratch even after failure,
-/// cancellation, or early return. The stub never checks cancellation, so a
-/// cancelled test still reaps.
 public final class HermeticContainerRuntime: ContainerHostRuntime, Sendable {
     private struct State: Sendable {
         var names: [String] = []
@@ -462,11 +416,9 @@ public final class HermeticContainerRuntime: ContainerHostRuntime, Sendable {
         state.withLock { $0.scratch }
     }
 
-    /// Deletes tracked scratch plus clears tracking, never throwing.
-    ///
-    /// Scratch removal is synchronous file work, so it runs even when the
-    /// calling task is cancelled; container entries are stub-only and need no
-    /// spawn to reap.
+    /// Deletes tracked scratch plus clears tracking, never throwing. Scratch removal is synchronous
+    /// file work, so it runs even when the calling task is cancelled; container entries are
+    /// stub-only and need no spawn to reap.
     public func reapAll() async {
         let snapshot = state.withLock { current -> State in
             let copy = current
@@ -585,14 +537,6 @@ public actor StrictTurnRegistry {
     }
 
     /// Ensures one isolated container plus one scratch leaf for the session.
-    ///
-    /// Reuses the live entry within the session when the network mode matches;
-    /// a network change recreates the container on the existing scratch so a
-    /// parked-then-approved turn cannot reuse the wrong DNS mode. Otherwise
-    /// the shared ledger admits the create before any spawn, so the cap denies
-    /// fail-closed past its limit and census failure denies without spawning,
-    /// and any same-name leftover pre-deletes before creating, so a crashed
-    /// turn cannot collide.
     public func ensure(
         sessionID: UUID,
         workspaceTmp: URL,
@@ -761,15 +705,6 @@ public actor StrictTurnRegistry {
     }
 
     /// Park-aware sweep removing stopped ephemeral containers plus expired orphan scratch.
-    ///
-    /// Sessions holding undecided approvals are skipped regardless of age;
-    /// the workspace container is skipped by name while other names filter
-    /// by the ephemeral scope (strict prefix plus detonation shapes). Stopped
-    /// orphans reclaim immediately while running orphans reclaim only past the
-    /// TTL (ledger admission age, else the inspect creation stamp) so a fresh
-    /// container racing registration survives. The
-    /// TTL governs registry-entry expiry plus orphan-scratch aging, so the
-    /// hourly reclamation pass passes the `[containers]` idle window here.
     public func sweep(
         workspaceTmp: URL,
         parkedSessionIDs: Set<UUID>,
@@ -805,10 +740,6 @@ public actor StrictTurnRegistry {
     }
 
     /// Whether one running orphan is old enough to reclaim.
-    ///
-    /// Ledger admission age wins when this process admitted the container;
-    /// otherwise the inspect creation stamp ages it. Unknown age reads as
-    /// fresh so an ageless container is kept instead of reaped blind.
     private func isExpiredRunningOrphan(
         name: String,
         now: Date,
@@ -961,12 +892,9 @@ extension StrictTurnRegistry {
     }
 }
 
-/// Shared container seam carrying one runtime plus its registries.
-///
-/// Production passes nil and uses the shared live registry plus the live
-/// machine client, preserving per-turn strict plus long-lived workspace reuse.
-/// Hermetic tests pass a stubbed seam so strict plus machine creations never
-/// spawn and teardown reaps every tracked name plus scratch leaf.
+/// Shared container seam carrying one runtime plus its registries. Hermetic tests pass a stubbed
+/// seam so strict plus machine creations never spawn and teardown reaps every tracked name plus
+/// scratch leaf.
 public struct ContainerSeam: Sendable {
     /// Host runtime behind both tiers.
     public let runtime: any ContainerHostRuntime
@@ -1025,9 +953,6 @@ public struct ContainerSeam: Sendable {
     }
 
     /// Hermetic seam plus its stub, sharing one stubbed runtime.
-    ///
-    /// The stubbed seam carries the production memory cap so hermetic turns
-    /// verify the same limit production enforces.
     public static func hermetic() -> (seam: Self, runtime: HermeticContainerRuntime) {
         let stub = HermeticContainerRuntime()
         return (Self(runtime: stub), stub)

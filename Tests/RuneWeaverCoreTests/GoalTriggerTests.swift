@@ -1,12 +1,4 @@
 // Rune Weaver Core Tests — Event-triggered goal wake-ups.
-//
-// Purpose: exercises the additive event-trigger layer end to end against
-// isolated temporary databases: trigger persistence and removal, match and
-// debounce semantics, the bridge polling mirrored episodes into a due date,
-// goal.status surfacing armed triggers, engine/tool creation with triggers,
-// and the disabled-install posture. Scope: the store, bridge, and tool
-// contracts only; due firing itself stays with the scheduler worker suite.
-// Tests never touch the real `~/.runeweaver/memory` store.
 
 import Foundation
 @testable import RuneWeaverCore

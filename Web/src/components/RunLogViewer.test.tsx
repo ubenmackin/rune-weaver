@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — Component tests for RunLogViewer listing and details view.
-// Covers listing, filters, deletion, the fan-out swarm grouping (a parent
-// kind=fanout row expands to its worker children), the sanitized merged
-// summary rendering, and in-flight fan-out cancellation (row-scoped buttons,
-// whole-swarm confirmation, worker-direct stops, honest 409 surfacing, and the
-// settled cancelled badge after refetch).
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

@@ -1,15 +1,4 @@
 // Rune Weaver Tools — Desktop vision and control tools (`desktop.screenshot`, `desktop.action`).
-//
-// `desktop.screenshot` is read-only and safe: it captures the screen or a
-// specific window, downscales the image, and returns it with coordinate
-// metadata and an optional window list.
-//
-// `desktop.action` is approval-gated and dangerous: it dispatches batched
-// mouse, keyboard, and app-switch actions through the permission gate.
-// Both tools always register so they stay visible in `GET /tools`, but
-// boot registration ships them disabled and the persisted tool-state toggle
-// is the sole authority for enablement, so neither runs without an explicit
-// operator action.
 
 import Foundation
 import RuneWeaverCore
@@ -39,11 +28,8 @@ public struct DesktopScreenshotTool: Tool, Sendable {
     private let maxDimension: Int
     private let jpegQuality: Double
 
-    /// Creates the screenshot tool.
-    /// - Parameters:
-    ///   - captureBridge: Capture implementation (live by default, stub for tests).
-    ///   - maxDimension: Longest edge bound for the downscaled image.
-    ///   - jpegQuality: JPEG compression quality (0.0–1.0).
+    /// Creates the screenshot tool. captureBridge: Capture implementation (live by
+    /// default, stub for tests).
     public init(
         captureBridge: any DesktopCapturing = DesktopCaptureBridge(),
         maxDimension: Int = DesktopConfig.defaultMaxImageDimension,
@@ -179,16 +165,10 @@ public struct DesktopActionTool: Tool, Sendable {
     private let controlBridge: any DesktopControlling
     private let blockedApps: [String]
     /// Outbound egress supervisor for typed-URL screening.
-    /// Retained for construction parity with the bridge: screening itself
-    /// lives in the bridge's session-aware batch entry point, which the tool
-    /// reaches dynamically through the protocol requirement.
     public let egressSupervisor: OutboundEgressSupervisor?
 
-    /// Creates the action tool.
-    /// - Parameters:
-    ///   - controlBridge: Control implementation (live by default, stub for tests).
-    ///   - blockedApps: Application names to block from receiving input.
-    ///   - egressSupervisor: Supervisor handed to the live bridge for typed-URL screening.
+    /// Creates the action tool. controlBridge: Control implementation (live by
+    /// default, stub for tests).
     public init(
         controlBridge: any DesktopControlling = DesktopControlBridge(),
         blockedApps: [String] = DesktopConfig.defaultBlockedApps,
@@ -207,13 +187,9 @@ public struct DesktopActionTool: Tool, Sendable {
         }
         let declaredHosts = hostsResult.hosts ?? []
 
-        // URL screening lives in the control bridge's session-aware batch
-        // entry point, reached dynamically through the protocol requirement
-        // so every bridge honors the calling session's grants. The tool never
-        // pre-screens: a pre-check would consume a one-shot grant the bridge
-        // check then re-parks.
-        // Mark the batch active so the menu-bar indicator and Emergency Stop
-        // appear for exactly the window the bridge is dispatching input.
+        // URL screening lives in the control bridge's session-aware batch entry point, reached
+        // dynamically through the protocol requirement so every bridge honors the calling session's
+        // grants.
         await DesktopControlMonitor.shared.beginBatch()
         do {
             let results = try await controlBridge.executeBatch(
@@ -236,10 +212,8 @@ public struct DesktopActionTool: Tool, Sendable {
             return .success(content)
         } catch let error as DesktopControlError where error.isOperatorTakeover {
             await DesktopControlMonitor.shared.endBatch()
-            // Mid-batch takeover keeps its completed steps: the bridge threads
-            // them on the error so the envelope reports partial progress
-            // instead of zeroing the audit trail. Pre-step takeover carries
-            // no partials, so the same path honestly reports zero.
+            // Mid-batch takeover keeps its completed steps: the bridge threads them on the error so
+            // the envelope reports partial progress instead of zeroing the audit trail.
             let partials = error.partialResults
             let envelope = DesktopActionEnvelope(
                 success: false,
@@ -269,11 +243,8 @@ public struct DesktopActionTool: Tool, Sendable {
         }
     }
 
-    /// Validates `network_hosts` through the shared Seatbelt checker.
-    ///
-    /// Thin wrapper over `SeatbeltProfileBuilder.validatedDeclaredHosts` so
-    /// shell and desktop share one validity rule.
-    /// - Returns: Hosts plus an optional failure envelope to return directly.
+    /// Validates `network_hosts` through the shared Seatbelt checker. - Returns: Hosts plus an
+    /// optional failure envelope to return directly.
     private func checkedDeclaredHosts(
         _ args: DesktopActionArgs,
         callID: String?
@@ -446,11 +417,6 @@ public struct DesktopScreenshotEnvelope: Sendable, Codable, Equatable {
     }
 
     /// Redacts screenshot pixels from raw tool content for durable storage.
-    /// Decodes the envelope when present and re-encodes the stripped copy so
-    /// run logs, message history, and episodic records keep the hash plus
-    /// dimensions and scales; other payloads fall back to the shared vision
-    /// gate so inline data URLs never reach disk. The live turn keeps the
-    /// full data URL in memory.
     public static func redactedForPersistence(_ content: String) -> String {
         if let envelope = parse(content) {
             do {
@@ -502,29 +468,9 @@ public enum DesktopTools {
         [screenshotToolName, actionToolName]
     }
 
-    /// Builds the desktop tools according to the configuration.
-    ///
-    /// Both tools always register — visibility in `GET /tools` never
-    /// depends on a toggle, so the surface stays inspectable instead of
-    /// shape-shifting. Enablement is governed solely by the persisted
-    /// tool-state toggle: boot-path callers register them disabled
-    /// (`isEnabled: false`), stored rows restore operator intent, and no
-    /// config gate overrides that state.
-    ///
-    /// Takeover sensing is mouse-only in production: the default control
-    /// bridge ships with a nil takeover detector (no in-process HID key
-    /// poll) and detects the operator automatically via cursor displacement
-    /// past the threshold. A keyboard abort still parks through the explicit
-    /// shared-monitor latch, and tests or host HID bridges inject a detector
-    /// through `controlBridge` instead of this factory claiming a sensor it
-    /// never wires.
-    /// - Parameters:
-    ///   - desktopConfig: The `[desktop]` configuration section carrying
-    ///     capture knobs (dimensions, quality, blocklist).
-    ///   - captureBridge: Optional capture bridge (for tests).
-    ///   - controlBridge: Optional control bridge (for tests and host HID wiring).
-    ///   - egressSupervisor: Optional supervisor screening typed URLs against policy.
-    /// - Returns: Both desktop tools, in registration order.
+    /// Builds the desktop tools according to the configuration. Both tools always register —
+    /// visibility in `GET /tools` never depends on a toggle, so the surface stays inspectable
+    /// instead of shape-shifting.
     public static func makeTools(
         desktopConfig: DesktopConfig = DesktopConfig(),
         captureBridge: (any DesktopCapturing)? = nil,
@@ -552,14 +498,6 @@ public enum DesktopTools {
     }
 
     /// Requests desktop TCC trust for an explicit enable toggle.
-    ///
-    /// Why a separate requesting path: the system dialogs take focus and
-    /// would derail an autonomous turn, so tool execution stays on the
-    /// silent checks and only the enable UI calls here in direct response
-    /// to the operator flipping desktop tools on. Each return reflects
-    /// trust at call time; the operator grants in Settings and relaunches
-    /// before the next turn re-checks silently.
-    /// - Returns: Trust at call time for capture and control, respectively.
     @MainActor
     public static func requestPermissionsForEnable() -> (
         screenRecordingGranted: Bool, accessibilityGranted: Bool

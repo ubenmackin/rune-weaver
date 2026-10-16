@@ -1,14 +1,4 @@
 // Rune Weaver Dashboard — Unit tests for the credential binding preview decision.
-//
-// Purpose: Pins the client-side mirror of the engine `CredentialBinding`
-// gate so the binding modal probe answers honestly without a network round
-// trip: one binding pairs one key with hosts, methods, and path prefixes, and
-// the secret is sent only when all three match the effective request path.
-// Scope: Pure host, method, and effective-path matching only, in both call
-// shapes and both DTO spellings. Network allowlist, Keychain state, and TOML
-// persistence stay with their owners.
-// Architectural role: Keeps the dashboard probe and the egress supervisor on
-// one verdict, so a previewed Yes can never disagree with the enforced gate.
 
 import { describe, expect, it } from "vitest";
 import { previewBindingDecision } from "./policyBindingPreview";

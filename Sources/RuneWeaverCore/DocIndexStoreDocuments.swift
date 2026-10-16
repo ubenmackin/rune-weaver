@@ -1,10 +1,4 @@
 // Rune Weaver Core — Document rows for the local document index.
-//
-// Holds the document write and read path for `SQLiteDocIndexStore`: content-hash
-// gated upserts that preserve the stable identifier, row binding in declaration
-// order, source-scoped reads, reindex checks that retry failed extractions, and
-// JSON metadata plus optional-double codecs. Chunk lifecycle stays in
-// `DocIndexStoreChunks.swift` and schema plus maintenance live beside it.
 
 import Foundation
 
@@ -53,19 +47,6 @@ import Foundation
         }
 
         /// Commits one document with its chunks and run stamp in a single transaction.
-        ///
-        /// The document row, its replacement chunk rows (whose FTS entries
-        /// follow through the chunk triggers), and the `last_seen_run` stamp
-        /// land or roll back together, so a crash between writes can never
-        /// strand a half-indexed document. Exactly one document is handled per
-        /// call so per-file cancel, resume, and reconcile accounting stay
-        /// independent across files.
-        /// - Parameters:
-        ///   - document: Document to persist; a stored row keeps its identifier.
-        ///   - chunks: Replacement chunks bound to the resolved document.
-        ///   - runID: Opaque stamp recorded alongside the rows for reconcile.
-        ///   - dbPath: SQLite file path. `~` is expanded.
-        /// - Returns: The persisted document carrying the stable identifier.
         static func upsertDocumentWithChunks(
             document: IndexedDocument,
             chunks: [IndexedChunk],
@@ -118,13 +99,6 @@ import Foundation
         }
 
         /// Records the run stamp for one document inside an open transaction.
-        ///
-        /// Scoped by stable identifier rather than source key so the stamp
-        /// cannot drift onto a concurrent row with the same external identity.
-        /// - Parameters:
-        ///   - handle: Open database handle owning the transaction.
-        ///   - documentID: Stable row to stamp.
-        ///   - runID: Opaque identifier for the run in flight.
         private static func stampDocument(handle: OpaquePointer?, documentID: UUID, runID: String) throws {
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, "UPDATE indexed_documents SET last_seen_run = ? WHERE id = ?;", -1, &statement, nil) == SQLITE_OK else {

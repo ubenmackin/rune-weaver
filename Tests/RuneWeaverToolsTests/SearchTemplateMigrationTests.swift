@@ -1,16 +1,4 @@
 // Rune Weaver Tools Tests — SearXNG stale-override auto-migration with recreate.
-//
-// Purpose: pins the template-version marker contract that lets both the engine
-// and the escape-hatch script tell a stale per-install override from a current
-// one, so a missing or older marker regenerates with a fresh secret and the
-// container recreates with rm-first plus a fresh run instead of lingering
-// behind a start of the old entry.
-// Scope: pure `SearXNGEnsurer` settings helpers plus repo-file drift checks
-// against `scripts/searxng-up.sh`; no containers are spawned, no home
-// directory is written, and no network is touched.
-// Architectural role: guards the shared migration invariant behind serve boot,
-// first search, and the manual hatch so all three converge on the same marker,
-// the same secret handling, and the same remove-before-run ordering.
 
 import Foundation
 @testable import RuneWeaverTools
@@ -56,10 +44,9 @@ struct SearchTemplateMigrationTests {
 
     @Test
     func `Fresh rendering stamps the current marker with the given secret`() {
-        // Every producer (first creation, stale migration, script fallback)
-        // must emit the same schema: the marker for future migration checks
-        // plus the caller-supplied secret so the mount never carries a
-        // placeholder key.
+        // Every producer (first creation, stale migration, script fallback) must emit the same
+        // schema: the marker for future migration checks plus the caller-supplied secret so the
+        // mount never carries a placeholder key.
         let rendered = SearXNGEnsurer.settingsYAML(secretKey: "fresh-secret-123")
         #expect(rendered.contains(SearXNGEnsurer.settingsTemplateVersionMarkerLine()))
         #expect(rendered.contains("secret_key: \"fresh-secret-123\""))
@@ -68,10 +55,9 @@ struct SearchTemplateMigrationTests {
 
     @Test
     func `Stale document migrates to the current marker with a fresh secret`() {
-        // The migration rebuilds from the current template rather than
-        // swapping the secret inside the stale text, so old sizing and schema
-        // cannot linger behind; the test pins the converge point by rendering
-        // a stale template with a new key and checking the stamp flips.
+        // The migration rebuilds from the current template rather than swapping the secret inside
+        // the stale text, so old sizing and schema cannot linger behind; the test pins the converge
+        // point by rendering a stale template with a new key and checking the stamp flips.
         let staleTemplate = "# old settings\nserver:\n  secret_key: \"old-key\"\n"
         let migrated = SearXNGEnsurer.renderedSettingsYAML(template: staleTemplate, secretKey: "brand-new-key")
         #expect(migrated.contains(SearXNGEnsurer.settingsTemplateVersionMarkerLine()))
@@ -82,10 +68,9 @@ struct SearchTemplateMigrationTests {
 
     @Test
     func `Secret rotation preserves the current marker`() {
-        // Placeholder rotation (old committed secret or shipped placeholder)
-        // reuses the same renderer as migration, so a rotated file must already
-        // read as fresh on the next ensure instead of bouncing into the
-        // recreate path a second time.
+        // Placeholder rotation (old committed secret or shipped placeholder) reuses the same
+        // renderer as migration, so a rotated file must already read as fresh on the next ensure
+        // instead of bouncing into the recreate path a second time.
         let currentFile = "\(SearXNGEnsurer.settingsTemplateVersionMarkerLine())\nserver:\n  secret_key: \"change-me-generate-per-install-secret\"\n"
         let rotated = SearXNGEnsurer.renderedSettingsYAML(template: currentFile, secretKey: "rotated-key-456")
         #expect(rotated.contains(SearXNGEnsurer.settingsTemplateVersionMarkerLine()))
@@ -112,10 +97,9 @@ struct SearchTemplateMigrationTests {
 
     @Test
     func `Recreate ordering keeps remove before the fresh run with current sizing`() {
-        // The stale branch regenerates first, then drops the entry with
-        // rm-first before the fresh run mounts the new document; pinning the
-        // verbs here keeps the engine on the same ordering the script uses so
-        // the run can never hit an already-exists conflict on its own entry.
+        // The stale branch regenerates first, then drops the entry with rm-first before the fresh
+        // run mounts the new document; pinning the verbs here keeps the engine on the same ordering
+        // the script uses so the run can never hit an already-exists conflict on its own entry.
         let name = SearXNGEnsurer.containerName
         #expect(SearXNGEnsurer.containerRemoveArguments() == ["rm", name])
         let runArgs = SearXNGEnsurer.containerRunArguments(settingsPath: "/tmp/settings.yml", hostPort: 8888)
@@ -130,10 +114,9 @@ struct SearchTemplateMigrationTests {
 
     @Test
     func `Escape-hatch script mirrors the marker version and rm-first recreate`() throws {
-        // The shell hatch must detect the same stale state and recreate in the
-        // same order; a drift in the version number, the marker spelling, or
-        // the remove-before-run sequence would leave script recoveries on the
-        // old document while the engine boots the new one.
+        // The shell hatch must detect the same stale state and recreate in the same order; a drift
+        // in the version number, the marker spelling, or the remove-before-run sequence would leave
+        // script recoveries on the old document while the engine boots the new one.
         let script = try Self.searxngUpScript()
         // Decode once so every assertion below reads the same text the shell
         // executes; a binary decode failure would hide the marker drift the

@@ -1,25 +1,4 @@
 // Rune Weaver CLI — Single-owner bearer-token lifecycle commands.
-//
-// Rune Weaver is a personal, single-owner harness: exactly one bearer token
-// guards the engine surface once it leaves loopback. This file owns the operator
-// surface for that credential — generate, rotate, and inspect — so the token can
-// be provisioned from the terminal without ever editing config.toml.
-//
-// Scope boundaries that keep the trust boundary intact:
-// - Generation and rotation delegate to `ServerAuth`, which owns the 256-bit
-//   CSPRNG and the atomic Keychain-plus-0600-file persistence. The CLI never
-//   reimplements token minting or storage.
-// - Status resolution consumes `ServerAuthTokenStore.resolve()`, the single
-//   source of truth for the env → Keychain → restricted-file precedence, the
-//   loose-permission check, and the credential-free source label. Only a SHA-256
-//   fingerprint prefix and a source label are ever printed; the secret itself is
-//   never rendered by `status`.
-// - `generate` and `rotate` run in a separate process from the engine, so they
-//   can only rewrite the stored credential; they cannot mutate the token a
-//   running `serve`/menu-bar engine cached at boot. Only the in-process dashboard
-//   Settings rotation revokes a live token. Command output states this, and the
-//   persistence note reports the source the store actually resolves rather than
-//   claiming the Keychain unconditionally.
 
 import ArgumentParser
 import Foundation
@@ -73,13 +52,8 @@ struct AuthTokenGenerateCommand: AsyncParsableCommand {
             cliPrintError(TerminalStyle.error("Could not read the current owner token: \(error.localizedDescription)"))
             throw ExitCode(1)
         }
-        // Generation routes through the actor's rotation path so the CSPRNG,
-        // the Keychain write, and the atomic 0600 file write stay single-sourced
-        // rather than forked in the CLI. An empty seed is honest here: this
-        // verifier is never served, it only mints and persists. Supplying the
-        // durable session store lets that rotation clear any stale session file,
-        // so device logins minted under the previous credential cannot outlive
-        // the token they were exchanged for.
+        // Generation routes through the actor's rotation path so the CSPRNG, the Keychain write,
+        // and the atomic 0600 file write stay single-sourced rather than forked in the CLI.
         let store = ServerAuthTokenStore(authConfig: authConfig)
         if existing != nil {
             // The refusal is decided against the authoritative store; the same
@@ -210,8 +184,6 @@ struct AuthTokenStatusCommand: AsyncParsableCommand {
 
 /// Loads and validates the `[auth]` section for a command.
 /// - Parameter path: Explicit `--config` value, if any.
-/// - Returns: The declared token sources.
-/// - Throws: ``ConfigError`` when the file is missing or invalid.
 private func loadAuthConfig(path: String?) throws -> AuthConfig {
     let loaded = try CLIConfigLoader.loadConfig(path: path)
     if loaded.isFallback {
@@ -227,10 +199,8 @@ private func expandedPath(_ path: String) -> String {
     (path as NSString).expandingTildeInPath
 }
 
-/// Prints a freshly minted token exactly once, followed by its fingerprint.
-/// - Parameters:
-///   - token: New token value.
-///   - action: Verb describing the mint (`Generated` or `Rotated`).
+/// Prints a freshly minted token exactly once, followed by its fingerprint. token:
+/// New token value.
 private func printMintedToken(_ token: String, action: String) {
     print("")
     print(TerminalStyle.success("\(action) owner token (shown once — store it now):"))
@@ -239,18 +209,8 @@ private func printMintedToken(_ token: String, action: String) {
     print(TerminalStyle.dim("  fingerprint: \(ServerAuth.fingerprint(token)) (SHA-256 prefix, non-secret)"))
 }
 
-/// Reports where the new token actually resolves, how to present it, and why a
-/// running engine only adopts it after a restart.
-///
-/// Persistence always attempts the Keychain and writes the file fallback only
-/// when one is configured, but a live environment override outranks both on the
-/// next boot and a failed file write can pass silently once the Keychain
-/// succeeded. Re-resolving through the store and comparing against the minted
-/// value lets the note name the source that will be read instead of
-/// unconditionally claiming the Keychain.
-/// - Parameters:
-///   - authConfig: Declared token sources used by the store.
-///   - token: Freshly minted token compared against what the store resolves.
+/// Reports where the new token actually resolves, how to present it, and why a running engine only
+/// adopts it after a restart.
 private func printPersistenceNote(_ authConfig: AuthConfig, token: String) async {
     do {
         let resolved = try await ServerAuthTokenStore(authConfig: authConfig).resolve()
@@ -294,11 +254,8 @@ private func printPersistenceNote(_ authConfig: AuthConfig, token: String) async
     print(TerminalStyle.dim("Present it as: Authorization: Bearer <token>"))
 }
 
-/// Asks the operator to confirm a destructive operation.
-/// - Parameters:
-///   - prompt: Question shown before the read.
-///   - assumeYes: Whether `--yes` pre-answered the question.
-/// - Returns: True only on an explicit yes/`y`.
+/// Asks the operator to confirm a destructive operation. prompt: Question shown
+/// before the read.
 private func confirm(_ prompt: String, assumeYes: Bool) async -> Bool {
     if assumeYes {
         return true

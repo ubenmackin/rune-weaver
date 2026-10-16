@@ -1,35 +1,17 @@
 // Rune Weaver Server — Approval decision contract and routes.
-//
-// Purpose: own the single decision path every transport shares — applying an
-// approval verdict, mapping egress-parked requests through the supervisor and
-// policy store, resuming parked turns, and broadcasting access-rule changes —
-// so REST and WebSocket triage resolve identically and neither can drift.
-// Scope: the decide-plus-map function, the approvals list and decision routes,
-// and the operator question response route; rule listing and administration
-// stay with the dedicated rules file, and grant storage stays with the gate.
-// Architectural role: keeps the Vapor adapters decoupled from the engine core
-// in one decision contract, so tier semantics live in exactly one function
-// instead of one copy per transport.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
-/// The client-facing subset of the decision-log surface vocabulary
-/// (ARCHITECTURE.md "Approvals — Decision Contract, Surfaces, Decision Log"): the chat inline banner, the dashboard quick-action
-/// card, and the Inbox card are the only surfaces a REST decide caller can
-/// name. `websocket` and `question` arrive solely through trusted internal
-/// paths — the WS triage handler and the question respond route — and never
-/// through this boundary, so they are deliberately absent here.
+/// The client-facing subset of the decision-log surface vocabulary (ARCHITECTURE.md "Approvals —
+/// Decision Contract, Surfaces, Decision Log"): the chat inline banner, the dashboard quick-action
+/// card, and the Inbox card are the only surfaces a REST decide caller can name.
 private let clientDecisionSurfaces: Set<String> = ["chat", "inbox", "dashboard"]
 
-/// Normalizes a client-supplied surface tag to the closed vocabulary before
-/// it reaches the decision log: the three client-facing surfaces pass
-/// through and anything else — hostile, drifted, over-long, or absent —
-/// records "unknown", so the durable `surface` column only ever carries a
-/// documented value without failing the decision it tags.
-/// - Parameter raw: The caller-supplied surface tag, if any.
-/// - Returns: The normalized tag for the audit row.
+/// Normalizes a client-supplied surface tag to the closed vocabulary: known surfaces pass
+/// through and anything else records "unknown", so the durable `surface` column only ever
+/// carries a documented value without failing the decision it tags.
 private func normalizedDecisionSurface(_ raw: String?) -> String {
     guard let raw, clientDecisionSurfaces.contains(raw) else { return "unknown" }
     return raw
@@ -47,12 +29,8 @@ enum ApprovalDecisionOutcome: Equatable {
     case sideEffectFailed(reason: String)
 }
 
-/// Transport-owned spawner for the narrated resume that follows a
-/// session-tagged decision, receiving the effective approval verdict.
-///
-/// The shared contract decides when a resume runs; the transport keeps owning
-/// how, so a WebSocket decision still tracks its resume under the connection
-/// lifetime while REST spawns a detached task.
+/// Transport-owned spawner for the narrated resume that follows a session-tagged decision,
+/// receiving the effective approval verdict.
 typealias ApprovalResumeSpawner = @Sendable (_ effectiveApproved: Bool) async -> Void
 
 /// Caller-supplied parameters for applying an approval decision.
@@ -81,24 +59,8 @@ struct ApprovalDecisionInput: Sendable {
     }
 }
 
-/// Applies one approval decision through the single decision contract the REST
-/// route and WebSocket triage share.
-///
-/// Egress tiers are gone from the wire: the parked request's host plus the
-/// requested duration carry the whole mapping, so both transports decide
-/// identically and neither can drift. An allow side effect that fails never
-/// approves a call the policy did not record — the request stays parked for a
-/// later decision — and a durable deny whose policy write failed never
-/// resolves, so the next identical call re-parks instead of silently
-/// auto-denying. The brake-resume side effect, the question guard, the
-/// durable-rule broadcast, and the session-tagged resume all live here so a
-/// transport fix cannot reopen a second decision path.
-/// - Parameters:
-///   - input: Parameters identifying and describing the decision.
-///   - pulse: Verified system-pulse actor receiving the watchdog record.
-///   - context: Live server context owning the queue and side effects.
-///   - spawnResume: Transport-owned spawner for the narrated resume.
-/// - Returns: The outcome each transport maps to its own response shape.
+/// Applies one approval decision through the single decision contract the REST route and WebSocket
+/// triage share.
 func applyApprovalDecision(
     input: ApprovalDecisionInput,
     pulse: SystemHealthSnapshot? = nil,
@@ -154,11 +116,9 @@ func applyApprovalDecision(
         displayTarget: pending.displayTarget,
         decidedAt: Date()
     ))
-    // The brake clears only on an explicit owner Resume: approving the brake
-    // card releases every parked turn with fresh counters, while denying it
-    // leaves the park exactly as the owner left it. Every transport reaches
-    // this through the same call, so the resume no longer depends on which
-    // surface the owner decided from.
+    // The brake clears only on an explicit owner Resume: approving the brake card releases every
+    // parked turn with fresh counters, while denying it leaves the park exactly as the owner left
+    // it.
     if effectiveApproved, pending.toolName == BehaviorWatchdog.brakeCardToolName {
         await context.watchdog.resume()
         if let pulse {
@@ -170,12 +130,8 @@ func applyApprovalDecision(
             }
         }
     }
-    // A durable decision stores a rule inside `decide`, so dashboards need a
-    // refresh signal; one-shot approvals store nothing. The one-shot tools
-    // resolve a single parked batch rather than gating a repeatable call, so a
-    // durable vote on them must not fire a refresh when nothing changed.
-    // A standing deny is a durable mint too: approved=false plus forever
-    // stores a deny rule inside `decide`, so it fires the same frame.
+    // A durable decision stores a rule inside `decide`, so dashboards need a refresh signal;
+    // one-shot approvals store nothing.
     let mintsDurableRule = input.duration.isDurable
         && (effectiveApproved || input.duration == .forever)
         && pending.toolName != "engine.continue"
@@ -194,21 +150,6 @@ func applyApprovalDecision(
 }
 
 /// Maps an egress-parked decision onto its supervisor and policy side effects.
-///
-/// The parked request carries the host it dialed, so the polarity plus tier
-/// carry the whole mapping: a one-shot allow spends a supervisor grant, a
-/// session allow trusts the domain for the rest of the conversation, a durable
-/// allow mints a domain-scoped rule, a one-shot deny refuses the call alone,
-/// and a durable deny blocks the domain in policy beside the rule it mints.
-/// Returns nil when a required side effect failed, so the caller fails closed
-/// instead of approving a call nothing recorded.
-/// - Parameters:
-///   - approved: Approval polarity the client sent.
-///   - duration: Requested trust tier.
-///   - host: Host the parked request dialed.
-///   - pending: Pending request owning the session scope.
-///   - context: Live server context owning the supervisor and policy store.
-/// - Returns: Effective approval verdict, or nil when a side effect failed.
 func egressApprovalVerdict(
     approved: Bool,
     duration: TrustDuration,
@@ -216,10 +157,8 @@ func egressApprovalVerdict(
     pending: PermissionRequest,
     context: ServerContext
 ) async -> Bool? {
-    // The host can be model-filled, so a star shape is an attacker-controlled
-    // pattern rather than a legitimate target. Deny tiers stay untouched:
-    // blocking a wildcard only tightens the posture, while allowing one does
-    // the opposite. Fail closed so the pattern is never approved.
+    // The host can be model-filled, so a star shape is an attacker-controlled pattern rather than a
+    // legitimate target.
     if approved, AllowedOriginPattern.classifyWildcard(host.lowercased()) != .none {
         return nil
     }
@@ -259,10 +198,8 @@ func egressApprovalVerdict(
     }
 }
 
-/// Registers approvals list plus decision routes.
-/// Durable access-rules routes live in the dedicated rules file alongside
-/// their change broadcast; both sets register on the same paths.
-/// - Parameter app: Application receiving the routes.
+/// Registers approvals list plus decision routes. Durable access-rules routes live in the dedicated
+/// rules file alongside their change broadcast; both sets register on the same paths.
 func registerApprovalRoutes(_ app: Application) {
     app.get(PathComponent.constant(ServerPaths.approvals)) { req async throws -> ApprovalsResponse in
         let pending = await req.application.runeWeaver.approvals.list()

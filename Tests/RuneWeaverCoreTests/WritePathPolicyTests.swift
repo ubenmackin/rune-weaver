@@ -1,14 +1,4 @@
 // Rune Weaver Tests — Write-path policy precedence and the [files] write_path_rules section.
-//
-// Exercises the single owner of write posture: every precedence tier beats
-// the ones below it (deny patterns beat rules, rules beat the global mode, the
-// resolved allow roots gate the forced mode so an out-of-root write asks), the
-// engine-owned deny list still refuses after an operator replaces the editable
-// one, defaults seed on an absent key while an explicit empty list stays
-// empty, the bounded TOML section round-trips and rejects malformed entries
-// naming the offending entry, and every classification runs on the canonical
-// view so a symlink or `..` spelling cannot escape the rule that covers the
-// real path.
 
 import Foundation
 @testable import RuneWeaverCore

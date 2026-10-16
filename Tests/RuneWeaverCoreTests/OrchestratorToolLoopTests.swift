@@ -1,9 +1,4 @@
 // Rune Weaver Core Tests — Shared tool-loop policy for degraded schemas and tool-round notes.
-//
-// Exercises the OrchestratorToolLoop seam directly: the degraded-schema denylist that both
-// the orchestrator and the CLI filter native calls through, and the assistant-note builder
-// that decides what one tool round persists. Keeping both under focused tests pins the
-// fail-closed behavior and the one-line-per-call-ID persistence invariant.
 
 import Foundation
 @testable import RuneWeaverCore

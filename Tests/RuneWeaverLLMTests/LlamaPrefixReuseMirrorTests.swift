@@ -1,6 +1,4 @@
 // Rune Weaver LLM Tests — Mirror test pinning prefix-reuse knobs across file and options shapes.
-// Keeps the TOML snake shape and the JSON camel shape in sync so dashboard round-trips never strip
-// file-configured slot and cache values and provider construction never drifts from the file default.
 
 import Foundation
 @testable import RuneWeaverCore

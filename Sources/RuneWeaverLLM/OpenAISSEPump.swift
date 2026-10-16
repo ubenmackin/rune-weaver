@@ -46,10 +46,9 @@ enum OpenAISSEPump {
                 totalTokens: total,
                 cachedTokens: cached
             )
-            // Surface prefix reuse where the server reports it: a growing cached
-            // count beside a stable prompt count proves the leading bytes (system
-            // prompt plus tools plus early history) hit the KV cache instead of
-            // re-evaluating. Missing fields stay silent to preserve current behavior.
+            // Surface prefix reuse where the server reports it: a growing cached count beside a
+            // stable prompt count proves the leading bytes (system prompt plus tools plus early
+            // history) hit the KV cache instead of re-evaluating.
             if let cached {
                 RuneWeaverLog.server.info("Chat usage: prompt \(prompt) tokens (\(cached) cached)")
             }

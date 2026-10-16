@@ -1,22 +1,4 @@
 // Rune Weaver Tools — Pinned-address dial transport for API requests.
-//
-// Purpose: dial exactly the numeric address the SSRF gate proved for a hop,
-// while preserving the original host identity (HTTP `Host` header and TLS
-// server name) so a DNS name that rebinds between vetting and connect cannot
-// steer the request to a loopback, private, link-local, or metadata
-// destination the gate refused.
-//
-// Scope: one-shot HTTP/1.1 request serialization, incremental response
-// framing, and a Network.framework exchange over one pinned address.
-// Redirect following, policy gates, credential injection, and output caps
-// stay with the tool and the egress supervisor.
-//
-// Architectural role: the dial-time half of the SSRF contract. The gate pins
-// addresses (`ApiSSRFGuard.vetAsync`), the supervisor carries the pin to the
-// tool, and this transport dials only the pinned numbers — never the hostname
-// again. URLSession cannot serve this role: dialing a hostname re-resolves at
-// connect time, and dialing an IP literal cannot present the original TLS
-// server name.
 
 import Foundation
 import Network
@@ -24,10 +6,8 @@ import os
 import RuneWeaverCore
 import Security
 
-/// Typed failures from the pinned dial path.
-///
-/// Every case fails closed: when the exchange cannot complete over a vetted
-/// address, no request bytes reach an unvetted peer.
+/// Typed failures from the pinned dial path. Every case fails closed: when the exchange cannot
+/// complete over a vetted address, no request bytes reach an unvetted peer.
 public enum PinnedDialError: Error, Sendable, Equatable {
     /// The live transport was asked to dial without a vetting pin.
     case unpinnedDialRefused
@@ -69,12 +49,6 @@ extension PinnedDialError: LocalizedError {
 }
 
 /// Builds the HTTP/1.1 wire bytes for one pinned hop.
-///
-/// Intent: the request line, `Host`, and framing headers come only from the
-/// destination URL plus the pinned host identity, so a caller cannot smuggle
-/// a second authority or a stale framing header onto the wire.
-/// Invariant: a header name or value carrying CR or LF, or a target carrying
-/// whitespace, fails closed instead of reaching the peer.
 enum PinnedHTTPRequestSerializer: Sendable {
     /// Header names the dialer owns; caller-supplied copies are dropped so the
     /// pinned authority and body framing cannot be overridden.
@@ -89,13 +63,8 @@ enum PinnedHTTPRequestSerializer: Sendable {
         "accept-encoding"
     ]
 
-    /// Serializes one request for the pinned connection.
-    /// - Parameters:
-    ///   - request: Request shaped by the tool.
-    ///   - pin: Vetted address set plus the original host identity.
-    /// - Returns: Complete HTTP/1.1 request bytes.
-    /// - Throws: `PinnedDialError.malformedRequest` when a field cannot be
-    ///   sent safely.
+    /// Serializes one request for the pinned connection. request: Request shaped by
+    /// the tool.
     static func serialize(_ request: URLRequest, pin: SSRFDialPin) throws -> Data {
         let method = request.httpMethod?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() ?? "GET"
         guard !method.isEmpty, method.allSatisfy(\.isLetter) else {
@@ -171,18 +140,8 @@ enum PinnedHTTPRequestSerializer: Sendable {
 }
 
 /// Incremental HTTP/1.1 response framer for one pinned exchange.
-///
-/// Intent: the pinned dialer cannot use URLSession, so response framing is
-/// explicit and bounded — fixed length, chunked, or close-delimited bodies up
-/// to the output cap, with interim 1xx blocks skipped and malformed framing
-/// failing closed.
-/// Invariant: every `feed` either makes progress, asks for more bytes, or
-/// settles the exchange; a settled parser never resumes reading.
 struct PinnedHTTPResponseParser: Sendable {
     /// Outcome of feeding one received chunk.
-    ///
-    /// Deliberately not `Sendable`: the framed response class crosses no
-    /// concurrency domain, it is consumed inline by the waiting task.
     enum Outcome {
         /// More bytes are required to frame the response.
         case needMore
@@ -210,9 +169,6 @@ struct PinnedHTTPResponseParser: Sendable {
     }
 
     /// Result of one framing step inside `feed`.
-    ///
-    /// Keeps each byte-consuming rule small: a helper either advances the
-    /// framing state or settles the exchange.
     private enum FramingStep {
         /// The parser advanced and should frame the next state.
         case advance
@@ -247,24 +203,15 @@ struct PinnedHTTPResponseParser: Sendable {
     /// Ordered header fields of the final response.
     private var headerFields: [(name: String, value: String)] = []
 
-    /// Creates a framer for one exchange.
-    /// - Parameters:
-    ///   - responseURL: Original request URL reported on the response.
-    ///   - maxBodyBytes: Response body cap.
+    /// Creates a framer for one exchange. responseURL: Original request URL
+    /// reported on the response.
     init(responseURL: URL, maxBodyBytes: Int) {
         self.responseURL = responseURL
         self.maxBodyBytes = maxBodyBytes
     }
 
-    /// Feeds received bytes and advances framing.
-    ///
-    /// The state machine lives in the `frame*`/`consume*` helpers so each
-    /// framing rule stays independently reviewable; every helper reports
-    /// whether the parser advanced or the exchange settled.
-    /// - Parameters:
-    ///   - chunk: Bytes received from the pinned connection.
-    ///   - closed: Whether the peer closed after this chunk.
-    /// - Returns: Framing outcome.
+    /// Feeds received bytes and advances framing. chunk: Bytes received from the
+    /// pinned connection.
     mutating func feed(_ chunk: Data, closed: Bool) -> Outcome {
         if !chunk.isEmpty {
             buffer.append(chunk)
@@ -298,12 +245,6 @@ struct PinnedHTTPResponseParser: Sendable {
     }
 
     /// Frames one header block, discarding interim 1xx responses.
-    ///
-    /// An interim block leaves the parser in `.headers` so the final response
-    /// that follows is framed next; status, version, and fields are latched
-    /// only for a final response.
-    /// - Parameter closed: Whether the peer closed after the fed bytes.
-    /// - Returns: `.advance` when framing should continue, else the outcome.
     private mutating func frameHeaderBlock(closed: Bool) -> FramingStep {
         guard let terminator = buffer.range(of: Self.headerTerminator) else {
             if buffer.count > Self.maxHeaderBytes {
@@ -332,11 +273,6 @@ struct PinnedHTTPResponseParser: Sendable {
     }
 
     /// Consumes one trailer line; an empty line ends the chunked framing.
-    ///
-    /// The trailer section holds field lines and ends at the first empty line;
-    /// a single CRLF is the terminator, not CRLFCRLF.
-    /// - Parameter closed: Whether the peer closed after the fed bytes.
-    /// - Returns: `.advance` when framing should continue, else the outcome.
     private mutating func frameTrailerLine(closed: Bool) -> FramingStep {
         guard let lineEnd = buffer.range(of: Self.crlf) else {
             if buffer.count > Self.maxHeaderBytes {
@@ -352,11 +288,8 @@ struct PinnedHTTPResponseParser: Sendable {
         return .advance
     }
 
-    /// Consumes bytes for a fixed-length body, settling once capped.
-    /// - Parameters:
-    ///   - remaining: Body bytes still expected.
-    ///   - closed: Whether the peer closed after the fed bytes.
-    /// - Returns: `.advance` when framing should continue, else the outcome.
+    /// Consumes bytes for a fixed-length body, settling once capped. remaining:
+    /// Body bytes still expected.
     private mutating func consumeFixedBody(remaining: Int, closed: Bool) -> FramingStep {
         guard !buffer.isEmpty else {
             return .settle(closed ? .failed(.truncatedResponse) : .needMore)
@@ -401,10 +334,7 @@ struct PinnedHTTPResponseParser: Sendable {
     }
 
     /// Consumes bytes for the current chunk, moving to its CRLF terminator.
-    /// - Parameters:
-    ///   - remaining: Chunk bytes still expected.
-    ///   - closed: Whether the peer closed after the fed bytes.
-    /// - Returns: `.advance` when framing should continue, else the outcome.
+    /// remaining: Chunk bytes still expected.
     private mutating func consumeChunkBody(remaining: Int, closed: Bool) -> FramingStep {
         guard !buffer.isEmpty else {
             return .settle(closed ? .failed(.truncatedResponse) : .needMore)
@@ -507,10 +437,9 @@ struct PinnedHTTPResponseParser: Sendable {
         return .untilClose
     }
 
-    /// Parses one header block into status, version, and ordered fields.
-    ///
-    /// A block that is not valid UTF-8 cannot be framed honestly, so it returns
-    /// nil and the caller fails closed instead of decoding lossily.
+    /// Parses one header block into status, version, and ordered fields. A block that is not valid
+    /// UTF-8 cannot be framed honestly, so it returns nil and the caller fails closed instead of
+    /// decoding lossily.
     private static func parseHeaderBlock(_ block: Data) -> ParsedHeaderBlock? {
         guard let blockText = String(bytes: block, encoding: .utf8) else { return nil }
         let lines = blockText.components(separatedBy: "\r\n")
@@ -532,10 +461,8 @@ struct PinnedHTTPResponseParser: Sendable {
     }
 }
 
-/// Marks whether request bytes may already have reached the peer, so a retry
-/// against the next pinned address can never resend a non-idempotent request.
-/// Stores the typed Sendable failure instead of an existential so the wrapper
-/// itself stays Sendable across the concurrent attempt boundary.
+/// Marks whether request bytes may already have reached the peer, so a retry against the next
+/// pinned address can never resend a non-idempotent request.
 private struct PinnedDialFailure: Error, Sendable {
     /// Typed failure raised by the attempt.
     let failure: PinnedDialError
@@ -544,11 +471,6 @@ private struct PinnedDialFailure: Error, Sendable {
 }
 
 /// Carries one `NWConnection` across an attempt's `@Sendable` callbacks.
-///
-/// Network.framework connections natively conform to `Sendable` and deliver
-/// every callback on the queue passed to `start(queue:)`, so sharing one
-/// immutable reference among an attempt's callbacks is sound and statically
-/// checked under Swift 6 language mode.
 private final class PinnedConnectionBox: Sendable {
     /// The wrapped connection for one attempt.
     let connection: NWConnection
@@ -563,27 +485,11 @@ private final class PinnedConnectionBox: Sendable {
 /// One receive result: bytes delivered plus whether the peer closed after them.
 private typealias PinnedReceiveResult = (data: Data, closed: Bool)
 
-/// Performs one capped, no-follow HTTP/1.1 exchange over pinned addresses.
-///
-/// Intent: `api.request` never hands a hostname to a system resolver at dial
-/// time. Each address in the pin was proven by the SSRF gate, and the dialer
-/// walks them in resolver order within one request budget so dual-stack
-/// destinations keep their fallback without opening a rebinding window.
-/// Invariant: the next pinned address is tried only when the previous attempt
-/// failed before any request byte could have been sent, so a non-idempotent
-/// request is never resent.
-/// Scope: direct origin-form HTTP/1.1 on a fresh connection — no proxy
-/// negotiation, no automatic redirects (the tool owns the chain), no cookie
-/// store, and identity transfer encoding (the framer has no decompressor).
+/// Performs one capped, no-follow HTTP/1.1 exchange over pinned addresses. Intent: `api.request`
+/// never hands a hostname to a system resolver at dial time.
 enum PinnedHTTPDialer: Sendable {
-    /// Dials the pin and returns the capped response.
-    /// - Parameters:
-    ///   - request: Request shaped by the tool.
-    ///   - pin: Vetted addresses plus the original host identity.
-    ///   - maxBytes: Response body cap.
-    ///   - timeoutSeconds: Budget for the whole pinned exchange.
-    /// - Returns: Body bytes plus the framed URL response.
-    /// - Throws: `PinnedDialError` when no pinned address completes safely.
+    /// Dials the pin and returns the capped response. request: Request shaped by
+    /// the tool.
     static func perform(
         request: URLRequest,
         pin: SSRFDialPin,
@@ -614,10 +520,8 @@ enum PinnedHTTPDialer: Sendable {
                 throw failure.failure
             }
         }
-        // Every vetted address either failed before the request was sent or the
-        // budget ran out, so no request bytes reached an unvetted peer. A
-        // single-address pin reports its typed failure directly; a multi-address
-        // pin adds the aggregate context.
+        // Every vetted address either failed before the request was sent or the budget ran out, so
+        // no request bytes reached an unvetted peer.
         if pin.addresses.count == 1 {
             throw lastFailure
         }
@@ -683,12 +587,6 @@ enum PinnedHTTPDialer: Sendable {
     }
 
     /// Builds TCP/TLS parameters that pin the peer identity to the original host.
-    ///
-    /// For https the TLS layer is told the original host as the server name, so
-    /// SNI-based virtual hosting keeps working even though the dial target is a
-    /// numeric address, and an explicit verify block evaluates the peer chain
-    /// against that same host — a certificate for any other name is refused
-    /// before the handshake completes, which is before any request bytes.
     private static func makeParameters(pin: SSRFDialPin, queue: DispatchQueue, timeoutSeconds: Double) -> NWParameters {
         let tcp = NWProtocolTCP.Options()
         tcp.connectionTimeout = max(Int(timeoutSeconds.rounded(.up)), 1)

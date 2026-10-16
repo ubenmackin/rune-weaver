@@ -1,8 +1,4 @@
 // Rune Weaver Core — Goal plan lifecycle reporting seam.
-//
-// Defines the reporting protocol for goal plan creation and decomposition.
-// The server adapts this to `RunLogStore` and `WSHub` so planning turns appear
-// in the live execution stream, Working Right Now, and audit logs.
 
 import Foundation
 

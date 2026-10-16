@@ -1,9 +1,4 @@
 // Rune Weaver Core Tests — Message exitCode persistence and migration tests.
-//
-// Covers:
-// 1. Message exitCode persists and reloads correctly via ConversationManager.
-// 2. Legacy databases lacking `exit_code` column migrate automatically on open.
-// 3. Tool results hydrated from persisted messages preserve exitCode.
 
 import Foundation
 @testable import RuneWeaverCore

@@ -1,13 +1,4 @@
 // Rune Weaver Tools — Pinned file-read pipeline for `files.read`.
-//
-// Holds the read argument and envelope documents plus the O_NOFOLLOW pinned-read
-// helpers (argument decoding, descriptor-pinned capped reads, line windowing).
-// Reads pin the inode through a no-follow descriptor and re-validate the live
-// path so a symlink swapped between the policy check and the read cannot
-// redirect bytes, with the 1 MB and UTF-8 gates keeping envelopes bounded and
-// text-only. Separated from the `files.read`/`grep`/`glob` tool definitions so
-// the tool file stays within the file-length budget while the read path keeps
-// one shared policy-checked implementation.
 
 import Foundation
 import RuneWeaverCore
@@ -132,10 +123,8 @@ public enum FilesToolEncoding {
         try encode(envelope)
     }
 
-    /// Single shared encoder keeping every file tool document on the same key
-    /// order and formatting so read, deny, grep, and glob outputs cannot drift.
-    /// Invariant: sorted keys plus pretty printing is the only supported shape;
-    /// per-envelope wrappers delegate here instead of configuring their own encoder.
+    /// Single shared encoder keeping every file tool document on the same key order and formatting
+    /// so read, deny, grep, and glob outputs cannot drift.
     private static func encode(_ value: some Encodable) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
@@ -321,10 +310,8 @@ enum FilesReadHelpers: Sendable {
         }
     }
 
-    /// Reads at most the 1 MB ceiling from a pinned descriptor, reporting whether bytes were left unread.
-    /// The caller opens via the no-follow helper and seeks to the start first,
-    /// so this read observes the validated inode rather than a swapped path;
-    /// the one-byte probe learns truncation without materialising the tail.
+    /// Reads at most the 1 MB ceiling from a pinned descriptor, reporting whether bytes were left
+    /// unread.
     static func readUpToCap(from handle: FileHandle) throws -> (prefix: Data, truncated: Bool) {
         var prefix = Data()
         prefix.reserveCapacity(min(FilesReadTool.maxFileBytes, 64 * 1024))

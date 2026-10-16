@@ -1,13 +1,4 @@
 // Rune Weaver Core Tests — TemporalFilter parsing-owner tests.
-//
-// Purpose: pin the shared `since` / `until` contract every search tool
-// delegates to, so day-boundary drift cannot reappear per tool.
-// Scope: date-only inclusivity at local midnight, date-only `until`
-// exclusivity, offset-datetime exactness, blank-as-omitted, fail-closed field
-// naming, inverted-range rejection, IMAP formatting (including `BEFORE`
-// rounding for non-midnight `until`), Mac-epoch scales, and timestamp helpers.
-// Architectural role: guards the single choke point for temporal bounds; later
-// tool tasks consume `TemporalFilter.parse` and `imapDateString` directly.
 
 import Foundation
 @testable import RuneWeaverCore

@@ -1,30 +1,18 @@
 // Rune Weaver Tools — Embedded Python IMAP subprocess script source.
-//
-// Purpose: carries the one-shot python3 imaplib program backing single-turn search, fetch,
-// attachment, list, status, move, and append ops.
-// Scope: one JSON document over stdin with one JSON envelope on stdout; reads use BODY.PEEK
-// with quoted selects.
-// Architectural role: one-shot wire-protocol owner; composes the shared wire-parsing prelude
-// and the single-sourced search bound owned by EmailIMAPBridgeScript plus EmailIMAPLimits.
 
 import Foundation
 
-/// Single source for the bounded email search window.
-///
-/// The embedded Python helper clamps through this bound so a future `EmailSearchArgs.maxLimit`
-/// change propagates to the one-shot clamp without editing scattered literals.
+/// Single source for the bounded email search window. The embedded Python helper clamps through
+/// this bound so a future `EmailSearchArgs.maxLimit` change propagates to the one-shot clamp without
+/// editing scattered literals.
 enum EmailIMAPLimits {
     /// Upper bound for `email.search` limit shared by Swift validation and the one-shot helper.
     static let maxSearchLimit = EmailSearchArgs.maxLimit
 }
 
-/// Shared Python wire-parsing prelude for the one-shot IMAP helper.
-///
-/// The one-shot program decodes the shared wire shapes, so the header, body,
-/// attachment, snippet, and quoter helpers live here once. The spelling uses `+`
-/// concatenation instead of `append` so the one-shot program keeps its read-only shape
-/// without introducing extra operation names. Address ordering also lives here once so
-/// the helper dials IPv4 first on dual-stack hosts.
+/// Shared Python wire-parsing prelude for the one-shot IMAP helper. The spelling uses `+`
+/// concatenation instead of `append` so the one-shot program keeps its read-only shape without
+/// introducing extra operation names.
 enum EmailIMAPSharedPrelude {
     /// Shared Python source prepended ahead of each helper-specific body.
     static let text = #"""
@@ -164,9 +152,6 @@ enum EmailIMAPBridgeScript {
 }
 
 /// First half of the embedded `python3 imaplib` helper (imports through connect).
-///
-/// Composes the shared wire-parsing prelude after the imports so header, body,
-/// attachment, snippet, and quoter parsing stays single-sourced in the one-shot helper.
 private enum EmailIMAPBridgeScriptHead {
     /// First half of the Python source.
     static let text = importsText + "\n" + EmailIMAPSharedPrelude.text + "\n" + remainderText

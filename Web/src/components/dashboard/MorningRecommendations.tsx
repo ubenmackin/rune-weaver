@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — Morning Recommendations (Proactive Ideas Radar).
-//
-// Surfaces the agent's proactive initiatives (proposed ideas) directly on
-// the dashboard. Rather than waiting passively for instructions, RuneWeaver
-// uses its Ideas engine to spot codebase drift, test failures, or workflow
-// optimizations, allowing the operator to accept or dismiss with one click.
 
 import { useCallback, useEffect, useState } from "react";
 import {

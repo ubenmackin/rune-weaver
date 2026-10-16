@@ -57,11 +57,6 @@ public struct LlamaCppProviderOptions: Sendable, Codable, Equatable {
     public var cachePrompt: Bool?
 
     /// Creates llama.cpp options with local-first defaults.
-    /// The sticky slot and cache hint stay unset by default so servers with a small
-    /// `--parallel` never reject an out-of-range id and stored payloads keep an
-    /// omitted key distinct from an explicit hint. Stored defaults match the TOML
-    /// shape through `LlamaPrefixReuse`; the effective wire hint resolves separately
-    /// at provider construction so absent keys keep the always-on prefix hint.
     public init(
         serverURL: String = LlamaCppProvider.defaultServerURL,
         model: String = LlamaCppProvider.defaultModel,
@@ -78,12 +73,9 @@ public struct LlamaCppProviderOptions: Sendable, Codable, Equatable {
         self.cachePrompt = cachePrompt
     }
 
-    /// Builds the provider, resolving an unset cache hint to the always-on wire
-    /// value so stored payloads stay aligned with the TOML shape while the wire
-    /// keeps prefix reuse for payloads written before the knob existed.
-    /// Provider-level construction stays session-agnostic; per-turn slot pinning
-    /// takes the chat identifier at request time on `LlamaCppProvider`.
-    /// - Returns: Configured llama.cpp provider.
+    /// Builds the provider, resolving an unset cache hint to the always-on wire value so stored
+    /// payloads stay aligned with the TOML shape while the wire keeps prefix reuse for payloads
+    /// written before the knob existed.
     public func makeProvider() -> LlamaCppProvider {
         LlamaCppProvider(
             serverURL: serverURL,
@@ -95,10 +87,7 @@ public struct LlamaCppProviderOptions: Sendable, Codable, Equatable {
         )
     }
 
-    /// Camel wire keys match the JSON options transport. The TOML file shape keeps snake keys for
-    /// the same knobs; stored defaults for both reference `LlamaPrefixReuse` plus the mirror test
-    /// so the two shapes share one file-level default, with the effective wire hint resolved
-    /// separately at provider construction.
+    /// Camel wire keys match the JSON options transport.
     private enum CodingKeys: String, CodingKey {
         case serverURL
         case model
@@ -108,12 +97,8 @@ public struct LlamaCppProviderOptions: Sendable, Codable, Equatable {
         case cachePrompt
     }
 
-    /// Decodes options, leaving absent hints unset so stored payloads keep an
-    /// omitted key distinct from an explicit hint.
-    /// Both shapes share the same unset default; the effective wire hint resolves
-    /// through `LlamaPrefixReuse.resolvedCachePrompt` at provider construction so
-    /// payloads written before the knobs existed keep the always-on prefix hint
-    /// on the wire without baking it into storage.
+    /// Decodes options, leaving absent hints unset so stored payloads keep an omitted key distinct
+    /// from an explicit hint.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.serverURL = try container.decodeIfPresent(String.self, forKey: .serverURL) ?? LlamaCppProvider.defaultServerURL
@@ -236,13 +221,9 @@ public enum LLMProviderFactory: Sendable {
                 supportsVision: config.supportsVision ?? false
             )
         case "llamacpp", "llama-cpp", "llama_cpp", "local":
-            // An absent pool keeps server auto-assignment so default installs
-            // never send an out-of-range `id_slot` to small `--parallel`
-            // servers; operators opt in via `slot_count` matching the server's
-            // pool. An absent cache hint resolves to the always-on prefix hint at the
-            // wire so files written before the knob keep current behavior. Both the
-            // TOML entry and the JSON options shape store the same unset default and
-            // resolve through `LlamaPrefixReuse` so the two shapes stay in sync.
+            // An absent pool keeps server auto-assignment so default installs never send an
+            // out-of-range `id_slot` to small `--parallel` servers; operators opt in via
+            // `slot_count` matching the server's pool.
             return LlamaCppProvider(
                 serverURL: config.serverURL ?? LlamaCppProvider.defaultServerURL,
                 model: config.model ?? LlamaCppProvider.defaultModel,

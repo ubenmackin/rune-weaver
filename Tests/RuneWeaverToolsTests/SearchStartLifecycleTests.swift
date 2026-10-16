@@ -1,13 +1,4 @@
 // Rune Weaver Tools Tests — Explicit pull, wedged fallback, banners, stages, and joiners.
-//
-// Purpose: pins the pull-before-run split, per-step budgets, wedged-container
-// fallback, retry-aware banners, user-visible stages, and single-flight joiner
-// visibility so first-run pulls stay observable and failures stay one-cause.
-// Scope: pure `SearXNGEnsurer` helpers plus actor idle snapshots; no processes
-// are spawned and no network is touched.
-// Architectural role: guards the runtime, daemon, start, pull, run, watch
-// cascade contract shared by the engine, the CLI watcher, the dashboard watch,
-// and the escape-hatch script.
 
 import Foundation
 @testable import RuneWeaverCore

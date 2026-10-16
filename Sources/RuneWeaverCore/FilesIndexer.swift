@@ -1,36 +1,4 @@
 // Rune Weaver Core — Local files indexer feeding the document index.
-//
-// Walks the configured roots once per run, prunes excluded trees (media
-// libraries, VCS and dependency output, caches, and the app's own state), and
-// refuses symlinked entries so a link loop or a link out of policy can never be
-// traversed. Evicted iCloud files honor `IndexConfig.iCloudEvicted`: skipped by
-// default and downloaded only under the `download` policy.
-// A stored size-plus-mtime fingerprint skips unchanged files before any bytes
-// are read; the remaining candidates are hashed, skipped when `DocIndexStore`
-// reports the stored body is current, then extracted and written as one
-// document plus its chunks, with vectors attached only while the document stays
-// inside the vector policy.
-//
-// The indexer owns no path policy of its own beyond the walk shape: deny/allow
-// decisions arrive through the `FilesIndexAccessGuard` seam (the shared
-// `[files]` guard is adapted to it in the tools layer), and the embeddings
-// backend is injected so a keyword-only run and a vector run share one code
-// path. A run is cancellable between files and each file commits its document
-// and chunks before the next begins, so a cancelled run resumes from the first
-// unfinished file instead of replaying the whole tree. `nightly_budget` bounds
-// newly written documents per run. File contents are never logged and never
-// leave the machine through anything but the configured embeddings backend.
-//
-// Higher effort presets fan per-file bodies out over a bounded task group of
-// at most the resolved worker count: discovery stays sequential so pruning
-// and skip totals match the single-worker walk, while reads, extraction,
-// embedding, and store commits overlap with one pooled embeddings backend per
-// worker at utility quality of service. The document store remains an actor
-// so concurrent commits serialize naturally, the nightly budget lives in an
-// actor-isolated counter so parallel finishers cannot overshoot it, and
-// per-file commits still preserve cancel and resume. Gains are sublinear by
-// design because the underlying Accelerate engine is already internally
-// threaded; extra workers mainly overlap I/O, extraction, and writes.
 
 import CryptoKit
 import Foundation
@@ -38,25 +6,8 @@ import Foundation
 // MARK: - Indexer
 
 /// Actor that walks configured roots and maintains the local files index.
-///
-/// One actor owns a run so cancellation and counters stay serialized. Every
-/// dependency that touches the outside world — the document store, the text
-/// extractor, the path policy, and the embeddings backend — is injected, so the
-/// walker is exercised against fixtures without a real home directory.
 public actor FilesIndexer {
     /// Directory and file names the files walker always skips, before `IndexConfig.exclude`.
-    ///
-    /// Media libraries are excluded because the index is for documents, not
-    /// media; VCS, dependency, and cache trees are excluded because their
-    /// contents are machine output; and `.runeweaver` is excluded so the index
-    /// never indexes its own database or logs. Agent scratch stays excluded
-    /// through a scoped `.runeweaver/workspace` path-prefix check in
-    /// `isExcluded` (plus `walkDisposition`), not through a bare `workspace`
-    /// entry here, so user trees like `~/projects/workspace/` and files named
-    /// `workspace` stay indexable while scratch never enters recall.
-    /// Named distinctly from
-    /// `IndexConfig.defaultExcludePatterns` (the editable exclude-editor seed)
-    /// so the unconditional prune list cannot be confused with user configuration.
     public static let alwaysSkippedPatterns = [
         "Music",
         "Pictures",
@@ -76,10 +27,6 @@ public actor FilesIndexer {
     static let maxCurrentLength = 240
 
     /// Modification-time tolerance for the pre-read fingerprint fast path.
-    ///
-    /// Stored and live mtimes within one second count as a match so filesystem
-    /// rounding and double round-tripping never force a re-read of an
-    /// otherwise unchanged file.
     static let fingerprintMtimeTolerance: TimeInterval = 1.0
 
     /// Document index the run writes into.
@@ -125,24 +72,7 @@ public actor FilesIndexer {
     /// Instant of the last work frame, for the shared report cadence.
     var lastReportInstant: ContinuousClock.Instant?
 
-    /// Creates a files indexer.
-    /// - Parameters:
-    ///   - store: Document index to write into.
-    ///   - extractor: Text extractor for candidate files.
-    ///   - embedder: Embeddings backend, or nil for keyword-only indexing.
-    ///   - embeddingsPool: Pooled backends for parallel workers, or nil to share `embedder`.
-    ///   - workerCountOverride: Files in flight when set; nil resolves from `config`.
-    ///   - thermalStateProvider: Thermal state source; nil observes the live system state.
-    ///   - lowPowerModeProvider: Low Power Mode source; nil observes the live system state.
-    ///   - accessGuard: Path policy consulted before opening a candidate.
-    ///   - vectorPolicy: Which extracted documents are vectorized.
-    ///   - config: Walk roots, excludes, size cap, and budget.
-    ///   - homeDirectoryURL: Home boundary override, or nil for the real home.
-    ///   - evictedCheck: Override resolving evicted iCloud files, or nil for the live check.
-    ///   - downloadStarter: Download trigger for the `download` policy, or nil for `FileManager`.
-    ///   - fileReader: Override reading file bytes, or nil for memory-mapped reads.
-    ///   - nowProvider: Monotonic instant source.
-    ///   - progress: Advisory progress sink; defaults to a no-op.
+    /// Creates a files indexer. store: Document index to write into.
     public init(
         store: DocIndexStore,
         extractor: any DocumentTextExtracting = DocumentTextExtractor(),
@@ -180,24 +110,14 @@ public actor FilesIndexer {
         self.excludePatterns = Self.deduplicated(Self.alwaysSkippedPatterns + config.exclude)
     }
 
-    /// Requests cancellation of the run in flight.
-    ///
-    /// Cancellation is cooperative and observed between files, so a file already
-    /// being written finishes its document and chunks before the run stops;
-    /// nothing is left half-written for the next run to misread as current.
-    /// Parallel workers observe the same request through a lock-guarded mirror
-    /// and stop launching new files within one batch.
+    /// Requests cancellation of the run in flight. Parallel workers observe the same request
+    /// through a lock-guarded mirror and stop launching new files within one batch.
     public func cancel() {
         isCancelled = true
         cancelBox.set()
     }
 
     /// Runs one pass over every configured root.
-    ///
-    /// A single worker keeps the historical sequential walk so a light install
-    /// behaves exactly as before; higher presets fan per-file bodies out over
-    /// a bounded task group of at most the resolved worker count.
-    /// - Returns: Counts describing the run.
     public func run() async -> FilesIndexRunReport {
         guard config.enabled, config.files else {
             return FilesIndexRunReport(skippedReason: "File indexing is disabled in [index].")
@@ -254,15 +174,6 @@ public actor FilesIndexer {
     }
 
     /// Runs one sequential pass over every configured root.
-    ///
-    /// The run never throws: an unreadable file or a store failure is counted
-    /// as an error and the walk continues, because a background index should
-    /// make progress on the rest of the tree rather than abort on one bad entry.
-    /// Cancellation stops the walk between files and is reported on the result.
-    /// Thermal `.critical` and Low Power Mode halt new work through the same
-    /// `currentWorkerLimit` gate as the parallel path so a `light` run blocks
-    /// the retire reconcile instead of deleting against a partial view.
-    /// - Returns: Counts describing the run.
     func runSequential() async -> FilesIndexRunReport {
         isCancelled = false
         cancelBox.reset()
@@ -364,13 +275,6 @@ extension FilesIndexer {
     }
 
     /// Resolves how many files may be in flight right now.
-    ///
-    /// `.serious` thermal pressure halves the workers while `.critical` halts
-    /// new work (zero) so in-flight files drain; Low Power Mode halts new work
-    /// only when `pause_on_battery` opted in. Thermal gates apply only when
-    /// `thermal_backoff` is on.
-    /// - Parameter base: Files in flight absent any pressure.
-    /// - Returns: Files that may be in flight now, or zero to halt new work.
     func currentWorkerLimit(base: Int) -> Int {
         if config.pauseOnBattery, lowPowerModeProvider() {
             return 0
@@ -389,22 +293,11 @@ extension FilesIndexer {
     }
 
     /// Reports whether the sequential walk must halt for thermal or battery pressure.
-    ///
-    /// Mirrors the parallel gate so the single-worker (`light`) walk honors the
-    /// same `thermalBackoff`/`pauseOnBattery` contract: `.critical` or Low Power
-    /// Mode halts new work, the walk is marked incomplete, and the reconcile
-    /// stays skipped. `.serious` still permits one worker, matching the
-    /// parallel halving for a base of one.
-    /// - Returns: True when no new file should launch.
     func isSequentialThermalHaltRequested() -> Bool {
         currentWorkerLimit(base: max(1, resolvedWorkerCount())) <= 0
     }
 
     /// Records a sequential thermal/battery halt with the parallel copy.
-    ///
-    /// Marks the walk incomplete so the end-of-run reconcile stays skipped,
-    /// matching `runParallelGroup` instead of retiring against a partial view.
-    /// - Parameter counters: Cumulative run counters.
     func noteSequentialThermalHalt(counters: inout Counters) {
         counters.thermalStoppedEarly = true
         if config.pauseOnBattery, lowPowerModeProvider() {
@@ -415,18 +308,6 @@ extension FilesIndexer {
     }
 
     /// Runs one pass over every configured root with at most `workers` files in flight.
-    ///
-    /// Discovery stays sequential on the indexer so directory pruning and skip
-    /// totals match the single-worker walk; only per-file bodies fan out, each
-    /// at utility quality of service through a bounded task group. The
-    /// document store remains an actor so concurrent commits serialize
-    /// naturally, and every file still commits its document and chunks
-    /// atomically, so a cancelled run resumes from the first unfinished file.
-    /// Discovery yields cooperatively and honors budget and thermal gates as
-    /// it enumerates, so a stop truncates the walk like the sequential path
-    /// instead of counting a full-tree prune set.
-    /// - Parameter workers: Maximum files in flight; always greater than one here.
-    /// - Returns: Counts describing the run.
     func runParallel(workers: Int) async -> FilesIndexRunReport {
         isCancelled = false
         cancelBox.reset()
@@ -460,13 +341,6 @@ extension FilesIndexer {
     }
 
     /// Collects candidate files across all configured roots.
-    ///
-    /// Async so a large tree never pins the indexer while `cancel()` waits
-    /// for the actor: yields let the cancellation request land, and the
-    /// lock-guarded mirror plus the task flag stop the walk without needing
-    /// actor state in the hot loop. Budget and thermal gates apply between
-    /// roots so a truncated discovery matches the sequential partial walk
-    /// instead of counting full-tree excludes.
     private func collectAllCandidates(workers: Int, budget: FileIndexBudget, counters: inout Counters) async -> [(file: URL, root: URL)] {
         var candidates: [(file: URL, root: URL)] = []
         for root in config.roots {
@@ -533,10 +407,9 @@ extension FilesIndexer {
                 }
                 let allowed = currentWorkerLimit(base: workers)
                 if allowed <= 0 {
-                    // Thermal `.critical` or Low Power Mode: in-flight files
-                    // finish their current file while no new work launches, so
-                    // cancellation-style overrun stays within one batch. The
-                    // walk is incomplete, so the reconcile stays skipped.
+                    // Thermal `.critical` or Low Power Mode: in-flight files finish their current
+                    // file while no new work launches, so cancellation-style overrun stays within
+                    // one batch.
                     counters.thermalStoppedEarly = true
                     if config.pauseOnBattery, lowPowerModeProvider() {
                         counters.warnings.append("Paused new work: Low Power Mode is on")
@@ -588,20 +461,6 @@ extension FilesIndexer {
     }
 
     /// Enumerates one root sequentially, collecting committable file candidates.
-    ///
-    /// Directory pruning, symlink handling, and skip counting flow through the
-    /// shared classification with `indexRoot`; per-file bodies are left for
-    /// parallel workers so totals agree with a sequential run over the same
-    /// tree. The loop yields cooperatively and honors cancellation plus budget
-    /// and thermal gates as it enumerates, so a stop truncates discovery like
-    /// the sequential walk instead of counting a full-tree prune set.
-    /// - Parameters:
-    ///   - rootURL: Resolved root to walk.
-    ///   - rawRoot: Configured root string for optional cloud-root classification.
-    ///   - workers: Files in flight absent any pressure, for the thermal gate.
-    ///   - budget: Shared nightly budget; exhaustion stops discovery.
-    ///   - counters: Cumulative run counters.
-    /// - Returns: Candidate files with the root they were discovered under.
     func collectCandidates(rootURL: URL, rawRoot: String = "", workers: Int, budget: FileIndexBudget, counters: inout Counters) async -> [(file: URL, root: URL)] {
         var collected: [(file: URL, root: URL)] = []
         var isDirectory: ObjCBool = false
@@ -630,10 +489,9 @@ extension FilesIndexer {
         }
         var sinceYield = 0
         while let element = enumerator.nextObject() {
-            // Cooperative pause so `cancel()` reaches the actor on huge trees:
-            // the lock-guarded mirror and the task flag stop the walk without
-            // waiting on actor state, and each pause also lets a pending
-            // cancellation request land.
+            // Cooperative pause so `cancel()` reaches the actor on huge trees: the lock-guarded
+            // mirror and the task flag stop the walk without waiting on actor state, and each pause
+            // also lets a pending cancellation request land.
             sinceYield += 1
             if sinceYield >= 64 {
                 sinceYield = 0
@@ -682,14 +540,6 @@ extension FilesIndexer {
     }
 
     /// Folds one worker outcome into the run counters and emits a throttled frame.
-    ///
-    /// Cancelled outcomes set the shared flag without reporting, matching the
-    /// sequential early returns; every other outcome reports through the same
-    /// cadence so per-item progress frames are preserved.
-    /// - Parameters:
-    ///   - outcome: Worker outcome to fold in.
-    ///   - counters: Cumulative run counters.
-    ///   - start: Instant the run began.
     func foldOutcome(_ outcome: FileOutcome, counters: inout Counters, start: ContinuousClock.Instant) async {
         if outcome.propagateCancel {
             isCancelled = true
@@ -745,14 +595,6 @@ extension FilesIndexer {
     }
 
     /// Emits a work frame for the item just processed, honoring the shared cadence.
-    ///
-    /// The first work frame always reports so a fast run is visible immediately;
-    /// later frames wait out the `ToolProgress` spacing floor so a huge first
-    /// index cannot flood the transport.
-    /// - Parameters:
-    ///   - relative: Root-relative item path.
-    ///   - counters: Cumulative run counters.
-    ///   - start: Instant the run began.
     func reportWork(_ relative: String, counters: Counters, start: ContinuousClock.Instant) async {
         let now = nowProvider()
         let due: Bool = if !hasReportedWork {
@@ -773,12 +615,8 @@ extension FilesIndexer {
         )
     }
 
-    /// Emits one progress frame.
-    /// - Parameters:
-    ///   - message: Human-readable status line, safe to display verbatim.
-    ///   - counters: Cumulative run counters.
-    ///   - current: Relative display path, or nil.
-    ///   - start: Instant the run began.
+    /// Emits one progress frame. message: Human-readable status line, safe to
+    /// display verbatim.
     func emit(message: String, counters: Counters, current: String?, start: ContinuousClock.Instant) async {
         await progress(ToolProgress(
             message: message,
@@ -796,32 +634,19 @@ extension FilesIndexer {
         "Indexing files: \(counters.indexed) indexed, \(counters.scanned) scanned, \(counters.skipped) skipped, \(counters.errors) errors"
     }
 
-    /// Final-frame status line.
-    /// - Parameters:
-    ///   - report: Counters accumulated by the run.
-    ///   - cancelled: Whether the run stopped on cancellation.
-    /// - Returns: A finished or cancelled summary.
+    /// Final-frame status line. report: Counters accumulated by the run.
     static func finishMessage(report: Counters, cancelled: Bool) -> String {
         let verb = cancelled ? "cancelled" : "finished"
         return "Files indexing \(verb): \(report.indexed) indexed, \(report.scanned) scanned, \(report.errors) errors"
     }
 
     /// Reports whether a candidate is excluded by built-in or configured patterns.
-    /// - Parameters:
-    ///   - relativePath: Path relative to the walk root.
-    ///   - filename: Final path component.
-    /// - Returns: True when the candidate is skipped.
+    /// relativePath: Path relative to the walk root.
     func isExcluded(relativePath: String, filename: String) -> Bool {
         Self.isExcluded(relativePath: relativePath, filename: filename, patterns: excludePatterns)
     }
 
     /// Disposition of one enumerated entry, shared by the sequential walk and parallel discovery.
-    ///
-    /// A single classification keeps skip totals from drifting when the two
-    /// walks cover the same tree: symlinks, aliases, and AppleDouble sidecars are never
-    /// followed, excluded trees prune without descending, denied entries stay
-    /// out of policy, allowed directories descend, and allowed files collect
-    /// with the guard-resolved URL.
     enum WalkEntryDisposition: Sendable {
         /// Entry is skipped; `prune` requests `skipDescendants` for directories.
         case skip(countSkipped: Bool, prune: Bool)
@@ -854,17 +679,6 @@ extension FilesIndexer {
     }
 
     /// Classifies one enumerated entry without touching actor state.
-    ///
-    /// Static so parallel discovery can share the exact pruning rules without
-    /// hopping onto the indexer: patterns, guard, and home boundary travel as
-    /// parameters while the symlink, alias, AppleDouble, exclude, and policy checks
-    /// stay single-sourced.
-    /// - Parameters:
-    ///   - url: Enumerated entry.
-    ///   - values: Pre-fetched resource values, when available.
-    ///   - isItemDirectory: Whether the entry is a directory.
-    ///   - policy: Walk policy carrying root URL, exclude patterns, access guard, and home directory URL.
-    /// - Returns: How the caller should handle the entry.
     static func walkDisposition(
         url: URL,
         values: URLResourceValues?,
@@ -918,15 +732,6 @@ extension FilesIndexer {
     }
 
     /// Reports whether an enumerated directory must be pruned, shared by both walks.
-    ///
-    /// Thin wrapper over the shared classification so sequential and parallel
-    /// discovery prune excluded, symlinked, alias, AppleDouble, and denied
-    /// directories identically.
-    /// - Parameters:
-    ///   - url: Enumerated directory entry.
-    ///   - values: Pre-fetched resource values, when available.
-    ///   - rootURL: Walk root for relative paths.
-    /// - Returns: Prune and count flags, or nil when the walk should descend.
     func shouldPruneDirectory(url: URL, values: URLResourceValues?, rootURL: URL) -> (prune: Bool, countSkipped: Bool)? {
         switch Self.walkDisposition(
             url: url,
@@ -944,15 +749,6 @@ extension FilesIndexer {
     }
 
     /// Reports whether an enumerated file must be collected, shared by both walks.
-    ///
-    /// Thin wrapper over the shared classification so sequential and parallel
-    /// discovery skip symlinked, alias, AppleDouble, excluded, and denied files
-    /// identically and collect allowed files with the guard-resolved URL.
-    /// - Parameters:
-    ///   - url: Enumerated file entry.
-    ///   - values: Pre-fetched resource values, when available.
-    ///   - rootURL: Walk root for relative paths.
-    /// - Returns: Resolved URL to collect or index, or nil when skipped.
     func shouldCollectFile(url: URL, values: URLResourceValues?, rootURL: URL) -> URL? {
         switch Self.walkDisposition(
             url: url,
@@ -975,11 +771,8 @@ extension FilesIndexer {
         Self.isDownloadPolicy(config.iCloudEvicted)
     }
 
-    /// Reports whether a file's bytes are evicted in iCloud.
-    /// - Parameters:
-    ///   - url: Canonical file URL.
-    ///   - values: Pre-fetched resource values, when available.
-    /// - Returns: True when the file is ubiquitous and not downloaded.
+    /// Reports whether a file's bytes are evicted in iCloud. url: Canonical file
+    /// URL.
     func isEvictedForPolicy(at url: URL, values: URLResourceValues? = nil) -> Bool {
         if let check = evictedCheck {
             return check(url)
@@ -1058,14 +851,6 @@ extension FilesIndexer {
     }
 
     /// Reports whether a file is an iCloud item whose bytes are evicted.
-    ///
-    /// Only a positive `.notDownloaded` status counts as evicted: a missing
-    /// status or a non-ubiquitous file proceeds, so an undetermined download
-    /// state never hides a locally readable file from the index.
-    /// - Parameters:
-    ///   - url: File URL to inspect.
-    ///   - values: Pre-fetched resource values, when available.
-    /// - Returns: True when the file is ubiquitous and not downloaded.
     static func isLiveEvicted(at url: URL, values: URLResourceValues? = nil) -> Bool {
         let resolved: URLResourceValues? = if let values {
             values
@@ -1087,13 +872,7 @@ extension FilesIndexer {
     }
 
     /// Maps extraction chunks to indexed chunks, attaching vectors when present.
-    /// - Parameters:
-    ///   - extraction: Extracted document body.
-    ///   - documentID: Owning document identifier.
-    ///   - vectors: One vector per chunk, or nil for keyword-only.
-    ///   - fallbackDisplayName: Display name used if extraction produced 0 chunks.
-    ///   - fallbackPath: Relative display path used if extraction produced 0 chunks.
-    /// - Returns: Indexed chunks in extraction order.
+    /// extraction: Extracted document body.
     static func makeChunks(
         extraction: DocumentExtraction,
         documentID: UUID,
@@ -1123,39 +902,18 @@ extension FilesIndexer {
     }
 
     /// Reports whether the iCloud evicted policy requests a download.
-    ///
-    /// Single-sourced so the sequential walk and the parallel worker agree on
-    /// the spelling: only the `download` token downloads, any other value
-    /// fails closed to skip.
-    /// - Parameter rawValue: Raw `icloud_evicted` policy value.
-    /// - Returns: True only for the `download` policy.
     static func isDownloadPolicy(_ rawValue: String) -> Bool {
         rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "download"
     }
 
-    /// Builds the content-free warning line for one skipped file.
-    ///
-    /// Single-sourced so sequential and parallel paths report the same copy
-    /// for the same failure; only the reason travels into the warning, file
-    /// bytes never do.
-    /// - Parameters:
-    ///   - relative: Root-relative display path.
-    ///   - reason: Short failure reason, never file content.
-    /// - Returns: Warning line for the run.
+    /// Builds the content-free warning line for one skipped file. Single-sourced so sequential and
+    /// parallel paths report the same copy for the same failure; only the reason travels into the
+    /// warning, file bytes never do.
     static func skipWarningText(relative: String, reason: String) -> String {
         "Skipped '\(safeRelative(relative) ?? "item")': \(reason)"
     }
 
     /// Reports whether a stored fingerprint proves the file is unchanged.
-    ///
-    /// Single-sourced so the sequential fast path and the parallel worker
-    /// agree: a non-failed prior extraction plus a matching size and an mtime
-    /// within tolerance means the body is current without reading any bytes.
-    /// - Parameters:
-    ///   - fingerprint: Stored fingerprint for the file.
-    ///   - size: Live file size in bytes.
-    ///   - currentMtime: Live modification time, when known.
-    /// - Returns: True when the file can be skipped without a read.
     static func fingerprintMatchesStored(
         _ fingerprint: DocStoredFingerprint,
         size: Int,
@@ -1172,33 +930,13 @@ extension FilesIndexer {
     }
 
     /// Reports whether a document's tail chunks stayed keyword-only under the cap.
-    ///
-    /// Single-sourced so sequential and parallel commits count truncation the
-    /// same way: vectors present plus more chunks than the cap means the tail
-    /// was left keyword-only.
-    /// - Parameters:
-    ///   - vectors: Embedded vectors, or nil when the document stayed keyword-only.
-    ///   - chunkCount: Total chunks in the extraction.
-    ///   - cap: Maximum vectors for the document; values at or below zero mean unlimited.
-    /// - Returns: True when the document was truncated by the cap.
     static func isVectorTruncated(vectors: [[Float]]?, chunkCount: Int, cap: Int) -> Bool {
         vectors != nil && cap > 0 && chunkCount > cap
     }
 
-    /// Validates one embedding batch against the texts sent.
-    ///
-    /// Single-sourced so sequential and parallel embedding agree: a width or
-    /// count mismatch degrades to keyword-only instead of pairing a wrong
-    /// vector with a chunk. Widths must be uniform within the batch and match
-    /// the backend's known dimension when one is advertised; provider backends
-    /// with an unknown dimension still enforce intra-batch uniformity so a
-    /// mid-run model switch cannot silently mix widths. The store re-enforces
-    /// the pinned width on write.
-    /// - Parameters:
-    ///   - vectors: Vectors returned by the backend.
-    ///   - expectedCount: Number of texts sent for embedding.
-    ///   - expectedDimension: Backend's known dimension, or nil when unknown.
-    /// - Returns: Vectors when count and widths agree, or nil to stay keyword-only.
+    /// Validates one embedding batch against the texts sent. Single-sourced so sequential and
+    /// parallel embedding agree: a width or count mismatch degrades to keyword-only instead of
+    /// pairing a wrong vector with a chunk.
     static func validatedEmbedVectors(
         _ vectors: [[Float]],
         expectedCount: Int,
@@ -1215,27 +953,13 @@ extension FilesIndexer {
     }
 
     /// Reports the stored status for an image after the visual-embedding attempt.
-    ///
-    /// Extraction stays interim (pending visual work) so the stored row never
-    /// claims visual success up front; only a successful visual vector promotes
-    /// the row to `.extracted`, while a visual miss or text-only fallback keeps
-    /// the interim outcome.
-    /// - Parameters:
-    ///   - extraction: Extracted document body.
-    ///   - visualSucceeded: Whether the visual multimodal vector landed.
-    /// - Returns: `.extracted` for a visually embedded image, else the interim status.
     static func effectiveImageStatus(extraction: DocumentExtraction, visualSucceeded: Bool) -> ExtractStatus {
         guard extraction.format == .image else { return extraction.status }
         return visualSucceeded ? .extracted : extraction.status
     }
 
-    /// Embeds a single image file via visual multimodal embedding, verifying vector width against expected dimension.
-    /// - Parameters:
-    ///   - fileURL: Location of the image file on disk.
-    ///   - fileName: Display name for logging.
-    ///   - expectedDimension: Target embedding dimension (defaults to 768 if nil).
-    ///   - embedImage: Closure performing the image embedding.
-    /// - Returns: A single vector wrapped in an array, or nil to fall back to text extraction.
+    /// Embeds a single image file via visual multimodal embedding, verifying vector width against
+    /// expected dimension. fileURL: Location of the image file on disk.
     static func embedImageVisualVector(
         fileURL _: URL,
         fileName: String,
@@ -1263,12 +987,6 @@ extension FilesIndexer {
     }
 
     /// Reports whether components hold the scoped scratch prefix.
-    ///
-    /// Single-sourced so relative-path and absolute-URL checks agree: only a
-    /// consecutive `.runeweaver`/`workspace` pair counts, never a bare
-    /// `workspace` component or a file named `workspace` elsewhere.
-    /// - Parameter components: Lowercased `/`-separated path components.
-    /// - Returns: True when the path lies inside `.runeweaver/workspace`.
     static func isWorkspaceScratchComponents(_ components: [String]) -> Bool {
         guard components.count >= 2 else { return false }
         for index in 0 ..< (components.count - 1) {
@@ -1287,26 +1005,15 @@ extension FilesIndexer {
         return isWorkspaceScratchComponents(components)
     }
 
-    /// Reports whether an absolute file URL lies inside agent scratch.
-    ///
-    /// Covers walks rooted inside the scratch tree itself, where the
-    /// root-relative path no longer carries the `.runeweaver` prefix but the
-    /// absolute path still does.
-    /// - Parameter url: Candidate file or directory URL.
-    /// - Returns: True only for the `.runeweaver/workspace` subtree.
+    /// Reports whether an absolute file URL lies inside agent scratch. - Returns: True only for the
+    /// `.runeweaver/workspace` subtree.
     static func isWorkspaceScratchURL(_ url: URL) -> Bool {
         let components = url.standardizedFileURL.path.lowercased().split(separator: "/").map(String.init)
         return isWorkspaceScratchComponents(components)
     }
 
-    /// Reports whether a path relative to the walk root is an allowed cloud storage path within Library.
-    ///
-    /// The indexer skips machine caches and application support trees under
-    /// `Library`, but exempts user cloud storage trees residing under
-    /// `Library/CloudStorage` (modern FileProvider roots such as iCloud Drive, Dropbox,
-    /// OneDrive, Google Drive) and `Library/Mobile Documents` (legacy iCloud Drive).
-    /// - Parameter components: Lowercased path components relative to the walk root.
-    /// - Returns: True when the components represent or lead to an allowed cloud tree.
+    /// Reports whether a path relative to the walk root is an allowed cloud storage path within
+    /// Library.
     static func isAllowedLibraryCloudPath(components: [String]) -> Bool {
         guard !components.isEmpty, components[0] == "library" else { return false }
         if components.count == 1 {
@@ -1318,10 +1025,6 @@ extension FilesIndexer {
     }
 
     /// Reports whether a root path is an optional cloud storage root.
-    ///
-    /// Optional cloud roots (such as iCloud Drive or CloudStorage) may not exist
-    /// on all machines or setups. Missing optional cloud roots are ignored without
-    /// flagging `hasUnreadableRoot = true`, allowing `retireUnseenFiles` to proceed.
     static func isOptionalCloudRoot(rootURL: URL, rawRoot: String? = nil) -> Bool {
         // Component-anchored so a coincidental substring never clears the
         // unreadable-root flag: only an exact cloud component or a Library
@@ -1345,12 +1048,6 @@ extension FilesIndexer {
     }
 
     /// Reports whether anchored components name an optional cloud root.
-    ///
-    /// Matches the `Library/CloudStorage` and `Library/Mobile Documents`
-    /// prefixes plus exact `icloud drive` and `com~apple~clouddocs`
-    /// components; anything else stays fail-closed.
-    /// - Parameter components: Lowercased non-empty path components.
-    /// - Returns: True for an optional cloud root.
     private static func isCloudRootComponents(_ components: [String]) -> Bool {
         guard !components.isEmpty else { return false }
         for index in 0 ..< components.count {
@@ -1368,21 +1065,6 @@ extension FilesIndexer {
     }
 
     /// Reports whether a candidate is excluded by the given patterns.
-    ///
-    /// Static so the shared walk classification stays off the actor: the
-    /// matcher itself is case-sensitive, so both sides lower to agree with
-    /// the case-insensitive filesystem. Plain directory names (no slash or
-    /// glob syntax) match any path component so an excluded tree stays
-    /// excluded for files nested beneath it even when the walker would have
-    /// pruned the parent. Agent scratch is scoped separately: only the
-    /// `.runeweaver/workspace` prefix counts, never a bare `workspace`
-    /// component or a file named `workspace`, so a stale `workspace` pattern
-    /// in configuration stays inert outside scratch.
-    /// - Parameters:
-    ///   - relativePath: Path relative to the walk root.
-    ///   - filename: Final path component.
-    ///   - patterns: Built-in plus configured exclude patterns.
-    /// - Returns: True when the candidate is skipped.
     static func isExcluded(relativePath: String, filename: String, patterns: [String]) -> Bool {
         let loweredRelative = relativePath.lowercased()
         let loweredFilename = filename.lowercased()
@@ -1432,11 +1114,8 @@ extension FilesIndexer {
         }
     }
 
-    /// Expresses a file relative to the walk root for display.
-    /// - Parameters:
-    ///   - url: Candidate file URL.
-    ///   - root: Walk root.
-    /// - Returns: Relative path, or the final path component when outside the root.
+    /// Expresses a file relative to the walk root for display. url: Candidate file
+    /// URL.
     static func relativePath(of url: URL, root: URL) -> String {
         let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
         let canonicalURL = url.resolvingSymlinksInPath().standardizedFileURL.path
@@ -1457,10 +1136,9 @@ extension FilesIndexer {
         return url.lastPathComponent
     }
 
-    /// Normalizes a relative display path, dropping anything that could reveal
-    /// an absolute location or climb outside its root.
+    /// Normalizes a relative display path, dropping anything that could reveal an absolute location
+    /// or climb outside its root.
     /// - Parameter path: Candidate relative path.
-    /// - Returns: A trimmed relative path capped for display, or nil when unsafe.
     static func safeRelative(_ path: String) -> String? {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !trimmed.hasPrefix("/"), !trimmed.hasPrefix("~") else { return nil }

@@ -1,8 +1,4 @@
 // Rune Weaver Tools — Reminders gateway models and production implementation.
-//
-// Purpose: EventKit-backed reminders persistence with fail-closed validation and verbatim ID lookup.
-// Scope: RemindersGateway plus ReminderStore seam plus reminder value types; no ToolBus surface.
-// Architectural role: single persistence owner behind RemindersGateway, mirroring MessagesGateway per-domain seam.
 
 import Foundation
 import os
@@ -146,10 +142,6 @@ public struct EventKitReminder: Sendable, Equatable {
 }
 
 /// Which half of the reminder set one callback fetch covers.
-///
-/// EventKit offers no server-side date predicate for reminders, so `start`
-/// and `end` narrow due dates in memory inside the store; the gateway then
-/// applies the final window plus undated rule over the narrowed rows.
 public struct EventKitReminderPredicate: Sendable, Equatable {
     /// False fetches incomplete reminders, true fetches completed ones.
     public let fetchCompleted: Bool
@@ -168,27 +160,17 @@ public struct EventKitReminderPredicate: Sendable, Equatable {
     }
 }
 
-/// Per-domain reminder view of the system event store so tests inject a mock.
-///
-/// Covers reminder access only; CalendarStore (owned by CalendarGateway.swift)
-/// covers calendar access. Implementations read lists live per call, never cached.
+/// Per-domain reminder view of the system event store so tests inject a mock. Covers reminder
+/// access only; CalendarStore (owned by CalendarGateway.swift) covers calendar access.
 public protocol ReminderStore: Sendable {
     /// Current reminder authorization, checked per call.
     func reminderAuthorizationStatus() -> EventKitReminderAuthorization
-    /// Explicit consent prompt reserved for the owner-driven enable path.
-    ///
-    /// Gateways never call this; they only read `reminderAuthorizationStatus()`
-    /// and fail closed. The method stays so the live store retains the prompting
-    /// capability behind `PermissionProbes.request`, and so mocks can stand in
-    /// for that path in tests without involving EventKit prompts.
+    /// Explicit consent prompt reserved for the owner-driven enable path. Gateways never call this;
+    /// they only read `reminderAuthorizationStatus()` and fail closed.
     func requestReminderAccess() async throws -> Bool
     /// Lists reminder calendars live, never cached.
     func reminderCalendars() throws -> [EventKitReminderCalendar]
     /// Callback fetch mirroring the EventKit completion API.
-    ///
-    /// Date bounds narrow due dates in memory because EventKit has no
-    /// server-side date predicate; undated rows pass through and the gateway
-    /// decides whether the query keeps them.
     func fetchReminders(
         matching predicate: EventKitReminderPredicate,
         completion: @escaping @Sendable ([EventKitReminder]?) -> Void
@@ -196,9 +178,6 @@ public protocol ReminderStore: Sendable {
     /// Returns the reminder with an opaque identifier verbatim, or nil on a miss.
     func reminder(withIdentifier identifier: String) -> EventKitReminder?
     /// Upserts a reminder and returns the persisted record.
-    ///
-    /// The returned value carries the store-assigned identifier, so callers
-    /// use it for follow-up update and delete instead of the draft identifier.
     func save(_ reminder: EventKitReminder) throws -> EventKitReminder
     /// Removes a reminder by identifier verbatim.
     func removeReminder(withIdentifier identifier: String) throws
@@ -207,11 +186,6 @@ public protocol ReminderStore: Sendable {
 // MARK: - Update patch (keeps update within the 6-parameter lint budget)
 
 /// Bundled editable fields for one reminder update.
-///
-/// Nil means preserve the stored value; a non-nil value replaces it after
-/// validation. Notes follows the gateway convention where an empty string
-/// clears to nil via validation, so a single optional preserves the
-/// preserve-versus-replace distinction without double optionals.
 public struct ReminderUpdatePatch: Sendable, Equatable {
     public var title: String?
     public var notes: String?
@@ -280,12 +254,6 @@ public protocol RemindersGateway: Sendable {
 
 extension RemindersGateway {
     /// Best-effort ID fetch-one for conformers without verbatim store access.
-    ///
-    /// Delegates to the filtered search capped at the gateway maximum and narrows
-    /// to the verbatim identifier, so a reminder beyond the cap honestly reports
-    /// not-found through this fallback. Production overrides this with a verbatim
-    /// `reminder(withIdentifier:)` lookup that never truncates, and test doubles
-    /// keep this path only until they implement the verbatim overload directly.
     public func search(
         query: String?,
         reminderID: String?,
@@ -532,10 +500,8 @@ public struct ProductionRemindersGateway: RemindersGateway, Sendable {
 /// Private helpers live in an extension so the main type body stays within
 /// the 350-line lint budget; behavior is unchanged.
 extension ProductionRemindersGateway {
-    /// Fails closed unless reminder access is currently authorized.
-    ///
-    /// Tools and background work never initiate prompts; only the explicit
-    /// PermissionProbes.request path prompts. Fail closed on notDetermined.
+    /// Fails closed unless reminder access is currently authorized. Tools and background work never
+    /// initiate prompts; only the explicit PermissionProbes.request path prompts.
     private func ensureReminderAccess() throws {
         guard store.reminderAuthorizationStatus() == .authorized else {
             throw ReminderToolError.permissionDenied("Access has not been granted.")
@@ -553,12 +519,8 @@ extension ProductionRemindersGateway {
         }
     }
 
-    /// Sole bridge for the callback fetch; no other continuation exists here.
-    ///
-    /// A never-calling store cannot hang a tool forever: the first completion
-    /// wins and a timeout fails closed. A double-calling store cannot trap:
-    /// only the first completion resumes. The timeout task is cancelled as
-    /// soon as the fetch completes so no 15-second task outlives success.
+    /// Sole bridge for the callback fetch; no other continuation exists here. A never-calling store
+    /// cannot hang a tool forever: the first completion wins and a timeout fails closed.
     private func bridgedFetch(
         fetchCompleted: Bool,
         start: Date?,
@@ -782,11 +744,8 @@ extension ProductionRemindersGateway {
     }
 }
 
-/// Exactly-once guard for the callback bridge.
-///
-/// The store must call its completion exactly once, but a buggy store could
-/// call twice (trapping on second resume) or never (hanging the tool). The
-/// timeout and the fetch race through this guard so only the first wins.
+/// Exactly-once guard for the callback bridge. The store must call its completion exactly once, but
+/// a buggy store could call twice (trapping on second resume) or never (hanging the tool).
 private final class FetchResumeGuard: Sendable {
     private let didResume = OSAllocatedUnfairLock(initialState: false)
 

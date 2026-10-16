@@ -1,21 +1,12 @@
 // Rune Weaver Server — Ideas settings patch and merge logic.
-//
-// Extracted from ServerDTOs.swift to keep file length within lint bounds.
-// The partial `[ideas]` patch for `PUT /settings` and the merge helper
-// live beside the Ideas DTOs so the settings surface stays single-sourced.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
-/// Partial `[ideas]` patch for `PUT /settings`.
-///
-/// Every field stays optional so a request carrying only the enable flag leaves
-/// the rest of the stored suggestion policy untouched instead of resetting it.
-/// The dashboard owns the full suggestion surface — the enable toggle, the
-/// per-cycle cap, and the review timeout — matching the goals patch so both
-/// policies are tuned from settings with range checks single-sourced in the
-/// config validation layer.
+/// Partial `[ideas]` patch for `PUT /settings`. Every field stays optional so a request carrying
+/// only the enable flag leaves the rest of the stored suggestion policy untouched instead of
+/// resetting it.
 public struct IdeasUpdate: Content, Sendable, Equatable {
     /// Whether proactive idea generation runs at all. Nil preserves the stored value.
     public var enabled: Bool?
@@ -24,11 +15,7 @@ public struct IdeasUpdate: Content, Sendable, Equatable {
     /// Seconds the review waits on the model before returning no ideas. Nil preserves the stored value.
     public var timeoutSeconds: Int?
 
-    /// Creates a partial ideas patch.
-    /// - Parameters:
-    ///   - enabled: Whether suggestion generation runs.
-    ///   - maxPerCycle: Maximum ideas per generation cycle.
-    ///   - timeoutSeconds: Review timeout in seconds.
+    /// Creates a partial ideas patch. enabled: Whether suggestion generation runs.
     public init(
         enabled: Bool? = nil,
         maxPerCycle: Int? = nil,
@@ -50,12 +37,9 @@ public struct IdeasUpdate: Content, Sendable, Equatable {
 }
 
 extension UpdateSettingsRequest {
-    /// Merges a partial ideas patch onto the stored policy, preserving every
-    /// field the request omits. A nil patch is a no-op, so a dashboard edit
-    /// elsewhere never resets the `[ideas]` section.
-    ///
-    /// Internal so the shared settings `apply(to:)` keeps one merge path while
-    /// the ideas-specific logic lives beside its DTOs.
+    /// Merges a partial ideas patch onto the stored policy, preserving every field the request
+    /// omits. A nil patch is a no-op, so a dashboard edit elsewhere never resets the `[ideas]`
+    /// section.
     func applyIdeas(to ideas: inout IdeasConfig) {
         guard let update = self.ideas else { return }
         if let enabled = update.enabled {
@@ -71,11 +55,6 @@ extension UpdateSettingsRequest {
 }
 
 /// Public representation of one proactive suggestion.
-///
-/// Plain strings carry kind and status so the client does not couple to the
-/// engine's internal enum ordering; the wire values mirror the domain model
-/// so the dashboard, server, and episodic-memory layers agree without
-/// drifting.
 public struct IdeaDTO: Content, Sendable, Equatable {
     /// Stable idea identifier.
     public let id: UUID
@@ -143,11 +122,8 @@ public struct IdeaDTO: Content, Sendable, Equatable {
         case updatedAt
     }
 
-    /// Decodes tolerantly across the goal-identifier spellings through the
-    /// shared alias helper so a pushed or hand-built payload lands on one field.
-    /// A blank title fails decoding fail-closed so whitespace-only rows never
-    /// cross the wire.
-    /// - Parameter decoder: Source decoder.
+    /// Decodes tolerantly across the goal-identifier spellings through the shared alias helper so a
+    /// pushed or hand-built payload lands on one field.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(UUID.self, forKey: .id)
@@ -198,11 +174,8 @@ public struct IdeasListResponse: Content, Sendable, Equatable {
     }
 }
 
-/// Idea counts for `GET /ideas/summary`.
-///
-/// Explicit per-status tallies keep the dashboard badge free of key-string
-/// branching, mirroring the goals summary shape. `total` is the sum so a
-/// dropped status can never leave the per-status counts disagreeing with it.
+/// Idea counts for `GET /ideas/summary`. `total` is the sum so a dropped status can never leave the
+/// per-status counts disagreeing with it.
 public struct IdeasSummaryResponse: Content, Sendable, Equatable {
     /// Total ideas across every state.
     public let total: Int

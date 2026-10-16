@@ -1,22 +1,5 @@
 // Rune Weaver Dashboard — Component tests for the Access pane shell and its
 // Rules section.
-//
-// Purpose: Pins the access pane shell (the left section rail with Rules as the
-// landing section, lazy section mounting, and the selection staying put across
-// a section's save) plus the Rules section's contract: the plain-English header
-// derived from active allow rules grouped by tool, the four row actions
-// (revoke, widen, change duration, deny creation) with their payloads, the
-// server widening refusal surfacing inside the modal, the access deep-link
-// preselect and highlight, and the live refetch on the access_rules_changed
-// frame.
-// Scope: The shell's navigation and the Rules section's reads and writes over
-// the /approvals/rules routes. Scope matching, the deny-outranks decision
-// order, and the sibling sections' own editors stay with their owner suites;
-// only the shared access-wording output and the pane wiring are exercised here.
-// Architectural role: Guards the landing section the approvals inbox links to,
-// so a rule edit cannot ship an unreadable payload, a declined widen cannot
-// hide the server's reason, and a deep link cannot land the owner on the wrong
-// rule.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

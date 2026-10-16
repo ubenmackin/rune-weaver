@@ -230,6 +230,7 @@ Sovereign sidecars live beside the ledger: `~/.runeweaver/memory/ledger.sovereig
 
 ## Code Commenting Guidelines
 
-- **New-File Headers**: Every new source and test file must begin with a descriptive top-of-file header comment documenting the component's purpose, scope, and architectural role.
-- **Intent Over Mechanics**: Inline and doc comments must explain rationale, invariants, non-obvious logic, or edge cases rather than restating mechanics.
+- **File Headers**: Every source and test file must begin with a concise 1-to-2 line header identifying the subsystem and core responsibility: `// <Subsystem> — <Purpose and role>.`
+- **Max 3 Lines**: Comments (headers, doc comments, and inline comments) must be at most 3 lines long.
+- **Intent Over Mechanics**: Comments must explain non-obvious rationale, invariants, or edge cases rather than restating mechanics.
 - **No Planning-Artifact References**: Code comments must never reference task IDs, session IDs, PR numbers, plan identifiers, or other transient planning artifacts.

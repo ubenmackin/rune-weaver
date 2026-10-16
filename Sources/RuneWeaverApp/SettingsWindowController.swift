@@ -1,5 +1,4 @@
 // Rune Weaver App — Native macOS Settings Window Controller.
-// Hosts an isolated WebKit view for Settings with strict breakout containment.
 
 import AppKit
 import Foundation
@@ -19,12 +18,6 @@ public final class SettingsWindowController: NSObject {
     }
 
     /// Displays the native settings window, loading the standalone settings URL.
-    /// When a session token is provided, injects the `rw_session` cookie into
-    /// the WebKit cookie store prior to navigation so the settings view is
-    /// pre-authenticated without prompting for the owner bearer token. The
-    /// cookie carries the same sliding idle lifetime the server enforces, so the
-    /// native window and the browser dashboard cannot drift on when a session
-    /// goes dead or on the deadline the browser should honor.
     public func show(url: URL, sessionToken: String? = nil) async {
         self.allowedBaseURL = url
         let win = getOrCreateWindow()
@@ -120,10 +113,8 @@ extension SettingsWindowController: WKNavigationDelegate {
                 return
             }
 
-            // Any other same-origin main-frame navigation (including other
-            // internal dashboard routes such as #chat without the standalone
-            // gate, which forces the SettingsManager-only surface) is
-            // cancelled here to keep the window contained to Settings.
+            // Any other same-origin main-frame navigation without the standalone gate is cancelled
+            // here to keep the window contained to Settings.
             decisionHandler(.cancel)
             return
         }

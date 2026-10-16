@@ -1,23 +1,8 @@
 // Rune Weaver Core — Owner-facing assistant persona for the prompt identity block.
-//
-// The persona is the only owner-authored text the prefix-stable prompt carries:
-// the assistant name, the tone preset sentence, optional style guidance, and
-// the owner's preferred name all flow into the identity line
-// `SystemPromptComposer` renders on chat, scheduled, and goal turns. The
-// avatar stays a client-side accent and never reaches a prompt byte. An
-// untouched persona keeps the stock identity sentence byte-for-byte so
-// existing installs keep their KV-cache prefixes; only an explicit
-// customization rewrites the identity and misses the cache. Secrets never
-// appear here: the persona carries display wording only.
 
 import Foundation
 
 /// Tone preset folded into the prompt identity sentence.
-///
-/// Each case maps to one static sentence owned by the composer, so tone
-/// wording lives in exactly one place and a new preset is a single case plus
-/// one sentence. Codable travels as the lowercase string spelling used in
-/// `[persona] tone`.
 public enum PersonaTone: String, Sendable, Codable, CaseIterable, Equatable {
     /// Short direct answers without small talk.
     case concise
@@ -29,12 +14,9 @@ public enum PersonaTone: String, Sendable, Codable, CaseIterable, Equatable {
     case playful
 }
 
-/// Client-side avatar accent for persona surfaces.
-///
-/// The closed set is validated at the config boundary; the value selects an
-/// accent in clients only and is intentionally absent from composed prompt
-/// bytes. Codable travels as the lowercase string spelling used in
-/// `[persona] avatar`.
+/// Client-side avatar accent for persona surfaces. The closed set is validated at the config
+/// boundary; the value selects an accent in clients only and is intentionally absent from composed
+/// prompt bytes.
 public enum PersonaAvatar: String, Sendable, Codable, CaseIterable, Equatable {
     /// Violet accent. Default.
     case violet
@@ -47,12 +29,6 @@ public enum PersonaAvatar: String, Sendable, Codable, CaseIterable, Equatable {
 }
 
 /// `[persona]` — assistant persona injected into the prompt identity line.
-///
-/// Every key defaults, so an absent table keeps the stock identity and today's
-/// prompt bytes exactly. The normalize-or-reject bounds (name, style, owner
-/// name, tone and avatar spellings) are enforced by the shared normalizers in
-/// the validation layer so TOML load, JSON payloads, and hand-built configs
-/// cannot drift on fields or messages.
 public struct PersonaConfig: Sendable, Codable, Equatable {
     /// How the assistant refers to itself in the prompt identity.
     public var assistantName: String
@@ -99,12 +75,6 @@ public struct PersonaConfig: Sendable, Codable, Equatable {
     }
 
     /// Whether every prompt-affecting field sits at its stock default.
-    ///
-    /// The composer renders the legacy identity sentence exactly when this
-    /// holds, so removing `[persona]` restores today's prompt bytes. The
-    /// avatar is excluded on purpose: it never reaches the prompt, so an
-    /// accent-only change still collapses to the stock identity line while the
-    /// cache key covers it and re-renders the same bytes after a miss.
     public var isDefaultIdentity: Bool {
         assistantName == Self.defaultAssistantName
             && tone == Self.defaultTone
@@ -113,12 +83,6 @@ public struct PersonaConfig: Sendable, Codable, Equatable {
     }
 
     /// Length-framed canonical encoding of every persona field.
-    ///
-    /// The composer folds this into the prompt cache key so any persona
-    /// change — including the prompt-neutral avatar — is a cache miss. The
-    /// `count:value` framing makes the concatenation injective, so field
-    /// content carrying a separator character cannot collide with another
-    /// persona's framing.
     public var canonicalCacheString: String {
         var framed = ""
         for field in [assistantName, tone.rawValue, style, userName, avatar.rawValue] {
@@ -135,10 +99,9 @@ public struct PersonaConfig: Sendable, Codable, Equatable {
         case avatar
     }
 
-    /// Decodes a persona key-by-key, applying the documented default for every
-    /// omitted key and the same normalize-or-reject contract as TOML load, so
-    /// a JSON payload can never land a shape the file path would refuse.
-    /// - Parameter decoder: Decoder for the config document.
+    /// Decodes a persona key-by-key, applying the documented default for every omitted key and the
+    /// same normalize-or-reject contract as TOML load, so a JSON payload can never land a shape the
+    /// file path would refuse.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let rawAssistantName = try container.decodeIfPresent(String.self, forKey: .assistantName)

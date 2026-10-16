@@ -1,19 +1,4 @@
 // Rune Weaver Core Tests — Per-host egress scoping for shell and desktop URL-typing.
-//
-// Purpose: pin the host-scoped network contract shared by sandboxed shells and
-// desktop typing — validated host declarations, blanket-allow Seatbelt text
-// with supervisor string screening, supervisor cross-checks that refuse
-// undeclared dials, and approval surfaces that name destinations instead of
-// a blank check. The screening is best-effort: it sees explicit URLs,
-// schemeless host text, and typed URLs, but misses dials that never surface
-// as recognizable host strings (non-URL spellings and encoded or obfuscated
-// forms), so a screened pass narrows the dial surface without proving
-// no-egress.
-// Scope: Seatbelt profile text, supervisor host comparison, bash.exec argument
-// handling and screening, plus desktop bridge parity through the same checker.
-// Architectural role: executable specification for the posture where the
-// sandbox stays blanket-allow and the supervisor plus approval card agree
-// on hosts (undeclared deny, declared-plus-policy-allowed allow).
 
 import Foundation
 @testable import RuneWeaverCore
@@ -53,10 +38,9 @@ struct EgressScopingTests {
         try? FileManager.default.removeItem(at: url)
     }
 
-    /// Builds a hermetic bash tool rooted in isolated scratch with a stubbed seam.
-    ///
-    /// The isolated root forces the host fallback so turns never create
-    /// containers, while the stubbed seam keeps any isolated-tier probe hermetic.
+    /// Builds a hermetic bash tool rooted in isolated scratch with a stubbed seam. The isolated
+    /// root forces the host fallback so turns never create containers, while the stubbed seam keeps
+    /// any isolated-tier probe hermetic.
     private func makeHermeticBashTool(
         bashConfig: BashConfig,
         supervisor: OutboundEgressSupervisor?,
@@ -97,13 +81,9 @@ struct EgressScopingTests {
         )
         let profile = builder.buildProfile()
 
-        // Per-host SBPL is not expressible on current macOS (the kernel only
-        // accepts `localhost` or `*` as IP, so hostnames reject as kleene
-        // star), so declared hosts keep the blanket allow and the supervisor
-        // remains the per-host enforcement point through best-effort string
-        // screening (undeclared deny, declared-plus-policy-allowed allow).
-        // Narrowing declared hosts to deny-all would grant less capability
-        // than declaring nothing and leave `network_hosts` unusable.
+        // Per-host SBPL is not expressible on current macOS (the kernel only accepts `localhost` or
+        // `*` as IP, so hostnames reject as kleene star), so declared hosts keep the blanket allow
+        // and the supervisor remains the per-host enforcement point through best-effort string.
         #expect(profile.contains("(allow network*)"))
         #expect(!profile.contains("(deny network*)"))
         #expect(!profile.contains("network-outbound"))
@@ -152,14 +132,9 @@ struct EgressScopingTests {
 
     @Test
     func `Blanket profile pairs with supervisor host gate`() async throws {
-        // The profile stays blanket-allow (per-host SBPL inexpressible: the
-        // kernel only accepts `localhost` or `*` as IP, so hostnames reject as
-        // kleene star), so the supervisor's declared-host check is the
-        // per-host enforcement point: a declared-plus-policy-allowed dial
-        // passes while an undeclared dial denies. Screening stays
-        // best-effort — explicit URLs, schemeless host text, and typed URLs
-        // screen, while non-URL spellings and encoded or obfuscated forms
-        // bypass string matching without breaking this gate.
+        // The profile stays blanket-allow (per-host SBPL inexpressible: the kernel only accepts
+        // `localhost` or `*` as IP, so hostnames reject as kleene star), so the supervisor's
+        // declared-host check is the per-host enforcement point: a declared-plus-policy-allowed dial.
         let profile = SeatbeltProfileBuilder(
             allowedReadPaths: ["/tmp/app"],
             allowedWritePaths: ["/tmp/app"],
@@ -227,10 +202,7 @@ struct EgressScopingTests {
         guard FileManager.default.isExecutableFile(atPath: sandboxExecURL.path) else {
             return
         }
-        // Blanket-allow evidence: the declared-host profile must be accepted
-        // by the kernel parser. Per-host `remote tcp` with hostnames rejects
-        // as kleene star, so the form carries no `remote` filters at all and
-        // the supervisor screens declared hosts instead.
+        // Blanket-allow evidence: the declared-host profile must be accepted by the kernel parser.
         let profile = SeatbeltProfileBuilder(
             allowedReadPaths: ["/bin", "/usr"],
             allowedWritePaths: ["/tmp", "/private/tmp"],

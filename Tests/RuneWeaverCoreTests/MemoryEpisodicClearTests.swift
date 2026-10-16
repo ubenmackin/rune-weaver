@@ -1,8 +1,4 @@
 // Rune Weaver Core Tests — Engine-owned episodic deletion scope.
-// Verifies the episodic clear and single-row delete owner: clearing or deleting
-// episodes touches only the episodes tables while semantic facts, the profile
-// snapshot, and other ledgers stay intact. Empty clears report zero and missing
-// targets complete as no-ops, with reads observing the result immediately.
 
 import Foundation
 @testable import RuneWeaverCore

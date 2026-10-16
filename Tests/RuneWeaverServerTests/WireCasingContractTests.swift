@@ -1,12 +1,4 @@
 // Rune Weaver Server — Wire API casing contract test.
-//
-// Purpose: ensures all engine-dashboard wire DTOs encode strictly with
-// camelCase keys (no snake_case keys or aliases emitted over HTTP or WebSocket).
-// Scope: JSON serialization of SettingsResponse, UpdateSettingsRequest,
-// SecurityPolicyDTO, PolicyResponse, PermissionRequest, WSWire, and representative
-// Goal, Index, Idea, Media, Desktop, Bash DTOs.
-// Architectural role: guardrail preventing future agents and contributors from
-// reintroducing snake_case wire keys or drift between backend and frontend.
 
 import Foundation
 import RuneWeaverCore

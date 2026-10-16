@@ -1,29 +1,10 @@
 // Rune Weaver Server — Durable access-rule and session-trust DTOs for the approvals API.
-//
-// Purpose: carry the rules surface the dashboards read — one durable rule per
-// tool-plus-scope pair with its allow or deny action, usage counters, and
-// human-readable scope label — plus the ephemeral trust one session still holds
-// and the egress supervisor's session and one-shot domains beside it.
-// Scope: REST bodies and the scope envelope only; rule evaluation, minting,
-// widening, re-arming, and expiry stay with `PermissionGate`, and the grant
-// tables the ephemeral listing reads stay with the gate and
-// `OutboundEgressSupervisor`.
-// Architectural role: keeps the Vapor adapters decoupled from the engine core
-// in version-tolerant Codable contracts, so a dashboard built against an older
-// engine still decodes and a malformed scope fails here instead of minting
-// trust nobody chose.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
 /// Access-rule change signal pushed by the engine over WebSocket.
-///
-/// Dashboards refetch `GET /approvals/rules` on this signal, so the payload
-/// stays a lightweight discriminator instead of a full snapshot that could
-/// drift from the pruned store contents. Older clients drop the unknown `type`
-/// without rendering, so the rename from the grants-era frame costs them
-/// nothing.
 public struct WSAccessRulesChanged: Codable, Sendable, Equatable {
     /// Always `"access_rules_changed"`.
     public let type: String
@@ -35,13 +16,6 @@ public struct WSAccessRulesChanged: Codable, Sendable, Equatable {
 }
 
 /// How wide a rule or a decision reaches for one tool.
-///
-/// The wire envelope carries the kind discriminator plus only the fields that
-/// kind names, so a tool-wide scope stays a bare `{"kind":"tool"}` and a domain
-/// scope carries its host. Every decode routes through the shared
-/// ``AccessScope/canonicalized(_:)`` gate, so an over-bound recipient set, a
-/// wildcard host, a relative prefix, or a blank glob fails here rather than
-/// reaching a store that would have to refuse it later.
 public struct AccessScopeDTO: Content, Equatable, Sendable {
     /// Kind discriminator naming which payload fields carry the scope.
     public let kind: String
@@ -93,15 +67,7 @@ public struct AccessScopeDTO: Content, Equatable, Sendable {
         }
     }
 
-    /// Creates an envelope from its kind plus payload.
-    /// - Parameters:
-    ///   - kind: Kind discriminator.
-    ///   - target: Exact target for the exact-target kind.
-    ///   - handles: Canonical handles for the recipient-set kind.
-    ///   - host: Host for the domain kind.
-    ///   - subdomains: Subdomain coverage for the domain kind.
-    ///   - path: Prefix for the path-prefix kind.
-    ///   - pattern: Command pattern for the glob kind.
+    /// Creates an envelope from its kind plus payload. kind: Kind discriminator.
     public init(
         kind: Kind,
         target: String? = nil,
@@ -177,12 +143,6 @@ public struct AccessScopeDTO: Content, Equatable, Sendable {
     }
 
     /// Decodes one envelope, refusing an unknown kind or a malformed payload.
-    ///
-    /// A payload that does not survive ``AccessScope/canonicalized(_:)`` is
-    /// malformed data rather than a scope the matcher should refuse later, so
-    /// the decode throws and the route answers 400 instead of storing a rule
-    /// nobody could exercise.
-    /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let rawKind = try container.decode(String.self, forKey: .kind)
@@ -237,14 +197,8 @@ public struct AccessScopeDTO: Content, Equatable, Sendable {
     }
 }
 
-/// One durable access rule for `GET /approvals/rules`.
-///
-/// Allow rules keep covered calls auto-approved until they expire or are
-/// revoked; deny rules park covered calls forever. A nil `expiresAt` is the
-/// forever tier, so readers render it as never expiring rather than as missing
-/// data. The usage counters ride along so a dashboard can prove liveness — a
-/// steadily advancing counter shows the rule is relied upon, while a long-lived
-/// zero singles out untested trust that is safe to prune.
+/// One durable access rule for `GET /approvals/rules`. A nil `expiresAt` is the forever tier, so
+/// readers render it as never expiring rather than as missing data.
 public struct AccessRuleResponse: Content, Equatable, Sendable {
     /// Stable rule identifier.
     public let id: UUID
@@ -287,18 +241,7 @@ public struct AccessRuleResponse: Content, Equatable, Sendable {
         )
     }
 
-    /// Creates a rule row.
-    /// - Parameters:
-    ///   - id: Stable rule identifier.
-    ///   - toolName: Tool the rule covers.
-    ///   - scope: How wide the rule reaches.
-    ///   - action: Whether covered calls are trusted or refused.
-    ///   - duration: Lifetime tier, or nil for a standing rule.
-    ///   - grantedAt: Creation time.
-    ///   - expiresAt: Expiry, or nil when it never expires.
-    ///   - useCount: Covered-call counter.
-    ///   - lastUsedAt: Last covered-call time, nil when never used.
-    ///   - reason: Caller-facing note.
+    /// Creates a rule row. id: Stable rule identifier.
     public init(
         id: UUID,
         toolName: String,
@@ -400,13 +343,9 @@ public struct AccessRulesResponse: Content, Equatable, Sendable {
     }
 }
 
-/// Standing rule creation request for `POST /approvals/rules`.
-///
-/// The tool, scope, action, and optional tier fully describe the rule, so a
-/// caller holding a complete policy builds one without hand-mapping fields. A
-/// deny rule never expires: the duration is accepted for symmetry with the
-/// allow shape and ignored, because a dated refusal would let it lapse into the
-/// allow decision underneath it.
+/// Standing rule creation request for `POST /approvals/rules`. The tool, scope, action, and
+/// optional tier fully describe the rule, so a caller holding a complete policy builds one without
+/// hand-mapping fields.
 public struct RuleCreateRequest: Content, Equatable, Sendable {
     /// Tool the rule covers.
     public let toolName: String
@@ -420,13 +359,7 @@ public struct RuleCreateRequest: Content, Equatable, Sendable {
     /// Caller-facing note recorded with the rule.
     public let reason: String?
 
-    /// Creates a rule creation request.
-    /// - Parameters:
-    ///   - toolName: Tool the rule covers.
-    ///   - scope: How wide the rule reaches.
-    ///   - action: Whether covered calls are trusted or refused.
-    ///   - duration: Lifetime tier for an allow rule.
-    ///   - reason: Caller-facing note.
+    /// Creates a rule creation request. toolName: Tool the rule covers.
     public init(
         toolName: String,
         scope: AccessScopeDTO,
@@ -443,10 +376,6 @@ public struct RuleCreateRequest: Content, Equatable, Sendable {
 }
 
 /// Duration re-arm request for `PATCH /approvals/rules/:id`.
-///
-/// Carries only the replacement tier so the permission gate stays the single
-/// owner of expiry math; a re-arm must extend an allow rule to a durable tier,
-/// never collapse it back to a one-shot decision that stores no rule.
 public struct RearmRuleRequest: Content, Equatable, Sendable {
     /// Replacement duration tier.
     public let duration: TrustDuration
@@ -458,10 +387,8 @@ public struct RearmRuleRequest: Content, Equatable, Sendable {
     }
 }
 
-/// One non-durable grant a session still carries: the `forTask` and `forSession`
-/// tiers that expire with their turn or conversation instead of surviving into
-/// the durable rule store. Ephemeral grants carry no identity and no action,
-/// because a refusal stores nothing at all.
+/// One non-durable grant a session still carries: the `forTask` and `forSession` tiers that expire
+/// with their turn or conversation instead of surviving into the durable rule store.
 public struct EphemeralGrantDTO: Content, Equatable, Sendable {
     /// Tool the grant covers.
     public let toolName: String
@@ -470,11 +397,7 @@ public struct EphemeralGrantDTO: Content, Equatable, Sendable {
     /// Which lifecycle boundary ends the grant.
     public let duration: TrustDuration
 
-    /// Creates an ephemeral grant row.
-    /// - Parameters:
-    ///   - toolName: Tool the grant covers.
-    ///   - scope: How wide the grant reaches.
-    ///   - duration: `forTask` or `forSession`.
+    /// Creates an ephemeral grant row. toolName: Tool the grant covers.
     public init(toolName: String, scope: AccessScopeDTO, duration: TrustDuration) {
         self.toolName = toolName
         self.scope = scope
@@ -494,11 +417,6 @@ public struct EphemeralGrantDTO: Content, Equatable, Sendable {
 }
 
 /// Session trust view for `GET /approvals/session-trust`.
-///
-/// Lists the ephemeral grants the gate still holds for one session beside the
-/// egress supervisor's session and one-shot domain allowances, so a dashboard
-/// can show exactly what stays auto-approved for the rest of the conversation
-/// without re-deriving it from run history.
 public struct SessionTrustResponse: Content, Equatable, Sendable {
     /// Session the trust belongs to.
     public let sessionID: UUID
@@ -511,12 +429,7 @@ public struct SessionTrustResponse: Content, Equatable, Sendable {
     /// Unspent one-shot domains the supervisor still allows for this session.
     public let egressOneShotDomains: [String]
 
-    /// Creates a session trust view.
-    /// - Parameters:
-    ///   - sessionID: Session the trust belongs to.
-    ///   - grants: Ephemeral grants the session still carries.
-    ///   - egressSessionDomains: Supervisor session domains.
-    ///   - egressOneShotDomains: Supervisor unspent one-shot domains.
+    /// Creates a session trust view. sessionID: Session the trust belongs to.
     public init(
         sessionID: UUID,
         grants: [EphemeralGrantDTO],
@@ -532,22 +445,14 @@ public struct SessionTrustResponse: Content, Equatable, Sendable {
 }
 
 /// Ephemeral trust clear request for `POST /approvals/ephemeral/clear`.
-///
-/// The session is the unit of clearing: the gate's ephemeral tables and the
-/// supervisor's grant tables both key on it, so one call drops every grant the
-/// conversation still holds. An optional tool name is accepted for callers that
-/// revoke one row at a time; the clear itself stays session-scoped because the
-/// gate exposes no narrower boundary.
 public struct EphemeralClearRequest: Content, Equatable, Sendable {
     /// Session whose ephemeral trust clears.
     public let sessionID: UUID
     /// Tool the caller is revoking, when it named one row.
     public let toolName: String?
 
-    /// Creates an ephemeral clear request.
-    /// - Parameters:
-    ///   - sessionID: Session whose ephemeral trust clears.
-    ///   - toolName: Tool the caller is revoking, when named.
+    /// Creates an ephemeral clear request. sessionID: Session whose ephemeral trust
+    /// clears.
     public init(sessionID: UUID, toolName: String? = nil) {
         self.sessionID = sessionID
         self.toolName = toolName

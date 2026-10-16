@@ -1,18 +1,4 @@
 // Rune Weaver Tools Tests — Mandatory egress supervision on every api.request path.
-//
-// Purpose: pins the production wiring contract that `api.request` is built and
-// registered only with a live `OutboundEgressSupervisor` bound to a verified
-// policy store, and that the supervisor's gate order evaluates network policy
-// and credential target binding before any DNS resolution or Keychain access.
-// Scope: `OutboundEgressSupervisor.make` fail-closed construction, supervised
-// tool execution (allow plus deny plus dry-run preview), redirect-hop policy
-// enforcement with cross-origin credential stripping, and shared-store
-// visibility across reconstructed routes. Resolver observations bind to each
-// test's task so parallel suites cannot publish, clear, or observe them.
-// Architectural role: the executable guard that no supervisor-less api.request
-// path exists, that an unverifiable policy refuses boot, that a policy
-// write reaches the supervisor without a restart, and that redirect hops can
-// never escape the same supervised policy as the initial URL.
 
 import Foundation
 import os
@@ -55,10 +41,9 @@ private struct RecordingTransport: ApiRequestTransport, Sendable {
     }
 }
 
-/// Locked recorder for hostnames that reached the SSRF resolver.
-///
-/// Only ever attached to a task-scoped resolver binding, so concurrent suites
-/// cannot append foreign lookups to the log the ordering test counts.
+/// Locked recorder for hostnames that reached the SSRF resolver. Only ever attached to a
+/// task-scoped resolver binding, so concurrent suites cannot append foreign lookups to the log the
+/// ordering test counts.
 private final class DNSLookupRecorder: Sendable {
     /// Guarded resolution log in call order.
     private let hosts = OSAllocatedUnfairLock<[String]>(initialState: [])
@@ -75,10 +60,6 @@ private final class DNSLookupRecorder: Sendable {
 }
 
 /// Builds a verified policy store over a throwaway file path.
-///
-/// `update` commits through the same invariant gate a successful load uses,
-/// so the supervisor factory sees a verified snapshot without the test having
-/// to serialize TOML or touch the operator's real `policy.toml`.
 private func makePolicyStore(_ policy: SecurityPolicy) async -> PolicyStore {
     let url = FileManager.default.temporaryDirectory
         .appendingPathComponent("rw-supervision-\(UUID().uuidString).toml")
@@ -168,17 +149,8 @@ private func makeTemporaryPolicyDirectory() -> URL {
         .appendingPathComponent("rw-supervision-\(UUID().uuidString)")
 }
 
-/// Runs `body` with the debug DNS resolver bound to `resolver` for this test's
-/// task and its children, keeping parallel suites isolated.
-///
-/// The binding rides `ApiSSRFGuard.$taskTestDNSResolver` only, never the
-/// process-global holder: suites run in parallel and share that holder, so
-/// publishing here could redirect another suite's lookups while a concurrent
-/// clear (for example a global-only suite resetting to nil) could drop this
-/// suite's proof mid-test and surface as DNS-unavailable fail-closed. The
-/// production resolver prefers the task-scoped binding over the global holder
-/// before hopping off the cooperative pool, so hermetic suites observe only
-/// their own canned proof.
+/// Runs `body` with the debug DNS resolver bound to `resolver` for this test's task and its
+/// children, keeping parallel suites isolated.
 private func withTaskScopedDNS(
     _ resolver: @escaping @Sendable (String) -> [String],
     _ body: () async throws -> Void
@@ -195,10 +167,8 @@ struct ApiRequestToolSupervisionTests {
     @Test
     func `Factories require a live supervisor at compile time`() async throws {
         // The legacy fallback is impossible by construction: `ApiRequestTool`,
-        // `ApiRequestTools.makeTools`, and `BuiltinToolPlugins.makeTools` all
-        // take a non-optional supervisor (or the policy store that builds one),
-        // so any future default-nil reintroduction breaks every call site at
-        // compile time. This test exercises each required-parameter entry.
+        // `ApiRequestTools.makeTools`, and `BuiltinToolPlugins.makeTools` all take a non-optional
+        // supervisor (or the policy store that builds one), so any future default-nil reintroduction.
         let store = await makePolicyStore(SecurityPolicy())
         let supervisor = try await OutboundEgressSupervisor.make(policyStore: store)
         let direct = ApiRequestTool(egressSupervisor: supervisor)
@@ -399,13 +369,9 @@ struct ApiRequestToolSupervisionTests {
     @Test
     func `Redirect hop into blocked domains is refused before any dial`() async throws {
         try await withTaskScopedDNS({ _ in ["93.184.216.34"] }) {
-            // Unrestricted mode keeps the initial host dialable while the
-            // explicit blocklist refuses the redirect target, so the hop is
-            // stopped by the network policy gate rather than the allowlist.
-            // The initial hop uses a public IP literal so its SSRF vetting
-            // needs no DNS proof: sibling hostname tests already cover the
-            // resolver path, and a literal keeps this redirect-hop refusal
-            // deterministic under parallel suites.
+            // Unrestricted mode keeps the initial host dialable while the explicit blocklist
+            // refuses the redirect target, so the hop is stopped by the network policy gate rather
+            // than the allowlist.
             let store = await makePolicyStore(
                 SecurityPolicy(
                     network: NetworkEgressPolicy(mode: .unrestricted, blockedDomains: ["blocked.example.com"])
@@ -835,11 +801,9 @@ struct ApiRequestToolSupervisionTests {
 
     @Test
     func `Refused cross-origin 307 never vets the denied hop`() async throws {
-        // The cross-origin method-plus-body refusal precedes supervised
-        // vetting, so a denied hop authorizes no resolver query, no socket,
-        // and — because injection runs after the SSRF gate — no Keychain read.
-        // The resolver log proves vetting never ran for the denied target,
-        // while a bodyless GET still flows to show the refusal stays selective.
+        // The cross-origin method-plus-body refusal precedes supervised vetting, so a denied hop
+        // authorizes no resolver query, no socket, and — because injection runs after the SSRF gate
+        // — no Keychain read.
         let dnsRecorder = DNSLookupRecorder()
         try await withTaskScopedDNS({ host in
             dnsRecorder.record(host)
@@ -899,10 +863,9 @@ struct ApiRequestToolSupervisionTests {
 
     @Test
     func `Supervisor fails closed per hop when the verified snapshot is lost`() async throws {
-        // A supervisor built before corruption must not keep authorizing from
-        // the displayable fallback: every hop re-reads the verified snapshot,
-        // so losing verification denies before any resolver query or dial,
-        // through both the direct gate and the tool path sharing the store.
+        // Supervisors must not authorize from fallback when corrupted: every hop re-reads the
+        // verified snapshot, denying before any query or dial through both the direct gate
+        // and tool path sharing the store.
         let dnsRecorder = DNSLookupRecorder()
         try await withTaskScopedDNS({ host in
             dnsRecorder.record(host)

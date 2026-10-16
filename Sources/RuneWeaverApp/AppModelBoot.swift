@@ -1,10 +1,4 @@
 // Rune Weaver App — Menu bar boot collaborator construction.
-//
-// Isolates the document-index-aware boot helpers so the menu-bar model stays
-// focused on lifecycle: provider key resolution without logging, dummy fallback
-// selection, single-path memory wiring, best-effort conversation hydration, and
-// shared embeddings construction. All helpers run on the main actor because
-// they mutate published boot state through the owning model.
 
 import Foundation
 import RuneWeaverCore
@@ -15,10 +9,6 @@ import RuneWeaverTools
 @MainActor
 extension AppModel {
     /// Resolves provider API keys at boot without logging values.
-    ///
-    /// Each entry reads its `apiKeyEnv` from the environment first, then the
-    /// Keychain, so a missing credential simply stays absent and the provider
-    /// falls back rather than failing boot.
     func resolveBootAPIKeys(config: RuneWeaverConfig, secrets: SecretsManager) async -> [String: String] {
         var keysByEntry: [String: String] = [:]
         for (entryName, entry) in config.llm.providers {
@@ -40,10 +30,8 @@ extension AppModel {
         return keysByEntry
     }
 
-    /// Selects the active LLM provider, falling back to a dummy when none is enabled.
-    ///
-    /// The dummy keeps boot live so Settings can configure a provider; it never
-    /// dials or stores anything.
+    /// Selects the active LLM provider, falling back to a dummy when none is enabled. The dummy
+    /// keeps boot live so Settings can configure a provider; it never dials or stores anything.
     func selectBootProvider(config: RuneWeaverConfig, providers: [any LLMProvider]) -> any LLMProvider {
         if let chosen = LLMProviderFactory.selectProvider(named: nil, from: providers, config: config.llm) {
             return chosen
@@ -52,10 +40,6 @@ extension AppModel {
     }
 
     /// Builds the memory engine sharing one document-index path with recall.
-    ///
-    /// A disabled `[index]` keeps the keyword-and-vector engine so recall is
-    /// unchanged; an enabled section points recall at the same `db_path` the
-    /// index pipeline writes, keeping the single-path invariant.
     func makeBootMemoryEngine(config: RuneWeaverConfig) -> MemoryEngine {
         if config.index.enabled {
             return MemoryEngine(
@@ -67,10 +51,8 @@ extension AppModel {
         return MemoryEngine(config: config.memory)
     }
 
-    /// Loads persisted conversations best-effort for menu-bar resume.
-    ///
-    /// A read failure starts fresh but surfaces through the console so missing
-    /// history is never mistaken for an empty account.
+    /// Loads persisted conversations best-effort for menu-bar resume. A read failure starts fresh
+    /// but surfaces through the console so missing history is never mistaken for an empty account.
     func loadBootConversations(config: RuneWeaverConfig) async -> ConversationManager {
         let conversations = ConversationManager(episodesDBPath: config.memory.episodesDBPath)
         do {
@@ -81,10 +63,8 @@ extension AppModel {
         return conversations
     }
 
-    /// Shares one embeddings backend across memory tools and served recall.
-    ///
-    /// Nil keeps keyword-only behavior when vectors are disabled, matching the
-    /// CLI ranking path.
+    /// Shares one embeddings backend across memory tools and served recall. Nil keeps keyword-only
+    /// behavior when vectors are disabled, matching the CLI ranking path.
     func makeBootEmbedder(config: RuneWeaverConfig, providers: [any LLMProvider]) -> (any EmbeddingsBackend)? {
         EmbeddingsBackendFactory.makeBackend(
             memoryEmbeddingBackend: config.memory.embeddingBackend,
@@ -160,10 +140,6 @@ extension AppModel {
     }
 
     /// Assembles the boot pipeline collaborators.
-    ///
-    /// A security policy that cannot be verified exits the process nonzero
-    /// instead of starting the engine: there is no supervisor-less fallback,
-    /// matching the CLI's fail-closed boot refusal.
     func buildBootPipeline(
         config: RuneWeaverConfig,
         bindConfig: ServerConfig,
@@ -181,10 +157,9 @@ extension AppModel {
                 memoryEmbeddingBackend: config.memory.embeddingBackend,
                 providers: providers
             )
-        // Own the run store plus socket hub here so the index reporter writes
-        // into the same instances the status probe reads and the sockets fan
-        // out from; a manual run then leaves one start row updated in place by
-        // its completion instead of vanishing.
+        // Own the run store plus socket hub here so the index reporter writes into the same
+        // instances the status probe reads and the sockets fan out from; a manual run then leaves
+        // one start row updated in place by its completion instead of vanishing.
         let runs = await RunLogStore.load(dbPath: config.memory.episodesDBPath)
         let hub = WSHub()
         let indexComponents = ServerIndexBoot.makeComponents(
@@ -222,11 +197,9 @@ extension AppModel {
                 workspaceStore: agentWorkspace
             )
         } catch {
-            // Fail-closed boot: a policy that cannot be verified means no
-            // supervised registry exists, so the engine never starts and the
-            // process exits nonzero rather than ever serving a supervisor-less
-            // `api.request`. The reason reaches both the app log and the
-            // console so the owner can repair policy.toml.
+            // Fail-closed boot: a policy that cannot be verified means no supervised registry
+            // exists, so the engine never starts and the process exits nonzero rather than ever
+            // serving a supervisor-less `api.request`.
             let reason = error.localizedDescription
             RuneWeaverLog.app.error("Security policy rejected at boot: \(reason)")
             print("[RuneWeaverApp] Security policy rejected at boot: \(reason)")
@@ -256,9 +229,6 @@ extension AppModel {
     }
 
     /// Constructs the live ServerContext from the assembled boot pipeline.
-    /// - Throws: `PolicyInvariantError` when the served registry cannot be
-    ///   built over a verified policy; the boot then stops rather than
-    ///   serving an unsupervised tool set.
     func makeBootServerContext(pipeline: BootPipeline) async throws -> ServerContext {
         let appLLMOrigins = LLMOrigins.serverURLs(from: pipeline.config.llm)
         return try await ServerContext.make(

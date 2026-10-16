@@ -6,11 +6,6 @@ import RuneWeaverCore
 import Vapor
 
 /// Tracks in-flight approval resumes for one WebSocket connection.
-///
-/// Chat turns stay server-scoped through the tracker slot plus their detached
-/// task, so a socket close never cancels them; only resume continuations need
-/// the socket lifetime, and sealing them here keeps orphaned synthesis from
-/// outliving its viewer.
 final class ConnectionChatTasks: Sendable {
     /// One slot: awaiting its task, holding it, or already cancelled.
     /// Sendable so the lock-protected table stays within Swift 6 isolation.
@@ -21,9 +16,6 @@ final class ConnectionChatTasks: Sendable {
     }
 
     /// Locked table plus whether the socket has closed.
-    /// The flag stays beside the slots so reserve/insert/cancelAll decide
-    /// atomically; otherwise a close landing between reserve and insert
-    /// would leave the late task running with no handle to stop it.
     private struct State: Sendable {
         var slots: [UUID: Slot] = [:]
         var closed = false
@@ -48,9 +40,6 @@ final class ConnectionChatTasks: Sendable {
     }
 
     /// Tracks a resume task until it completes.
-    /// Always stores when open, even without a reservation, so a socket close
-    /// can still stop it; when the slot was already cancelled (or the socket
-    /// closed first) the task is cancelled immediately instead of stored.
     func insert(_ task: Task<Void, Never>, id: UUID) {
         let shouldCancel = state.withLock { locked -> Bool in
             if locked.closed {
@@ -75,9 +64,6 @@ final class ConnectionChatTasks: Sendable {
     }
 
     /// Cancels every tracked resume task.
-    /// Reserved slots flip to cancelled so a racing insert aborts on arrival,
-    /// and the closed flag makes later reserves cancel on insert; the socket
-    /// close path and an explicit in-flight cancel share this one hop.
     func cancelAll() {
         let current = state.withLock { locked -> [Task<Void, Never>] in
             locked.closed = true
@@ -102,10 +88,6 @@ final class ConnectionChatTasks: Sendable {
 }
 
 /// Partial audit snapshot for a turn that ended without an authoritative response.
-///
-/// Named fields keep error paths readable where an anonymous triple would hide
-/// which value is billed usage versus partial text, and keep the audit shape
-/// identical between the REST and WebSocket failure paths.
 struct ChatTurnAuditSnapshot: Sendable {
     /// Assistant text streamed before the failure, possibly empty.
     let partialText: String
@@ -130,13 +112,8 @@ struct ChatTurnAuditSnapshot: Sendable {
     }
 }
 
-/// Accumulates mid-turn audit progress from orchestrator events so error paths keep partial context.
-///
-/// Success paths persist the authoritative response, while failures have no response to persist;
-/// without this the audit row would drop tools that already ran. Completed tool frames build the
-/// action list, pending starts cover a tool interrupted mid-call, deltas rebuild partial text, and
-/// the latest turn total carries billed usage for the same response/toolActions/totalTokens shape
-/// as success.
+/// Accumulates mid-turn audit progress from orchestrator events so error paths keep partial
+/// context.
 final class ChatTurnAuditProgress: Sendable {
     /// One started-but-unfinished tool call, kept so an interrupted call still audits.
     private struct PendingStart: Sendable {
@@ -218,38 +195,6 @@ final class ChatTurnAuditProgress: Sendable {
 }
 
 /// Authorizes a WebSocket upgrade at the route boundary.
-///
-/// The global auth middleware is the primary gate; this re-checks the marker it
-/// leaves behind so a WebSocket route registered without that middleware fails
-/// closed instead of handing out a live socket. The credential itself is never
-/// read here: the middleware validates it once and strips the upgrade query
-/// token, so this guard cannot reintroduce it into logs.
-/// Validates whether an incoming HTTP Origin header is permitted to open a WebSocket connection.
-/// Browser clients connecting across origins must be restricted; non-browser clients (omitting Origin) pass.
-///
-/// Sole owner of the Origin decision: loopback plus the
-/// configured bind hostname plus exact parity with the request Host pass,
-/// everything else fails closed with no new config. A missing Origin is
-/// handled by `authorizeWebSocketUpgrade` (passes for non-browser clients);
-/// a malformed Origin fails closed here.
-///
-/// Middleware ordering assumption (security-critical): the Host-parity branch
-/// trusts the request Host only because `HostValidationMiddleware` already
-/// validated it upstream (`registerRuneWeaverRoutes` installs
-/// `GlobalSecurityHeadersMiddleware` then `HostValidationMiddleware` then the
-/// auth middleware before the `/ws` route). Parity alone passes any
-/// Host==Origin pair — including an attacker pair such as
-/// `rebind.attacker.com` — so an attacker Host==Origin is rejected end to end
-/// only by that upstream Host gate. Bypassing or misordering the middleware
-/// would leave parity fail-open; the retirement tests pin this ordering
-/// explicitly. Trailing-dot and empty hosts are rejected locally (not solely
-/// upstream) so `evil.com.` never rides parity under a stripped spelling.
-///
-/// Both sides compare under one normalization (`ServerEndpointConfig.normalizeHost`
-/// plus outer-bracket stripping): `URL.host` strips `[::1]` brackets while the
-/// normalized Host header keeps them, so a bare compare never matches a
-/// bracketed IPv6 proxy. Canonicalizing both to the bare form restores parity
-/// for `[::1]` without widening the gate.
 func isAllowedWebSocketOrigin(_ origin: String, request: Request) -> Bool {
     guard let originURL = URL(string: origin), let rawOriginHost = originURL.host, !rawOriginHost.isEmpty else {
         return false
@@ -338,12 +283,6 @@ private func extractWebSocketPort(from hostHeader: String) -> Int? {
 }
 
 /// Canonicalizes one host for WebSocket Origin comparison.
-///
-/// Single-sourced through `ServerEndpointConfig.normalizeHost` (trim,
-/// lowercase, port-strip) plus outer-bracket stripping so the normalized Host
-/// header (`[::1]`) and `URL.host` (`::1`) compare under identical semantics.
-/// - Parameter raw: Raw host text (URL host, Host header, or bind hostname).
-/// - Returns: Lowercased, port-stripped, unbracketed host.
 private func canonicalWebSocketHost(_ raw: String) -> String {
     var normalized = ServerEndpointConfig.normalizeHost(raw)
     if normalized.hasPrefix("["), normalized.hasSuffix("]"), normalized.count >= 2 {
@@ -367,16 +306,6 @@ func authorizeWebSocketUpgrade(_ request: Request) -> HTTPHeaders? {
 }
 
 /// Handles one inbound WebSocket text frame.
-///
-/// Chat turns dispatch without the connection table so they survive socket
-/// close; resume continuations keep the table so close still seals them.
-/// - Parameters:
-///   - text: Raw frame text.
-///   - connectionID: Socket that sent the frame.
-///   - context: Server context owning the queue and hub.
-///   - connectionTasks: Table tracking resumes under the socket lifetime.
-///   - pulse: Verified system-pulse actor, when the caller can reach the one
-///     the health route installs; a brake decision records into it.
 func handleWebSocketText(
     _ text: String,
     connectionID: UUID,
@@ -474,10 +403,8 @@ func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
             )
         )
     case let .toolProgress(progress):
-        // Generic indeterminate progress from a running tool: session-tagged so
-        // multiplexed views only apply their own turn and older clients drop the
-        // unknown type. Advisory only, so the terminal tool result stays the
-        // authoritative record.
+        // Generic indeterminate progress from a running tool: session-tagged so multiplexed views
+        // only apply their own turn and older clients drop the unknown type.
         encodeWSFrame(WSToolProgressFrame(progress, sessionID: sessionID))
     case .approval:
         nil
@@ -485,15 +412,6 @@ func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
 }
 
 /// Broadcasts one orchestrator event to every connected WebSocket client.
-///
-/// Turns are server-scoped, so a reloaded tab or a second viewer must see the
-/// same live deltas without re-sending: every frame carries the owning
-/// sessionID and viewers filter before touching state. Approval prompts keep
-/// their dedicated hub fan-out inside this path. A nil encoding drops before
-/// broadcast, and a cancelled turn emits zero further frames via the guard.
-/// Tool progress is advisory and droppable, so it leaves on a detached task
-/// while the tool loop resolves without hub latency; every other frame keeps
-/// the awaited ordering the terminal frames rely on.
 func broadcastWSEventFrame(_ event: OrchestratorEvent, sessionID: UUID, hub: WSHub) async {
     guard !Task.isCancelled else {
         return
@@ -535,13 +453,6 @@ func broadcastStreamDone(
 }
 
 /// Executes a chat turn over WebSocket with real-time streaming and cooperative cancellation.
-///
-/// Chat turns are server-scoped: the tracker slot plus the detached task own
-/// the turn, so closing the requesting socket never cancels it. Cancellation
-/// arrives only through explicit cancel or same-session supersede, both
-/// bridged through the tracker. Requester-scoped replies
-/// (validation errors, busy rejection) still answer the requesting socket
-/// directly before any spawn.
 func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: ServerContext) async {
     let trimmed: String
     do {
@@ -556,15 +467,8 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
     let sessionID = message.sessionID ?? UUID()
     let source = (message.source ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-    // Steering frames never start a fresh turn: they either join the live turn
-    // or fail honestly so the dashboard can roll back its optimistic bubble.
-    // The liveness probe and the enqueue are separate actor hops, so a finish
-    // or cancel can land between them; probing again after the enqueue keeps
-    // that window honest instead of silently queuing into a dead session.
-    // A joint tracker-plus-queue hop would close the window entirely, but the
-    // double probe is the narrowest honest shape without one: text that loses
-    // the race is withdrawn so the miss error and the queue agree, leaving no
-    // orphaned copy to answer the next turn as a duplicate.
+    // Steering frames never start a fresh turn: they either join the live turn or fail honestly so
+    // the dashboard can roll back its optimistic bubble.
     if message.steer == true {
         guard await context.activeTurns.isActive(sessionID: sessionID) else {
             await sendWSError(
@@ -591,14 +495,9 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
         return
     }
 
-    // Bound parallel turns so slow local inference never stacks silently: the
-    // acquire and the registration happen in one tracker hop, so concurrent
-    // fresh sessions cannot both slip past the cap. A replacement turn for
-    // the same session always fits (it supersedes the prior slot), while a
-    // fresh session past the cap fails honestly instead of starving every
-    // turn at once.
-    // Register before spawning so a fast turn can never finish before its slot exists; the box
-    // bridges the cancel action to the task created just below.
+    // Bound parallel turns so slow local inference never stacks silently: the acquire and the
+    // registration happen in one tracker hop, so concurrent fresh sessions cannot both slip past the
+    // cap.
     let taskBox = TurnTaskBox()
     guard let registration = await context.activeTurns.tryAcquire(sessionID: sessionID, onCancel: { taskBox.cancel() }) else {
         await sendWSError(
@@ -609,10 +508,9 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
         )
         return
     }
-    // Publish the running row immediately so dashboards badge the background
-    // session from the run log even before the first delta streams; the
-    // terminal paths below update this same row instead of appending a second,
-    // keeping one audit entry per turn.
+    // Publish the running row immediately so dashboards badge the background session from the run
+    // log even before the first delta streams; the terminal paths below update this same row instead
+    // of appending a second, keeping one audit entry per turn.
     let initialEntry = await context.runs.append(
         kind: "chat",
         status: "running",
@@ -621,11 +519,8 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
         durationMs: 0
     )
     await context.hub.broadcastRun(initialEntry)
-    // Detached ownership: the tracker slot plus this task own the turn, so no
-    // connection-table reserve/insert follows. A socket close seals only resume
-    // continuations while this turn keeps its slot and running row; the box
-    // bridges tracker cancellation (explicit cancel or supersede)
-    // to the task created just below.
+    // Detached ownership: the tracker slot plus this task own the turn, so no connection-table
+    // reserve/insert follows.
     let params = WebSocketTurnParameters(
         context: context,
         connectionID: connectionID,
@@ -642,10 +537,6 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
 }
 
 /// Parameters required to execute a single WebSocket chat turn.
-///
-/// The requesting socket identifies who started the turn for pre-spawn
-/// requester-scoped replies, while live and terminal delivery broadcasts
-/// session-tagged so detached viewers settle together.
 private struct WebSocketTurnParameters: Sendable {
     let context: ServerContext
     let connectionID: UUID
@@ -657,12 +548,6 @@ private struct WebSocketTurnParameters: Sendable {
 }
 
 /// Runs one chat turn's liveness heartbeat, inference process, and status updates.
-///
-/// The heartbeat and audit accumulator stay here while terminal persistence
-/// lives in the finish helpers below, keeping this body inside the lint budget
-/// without changing the per-path audit behavior. The turn runs until its
-/// terminal frame, explicit cancel, or same-session supersede; heartbeats keep
-/// viewers live while inference proceeds with no absolute time bound.
 private func executeWebSocketTurn(params: WebSocketTurnParameters) async {
     let context = params.context
     let sessionID = params.sessionID
@@ -737,14 +622,6 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters) async {
 }
 
 /// Persists a successful WebSocket turn and delivers its terminal done frame.
-///
-/// Parked approval-gated turns persist as awaiting_approval instead of ok so the
-/// inbox decision can transition the same session entry. Late steering stays
-/// queued for the next turn so guidance arriving after the final ingest still
-/// gets answered instead of vanishing after its optimistic render. The done
-/// frame broadcasts so every viewer holding the session settles together; a
-/// reloaded tab reconciles from the run log while live sockets settle from the
-/// frame.
 private func finishWebSocketSuccessfulTurn(
     params: WebSocketTurnParameters,
     response: OrchestratorResponse,
@@ -757,10 +634,8 @@ private func finishWebSocketSuccessfulTurn(
     } else {
         "ok"
     }
-    // Release the tracker slot before publishing the terminal row so observers
-    // polling the run log never see a settled row with a stale active slot.
-    // Stale tokens are ignored, keeping replacement turns intact, matching the
-    // REST turn ordering.
+    // Release the tracker slot before publishing the terminal row so observers polling the run log
+    // never see a settled row with a stale active slot.
     await context.activeTurns.unregister(sessionID: params.sessionID, token: params.registration.token)
     let entry = await context.runs.update(
         id: params.initialEntry.id,
@@ -779,14 +654,6 @@ private func finishWebSocketSuccessfulTurn(
 }
 
 /// Persists a failed WebSocket turn keeping the same audit shape as success.
-///
-/// Error rows reuse partial assistant text when streamed (else the error detail
-/// so the row is never response-less) plus the tools that already ran and their
-/// billed total, matching the tools the client already rendered live. Failed
-/// turns keep late steering queued so the retry can still answer guidance that
-/// arrived after the final ingest. The error frame broadcasts session-tagged so
-/// every viewer holding the session clears its live bubble together;
-/// requester-scoped validation and busy replies stay on the direct error path.
 private func finishWebSocketFailedTurn(
     params: WebSocketTurnParameters,
     error: Error,
@@ -822,13 +689,9 @@ private func finishWebSocketFailedTurn(
     }
 }
 
-/// Settles a cancelled WebSocket turn and notifies every viewer.
-///
-/// Cancellation arrives only through explicit cancel or same-session supersede;
-/// the run row updates in place so the turn keeps one audit
-/// entry. The cancelled frame broadcasts session-tagged so detached viewers
-/// clear their live bubbles together, while the cancel acknowledgement in
-/// `handleWebSocketCancel` stays direct to the requester.
+/// Settles a cancelled WebSocket turn and notifies every viewer. Cancellation arrives only through
+/// explicit cancel or same-session supersede; the run row updates in place so the turn keeps one
+/// audit entry.
 private func handleWebSocketTurnCancellation(
     context: ServerContext,
     sessionID: UUID,
@@ -855,11 +718,6 @@ private func handleWebSocketTurnCancellation(
 }
 
 /// Spawns a background liveness heartbeat task for long inference turns.
-///
-/// Heartbeats broadcast session-tagged so every viewer holding the session
-/// re-arms its inactivity timer while prompt evaluation stays silent; there is
-/// no owning socket because turns are server-scoped and detached viewers must
-/// stay live together.
 private func startHeartbeat(context: ServerContext, sessionID: UUID) -> Task<Void, Never> {
     Task {
         while !Task.isCancelled {
@@ -878,12 +736,9 @@ private func startHeartbeat(context: ServerContext, sessionID: UUID) -> Task<Voi
     }
 }
 
-/// Cancels an in-flight chat turn over WebSocket.
-///
-/// The tracker stop plus steering clear settle the turn, while this
-/// acknowledgement answers only the requesting socket: it reports whether a
-/// running turn was actually stopped. Terminal settlement still broadcasts
-/// separately so every viewer clears together.
+/// Cancels an in-flight chat turn over WebSocket. The tracker stop plus steering clear settle the
+/// turn, while this acknowledgement answers only the requesting socket: it reports whether a running
+/// turn was actually stopped.
 func handleWebSocketCancel(_ message: WSCancelMessage, connectionID: UUID, context: ServerContext) async {
     var cancelled = false
     if let sid = message.sessionID {
@@ -906,20 +761,6 @@ func handleWebSocketCancel(_ message: WSCancelMessage, connectionID: UUID, conte
 }
 
 /// Cancels one in-flight tool call over WebSocket, leaving its turn running.
-///
-/// The bus injects the cancellation as the call's failure result so the model
-/// re-scopes and continues; the terminal `tool_end` frame follows the normal
-/// event path, so a successful cancel needs no extra acknowledgement. Every
-/// outcome that stops nothing — a settled call, an unowned call, or a rejected
-/// identifier — reports through the dedicated non-terminal miss frame rather
-/// than ``WSErrorFrame``: a session-tagged `error` is a terminal turn failure to
-/// the dashboard, so reusing it here would tear down a turn that is still
-/// running. The miss frame lets the dashboard roll back only its optimistic
-/// "cancelling" mark, matching the REST fallback.
-/// - Parameters:
-///   - message: Decoded per-tool cancel frame.
-///   - connectionID: Socket that sent the request.
-///   - context: Server context owning the tool bus.
 func handleWebSocketToolCancel(_ message: WSToolCancelMessage, connectionID: UUID, context: ServerContext) async {
     do {
         let cancelled = try await cancelInFlightToolCall(
@@ -956,20 +797,6 @@ func handleWebSocketToolCancel(_ message: WSToolCancelMessage, connectionID: UUI
 }
 
 /// Resolves an approval decision received over WebSocket.
-///
-/// Routes through the same decide-plus-map function the REST route uses, so
-/// tier semantics cannot drift between transports: the question guard, the
-/// egress side effects, the brake resume, the durable-rule broadcast, and the
-/// session-tagged resume all resolve in one place. The resume stays tracked
-/// under this socket's lifetime so a close cancels it instead of leaving an
-/// orphaned synthesis turn running with no viewer to receive its broadcasts.
-/// - Parameters:
-///   - message: Decoded decision frame.
-///   - scope: Caller-supplied scope for a durable decision, or nil to derive.
-///   - connectionID: Socket that sent the decision.
-///   - context: Server context owning the queue and hub.
-///   - connectionTasks: Table tracking resumes under the socket lifetime.
-///   - pulse: Verified system-pulse actor, when the caller can reach it.
 func handleWebSocketDecision(
     _ message: WSDecisionMessage,
     scope: AccessScope? = nil,
@@ -996,10 +823,9 @@ func handleWebSocketDecision(
         context: context,
         spawnResume: { effectiveApproved in
             guard let resumeSessionID = pending?.sessionID else { return }
-            // Reserve before spawning so a close landing in the gap parks as
-            // cancelled and the insert aborts immediately; the defer removes
-            // the slot on every terminal path so the table never retains
-            // finished resumes.
+            // Reserve before spawning so a close landing in the gap parks as cancelled and the
+            // insert aborts immediately; the defer removes the slot on every terminal path so the
+            // table never retains finished resumes.
             let trackingID = UUID()
             connectionTasks.reserve(id: trackingID)
             let decidedCallID = pending?.input.callID
@@ -1039,12 +865,6 @@ func handleWebSocketDecision(
 }
 
 /// Fail-closed decode of the decision scope from a raw decision frame.
-///
-/// The core decision shape carries no scope, so the scope rides as an optional
-/// sibling key the strict decoder ignores. A missing key means the gate
-/// derives the request's own scope; a present-but-undecodable value (unknown
-/// kind, non-canonical payload, wrong type) marks the frame invalid so the
-/// caller errors instead of minting trust the owner never chose.
 private struct WSDecisionScopeOutcome: Sendable {
     /// Decoded scope, nil for decisions without an explicit scope.
     let scope: AccessScope?
@@ -1082,11 +902,6 @@ private func wsDecisionScope(from text: String) -> WSDecisionScopeOutcome {
 }
 
 /// Sends one requester-scoped error frame through the hub, best-effort.
-///
-/// Validation failures and busy rejections answer only the requesting socket so
-/// an unrelated viewer never tears down its own turn over another session's
-/// rejection. Terminal turn failures broadcast separately so every viewer
-/// holding the session settles together.
 func sendWSError(_ message: String, connectionID: UUID, context: ServerContext, sessionID: UUID? = nil) async {
     if Task.isCancelled {
         return
@@ -1096,18 +911,6 @@ func sendWSError(_ message: String, connectionID: UUID, context: ServerContext, 
 }
 
 /// Sends one non-terminal per-tool cancel miss frame through the hub, best-effort.
-///
-/// Kept separate from ``sendWSError`` because the dashboard treats an owned
-/// `error` as a terminal turn failure: routing a per-tool miss through that path
-/// would drop a live turn's accumulated segments over a cancel that stopped
-/// nothing. The dedicated shape only clears the target row's optimistic mark,
-/// so this helper must never carry a turn-ending meaning.
-/// - Parameters:
-///   - message: Human-readable, non-terminal explanation.
-///   - callID: Correlation identifier of the call that could not be cancelled.
-///   - connectionID: Socket that requested the cancel.
-///   - context: Server context owning the hub.
-///   - sessionID: Owning session, when the request was scoped to one.
 func sendToolCancelMiss(
     _ message: String,
     callID: String,

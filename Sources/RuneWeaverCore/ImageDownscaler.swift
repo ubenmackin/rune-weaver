@@ -14,13 +14,7 @@ public enum ImageDownscaler: Sendable {
     public static let defaultMaxBytes: Int = 500 * 1024
 
     /// Downscales an image payload to the target dimension and encodes it as JPEG.
-    /// - Parameters:
-    ///   - data: Raw image bytes (PNG, JPEG, HEIC, WebP, GIF, etc.).
-    ///   - maxDimension: Maximum length of the longest edge in pixels.
-    ///   - maxBytes: Upper bound for the compressed JPEG output.
-    /// - Returns: Compressed JPEG data fitting the budget, or `nil` if decoding fails.
-    ///   Platforms without ImageIO fail closed (`nil`) since pixel dimensions
-    ///   cannot be verified there, keeping the longest-edge cap intact.
+    /// data: Raw image bytes (PNG, JPEG, HEIC, WebP, GIF, etc.).
     public static func downscaleToBudget(
         data: Data,
         maxDimension: Int = defaultMaxDimension,
@@ -71,20 +65,15 @@ public enum ImageDownscaler: Sendable {
             }
             return nil
         #else
-            // Fail closed without ImageIO: byte size alone cannot prove the
-            // longest edge fits the dimension cap (a small file can still hide
-            // thousands of pixels), so refuse rather than pass through
-            // unverified pixels and break the 1280px/500KB contract.
+            // Fail closed without ImageIO: byte size alone cannot prove the longest edge fits the
+            // dimension cap (a small file can still hide thousands of pixels), so refuse rather than
+            // pass through unverified pixels and break the 1280px/500KB contract.
             return nil
         #endif
     }
 
-    /// Downscales image bytes and formats as a standard `data:image/jpeg;base64,...` data URL.
-    /// - Parameters:
-    ///   - data: Raw image data.
-    ///   - maxDimension: Maximum pixel length for the longest edge.
-    ///   - maxBytes: Maximum size for the compressed output.
-    /// - Returns: Data URL string, or `nil` if downscaling fails or exceeds budget.
+    /// Downscales image bytes and formats as a standard `data:image/jpeg;base64,...` data URL. -
+    /// Parameters: - data: Raw image data.
     public static func downscaledDataURL(
         for data: Data,
         maxDimension: Int = defaultMaxDimension,

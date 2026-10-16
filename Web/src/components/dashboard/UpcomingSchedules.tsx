@@ -1,9 +1,4 @@
 // Rune Weaver Dashboard — Upcoming Schedules (Cadence).
-//
-// Surfaces automated recurring tasks scheduled to run:
-// - Schedule frequency (cron / polling)
-// - Fast "Run Now" trigger
-// - Direct link to SchedulerManager
 
 import { useCallback, useEffect, useState } from "react";
 import {

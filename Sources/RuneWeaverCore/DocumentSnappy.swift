@@ -1,11 +1,4 @@
 // Rune Weaver Core — Snappy block decompression for compressed office archives.
-//
-// Pure-Swift, zero-dependency Snappy decompressor conforming to the raw Snappy
-// block framing specification. Used to unpack Apple iWork (.iwa) protobuf streams
-// in Pages, Numbers, and Keynote documents.
-//
-// Read-only, strictly bounds-checked, fail-closed: malformed or truncated payloads
-// return nil rather than crashing or throwing.
 
 import Foundation
 
@@ -14,10 +7,8 @@ public enum DocumentSnappy: Sendable {
     /// Maximum uncompressed bytes permitted per single block (25 MB default cap).
     public static let maxUncompressedBlockBytes = 25 * 1024 * 1024
 
-    /// Decompresses raw Snappy-compressed block bytes.
-    ///
-    /// - Parameter data: Snappy-compressed block data.
-    /// - Returns: Tuple of `(data: Data, bytesConsumed: Int)` on success, or `nil` on failure.
+    /// Decompresses raw Snappy-compressed block bytes. - Returns: Tuple of `(data: Data,
+    /// bytesConsumed: Int)` on success, or `nil` on failure.
     public static func decompress(_ data: Data) -> (data: Data, bytesConsumed: Int)? {
         guard !data.isEmpty else { return nil }
 

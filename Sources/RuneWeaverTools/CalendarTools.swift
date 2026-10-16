@@ -1,8 +1,4 @@
 // Rune Weaver Tools — Calendar search, create, update, and delete tools.
-//
-// Purpose: user-facing ToolBus surface for calendar events with fail-closed validation.
-// Scope: tool naming, schemas, permission levels, and gateway delegation only; no EventKit calls.
-// Architectural role: owns the calendar tool contract while ProductionCalendarGateway owns persistence.
 
 import Foundation
 import RuneWeaverCore

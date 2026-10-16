@@ -1,9 +1,4 @@
 // Rune Weaver Core — Text extraction from modern Apple iWork packages (.numbers, .pages, .keynote).
-//
-// Extracts readable text from Snappy-compressed iWork Archive (.iwa) streams.
-// Discovers .iwa files in reading/table order, decompresses framed Snappy payloads,
-// parses UTF-8 string runs, filters out internal Protobuf/style noise, and joins
-// cell/table/document text into searchable chunks.
 
 import Foundation
 
@@ -16,12 +11,8 @@ enum DocumentIWorkArchive: Sendable {
         "tableCell", "tableName", "tableHeader", "headerRow", "footerRow"
     ]
 
-    /// Extracts text from all relevant `.iwa` entries in an open iWork package.
-    ///
-    /// - Parameters:
-    ///   - archive: Parsed ZIP archive reader.
-    ///   - maxFileBytes: Maximum bytes to consider before capping.
-    /// - Returns: Joined normalized text, or nil if no content was extracted.
+    /// Extracts text from all relevant `.iwa` entries in an open iWork package. - maxFileBytes:
+    /// Maximum bytes to consider before capping.
     static func extractText(from archive: ZipArchiveReader, maxFileBytes: Int) -> String? {
         let iwaNames = archive.entryNames.filter { name in
             name.hasSuffix(".iwa") && !name.hasPrefix("Metadata/") && !isStylesheetEntry(name)
@@ -99,10 +90,8 @@ enum DocumentIWorkArchive: Sendable {
         return extractStrings(fromIWA: data, maxDecompressedBytes: Int.max, consumedDecompressedBytes: &consumed)
     }
 
-    /// Budgeted frame walk capping total decompressed output.
-    ///
-    /// Only a bounded prefix near the declared length reaches the Snappy decoder
-    /// so one frame never copies the remaining tail.
+    /// Budgeted frame walk capping total decompressed output. Only a bounded prefix near the
+    /// declared length reaches the Snappy decoder so one frame never copies the remaining tail.
     static func extractStrings(
         fromIWA data: Data,
         maxDecompressedBytes: Int,

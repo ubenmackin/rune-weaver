@@ -20,11 +20,8 @@ export interface InlineApprovalBannerProps {
 // line truncates, so a large tool payload cannot stretch the chat footer.
 const MAX_INLINE_ARGS_CHARS = 280;
 
-// One-shot (coerced-tool) requests resolve a single parked batch: any durable
-// tier coerces to thisTime and mints no rule, so a standing deny on one is a
-// dead vote. The generic banner hides the Deny-always chevron for these tools,
-// matching the dashboard card; continuation and desktop resume never reach
-// here (dedicated branches below) but stay in the set for contract parity.
+// One-shot (coerced-tool) requests resolve a single parked batch: any durable tier coerces to
+// thisTime and mints no rule, so a standing deny on one is a dead vote.
 const ONE_SHOT_TOOL_NAMES: ReadonlySet<string> = new Set([
   "engine.continue",
   "question.ask",
@@ -37,10 +34,7 @@ function truncateArgs(value: string): string {
   return `${value.slice(0, MAX_INLINE_ARGS_CHARS)}…`;
 }
 
-// Forward-compatible blocked signal for egress triage. The engine currently
-// tags only the host, so absent fields read as unlisted; when the payload
-// carries an explicit blocked flag or a verdict/reason naming a block, the
-// banner names the denial instead of understating it as an allowlist miss.
+// Forward-compatible blocked signal for egress triage.
 interface EgressVerdictShape {
   egressBlocked?: unknown;
   egress_blocked?: unknown;
@@ -65,10 +59,7 @@ export function resolveSandboxSummary(
   return null;
 }
 
-// Reports whether an egress request was denied by an explicit block rather
-// than parked as unlisted. Strict boolean flags win; verdict and reason
-// strings count only when they name a block, so drifted text never flips
-// the copy. Unknown shapes stay unlisted.
+// Reports whether an egress request was denied by an explicit block rather than parked as unlisted.
 export function isEgressBlocked(request: PermissionRequest): boolean {
   const extra = request as PermissionRequest & EgressVerdictShape;
   const flags = [
@@ -105,10 +96,9 @@ export default function InlineApprovalBanner({
   // for this request — 7 for plain, 3 for egress-parked — and sends no scope,
   // so the server resolves the request's own target.
   const allowOptions = durationOptionsFor(request);
-  // Shared split-menu machine: open state, outside-pointer-down dismissal,
-  // focus-on-open, and the allow/deny keyboard flow come from the hook both
-  // decision surfaces consume, so the chat banner and dashboard card cannot
-  // drift apart.
+  // Shared split-menu machine: open state, outside-pointer-down dismissal, focus-on-open, and the
+  // allow/deny keyboard flow come from the hook both decision surfaces consume, so the chat banner
+  // and dashboard card cannot drift apart.
   const {
     allowOpen: menuOpen,
     denyOpen: denyMenuOpen,
@@ -165,10 +155,9 @@ export default function InlineApprovalBanner({
   const isEgress = Boolean(egressHost);
   const egressBlocked = isEgress ? isEgressBlocked(request) : false;
   const sandboxSummary = resolveSandboxSummary(request);
-  // A one-shot request can only deny once: its durable tier coerces to
-  // thisTime inside the shared decision contract and mints no rule, so the
-  // standing-deny chevron stays off the generic banner entirely, matching
-  // the dashboard card.
+  // A one-shot request can only deny once: its durable tier coerces to thisTime inside the shared
+  // decision contract and mints no rule, so the standing-deny chevron stays off the generic banner
+  // entirely, matching the dashboard card.
   const isOneShot = ONE_SHOT_TOOL_NAMES.has(request.toolName);
 
   function handlePickAllow(value: TrustDuration) {
@@ -295,10 +284,9 @@ export default function InlineApprovalBanner({
             </span>
           ) : null
         ) : (
-          // Nil assessment means the background enrichment has not landed
-          // yet: show the pending badge with a spinner instead of outcome
-          // or warnings, while keeping Allow/Deny fully enabled so safety
-          // checking never blocks the decision.
+          // Nil assessment means the background enrichment has not landed yet: show the pending
+          // badge with a spinner instead of outcome or warnings, while keeping Allow/Deny fully
+          // enabled so safety checking never blocks the decision.
           <span
             className="badge approval-severity-badge severity-pending"
             data-testid={`approval-assessment-pending-${request.id}`}

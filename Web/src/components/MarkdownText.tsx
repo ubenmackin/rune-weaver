@@ -1,6 +1,4 @@
 // Rune Weaver Dashboard — Robust Markdown renderer for chat messages and run audits.
-// Powered by react-markdown and remark-gfm for spec-compliant CommonMark and GitHub Flavored Markdown (GFM)
-// with zero unsafe innerHTML.
 
 import React, { createContext, useContext } from "react";
 import ReactMarkdown from "react-markdown";
@@ -62,10 +60,7 @@ function MarkdownPre({ children, ...props }: PreProps) {
   );
 }
 
-/**
- * Normalizes informal table delimiter lines (e.g. `| -+-+-+- |` or `| -+- |`)
- * to standard GFM `| --- | --- |` delimiters so all LLM table formats render cleanly.
- */
+/** Normalizes informal table delimiter lines to standard GFM delimiters. */
 function normalizeMarkdown(text: string): string {
   // Separate divider lines from tables if directly adjacent to prevent setext heading interpretation
   const separated = text.replace(/(\|[\r\n]+)(---+|\*\*\*+|___+)/g, "$1\n$2");

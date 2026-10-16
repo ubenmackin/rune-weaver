@@ -1,20 +1,5 @@
 // Rune Weaver Dashboard — Tests for the persona avatar module: the pure
 // avatar-state priority, the idle→sleeping wake timer that feeds it, the
-// fail-closed image rendering contract, the idle blink's visibility pause,
-// the transform-only float motion with its reduced-motion gate, and the
-// generated bundle assets.
-//
-// The priority matrix is the behavioral core of the persona layer, so the
-// attention > working > sleeping > idle ordering and the 10-minute sleeping
-// boundary are pinned here without timers or fetches, and the wake-timer suite
-// pins that the deadline timer lands on the boundary and never hands
-// `setTimeout` an epoch-scale duration when two clock sources disagree. The
-// component suite pins the two fallback promises (unknown server keys and a
-// load failure must never produce a broken image), and the asset suite pins
-// that the bundle the dashboard's srcSet points at actually exists per
-// colorway-state pair. The motion suite pins that avatar movement is
-// transform-only float gated behind `prefers-reduced-motion: no-preference`
-// with a static fallback, so reduced-motion owners always see still frames.
 
 import { act, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -176,11 +161,9 @@ describe("PersonaAvatar rendering", () => {
   });
 
   it("never emits a sleeping src or sleeping class while blinking", () => {
-    // Regression: the blink's closed phase must not masquerade as the sleeping
-    // state in the DOM — no `wisp-*-sleeping-*` src/srcSet and no
-    // `persona-avatar--sleeping` class on any tick of the blink cycle — while
-    // genuine sleeping (resolved after ten silent minutes) still renders the
-    // sleeping frame untouched.
+    // Regression: blink's closed phase must not masquerade as sleeping in the DOM (no sleeping src
+    // or class on any blink tick), while genuine sleeping after ten silent minutes still renders
+    // the sleeping frame untouched.
     vi.useFakeTimers();
     const { container } = render(<PersonaAvatar color="violet" state="idle" />);
     const img = () =>
@@ -274,11 +257,8 @@ describe("PersonaAvatar rendering", () => {
   });
 });
 
-// Renders the store-resolved state through the shared signals so the
-// sleep-wake deadline timer inside `useResolvedAvatarState` is exercised
-// end-to-end. `blink={false}` keeps the idle blink lid out of the same fake
-// clock, so the landing assertion reads the resolved sleeping frame without a
-// concurrent blink overlay in the tree.
+// Renders the store-resolved state through the shared signals so the sleep-wake deadline timer
+// inside `useResolvedAvatarState` is exercised end-to-end.
 function PersonaSignalsProbe() {
   const state = useResolvedAvatarState();
   return <PersonaAvatar color="violet" state={state} blink={false} dataTestId="signals-probe" />;
@@ -315,13 +295,9 @@ describe("useResolvedAvatarState sleep-wake timer", () => {
   });
 
   it("never hands the wake timer an epoch-scale duration when the clocks diverge", () => {
-    // Regression for the TimeoutOverflowWarning: a clock parked at the epoch
-    // beside a store value written by a real `Date.now()` made the raw
-    // remaining time an absolute timestamp, and past setTimeout's 32-bit
-    // ceiling Node warns and fires after 1 ms instead of waiting. Every delay
-    // scheduled from this mount must stay inside that ceiling, and the
-    // re-arming landing must still deliver idle→sleeping once the deadline
-    // genuinely passes.
+    // Regression for the TimeoutOverflowWarning: a clock parked at the epoch beside a store value
+    // written by a real `Date.now()` made the raw remaining time an absolute timestamp, and past
+    // setTimeout's 32-bit ceiling Node warns and fires after 1 ms instead of waiting.
     const EPOCH_SCALE_ACTIVITY = 1_791_194_688_042;
     const TIMER_CEILING_MS = 2_147_483_647;
     vi.useFakeTimers({ now: 0 });
@@ -354,14 +330,9 @@ describe("persona avatar motion", () => {
   });
 
   it("floats on transform only and freezes under reduced-motion", async () => {
-    // Motion is float-only by contract: the sleeping and working states drift
-    // on translateY alone with no opacity pulse, and every avatar animation
-    // arms only under `prefers-reduced-motion: no-preference` with a static
-    // fallback — so reduced-motion owners always see still frames and the
-    // sleeping dim can only come from the prerendered asset, never a filter.
-    //
-    // The stylesheet probe mirrors the bundle-asset probe below: Node builtins
-    // resolve via dynamic import because the suite carries no @types/node.
+    // Motion is float-only: sleeping and working drift on translateY alone with no opacity pulse,
+    // arming only under `prefers-reduced-motion: no-preference` with a static fallback so
+    // reduced-motion users always see still frames.
     const { readFileSync } = (await import(
       // @ts-expect-error node builtin without @types/node; test-only probe.
       "node:fs"
@@ -433,18 +404,9 @@ describe("persona avatar bundle assets", () => {
   it(
     "ships a 256/64/32 PNG triple per colorway-state pair plus one SVG master per state",
     async () => {
-      // The frames are derived assets owned by scripts/generate_persona_avatars.py
-      // and the srcSet above points at them by name, so a missing file is a
-      // broken avatar surface. If this machine has never rendered them, the
-      // canonical generator (the same single rasterizer everything else uses)
-      // materializes the full set deterministically; the test never writes a
-      // second pipeline.
-      //
-      // Node builtins are resolved via dynamic import on purpose: the project
-      // carries no @types/node (the production bundle must never gain a Node
-      // dependency) and this file-system probe runs only inside the Vitest
       // process. The @ts-expect-error directives are a tripwire — adding
-      // @types/node later will fail here loudly until this shim is retired.
+      // The frames are derived assets owned by scripts/generate_persona_avatars.py and the srcSet
+      // above points at them by name, so a missing file is a broken avatar surface.
       const { existsSync } = (await import(
         // @ts-expect-error node builtin without @types/node; test-only probe.
         "node:fs"
@@ -459,18 +421,9 @@ describe("persona avatar bundle assets", () => {
           options?: { stdio?: string },
         ) => unknown;
       };
-      // Anchor both paths to `process.cwd()`, not `import.meta.url`: under
-      // Vitest the module URL sits in Vite's `/@fs/` serving space, and a
-      // `new URL(..., import.meta.url).pathname` there yields a `/@fs/...`
-      // string that neither `existsSync` nor a `python3` argv can open — the
-      // probe reported the present SVG masters as missing and the generator
-      // fallback died on a file that does not exist. The web suite is always
-      // launched from the `Web/` package directory (`make test-web` runs
-      // `cd Web && npm test`, and the fork pool workers inherit that cwd), so
-      // cwd is the one address every runner shares. The generator anchors its
-      // own outputs to its `__file__`, so handing it this absolute script
-      // path materializes the bundle into `Web/public/avatars` regardless of
-      // any later process-relative drift.
+      // Anchored to `process.cwd()`, not `import.meta.url`: Vitest puts module URLs in `/@fs/`
+      // space where pathnames fail `existsSync` and `python3`, falsely reporting missing masters
+      // and causing generator fallbacks to fail.
       const { resolve } = (await import(
         // @ts-expect-error node builtin without @types/node; test-only probe.
         "node:path"
@@ -495,10 +448,9 @@ describe("persona avatar bundle assets", () => {
         try {
           execFileSync("python3", [generator], { stdio: "pipe" });
         } catch (failure) {
-          // The same toolchain as the favicon/app-icon scripts (python3 plus
-          // Pillow plus sips) is a repo prerequisite; surface its stderr
-          // rather than a bare ENOENT so a broken bundle failure reads as
-          // what it is instead of a mystery.
+          // The same toolchain as the favicon/app-icon scripts (python3 plus Pillow plus sips) is a
+          // repo prerequisite; surface its stderr rather than a bare ENOENT so a broken bundle
+          // failure reads as what it is instead of a mystery.
           const stderr = (failure as { stderr?: unknown }).stderr;
           throw new Error(
             `scripts/generate_persona_avatars.py could not render the bundle: ${

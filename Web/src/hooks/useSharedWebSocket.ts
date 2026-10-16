@@ -1,5 +1,4 @@
-// Shared WebSocket client connecting to /ws with multi-subscriber support.
-// Keeps a single persistent connection across the entire dashboard to avoid duplicate connections.
+// Rune Weaver Dashboard — Shared WebSocket client connecting to /ws with multi-subscriber support.
 
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
@@ -86,10 +85,7 @@ export interface WSStreamDone {
   // engines predate completion footers; absent renders no footer so live cards
   // agree with history reloads that derive the same instant from persistence.
   completedAt?: string | number | null;
-  // Late steering still queued server-side at completion. Mirrors the engine
-  // terminal frame so the view keeps exactly that many newest bubbles for the
-  // next turn and releases the consumed ones answered here; absent on older
-  // engines where the view clears consumed tracking as answered.
+  // Late steering still queued server-side at completion.
   retainedSteerCount?: number;
   // Content-free recall counts plus source names plus skip flag for the chip.
   // Optional because older engines predate the chip; absent renders no chip.
@@ -113,26 +109,14 @@ export interface WSWarningFrame {
   sessionID?: string;
 }
 
-// Session-tagged liveness heartbeat proving the engine is still processing a
-// turn while prompt evaluation emits no deltas to render. Views re-arm their
-// inactivity timer on it without touching message state; older dashboards that
-// do not know this type drop it as an unknown frame. TypeScript mirror of
-// RuneWeaverCore.WSTurnAliveFrame (Sources/RuneWeaverCore/WSWire.swift);
-// update both sides together so the wire shape never drifts.
+// Session-tagged liveness heartbeat proving the engine is still processing a turn while prompt
+// evaluation emits no deltas to render.
 export interface WSTurnAliveFrame {
   type: "turn_alive";
   sessionID?: string;
 }
 
-// Per-round token usage progress for the in-flight turn. The engine emits one
-// frame after each LLM round that reports usage so the footer shows a running
-// turn total and a live session estimate without waiting for done, which stays
-// authoritative for reconciliation. Session-tagged like the heartbeat so
-// multiplexed views only apply their own turn and older dashboards drop the
-// unknown type. Counters stay required like the engine frame so a partial
-// payload never renders as a zeroed sum. TypeScript mirror of
-// RuneWeaverCore.WSTurnTokensFrame (Sources/RuneWeaverCore/WSWire.swift);
-// update both sides together.
+// Per-round token usage progress for the in-flight turn.
 export interface WSTurnTokensFrame {
   type: "turn_tokens";
   sessionID?: string;
@@ -147,12 +131,9 @@ export interface WSTurnTokensFrame {
   contextTokens?: number;
 }
 
-// Live per-tool progress for one executing call. The engine throttles these
-// (~2 Hz) and tags them with the owning session so multiplexed views only apply
-// their own turn; `current` is relative-only and optional. Counters stay
-// required so a partial payload drops rather than rendering a zeroed tally.
-// TypeScript mirror of the engine's `tool_progress` frame; update both sides
-// together so the wire shape never drifts.
+// Live per-tool progress for one executing call. The engine throttles these (~2 Hz) and tags them
+// with the owning session so multiplexed views only apply their own turn; `current` is relative-only
+// and optional.
 export interface WSToolProgressFrame {
   type: "tool_progress";
   callID: string;
@@ -175,11 +156,6 @@ export interface WSErrorFrame {
 }
 
 // Non-terminal acknowledgement that a per-tool cancel found nothing to stop.
-// The engine emits this instead of `error` because the view treats an owned
-// `error` as a terminal turn failure; a miss must only clear the row's
-// optimistic cancel mark. `callID` stays required so a partial frame can never
-// clear an unrelated row. TypeScript mirror of the engine's `tool_cancel_miss`
-// frame; update both sides together so the wire shape never drifts.
 export interface WSToolCancelMissFrame {
   type: "tool_cancel_miss";
   callID: string;
@@ -188,22 +164,14 @@ export interface WSToolCancelMissFrame {
   sessionID?: string;
 }
 
-// Global goal-change broadcast emitted on create, plan-ready, step progress,
-// status flips, and advancement turns so dashboards patch one row instead of
-// refetching the list. The snapshot rides whole because the push is the
-// refresh. Untagged rather than session-scoped: a goal outlives any single
-// turn, so only the goal identity routes it. TypeScript mirror of
-// RuneWeaverCore.WSGoalUpdatedFrame; update both sides together.
+// Global goal-change broadcast emitted on create, plan-ready, step progress, status flips, and
+// advancement turns so dashboards patch one row instead of refetching the list.
 export interface WSGoalUpdatedFrame {
   type: "goal_updated";
   goal: Goal;
 }
 
-// Owner-visible nudge the engine volunteers outside any turn (a due goal, a
-// parked wait). `kind` names the trigger family while `title` plus `headline`
-// carry the one-line card; the optional session and goal links let a card
-// deep-link without a second lookup. TypeScript mirror of
-// RuneWeaverCore.WSProactiveMessageFrame; update both sides together.
+// Owner-visible nudge the engine volunteers outside any turn (a due goal, a parked wait).
 export interface WSProactiveMessageFrame {
   type: "proactive_message";
   kind: string;
@@ -230,24 +198,14 @@ export interface WSFileDiscardedFrame {
   sessionID?: string;
 }
 
-// Terminal broadcast for one resolved live write review. The optional state
-// names which branch ran so a card reconciles without re-reading the ledger:
-// `accepted` keeps the write, `reverted` restores the rollback copy, and
-// `discarded` removes a newly created file. TypeScript mirror of the engine
-// `live_resolved` frame (WSFileActionEvent); update both sides together so the
-// wire shape never drifts.
+// Terminal broadcast for one resolved live write review.
 export interface WSLiveResolvedFrame {
   type: "live_resolved";
   path?: string;
   state?: "accepted" | "reverted" | "discarded";
 }
 
-// Terminal broadcast for one pending staged write review that a live write
-// superseded. A superseding live write resolves the staged ledger row inside
-// the write tool rather than a route, so the frame carries the canonical live
-// path plus the staged row's terminal state. TypeScript mirror of the engine
-// `file_superseded` frame (WSFileActionEvent); update both sides together so
-// the wire shape never drifts.
+// Terminal broadcast for one pending staged write review that a live write superseded.
 export interface WSFileSupersededFrame {
   type: "file_superseded";
   path?: string;
@@ -319,10 +277,8 @@ export type WSIncomingFrame =
 
 export type MessageHandler = (data: WSIncomingFrame) => void;
 
-// Index runs may omit the tool name on older engines, so a progress frame
-// with a blank or missing tool name still passes when its message and
-// counters are otherwise valid. The index panel adopts such frames during any
-// run in flight, while chat keeps dropping them at its own parser.
+// Index runs may omit the tool name on older engines, so a progress frame with a blank or missing
+// tool name still passes when its message and counters are otherwise valid.
 function isIndexProgressWithoutToolName(value: Record<string, unknown>): boolean {
   if (!(value.sessionID === undefined || typeof value.sessionID === "string")) {
     return false;
@@ -373,9 +329,6 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
       // Text and the parked flag are both optional for back-compat: older engines omit them when
       // streamed deltas already carry the reply or when the turn was never parked, and the view
       // finalizes from its accumulated snapshot while treating a missing flag as not parked.
-      // Terminal warnings degrade to absent via the shared sanitizer so a drifted shape never
-      // drops an otherwise complete turn. Recall diagnostics degrade the same way
-      // through the shared parser.
       if (
         !(value.text === undefined || typeof value.text === "string") ||
         typeof value.sessionID !== "string" ||
@@ -431,12 +384,9 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
           typeof value.message === "string")
       );
     case "turn_tokens":
-      // Token counters are required like the engine frame: a frame missing any
-      // counter drops here so dashboards never render a partial sum as zeroed
-      // progress, matching the engine decoder which throws on missing keys.
-      // Counters stay non-negative integers like the round-index and engine
-      // Int contract so a drifted engine cannot smuggle a negative or
-      // fractional sum into live footers.
+      // Token counters are required like the engine frame: a frame missing any counter drops here
+      // so dashboards never render a partial sum as zeroed progress, matching the engine decoder
+      // which throws on missing keys.
       return (
         (value.sessionID === undefined ||
           typeof value.sessionID === "string") &&
@@ -492,10 +442,8 @@ class SharedWebSocketClient {
   private platformListenersAttached = false;
 
   constructor() {
-    // The socket follows the owner-auth gate: a login or rotation must present
-    // the new token at the next upgrade, and a logout or uniform 401 must drop a
-    // socket the engine no longer honors. The subscription reports changes only,
-    // so construction stays side-effect free.
+    // The socket follows the owner-auth gate: a login or rotation must present the new token at the
+    // next upgrade, and a logout or uniform 401 must drop a socket the engine no longer honors.
     subscribeAuthState((authenticated) => {
       this.handleAuthStateChange(authenticated);
     });
@@ -505,10 +453,8 @@ class SharedWebSocketClient {
     this.attachPlatformListeners();
   }
 
-  // Attaches the online/visibility re-arm exactly once so repeated resets
-  // never stack duplicate wake signals. Marks attached only when a listener
-  // was actually installed so a render without window/document can still
-  // attach later on hydration instead of staying permanently detached.
+  // Attaches the online/visibility re-arm exactly once so repeated resets never stack duplicate
+  // wake signals.
   private attachPlatformListeners(): void {
     if (this.platformListenersAttached) return;
     let attached = false;
@@ -543,11 +489,8 @@ class SharedWebSocketClient {
     this.platformListenersAttached = false;
   }
 
-  // Releases platform wake signals plus any pending reconnect and the cached
-  // socket so module replacement leaves no orphaned listeners, timers, or
-  // sockets behind. Subscribers stay owned by their mounted views: the next
-  // subscribe re-dials on demand, while a stale timer or socket must never
-  // outlive the module and dial after replacement.
+  // Releases platform wake signals plus any pending reconnect and the cached socket so module
+  // replacement leaves no orphaned listeners, timers, or sockets behind.
   public dispose(): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -662,10 +605,7 @@ class SharedWebSocketClient {
     );
   }
 
-  // Releases the idle loopback socket once the last subscriber leaves. An
-  // unclosed idle socket would pin the connection forever after every view
-  // unmounts, so teardown cancels a pending reconnect and closes the handle;
-  // the close callback sees no subscribers and schedules nothing further.
+  // Releases the idle loopback socket once the last subscriber leaves.
   private closeIdleConnection(): void {
     if (this.hasSubscribers()) return;
     if (this.reconnectTimer) {
@@ -674,12 +614,9 @@ class SharedWebSocketClient {
     }
     if (this.ws) {
       try {
-        // Closing an OPEN socket fires onclose, which re-checks subscribers
-        // before scheduling, so an idle close never resurrects itself. A
-        // CONNECTING socket aborts the same way instead of lingering. The
-        // reference drops immediately so isOpen flips without waiting for the
-        // async close event; the stale onclose is identity-guarded and cannot
-        // null a fresh socket dialed by the next subscriber.
+        // Closing an OPEN socket fires onclose, which re-checks subscribers before scheduling, so
+        // an idle close never resurrects itself. A CONNECTING socket aborts the same way instead of
+        // lingering.
         if (
           this.ws.readyState === WebSocket.OPEN ||
           this.ws.readyState === WebSocket.CONNECTING
@@ -687,12 +624,8 @@ class SharedWebSocketClient {
           const closing = this.ws;
           closing.close();
         }
-        // CLOSED/CLOSING and unknown states need no close call; dropping the
-        // reference lets the next subscriber dial fresh instead of joining a
-        // stale close.
-        // Single release point for every state above: re-check subscribers
-        // after the close because a view may have resubscribed while the
-        // close was in flight, and that fresh interest must keep the handle.
+        // CLOSED/CLOSING and unknown states need no close call; dropping the reference lets the
+        // next subscriber dial fresh instead of joining a stale close.
         if (!this.hasSubscribers()) {
           this.ws = null;
         }
@@ -717,10 +650,8 @@ class SharedWebSocketClient {
     }, 3000);
   }
 
-  // Reacts to an authentication transition by releasing a socket the engine
-  // would now reject or redialing with a newly adopted credential. A rotation
-  // swaps the token while the old socket is still open server-side, so the
-  // socket is closed and redialed rather than left running on a stale upgrade.
+  // Reacts to an authentication transition by releasing a socket the engine would now reject or
+  // redialing with a newly adopted credential.
   private handleAuthStateChange(authenticated: boolean): void {
     if (!authenticated) {
       if (this.reconnectTimer) {
@@ -745,10 +676,8 @@ class SharedWebSocketClient {
     this.reconnectNow();
   }
 
-  // Forces a fresh upgrade so the new token is presented immediately. The old
-  // handle is detached before close so its asynchronous onclose cannot clobber
-  // the replacement socket. Private forced-redial primitive; views reach it
-  // only through the single public retryConnection entry below.
+  // Forces a fresh upgrade so the new token is presented immediately. The old handle is detached
+  // before close so its asynchronous onclose cannot clobber the replacement socket.
   private reconnectNow(): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -791,10 +720,8 @@ class SharedWebSocketClient {
     if (onOpen) {
       this.openListeners.add(onOpen);
     }
-    // A new subscriber arriving while the socket is closing must not wait
-    // for the stale 3s reconnect: reconnect immediately so it joins live.
-    // Idle callers with no callbacks skip the dial so they never resurrect a
-    // released socket.
+    // A new subscriber arriving while the socket is closing must not wait for the stale 3s
+    // reconnect: reconnect immediately so it joins live.
     if (this.hasSubscribers()) {
       if (
         !this.ws ||
@@ -889,13 +816,8 @@ export function useSharedWebSocket(onMessage?: MessageHandler, onClose?: () => v
     openRef.current = onOpen;
   }, [onOpen]);
 
-  // Subscribes only the callbacks the caller actually wants so a mounted view
-  // with no handler holds no socket interest and never pins an idle loopback
-  // connection. Presence (not identity) drives resubscription: ref indirection
-  // keeps forwarding the latest callbacks without churning the shared socket,
-  // while a handler that arrives after mount still dials instead of waiting
-  // for a stale reconnect. Unmount releases the last hold via the client's
-  // idle close instead of leaving an OPEN socket behind.
+  // Subscribes only the callbacks the caller actually wants so a mounted view with no handler holds
+  // no socket interest and never pins an idle loopback connection.
   const wantsMessage = onMessage != null;
   const wantsClose = onClose != null;
   const wantsOpen = onOpen != null;

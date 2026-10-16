@@ -1,12 +1,4 @@
 // Rune Weaver Tools — RE2-safe regex policy for `files.grep`.
-//
-// Purpose: hold the linear-time pattern subset so pathological expressions
-// fail closed before any file is opened, keeping costly backtracking off the
-// cooperative pool. Scope: shape checks only (backreferences, lookaround,
-// atomic and possessive forms, nested quantifiers); pattern compilation and
-// the file walk stay with the tool. Architectural role: single-source policy
-// backing `FilesGrepTool`; every search vets its pattern here so the tool
-// body stays within the type-length budget without a second policy pass.
 
 import Foundation
 
@@ -81,12 +73,9 @@ extension FilesGrepTool {
         return nil
     }
 
-    /// Reports whether a pattern quantifies a group that already contains a quantified atom.
-    /// Keeps matching linear-time under ICU backtracking by failing closed on forms like
-    /// `(a+)+`, `(a*)*`, `([a]+)+`, or `(a{2,3})+`. Escapes and character classes are
-    /// skipped so literals like `[a+]+` stay allowed; a quantified inner group counts as
-    /// a quantified atom for its parent so `((a)+)+` still refuses. Invariant: over-rejecting
-    /// an edge spelling stays fail-closed, while under-rejecting would hang the turn.
+    /// Reports whether a pattern quantifies a group that already contains a quantified atom. Keeps
+    /// matching linear-time under ICU backtracking by failing closed on forms like `(a+)+`, `(a*)*`,
+    /// `([a]+)+`, or `(a{2,3})+`.
     static func containsNestedQuantifier(_ pattern: String) -> Bool {
         let chars = Array(pattern)
         var stack: [Bool] = []
@@ -154,10 +143,6 @@ extension FilesGrepTool {
     }
 
     /// Length of the quantifier starting at an index, or zero when the text is literal.
-    /// Covers `*`, `+`, `?` with lazy or possessive tails plus `{m}`, `{m,}`, `{m,n}`
-    /// with an optional trailing modifier, so lazy `+?` consumes as one atom instead of
-    /// reading its `?` as a second quantifier. A `{` without the digit-comma-brace shape
-    /// stays literal for nesting purposes and lets the regex compiler report validity.
     static func quantifierLength(at position: Int, in chars: [Character]) -> Int {
         guard position < chars.count else { return 0 }
         let head = chars[position]

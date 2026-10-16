@@ -13,9 +13,6 @@ struct ValidatedDefinitions: Sendable {
 }
 
 /// Checks whether a decoded schema object is safe to send on the wire.
-/// Single-sources the rule through the prompt filter so wire and prompt agree
-/// on which schemas are valid; strict backends reject non-object types and
-/// malformed additionalProperties, so those degrade to fewer tools.
 func isValidToolParametersObject(_ object: [String: Any]) -> Bool {
     VisionSchemaFilter.isValidParametersObject(object)
 }
@@ -55,10 +52,8 @@ func validatedDefinitions(_ tools: [ToolDefinition], logSkips: Bool = true) -> V
     return ValidatedDefinitions(valid: part.valid, skipped: part.skipped)
 }
 
-/// Builds a JSON request body for `/chat/completions`.
-/// - Parameters:
-///   - cachePrompt: llama.cpp-only KV-cache hint; nil omits the key so cloud providers are unaffected.
-///   - slotID: llama.cpp-only sticky slot; nil omits the key so the server auto-assigns.
+/// Builds a JSON request body for `/chat/completions`. cachePrompt: llama.cpp-only
+/// KV-cache hint; nil omits the key so cloud providers are unaffected.
 func openAIChatRequestBody(
     model: String,
     messages: [Message],
@@ -87,10 +82,9 @@ func openAIChatRequestBody(
     if !tools.isEmpty {
         // Omit invalid entries so a single bad schema degrades to fewer tools, not a failed turn.
         let filtered = validatedDefinitions(tools)
-        // Canonical wire sort lives here at the request-body boundary: it mirrors
-        // the prompt's sorted order so leading bytes stay identical across rounds
-        // and the server can reuse the cached prefix. Earlier helpers pass
-        // definitions through unsorted so this stays the single ordering site.
+        // Canonical wire sort lives here at the request-body boundary: it mirrors the prompt's
+        // sorted order so leading bytes stay identical across rounds and the server can reuse the
+        // cached prefix.
         let ordered = VisionSchemaFilter.sortedByName(filtered.valid, name: { $0.name })
         if !ordered.isEmpty {
             body["tools"] = try ordered.map { tool -> [String: Any] in
@@ -115,10 +109,8 @@ func openAIChatRequestBody(
 }
 
 private func buildOpenAIChatWireMessages(messages: [Message]) -> [[String: Any]] {
-    // OpenAI-compatible endpoints reject an assistant `tool_calls` entry that no
-    // following tool-role message answers. Parked/approval-gated placeholders persist
-    // an assistant note with no results until the approval resumes, so restrict
-    // promotion to call IDs that already have a result in this request.
+    // OpenAI-compatible endpoints reject an assistant `tool_calls` entry that no following
+    // tool-role message answers.
     let answeredCallIDs = answeredToolCallIDs(in: messages)
     // Track identifiers across the whole request so a call ID re-persisted in a
     // later note cannot reach the wire twice beside its single answer.
@@ -219,9 +211,6 @@ private func buildOpenAIChatWireMessages(messages: [Message]) -> [[String: Any]]
 }
 
 /// Validates and returns tool call arguments for the wire, falling back to "{}" if malformed.
-/// Protects OpenAI-compatible and llama.cpp endpoints (which strictly parse arguments as JSON)
-/// from 500 errors when encountering legacy truncated placeholders (e.g. ending in '…') or invalid syntax.
-/// The wire expects an object string, so non-object valid JSON (arrays, scalars, null) also falls back.
 func sanitizedToolCallArgumentsJSON(_ raw: String) -> String {
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return "{}" }
@@ -261,17 +250,6 @@ struct ResponsesAssistantContentSplit: Sendable {
 }
 
 /// Splits an assistant message into structured calls plus leftover text.
-/// - Parameter answeredCallIDs: When provided, a parsed placeholder whose call ID
-///   has no matching tool result is scrubbed from the wire entirely instead of
-///   becoming a call, so dangling parked/gated placeholders neither reach the wire
-///   as unmatched calls nor leak their raw `Calling …` text as content. Passing nil
-///   promotes every parsed placeholder, preserving the result-free split used by
-///   callers that validate placeholders in isolation.
-/// - Parameter excludingCallIDs: Identifiers already emitted earlier in this request.
-///   A placeholder carrying one drops entirely so a single call ID never maps to two
-///   wire entries; a repeat inside this note collapses the same way.
-/// - Returns: The split result carrying structured calls, leftover text, and whether
-///   any placeholder line was recognized.
 func splitResponsesAssistantContent(
     _ content: String,
     answeredCallIDs: Set<String>? = nil,
@@ -293,11 +271,8 @@ func splitResponsesAssistantContent(
             // rather than leaking plumbing back into the leftover text.
             guard emitted.insert(call.id).inserted else { continue }
             if let answeredCallIDs, !answeredCallIDs.contains(call.id) {
-                // Dangling placeholder: a parked or approval-gated call has no
-                // result in this request, so promoting it would send an unmatched
-                // call. Scrub the line entirely rather than re-emitting the raw
-                // `Calling …` plumbing as request content; genuine prose on this
-                // same note still survives through the else branch below.
+                // Dangling placeholder: a parked or approval-gated call has no result in this
+                // request, so promoting it would send an unmatched call.
                 continue
             }
             calls.append(call)
@@ -312,10 +287,8 @@ func splitResponsesAssistantContent(
     )
 }
 
-/// Builds a JSON request body for `/responses`.
-/// - Parameters:
-///   - cachePrompt: llama.cpp-only KV-cache hint; nil omits the key so cloud providers are unaffected.
-///   - slotID: llama.cpp-only sticky slot; nil omits the key so the server auto-assigns.
+/// Builds a JSON request body for `/responses`. cachePrompt: llama.cpp-only
+/// KV-cache hint; nil omits the key so cloud providers are unaffected.
 func openAIResponsesRequestBody(
     model: String,
     messages: [Message],

@@ -1,17 +1,4 @@
 // Rune Weaver Core Tests — CPU and memory bounds for shell execution.
-//
-// Purpose: pin the `[bash]` resource contract that keeps shell turns bounded
-// without cgroup isolation: CPU time plus address-space budgets with
-// fail-closed validation, best-effort `ulimit` prefixing, and an honest
-// CPU-only kill-reason envelope distinguishing wall-clock kills from CPU-limit
-// kills (memory-limit deaths stay clean).
-// Scope: config defaults plus TOML decode plus canonical render round-trip
-// plus clamp and validation bounds, `ulimit` prefix construction, kill-reason
-// classification, and live shell fixtures for clean, wall-timeout, and
-// resource-limit deaths.
-// Architectural role: regression net beside the Tools shell and the Core
-// config loader, proving a spinning loop dies by its CPU budget rather than
-// the wall watchdog.
 
 import Foundation
 @testable import RuneWeaverCore

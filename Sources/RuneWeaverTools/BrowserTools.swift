@@ -1,24 +1,4 @@
 // Rune Weaver Tools — Interactive browser navigation plus unified act.
-//
-// `browser.navigate` (read-only open returning distilled text plus snapshot
-// refs) and `browser.act` (approval-gated single validated action against one
-// ref plus its snapshot URL) share one subprocess gateway and one persistent
-// Chromium profile, so login sessions survive across calls while refs never
-// cross pages; every call closes its context before returning, and helper
-// spawns serialize process-wide on Chromium's one-process-per-profile lock.
-// The configured `browser.timeout_seconds` rides the request document so
-// navigation and per-action waits honor it, not just the subprocess kill.
-// The unified act surface validates one verb (click, fill, select,
-// press, scroll) plus integer-or-string ref aliases against the snapshot URL,
-// parking every call with target plus URL. Every URL-bearing verb vets
-// through the canonical SSRF guard with the configured search, media, and
-// model exemptions before reaching the bridge, and every bridge-reported
-// redirect and landing URL re-vets the same way so a public start cannot
-// bounce into loopback, link-local, metadata, or private ranges.
-// Screenshots are an opt-in
-// `includeScreenshot` flag (default false) advertised only to vision-capable
-// models and stripped from text-only history, with captures held in memory
-// for the turn and only a content hash persisted.
 
 import Foundation
 import RuneWeaverCore
@@ -47,11 +27,6 @@ public struct BrowserNavigateArgs: Sendable, Equatable, Decodable {
     }
 
     /// Decodes canonical navigate arguments.
-    /// Strict wire carries only `url`/`includeScreenshot`/`headed`; `interactive`
-    /// stays as intentional compatibility for headed and is kept out of the schema
-    /// so retired page and screenshot spellings fail closed while old prompts
-    /// still park correctly.
-    /// - Parameter decoder: Decoder for the arguments document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if let direct = try container.decodeIfPresent(String.self, forKey: .url), !direct.isEmpty {
@@ -110,10 +85,6 @@ public struct BrowserActArgs: Sendable, Equatable, Decodable {
     }
 
     /// Decodes canonical act arguments.
-    /// Strict wire carries only `action`/`ref`/`text`/`key`/`url`; `key` stays as
-    /// intentional compatibility for press text and integer refs coerce to snapshot
-    /// shape, both kept out of the strict schema beyond the string `ref` so wire
-    /// plus decoder agree on retired spellings.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if let direct = try container.decodeIfPresent(String.self, forKey: .action), !direct.isEmpty {
@@ -145,11 +116,9 @@ public struct BrowserActArgs: Sendable, Equatable, Decodable {
 
     /// Decodes the element ref from string or integer input.
     private static func decodeRef(from container: KeyedDecodingContainer<CodingKeys>) throws -> String {
-        // String input probes with `try?` so an integer-shaped value
-        // (for example `{"ref": 12}`) does not throw a type mismatch before
-        // the integer pass maps it to snapshot shape (`"e12"`). Bare numeric
-        // strings normalize through the shared validator so `"12"` behaves
-        // like `12` under the string-only `ref` schema with decoder coercion.
+        // String input probes with `try?` so an integer-shaped value (for example `{"ref": 12}`)
+        // does not throw a type mismatch before the integer pass maps it to snapshot shape
+        // (`"e12"`).
         if let direct = try? container.decodeIfPresent(String.self, forKey: .ref),
            !direct.isEmpty
         {
@@ -273,12 +242,6 @@ public struct BrowserNavigateEnvelope: Sendable, Equatable, Codable {
     }
 
     /// Decodes tolerantly across envelope shapes.
-    /// Shared wire fields (`finalUrl`, redirect chain and count,
-    /// `authRequired`, text snapshot, screenshot hash and data URL) decode
-    /// single-sourced through `BrowserNavigateResult` (backed by
-    /// `BrowserNavigateWire`); only envelope-only keys decode locally so the
-    /// shape cannot drift between tool output and display/audit.
-    /// - Parameter decoder: Decoder for the envelope document.
     public init(from decoder: Decoder) throws {
         let shared = try BrowserNavigateResult(from: decoder)
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -337,9 +300,6 @@ public struct BrowserNavigateEnvelope: Sendable, Equatable, Codable {
     }
 
     /// Copy safe for durable history with transient pixels removed.
-    /// Screenshot stripping shares the display/audit contract: the shared
-    /// view drops the data URL while keeping the hash, and the envelope
-    /// mirrors that outcome so persisted tool output and history agree.
     public func strippedForPersistence() -> BrowserNavigateEnvelope {
         let stripped = asResult().strippedForPersistence()
         return BrowserNavigateEnvelope(
@@ -371,11 +331,9 @@ public struct BrowserNavigateEnvelope: Sendable, Equatable, Codable {
         )
     }
 
-    /// Parses a raw tool output document, returning nil for non-browser payloads.
-    /// Shares the `BrowserNavigateResult.parse` gate so tool output and
-    /// display agree on what counts as a browser document.
-    /// - Parameter content: Raw JSON tool output.
-    /// - Returns: Decoded envelope, or nil when the payload is not browser JSON.
+    /// Parses a raw tool output document, returning nil for non-browser payloads. Shares the
+    /// `BrowserNavigateResult.parse` gate so tool output and display agree on what counts as a
+    /// browser document.
     public static func parse(_ content: String) -> BrowserNavigateEnvelope? {
         guard BrowserNavigateResult.parse(content) != nil else { return nil }
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -437,9 +395,6 @@ public struct BrowserNavigateTool: Tool, Sendable {
             + "Auth walls escalate to human login via headed=true; downloads are manifest-only. "
             + "Navigation is SSRF-guarded: approval-free browsing must not dial loopback, link-local, metadata, or private ranges."
     /// Function-calling contract for `url`, the screenshot opt-in, and headed mode.
-    /// Schema advertises only canonical keys; decoder tolerance for retired
-    /// spellings stays out of the schema as intentional compatibility so strict
-    /// validators and the decoder agree on what is advertised.
     public let inputSchema =
         JSONSchema(
             rawValue: """
@@ -493,13 +448,6 @@ public struct BrowserNavigateTool: Tool, Sendable {
     }
 
     /// Creates a navigate tool.
-    /// Delegates to the designated config-bound init with a neutral policy so
-    /// the precomputed explicit set stays the sole exemption source instead of
-    /// gaining a default search origin the caller never configured.
-    /// - Parameters:
-    ///   - gateway: Playwright gateway. Defaults to the `python3` subprocess bridge.
-    ///   - allowlistedOrigins: Allowlisted origin and host patterns exempted from SSRF refusals.
-    ///   - egressSupervisor: Optional supervisor screening destination URLs against policy.
     public init(
         gateway: (any BrowserPlaywrightGateway)? = nil,
         allowlistedOrigins: Set<String> = [],
@@ -516,17 +464,6 @@ public struct BrowserNavigateTool: Tool, Sendable {
     }
 
     /// Creates a navigate tool bound to the configured exemption set.
-    /// Entry URLs vet through the canonical guard with search, media, and
-    /// model origins exempted before reaching the bridge, and every
-    /// bridge-reported hop re-vets the same way so a public start cannot
-    /// bounce into sensitive ranges.
-    /// - Parameters:
-    ///   - gateway: Playwright gateway. Defaults to a config-bound subprocess bridge.
-    ///   - browserConfig: `[browser]` policy feeding the SSRF exemption set.
-    ///   - mediaConfig: Optional media policy for auto-allowing media server origins.
-    ///   - llmServerURLs: Configured model endpoints exempted from the loopback deny.
-    ///   - allowlistedOrigins: Additional origin and host patterns exempted alongside the configured set.
-    ///   - egressSupervisor: Optional supervisor screening destination URLs against policy.
     public init(
         gateway: (any BrowserPlaywrightGateway)? = nil,
         browserConfig: BrowserConfig,
@@ -569,13 +506,9 @@ public struct BrowserNavigateTool: Tool, Sendable {
         let includeScreenshot = args.includeScreenshot
             || BrowserScreenshotPolicy.includeScreenshotRequested(argumentsJSON: input.argumentsJSON)
         do {
-            // Single stateful policy gate lives in the gateway's
-            // session-aware path, reached dynamically through the protocol
-            // requirement so every bridge honors the calling session's
-            // grants. The tool keeps SSRF-only pre- and post-checks around
-            // the call (no grant consumed): the pre-check avoids spawning
-            // the helper for malformed entry, and the post-check covers
-            // injected doubles that bypass the gateway's hop gate.
+            // Single stateful policy gate lives in the gateway's session-aware path, reached
+            // dynamically through the protocol requirement so every bridge honors the calling
+            // session's grants.
             _ = try await BrowserValidation.validateURLAsync(
                 args.trimmedURL,
                 browserConfig: browserConfig,
@@ -646,13 +579,8 @@ public struct BrowserNavigateTool: Tool, Sendable {
             notes.append("Screenshot requested but unavailable (over budget or capture failed); text snapshot carries the page content.")
             screenshotHash = nil
         }
-        // Bounded captures live in memory for this turn only: the envelope
-        // carries the transient data URL while durable history keeps only the
-        // hash (`strippedForPersistence`). Pixels are never written to disk,
-        // so no per-navigate temp directory accumulates; the helper already
-        // downscales to the 1280px longest edge (`targetCaptureSize`) and
-        // re-encodes to bounded JPEG, and this budget check is a fail-closed
-        // last resort for still-over-budget payloads.
+        // Bounded captures live in memory for this turn only: the envelope carries the transient
+        // data URL while durable history keeps only the hash (`strippedForPersistence`).
         if let dataURL = screenshotDataURL,
            let bytes = BrowserBridgeParsing.screenshotBytes(from: dataURL),
            BrowserScreenshotPolicy.isWithinBudget(byteCount: bytes.count)
@@ -691,9 +619,6 @@ public struct BrowserActTool: Tool, Sendable {
             + "fill/select need text, approval-gated, manifest-only downloads. "
             + "Act URLs are SSRF-guarded like navigation: loopback, link-local, metadata, and private ranges stay denied."
     /// Function-calling contract for `action`, `ref`, optional `text`, and `url`.
-    /// Schema advertises only canonical keys; decoder tolerance for retired
-    /// spellings and integer refs stays out of the schema as intentional
-    /// compatibility so strict validators and the decoder agree on what is advertised.
     public let inputSchema =
         JSONSchema(
             rawValue: """
@@ -749,14 +674,8 @@ public struct BrowserActTool: Tool, Sendable {
         gateway
     }
 
-    /// Creates an act tool.
-    /// Delegates to the designated config-bound init with a neutral policy,
-    /// matching the navigate tool: the explicit set stays the only exemption
-    /// source here.
-    /// - Parameters:
-    ///   - gateway: Playwright gateway. Defaults to the `python3` subprocess bridge.
-    ///   - allowlistedOrigins: Allowlisted origin and host patterns exempted from SSRF refusals.
-    ///   - egressSupervisor: Optional supervisor screening destination URLs against policy.
+    /// Creates an act tool. Delegates to the designated config-bound init with a neutral policy,
+    /// matching the navigate tool: the explicit set stays the only exemption source here.
     public init(
         gateway: (any BrowserPlaywrightGateway)? = nil,
         allowlistedOrigins: Set<String> = [],
@@ -773,16 +692,6 @@ public struct BrowserActTool: Tool, Sendable {
     }
 
     /// Creates an act tool bound to the configured exemption set.
-    /// The snapshot URL vets through the canonical guard with search, media,
-    /// and model origins exempted before the bridge re-navigates, and the
-    /// reported post-action URL re-vets the same way before it enters output.
-    /// - Parameters:
-    ///   - gateway: Playwright gateway. Defaults to a config-bound subprocess bridge.
-    ///   - browserConfig: `[browser]` policy feeding the SSRF exemption set.
-    ///   - mediaConfig: Optional media policy for auto-allowing media server origins.
-    ///   - llmServerURLs: Configured model endpoints exempted from the loopback deny.
-    ///   - allowlistedOrigins: Additional origin and host patterns exempted alongside the configured set.
-    ///   - egressSupervisor: Optional supervisor screening destination URLs against policy.
     public init(
         gateway: (any BrowserPlaywrightGateway)? = nil,
         browserConfig: BrowserConfig,
@@ -839,10 +748,8 @@ public struct BrowserActTool: Tool, Sendable {
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
-        // Act previews stay local: the would-act envelope returns without
-        // reaching the gateway, so no browser context is opened and the
-        // gateway exposes no dry-run overload to go stale. Preview URLs vet
-        // SSRF-only here (no grant consumed) while the live run gates fully.
+        // Act previews stay local: the would-act envelope returns without reaching the gateway, so
+        // no browser context is opened and the gateway exposes no dry-run overload to go stale.
         if context.dryRun {
             do {
                 let url = try BrowserValidation.validateURL(
@@ -865,13 +772,9 @@ public struct BrowserActTool: Tool, Sendable {
             }
         }
         do {
-            // Single stateful policy gate lives in the gateway's
-            // session-aware path, reached dynamically through the protocol
-            // requirement so every bridge honors the calling session's
-            // grants. The tool keeps SSRF-only pre- and post-checks around
-            // the call (no grant consumed): the pre-check avoids spawning
-            // the helper for a sensitive snapshot URL, and the post-check
-            // covers injected doubles that bypass the gateway's landing gate.
+            // Single stateful policy gate lives in the gateway's session-aware path, reached
+            // dynamically through the protocol requirement so every bridge honors the calling
+            // session's grants.
             _ = try await BrowserValidation.validateURLAsync(
                 args.trimmedURL,
                 browserConfig: browserConfig,
@@ -969,9 +872,6 @@ public enum BrowserTools {
     }
 
     /// Builds the browser tools sharing one gateway bound to the configured exemption set.
-    /// Entry URLs vet through the canonical guard with search, media, and
-    /// model origins exempted, and every bridge-reported hop re-vets the same
-    /// way; the explicit set rides along for callers that precompute origins.
     public static func makeTools(
         gateway: (any BrowserPlaywrightGateway)? = nil,
         browserConfig: BrowserConfig,

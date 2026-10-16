@@ -1,17 +1,4 @@
 // Rune Weaver Dashboard — Global label interaction fix for text selection.
-//
-// Purpose: In standard HTML, clicking or selecting text inside a `<label>` element
-// triggers the browser's default label activation algorithm, focusing or clicking
-// the associated form control. For text inputs, textareas, and selects, this causes
-// the caret to jump into the input field and destroys any text selection, making it
-// impossible for users to highlight and copy field labels.
-//
-// This helper attaches a global capture-phase listener:
-// 1. If text is selected on the label, prevents default so the selection remains intact for copying.
-// 2. If the associated control is a text input, textarea, or select, prevents default label activation
-//    so clicks, double-clicks, and drag-selections never jump focus into the input.
-// 3. Checkboxes and radio buttons preserve standard click-to-toggle behavior (unless text was selected).
-// 4. Direct clicks on inputs, textareas, buttons, and selects inside a label are never intercepted.
 
 export function setupLabelSelectionFix(): () => void {
   if (typeof document === "undefined" || typeof window === "undefined") {

@@ -967,10 +967,7 @@ struct FilesToolsTests {
     func `Glob reports progress for a walk under the file interval`() async throws {
         let (base, home) = try FilesTestSupport.makeBaseAndHome()
         defer { FilesTestSupport.cleanup(base) }
-        // Fewer files than the work interval, so only the time trigger can open
-        // the gate. The injected clock advances past the spacing floor before the
-        // walk ends, proving a short scan still reports instead of sitting silent
-        // until the enumeration returns and looking hung.
+        // Fewer files than the work interval, so only the time trigger can open the gate.
         let fileCount = FilesProgressThrottle.fileInterval / 5
         for index in 0 ..< fileCount {
             let name = String(format: "note-%03d.txt", index)

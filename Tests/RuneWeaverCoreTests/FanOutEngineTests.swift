@@ -1,15 +1,4 @@
 // Rune Weaver Core Tests — Parallel worker fan-out engine and config.
-//
-// Exercises the fan-out stack with a stub orchestrator seam and a stub run
-// logger: concurrent worker turns on fresh sessions carrying the
-// fanout_worker source, the parent plus child run rows with their terminal
-// status flips, the cap and empty-list rejections, the bounded wall-clock
-// timeout marking a worker failed with an honest note, the allowedTools
-// subset carried verbatim to workers plus the deterministic registry filter,
-// and the parent settling when every subtask settles. Configuration coverage
-// pins the additive `[fanout]` section defaults, decoding, round-trips,
-// bounds, and the clamped posture. Tests never touch the real run-log store
-// or the live orchestrator.
 
 import Foundation
 import os
@@ -26,10 +15,7 @@ private final class CapturingFanOutOrchestrator: OrchestratorFanOutSeam {
     /// Error reasons thrown per prompt; a prompt with no entry succeeds.
     private let failures: [String: String]
 
-    /// Creates a capturing stub.
-    /// - Parameters:
-    ///   - delaySeconds: Artificial delay per turn.
-    ///   - failures: Error reasons thrown per prompt.
+    /// Creates a capturing stub. delaySeconds: Artificial delay per turn.
     init(delaySeconds: Double = 0, failures: [String: String] = [:]) {
         self.delaySeconds = delaySeconds
         self.failures = failures
@@ -403,10 +389,8 @@ struct FanOutEngineTests {
             originSessionID: UUID()
         )
 
-        // The timed-out worker reads failed and the digest names the timeout
-        // honestly; the parent settles (never stays running) once it lands.
-        // A timeout is a failure, never an owner cancellation: the cancelled
-        // state is reserved for stops the owner asked for.
+        // The timed-out worker reads failed and the digest names the timeout honestly; the parent
+        // settles (never stays running) once it lands.
         #expect(run.subtasks.first?.status == .failed)
         #expect(run.status == .failed)
         #expect(run.subtasks.allSatisfy { $0.status != .cancelled })

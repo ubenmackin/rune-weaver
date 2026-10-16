@@ -1,7 +1,4 @@
 // Rune Weaver Core — Bounded async drain helpers for the shared process runner.
-// Isolates capped pipe accumulation, budget mapping, and timeout plumbing so the
-// main runner stays within type-length budgets while preserving timeouts, caps,
-// and cancellation distinguishability.
 
 import Foundation
 import os

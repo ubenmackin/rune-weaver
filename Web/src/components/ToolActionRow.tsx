@@ -1,8 +1,4 @@
 // Rune Weaver Dashboard — Shared tool execution action row component.
-// Renders interactive tool activity in both 'chat' (in-flight or completed turns)
-// and 'card' (run log detail modal) variants with collapsible arguments and outputs.
-// The chat variant also surfaces live per-tool progress and a per-call cancel
-// affordance while a tool is genuinely executing.
 
 import { useState, useEffect, useRef } from "react";
 import type {
@@ -54,9 +50,7 @@ export interface BrowserNavigate {
   finalUrl?: string | null;
   // Unified envelope mirrors the engine shape ({url,title,text,refs,
   // truncated,authRequired,downloads,note}) plus the shared wire aliases
-  // ({finalUrl/finalURL/final_url, textSnapshot/snapshot, redirectChain/
-  // redirect_chain/redirects}) single-sourced with `BrowserNavigateWire`, so
-  // engine and dashboard agree on every key.
+  // ({finalUrl/finalURL/final_url, textSnapshot/snapshot, redirectChain/ redirect_chain/redirects}).
   title?: string | null;
   redirectCount: number;
   redirectChain: BrowserRedirect[];
@@ -134,19 +128,15 @@ function isSafeThumbnailDataURL(value: string | null | undefined): value is stri
 }
 
 // Strict shared contract mirrored by the engine thumbnail gate
-// (BrowserNavigateWire.normalizedDataURL): only data:image/jpeg|png|webp|gif
-// mounts, plus raw helper bytes starting with /9j/ or iVBOR. Bare base64 of
-// any length never mounts, so engine and dashboard agree on what counts as
-// an image.
+// (BrowserNavigateWire.normalizedDataURL): only data:image/jpeg|png|webp|gif mounts, plus raw helper
+// bytes starting with /9j/ or iVBOR.
 function asImageDataURL(value: unknown): string | null {
   const raw = asNonEmptyString(value);
   if (!raw) return null;
   const trimmed = raw.trim();
   if (trimmed.startsWith("data:image/")) {
-    // Only raster thumbnails reach the lightbox; anything else stays a hash
-    // so an unexpected data URL never becomes executable markup.
-    // Single-sourced through `isSafeThumbnailDataURL` so the allowlist
-    // cannot drift between parsing and rendering.
+    // Only raster thumbnails reach the lightbox; anything else stays a hash so an unexpected data
+    // URL never becomes executable markup.
     return isSafeThumbnailDataURL(trimmed) ? trimmed : null;
   }
   if (trimmed.startsWith("/9j/") || trimmed.startsWith("iVBOR")) {
@@ -155,13 +145,7 @@ function asImageDataURL(value: unknown): string | null {
   return null;
 }
 
-// Tolerant reader for browser.navigate JSON results. Accepts the single unified schema single-sourced
-// with the engine wire (`BrowserNavigateWire` + `BrowserNavigateEnvelope`): engine keys
-// ({url,title,text,refs,truncated,authRequired,downloads,note}) plus the shared wire aliases
-// ({finalUrl/finalURL/final_url, textSnapshot/text_snapshot/snapshot, redirectChain/redirect_chain/
-// redirects, redirect_count, auth_required/requiresAuth, screenshot_hash/imageHash,
-// screenshotDataURL/thumbnailDataURL/imageDataURL/screenshot/thumbnail}). No other aliases resolve,
-// so engine and dashboard agree on every field.
+// Tolerant reader for browser.navigate JSON results.
 export function parseBrowserNavigate(content: string | null | undefined): BrowserNavigate | null {
   if (typeof content !== "string") return null;
   const trimmed = content.trim();
@@ -220,8 +204,7 @@ export function parseBrowserNavigate(content: string | null | undefined): Browse
     asNonEmptyString(record.snapshot);
   // Generic text is a first-class snapshot for browser.navigate results: the parser only runs for
   // that tool, and the engine emits bare {url,text,refs} without alias keys, so gating text behind
-  // finalUrl hid real output. Only the engine text keys resolve
-  // (textSnapshot/text_snapshot/snapshot/text).
+  // finalUrl hid real output.
   const genericText = asNonEmptyString(record.text);
   const snapshot = textSnapshot ?? genericText;
   // Engine screenshot hash keys only (screenshotHash/screenshot_hash/imageHash).
@@ -551,11 +534,7 @@ function BrowserDetails({ browser }: { browser: BrowserNavigate }) {
   );
 }
 
-// Semantic status for a finished tool result, mirrored by both the chat pill
-// and the card variant. `kind` is variant-neutral: each surface prefixes it
-// with its own class namespace (`tool-badge-*` for cards, bare for pills), so
-// classification and labels live in exactly one branch and the two surfaces
-// cannot drift on errorKind handling.
+// Semantic status for a finished tool result, mirrored by both the chat pill and the card variant.
 type ToolResultStatusKind =
   | "invalid-tool"
   | "invalid-syntax"
@@ -678,9 +657,6 @@ function resolveResultStatus(
 }
 
 // Whether a bash result is a clean non-zero exit that stays honest-amber.
-// The pill already classifies it as warning while isError stays true for
-// retry and audit; the expanded output must match the pill and skip the red
-// error tone for the same envelope.
 function isBashCleanExitWarning(
   result: ToolResult,
   toolName?: string,
@@ -720,12 +696,7 @@ function shouldUseErrorTone(
   return true;
 }
 
-// Live progress line rendered under the Running pill. The engine reports
-// counters and a relative tail only, never a completion fraction, so the bar
-// stays indeterminate: a shimmer communicates activity without inventing a
-// percentage the engine cannot supply. The broad-scope warning is a dedicated
-// frame field, so the scope line renders verbatim and a pattern that happens to
-// contain a separator is never split into a false warning.
+// Live progress line rendered under the Running pill.
 function ToolProgressLine({ progress }: { progress: ToolProgress }) {
   const scope = progress.message.trim();
   const warning =

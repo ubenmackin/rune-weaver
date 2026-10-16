@@ -1,17 +1,4 @@
 // Rune Weaver Core — Local document text extraction for the retrieval index.
-//
-// Turns supported local documents into bounded, overlapping text chunks plus an
-// honest status so an indexer can store searchable content without ever throwing
-// on an unknown or malformed file. Extraction is read-only and network-free:
-// office and iWork packages are opened as in-memory ZIP archives, PDFs use the
-// native text layer, and everything else falls back to plain-text or
-// tag-stripped decoding. An empty text layer reports `metadataOnly` so the caller
-// can route the original bytes to a vision path instead of silently indexing
-// nothing. The byte bound is injected by the caller so the extractor never reads
-// past the indexer's configured `max_file_bytes` policy.
-// Format-specific extraction lives in `DocumentOfficeExtraction.swift`, shared
-// decoding in `DocumentTextParsing.swift` and `DocumentXMLEntities.swift`, and
-// ZIP reading in `DocumentZipArchive.swift`.
 
 import Foundation
 import os
@@ -73,11 +60,7 @@ public struct DocumentChunk: Sendable, Equatable {
     /// Estimated token count using the shared ~4 characters-per-token rule of thumb.
     public let estimatedTokens: Int
 
-    /// Creates a document chunk.
-    /// - Parameters:
-    ///   - index: Zero-based position in extraction order.
-    ///   - text: Normalized chunk text.
-    ///   - estimatedTokens: Estimated token count for the chunk.
+    /// Creates a document chunk. index: Zero-based position in extraction order.
     public init(index: Int, text: String, estimatedTokens: Int) {
         self.index = index
         self.text = text
@@ -87,11 +70,9 @@ public struct DocumentChunk: Sendable, Equatable {
 
 /// Result of extracting text from one document.
 public struct DocumentExtraction: Sendable, Equatable {
-    /// How completely the body was extracted, using the shared index
-    /// ``ExtractStatus``: clean success is `.extracted`, best-effort iWork or a
-    /// source past the byte bound is `.partial`, an empty text layer is
-    /// `.metadataOnly` for the vision path, an unknown format is `.unsupported`,
-    /// and an unreadable recognized package is `.failed`.
+    /// How completely the body was extracted, using the shared index ``ExtractStatus``: clean
+    /// success is `.extracted`, best-effort iWork or a source past the byte bound is `.partial`, an
+    /// empty text layer is `.metadataOnly` for the vision path, an unknown format is `.unsupported`.
     public let status: ExtractStatus
     /// Recognized format family, or `.unsupported` when dispatch failed.
     public let format: DocumentFormat
@@ -104,14 +85,7 @@ public struct DocumentExtraction: Sendable, Equatable {
     /// Whether the byte cap or an internal bound shortened the extraction.
     public let truncated: Bool
 
-    /// Creates a document extraction result.
-    /// - Parameters:
-    ///   - status: Outcome classification.
-    ///   - format: Recognized format family.
-    ///   - chunks: Extracted chunks in reading order.
-    ///   - reason: Explanation for non-`.extracted` outcomes.
-    ///   - byteCount: Bytes considered.
-    ///   - truncated: Whether the source was shortened.
+    /// Creates a document extraction result. status: Outcome classification.
     public init(
         status: ExtractStatus,
         format: DocumentFormat,
@@ -136,19 +110,11 @@ public struct DocumentExtraction: Sendable, Equatable {
 
 /// Protocol seam for document text extraction so an indexer can inject a stub.
 public protocol DocumentTextExtracting: Sendable {
-    /// Extracts text from raw document bytes.
-    /// - Parameters:
-    ///   - data: Raw document bytes.
-    ///   - fileName: File name used for extension-based dispatch.
-    ///   - contentType: Optional MIME type or UTI used when the extension is unknown.
-    /// - Returns: Extraction result; never throws for an unsupported format.
+    /// Extracts text from raw document bytes. data: Raw document bytes.
     func extract(data: Data, fileName: String, contentType: String?) -> DocumentExtraction
 
-    /// Extracts text from a file URL asynchronously.
-    /// - Parameters:
-    ///   - fileURL: Document file location on disk.
-    ///   - contentType: Optional MIME type or UTI used when the extension is unknown.
-    /// - Returns: Extraction result; never throws for an unsupported format.
+    /// Extracts text from a file URL asynchronously. fileURL: Document file
+    /// location on disk.
     func extract(fileURL: URL, contentType: String?) async -> DocumentExtraction
 }
 
@@ -173,11 +139,6 @@ extension DocumentTextExtracting {
 // MARK: - Extractor
 
 /// Dispatches by file extension or content type and extracts bounded text chunks.
-///
-/// The extractor is a value type with no shared mutable state, so it is safe to
-/// hold across concurrent indexing work. The byte bound and chunk sizing are
-/// injected at construction so a caller's configured policy is the single source
-/// of truth rather than a literal buried here.
 public struct DocumentTextExtractor: DocumentTextExtracting {
     /// Default byte bound for one document (25 MB).
     public static let defaultMaxFileBytes = 25 * 1024 * 1024
@@ -194,11 +155,7 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
     public let chunkOverlapTokens: Int
 
     /// Creates an extractor with an explicit byte bound and chunk sizing.
-    /// - Parameters:
-    ///   - maxFileBytes: Byte bound applied before parsing.
-    ///   - chunkTokenBudget: Target token budget per chunk.
-    ///   - chunkOverlapTokens: Token overlap between adjacent chunks, clamped to
-    ///     at most half the budget so overlap never doubles a chunk.
+    /// maxFileBytes: Byte bound applied before parsing.
     public init(
         maxFileBytes: Int = defaultMaxFileBytes,
         chunkTokenBudget: Int = defaultChunkTokenBudget,
@@ -210,24 +167,14 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
         self.chunkOverlapTokens = max(0, min(chunkOverlapTokens, budget / 2))
     }
 
-    /// Extracts text using the file name alone for format dispatch.
-    /// - Parameters:
-    ///   - data: Raw document bytes.
-    ///   - fileName: File name used for extension-based dispatch.
-    /// - Returns: Extraction result; never throws for an unsupported format.
+    /// Extracts text using the file name alone for format dispatch. data: Raw
+    /// document bytes.
     public func extract(data: Data, fileName: String) -> DocumentExtraction {
         extract(data: data, fileName: fileName, contentType: nil)
     }
 
-    /// Extracts text from a file URL, applying the byte bound before reading.
-    ///
-    /// The size check runs before the bytes are loaded so an oversized document
-    /// never spends memory on the read. A missing or unreadable file reports
-    /// `.failed` with a reason instead of throwing.
-    /// - Parameters:
-    ///   - fileURL: Document location.
-    ///   - contentType: Optional MIME type or UTI used when the extension is unknown.
-    /// - Returns: Extraction result; never throws for an unreadable file.
+    /// Extracts text from a file URL, applying the byte bound before reading. The size check runs
+    /// before the bytes are loaded so an oversized document never spends memory on the read.
     public func extract(fileURL: URL, contentType: String? = nil) async -> DocumentExtraction {
         let fileName = fileURL.lastPathComponent
         let format = Self.detectFormat(fileName: fileName, contentType: contentType)
@@ -265,10 +212,8 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
                     missingReason: "The media contains no extractable speech transcript."
                 )
             }
-            // The file-backed path attempted on-device transcription and found
-            // nothing, so this reason honestly reports an attempt was made. The
-            // in-memory data path below reports the opposite because a sync
-            // bytes-only call cannot route through the async recognizer.
+            // The file-backed path attempted on-device transcription and found nothing, so this
+            // reason honestly reports an attempt was made.
             return makeResult(
                 status: .metadataOnly,
                 format: format,
@@ -280,11 +225,7 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
     }
 
     /// Extracts text from raw bytes, dispatching on extension then content type.
-    /// - Parameters:
-    ///   - data: Raw document bytes.
-    ///   - fileName: File name used for extension-based dispatch.
-    ///   - contentType: Optional MIME type or UTI used when the extension is unknown.
-    /// - Returns: Extraction result; never throws for an unsupported format.
+    /// data: Raw document bytes.
     public func extract(data: Data, fileName: String, contentType: String?) -> DocumentExtraction {
         let format = Self.detectFormat(fileName: fileName, contentType: contentType)
         guard data.count <= maxFileBytes else {
@@ -391,15 +332,7 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
         )
     }
 
-    /// Builds a result with explicit fields.
-    /// - Parameters:
-    ///   - status: Outcome classification.
-    ///   - format: Recognized format family.
-    ///   - chunks: Extracted chunks in reading order.
-    ///   - reason: Explanation for non-`.extracted` outcomes.
-    ///   - byteCount: Bytes considered.
-    ///   - truncated: Whether the source was shortened.
-    /// - Returns: Assembled extraction result.
+    /// Builds a result with explicit fields. status: Outcome classification.
     func makeResult(
         status: ExtractStatus,
         format: DocumentFormat,
@@ -419,12 +352,7 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
     }
 
     /// Normalizes decoded text and chunks it, or reports `metadataOnly` when blank.
-    /// - Parameters:
-    ///   - text: Decoded text, or nil when decoding failed.
-    ///   - format: Recognized format family.
-    ///   - byteCount: Bytes considered.
-    ///   - missingReason: Explanation used when no text survives normalization.
-    /// - Returns: `.extracted` with chunks, or `.metadataOnly` when nothing is extractable.
+    /// text: Decoded text, or nil when decoding failed.
     func makeTextResult(
         text: String?,
         format: DocumentFormat,
@@ -442,14 +370,6 @@ public struct DocumentTextExtractor: DocumentTextExtracting {
     }
 
     /// Splits normalized text into ~budget-sized chunks with tail overlap.
-    ///
-    /// Segments are packed greedily so a chunk never crosses the character budget
-    /// derived from the token budget, and each new chunk begins with the tail of
-    /// the previous one so a passage straddling a boundary stays retrievable from
-    /// either side. Overlap is clamped to half a chunk so tiny chunks cannot be
-    /// duplicated wholesale.
-    /// - Parameter text: Normalized extracted text.
-    /// - Returns: Chunks in reading order.
     func makeChunks(from text: String) -> [DocumentChunk] {
         let characterBudget = max(1, chunkTokenBudget * Int(Self.charactersPerToken))
         let overlapCharacters = max(0, min(chunkOverlapTokens * Int(Self.charactersPerToken), characterBudget / 2))
@@ -703,14 +623,8 @@ extension DocumentTextExtractor {
         return nil
     }
 
-    /// Resolves document format using the 3-Tier Classification Model:
-    /// Tier 1: Security & Archive Guard (fail-closed on secrets and archives).
-    /// Tier 2: Developer Code/Config Catalog (preserves code from Spotlight misclassification).
-    /// Tier 3: Apple `UTType` system taxonomy with fallback static maps.
-    /// - Parameters:
-    ///   - fileName: File name carrying the extension.
-    ///   - contentType: Optional MIME type or UTI.
-    /// - Returns: Recognized format, or `.unsupported`.
+    /// Resolves document format using the 3-Tier Classification Model: Tier 1: Security & Archive
+    /// Guard (fail-closed on secrets and archives).
     public static func detectFormat(fileName: String, contentType: String? = nil) -> DocumentFormat {
         // Tier 1: Security & Archive Guard (Fail Closed)
         if isSecretOrUnsafeFile(fileName: fileName) {
